@@ -1148,6 +1148,21 @@ class AttachedSession:
         #: :attr:`cold_reason` defaults the token for a cold facade, so a
         #: renderer that knew only the ``cold`` boolean is unaffected.
         self._read_cold_reason: str | None = None
+        #: When this viewer last had a ROUND TRIP TO THE OWNER ANSWERED, as
+        #: ``time.time()``, or ``None`` for a facade that has never had one. The
+        #: evidence a status frame is allowed to publish "live" on; see
+        #: :attr:`verified_at` and :meth:`_note_wire_answer`.
+        #:
+        #: ``None`` IS LOAD-BEARING, not a default: a cold facade — the ones
+        #: ``saved_preview`` builds, and every facade before its first sync —
+        #: must carry NO stamp, so that "a cold facade never reports a
+        #: verification" is an invariant a test can hold rather than a
+        #: convention. It is written in exactly one place and cleared in none:
+        #: a stamp that stops advancing is what makes a killed owner stale
+        #: rather than fresh, and clearing one on a resync would turn a live,
+        #: mid-refresh session cold (the conflation ``owner_reachable`` exists
+        #: to prevent).
+        self._verified_at: float | None = None
         #: An authenticated dial RETAINED past a read's envelope, waiting for a
         #: canonical sync that arrived too late for the read that opened it.
         #: The socket is a residency term of the runtime's own exit predicate,
@@ -2449,6 +2464,99 @@ class AttachedSession:
     def is_cold(self) -> bool:
         """No fully synchronized runtime is attached to this viewer."""
         return self._client is None or not self._client.connected or not self._ready_for_events
+
+    @property
+    def verified_at(self) -> float | None:
+        """When a round trip to this session's owner was last ANSWERED.
+
+        THE STATUS FIELD'S EVIDENCE, and the one term that separates "the owner
+        is there" from "this viewer believes the owner is there". ``is_cold``
+        answers the second question from LOCAL state alone —
+        ``self._client is None or not self._client.connected or not
+        self._ready_for_events`` — so a facade whose owner has been stopped
+        still reads as live for as long as its socket stays open, which is what
+        made a SIGSTOPped runtime report ``warm``.
+
+        ``None`` means NEVER VERIFIED, and is not the same as "stale": a cold
+        facade carries no stamp at all, and a live one carries the moment of its
+        last answer. A READER applies the age (``LIVE_FRESHNESS_BUDGET_S``,
+        ``session/runtime/types.py``); nothing here expires it, so an owner that
+        dies simply stops advancing the stamp — the window then NARROWS rather
+        than resetting to a fresh false "current".
+
+        NOT a liveness term for classification, and that is deliberate. A
+        mid-resync viewer is ``is_cold`` (its third disjunct) while its owner is
+        demonstrably answering, and ``owner_reachable`` is the predicate that
+        question already has. This attribute adds evidence about the OWNER; it
+        does not replace either predicate, and no resync path clears it.
+        """
+        return self._verified_at
+
+    def _note_wire_answer(self) -> None:
+        """Record that the owner answered. Called ONLY on a wire answer.
+
+        Private, and called ONLY on a wire answer. THREE WIRE SURFACES, and the
+        enumeration is the contract — a count here goes wrong the next time one
+        is added, and a reader who "restored" a count by deleting a caller would
+        re-break the read path the third one exists for:
+
+        * a completed frontend sync — :meth:`_await_frontend`, both its arms;
+        * a landing sync that settles after the read already answered — the
+          ``pending_sync`` await in :meth:`_await_late_sync`, which receives the
+          owner's ``FrontendSync`` directly and does NOT pass through
+          ``_await_frontend``;
+        * a received display refresh — the install inside
+          :meth:`_refresh_display_history`, which likewise arrives without that
+          await. Stamping only the first surface turned HEALTHY read-attached
+          owners cold: a frame that refuses ``cold:false`` without a stamp is
+          right, but a facade stamped on one path only is not.
+          ``tests/unit/server/test_desktop_read_without_owner.py::test_a_healthy_owner_is_still_a_live_read``
+          is that regression's guard;
+
+        plus :meth:`verify_live`, the ``ping`` probe, which is the definition of
+        the freshness rather than a fourth surface.
+
+        The check is what the answer CAME FROM rather than where the code sits:
+        a path that can run with no dial, or with a dial that never answered,
+        must not call this. That is why it is NOT in ``_finish_sync``, whose
+        seven callers include two COLD paths.
+        """
+        self._verified_at = time.time()
+
+    async def verify_live(self, timeout: float) -> bool:
+        """Ask the owner to answer, and stamp the verification if it does.
+
+        THE EXISTING INSTRUMENT, not a new one: the attach protocol already
+        carries a ``ping`` op answered synchronously with ``"pong"``
+        (``session/runtime/server.py:6145``), and it is exempt from the op chain
+        (``_UNCHAINED_OPS``, ``:896``) exactly so a health probe is answered
+        while mutations queue behind it. Using it means the honest-liveness
+        mechanism ships in one place rather than beside the one that exists.
+
+        WHY A ROUND TRIP IS THE ONLY HONEST ANSWER, and why this is what a
+        stopped owner fails: a viewer's socket to a SIGSTOPped process stays
+        OPEN — the kernel keeps the connection, no FIN is sent, and nothing the
+        viewer can read locally changes. ``is_cold`` therefore keeps saying live
+        for as long as the freeze lasts. A ping has to be ANSWERED, and a frozen
+        process answers nothing, so the expiry is the evidence.
+
+        Returns ``True`` when the owner answered inside ``timeout``. On a
+        refusal, a missing dial or an expiry it returns ``False`` and TOUCHES
+        NOTHING: the last stamp stays where it was, so a failed probe narrows
+        the staleness window (the reader sees an older and older stamp) instead
+        of clearing it (which would look like a fresh classification and turn a
+        merely-slow owner cold).
+        """
+        client = self._client
+        if client is None or not client.connected:
+            return False
+        try:
+            await client.request_ack_with_duplicate("ping", deadline_s=timeout)
+        except Exception:  # noqa: BLE001 — an unanswered probe is a False, not a raise
+            logger.debug("liveness probe unanswered", exc_info=True)
+            return False
+        self._note_wire_answer()
+        return True
 
     @property
     def owner_reachable(self) -> bool:
@@ -4020,6 +4128,20 @@ class AttachedSession:
             # superseding dial's to close, which is why nothing is closed here.
             self._abandon_landing_claim(pending_sync)
             return
+        # A WIRE ANSWER, and the surfacing path the not-stale contract cannot
+        # miss: this method carries the READ attach's sync (and a late sync that
+        # settles after the read answered), and it receives the owner's canonical
+        # ``FrontendSync`` WITHOUT going through ``_await_frontend`` — it awaits
+        # ``pending_sync`` directly above. Stamping only in ``_await_frontend``
+        # therefore left every healthy read-attached facade with no evidence, and
+        # a frame that refuses to claim live without one turns the READ path cold
+        # for owners that are answering perfectly — the honest-classification
+        # regression in the other direction.
+        #
+        # Stamped HERE, before ``_install_frontend`` can raise: the answer has
+        # already arrived, and what a later failure would invalidate is the
+        # installed state, not the fact that the owner replied.
+        self._note_wire_answer()
         # THE DIAL IS NO LONGER RETAINED: it is an ordinary attached client from
         # here, so the claim is dropped WITHOUT the discard below — releasing it
         # through the abandonment path would close the very socket that just
@@ -4503,8 +4625,25 @@ class AttachedSession:
         # `self._frontend_future` instead — is closed by the signature.
         try:
             if preempt is None:
-                return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-            return await self._await_frontend_preemptible(future, timeout, preempt)
+                sync = await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+                # THE ONE PLACE A VIEWER LEARNS THE OWNER IS THERE. The stamp is
+                # written here and nowhere else, because this is the only moment
+                # in the viewer's life that is by construction an ANSWERED round
+                # trip: the owner built this ``FrontendSync`` and sent it.
+                #
+                # Deliberately NOT in ``_finish_sync``, which has seven callers
+                # and two of them are COLD paths (``:1646`` with
+                # ``_can_go_cold = True`` and a ``cold-{session_id}`` epoch, and
+                # ``:1719`` whose own comment reads "Nothing is queued behind an
+                # owner that will never arrive"). A stamp written there would
+                # hand a facade with no owner and no round trip a verification —
+                # satisfying the letter of the not-stale rule while defeating it,
+                # and it would pass review because the field would be present.
+                self._note_wire_answer()
+                return sync
+            sync = await self._await_frontend_preemptible(future, timeout, preempt)
+            self._note_wire_answer()
+            return sync
         except TimeoutError as exc:
             # Do NOT believe the expiry yet. ``wait_for`` checks a wall clock,
             # so a viewer loop blocked past the deadline trips it even when the
@@ -5069,6 +5208,16 @@ class AttachedSession:
                     ):
                         raise ConnectionError("history binding changed during refresh")
                     self._frontend_refresh_cut = (frontend.epoch, frontend.sequence)
+                    # A WIRE ANSWER on the refresh path: this ``frontend`` was
+                    # just received from the owner, and it is the third surfacing
+                    # site the not-stale contract has to cover. It does NOT pass
+                    # through ``_await_frontend`` — the state arrives here and is
+                    # installed directly — so stamping only on the await paths
+                    # left a healthy, refreshing owner with no evidence and made
+                    # its frames read cold. Stamped BEFORE the install, because
+                    # what a later failure invalidates is the installed state,
+                    # not the fact that the owner answered.
+                    self._note_wire_answer()
                     self._install_frontend(frontend.snapshot, publish=True)
                     await self._load_frontend_history(frontend)
                     self._display_invalidated = (
