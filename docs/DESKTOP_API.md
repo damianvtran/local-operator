@@ -345,6 +345,9 @@ Expired desktop leases count neither as interactivity nor as idle-runtime
 residency. The runtime's existing heartbeat re-evaluates expired leases and
 restores parked-gate OS fallback. A valid desktop notification lease suppresses
 that fallback, so one gate does not produce both an Electron and runtime toast.
+`desktop_withdraw` is the explicit end of the `desktop_watch` lease: the bridge
+sends it once the last live lease has run out (45 s with no beat), never at a
+transient stream end.
 
 A lease is also the one signal that CREATES residency rather than only
 preserving it. While a live lease says `visible`, the HTTP bridge starts the

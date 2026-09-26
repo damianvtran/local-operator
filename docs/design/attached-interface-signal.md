@@ -1,6 +1,10 @@
 # Design: an attached interface is not an attended one
 
 Status: **shipped on `fix/attached-interface-signal`, remediated in round 2**.
+Extended in round 3 (the transport-bound hole, §12) on `fix/desktop-attach-truth`:
+the attach fact is session-scoped, a successor reads the app's own record
+narrowly, and an explicit withdrawal op ends the attachment. §12 is written to
+match the code on that branch, same rule as the rest of this file.
 This file began as a proposal (architect) against `origin/main` `1392324b` in the
 worktree `~/local-operator-worktrees/attached-interface-signal`; it is now the
 **in-branch authority for what the branch does**, so every body, predicate and
@@ -1237,3 +1241,122 @@ fleet-scale before/after that needs no rig.
 - **Whether any *other* consumer reads `has_ui` as "a human is here".** I checked
   the `ask` builder (`builtin.py:16995-17023`) and left the field alone; a
   dedicated sweep of `has_ui` was outside this design's scope.
+
+---
+
+## 12. Round 3: the attach fact outlives the socket (`fix/desktop-attach-truth`)
+
+### 12.1 The hole §2.2 left open
+
+Everything in §2.2 is a fact about a SOCKET, and the socket is what a bridge
+re-dial (`reader eof` / `reader reset`), a renderer stream restart or a runtime
+swap takes away. Reproduced against the real `RuntimeServer` + a real control
+socket (isolated config root), before the change:
+
+```
+desktop conn, before any desktop_watch   -> frozenset()
+live desktop_watch lease                 -> frozenset({"desktop"})
+socket lost, app still up, pane mounted  -> frozenset()   <-- FALSE "no interface"
+re-dialed, re-assert not yet landed      -> frozenset()   <-- FALSE "no interface"
+re-dial renewed the lease                -> frozenset({"desktop"})
+conn alive, desktop_seen lapsed >45s     -> frozenset()   <-- FALSE "no interface"
+```
+
+Live evidence (2026-09-25): the session runtime log shows `dropped attach client
+(… surface=desktop)` at 09:14:46 and storms at 09:17:10-22 / 09:19:02-39, each
+coinciding with an injected "No interface is attached…" block; the app's log
+shows the renderer's SSE re-subscribing with new epochs on each drop.
+
+### 12.2 C1 — the heartbeat is remembered per session
+
+`RuntimeServer._desktop_attach_seen`, renewed by every accepted `desktop_watch`
+op and cleared only by the explicit withdrawal (§12.3). `attached_surfaces()`'s
+desktop arm counts it for the SAME `DESKTOP_WATCH_LEASE_S` (45 s) window as the
+per-connection lease — not a second constant, not a wider window — and after the
+TTL with no heartbeat it is honest again. The comment on the field states what
+renews it, why it is session-scoped (a live pane's attachment must not die with
+the socket that carried it), and that no deliberate stop/exit path leaves the
+runtime alive, so the withdrawal is the only in-place clear.
+
+KEPT OUT of `attach_clients()` (the reaper), `watching_surfaces()`,
+`_visible_attach_surfaces()` and `_desktop_visible()`: a stale memory must never
+keep a runtime resident, and a dropped socket is not attention. Pinned by
+`test_a_dropped_then_recent_heartbeat_moves_none_of_the_other_tiers`.
+
+### 12.3 C2 — an explicit withdrawal, and why it is its own op
+
+The obvious vehicle — `desktop_watch(visible=False, can_notify=False)` — CANNOT
+carry this meaning, and the incident's own churn proves it: a transient renderer
+stream end makes the bridge send exactly that pair (the post-pop refresh), and a
+live pane on a host with no notification channel beats it every 15 s. Clearing
+on `(False, False)` would wipe the memory at every stream restart — re-opening
+the incident — and would flap the persisted block on no-notify hosts, which is
+the round-2 churn pin. So the bridge sends a new, shape-gated, attach-only op,
+**`desktop_withdraw`**, at the earliest moment this layer can honestly say "the
+pane left": the lease EXPIRY path (`_expire_watches`'s final pass — 45 s with no
+beat, each beat cancelling it), where a transient restart is already excluded by
+its own re-subscription.
+
+`AttachedSession` records the withdrawal as the desired state and `_dial`
+replays it (the withdrawal arm of the re-assert), so a successor runtime engaged
+under a closed pane starts and STAYS detached instead of resurrecting a 45 s
+lease nobody holds; a stale, never-withdrawn record takes the same arm. Both
+sends keep the existing `desktop_watch` envelope: bounded at
+`_DESKTOP_WATCH_ACK_BOUND_S`, swallowed, because it is a presence hint whose
+loss its own TTL repairs — and a cancellation still propagates.
+
+PROMPTNESS is bounded by what this layer can know: the renderer's release
+(`releaseWatchHeartbeat`) stops at main today, so the bridge cannot tell a leave
+from a restart before the lease runs out. When the release reaches this bridge
+(§8's UI item), the same op can be sent at once; the runtime semantics are
+already right.
+
+### 12.4 C3 — a successor reads the app's own record, narrowly
+
+The desktop arm also counts `desktop` when the machine-wide presence record is
+`present ∧ has_window ∧ session_id == THIS session's` (non-empty), bounded by
+that record's own TTL (its reader already reaps it). It covers a successor
+runtime booted under a still-open window before the bridge's re-dial lands.
+
+**The rejected alternative, recorded because it was argued for:** granting on
+`session_id == ""` (the architect's `∨ ""`). On this machine the record read
+`""` WHILE the operator was watching — the UI withdraws the name on every
+transient stream end (§8, C4) — so that grant would tell EVERY session on the
+machine "an interface is attached". `_desktop_visible` (Tier B, §2.3) is
+untouched; its fallback already denies nothing on the empty name.
+
+### 12.5 C5 — the churn is readable now (logs only)
+
+Bridge side (`server/utils/desktop_sessions.py`): one INFO/WARNING line per
+ended subscriber stream naming the reason — client disconnect, subscriber
+overflow, relay error, bridge dispose — and the session id; one line when a
+re-dial lands, carrying the gap since the socket died. Runtime side
+(`server.py::_drop_client`): the existing drop line gains, FOR DESKTOP CONNS
+ONLY, whether the session-scoped memory survived the drop (`live` / `lapsed` /
+`never`). No behaviour changes; the next storm is diagnosable from these lines.
+
+### 12.6 What the extension changes for the tests
+
+Fails on the pre-extension tree, passes after: `test_socket_lost_while_the_pane
+_is_mounted_does_not_move_the_attachment_answer`,
+`test_a_redial_before_its_re_assert_has_landed_does_not_move_the_attachment_answer`,
+`test_a_lapsed_lease_past_the_ttl_reads_detached`,
+`test_a_successor_runtime_reads_the_record_that_names_this_session`,
+`test_a_dropped_then_recent_heartbeat_moves_none_of_the_other_tiers`,
+`test_a_withdrawal_clears_the_memory_and_a_drop_does_not` (the C2 pin),
+`test_a_real_drop_does_not_flip_the_interactivity_block` (prompt-level), plus the
+bridge-side `test_the_last_lease_to_expire_is_withdrawn_explicitly` /
+`test_a_transient_stream_end_renews_and_does_not_withdraw` and the dial-side
+`test_a_recorded_withdrawal_replays_as_a_withdrawal_not_a_lease`.
+`test_an_unnamed_record_does_not_grant` (the C3 overrule) and
+`test_a_heartbeat_re_arms_the_attachment_answer` pin invariants that hold on both trees.
+
+### 12.7 Not addressed here (UI repo)
+
+The renderer withdraws its presence report (`releaseWatchHeartbeat` +
+`noteLeftSession`) on EVERY transient stream end, not only on pane unmount —
+which is why the machine-wide record read `session_id: ""` while the operator
+was watching. That fix belongs in `~/local-operator-ui` (its own release
+window); the backend here treats the empty name as absence of evidence either
+way, and C2's withdrawal is what will make a genuine pane-leave prompt once the
+release reaches this bridge.
