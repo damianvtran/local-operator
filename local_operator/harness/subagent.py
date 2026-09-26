@@ -2557,11 +2557,13 @@ async def _construct_child_session(
     # removes what the merge ADDED, and ``hub`` was already present.
     #
     # So the load-bearing invariant is not this line but the merge-time
-    # context: ``Session._build_tool_context`` passes ``job_id``, and
-    # ``is_child(job_id)`` is what makes the replacement the CHILD shape
-    # (message your parent) rather than the parent shape (address, steer,
-    # stop and resume your children). If ``job_id`` ever stopped reaching
-    # that context, a child would silently be handed its parent's tool.
+    # context: ``Session._build_tool_context`` passes ``job_id`` and
+    # ``may_delegate``. ``is_child(job_id)`` without ``may_delegate`` is what
+    # makes the replacement the CHILD shape (message your parent); a child
+    # that holds ``task`` gets the parent shape scoped to its own subtree
+    # (BEN-7-D5, rebuilt after the prune below). If ``job_id`` ever stopped
+    # reaching that context, a child would silently be handed its parent's
+    # UNSCOPED tool.
     tool_context = ToolContext(
         cwd=cwd,
         session_id=transcript.directory.name,
@@ -2952,6 +2954,14 @@ async def _construct_child_session(
     if _can_background(tools):
         drop = drop - {"jobs", "wait"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
+    if any(tool.name == "task" for tool in child._tools):
+        # A child that KEPT ``task`` (a pod lead) rebuilds ``hub`` now that its
+        # inventory says it may delegate: ``build_hub_tool`` hands it the
+        # parent shape, scoped to its own subtree (BEN-7-D5). The constructor's
+        # merge ran before the prune, while no ``task`` was held yet, so it
+        # built the message-only shape. ``hub`` alone, so nothing pruned above
+        # comes back.
+        child._merge_capability_tools(("hub",))
     # A DECLARED parent inventory carries down, or a bounded session could reach
     # an excluded tool by delegating to a child that never heard of the bound.
     # One hop is enough to make the declaration meaningful and is also all the

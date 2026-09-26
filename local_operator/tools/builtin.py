@@ -21071,6 +21071,57 @@ class HubChildParams(BaseModel):
         return value
 
 
+#: What a bare ``message`` with no ``op`` means on the lead's hub: the reply to
+#: the parent that delegated to it. Stated once because the schema patch and the
+#: executor branch have to agree on it.
+_LEAD_REPLY_SENTENCE = (
+    "Omit 'op' and pass only 'message' to answer the agent that delegated to "
+    "you (the same reply the message-only hub sends)."
+)
+
+
+def _lead_hub_schema() -> dict[str, Any]:
+    """``HubParams``' schema with ``op`` optional, for a delegating CHILD only.
+
+    WHY THE VARIANT EXISTS. The ask injection every child receives says
+    "Answer it now with the ``hub`` tool — a short, direct reply"
+    (``comms.TO_CHILD_INSTRUCTIONS``), and the loop validates a call's
+    arguments against the tool's schema BEFORE executing it
+    (``loop.validate_tool_arguments``). A lead holding the plain parent schema
+    therefore could not answer its own parent at all: ``{"message": ...}`` was
+    rejected as invalid arguments, the parent's ``ask`` burned to a timeout,
+    and the child died on the repeated-error guard. Making ``op`` nullable lets
+    that one call through to the executor's reply branch.
+
+    Rendered as the NULLABLE anyOf rather than a bare ``required`` removal so it
+    matches the shape ``message``/``to``/``steps`` already render in this
+    schema — the one the provider matrix accepts (see the ``to`` field's note on
+    non-nullable unions).
+
+    The top session keeps ``HubParams.model_json_schema()`` byte for byte: this
+    is built only for a child that holds ``task``, the same 2.1% of children
+    that already pays for the parent shape (BEN-7-D5 and its 2026-09-26
+    addendum).
+    """
+    schema = HubParams.model_json_schema()
+    properties = dict(schema.get("properties") or {})
+    op = dict(properties.get("op") or {})
+    variant = {key: value for key, value in op.items() if key != "enum"}
+    variant["anyOf"] = [{"enum": list(op.get("enum") or [])}, {"type": "null"}]
+    variant["default"] = None
+    variant["description"] = f"{op.get('description', '')} {_LEAD_REPLY_SENTENCE}"
+    properties["op"] = variant
+    addressed = dict(properties.get("to") or {})
+    addressed["description"] = (
+        f"{addressed.get('description', '')} "
+        '["parent"] addresses the agent that delegated to you.'
+    )
+    properties["to"] = addressed
+    schema["properties"] = properties
+    schema["required"] = [name for name in schema.get("required") or [] if name != "op"]
+    return schema
+
+
 def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
     """``<op> <target>: <body>`` — the act, who it hits, and what it says.
 
@@ -21092,16 +21143,20 @@ def _describe_hub_approval(args: dict[str, Any], cwd: str) -> str:
     return f"{head}: {body}" if body else head
 
 
-def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
+def _hub_targets(comms: Any, raw: Any, scope: str | None = None) -> tuple[list[str], list[str]]:
     """Resolve the ``to`` argument to ``(job ids, errors)``, order preserved
     and duplicates dropped (``["all", "<id>"]`` must not message one child
-    twice)."""
+    twice). ``scope`` confines a delegating child to its own descendants."""
     requested = raw if isinstance(raw, list) else [raw]
     ids: list[str] = []
     seen: set[str] = set()
     errors: list[str] = []
     for item in requested:
-        resolved, error = comms.resolve(str(item))
+        # Keyword only when scoped: the top session's call is unchanged, and
+        # a reduced comms double that predates the scope keeps working there.
+        resolved, error = (
+            comms.resolve(str(item), scope=scope) if scope else comms.resolve(str(item))
+        )
         if error is not None:
             errors.append(error)
         for job_id in resolved:
@@ -21113,7 +21168,7 @@ def _hub_targets(comms: Any, raw: Any) -> tuple[list[str], list[str]]:
     return ids, errors
 
 
-def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
+def _hub_list(tool_call_id: str, comms: Any, scope: str | None = None) -> ToolResult:
     """Render the subagent roster for ``op='list'``.
 
     Every row states the one thing the caller acts on \u2014 whether the child can
@@ -21122,6 +21177,10 @@ def _hub_list(tool_call_id: str, comms: Any) -> ToolResult:
     while ``running`` is not, which is the opposite of the intuitive reading.
     """
     rows = comms.roster()
+    if scope:
+        # A pod lead lists its own subtree, not its siblings' (BEN-7-D5).
+        mine = comms.descendant_ids(scope)
+        rows = [row for row in rows if row.job_id in mine]
     if not rows:
         return _text(
             tool_call_id,
@@ -21278,6 +21337,13 @@ async def execute_hub(
             "agent messaging is not available in this session (no subagent engine).",
         )
     if comms.is_child(context.job_id if context else None):
+        # Dispatch on the SHAPE the caller holds, which ``build_hub_tool``
+        # derives from the same two facts: a child that may delegate (a pod
+        # lead) drives its own subagents, scoped to its subtree (BEN-7-D5).
+        if context is not None and context.may_delegate and context.job_id:
+            return await _execute_hub_parent(
+                tool_call_id, args, comms, context, scope=context.job_id
+            )
         return await _execute_hub_child(tool_call_id, args, comms, context)
     return await _execute_hub_parent(tool_call_id, args, comms, context)
 
@@ -21304,14 +21370,40 @@ async def _execute_hub_parent(
     args: dict[str, Any],
     comms: Any,
     context: ToolContext | None = None,
+    *,
+    scope: str | None = None,
 ) -> ToolResult:
+    """The parent-shaped hub. ``scope`` is a delegating CHILD's own job id:
+    every op is confined to its descendants, and ``to=["parent"]`` reports up."""
+    if scope and not args.get("op") and (args.get("message") or "").strip():
+        # A delegating child holds THIS shape, but answering its own parent is
+        # still the reply it makes most often — and ``{"message": ...}`` with no
+        # op is the child shape it (and every transcript it has read) knows.
+        # There is no second reading: every parent op requires ``op``. The same
+        # tolerance in the other direction is why ``HubChildParams`` drops
+        # parent-shaped keys rather than rejecting them (BEN-7-D5).
+        outcome = comms.reply_to_parent(scope, str(args["message"]))
+        return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
     try:
         params = HubParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "hub", exc)
 
     if params.op == "list":
-        return _hub_list(tool_call_id, comms)
+        return _hub_list(tool_call_id, comms, scope)
+
+    if scope and params.to and "parent" in params.to:
+        # A lead still reports up through the same tool it drives its pod with.
+        if params.to != ["parent"] or params.op not in ("send", "ask"):
+            return _error(
+                tool_call_id,
+                "hub",
+                "to=['parent'] takes op='send' (or 'ask') alone, with a message.",
+            )
+        if not (params.message or "").strip():
+            return _error(tool_call_id, "hub", "a message to the parent needs a message.")
+        outcome = comms.reply_to_parent(scope, params.message or "")
+        return _text(tool_call_id, "hub", outcome, details={"direction": "to_parent"})
 
     if params.op not in ("cancel", "pause", "peek") and not (params.message or "").strip():
         return _error(tool_call_id, "hub", f"op='{params.op}' needs a message.")
@@ -21323,7 +21415,7 @@ async def _execute_hub_parent(
             f"op='{params.op}' needs a 'to' target; use op='list' to see the subagents.",
         )
 
-    ids, errors = _hub_targets(comms, params.to)
+    ids, errors = _hub_targets(comms, params.to, scope)
     if not ids:
         return _error(
             tool_call_id,
@@ -21484,7 +21576,13 @@ async def _execute_hub_parent(
 def build_hub_tool(context: ToolContext) -> AgentTool | None:
     if context.subagent_comms is None:
         return None
-    if context.subagent_comms.is_child(context.job_id):
+    is_child = context.subagent_comms.is_child(context.job_id)
+    # A child that holds ``task`` (a pod lead) gets the parent shape, scoped to
+    # its own subtree by ``execute_hub``; every other child keeps the
+    # message-only tool, so the larger schema is paid only where it is used
+    # (BEN-7-D5).
+    leads = is_child and context.may_delegate
+    if is_child and not leads:
         return AgentTool(
             name="hub",
             label="Message parent",
@@ -21516,8 +21614,16 @@ def build_hub_tool(context: ToolContext) -> AgentTool | None:
             "resume a stopped, paused or failed one (or a whole batch of them at once) "
             "against its own transcript so it continues where it left off. Address them "
             'by job id, by label, or "all".'
+            + (
+                # Only a delegating child reads this; the top session's
+                # description (a cache-prefix string) is unchanged.
+                " Your scope is your own subagents, and a bare 'message' with no "
+                "'op' answers the agent that delegated to you."
+                if leads
+                else ""
+            )
         ),
-        parameters=HubParams.model_json_schema(),
+        parameters=_lead_hub_schema() if leads else HubParams.model_json_schema(),
         # Write, like 'task' and 'wake': these ops redirect, kill and restart
         # autonomous work. The gate is per TOOL, not per op, so the tier is
         # the highest any op needs — 'resume' starts a child session, which is
