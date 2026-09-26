@@ -1806,6 +1806,121 @@ async def test_flat_unknown_model_404_still_aborts_immediately() -> None:
     assert len(attempts) == 1, "a bad model id must surface at once, not after a cascade"
 
 
+def _openrouter_no_route_404() -> ProviderError:
+    """The exact body the sealed 2026-09-26 bundles carried, via the wire mapper.
+
+    Built through :func:`raise_for_status` so the tests classify the bytes
+    OpenRouter actually sent rather than a hand-stamped error.
+    """
+    from local_operator.providers.clients import raise_for_status
+
+    try:
+        raise_for_status(
+            httpx.Response(
+                404,
+                json={
+                    "error": {
+                        "message": "All providers have been ignored. To change your default "
+                        "ignored providers, visit: https://openrouter.ai/settings/privacy",
+                        "code": 404,
+                    }
+                },
+            )
+        )
+    except ProviderError as exc:
+        return exc
+    raise AssertionError("raise_for_status must raise")
+
+
+def test_openrouter_no_route_404_is_retryable_but_other_404s_are_not() -> None:
+    """The gateway's "no eligible route" 404 must retry; a real 404 must not.
+
+    Measured 2026-09-26: this exact body arrived twice in ~600 model calls of a
+    paid run, on a model id that had served hundreds of calls and kept serving
+    afterwards, and each occurrence ENDED the episode because a flat 404
+    classifies as a request defect. The match is message-based, so the
+    counterexamples below — a per-request routing constraint, an unknown model,
+    a bad parameter — must all stay request defects."""
+    from local_operator.providers.clients import raise_for_status
+
+    sealed = _openrouter_no_route_404()
+    assert sealed.status == 404
+    assert sealed.retryable is True
+    assert sealed.kind == "transient", "the flap arm must not also spend its budget"
+
+    def built(status: int, message: str) -> ProviderError:
+        try:
+            raise_for_status(
+                httpx.Response(status, json={"error": {"message": message, "code": status}})
+            )
+        except ProviderError as exc:
+            return exc
+        raise AssertionError("raise_for_status must raise")
+
+    # A per-request routing 404 describes OUR request (review R3's line).
+    assert built(404, "No endpoints found that support tool use").retryable is False
+    # A flat unknown-model refusal is deterministic and actionable.
+    assert built(404, "Model not found").retryable is False
+    assert built(400, "qwen/x is not a valid model ID").retryable is False
+    # A parameter defect is a request defect at any status.
+    assert built(400, "invalid value for 'temperature'").retryable is False
+
+
+async def test_openrouter_no_route_404_recovers_on_the_next_attempt() -> None:
+    """One re-ask saves the episode: the first occurrence must not end the run.
+
+    The two sealed failures each died on first sight; a single re-ask was all
+    the repaired window needed."""
+    attempts: list[str | None] = []
+
+    async def fail_once(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        if len(attempts) == 1:
+            raise _openrouter_no_route_404()
+        yield StreamTextDelta(delta="ok")
+        yield StreamEndEvent(stop_reason="stop")
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(fail_once)
+
+    auth = FakeAuth({"openai": ["k"]})
+    settings = {"retry": {"baseDelayMs": 1, "maxRetries": 3, "fallbackChains": {}}}
+    got = [event async for event in stream_with_failover(_request(), auth, settings, client_for)]
+    assert any(isinstance(e, StreamTextDelta) and e.delta == "ok" for e in got)
+    assert len(attempts) == 2, "the second attempt must be the one that serves"
+
+
+async def test_openrouter_no_route_404_gets_the_transient_ladder_only() -> None:
+    """Always failing: exactly one attempt plus ``maxRetries``, then surface.
+
+    The failure must ride the configured transient budget and nothing else —
+    the routing-flap arm owns a separate three-re-ask budget, and the
+    ``kind == "transient"`` gate is what keeps this error out of it (the same
+    exclusion ``test_relayed_transient_404_does_not_also_spend_the_flap_budget``
+    pins)."""
+    attempts: list[str | None] = []
+
+    async def always_fail(
+        request: ChatRequest, api_key: str | None, oauth_access: Any = None
+    ) -> AsyncIterator[Any]:
+        attempts.append(api_key)
+        raise _openrouter_no_route_404()
+        yield  # pragma: no cover - makes this an async generator
+
+    async def client_for(spec: ModelSpec) -> Any:
+        return _FnClient(always_fail)
+
+    auth = FakeAuth({"openai": ["k"]})
+    settings = {"retry": {"baseDelayMs": 1, "maxRetries": 2, "fallbackChains": {}}}
+    with pytest.raises(ProviderError) as excinfo:
+        async for _ in stream_with_failover(_request(), auth, settings, client_for):
+            pass
+    assert excinfo.value.retryable is True
+    assert len(attempts) == 3, "one attempt plus the configured two retries, no flap re-asks"
+
+
 async def test_transport_retries_honor_budget_same_key_first() -> None:
     """PR-06: retryable 5xx consumes retry.maxRetries on the SAME key with
     backoff BEFORE any credential rotation."""

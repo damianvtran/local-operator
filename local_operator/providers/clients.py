@@ -732,6 +732,37 @@ def _relayed_upstream_failure(status: int | None, error: Mapping[str, Any]) -> b
     return True
 
 
+#: OpenRouter's routing layer answering HTTP 404 because at that moment NO
+#: eligible route exists for the request: every provider that could serve it
+#: is excluded by the account's privacy/routing settings. That is the
+#: gateway's own state, not a refusal of our bytes — measured 2026-09-26, it
+#: struck ~2 of ~600 model calls in one paid run, on a model id that had
+#: served hundreds of calls in the same process and kept serving afterwards,
+#: and each occurrence ended a paid episode because a flat 404 classifies as
+#: a request defect. A single re-ask is the repair, so the class has to reach
+#: the transient retry ladder like any other retryable provider failure.
+#:
+#: Matched on the provider's OWN words, never on the bare status: a 404 for a
+#: request the provider actually read — a bad field, a flat unknown-model
+#: refusal, a per-request routing constraint such as "No endpoints found that
+#: support tool use" — stays a request defect. The marker is OpenRouter's own
+#: sentence, so the widening covers exactly this refusal and nothing else.
+_OPENROUTER_NO_ROUTE_MARKERS = ("all providers have been ignored",)
+
+
+def _openrouter_no_route(status: int | None, message: str) -> bool:
+    """Is this 404 the gateway reporting no eligible route RIGHT NOW?
+
+    See :data:`_OPENROUTER_NO_ROUTE_MARKERS` for the evidence and why the
+    match is message-based. Deliberately narrow: only a 404 carrying
+    OpenRouter's own sentence counts.
+    """
+    if status != 404:
+        return False
+    lowered = message.lower()
+    return any(marker in lowered for marker in _OPENROUTER_NO_ROUTE_MARKERS)
+
+
 def _compat_stream_error(chunk: Mapping[str, Any]) -> ProviderError:
     """An in-band mid-stream failure on an OpenAI-compatible stream.
 
@@ -913,9 +944,19 @@ def raise_for_status(response: httpx.Response) -> None:
     error = payload.get("error") if isinstance(payload, Mapping) else None
     if isinstance(error, Mapping) and _relayed_upstream_failure(status, error):
         retryable = True
+    message = _extract_error_message(response, payload)
+    # ...and except the routing layer saying, in the provider's own words,
+    # that no eligible route exists for us right now — OpenRouter's "All
+    # providers have been ignored" (see :data:`_OPENROUTER_NO_ROUTE_MARKERS`).
+    # That is the gateway's momentary state rather than an answer about our
+    # request, so it earns the ordinary transient retry ladder instead of
+    # ending the turn. Message-matched, never status-matched: a genuine
+    # bad-request 404 stays a request defect.
+    if _openrouter_no_route(status, message):
+        retryable = True
     raise ProviderError(
         status,
-        _extract_error_message(response, payload),
+        message,
         retryable=retryable,
         retry_after_ms=_parse_retry_after(response, payload),
         auth_error=auth_error,
