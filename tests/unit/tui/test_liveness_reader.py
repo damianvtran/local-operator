@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-
 from typing import Any
+
+import pytest
 
 from local_operator.session.runtime.types import LIVE_FRESHNESS_BUDGET_S
 from local_operator.tui.liveness import (
@@ -294,3 +295,86 @@ def test_a_probe_answer_makes_a_quiet_session_read_live_instead_of_stale():
     quiet.verified_at = NOW  # what verify_live's stamp does
     assert owner_liveness(quiet, now=NOW) is OwnerLiveness.LIVE
     assert liveness_text(OwnerLiveness.LIVE) == ""
+
+
+# --------------------------------------------------------------------------
+# THE FEATURE, DRIVEN THE WAY THE REVIEWER DROVE IT: the app's own timer.
+#
+# The tests above are at the right level for the CLASSIFICATION and were the
+# wrong level for the FEATURE. Both the reader and the band rendered correctly
+# while the row could not reach the screen at all: the repaint gate watched the
+# verdict ENUM, a failed probe deliberately changes nothing, so `before is after
+# is STALE` and six probes over 1800 s produced zero repaints. Green tests at
+# the wrong level are how that shipped, so this drives `OperatorApp` itself.
+#
+# AND IT USES A REAL `AttachedSession`, not a double. The first draft handed the
+# pilot a `SidebarRemote`, which does not satisfy `_is_viewer` — and a test that
+# has to DEFEAT `_is_viewer` to pass is testing something the app would never do.
+# The guard is correct; the double was the wrong object. `BoundClient` is the
+# known-good way (the task-6 SIGSTOP tests use it): a real facade, made to look
+# bound, with an owner that does not answer.
+# --------------------------------------------------------------------------
+
+
+class BoundClient:
+    """A connected dial whose owner never answers — a frozen owner's wire shape."""
+
+    connected = True
+
+    def __init__(self, *, answers: bool = False) -> None:
+        self.answers = answers
+        self.ops: list[str] = []
+
+    def close(self) -> None:
+        pass
+
+    async def request_ack_with_duplicate(self, op, **kwargs):
+        self.ops.append(op)
+        if not self.answers:
+            raise TimeoutError("owner did not answer")
+        return ("pong", False)
+
+
+async def _viewer_facade(tmp_path, *, quiet_for: float, answers: bool = False):
+    """A real viewer facade that last heard from its owner ``quiet_for`` ago."""
+    from local_operator.session.attached import AttachedSession
+
+    session = await AttachedSession.cold(
+        "s1",
+        config_dir=tmp_path,
+        cwd=str(tmp_path),
+        takeover_factory=lambda *a, **k: None,
+    )
+    session._client = BoundClient(answers=answers)  # type: ignore[assignment]
+    session._ready_for_events = True
+    session._verified_at = time.time() - quiet_for
+    assert session.is_cold is False, "the premise: the facade must look bound"
+    assert callable(getattr(session, "verify_live", None)), "the probe must exist"
+    return session
+
+
+@pytest.mark.asyncio
+async def test_the_apps_own_row_text_for_a_real_silent_facade(tmp_path, monkeypatch):
+    """The harness, and what it proves TODAY.
+
+    `_is_viewer` is True for a real `AttachedSession` made to look bound (it was
+    False for the `SidebarRemote` double, which is why the first draft could not
+    work: the guard was right and the double was the wrong object), and the app's
+    own reader turns that facade into the row it would paint. What this does NOT
+    yet prove is that the app REPAINTS — see the note at the top of this file.
+    """
+    from local_operator.tui.app import OperatorApp, _is_viewer
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        for _ in range(10):
+            await pilot.pause()
+        session = await _viewer_facade(tmp_path, quiet_for=60.0)
+        app._interaction.session = session
+        assert _is_viewer(session) is True, "a real bound facade must pass the viewer guard"
+        row = app._liveness_row_text(session)
+        assert row.startswith("Not answering"), row
+        assert "\u00b7" in row, "STALE always carries its measured tail"
