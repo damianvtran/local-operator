@@ -1672,8 +1672,13 @@ class DesktopSessionBridge:
         never meet the ``None`` sentinel -- a disconnected subscriber has
         ``overflow = True`` and is skipped by the caller.
         """
-        frame, size = sub.queue.get_nowait()
-        assert frame is not None
+        item = sub.queue.get_nowait()
+        # The `None` sentinel cannot reach here -- a disconnected subscriber has
+        # `overflow = True` and the caller skips it -- but the queue's item type
+        # admits it, so the guard is written where the reader can see it rather
+        # than left to the comment above.
+        assert item is not None
+        _, size = item
         sub.queued_bytes -= size
 
     def publish(self, kind: str, payload: dict[str, Any], *, replay: bool = True) -> None:
