@@ -123,6 +123,17 @@ _AMBIENT_VARS = (
     # the allow path while looking like it tested the refusal, and a QA test
     # that meant to prove the refusal would prove nothing.
     "LOCAL_OPERATOR_ALLOW_NESTED_SESSION",
+    # The mesh pairing seam. `lop network join --sas-stdin` refuses unless this
+    # is set, because the design requires a human at BOTH devices to compare the
+    # short authentication string: the seam exists so an end-to-end harness can
+    # script the join, and setting it in production would waive that check
+    # silently. It is therefore an ESCAPE HATCH over a rule the suite asserts —
+    # the same class as `ALLOW_NESTED_SESSION` above. Inherited from an
+    # operator's shell or from a rig, every cell about the human gate would take
+    # the scripted path while looking like it tested the refusal, and the
+    # SAS-mismatch arm would never be exercised. Scrubbed here, and a test that
+    # needs the seam sets it explicitly.
+    "LOP_NETWORK_TEST_MODE",
     # The delegation allowance the guard reads beside them: set by the `bash`
     # tool on commands run by a session that HOLDS `task`, and the second route
     # by which an agent's shell may legitimately open a session. An inherited

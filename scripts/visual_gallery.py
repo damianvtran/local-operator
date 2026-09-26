@@ -61,10 +61,70 @@ def cases() -> list[dict[str, Any]]:
             elif script in {"fallback_shot.py", "nerd_glyph_shot.py"}:
                 args += [variant]
             elif script == "sidebar_shot.py":
-                # Two widths, because the whole point of the sample is the
-                # trade-off between them: "base" is the size at which the list
-                # does not grow at all, "wide" the size at which it does.
-                args += ["160x40" if variant == "wide" else "100x30"]
+                # Five widths/variants, because the sample's whole point is the
+                # trade-off between them: "base" is the size at which the list does
+                # not grow at all, "wide" the size at which it does, and "peers"
+                # adds the remote rows whose `⇄` slot and `⇄ <device>` sections are
+                # the mesh annotation's own frame (`mesh-ui.md` §1.3/§4.1).
+                # "silent"/"silent-two" are the delta's HEADLINE state — a peer
+                # that answered nothing, so the whole section is its heading —
+                # which had no case at all until design round 4 (D26).
+                if variant == "peers-focus":
+                    # TALLER THAN THE OTHER FRAMES ON PURPOSE: this is the settling
+                    # frame for the caret/locality interaction (design round 1,
+                    # D4) AND the only size at which the second peer's section is
+                    # on screen at all — the `(unreachable)` heading and the
+                    # unreachable row were in no artifact of that round because
+                    # the peer tier is three chrome lines per device and the
+                    # 100x30 window stopped before it (review round 4, MINOR 5).
+                    args += ["peers-focus", "100x45"]
+                elif variant == "peers":
+                    args += ["peers", "100x30"]
+                elif variant in {"silent", "silent-two"}:
+                    # 100x45 for the reason `peers-focus` is: at 100x30 the frame
+                    # stops before the subagent tier, and the whole claim these
+                    # cases carry is the ORDER of a silent peer's section against
+                    # it (design round 4, D27). The rig refuses such a frame
+                    # rather than writing one — `_require_silent_sections`.
+                    args += [variant, "100x45"]
+                else:
+                    args += ["160x40" if variant == "wide" else "100x30"]
+            elif script == "mesh_sidebar_shot.py":
+                # THE ONLY FRAME BUILT FROM A REAL MESH (design round 4, D29):
+                # two config roots, two identities, two relays on loopback and a
+                # live link, where the peer tier comes from the production
+                # producer rather than from a hand-stamped fixture. It was
+                # outside this census while being the source of a committed
+                # artifact (`static/tui-mesh-sidebar.png`), so a reviewer had to
+                # rebuild the rig by hand to re-derive that frame. The size is
+                # the script's own default, 800x510 (100x30) — the NOMINAL grid
+                # of the frame it ships, not a new one.
+                #
+                # NOMINAL IS NOT THE COMMITTED PNG'S PIXEL SIZE (design round 5,
+                # D33): `static/tui-mesh-sidebar.png` is 1440x918, this same
+                # frame at 1.8x, because this census rasterizes at 1:1. Compare
+                # the two only after normalizing the zoom — `rsvg-convert -z 1.8`
+                # — or the difference measured is the rescale. The table of the
+                # three mesh artifacts and their zooms is in
+                # docs/VISUAL_CAPTURE.md, "A fresh capture against a committed
+                # PNG", and pinned by tests/unit/tui/test_visual_gallery.py.
+                args += ["100x30"]
+            elif script == "network_shot.py":
+                # Both of the panel's phases from one boot, so the pair differs by
+                # nothing but the relay's answer. It writes into the case's own
+                # directory and the gallery globs both SVGs.
+                args = ["{directory}", "100x30"]
+            elif script == "new_remote_shot.py":
+                # The two states of the `/new` device picker: a device that knows
+                # peers (the rows must read as a device selection) and one that
+                # knows none — the state every new user starts in (design round
+                # 2, D15/D16). At 110 columns, which is where the reported row
+                # truncation was measured, and at 34 ROWS so the two frames are
+                # the same app state (QA round 12, Q-12-2): at 30 rows the
+                # picker's own rows take the room the boot splash's mark needs,
+                # so the with-peers frame painted none of it while the peerless
+                # one painted all of it — see the script's DEFAULT_SIZE.
+                args += [variant, "110x34"]
             elif script == "stop_ladder_shot.py":
                 args += [variant, "100x30"]
             elif script == "org_chart_shot.py":

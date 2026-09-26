@@ -1,0 +1,1464 @@
+"""``/network`` — one vocabulary, three readers, and a CLI behind all of them.
+
+The design (``docs/design/mesh-ui.md`` §1.1) makes three claims this file exists
+to hold:
+
+1. **The picker's words and the handler's words are ONE list.** Drift between the
+   word a row offers and the word the handler accepts is a defect class this repo
+   has paid for, so the picker's rows are asserted equal to ``NETWORK_SUBCOMMANDS``
+   rather than eyeballed against the table in the design.
+2. **``/network`` is FRONTEND-LOCAL.** Every verb is a fact about THIS device's
+   mesh, and the family must be answerable with no runtime at all (a device whose
+   peers are unreachable is the device that needs it) — so the classification is
+   asserted here, where the registry's own complement rule can see it.
+3. **The destructive verbs need their word.** ``disconnect``, ``member rm``,
+   ``rm`` and ``panic`` run NOTHING without a typed confirmation, and ``panic``'s
+   token is the network's own NAME rather than ``yes`` because a panic is not
+   undoable by the same command. Each is driven through the real editor and the
+   real submit handler — the reported path — with the CLI stubbed at
+   ``run_network``, so the assertion is about what the SURFACE decided to run.
+
+The CLI itself is not stubbed at the process boundary in the drives that prove it
+(``tests/unit/network`` and the PR's own before/after runs do that): here the
+question is which argv the handler spells, which a fake answer answers exactly.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+import pytest
+from rich.cells import cell_len
+
+from local_operator.session.frontend_state import _FRONTEND_LOCAL_SLASHES
+from local_operator.slash_commands import (
+    NETWORK_SUBCOMMANDS,
+    command_argument_is_used,
+    command_argument_refusal,
+    network_subcommand_rows,
+    slash_command_for,
+)
+from local_operator.tui.network_cli import NetworkRun
+
+# ---------------------------------------------------------------------------
+# the registry: one list, three readers
+# ---------------------------------------------------------------------------
+
+
+def test_the_registry_entry_declares_the_vocabulary_and_no_destination() -> None:
+    spec = slash_command_for("/network")
+    assert spec is not None
+    assert spec.name == "network"
+    assert spec.subcommands == NETWORK_SUBCOMMANDS
+    # `echo=False`: the listing or the receipt IS the answer.
+    assert spec.echo is False
+    # No desktop surface in this pass — see `mesh-ui.md` §2.7/§2.8. An advertised
+    # destination with no adapter behind it is the offered-but-dead failure the
+    # `/mobile` entry documents.
+    assert spec.desktop_destination == ""
+
+
+def test_the_picker_offers_exactly_the_words_the_handler_accepts() -> None:
+    """Claim 1, mechanically. Both halves through their own public reader."""
+    handler_words = set(NETWORK_SUBCOMMANDS)
+    picker_words = {word for word, _help in network_subcommand_rows()}
+    assert picker_words == handler_words, "the picker and the handler disagree"
+    # The help line is part of the contract rather than decoration: a word with no
+    # description is a row that teaches nothing, so the reader is total over the
+    # vocabulary (it raises on a missing key) and this asserts the same fact from
+    # the other side.
+    assert all(help_text for _word, help_text in network_subcommand_rows())
+    assert len(NETWORK_SUBCOMMANDS) == len(set(NETWORK_SUBCOMMANDS)), "a duplicate verb"
+
+
+def test_network_is_frontend_local() -> None:
+    """Claim 2: this device's own mesh state, never the runtime's."""
+    assert "network" in _FRONTEND_LOCAL_SLASHES
+    # The installation verbs are NOT in the vocabulary: a composer row that boots
+    # out the operator's relay, or deletes this device's identity keypair, is the
+    # one-keystroke class of mistake the incident verbs' confirmation refuses.
+    for installation in ("serve", "start", "stop", "restart", "uninstall"):
+        assert installation not in NETWORK_SUBCOMMANDS
+    # Nor `pool`: `lop network` has no such parser (compute-pool is not
+    # implemented), and a row for a verb the CLI lacks is offered-but-broken.
+    assert "pool" not in NETWORK_SUBCOMMANDS
+
+
+def test_the_shape_accepts_a_subcommand_and_keeps_a_sentence_prose() -> None:
+    spec = slash_command_for("/network")
+    assert spec is not None
+    assert command_argument_is_used(spec, "ls")
+    assert command_argument_is_used(spec, "status")
+    assert command_argument_is_used(spec, "doctor devon-laptop")
+    # THE BOUNDARY IS THE THIRD TOKEN, and this is the shape's one real cost
+    # (`mesh-ui.md` §2.8.3): the predicate is MCP's — at most two tokens, the
+    # second name-shaped — so a family verb that needs its own two arguments,
+    # `member rm <network> <device>`, is PROSE to the messages endpoint. It is
+    # asserted here rather than left as a surprise, and it is harmless while no
+    # desktop surface queries this family: the TUI dispatches on the first word,
+    # so the command runs either way.
+    assert not command_argument_is_used(spec, "member rm net dev")
+    assert not command_argument_is_used(spec, "ls and then tell me a story")
+    assert not command_argument_is_used(spec, "disconnect?! please")
+
+
+def test_the_route_refusal_names_this_familys_words_not_mcps() -> None:
+    """A `/network` misuse must not be told to use the MCP setup form."""
+    spec = slash_command_for("/network")
+    assert spec is not None
+    refusal = command_argument_refusal(spec, "git push")
+    assert refusal is not None
+    assert "ls" in refusal and "panic" in refusal
+    assert "MCP" not in refusal
+
+
+def test_argparse_does_not_own_a_verb_the_cli_lacks() -> None:
+    """Every word in the vocabulary is a parser this tree actually has.
+
+    The vocabulary is a front end, so a word with no parser behind it would be a
+    row that runs ``lop network <unknown>`` and answers with argparse's usage
+    text — the "offered but broken" shape, caught here rather than by a user.
+
+    `subcommands_of` rather than walking `parser._subparsers` directly: argparse
+    types that attribute `Optional` and an action's `choices` as
+    `Iterable[Any] | None`, so the direct walk is four non-narrowable sites (the
+    checkout's own `pyright` gate flagged them). The helper proves the mapping is
+    the dict `add_subparsers` built once, in one place, for every test module
+    that asks — including this one.
+    """
+    import argparse
+
+    from local_operator.network.cli import add_parser
+    from tests.unit.network import conftest as net_fixtures
+
+    parser = argparse.ArgumentParser(prog="lop", add_help=False)
+    subparsers = parser.add_subparsers(dest="command")
+    add_parser(subparsers)
+    network = net_fixtures.subcommands_of(parser)["network"]
+    available = set(net_fixtures.subcommands_of(network))
+    # `new` is the user-facing word and `init` is the CLI's verb (the receipt says
+    # which); `rename`/`rm` map straight through.
+    mapping = {"new": "init"}
+    for word in NETWORK_SUBCOMMANDS:
+        assert mapping.get(word, word) in available, word
+
+
+# ---------------------------------------------------------------------------
+# the handler: what it runs, and what it refuses to run
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Recorder:
+    """A ``run_network`` stand-in: records argv, answers with a fixed line."""
+
+    calls: list[list[str]] = field(default_factory=list)
+    answer: str = "ok"
+    returncode: int = 0
+
+    def __call__(self, args: list[str], **kwargs: Any) -> NetworkRun:
+        self.calls.append(list(args))
+        return NetworkRun(tuple(args), self.returncode, stdout=self.answer + "\n")
+
+    @property
+    def argv(self) -> list[str]:
+        assert len(self.calls) == 1, self.calls
+        return self.calls[0]
+
+
+def _isolated_network_store(monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...]) -> None:
+    """Give ``_network_records`` a fixed set of records, with no disk behind it."""
+
+    class _Record:
+        def __init__(self, network_id: str, name: str) -> None:
+            self.network_id = network_id
+            self.name = name
+
+    records = [_Record(f"n_{index:02d}", name) for index, name in enumerate(names)]
+    monkeypatch.setattr(
+        "local_operator.network.store.list_networks", lambda root=None: list(records)
+    )
+
+
+async def _boot(pilot: Any, app: Any) -> None:
+    for _ in range(40):
+        await pilot.pause()
+        if app._session is not None:
+            return
+
+
+async def _type(pilot: Any, text: str) -> None:
+    """Type ``text`` as real keystrokes, so the caret lands where a user's does."""
+    await pilot.press(*("space" if char == " " else char for char in text))
+
+
+async def _submit(pilot: Any, app: Any, text: str) -> None:
+    from local_operator.tui.widgets.editor import Editor
+
+    editor = app.query_one(Editor)
+    editor.text = text
+    await pilot.pause()
+    if editor._picker.is_open():
+        await pilot.press("escape")
+        await pilot.pause()
+    await pilot.press("enter")
+    await pilot.pause()
+    await pilot.pause()
+
+
+def _app_fixture() -> Any:
+    from local_operator.tui.app import OperatorApp
+    from tests.unit.tui.test_app_pilot import FakeSession, _factory
+
+    return OperatorApp(lambda: _factory(FakeSession()))
+
+
+def _notices(app: Any) -> list[str]:
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    return [
+        block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
+    ]
+
+
+def _painted(app: Any) -> str:
+    """The whole rendered frame as text — receipts are painted, not stored.
+
+    ``RichBlock`` carries a rich renderable rather than a string attribute, so the
+    frame is the only place its line exists: reading it from the compositor is
+    what makes the assertion about what the user READS (the same reader
+    ``test_slash_echo`` uses).
+    """
+    return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+
+@pytest.mark.asyncio
+async def test_read_verbs_run_the_cli_with_the_argv_the_design_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each read verb, through the real editor, asserting the EXACT argv."""
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network peers")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["peers"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network log")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["log", "--limit", "20"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network doctor devon-laptop")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["doctor", "--peer", "devon-laptop"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network show devmesh")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["show", "devmesh"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network invite")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["invite", "--role", "drive"]
+
+        # The session plane (review round 4, MINOR 3): the ONE way the session
+        # `/new remote <peer>` creates is observable and controllable from the
+        # composer. The tail is passed through, because the same CLI verb lists,
+        # creates and acts on a session.
+        run.calls.clear()
+        await _submit(pilot, app, "/network sessions --peer radiant-m4")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["sessions", "--peer", "radiant-m4"]
+
+        # A NAME IS A SENTENCE (review round 4, MINOR 2): both verbs take a
+        # free-text positional, and slicing the tail to its first word silently
+        # created a network called `My`. The whole tail goes in, and the arity
+        # check refuses a SHORT command without refusing a longer name.
+        run.calls.clear()
+        await _submit(pilot, app, "/network new My Fancy Net")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["init", "My Fancy Net"]
+
+        run.calls.clear()
+        await _submit(pilot, app, "/network rename devmesh My Fancy Name")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["rename", "devmesh", "My Fancy Name"]
+
+
+@pytest.mark.asyncio
+async def test_the_receipt_is_the_clis_own_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The output is a BLOCK carrying the CLI's line, not a paraphrase of it."""
+    run = _Recorder(answer="the relay is not running; start it with `lop network start`")
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network peers")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert "start it with `lop network start`" in _painted(app)
+
+
+@pytest.mark.asyncio
+async def test_join_names_the_cli_instead_of_half_pairing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairing needs a terminal; the surface says so and runs NOTHING.
+
+    ``network/cli.py::_cmd_join`` shows this device's own code and reads the other
+    device's code from stdin — the SAS ceremony has a human in the middle by
+    design, and ``--sas-stdin`` exists only behind the test-mode environment
+    variable. A subprocess with no stdin cannot pair, so the honest answer is the
+    command to run: the same call the installation verbs get.
+    """
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network join @some/token")
+        await app.workers.wait_for_complete()
+        assert run.calls == [], "join must not spawn a pairing subprocess"
+        assert any("lop network join @some/token" in text for text in _notices(app))
+
+
+@pytest.mark.asyncio
+async def test_a_network_name_with_a_space_is_addressable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Q-R10-4: the addressing verbs resolve their target as a LONGEST PREFIX.
+
+    ``/network new`` takes the WHOLE tail as a name, so a network called
+    ``Gamma Mesh`` is creatable from this surface — and the first-token rule
+    answered "this device is not in a network called 'Gamma'" for the network
+    the sibling verb had just made, while ``lop network rename "Gamma Mesh" …``
+    renamed it. Two networks are staged on purpose: ``Gamma`` beside
+    ``Gamma Mesh`` is the case where a shorter-prefix-first rule would silently
+    rename the wrong one.
+    """
+    _isolated_network_store(monkeypatch, ("Gamma Mesh", "Gamma"))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network rename Gamma Mesh Gamma Renamed")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["rename", "Gamma Mesh", "Gamma Renamed"]
+
+        await _submit(pilot, app, "/network rename Gamma Gamma Prime")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["rename", "Gamma", "Gamma Prime"]
+
+        await _submit(pilot, app, "/network rm Gamma Mesh yes")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["rm", "Gamma Mesh"]
+
+        await _submit(pilot, app, "/network disconnect Gamma Mesh yes")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["disconnect", "Gamma Mesh"]
+
+        await _submit(pilot, app, "/network member rm Gamma Mesh d_peer yes")
+        await app.workers.wait_for_complete()
+        assert run.calls[-1] == ["member", "rm", "Gamma Mesh", "d_peer"]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_verb_refuses_without_running_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network install")
+        await app.workers.wait_for_complete()
+        assert run.calls == []
+        assert any("Use /network" in text for text in _notices(app))
+
+
+@pytest.mark.asyncio
+async def test_disconnect_rehearses_then_runs_on_yes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claim 3: the rehearsal names the act, and only the exact word runs it."""
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network disconnect")
+        await app.workers.wait_for_complete()
+        assert run.calls == [], "a bare disconnect must not leave the network"
+        rehearsals = [text for text in _notices(app) if "To confirm" in text]
+        assert rehearsals, _notices(app)
+        assert "/network disconnect yes" in rehearsals[-1]
+
+        # A wrong word is refused, and still runs nothing.
+        await _submit(pilot, app, "/network disconnect ok")
+        await app.workers.wait_for_complete()
+        assert run.calls == []
+
+        await _submit(pilot, app, "/network disconnect yes")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["disconnect"]
+
+
+@pytest.mark.asyncio
+async def test_panic_demands_the_networks_name_not_a_yes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The design's typed token, and the reason it is not ``yes``.
+
+    A panic rotates the network's secret: every OTHER device must be re-invited
+    before it can come back, which is not something the same command can undo. A
+    confirmation that any word would satisfy is not a confirmation for that act.
+    """
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network panic n_00")
+        await app.workers.wait_for_complete()
+        assert run.calls == []
+        assert any("/network panic n_00 devmesh" in text for text in _notices(app))
+
+        await _submit(pilot, app, "/network panic n_00 yes")
+        await app.workers.wait_for_complete()
+        assert run.calls == [], "`yes` is not the token for a panic"
+        assert any("Type the network's name" in text for text in _notices(app))
+
+        await _submit(pilot, app, "/network panic n_00 devmesh")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["panic", "n_00"]
+
+
+@pytest.mark.asyncio
+async def test_member_rm_is_rehearsed_and_takes_yes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+
+        await _submit(pilot, app, "/network member rm devmesh d_abc")
+        await app.workers.wait_for_complete()
+        assert run.calls == []
+        assert any("rotates the network secret" in text for text in _notices(app))
+
+        await _submit(pilot, app, "/network member rm devmesh d_abc yes")
+        await app.workers.wait_for_complete()
+        assert run.argv == ["member", "rm", "devmesh", "d_abc"]
+
+
+@pytest.mark.asyncio
+async def test_member_without_rm_names_the_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network member show devmesh")
+        await app.workers.wait_for_complete()
+        assert run.calls == []
+        assert any("member rm <network> <device>" in text for text in _notices(app))
+
+
+@pytest.mark.asyncio
+async def test_a_named_network_runs_without_a_rehearsal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The named form is unambiguous, so ``rm`` runs on the file it names."""
+    _isolated_network_store(monkeypatch, ("devmesh", "homelab"))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network rm devmesh yes")
+        await app.workers.wait_for_complete()
+        # Ambiguity is only a problem for the BARE forms; a named network is
+        # unambiguous and runs.
+        assert run.argv == ["rm", "devmesh"]
+
+
+@pytest.mark.asyncio
+async def test_the_panel_opens_from_the_bare_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/network`` and ``/network status`` push the screen — one surface, two doors."""
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    _isolate_panel(monkeypatch)
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network")
+        from local_operator.tui.widgets.network_panel import NetworkScreen
+
+        assert isinstance(app.screen, NetworkScreen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert any("Mesh networks" in line for line in app.screen.render_lines_for_test())
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, NetworkScreen)
+
+
+def _isolate_panel(monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...] = ("devmesh",)) -> None:
+    """Point the PANEL at a fixed first frame and at nothing that spawns.
+
+    The panel is a second reader of both halves, so both are redirected:
+
+    * ``capture_local`` — its first frame reads this device's identity file, its
+      relay record and its member lists off disk. A test must not paint whatever
+      the machine happens to hold, and it must not depend on a store it does not
+      own.
+    * ``network_panel.run_network`` — the screen's own worker calls the CLI. Left
+      alone, an assertion about what the SCREEN ran would spawn real
+      ``lop network`` subprocesses from a unit test.
+
+    The app's own ``run_network`` is patched separately by each test, so the two
+    recorders never see each other's calls.
+    """
+    from local_operator.tui.widgets.network_panel import NetworkEntry, NetworkLocal
+
+    monkeypatch.setattr(
+        "local_operator.tui.widgets.network_panel.capture_local",
+        lambda root=None: NetworkLocal(
+            device_id="d_self",
+            device_name="this-mbp",
+            identity_present=True,
+            relay_state="",
+            networks=[
+                NetworkEntry(
+                    network_id=f"n_{index:02d}",
+                    name=name,
+                    epoch=1,
+                    role="admin",
+                    members=1,
+                    trust="active",
+                )
+                for index, name in enumerate(names)
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "local_operator.tui.widgets.network_panel.run_network",
+        lambda args, **kwargs: NetworkRun(tuple(args), 0, stdout="", stderr=""),
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_picker_arm_offers_the_vocabulary_through_the_real_editor() -> None:
+    """The rows behind ``/network `` are that list, read off the real editor.
+
+    The reader being one list is asserted above; this is the other half — that the
+    ARM uses it, so what a user sees is that vocabulary rather than a second list
+    assembled somewhere else.
+    """
+    from local_operator.tui.widgets.editor import Editor
+
+    app = _app_fixture()
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _boot(pilot, app)
+        # REAL KEYSTROKES, not a text assignment: the argument list opens from the
+        # caret being past the terminating space, and `editor.text = "/network "`
+        # leaves the caret where it was — so assigning the buffer would test a
+        # state no typing user reaches.
+        await _type(pilot, "/network ")
+        editor = app.query_one(Editor)
+        await pilot.pause()
+        assert editor._picker.is_open(), "a space after /network must open its list"
+        painted = "\n".join(row.plain for row in editor._picker.render_rows(70))
+        for word in NETWORK_SUBCOMMANDS:
+            assert word in painted, word
+        # And the help line travels with the row: a picker of bare words teaches
+        # nothing about which one to press.
+        assert "Networks this device is in" in painted
+
+
+@pytest.mark.asyncio
+async def test_the_panels_panic_key_fills_the_composer_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``shift+P`` hands the typed command over UNSUBMITTED.
+
+    The panel selects and the command confirms: a screen that both chose a network
+    and fired the revoke would be the one-step accident the typed confirmation
+    exists to prevent, so this asserts the buffer, not an effect.
+    """
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    _isolate_panel(monkeypatch)
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        from local_operator.tui.widgets.editor import Editor
+
+        await pilot.press("shift+p")
+        await pilot.pause()
+        assert app.query_one(Editor).text == "/network panic n_00"
+        assert run.calls == [], "the panel never runs a destructive verb itself"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("size", "cut"), [((100, 30), False), ((64, 30), True)])
+async def test_the_panel_footer_says_when_it_has_been_cut(
+    monkeypatch: pytest.MonkeyPatch, size: tuple[int, int], cut: bool
+) -> None:
+    """U8: the footer fits, or it says it does not.
+
+    Measured before the fix, at 64x30: the line ended after ``shift+p`` with no
+    ellipsis and no fallback, so the only hints for refresh, copy and panic were
+    gone exactly where a cramped terminal wanted them — and nothing on the frame
+    said more existed. A cut line that does not say it was cut is the defect; a
+    cut line that does is the fix.
+    """
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    _isolate_panel(monkeypatch)
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        hint = app.screen.query_one("#network-hint")
+        text = str(hint.render())
+        if cut:
+            assert text.endswith("…"), text
+            assert "ctrl+r copy" not in text, text
+        else:
+            assert text.endswith("ctrl+r copy"), text
+            assert "…" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_the_panels_disconnect_key_names_the_selected_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    _isolate_panel(monkeypatch)
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        from local_operator.tui.widgets.editor import Editor
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert app.query_one(Editor).text == "/network disconnect n_00"
+        assert run.calls == []
+
+
+# ---------------------------------------------------------------------------
+# design round 2, D20 — the loading frame's one relay fact
+# ---------------------------------------------------------------------------
+
+
+def _panel_local() -> Any:
+    from local_operator.tui.widgets.network_panel import NetworkLocal
+
+    return NetworkLocal(
+        device_id="d_self", device_name="this-mbp", identity_present=True, relay_state=""
+    )
+
+
+def test_the_pending_frame_does_not_call_the_relay_not_running() -> None:
+    """MEASURED ON THE LOADING FACE, which is the one it was filed against.
+
+    ``relay: not running on this device`` painted under This device while the
+    Relay section seven lines below painted its own pending line — the same frame
+    contradicting itself about the one fact both lines are about. While the live
+    answer is out, the disk record is the input the answer is about, not an
+    answer, so the pending sentence is the same on both lines.
+
+    The pending word is ONE word since design round 3's D23 (``checking``; it was
+    ``asking the relay…`` on this section and ``relay: checking…`` on the device
+    line), which is why the two assertions below are about the same verb.
+    """
+    from local_operator.tui.widgets.network_panel import build_network_report
+
+    text = build_network_report(_panel_local()).plain
+    assert "relay: checking…" in text, text
+    assert "not running on this device" not in text, text
+    assert "  checking…" in text, text
+
+
+def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
+    """The other half of D20: once the answer IS in, the sections inherit it.
+
+    ``checking with the relay…`` is a promise the frame has already broken when
+    the Relay section's own answer says the relay is not running — there is
+    nothing to check with — and the Peers section then also has to paint the rows
+    it already holds rather than nothing at all.
+    """
+    import json
+
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    screen = NetworkScreen(_panel_local())
+    screen.status_run = NetworkRun(
+        ("status",),
+        0,
+        stdout=json.dumps({"installed": True, "identity_present": True, "relay_running": False}),
+    )
+    text = "\n".join(screen.render_lines_for_test())
+    assert "checking with the relay…" not in text, text
+    assert "from this device's records" in text, text
+    assert "no peers yet" in text, text
+
+
+# ---------------------------------------------------------------------------
+# Design round 3 D23 / UX round 3 U22 — the pending word, and the log path's indent
+# ---------------------------------------------------------------------------
+
+
+def test_one_pending_word_for_one_pending_fact() -> None:
+    """D23: the frame said "the relay has not answered yet" three ways.
+
+    ``relay: checking…`` on the device line, ``checking with the relay…`` on the
+    two sections that inherit the answer, and ``asking the relay…`` in the Relay
+    section — three spellings of one state on one screen. The verb is one word
+    now; what differs is only the OBJECT, which is the fact each line is about.
+    """
+    from local_operator.tui.widgets.network_panel import build_network_report
+
+    text = build_network_report(_panel_local()).plain
+    assert "asking the relay…" not in text, text
+    assert "relay: checking…" in text, text
+    assert "checking with the relay…" in text, text
+    # The Relay section's own pending line: the same verb, and its subject is the
+    # relay the heading three lines above already names.
+    assert "  checking…" in text, text
+
+
+def test_a_wrapped_log_path_keeps_the_sections_indent() -> None:
+    """U22: the value dropped to column 0 when it wrapped, so the tail of a path
+    read as a different section."""
+    from local_operator.tui.widgets.network_panel import _indented_value
+
+    prefix = "  log:        "
+    long_path = "/Users/someone/Library/Application Support/local-operator/logs/network.log"
+    wrapped = _indented_value(prefix, long_path, 60)
+    lines = wrapped.splitlines()
+    assert len(lines) > 1, wrapped
+    assert lines[0].startswith(prefix)
+    for continuation in lines[1:]:
+        assert continuation.startswith(" " * len(prefix)), repr(continuation)
+    # Nothing is lost: the wrapped form re-joins to the original value.
+    assert "".join([lines[0][len(prefix) :], *(ln[len(prefix) :] for ln in lines[1:])]) == long_path
+    # A value that fits is untouched — there is no second code path for it.
+    assert _indented_value(prefix, "/short/log", 60) == prefix + "/short/log"
+
+
+# ---------------------------------------------------------------------------
+# UX round 3 U23 — the reason, in words
+# ---------------------------------------------------------------------------
+
+
+def test_a_reason_token_is_said_in_words_and_a_sentence_is_left_alone() -> None:
+    """U23, at the function every surface now shares.
+
+    ``connect_failed:ConnectionRefusedError`` is a stage, a colon with no space
+    and a Python class name: a user surface that prints it names the transport's
+    failure mode where the reader needs "that device is not there" (design round 1,
+    D3). ``asked, and it did not answer`` is a SENTENCE the relay already wrote for
+    a person, and glossing that one away would replace a specific answer with a
+    blander one — which is why the rule splits on what the field holds rather than
+    on which surface is reading it.
+    """
+    from local_operator.resume import peer_reason_words
+
+    assert peer_reason_words("connect_failed:ConnectionRefusedError") == "it did not answer"
+    assert peer_reason_words("connect_failed:TimeoutError") == "it did not answer"
+    assert peer_reason_words("no_endpoint") == "no address published for it"
+    assert peer_reason_words("") == "it did not answer"
+    # A sentence survives, and a ``stage: <sentence>`` keeps its sentence and
+    # loses only the stage word.
+    assert peer_reason_words("asked, and it did not answer") == "asked, and it did not answer"
+    assert (
+        peer_reason_words("not_attempted: the listing budget ran out before this member was probed")
+        == "the listing budget ran out before this member was probed"
+    )
+    # NEVER EMPTY is the contract every caller paints into a clause.
+    for token in ("", "  ", "connect_failed:", "unreachable:TimeoutError"):
+        assert peer_reason_words(token).strip(), token
+
+
+#: The one prose reason whose body EMBEDS an endpoint, built by its producer so the
+#: case cannot drift out of this file (round 10, MAJOR-1).
+_HANDSHAKE_ANSWERED = (
+    "handshake_not_attempted: 127.0.0.1:39223 answered and the listing budget ran out "
+    "before the handshake"
+)
+
+
+def test_a_sentence_carrying_an_address_is_still_a_sentence() -> None:
+    """Round 10, MAJOR-1, at the shared function: the shape test read prose as a list.
+
+    The relay writes this one reason as a SENTENCE with the winning endpoint inside
+    it, and the winner is by construction a bare ``host:port``. The previous shape
+    test counted any colon-bearing field as a wire token, so this input came back as
+    "no address of it answered" — for an address that answered — which is the
+    inverse of the truth (round 10's own reproduction, at this function).
+
+    The reason is built by the REAL producer, and the two neighbours it must not be
+    confused with are asserted beside it: a machine list is still glossed whole, and
+    a bare endpoint-plus-detail segment with no ``;`` at all is still a list.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import relay
+
+    assert relay.handshake_not_attempted_reason("127.0.0.1:39223") == _HANDSHAKE_ANSWERED
+    words = resume.peer_reason_words(_HANDSHAKE_ANSWERED)
+    assert words == "it answered, and the listing ran out of time before the handshake"
+    # Neither the address nor the stage word survives — and the meaning does.
+    assert "127.0.0.1" not in words and "handshake_not_attempted" not in words, words
+    assert "no address of it answered" not in words, words
+    # THE OTHER DIRECTION. A machine list is a ``;``-separated sequence of
+    # ``<endpoint> <detail>`` pairs, and every one of its segments ends in a code the
+    # probe can write — so a list is glossed WHOLE, including a one-segment list,
+    # which is the shape closest to the prose above.
+    for tail in (
+        "127.0.0.1:39223 connect_failed:ConnectionRefusedError",
+        "10.0.0.1:7 no_answer; 10.0.0.2:7 bad_endpoint",
+        "10.0.0.1:7 not_attempted",
+    ):
+        assert resume.peer_reason_words(f"unreachable: {tail}") == "no address of it answered", tail
+        assert resume.peer_reason_words(f"half_broken: {tail}") == "no address of it answered", tail
+    # THE DISCRIMINATOR ITSELF, both directions, because the arm above would hide a
+    # regression in it: the relay's sentence is NOT a machine list, and a list of
+    # ``<endpoint> <detail>`` pairs IS — whichever stage word prefixes either one.
+    assert (
+        resume._carries_wire_tokens(  # noqa: SLF001 — the rule under test
+            "127.0.0.1:39223 answered and the listing budget ran out before the handshake"
+        )
+        is False
+    )
+    assert (
+        resume._carries_wire_tokens("127.0.0.1:39223 connect_failed:ConnectionRefusedError") is True
+    )
+    assert resume._carries_wire_tokens("10.0.0.1:7 no_answer") is True
+    assert (
+        resume._carries_wire_tokens("the listing budget ran out before this member was probed")
+        is False
+    )
+
+
+def test_the_member_reading_fails_closed_on_prose_that_names_an_address() -> None:
+    """Round 11's R11-2 and Q-R25-3, and the trap R11-4 called a dead arm.
+
+    THREE INPUTS, ONE PROPERTY: prose the recogniser cannot read must still not reach a
+    person carrying an address, a class name or a stage word.
+
+    * R11-2 — a declared endpoint containing ``;``. Endpoints are stored verbatim and
+      unvalidated at both write points (an operator's ``advertise_hosts``, a peer's
+      handshake ``peer_endpoints``), so one ``;`` inside an address splits an
+      ``<endpoint> <detail>`` pair in two and left a segment whose last field is not a
+      code. The rule required EVERY segment to end in a code, so a genuine machine
+      list was handed back as prose. It now requires ANY, which is the fail-closed
+      direction: at worst a mixed tail reads blander than it is, never wider.
+    * Q-R25-3 — the doctor's PRE-round-24 spelling of ``handshake_not_attempted``,
+      which an old stored reason or a peer on an older build can still hand the member
+      table. It is not a machine list (no ``;`` at all), so the recogniser said prose
+      and the sentence kept the endpoint that ANSWERED.
+    * R11-4 — the bare stage word ``unreachable`` is an identifier, so the bare-code
+      fallback matched it first and read it as a REFUSAL, the opposite state, while
+      the arm written for it sat unreachable below.
+
+    The other direction is asserted beside them, because a rule that glosses
+    everything is not a fix: the relay's own member-level sentence (no address in it)
+    is still returned as written.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import relay
+
+    # R11-2, through the real producer.
+    compound = relay.probe_reason(
+        [
+            relay.CandidateAttempt("10.0.0.1;evil", False, "connect_failed:ConnectionRefusedError"),
+            relay.CandidateAttempt("10.0.0.2:7", False, "no_answer"),
+        ]
+    )
+    assert ";" in compound, compound
+    read = resume.peer_reason_words(compound)
+    assert read == "no address of it answered", read
+    for leaked in ("10.0.0.1", "10.0.0.2", "evil", "ConnectionRefusedError", "no_answer"):
+        assert leaked not in read, (leaked, read)
+    # The discriminator itself, so the arm above cannot hide a regression in it.
+    assert resume._carries_wire_tokens(compound.rsplit(": ", 1)[-1]) is True  # noqa: SLF001
+
+    # Q-R25-3: the legacy spelling, built as the relay's own producer builds it.
+    legacy = (
+        "not_attempted: 127.0.0.1:64994 answered and the doctor budget ran out "
+        "before the handshake"
+    )
+    words = resume.peer_reason_words(legacy)
+    assert words == "it answered, and the listing ran out of time before the handshake", words
+    assert "127.0.0.1" not in words and "64994" not in words, words
+    assert "not_attempted" not in words, words
+    # Prose with no address in it is still prose, from the member's own producer.
+    untouched = resume.peer_reason_words(relay.NOT_ATTEMPTED_REASON)
+    assert untouched == "the listing budget ran out before this member was probed", untouched
+
+    # R11-4: the bare stage word is not a refusal.
+    assert resume.peer_reason_words("unreachable") == "no address of it answered"
+    assert resume.peer_reason_words("unreachable") != resume._BARE_CODE_WORDS  # noqa: SLF001
+    assert resume.peer_reason_words("connect_failed") == "it did not answer"
+
+
+def test_the_membership_table_speaks_in_words_too() -> None:
+    """Round 11, Step 1's own enumeration: a THIRD vocabulary, missed by all of 9-11.
+
+    ``MembershipReport``'s silent rows carry a reason for a member's TABLE not arriving,
+    and two renderers printed it raw beside a 34-character device id: the sentence
+    `lop network show` prints, and the marker `lop network ls` and the agent tool's
+    digest append to each row. Rounds 9-11 each swept a surface that renders a PEER's
+    reason and never looked at the surfaces that render a MEMBERSHIP row's, which is
+    the enumeration failure this round is about rather than a fourth instance of it.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import relay
+
+    device = "d_1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
+    report = relay.MembershipReport(network_id="n_" + "a" * 22, refreshed_at=0.0)
+    report.silent.append({"device_id": device, "reason": "no_live_link"})
+    report.silent.append(
+        {"device_id": "d_ffffffffffffffffffffffffffffffff", "reason": "no_table:error"}
+    )
+    sentence = report.sentence()
+    assert sentence.startswith("members NOT verified"), sentence
+    for leaked in (device, "no_live_link", "no_table", "d_ffffffffffffffffffffffffffffffff"):
+        assert leaked not in sentence, (leaked, sentence)
+    assert "nothing is connected to it" in sentence, sentence
+
+    row = {
+        "members": 3,
+        "membership": {
+            "table": {
+                "complete": False,
+                "answered": [],
+                "not_answered": [{"device_id": device, "reason": "no_live_link"}],
+            }
+        },
+    }
+    marker = relay.membership_marker(row)
+    assert "NOT verified" in marker, marker
+    assert device not in marker and "no_live_link" not in marker, marker
+    # A reason the producer wrote for a reader survives; one that names an address
+    # does not, whichever shape it arrives in.
+    assert (
+        resume.table_reason_words("not_asked: the refresh budget ran out before this peer's turn")
+        == "the refresh budget ran out before this peer's turn"
+    )
+    assert resume.table_reason_words("nothing at 127.0.0.1:9 answered") == (
+        "it did not answer the table read"
+    )
+
+
+def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
+    """Round 10, MAJOR-2: the single-code path's tokens had no table entry.
+
+    A member whose addresses are all black holes and whose budget expires is
+    reported with the bare ``no_answer`` code, and that code — like ``bad_endpoint``
+    and ``not_attempted`` — had no reading, so a human row printed it. The codes are
+    enumerated FROM THE SOURCE here rather than typed: the probe's own vocabulary
+    (``relay.PROBE_DETAIL_CODES`` plus the open ``connect_failed:`` family), the
+    record facts the relay names as reasons, the handshake's refusal constants
+    (``handshake.REASON_*``) and the dial's own phase guard. Every one has a stated
+    reading — a table entry, a stage arm, or one of the two documented fallbacks —
+    so none of them can reach a reader as itself.
+    """
+    import local_operator.resume as resume
+    from local_operator.network import handshake, relay
+
+    codes = set(relay.PROBE_DETAIL_CODES) - {relay.DETAIL_OK}
+    # ``ok`` is a detail an attempt carries, never a reason: a reason exists only
+    # when no candidate connected, so ``probe_reason`` drops it.
+    assert relay.DETAIL_OK not in codes
+    codes |= {
+        f"{relay.CONNECT_FAILED_PREFIX}{name}"
+        for name in ("OSError", "TimeoutError", "ConnectionRefusedError")
+    }
+    codes |= {value for name, value in vars(handshake).items() if name.startswith("REASON_")}
+    codes |= {"pair_phase_requires_the_ceremony", "no_endpoint", "not_a_member", "member_removed"}
+    codes |= {
+        relay.NOT_ATTEMPTED_REASON,
+        relay.handshake_not_attempted_reason("127.0.0.1:39223"),
+        "handshake_refused:OSError",
+        # The one arrival a bare identifier cannot be told apart from: a peer's own
+        # refusal message in a single word. It reads as that peer's refusal, which
+        # is what it is.
+        "denied",
+    }
+    assert len(codes) > 20, codes  # a truncated enumeration is not evidence
+    for code in sorted(codes):
+        words = resume.peer_reason_words(code)
+        assert words.strip(), code
+        # Never the code itself, and never anything that still LOOKS like one: no
+        # stage colon, no snake_case.
+        assert words != code, code
+        assert ":" not in words and "_" not in words, (code, words)
+    # AND THE CODES WHOSE READING IS ALREADY KNOWN HAVE THAT READING, in the table
+    # rather than through the function: "something other than the code" is satisfied
+    # by the bare-code fallback, which is a sentence about a REFUSED link and simply
+    # the wrong one for a dial that produced no answer at all. A probe code added
+    # without an entry fails here, which is the gap this round found.
+    for code in sorted(relay.PROBE_DETAIL_CODES - {relay.DETAIL_OK}):
+        assert code in resume.PEER_REASON_WORDS, code
+    assert resume.PEER_REASON_WORDS["no_answer"] == resume._NO_ADDRESS_ANSWERED
+    assert resume.PEER_REASON_WORDS["not_attempted"] == (
+        "the listing ran out of time before it was tried"
+    )
+    assert resume.PEER_REASON_WORDS["bad_endpoint"] == (
+        "the address it publishes cannot be dialled"
+    )
+    # AND THE FAMILIES THAT ARE ONLY EVER WRITTEN AFTER A CONNECT HAVE THE RIGHT
+    # READING, which is the assertion "not the code" cannot make: the silence default
+    # satisfies it too, which is how ``handshake_refused:`` — the one arrival whose
+    # own name says the peer ANSWERED — shipped reading as silence, and how the bare
+    # refusal codes could regress to it (round 24, Q-R24-1).
+    refused = {value for name, value in vars(handshake).items() if name.startswith("REASON_")} | {
+        "pair_phase_requires_the_ceremony"
+    }
+    # ``not_a_member`` is the one refusal with a DIAGNOSIS rather than the refusal
+    # reading (the peer answered, refused, and said WHICH way this device is wrong),
+    # so it keeps its table entry; the assertion below it covers that.
+    refused -= {"not_a_member"}
+    refused |= {
+        relay.handshake_refused_reason(exc)
+        for exc in (TimeoutError(), ConnectionResetError("the peer closed it"))
+    }
+    assert len(refused) >= 11, refused  # a truncated enumeration is not evidence
+    for reason in sorted(refused):
+        assert resume.peer_reason_words(reason) == resume._BARE_CODE_WORDS, reason  # noqa: SLF001
+    assert resume.peer_reason_words("not_a_member") == resume.PEER_REASON_WORDS["not_a_member"]
+
+
+# ---------------------------------------------------------------------------
+# Design round 3 D40 — the audit row, and the row it is allowed to cost
+# ---------------------------------------------------------------------------
+
+
+def test_the_audit_row_is_painted_where_the_fold_cannot_reach_it() -> None:
+    """THE FOLD IS THE CONSTRAINT, so the row left the scrolled region entirely.
+
+    Round 3 painted the audit news in the Relay block and paid for it out of the
+    block's separator blank. That held only while the content above held still: the
+    block is the LAST thing in ``#network-scroll``, whose height grows with every
+    network and peer row, so two more peers pushed the block — and the row with it —
+    under the fold, and the distinction vanished again in exactly the state the row
+    exists for (design round 4, D46, measured on the real wedged payload and on the
+    fixture with two more peers: ``virtual_size`` 18 and 20 in an 84x16 region).
+
+    The row is the title block's third line now, outside ``#network-scroll`` and out
+    of its budget, in the row the title's own blank padding used to hold — so what this
+    pins is a model fact rather than a pixel: **the body is the same in every audit
+    state**, and the news is a property of the panel. A steady panel paints the third
+    line empty, which is the frame every geometry comparison in the round (and the
+    committed README figure) is made against.
+    """
+    import json
+
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    def block(relay: Any, **over: Any) -> list[str]:
+        screen = NetworkScreen(_panel_local())
+        payload = {
+            "installed": True,
+            "identity_present": True,
+            "relay_running": True,
+            "relay_answering": True,
+            "relay_state": "live",
+            "relay": relay,
+            "log": "/tmp/iso/logs/network.log",
+        }
+        payload.update(over)
+        screen.status_run = NetworkRun(("status",), 0, stdout=json.dumps(payload))
+        return screen.render_lines_for_test()
+
+    steady = block({"pid": 4711, "audit_recorded_through": 13, "audit_published_through": 13})
+    lagging = block({"pid": 4711, "audit_recorded_through": 13, "audit_published_through": 12})
+
+    # The steady panel carries no news anywhere, and the title block contributes no
+    # third line: that row is the title's own padding, which is what keeps the steady
+    # frame's styles — and its bytes — exactly as they were.
+    assert not [line for line in steady if line.startswith("  audit:")], steady
+    assert steady[0] == "Mesh networks", steady
+    assert steady[_body_start(steady)] == "This device", steady[:5]
+
+    # The news is on the TITLE: after the rule and before the body, in the same words
+    # at the same cell 14 the block's rows use — so a reader moving between the panel
+    # and `lop network status` reads the same field twice.
+    body_at = _body_start(lagging)
+    assert lagging[0] == "Mesh networks", lagging
+    assert lagging[1] == steady[1], lagging[:2]
+    news_lines = lagging[2:body_at]
+    assert len(news_lines) == 1, lagging[:6]
+    assert news_lines[0].startswith("  audit:"), lagging[:5]
+    assert lagging[2].index("13 recorded") == 14, lagging[2]
+    # AND IT IS ONE ROW, ELIDED AND MARKED. This rig's title is built at the panel's
+    # 40-cell floor — the screen is never mounted, so ``_card_width`` falls back to
+    # ``_MIN_CARD_WIDTH`` — and the sentence is 53 cells of value against a 26-cell
+    # budget, so the row is cut and ends in the ``…`` that says so (``_one_row_value``).
+    # Round 4 wrapped here instead, which is what grew the title block 3 -> 8 rows on a
+    # real terminal at 50x18 and took the body's six rows down to one (review round 4
+    # MAJOR 1; design round 5, D48).
+    assert news_lines[0] == "  audit:      13 recorded, published th…", news_lines
+
+    # THE BODY IS STATE-INDEPENDENT, and the separator is the section rhythm in every
+    # state — the two halves of D47: the news no longer spends the blank, so `Relay` no
+    # longer abuts the peers list in the states that carry news.
+    steady_at = _body_start(steady)
+    assert lagging[body_at:] == steady[steady_at:]
+    relay_at = next(n for n, line in enumerate(steady) if line == "Relay") - steady_at
+    assert steady[steady_at + relay_at - 1] == "", steady[steady_at + relay_at - 2 :]
+    assert lagging[body_at + relay_at - 1] == "", lagging[body_at + relay_at - 2 :]
+
+
+def _body_start(lines: list[str]) -> int:
+    """Where the scrolled body begins — the first row after the title block."""
+    return next(n for n, line in enumerate(lines) if line == "This device")
+
+
+def _band(app: Any, screen: Any) -> dict[str, Any]:
+    """What the title band OWNS, read off the painted frame rather than the model.
+
+    The rows come from the compositor's own strips — the title's region is a rectangle
+    of the frame — because the property under test is that a row of the scrolled body
+    is still on screen, and no widget's own model can answer that: the block's BOX grew
+    while its content did not, which is a thing only the painted frame shows (review
+    round 4 MAJOR 1). ``content`` is the border box's content area, so it is the cells
+    a row can actually occupy — the number the card width has to stay inside.
+    """
+    title = screen.query_one("#network-title")
+    scroll = screen.query_one("#network-scroll")
+    rows = _painted(app).split("\n")
+    top, height = title.region.y, title.region.height
+    return {
+        "box": (title.region.width, title.region.height),
+        "content": (title.size.width, title.size.height),
+        "rows": rows[top : top + height],
+        "region": scroll.region.height,
+        "virtual": scroll.virtual_size.height,
+        "bar": bool(scroll.show_vertical_scrollbar),
+    }
+
+
+#: The sizes the band is pinned at — the six the review round measured (its own
+#: table, 100x30 down to the 50x18 floor where the region went 6 -> 1), the 80x24
+#: default-width case, the 84x16 region this file's other geometry tests cite, and
+#: the 40x20 floor where the rule itself was wider than the box. A single width is
+#: the defect this replaced: the claim held at 100x30 and at no other size, so a
+#: test pinned there passed while the panel grew 3 -> 8 rows on a real terminal
+#: (review round 4 MAJOR 1; design round 5, D48).
+_BAND_SIZES = ((100, 30), (98, 30), (96, 30), (84, 16), (80, 24), (56, 20), (50, 18), (40, 20))
+
+
+@pytest.mark.asyncio
+async def test_the_news_row_costs_the_scrolled_body_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE ROW IS OUTSIDE THE REGION, and the region does not shrink to pay for it.
+
+    The claim is about the PAINTED frame — the row the reader loses is a row of the
+    scrolled body, and no model assertion can see it — so this is measured off the
+    compositor at every size in ``_BAND_SIZES``, in both states: the title block is a
+    three-row box with news and a three-row box without it, and ``#network-scroll``
+    is the same region with the same scrollbar in both. ``1fr`` makes that the second
+    half of the claim: the region is whatever the title and hint leave, so a row the
+    title took would be a body row lost, and the designer's "nothing that was on-page
+    was pushed off it" is a measurement here rather than a property (round 4, D46/D47).
+
+    THE BOX IS THE BOUND, and it is what round 4's ``height: auto`` broke: the block
+    grew to fit a wrapped sentence (3 -> 4 -> 8 rows over this list of sizes) and the
+    growth came out of a ``1fr`` region that went 16 -> 10 -> 1 at 50x18. The sentence
+    is elided to one row now, so the assertion is that the box is three rows at every
+    size rather than three rows at the one size where nothing wraps — and the rule is
+    checked for the same reason, because a card one cell wider than the box made the
+    rule wrap onto a row of its own below itself at the floor.
+    """
+    import json
+
+    import local_operator.tui.widgets.network_panel as panel_mod
+    from local_operator.network.relay import audit_status_words
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    def status_dict(published_through: int) -> dict[str, Any]:
+        return {
+            "installed": True,
+            "identity_present": True,
+            "relay_running": True,
+            "relay_answering": True,
+            "relay_state": "live",
+            "relay": {
+                "pid": 4711,
+                "audit_recorded_through": 13,
+                "audit_published_through": published_through,
+            },
+            "record": {"pid": 4711},
+            "log": "/tmp/iso/logs/network.log",
+        }
+
+    def stub(published_through: int) -> Any:
+        def run(args: list[str], **kwargs: Any) -> NetworkRun:
+            if not args or args[0] != "status":
+                return NetworkRun(tuple(args), 0, stdout="")
+            return NetworkRun(tuple(args), 0, stdout=json.dumps(status_dict(published_through)))
+
+        return run
+
+    # The relay's own words for this payload: the panel paints them, so the elision is
+    # checked against the sentence rather than against a copy of it written here.
+    words = audit_status_words(status_dict(12), omit_steady=True)
+    #: The label column the block's own rows use, and so the cells of value a row has.
+    label = "  audit:      "
+
+    bands: dict[bool, dict[tuple[int, int], dict[str, Any]]] = {False: {}, True: {}}
+    for news in (False, True):
+        for size in _BAND_SIZES:
+            monkeypatch.setattr(panel_mod, "run_network", stub(12 if news else 13))
+            app = _app_fixture()
+            async with app.run_test(size=size) as pilot:
+                screen = NetworkScreen(_panel_local())
+                app.push_screen(screen)
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                await pilot.pause()
+                band = _band(app, screen)
+                bands[news][size] = band
+
+                # THREE ROWS, and the box is exactly as tall as the content it was
+                # given: the steady title is a 3-row box holding 2 rows and a padding
+                # row, the news state a 3-row box holding all 3 rows.
+                assert band["box"] == (band["content"][0], 3), (size, news, band["box"])
+                assert band["content"][1] == (3 if news else 2), (size, news, band["content"])
+                # ONE rule row, never two: the rule is built at the card width, which
+                # may not exceed the box it is painted in, or it wraps below itself.
+                assert [n for n, row in enumerate(band["rows"]) if "─" in row] == [1], (
+                    size,
+                    news,
+                    band["rows"],
+                )
+                # The frame row carries the panel's own offset (a 90% card, centred,
+                # inside a padding box), so the block's rows are read from the label the
+                # block itself writes. ``label`` is the cell-14 column the block's rows
+                # use; from the frame, the label is what is left after the offset.
+                third = band["rows"][2].rstrip()
+                if news:
+                    # One row, and it is the relay's sentence elided to the cells it
+                    # has — the whole sentence where it fits, and the tail replaced by
+                    # the ``…`` that says it was cut (never a second row: a wrapped
+                    # line is what grew the block instead of marking the cut).
+                    row = third.lstrip()
+                    assert row.startswith(label.lstrip()), (size, third)
+                    value = row[len(label.lstrip()) :]
+                    # AND THE CUT IS AT THE CELL THE BUDGET ENDS ON, not merely inside
+                    # the row (review round 5, NIT): the cells the value may use are
+                    # the panel's own card width minus the label, so an elision that
+                    # cut EARLY and still stayed inside the box would fail here, where
+                    # "some prefix ending in an ellipsis" passed. Both fixtures are
+                    # ASCII, so cells and characters are the same number for them.
+                    budget = screen._card_width() - cell_len(label)
+                    assert cell_len(value) == min(cell_len(words), budget), (
+                        size,
+                        third,
+                        budget,
+                        cell_len(value),
+                    )
+                    if cell_len(words) <= cell_len(value):
+                        assert value == words, (size, third, words)
+                    else:
+                        assert value == words[: len(value) - 1] + "…", (size, third, words)
+                else:
+                    assert third.strip() == "", (size, band["rows"])
+
+    for size in _BAND_SIZES:
+        # THE REGION, as the reader experiences it: same rows, same thumb, same state.
+        assert bands[False][size]["region"] == bands[True][size]["region"], size
+        assert bands[False][size]["bar"] == bands[True][size]["bar"], size
+        assert bands[True][size]["box"][1] == 3, (size, bands[True][size])
+        # And the body's own EXTENT is the same number of rows in both states — the
+        # claim D46/D47 rests on, and the one a row moved out of the body has to keep:
+        # the sentence is painted in the band, not added to the region's content.
+        assert bands[False][size]["virtual"] == bands[True][size]["virtual"], (size, bands)
+
+
+@pytest.mark.asyncio
+async def test_a_re_layout_leaves_the_band_the_same_three_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A RESIZE THAT CHANGES NOTHING IN THE MODEL MUST LEAVE THE FRAME ALONE.
+
+    Q-R4-1, measured: in the news state any re-layout left the title holding four rows
+    for three rows of content — an empty row under the sentence — and the row did not
+    come back until the news cleared, so ``#network-scroll`` sat one row short (16 -> 15)
+    with a scrollbar it did not have. It was not the sentence wrapping at the
+    destination width: bouncing through 110x34, where nothing wrapped on this tree
+    either, returned the same 4/15. The empty row was the block's own padding row,
+    which ``height: auto`` re-added to a three-row content measurement on the way back.
+
+    So the assertion is the pair: a fresh frame at a size and the frame a resize
+    returns to that same size are THE SAME FRAME, and the news clearing gives the row
+    back to the padding it took it from. Driven through the pilot's own
+    ``resize_terminal``, which enters the same ``on_resize`` -> ``_repaint`` path a
+    terminal resize does.
+    """
+    import json
+
+    import local_operator.tui.widgets.network_panel as panel_mod
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    def payload(published_through: int) -> str:
+        return json.dumps(
+            {
+                "installed": True,
+                "identity_present": True,
+                "relay_running": True,
+                "relay_answering": True,
+                "relay_state": "live",
+                "relay": {
+                    "pid": 4711,
+                    "audit_recorded_through": 13,
+                    "audit_published_through": published_through,
+                },
+                "record": {"pid": 4711},
+                "log": "/tmp/iso/logs/network.log",
+            }
+        )
+
+    def run(args: list[str], **kwargs: Any) -> NetworkRun:
+        if not args or args[0] != "status":
+            return NetworkRun(tuple(args), 0, stdout="")
+        return NetworkRun(tuple(args), 0, stdout=payload(12))
+
+    monkeypatch.setattr(panel_mod, "run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = NetworkScreen(_panel_local())
+        app.push_screen(screen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.pause()
+        fresh = _band(app, screen)
+        assert fresh["rows"][2].strip().startswith("audit:"), fresh["rows"]
+
+        # Away and back through every size the round found a defect at: the wider
+        # 110x34 (nothing wraps at either end), the capture width's neighbours, and
+        # the 50x18 floor where the region collapsed to a single row.
+        for via in ((110, 34), (96, 30), (80, 24), (50, 18), (40, 20)):
+            await pilot.resize_terminal(*via)
+            await pilot.pause()
+            await pilot.pause()
+            at = _band(app, screen)
+            assert at["box"][1] == 3, (via, at)
+            assert [n for n, row in enumerate(at["rows"]) if "─" in row] == [1], (via, at["rows"])
+            assert at["rows"][2].strip().startswith("audit:"), (via, at["rows"])
+
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        await pilot.pause()
+        back = _band(app, screen)
+        assert back["box"] == fresh["box"], (fresh, back)
+        assert back["content"] == fresh["content"], (fresh, back)
+        assert back["region"] == fresh["region"], (fresh, back)
+        assert back["rows"] == fresh["rows"], (fresh["rows"], back["rows"])
+
+        # THE ROW COMES BACK when the news clears — the sentence and the class go
+        # together, through the panel's own "the worker answered" door. The two
+        # non-status runs are the ones the stubbed fill already published.
+        assert screen.relay is not None and screen.peers_run is not None, "the fill did not settle"
+        answered = NetworkRun(("status",), 0, stdout=payload(13))
+        screen.set_relay(screen.relay, screen.peers_run, answered)
+        await pilot.pause()
+        await pilot.pause()
+        cleared = _band(app, screen)
+        assert not screen.query_one("#network-title").has_class("audit-news"), cleared
+        assert cleared["rows"][2].rstrip() == "", cleared["rows"]
+        assert cleared["box"] == fresh["box"], (fresh, cleared)
+        assert cleared["content"] == (fresh["content"][0], 2), (fresh, cleared)
+        assert cleared["region"] == fresh["region"], (fresh, cleared)
+
+
+def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be() -> None:
+    """The SIGSTOP case: ``relay: null`` and no ``audit*`` key at all.
+
+    A reader who has just found a row missing from ``audit.jsonl`` is, by construction,
+    in a state where the relay may not answer — so the panel must not go quiet here,
+    because its silence is indistinguishable from a healthy writer's. This is the one
+    surface case D40 said it would not accept as a follow-up.
+
+    AND IT NAMES THE PROCESS IT IS TALKING ABOUT (design round 4, D45). The wedged
+    payload is the one where ``relay`` is null, which is exactly why the pid cannot be
+    read from that block alone: it printed the literal ``None`` above a sentence saying
+    the process is up. The record on disk carries the pid, and the panel reads the pair
+    in the order the CLI and the agent digest already do.
+    """
+    import json
+
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    screen = NetworkScreen(_panel_local())
+    screen.status_run = NetworkRun(
+        ("status",),
+        0,
+        stdout=json.dumps(
+            {
+                "installed": True,
+                "identity_present": True,
+                "relay_running": True,
+                "relay_answering": False,
+                "relay_state": "wedged",
+                "relay": None,
+                "record": {"pid": 35292},
+                "log": "/tmp/iso/logs/network.log",
+            }
+        ),
+    )
+    text = "\n".join(screen.render_lines_for_test())
+    assert "relay:      running, pid 35292 — NOT answering" in text, text
+    assert "pid None" not in text, text
+    assert "audit:" in text, text
+    # The sentence is present even at this cell's 40-cell panel width (a 26-cell value
+    # budget), as ONE elided row — the words it can carry, and the ``…`` that says it
+    # could not carry the rest. It used to wrap here, which cost the body a row per
+    # wrapped line on a real terminal (review round 4 MAJOR 1).
+    assert "  audit:      unavailable — relay not a…" in text, text
+    assert "audit.jsonlholds" not in text.replace(" ", ""), text
+    # And the numbers are never invented for it: no counter survives a null relay.
+    assert "recorded," not in text, text

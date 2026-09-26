@@ -1,0 +1,1451 @@
+"""The mesh's vocabulary: record shapes, capability names, op tables, refusals.
+
+WHY THIS MODULE IS STDLIB-ONLY. ``local_operator/cli.py`` imports the network
+package to register ``lop network``, so every ``lop`` invocation including
+``--version`` pays whatever this module imports. Nothing here may reach
+``cryptography`` (the handshake), ``socket``/``threading`` (the relay) or
+``yaml`` (the config store): the same import-light contract
+``session/runtime/types.py`` carries, and the reason its constants are imported
+from it rather than re-spelled here.
+
+TWO VERSIONS, DELIBERATELY SEPARATE.
+:data:`MESH_PROTOCOL_VERSION` is the LINK protocol — the handshake, the
+transcript and the record framing in ``wire.py``/``handshake.py``. It moves only
+when one of those three changes. ``PROTOCOL_VERSION`` (imported, never
+re-spelled) is the SESSION control protocol the local runtimes speak; the relay
+carries it through as ``session_protocol`` and never interprets a session frame,
+so a mixed-version fleet degrades per op through the existing unknown-op rule
+rather than at the link. Adding a session-level op therefore moves neither
+number, and adding a link feature moves neither either — that is what the
+capability strings below are for.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import asdict, dataclass, field
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:  # the crypto module is function-local at runtime; this is a type only
+    from local_operator.network.wire import LinkKeys
+
+# The session control protocol, imported rather than copied: a second literal
+# here is a second thing to forget to bump, and this module is already on the
+# CLI startup path with that module for other reasons (it is stdlib-only).
+from local_operator.session.runtime.types import PROTOCOL_VERSION
+
+#: The LINK protocol: the handshake frames, the transcript construction and the
+#: AEAD record framing. Bumped for a change to any of those three and for
+#: nothing else — a new op is a new string in a dispatch table, and an old peer
+#: answers ``error: unknown op`` exactly as it does on the session plane.
+MESH_PROTOCOL_VERSION = 1
+
+#: Directory (under the config root) holding one record per live mesh RELAY.
+#:
+#: A FOURTH namespace for the reason ``run/serve`` is a second one: every reader
+#: of ``run/mobile`` treats each file there as a SESSION, and ``SessionRecord.kind``
+#: is a ``Literal`` those readers pass through unvalidated, so a relay record
+#: dropped in beside them would surface as a phantom session with an empty
+#: ``session_id`` and no error anywhere. A relay record carries ``network_id``,
+#: ``device_id``, ``epoch`` and endpoints — facts a session record must not carry
+#: and a session reader would misread. It is also not a ``run/serve`` record:
+#: that answers "which install is serving HTTP", this answers "which install is
+#: on the mesh, as whom, and on which networks". One install can have either,
+#: both, or neither.
+#:
+#: It lives HERE rather than beside ``RUN_DIRNAME``/``SERVE_RUN_DIRNAME``/
+#: ``HOST_RUN_DIRNAME`` in ``session/runtime/types.py`` because this slice may
+#: not edit that module; the registry path is parameterised by dirname, so the
+#: namespace works identically from here. See ``store.py`` for the accessors.
+PEERS_RUN_DIRNAME = "run/peers"
+
+# ---------------------------------------------------------------------------
+# Numbers that arrived from a PEER
+# ---------------------------------------------------------------------------
+
+#: The largest number a peer may send for ANY field (``2**53``): the biggest integer a
+#: JSON number keeps exactly in every implementation, and far above any real value here
+#: (a millisecond timestamp is ~1.8e12). A value above it is not one this protocol
+#: produces, so it is treated as over the cap rather than trusted.
+PEER_NUMBER_CEILING = 2**53
+
+
+def peer_number(value: Any, *, default: float = 0, maximum: float | None = None) -> float:
+    """A number a PEER sent, or ``default`` — TOTAL: no input raises, none is out of range.
+
+    LIFTED, NOT REINVENTED: this is the credentials slice's ``peer_number`` (commit
+    ``8d001f254``, review round 4 on that branch), moved into the mesh's own vocabulary
+    module because two slices need it and a second spelling of the rule is exactly how the
+    tenth call site was missed the first time. Anything that changes here changes there.
+
+    WHY THIS EXISTS (QA round 2, and review round 2 m1 before it): every numeric field on
+    a broker frame, a grant, a refusal or a pulled placement document was read with a bare
+    ``int(...)``/``float(...)``, so one ``"abc"`` from a peer (or a build that spells a
+    field differently) raised ``ValueError`` in the handler — the reply came back ``null``
+    and the borrower read a crash as "owner offline". The boundary is where a value stops
+    being the peer's claim and becomes this device's input, so it is validated HERE, once,
+    for every field. The federated listing is the same boundary one slice over: a peer's
+    ``pid: "abc"`` used to raise into the listing's own reader, so a listed peer could
+    break the listing for every other peer in it.
+
+    AN ``int`` NEVER GOES THROUGH ``float`` (review round 4, R4-M1 and R4-n1).
+    ``json.loads`` turns a 309-digit number into an ``int``, and ``float()`` of that raises
+    ``OverflowError`` — which is not ``ValueError``, so it escaped every caller and brought
+    the ``null`` reply back. Comparing ints as ints also keeps them exact: the float
+    round-trip turned ``2**53 + 1`` into ``2**53``.
+
+    Accepted: a finite ``int``/``float`` or a numeric string in ``[0, 2**53]``. A ``bool``,
+    a container, ``NaN``, an infinity, a negative number or anything unparseable yields
+    ``default``. A value over ``maximum`` — or over :data:`PEER_NUMBER_CEILING` — yields
+    ``maximum`` when the field has one (a clamp, so an over-long timeout becomes the
+    LONGEST allowed, never the shorter default) and ``default`` when it has none (every
+    such field's default is its fail-safe: an expired grant, the floor revision, epoch 0).
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    number: int | float
+    if isinstance(value, (int, float)):
+        number = value
+    elif isinstance(value, str):
+        text = value.strip()
+        try:
+            # An integer string parses as an int, exactly; only a non-integer string takes
+            # the float path (where "1e400" is ``inf`` and refused below).
+            number = int(text)
+        except ValueError:
+            try:
+                number = float(text)
+            except ValueError:
+                return default
+    else:
+        return default
+    if isinstance(number, float) and not math.isfinite(number):
+        return default
+    if number < 0:
+        return default
+    if number > PEER_NUMBER_CEILING or (maximum is not None and number > maximum):
+        return maximum if maximum is not None else default
+    return number
+
+
+def peer_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int:
+    """:func:`peer_number` for a field the protocol defines as an integer.
+
+    ``int()`` of the result cannot overflow: :func:`peer_number` returns nothing above
+    :data:`PEER_NUMBER_CEILING`, and it is already finite.
+    """
+    return int(peer_number(value, default=default, maximum=maximum))
+
+
+def peer_whole_int(value: Any, *, default: int = 0, maximum: int | None = None) -> int:
+    """:func:`peer_int` for a field the protocol defines as a WHOLE number.
+
+    ``peer_int`` floors a float, which is right for a duration and wrong for anything that
+    NAMES something: a peer's ``pid: 1.5`` floored to ``1`` fabricates a plausible process
+    id (and ``1`` is a real one), and a ``protocol: 2.5`` floored to ``2`` would SELECT the
+    newest path the attach gate guards — both are the "a bad value must not win" failure
+    this boundary exists to prevent. A whole number, or an integer string, is accepted; a
+    fractional one is not a value this protocol can have sent, so it falls to ``default``.
+    """
+    number = peer_number(value, default=float(default))
+    return int(number) if float(number).is_integer() else default
+
+
+# ---------------------------------------------------------------------------
+# Capabilities and roles
+# ---------------------------------------------------------------------------
+
+#: The ONE capability vocabulary (convergence round, authoritative): ten
+#: names, no synonyms. ``broker:request``, ``broker:grant`` and ``member:admin``
+#: were draft names and are not implemented.
+CAPABILITIES: frozenset[str] = frozenset(
+    {
+        "list",
+        "view",
+        "prompt",
+        "steer",
+        "stop",
+        "slash",
+        "delete",
+        "move",
+        "broker_credential",
+        "admin",
+    }
+)
+
+#: What an invite's ``--role`` grants. Resolved AT ADMISSION and stored on the
+#: member row rather than derived at read time, so a later change to this table
+#: cannot retroactively widen an existing member's authority — the failure a
+#: derived-at-read-time design gets wrong.
+ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
+    # Read-only is FIRST-CLASS, not a degenerate drive: "let my laptop see the
+    # fleet" is a common and much safer ask than "let it drive everything".
+    "read": frozenset({"list", "view"}),
+    "drive": frozenset({"list", "view", "prompt", "steer", "stop", "slash"}),
+    "admin": CAPABILITIES,
+}
+
+ROLES: tuple[str, ...] = ("read", "drive", "admin")
+
+#: Roles an invite may name. Deliberately includes ``admin``: an operator
+#: pairing their own second machine needs it, and the human SAS step is what
+#: makes the grant deliberate.
+INVITE_ROLES: tuple[str, ...] = ("read", "drive", "admin")
+
+
+def capabilities_for_role(role: str) -> frozenset[str]:
+    """The capability set a role grants, or :class:`KeyError` for an unknown role.
+
+    Raising rather than defaulting is the point: an unknown role silently
+    resolving to ``read`` or to ``admin`` is a grant nobody decided.
+    """
+    if role not in ROLE_CAPABILITIES:
+        raise KeyError(f"unknown role {role!r}; known roles are {', '.join(ROLES)}")
+    return ROLE_CAPABILITIES[role]
+
+
+# ---------------------------------------------------------------------------
+# The session row's ``pending`` vocabulary
+# ---------------------------------------------------------------------------
+
+#: WHAT A PERSON IS BEING WAITED ON, and the ONE spelling of it.
+#:
+#: ``SessionRecord.pending`` owns this vocabulary (``approval`` / ``ask`` /
+#: ``None``; see ``session/runtime/types.py``): ``lop sessions`` prints the value
+#: raw in its NEEDS column and the sidebar maps it to "Approval needed"/"Answer
+#: needed", so a second spelling for one fact shows up as a column nobody can
+#: read. The federated row carries the SAME strings (§9.2), and the stored half
+#: of a catalogue derives its claim from the attention store's ``unseen`` flag —
+#: an unread completion IS the operator being awaited, and it is not an
+#: approval, so that half publishes :data:`NEEDS_ASK`.
+NEEDS_APPROVAL = "approval"
+NEEDS_ASK = "ask"
+
+
+def normalise_pending(value: object) -> str | None:
+    """The ONE reader of a ``pending`` value, whichever producer wrote it.
+
+    A STRING IS THE CONTRACT and ``None`` is "no claim", never ``False``: the
+    field is read by the federated listing, the sidebar and the picker, and a
+    truthy NON-string reaching any of them is how ``lop sessions --all-peers``
+    died with ``TypeError: object of type 'bool' has no len()`` (QA round 7,
+    Q-R7-1) — the crashing row carried ``True``, because a producer had answered
+    "is there an unread completion" in the field that asks "what is needed".
+
+    A BOOLEAN is therefore TRANSLATED rather than echoed: the only build that
+    ever wrote one wrote it from that same ``unseen`` flag, so ``True`` reads as
+    :data:`NEEDS_ASK` — the claim it meant — while ``"True"`` (the
+    stringification a reviewer flagged) can no longer be produced. ``False``,
+    ``None``, an empty string and anything that is neither a string nor a bool
+    are all "no claim".
+    """
+    if isinstance(value, bool):
+        return NEEDS_ASK if value else None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+# ---------------------------------------------------------------------------
+# Op vocabularies
+# ---------------------------------------------------------------------------
+
+#: The peer-scope ops: relay → relay over an authenticated MEMBER link. The
+#: session-plane ops travelled by ``net_forward`` are ``ControlOp`` values and
+#: are deliberately absent here (see :data:`INNER_OP_CAPABILITY`).
+#:
+#: ``net_stream`` is the ONE name this slice adds beyond the design's vocabulary,
+#: and it is a CARRIER rather than a new capability surface: ``net_forward``
+#: carries one frame and returns its reply, which cannot express a viewer
+#: connection (a welcome, then a continuous stream of events with the viewer's
+#: frames interleaved). Its capability row is ``view`` — the act of opening is a
+#: read — and every frame written down it is resolved through
+#: :data:`INNER_OP_CAPABILITY` exactly as ``net_forward``'s inner frame is, so it
+#: is not a way round the capability model.
+NET_OPS: tuple[str, ...] = (
+    "net_reconcile",
+    "net_catalog",
+    "net_member_list",
+    "net_epoch",
+    "net_leave",
+    "net_panic",
+    "net_trust",
+    "net_identity_rotate",
+    "net_forward",
+    "net_stream",
+    "net_sync",
+    "net_broker",
+    "net_session_lifecycle",
+    "net_session_move",
+    "net_session_create",
+    "net_session_engage",
+    "net_session_stop",
+    # AGENT AND TEAM DEFINITIONS (definitions.py). A peer-scope op of its own
+    # rather than part of a session op: a definition is install-wide
+    # configuration with no owner device, and a create that named one had
+    # nothing on the far end to resolve it against until this existed.
+    "net_definitions",
+    "net_bye",
+    "ping",
+)
+
+#: The pairing ceremony's ops. They are NOT in :data:`OP_CAPABILITY` and this is
+#: deliberate: a pair-phase link has no member row yet, so there is nothing to
+#: authorise against — its authorisation IS the invite validation plus the two
+#: human confirmations. Dispatch refuses them outside phase ``pair``, and a test
+#: asserts the two directions of that rule.
+NET_PAIR_OPS: tuple[str, ...] = ("net_pair_ready", "net_pair_abort", "net_pair_result")
+
+#: The relay's LOCAL control-socket ops (viewer → relay, authorised by the
+#: control key of the peers record). These never reach a peer link: a name from
+#: this tuple appearing in :data:`OP_CAPABILITY` is a bug, not a gap, and the
+#: totality test asserts both directions.
+#:
+#: THE ``peer_*`` NAMES ARE THIS SLICE'S, and they are deliberately not ``net_*``:
+#: the local surface has its own vocabulary so a reader can tell from the frame
+#: alone which boundary it crossed (the ``stream_*`` precedent), and a viewer
+#: asking ITS OWN relay to ask a peer is a local act. ``peer_session_create`` /
+#: ``_engage`` / ``_stop`` are the client half of the design's three peer ops;
+#: ``peer_session_rows`` and ``peer_session_facts`` are the catalogue and the
+#: resolver's live read.
+LOCAL_OPS: tuple[str, ...] = (
+    "net_status",
+    "net_ls",
+    "net_show",
+    "net_init",
+    "net_rename",
+    "net_rm",
+    "net_invite",
+    "net_join",
+    "net_member_rm",
+    "net_peer_ls",
+    "net_disconnect",
+    "net_panic_local",
+    "net_trust_local",
+    "net_log",
+    "net_doctor",
+    "stream_open",
+    "stream_send",
+    "stream_close",
+    "peer_session_rows",
+    "peer_session_facts",
+    "peer_session_create",
+    "peer_session_engage",
+    "peer_session_stop",
+    # The on-demand half of the definitions sync (definitions.py): reach every
+    # linked peer, or one named peer, and bring its definitions up to date.
+    # A local op because it is this device's own relay being told to talk
+    # outward — the same boundary `peer_session_create` sits on.
+    "definitions_sync",
+    # P0 PLUMBING (mesh build plan §0 finding 3): the LOCAL half of a capability
+    # grant. A member row's capabilities are resolved at admission and every
+    # device keeps its OWN copy (``relay.adopt_members`` rule 2), so widening what
+    # a peer may do HERE is a write to this device's row and nothing else — a
+    # local act with a local name, never a wire op.
+    "net_member_caps",
+    # The three verbs the later slices serve (§1.3). Declared here, in P0, so the
+    # totality rule ("a LOCAL_OPS name never appears in OP_CAPABILITY") already
+    # holds for them and no slice has to edit this tuple: the names are this
+    # tree's local vocabulary, deliberately not ``net_*`` (``relay.py``'s
+    # control-handler comment gives the rule).
+    "session_move",
+    "session_sync",
+    "session_lifecycle",
+    # The credential broker's leg 1 (runtime → its own relay, §2.3).
+    "credential_grant",
+    "credential_report",
+    "credential_placement",
+)
+
+#: The phases ``net_session_move`` carries (§1.3 of the build plan). Declared
+#: next to the op tables because the AUTHORISER reads them: ``status``, ``ready``
+#: and ``done`` must still reach a device that has already TOMBSTONED the id (the
+#: §6.5 recovery — the destination asks the source what happened), and ``invite``
+#: reaches the DESTINATION, which by definition does not own the id yet. See
+#: ``authorizer.Authorizer._session_scope`` for the carve-outs.
+MOVE_PHASES: tuple[str, ...] = ("status", "prepare", "ready", "done", "invite")
+
+#: Move phases the SOURCE must answer for an id it has already handed away. A
+#: ``prepare`` is deliberately absent: preparing a session this device no longer
+#: holds is exactly the double-writer INV-1 forbids, so the scope rule refuses it.
+MOVE_PHASES_AFTER_HANDOFF: frozenset[str] = frozenset({"status", "ready", "done"})
+
+#: Capabilities ``lop network member grant`` may add to a peer's LOCAL row.
+#: ``admin`` is absent ON PURPOSE: admin is a role granted by an admin invite and a
+#: human SAS step (``INVITE_ROLES``), and a one-line CLI verb that could mint one
+#: would be a way round that ceremony. ``broker_credential`` IS grantable — it is
+#: what ``credential share`` writes on the owner (§2.2) — but only by a device
+#: whose own row holds ``admin``, which is the "stays admin-only" rule: the
+#: capability is never in a non-admin ROLE, and only an admin may hand it out.
+GRANTABLE_CAPABILITIES: frozenset[str] = frozenset(
+    {"list", "view", "prompt", "steer", "stop", "slash", "delete", "move", "broker_credential"}
+)
+
+#: What each capability lets the peer DO, in words, for ``member grant/revoke``'s
+#: human output. A capability name alone ("broker_credential") does not tell the
+#: operator what they just allowed.
+CAPABILITY_WORDS: dict[str, str] = {
+    "list": "see this device's sessions",
+    "view": "watch a session here",
+    "prompt": "send prompts to a session here",
+    "steer": "steer a running turn here",
+    "stop": "stop a session here",
+    "slash": "run slash commands in a session here",
+    "delete": "archive or delete a session here",
+    "move": "move sessions to or from this device",
+    "broker_credential": "borrow this device's logins",
+    "admin": "administer the network",
+}
+
+#: The capability each peer-scope op requires. ``None`` means "an authenticated
+#: member at the current epoch, no capability needed" and exists for exactly one
+#: op — ``net_bye``, the graceful teardown, which every member may always send.
+OP_CAPABILITY: dict[str, str | None] = {
+    "net_reconcile": "list",
+    "net_catalog": "list",
+    "net_member_list": "list",
+    "net_epoch": "admin",
+    # ``net_leave`` is ``list``: a member announcing its own departure is the
+    # cheapest honest signal there is, and gating it higher would leave a
+    # read-only member unable to leave cleanly.
+    "net_leave": "list",
+    # ``net_panic`` is ``list`` on purpose: any member that DETECTS a compromise
+    # must be able to raise the alarm. The DoS that enables is bounded (it forces
+    # a re-admit, it leaks and destroys nothing) and it is audited with the
+    # sender's id; a suppressed alarm costs the network, a false one costs an
+    # operator action.
+    "net_panic": "list",
+    # ``net_trust`` is ``admin``: the convergence round's one capability
+    # vocabulary has no ``trust`` member, so re-admitting a network after a panic
+    # is an administrative act rather than a capability of its own.
+    "net_trust": "admin",
+    "net_identity_rotate": "admin",
+    "net_forward": None,  # resolved to the INNER op's capability; see effective_op
+    # ``net_stream`` needs ``view`` to OPEN a pipe, and every frame written down
+    # that pipe is resolved through INNER_OP_CAPABILITY at the receiving relay —
+    # so a read-only member may open a stream and may not prompt through it.
+    "net_stream": "view",
+    "net_sync": "view",
+    "net_broker": "broker_credential",
+    "net_session_lifecycle": "delete",
+    "net_session_move": "move",
+    # The three the mobility design adds (§2.2): creating a session IS a prompt
+    # (it admits one), warming a cold one is a read, and the kill switch is its
+    # own capability.
+    "net_session_create": "prompt",
+    "net_session_engage": "view",
+    "net_session_stop": "stop",
+    # ``admin``, and the conservative choice is deliberate. Installing a
+    # definition writes DURABLE, install-wide state on the receiving device and
+    # changes what every FUTURE session there resolves by name — which is
+    # broader than the one conversation a ``prompt``-level caller asked for. The
+    # vocabulary has no ``configure`` member, and ``admin`` is what
+    # ``net_identity_rotate`` and ``net_trust`` already use for "a change to
+    # this install", so a role that may not re-admit a network may not rewrite
+    # its agents either. A ``drive`` peer is therefore told, in words, that the
+    # definition could not be sent and why — never silently sent with the
+    # create and dropped.
+    "net_definitions": "admin",
+    "net_bye": None,
+    "ping": "list",
+}
+
+#: The capability each SESSION-plane op needs when it arrives wrapped in
+#: ``net_forward``. Every ``ControlOp`` name must appear here, which is what
+#: makes "a new op cannot be added without deciding who may call it" true; the
+#: totality test fails by name.
+#:
+#: Two of these are judgement calls the design left open, resolved toward the
+#: CONSERVATIVE end and recorded here so a reviewer can disagree with a reason:
+#: ``variables`` (the live eval-kernel namespace) and ``complete_aside`` (an
+#: authoritative off-record provider request) are ``prompt``-level, because both
+#: spend the peer's context or mutate its live state; ``resume_session`` (rebind
+#: the runtime to another transcript) and ``new_conversation`` are ``prompt`` and
+#: ``stop`` respectively, because a peer must not be able to silently repoint a
+#: session that is mid-turn — a viewer that owns the session tree enough to
+#: resume another conversation is driving it, so ``prompt``/``stop`` bound the
+#: damage without inventing a capability the spine does not name.
+INNER_OP_CAPABILITY: dict[str, str] = {
+    # prompt — "start/continue a turn, answer an approval or an ask"
+    "prompt": "prompt",
+    "approval_answer": "prompt",
+    "ask_answer": "prompt",
+    "set_model": "prompt",
+    "set_effort": "prompt",
+    "new_conversation": "prompt",
+    "complete_aside": "prompt",
+    "peer_message": "prompt",
+    # ``peer_set_model`` is main's newer sibling of ``peer_message`` (a peer
+    # switching THIS session's model over the control frame, added after this
+    # table was written). It lands on the SAME capability as its two nearest
+    # rows: ``set_model``, the local verb with the identical effect, and
+    # ``peer_message``, the peer verb beside it. Without a row it is refused
+    # closed on the relay's inner-frame path (``unknown_op``), which is how a
+    # peer's switch would fail rather than how it would be authorised.
+    "peer_set_model": "prompt",
+    "variables": "prompt",
+    # steer
+    "steer": "steer",
+    "recall_steer": "steer",
+    # stop — "abort, cancel, stop (the kill switch), retire_if_pristine"
+    "abort": "stop",
+    "cancel": "stop",
+    "stop": "stop",
+    "retire_if_pristine": "stop",
+    "resume_session": "stop",
+    # slash
+    "slash": "slash",
+    # view — reading the session
+    "snapshot": "view",
+    "watch": "view",
+    "unwatch": "view",
+    # list — liveness only
+    "ping": "list",
+    # THE OPS A REAL VIEWER SENDS THAT ARE NOT IN ``ControlOp`` (mesh slice V).
+    # The totality test above keys on the ``ControlOp`` literal, but the runtime's
+    # dispatch serves more than that literal names — the payload ops an
+    # ``AttachedSession`` issues on every bind and every routed slash. Without a
+    # row here the relay refused each one ("has no capability decision"), so a
+    # remote viewer could prompt but could not page history, sync its canonical
+    # state, or run one routed slash command (`/rename`, `/model`, `/goal` all
+    # travel as ``slash_result``). Measured over two real relays with a real peer
+    # Session. Each is the NARROWEST capability already covering its effect, and
+    # an op NOT listed here is still refused — ``_accept_stream_frame`` answers
+    # ``unknown_op`` for a missing row (relay.py, "has no capability decision").
+    #
+    # Every op here acts on the session the STREAM is bound to: the frame carries
+    # no session id of its own, and the peer relay's dial is to that one runtime's
+    # socket (``_session_scope`` authorised the id at ``stream_open``).
+    #
+    # view — reads, and presence hints; none mutates the conversation.
+    "frontend_sync": "view",  # the canonical state the welcome already carries
+    "history_page": "view",  # older transcript pages; `view` already streams them live
+    "job_trajectory": "view",  # a background job's own transcript page, read-only
+    "watch_job": "view",  # subscribe to a job's events; no effect on the job
+    "unwatch_job": "view",  # the matching unsubscribe
+    "viewer_watch": "view",  # "someone is displaying this" — residency hint only
+    "desktop_watch": "view",  # the desktop's presence lease — same hint, other surface
+    # A GRANTABLE WITHDRAWAL, and the decision is on the merits rather than on
+    # symmetry with the row above it. ``desktop_withdraw`` is the desktop's own
+    # "the pane left, for real" signal, added to the runtime by
+    # ``session/attached.py::withdraw_desktop_watch`` — which REFUSES every other
+    # surface in words ("only a desktop viewer can withdraw a desktop lease") and
+    # is called when the bridge's last live watch lease for THIS session has run
+    # out (``server/utils/desktop_sessions.py::_withdraw_last_lease``). It is the
+    # withdrawal half of the ``desktop_watch`` lease: same connection, same hint,
+    # and main deliberately gave it its own op because no ``desktop_watch`` shape
+    # can carry it (every accepted beat renews the memory, ``(False, False)``
+    # included, so withdrawing is the only way to LOWER the answer).
+    #
+    # REACHABLE FROM A REMOTE DESKTOP SURFACE, which is why this is a decision
+    # rather than a formality. ``session_dial.dial_owner`` authenticates as
+    # ``client: "attach"`` and forwards the VIEWER's own fields, ``surface``
+    # among them (``dial.py`` AUTH_FIELDS; ``projection.py`` sets
+    # ``auth["surface"] = "desktop"`` for a desktop surface and already requires
+    # ``DESKTOP_WATCH_CAPABILITY`` of one). So the mesh's dial lands on the owner
+    # as ``kind == "attach", surface == "desktop"`` and passes the runtime's own
+    # shape gate for this op exactly as its ``desktop_watch`` beats pass it. The
+    # branch supports that surface on purpose; the table must not contradict it.
+    #
+    # THE EFFECT IS A PRESENCE HINT AND NOTHING ELSE. It clears the session-scoped
+    # ``_desktop_attach_seen`` memory and this connection's lease, which
+    # ``attached_surfaces()`` alone reads for the model-facing answer — no
+    # transcript, no durable state, no action, no credential. ``view`` ("watch a
+    # session here") is the narrowest capability whose words cover a viewer ending
+    # its own announcement that it is watching, so this is the same call the
+    # ``event_mute``/``event_unmute`` pair two rows down already records: a pair
+    # split across two decisions leaves the viewer unable to say the thing the
+    # other half depends on.
+    #
+    # THE COST, RECORDED RATHER THAN GLOSSED (the ``acknowledge_attention`` row
+    # below sets this precedent). The memory is SESSION-scoped, not per-connection,
+    # so a remote desktop viewer's withdrawal also clears the fact for the owner's
+    # own surfaces, and the model can read "no interface is attached" while the
+    # operator's local pane is mounted. That falsehood is bounded by the local
+    # bridge's own next beat, which renews it, and by the same 45 s TTL — it is a
+    # hint's worth of churn, corrected rather than durable.
+    #
+    # WHAT REFUSING WOULD COST, and this is what settles it. A missing row is not a
+    # dropped hint: ``_forward_stream_frame`` (relay.py) writes the ``unknown_op``
+    # error back and CLOSES the stream. ``session/attached.py``'s ``_dial`` REPLAYS
+    # this op on the fresh connection whenever a recorded withdrawal exists or the
+    # recorded lease is not live, so the refusal would land on the stream that
+    # re-dial had just opened — the viewer's own reconnect would kill itself, and
+    # every reconnect after it, rather than costing one hint. A view-only
+    # member holding ``desktop_watch`` may say "I am showing this"; to withhold
+    # its matching "I have stopped" would gag a signal it already holds the
+    # authority to send.
+    "desktop_withdraw": "view",
+    # event_mute and its UNMUTE are a PAIR and must never be split across two
+    # decisions. Both do the same thing to the same connection — ``event_mute``
+    # stops delta-grade frames on THIS one, ``event_unmute`` resumes them — so
+    # the narrowest capability covering either covers both. Round 1 shipped the
+    # mute alone, and the omission was worse than a refused optimisation:
+    # ``_forward_stream_frame`` (relay.py) writes an ``unknown_op`` error back
+    # and CLOSES the stream, so a viewer that parked its event controller and
+    # unparked it lost the whole session stream, silently and one-way.
+    # Reachable from a real viewer, not in theory: ``EventController.set_parked``
+    # → ``AttachedSession.set_event_mute`` → ``RemoteSessionClient`` → this op,
+    # and the runtime advertises ``EVENT_MUTE_CAPABILITY`` unconditionally
+    # (session/runtime/server.py ``_welcome_frame``). The pair is pinned by
+    # ``tests/unit/network/test_stream_op_gate.py``, which derives the ops a
+    # viewer sends from ``mobile/attach_client.py`` rather than listing them —
+    # the hand-written list is what missed this row.
+    "event_mute": "view",  # stop sending THIS connection deltas; affects nobody else
+    "event_unmute": "view",  # the matching resume, on the same connection
+    # session-scoped WRITE, not a per-viewer mark: it clears the OWNER's own
+    # attention state (serving.py ``acknowledge_attention`` →
+    # ``Session.acknowledge_attention``), and the runtime then pushes the new
+    # state to EVERY viewer (server.py ``_schedule_push``) — so one peer's
+    # viewer clears the mark the owner's desktop is showing. ``view`` is the
+    # narrowest capability whose WORDS cover that (the 36-character completion
+    # token is what bounds who may do it, not the capability), and the row says
+    # so rather than claiming a local-only effect. Round 1's comment claimed a
+    # per-viewer mark the op does not have.
+    "acknowledge_attention": "view",  # clears session-scoped attention for every viewer
+    # slash — the authoritative slash seam. The owner's own dispatch decides what
+    # each command does and refuses the terminal-only ones
+    # (serving.py ``run_slash_authoritative`` / ``slash``: "terminal-only here").
+    #
+    # ``slash`` IS NOT THE WHOLE STORY FOR EVERY VERB: three of the commands the
+    # owner's dispatch answers with a real ACTION — ``/archive``, ``/unarchive``
+    # and ``/delete`` — produce exactly the effect ``delete`` is reserved for
+    # (``OP_CAPABILITY["net_session_lifecycle"]``, ``CAPABILITY_WORDS["delete"]``),
+    # so they are gated on ``delete`` at the point where the verb is chosen.
+    # See :data:`DELETE_SCOPED_SLASH` for why that gate cannot live in this
+    # table: the table authorises the SEAM, and only the dispatch knows which
+    # verb travelled down it.
+    "slash_result": "slash",
+    # prompt — session-scoped WRITES. The threshold is design §3.3: a member that
+    # may prompt can already make the agent (which has a shell) do each of these.
+    #
+    # fork_snapshot copies THE STREAM'S OWN session into a new id on the OWNER's
+    # store and returns only ``{fork_id, parent_id, busy, incomplete}``
+    # (session.py:6012 ``Session.fork_snapshot``; server.py:5917 refuses any frame
+    # field but ``message``, so no other session or path can be named). It exposes
+    # no content the stream's `view` does not already carry, and the fork stays on
+    # the owner, readable only through that owner's own authorisation.
+    "fork_snapshot": "prompt",
+    # credential / mcp_credentials are WRITE-ONLY toward the owner: they carry a
+    # value IN and return only names and outcomes, never material. Proof:
+    # session/credential_ops.py:59/:66 (``list``/``names`` → key names and a
+    # source label), :81 (``persist`` → key + outcome sentence), the ``store`` arm
+    # (→ key + replaced); mcp/credentials.py:129-130 (``store_credentials`` →
+    # ``saved_ids``/``failed_ids``/``code``); serving.py ``credential_op``'s
+    # docstring ("The value is never logged, never journalled, and never
+    # returned"). Borrowing a token FROM the owner is a different act and needs
+    # ``broker_credential`` (the credentials slice); nothing here reads one out.
+    "credential": "prompt",
+    "mcp_credentials": "prompt",
+    # record_shell appends a `! cmd` receipt row to the transcript (a turn-shaped
+    # write); adopt_aside adds an aside's turns to the conversation.
+    "record_shell": "prompt",
+    "adopt_aside": "prompt",
+    # register_secret_redaction accepts ONE value and adds it to the owner's
+    # redaction set — it only makes the owner scrub more; it returns ``True`` and
+    # nothing is read back (serving.py:1205 ``register_secret_redaction``: "never a
+    # credential, never an announcement, never a log line").
+    "register_secret_redaction": "prompt",
+    # stop — ends work or ends the runtime.
+    "cancel_subagents": "stop",  # the second-Esc path: cancels this session's children
+    # retire_now / refresh_if_idle CANNOT INTERRUPT WORK IN FLIGHT: both go
+    # through ``RuntimeServer._retire_for`` (server.py:5540), which asks the
+    # handle's own idle predicate (``may_refresh``) first and answers
+    # ``kept: <reason>`` for a busy runtime (server.py:5569) — a wrong "retire"
+    # costs a cold start, never a turn. ``retire_now {exclusive}`` additionally
+    # refuses while another viewer is attached.
+    "retire_now": "stop",
+    "refresh_if_idle": "stop",
+    # DELIBERATELY ABSENT, and therefore refused: ``operator_challenge``. It
+    # produces material a surface uses to SIGN as the operator, and no capability
+    # in the transport's set grants a peer that authority.
+}
+
+
+#: The routed slash commands whose EFFECT the peer vocabulary already reserves
+#: for ``delete``.
+#:
+#: ``/archive``, ``/unarchive`` and ``/delete`` write the OWNER's archive index
+#: and its session store — the same acts as ``net_session_lifecycle``
+#: (``OP_CAPABILITY["net_session_lifecycle"] == "delete"``, whose words are
+#: "archive or delete a session here"). They reach the owner as ROUTED slash
+#: commands, and every carrier of those is authorised on ``slash`` — a ``drive``
+#: role holds ``slash`` and ``delete`` is not part of it. So over the mesh, a
+#: member that may not take the lifecycle lane could take the same action through
+#: a routed slash command, and the only thing that ever refused it was the
+#: owner's LIVE-LEASE guard — which a session whose writer has exited does not
+#: have.
+#:
+#: TWO CARRIERS, ONE RULE. ``slash_result`` returns a typed receipt and ``slash``
+#: renders one; both are admitted on ``slash``, so a gate on either alone leaves
+#: the effect one door over. Round 1's first fix sat on ``slash_result`` only, and
+#: a ``drive`` member's imaged ``{"op": "slash", "command": "archive"}``
+#: still archived the owner's session — measured over two real relays.
+#:
+#: WHY THE GATE IS NOT A TABLE ROW. ``INNER_OP_CAPABILITY`` authorises the SEAM:
+#: the frames that arrive are ``slash_result`` and ``slash``, and every routed
+#: command travels under them. Which VERB was typed is only known at the dispatch
+#: that chooses it, so the check belongs there — held here, beside the vocabulary
+#: it reads, because THREE hosts answer this way (``ServingSessionHandle`` in
+#: ``session/runtime/serving.py``, ``OperatorApp`` in ``tui/app.py``, and
+#: ``TuiSessionHandle`` in ``mobile/tui_handle.py``, whose carrier runs the line in
+#: the owner's own terminal rather than reaching a dispatcher at all) and a second
+#: copy of the set is free to drift on one host alone. Round 2 found that the
+#: terminal carrier cannot be closed by naming effects at all — it reaches the
+#: terminal's WHOLE local verb set, ``/move --to`` and ``/exit`` included — so round
+#: 3 replaced the naming with a LANE decision (``/move`` and friends go to the typed
+#: dispatcher, which has no branch for them, rather than to a refusal list:
+#: :func:`may_run_slash_in_the_owners_terminal`). This set stays what the three
+#: ROUTED hosts check, and what the terminal carrier checks for a delete-scoped verb
+#: before letting a capable member run it there.
+DELETE_SCOPED_SLASH: frozenset[str] = frozenset({"archive", "unarchive", "delete"})
+
+
+def may_run_delete_scoped_slash(locality: str | None, capabilities: frozenset[str] | None) -> bool:
+    """Whether a client at ``locality`` holding ``capabilities`` may run one.
+
+    A LOCAL client is a process on this machine asked by its own user — the pane
+    that owns its own gate — and is allowed, the same way the approval gate
+    treats a caller whose ``may_loosen`` it can answer for itself. A RELAYED
+    client is allowed only if the CONNECTION proved ``delete``: these verbs
+    archive or delete a session on THIS owner, so a member the lifecycle lane
+    refuses must not reach the same effect down this one.
+
+    ``None`` is "the caller has not said", and it FAILS CLOSED — the direction
+    the ``may_loosen`` default takes one call over, and the only safe reading of
+    "unknown authority" for a verb that writes the owner's store. ``None`` covers
+    BOTH the locality and the capability, because a caller that forwarded one and
+    not the other has told us nothing it can prove. Any locality that is not
+    ``"local"`` is treated as relayed for the same reason: a gate whose default is
+    "allow" is not a gate, which is the property every forgotten forward in this
+    slice has violated so far.
+    """
+    if locality == "local":
+        return True
+    return "delete" in (capabilities or frozenset())
+
+
+def delete_scope_refusal_sentence(command: str) -> str:
+    """The ONE sentence both slash hosts give for a delete-scoped verb refused.
+
+    Written once because both hosts need it and neither may drift: a session is
+    owned either by a detached runtime (``ServingSessionHandle._slash_result``)
+    or by the TUI (``OperatorApp._slash_result``), a follower may reach either,
+    and the two refuse the SAME act — so the receipt has to read the same
+    whichever host answered, the rule this repo keeps for every host pair.
+
+    It names the capability and no remedy on purpose: neither host can see who
+    the operator is or which device would have to grant it, and a viewer told to
+    ask for something it cannot name has been handed a task instead of a fact.
+    It also says what the CONNECTION did not resolve rather than what it holds,
+    because the callers refused here are not all mesh members: the phone sends
+    ``locality="remote"`` with no capability set at all, so a sentence claiming it
+    "holds 'slash' without 'delete'" would be false about the caller it is told to
+    (agent review round 3, R3-4).
+    """
+    return (
+        f"/{command} archives or deletes a session on this machine, which needs the "
+        "'delete' capability. This connection did not resolve it, so the command was "
+        "refused and nothing was changed."
+    )
+
+
+def delete_scope_refusal(
+    command: str, locality: str | None, capabilities: frozenset[str] | None
+) -> str | None:
+    """The ONE refusal for a delete-scoped verb this connection may not run.
+
+    ``None`` means "may run". The three routed hosts ask this and wrap the sentence
+    in their own shape (a ``SlashResult`` for the two dispatchers, a receipt for the
+    terminal carrier), which is why the decision and the words live here and not in
+    each host: they were copied into three places in round 1, and R2-5 asked for one.
+
+    A RELAYED caller with NO capability set fails closed here, and that half is not
+    implied by the locality half — ``capabilities=None`` means "not said", not
+    "said none", and both refuse. Round 3's review found the surviving mutation on
+    exactly this asymmetry, so see the cells in ``test_stream_op_gate.py`` and
+    ``test_serving.py`` that pin it.
+
+    ``command`` must already be the registry PRIMARY name. This module is
+    stdlib-only by contract — ``cli.py`` imports the network package for every
+    ``lop`` invocation, ``--version`` included — and ``slash_commands`` pulls in the
+    TUI's autocomplete tables, so alias resolution stays with the caller. Every
+    host resolves first (round 1's review verified that for the routed carriers).
+    """
+    if command not in DELETE_SCOPED_SLASH:
+        return None
+    if may_run_delete_scoped_slash(locality, capabilities):
+        return None
+    return delete_scope_refusal_sentence(command)
+
+
+#: The slash commands a RELAYED connection may run through the ONE carrier that
+#: types the line into the OWNER's own terminal.
+#:
+#: WHY A LIST AT ALL, WHEN EVERYTHING ELSE IS ROUTED. The other carriers answer
+#: from a dispatcher whose verb set is known and gated per verb (``slash_result`` →
+#: ``ServingSessionHandle._slash_result`` / ``OperatorApp._slash_result``). This
+#: carrier is different in kind: it hands the line to the owner's LOCAL command
+#: dispatch (``OperatorApp._run_slash_command``), where the verbs are the
+#: terminal's own — ``/exit`` ends the owner's app, ``/update`` rebuilds its
+#: install, ``/resume``/``/new``/``/clear`` drive its session store, and
+#: ``/move <id> --to <device>`` hands a session's custody to another device or
+#: copies its whole transcript there with ``--keep``. That set is not enumerable
+#: from here and it grows, so a denylist is always one round behind: naming three
+#: verbs closed three verbs, and the fourth was a review's blocker.
+#:
+#: SO A RELAYED COMMAND THAT IS NOT LISTED HERE GOES TO THE TYPED DISPATCHER
+#: rather than being refused (:func:`may_run_slash_in_the_owners_terminal` decides
+#: which lane a command gets). That is what keeps the operator's PHONE working: the
+#: phone composer sends every typed ``/…`` line as the ``slash`` op
+#: (``mobile/web/src/components/composer.tsx``), and the phone daemon authenticates
+#: with ``"locality": "remote"`` and no capabilities (``mobile/daemon.py``), so a
+#: refusal here is a refusal for the phone. The dispatcher is the right lane for it
+#: because it gates per verb, answers with a typed receipt, and has NO branch for
+#: ``/move``, ``/exit`` or ``/update`` — the verbs that made this carrier dangerous
+#: — so those come back as its own honest sentence.
+#:
+#: WHY THESE THREE. ``goal`` and ``compact`` are the set the RUNTIME host runs down
+#: this same op (``ServingSessionHandle.slash`` runs them and answers
+#: "terminal-only here" for everything else), so a follower's un-imaged command is
+#: run by both hosts alike instead of one host running in its terminal what the
+#: other refuses; both are session-scoped work with no machine-local effect.
+#: ``stop`` is the kill switch, and it is the one verb in this family the routed
+#: dispatcher has no branch for — so it stays here, and its SCOPE is pinned
+#: separately below. Round 4 (V4-1) measured why that pin is load-bearing: this lane
+#: hands over the WHOLE LINE, and ``/stop``'s local handler is argument-sensitive,
+#: so a relayed ``/stop all`` armed the owner's machine-wide fan-out on the caller's
+#: screen and ``/stop <pid>`` reached a session the caller does not host.
+#: ``CAPABILITY_WORDS["stop"]`` is "stop a session here", SINGULAR: the argument
+#: forms name the fleet or another session, which no row in the mesh vocabulary
+#: grants a relayed caller.
+#:
+#: THE IMAGED TWIN USES THE SAME RULE, because the rule is about the CARRIER — does
+#: this reach a terminal — not about the frame's payload.
+RELAYED_TERMINAL_SLASH: frozenset[str] = frozenset({"goal", "compact", "stop"})
+
+#: The subset of :data:`RELAYED_TERMINAL_SLASH` whose ARGUMENTS change WHAT IT ACTS
+#: ON, and which a relayed caller may therefore run only in its BARE, session-scoped
+#: form (round 4, V4-1).
+#:
+#: ``/stop`` bare is the kill switch for the session the caller is looking at — the
+#: one session this carrier is attached to, and exactly what ``stop``'s capability
+#: words promise. ``/stop all`` sweeps every agent on the machine (``_stop_all`` in
+#: ``tui/app.py``), ``/stop <pid>`` resolves through the send vocabulary to another
+#: session, and a flag is answered with a remedy that names both. The other two
+#: verbs in the set are not here on purpose: ``/goal <text>`` acts on THIS session
+#: (it submits a turn for it) and ``/compact`` takes no argument that changes its
+#: target.
+ARG_SCOPED_TERMINAL_SLASH: frozenset[str] = frozenset({"stop"})
+
+
+def may_run_slash_in_the_owners_terminal(
+    command: str,
+    locality: str | None,
+    capabilities: frozenset[str] | None = None,
+    *,
+    args: str = "",
+) -> bool:
+    """Whether this connection's command may be TYPED INTO the owner's terminal.
+
+    THREE WAYS TO BE ALLOWED, and nothing else is:
+
+    * a LOCAL caller — it is the user's own terminal, and ``/exit`` must still exit;
+    * a relayed command in :data:`RELAYED_TERMINAL_SLASH` — the session-scoped set
+      the runtime host runs down this same op — in its BARE form when it is also in
+      :data:`ARG_SCOPED_TERMINAL_SLASH`;
+    * a delete-scoped verb the connection RESOLVED (``delete``), because those have
+      no other lane that keeps their receipt: the routed dispatcher would archive on
+      the owner and answer with a typed notice, while the caller that holds the
+      capability asked this carrier and has always got ``ran /archive``.
+
+    ``args`` is READ, because the LANE is chosen by the LINE and not by the verb: this
+    carrier types the whole line into the owner's local dispatch, whose handlers are
+    argument-sensitive. Round 4 (V4-1) measured the cost of a verb-only test — a
+    relayed ``/stop all`` reached ``_stop_all`` and ``/stop <pid>`` reached another
+    session — so a verb whose arguments change its target is allowed here only when it
+    carries none. It is KEYWORD-ONLY for that reason (round 5, R5-2): a positional
+    caller cannot reach the bare form by accident, because the argument that decides
+    the scope must be named at the call site rather than remembered. A default only
+    some callers honour is how a forgotten forward goes unnoticed; this one cannot be
+    omitted silently AND silently mean "bare", which is the permissive reading for the
+    one verb it governs. The argument form is not refused BY THIS MODULE: it falls out of the
+    terminal lane and takes the routed dispatcher, which has no ``stop`` branch and
+    answers with its own honest sentence.
+
+    THE DEFAULT IS THE FIX, NOT THE LIST. ``locality`` is ``None`` when a caller did
+    not forward the connection's facts, and ``None`` is read as RELAYED — so a
+    carrier that forgets to pass them routes to the dispatcher rather than into the
+    owner's terminal. Round 1 shipped the opposite reading
+    (``locality: str = "local"``), which made every forgotten forward permissive:
+    V2 survived its first fix that way, and a ``drive`` member's ``/move --to``
+    survived its second.
+
+    ``command`` must already be the registry PRIMARY name; see
+    :func:`delete_scope_refusal` for why this module cannot resolve it.
+    """
+    if locality == "local":
+        return True
+    if command in RELAYED_TERMINAL_SLASH:
+        # Bare only for the argument-scoped subset: the line's ARGUMENTS are what
+        # widen its scope, and a verb-only test cannot see them (V4-1).
+        if command in ARG_SCOPED_TERMINAL_SLASH and args.strip():
+            return False
+        return True
+    return command in DELETE_SCOPED_SLASH and may_run_delete_scoped_slash(locality, capabilities)
+
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+
+class MeshRefusal(Exception):
+    """A refusal that carries a machine ``code`` and a sentence for the operator.
+
+    EVERY refusal path refuses CLOSED and names its reason in the operator's
+    language: the code is what the audit log and the tests key on, the sentence
+    is what a person reads. The two are separate because the sentence is often
+    NOT what the peer is told — an authorisation refusal tells the peer only that
+    it was refused, while the local audit record keeps the real cause.
+    """
+
+    def __init__(self, code: str, sentence: str) -> None:
+        super().__init__(sentence)
+        self.code = code
+        self.sentence = sentence
+
+    def __str__(self) -> str:  # pragma: no cover - Exception's own repr is enough
+        return self.sentence
+
+
+class Refusal(MeshRefusal):
+    """The authoriser's refusal (``authorizer.Authorizer.check``)."""
+
+
+class HandshakeRefusal(MeshRefusal):
+    """A handshake step refused. The socket closes with no reply frame."""
+
+
+class PairingRefusal(MeshRefusal):
+    """A pairing step refused (invite validation, SAS, admission)."""
+
+
+# ---------------------------------------------------------------------------
+# Records
+# ---------------------------------------------------------------------------
+
+MemberKind = Literal["device", "pool"]
+MemberLifecycle = Literal["active", "provisioning", "draining", "expired"]
+TrustState = Literal["active", "untrusted", "disconnected"]
+InviteState = Literal["minted", "redeemed", "consumed"]
+LinkPhase = Literal["member", "reconcile", "pair"]
+Outcome = Literal["ok", "refused", "failed", "partial", "admitted", "aborted"]
+
+#: The three trust states as a runtime set, mirrored by the reader below — which
+#: is the ONE place a string becomes a :data:`TrustState`, whether it arrived in
+#: another device's frame or on an operator's command line. The set is exported so
+#: a future caller can ask "is this one of them" without restating the list.
+TRUST_STATES: frozenset[str] = frozenset({"active", "untrusted", "disconnected"})
+
+
+def trust_state(value: object) -> TrustState:
+    """``value`` as a :data:`TrustState`, or :class:`MeshRefusal` naming it.
+
+    One reader means one refusal code and one sentence instead of one per caller,
+    and it is deliberately EXACT rather than coercing: a trust value that cannot
+    be read must never be quietly promoted to ``"active"``, which is the one
+    direction where mis-reading it would matter. The refusal is ``bad_trust``,
+    the code every caller that used to validate this by hand already raised, so
+    moving the check here changes no contract — it removes the copies.
+    """
+    if value == "active":
+        return "active"
+    if value == "untrusted":
+        return "untrusted"
+    if value == "disconnected":
+        return "disconnected"
+    raise MeshRefusal("bad_trust", f"unknown trust state {value!r}")
+
+
+@dataclass
+class MemberRecord:
+    """One device's membership in one network.
+
+    A REMOVED MEMBER IS A TOMBSTONE, never a deleted row: ``removed_at`` is set,
+    ``lifecycle`` is ``expired``, and the id can never be re-added. Tombstones
+    make revocation auditable and make a re-pair a genuinely new identity; the
+    ``removed_ids`` list on the network record is what actually enforces the
+    burn, so pruning the row after the retention window cannot un-burn the id.
+    """
+
+    device_id: str
+    #: The member's Ed25519 public key, base64url — the thing every later
+    #: handshake is verified against. An id is a name, never authority.
+    public_key: str = ""
+    name: str = ""
+    kind: MemberKind = "device"
+    lifecycle: MemberLifecycle = "active"
+    role: str = "drive"
+    #: Resolved at admission and stored, never derived at read time.
+    capabilities: list[str] = field(default_factory=list)
+    added_at: float = field(default_factory=time.time)
+    added_by: str = ""
+    #: ``self`` (this device created the network), ``invite``, or ``rotation``.
+    added_via: str = "invite"
+    endpoints: list[str] = field(default_factory=list)
+    last_seen_at: float | None = None
+    last_seen_instance: str = ""
+    #: How many times a second live process has claimed this device id outside
+    #: the restart grace window — the copied-key detector's evidence.
+    duplicate_count: int = 0
+    suspect: bool = False
+    #: Device ids this row was known by before a key rotation, kept for a bounded
+    #: window so a link that authed at the old id is not cut mid-turn.
+    previous_ids: list[str] = field(default_factory=list)
+    #: The rotation STATEMENT that produced this row (``identity.rotation_statement``,
+    #: signed by the old key), or ``{}`` when the row was never rotated. It is the
+    #: continuity proof, and it rides on the row because the row is the only place a
+    #: peer that never saw the ``net_identity_rotate`` frame can get it: the member
+    #: table is a snapshot, and a table delivered after a rotation otherwise shows a
+    #: device as a new id with no way to tell that from an impostor claiming a
+    #: member's name with a new key (QA round 16, Q16-1). Additive: a build that does
+    #: not know the field drops it on parse (``_known``) and simply cannot retire the
+    #: superseded row, which is where this codebase was before it existed.
+    rotation_proof: dict[str, Any] = field(default_factory=dict)
+    rotated_at: float | None = None
+    removed_at: float | None = None
+    removed_by: str | None = None
+
+    @property
+    def active(self) -> bool:
+        """A live member: not removed, and not expired by any other route."""
+        return self.removed_at is None and self.lifecycle != "expired"
+
+    def has(self, capability: str) -> bool:
+        return capability in self.capabilities
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> MemberRecord:
+        fields = _known(MemberRecord, data)
+        # A peer's JSON can carry ``null`` or a list where this field expects an
+        # object, and a row that fails to parse is a member this device forgets — so
+        # an unusable proof degrades to "no proof", never to a raise.
+        if not isinstance(fields.get("rotation_proof"), dict):
+            fields["rotation_proof"] = {}
+        return MemberRecord(**fields)
+
+
+@dataclass
+class PendingPairing:
+    """An inbound pairing waiting for the INVITER's human to confirm the code.
+
+    WHY THIS EXISTS ON DISK. The inviter's second hand (design §5.3: "B
+    transcribes, A compares") happens on a device whose relay is usually a
+    launchd daemon with no terminal. The code therefore has to be somewhere a
+    human can reach it: this record is written the instant the transcript is
+    fixed, the relay prints it when it HAS a terminal, and otherwise the operator
+    answers with ``lop network confirm``, which reads this record and writes the
+    decision beside it.
+
+    ``sas`` is in here and nowhere else. It is a value derived from THIS device's
+    own handshake and it is what the human compares — so it lives in a 0600 file
+    under a 0700 directory for the seconds the ceremony lasts, is never sent to
+    the peer in either direction (§5.3), and never reaches the audit log (the
+    never-log list covers it). The record is deleted with the decision.
+    """
+
+    invite_id: str
+    network_id: str
+    network_name: str
+    joiner_device_id: str
+    joiner_name: str
+    #: THIS device's derivation, and the value its human must see on the other
+    #: device's screen.
+    sas: str
+    fingerprint: str
+    #: What the joiner's human typed, from the ``net_pair_ready`` frame. Kept so
+    #: the inviter's human compares two values rather than trusting one.
+    transcribed: str = ""
+    peer_addr: str = ""
+    issued_at: float = field(default_factory=time.time)
+    expires_at: float = 0.0
+    #: The rendered question, so every surface (the relay's log, `lop network
+    #: confirm`, `--json`) shows the SAME words. Rendering it twice is how two
+    #: prompts drift apart.
+    prompt: str = ""
+    schema: int = 1
+
+    def seconds_left(self, now: float | None = None) -> float:
+        return max(0.0, self.expires_at - (time.time() if now is None else now))
+
+    def is_open(self, now: float | None = None) -> bool:
+        return self.seconds_left(now) > 0.0
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> PendingPairing:
+        return PendingPairing(**_known(PendingPairing, data))
+
+
+@dataclass
+class PairDecision:
+    """The inviter's human answer to a :class:`PendingPairing`.
+
+    ``admit`` is only ever written when BOTH transcriptions matched this device's
+    derivation — the joiner's (in the frame) and the inviter's human (here) — so a
+    single mistyped digit anywhere ends the ceremony, and the invite is consumed
+    either way.
+    """
+
+    invite_id: str
+    decision: Literal["admit", "decline"]
+    matched: bool = False
+    reason: str = ""
+    answered_by: str = "human"
+    answered_at: float = field(default_factory=time.time)
+    schema: int = 1
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> PairDecision:
+        return PairDecision(**_known(PairDecision, data))
+
+
+@dataclass
+class InviteRecord:
+    """One minted invite, and its single-use state.
+
+    ``state`` is on disk, so a relay restart mid-pairing cannot be used to replay
+    an invite: ``redeemed`` is written the instant a valid redemption arrives
+    (before any human sees anything) and ``consumed`` when the ceremony ends in
+    EITHER outcome.
+    """
+
+    invite_id: str
+    minted_at: float = field(default_factory=time.time)
+    #: The epoch the token was minted at. A rotation during the invite's life
+    #: invalidates it (``invite_epoch_stale``), and the comparison needs the minted
+    #: epoch stored rather than re-derived from the token, which the inviter no
+    #: longer has by the time it admits.
+    epoch: int = 0
+    #: A DURATION, not an absolute expiry, so no cross-host clock comparison ever
+    #: enters pairing: the inviter enforces freshness against its own clock.
+    ttl_s: float = 600.0
+    role: str = "drive"
+    capabilities: list[str] = field(default_factory=list)
+    hosts: list[str] = field(default_factory=list)
+    state: InviteState = "minted"
+    #: OPTIONAL device binding (convergence round): when set, only that device id
+    #: may redeem the token. Empty means unbound — the ordinary invitation case.
+    device_id: str = ""
+    redeemed_by: str = ""
+    redeemed_at: float | None = None
+    outcome: str = ""
+    #: How many CODE guesses this invite has spent: incremented by
+    #: :func:`local_operator.network.invite.release` when a ceremony failed on a code
+    #: that was compared and disagreed. A delay does not spend one (no guess was made),
+    #: and neither does anything that consumes the token outright — a decline or a
+    #: device-id conflict ends it, and ``consume`` does not touch this field.
+    #: :func:`local_operator.network.invite.failures_exhausted` reads it against
+    #: :data:`local_operator.network.invite.PAIRING_MAX_FORGIVEN_FAILURES`, and it lives
+    #: on the record so a relay restart cannot hand the same token a fresh budget.
+    attempts: int = 0
+
+    @property
+    def expires_at(self) -> float:
+        """The expiry as the MINTING device's clock sees it — local convenience.
+
+        Never transmitted (the envelope carries ``ttl_s``) and never compared
+        across hosts; it exists so a prompt or a listing can say "10 minutes".
+        """
+        return self.minted_at + self.ttl_s
+
+    def is_fresh(self, now: float) -> bool:
+        return now < self.expires_at
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> InviteRecord:
+        return InviteRecord(**_known(InviteRecord, data))
+
+
+@dataclass
+class NetworkRecord:
+    """One network on this device: membership, epoch, trust, invites.
+
+    THE SECRET IS NOT HERE. It lives in a sibling ``<network_id>.secrets.json``
+    so that the record — which ``lop network show --json`` dumps, which the
+    desktop route returns, and which a future syncer copies — has no field a
+    surface has to remember to redact. That inversion is the same one the secret
+    store enforces: no surface returns a value to the model.
+    """
+
+    network_id: str
+    name: str
+    epoch: int = 1
+    schema: int = 1
+    created_at: float = field(default_factory=time.time)
+    created_by: str = ""
+    #: Increments on every write and is carried in epoch broadcasts, so a
+    #: receiver can tell "I already have this" from "this is newer". It is NOT a
+    #: Lamport clock for the member list — the epoch's ``min(device_id)`` rule is
+    #: what makes concurrent rotations converge.
+    sequence: int = 0
+    trust: TrustState = "active"
+    untrusted_reason: str = ""
+    self_device_id: str = ""
+    self_role: str = "admin"
+    self_capabilities: list[str] = field(default_factory=list)
+    #: ``{address, port, advertised: [...]}`` — what this device publishes.
+    listen: dict[str, Any] = field(default_factory=dict)
+    #: epoch → the device id that initiated the rotation. The tie-break for
+    #: concurrent rotations reads this, and it is also the rotation lock.
+    rotations: dict[str, str] = field(default_factory=dict)
+    members: list[MemberRecord] = field(default_factory=list)
+    #: A join in progress: ``{invite_id, device_id, public_key, name, role,
+    #: started_at}``. Kept so a crash mid-ceremony leaves a visible pending row
+    #: rather than a half-written member.
+    pending: list[dict[str, Any]] = field(default_factory=list)
+    invites: list[InviteRecord] = field(default_factory=list)
+    #: Ids burned forever by a removal, kept even after the tombstone row is
+    #: pruned — this list is what actually prevents a re-admission.
+    removed_ids: list[str] = field(default_factory=list)
+    #: Refused-by-peers evidence: a device that was removed while offline learns
+    #: it on its next dial, and says so rather than showing a healthy network it
+    #: cannot reach.
+    stale: str = ""
+    #: Unix seconds before which a second LOCAL rotation is refused
+    #: (``rotation_in_progress``).
+    rotation_lock_until: float = 0.0
+
+    def member(self, device_id: str) -> MemberRecord | None:
+        for row in self.members:
+            if row.device_id == device_id or device_id in row.previous_ids:
+                return row
+        return None
+
+    def active_members(self) -> list[MemberRecord]:
+        return [row for row in self.members if row.active]
+
+    def invite(self, invite_id: str) -> InviteRecord | None:
+        for row in self.invites:
+            if row.invite_id == invite_id:
+                return row
+        return None
+
+    def self_member(self) -> MemberRecord | None:
+        return self.member(self.self_device_id)
+
+    def is_burned(self, device_id: str) -> bool:
+        return device_id in self.removed_ids
+
+    def to_json(self) -> dict[str, Any]:
+        payload = asdict(self)
+        payload["members"] = [row.to_json() for row in self.members]
+        payload["invites"] = [row.to_json() for row in self.invites]
+        return payload
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> NetworkRecord:
+        fields = _known(NetworkRecord, data)
+        fields["members"] = [
+            MemberRecord.from_json(row)
+            for row in data.get("members") or []
+            if isinstance(row, dict)
+        ]
+        fields["invites"] = [
+            InviteRecord.from_json(row)
+            for row in data.get("invites") or []
+            if isinstance(row, dict)
+        ]
+        # A JSON object with non-string keys (``{"7": "d_…"}``) is what this
+        # round-trips to, and it must stay a dict: the epoch lookup is by string.
+        rotations = data.get("rotations")
+        if isinstance(rotations, dict):
+            fields["rotations"] = {str(key): str(value) for key, value in rotations.items()}
+        return NetworkRecord(**fields)
+
+
+@dataclass
+class SecretState:
+    """The two retained epoch secrets. Never more than two, by construction.
+
+    ``current`` authenticates member links; ``previous`` is accepted ONLY for a
+    ``reconcile``-phase handshake, so a stolen old secret is worth one rotation
+    generation and nothing else. A third is dropped on rotation.
+    """
+
+    network_id: str
+    epoch: int
+    secret: str = ""  # base64url(32), current epoch
+    previous_epoch: int | None = None
+    previous_secret: str = ""
+    schema: int = 1
+
+    def to_json(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema": self.schema,
+            "network_id": self.network_id,
+            "current": {"epoch": self.epoch, "secret": self.secret},
+        }
+        if self.previous_epoch is not None and self.previous_secret:
+            payload["previous"] = {
+                "epoch": self.previous_epoch,
+                "secret": self.previous_secret,
+            }
+        return payload
+
+    def rotate(self, new_secret: str, new_epoch: int) -> None:
+        """Adopt a new epoch, keeping exactly one generation of history."""
+        self.previous_epoch = self.epoch
+        self.previous_secret = self.secret
+        self.epoch = new_epoch
+        self.secret = new_secret
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> SecretState:
+        current = data.get("current") or {}
+        previous = data.get("previous") or {}
+        if not isinstance(current, dict) or not isinstance(previous, dict):
+            raise ValueError("secrets file: 'current'/'previous' must be objects")
+        return SecretState(
+            network_id=str(data.get("network_id") or ""),
+            epoch=int(current.get("epoch") or 0),
+            secret=str(current.get("secret") or ""),
+            previous_epoch=int(previous["epoch"]) if previous.get("epoch") is not None else None,
+            previous_secret=str(previous.get("secret") or ""),
+            schema=int(data.get("schema") or 1),
+        )
+
+
+@dataclass
+class PeerRecord:
+    """The relay's discovery record, published under ``run/peers``.
+
+    The file is keyed by pid and mode 0600 inside a 0700 directory, exactly like
+    a session record, so the ``control_key`` it carries is protected by the
+    account and the loopback control socket needs no credential of its own.
+
+    TWO ABSENCES, AS PROPERTIES: it never contains the device private key, and
+    it never contains a network secret. Its docstring says so because "a record
+    that is dumped by every status command" is the natural place for someone to
+    add a helpful field.
+    """
+
+    pid: int
+    #: A constant, present so a reader that globbed the wrong directory sees it.
+    kind: str = "relay"
+    protocol: int = MESH_PROTOCOL_VERSION
+    #: What the local session runtimes speak — passed through, never interpreted.
+    session_protocol: int = PROTOCOL_VERSION
+    device_id: str = ""
+    #: Operator-set, cosmetic, never authority.
+    device_name: str = ""
+    #: Per-process: minted at relay start and bound into the handshake transcript.
+    instance_id: str = ""
+    control_port: int = 0
+    control_key: str = ""
+    #: ``{address, port, advertised: [...]}``
+    listen: dict[str, Any] = field(default_factory=dict)
+    networks: list[dict[str, Any]] = field(default_factory=list)
+    links: int = 0
+    #: Link feature strings (``mesh-net-v1``, ``credential-broker-v1``, …).
+    capabilities: list[str] = field(default_factory=list)
+    version: str = ""
+    source_ref: str = ""
+    install_root: str = ""
+    started_at: float = field(default_factory=time.time)
+    heartbeat_at: float = field(default_factory=time.time)
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> PeerRecord:
+        # Tolerate unknown keys: a record written by a newer binary must not break
+        # an older reader mid-upgrade, the same contract every record here keeps.
+        return PeerRecord(**_known(PeerRecord, data))
+
+
+def _known(cls: type[Any], data: dict[str, Any]) -> dict[str, Any]:
+    """Drop keys this build does not know, so a newer peer's record still parses.
+
+    Shared rather than repeated because it is the forward-compatibility contract
+    of every record in this module, and four copies of it are four places to get
+    the ``pid``/``heartbeat_at`` requirement subtly wrong.
+    """
+    known = set(cls.__dataclass_fields__)
+    return {key: value for key, value in data.items() if key in known}
+
+
+# ---------------------------------------------------------------------------
+# Link-scoped types (the authoriser's inputs and outputs)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LinkContext:
+    """Everything the authoriser is allowed to know about one link.
+
+    Frozen and self-contained so a refusal can be reasoned about from the
+    context alone: the epoch the link authed at, the capabilities resolved from
+    the MEMBER ROW at admission (not recomputed from the role now), and the phase
+    that decides which ops exist at all.
+    """
+
+    link_id: str
+    device_id: str
+    instance_id: str
+    network_id: str
+    epoch: int
+    capabilities: frozenset[str]
+    phase: LinkPhase
+    peer_addr: str = ""
+
+
+@dataclass(frozen=True)
+class Granted:
+    """The authoriser's answer: what was admitted, for the audit record."""
+
+    action: str
+    session_id: str | None = None
+    capability: str | None = None
+
+
+@dataclass
+class HandshakeResult:
+    """What both roles end up holding after ``welcome``.
+
+    ``sas`` is derived and never transmitted; ``transcript`` is kept because the
+    fingerprint a human may compare is a function of it, and ``keys`` is the
+    only thing that can decrypt a record on this link.
+    """
+
+    role: Literal["dialer", "listener"]
+    peer_device_id: str
+    peer_instance_id: str
+    peer_public_key: str
+    network_id: str
+    epoch: int
+    phase: LinkPhase
+    link_id: str
+    #: ``wire.LinkKeys``. Typed through ``TYPE_CHECKING`` so this module stays free
+    #: of the ``cryptography`` import while still being precise at a call site.
+    keys: LinkKeys
+    sas: str
+    transcript_hash: str
+    session_protocol: int = PROTOCOL_VERSION
+    peer_build: dict[str, Any] = field(default_factory=dict)
+    peer_capabilities: list[str] = field(default_factory=list)
+    network_name: str = ""

@@ -176,9 +176,11 @@ from local_operator.session.runtime.types import (
     update_phrase,
 )
 from local_operator.slash_commands import (
+    NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
+    network_subcommand_rows,
     primary_slash_name,
     slash_command_for,
     unknown_flag_refusal,
@@ -238,10 +240,30 @@ from local_operator.tui.markdown_theme import (
     install_markdown_theme,
 )
 from local_operator.tui.narration import DEFAULT_NARRATION, is_intermediate_narration
+
+# The mesh family's own runner: a subprocess over the CLI, bounded and reaped by
+# its process group. Imported at module scope because it pulls in only the
+# stdlib and ``interpreter.python_argv`` — the mesh package itself (relay, store,
+# identity) stays FUNCTION-LOCAL everywhere below, the rule ``local_operator/
+# cli.py`` states for the 99% of runs that never touch a network.
+from local_operator.tui.network_cli import (
+    LISTING_TIMEOUT_S,
+    PEER_CALL_TIMEOUT_S,
+    QUICK_TIMEOUT_S,
+    NetworkRun,
+    created_session_id,
+    run_network,
+)
 from local_operator.tui.notify import Notifier, notifications_enabled
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import SessionDraft, SessionInteraction
+from local_operator.tui.session_move import (
+    MOVE_PHASE_ORDER,
+    MoveTo,
+    parse_move_to,
+    run_session_move,
+)
 from local_operator.tui.session_navigation import SessionNavigation
 from local_operator.tui.session_presentation import (
     DraftRecoveryNotice,
@@ -317,6 +339,7 @@ from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
+from local_operator.tui.widgets.network_panel import NetworkCommandRequested
 from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
@@ -2801,6 +2824,37 @@ CREDENTIAL_TYPING_NOTICE_RUNGS: tuple[str, ...] = (
 #: separately because tests and callers that mean "the full string" should not
 #: index into the ladder.
 CREDENTIAL_TYPING_NOTICE = CREDENTIAL_TYPING_NOTICE_RUNGS[0]
+
+#: What ``/new``'s picker says when this device knows no peers, widest first.
+#:
+#: BOTH VERBS, AS LONG AS BOTH FIT — and then ``join``, which is the one that
+#: must not be lost (UX round 3, U17). The first rung is the full chain and needs
+#: ~91 cells, so it paints only on a very wide terminal; the rung below it is the
+#: one the dock actually has room for at 110 columns, and design round 2's D16
+#: measured that this is the ONLY place the product tells a peerless user how a
+#: first peer comes to exist. ``join`` is the half that has to survive the tight
+#: widths: the user standing at an empty ``/new`` with a token in hand is the one
+#: who cannot act, and the inviter is already told what to run by the invite the
+#: mint prints. So every rung names ``join``, and ``invite`` rides along while
+#: the cells allow it rather than being promised and then cropped (the failure
+#: mode the previous ladder's own docstring recorded).
+#:
+#: RESOLVED AT PAINT TIME against the row's real budget (``set_notice_rungs``),
+#: so these are rungs and not a choice made per caller: which one shows is a
+#: property of the terminal, and it re-fits on resize.
+NO_PEERS_NOTICE_RUNGS: tuple[str, ...] = (
+    "No peers yet — /network invite mints a token; /network join redeems it on the other device.",
+    "No peers yet — /network join <token>, or /network invite to mint one.",
+    # Both verbs spelled as COMMANDS for as long as the row can hold them: a bare
+    # ``invite`` is a word, not something the user can type, and the rung below
+    # this one only reaches the bare verb once the command spelling has stopped
+    # fitting. Measured on the picker's own row budget: this rung paints at 100
+    # and at 110 columns.
+    "No peers yet — /network join <token> or /network invite",
+    "No peers yet — /network join <token>, or invite",
+    "No peers yet — /network join <token>",
+    "No peers yet — /network join",
+)
 
 #: Said after Esc unredacts a typed secret back into the composer as plaintext.
 #:
@@ -8666,7 +8720,7 @@ class OperatorApp(App[None]):
             if not source.display_only:
                 self._submit_boot_prompt(session)
             session.resume_viewer_gates()
-            self._session_sidebar.current_id = session_id
+            self._session_sidebar.set_current(session_id)
             self._session_sidebar.refresh()
             if refreshing and focused_before_refresh is not None:
                 if focused_before_refresh is old_view:
@@ -9485,7 +9539,7 @@ class OperatorApp(App[None]):
         self._restate_composer_refusal()
         return True
 
-    def _select_sidebar_session(self, session_id: str) -> asyncio.Task[None]:
+    def _select_sidebar_session(self, session_id: str) -> asyncio.Task[None] | None:
         """Start a sidebar navigation to ``session_id`` — the ONE way to switch.
 
         Extracted so the notification-click path (:meth:`viewer_resume_session`)
@@ -9501,7 +9555,38 @@ class OperatorApp(App[None]):
         Cancelling the outgoing session's worker group first is part of that
         contract and not an optimisation: those workers still hold the
         presentation the navigation is about to replace.
+
+        A SESSION ANOTHER DEVICE HOLDS IS NAMED, NOT OPENED (UX round 5, U27),
+        and that guard is asked HERE so it is asked by every caller of this
+        function rather than by the one that remembered. The list carries a
+        peer's sessions, so the pick that reaches this function can name one —
+        and this used to hand the bare id to a navigation that looks it up in
+        THIS device's store, fail, and print ``Could not open conversation: This
+        conversation is no longer available`` about a conversation running on
+        the other machine, in the same frame in which ``/resume`` on that same id
+        printed the device it is running on. ``None`` is that refusal, and it
+        means the sentence was the whole outcome: nothing was started, no
+        transition was opened, and no draft was moved. A caller that needs to
+        know whether a switch is under way must read the return value rather than
+        assume a task came back — :meth:`viewer_resume_session` does exactly that
+        before it attaches its own settle callback.
         """
+        if session_id:
+            from local_operator.paths import config_dir
+
+            if self._open_session_or_refuse(session_id, config_dir()):
+                # THE PEER ROW STAYS THE ORIGIN (review round 9, MINOR 1). This
+                # used to clear the intent, and ``_switch_session_from`` then
+                # re-derived its origin from the ATTACHED session — the local row
+                # BEFORE the peer row — so the next `ctrl+shift+down` recomputed
+                # the same peer row forever and nothing below it was reachable by
+                # the shortcut. Leaving the id published means the next press
+                # steps from where the user just went: past the row, whether it
+                # opened (a remote viewer transition is under way) or was refused
+                # (an unreachable peer). ``intend`` never raises a boundary or
+                # starts a preparation, so leaving it set commits to nothing.
+                self._sidebar_navigation.intend(session_id)
+                return None
         self._sidebar_prior_workers.update(self.workers.cancel_group(self, "session"))
         return self._sidebar_navigation.select(session_id)
 
@@ -9648,7 +9733,7 @@ class OperatorApp(App[None]):
             return
         # Closed list: adopt the fresh read so the drawer, when it next opens,
         # shows the order the switch just traversed rather than the stale one.
-        self._session_sidebar.current_id = str(getattr(self._session, "session_id", ""))
+        self._session_sidebar.set_current(str(getattr(self._session, "session_id", "")))
         self._session_sidebar.set_entries(entries)
         self._switch_session_from(self._session_sidebar.entries, delta)
 
@@ -9801,8 +9886,12 @@ class OperatorApp(App[None]):
         generation = self._sidebar_refresh_generation
         self._sidebar_refresh_pending = True
 
-        def collect() -> tuple[list[CatalogEntry], list[str], int | None]:
+        def collect() -> tuple[list[CatalogEntry], list[str], int | None, list[tuple[str, str]]]:
             from local_operator.paths import config_dir
+            from local_operator.session.peer_rows import (
+                peer_session_rows,
+                unanswered_peers,
+            )
             from local_operator.tui.session_catalog import (
                 load_catalog,
                 subagent_population,
@@ -9816,6 +9905,24 @@ class OperatorApp(App[None]):
                 include_subagents=self._session_sidebar.show_subagents,
                 pinned_hidden_ids=tuple(pins),
             )
+            # THE PEER TIER (``mesh-ui.md`` §1.3, review round 4 MINOR 3): the
+            # sessions other devices hold, appended to this device's own listing,
+            # which is what gives the sidebar's locality mark and its per-device
+            # heading a live producer instead of the fixture the rendering slice
+            # landed against. Bounded and cached inside `peer_session_rows` (one
+            # relay call per TTL, never a dial per row, and NO call at all on a
+            # device with no relay) — this poll runs every two seconds, so an
+            # uncached listing here would be the one thing on the sidebar's
+            # path that talks to the network. A device in no mesh adds no rows.
+            entries = [*entries, *(CatalogEntry(row) for row in peer_session_rows(root))]
+            # AND THE PEERS THAT SAID NOTHING (UX round 3, U16). The relay names
+            # them in the same answer the rows came from — `unanswered_peers`
+            # reads the cache entry `peer_session_rows` just filled, so this is
+            # not a second fan-out and the two halves cannot disagree about a
+            # mesh that moved between them. Without it a peer that stopped
+            # answering lost its whole section silently: §8.3 drops its ROWS,
+            # and a section built from rows dropped the fact with them.
+            silent = [(peer.name, peer.reason) for peer in unanswered_peers(root)]
             # Read on a SLOW cadence, never per poll: `subagent_population` is
             # a second whole-store scan (+2.36 ms, +21% measured with the layer
             # off) and the count it answers changes when a delegated run
@@ -9825,20 +9932,21 @@ class OperatorApp(App[None]):
             if self._subagent_population_poll % SUBAGENT_POLL_EVERY == 0:
                 total = subagent_population(root)
             self._subagent_population_poll += 1
-            return entries, pins, total
+            return entries, pins, total, silent
 
         async def refresh() -> None:
             try:
-                entries, pins, total = await asyncio.to_thread(collect)
+                entries, pins, total, silent = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
                     or not self._session_sidebar.display
                 ):
                     return
                 session = self._session
-                self._session_sidebar.current_id = str(getattr(session, "session_id", ""))
+                self._session_sidebar.set_current(str(getattr(session, "session_id", "")))
                 self._session_sidebar.set_entries(entries)
                 self._session_sidebar.set_pins(pins)
+                self._session_sidebar.set_silent_peers(silent)
                 if total is not None:
                     self._session_sidebar.set_subagent_total(total)
                 self._prewarm_sidebar(list(self._session_sidebar.visible_entries))
@@ -10355,6 +10463,17 @@ class OperatorApp(App[None]):
         # a runaway nobody can halt (see `_cmd_stop`, QA Q-2). Recorded on
         # adoption because that is the one edge where the identity is known.
         self._adopted_session_id = getattr(session, "session_id", "") or ""
+        # AND THE LIST SHOWS IT, from here rather than from each caller, because
+        # THIS is the one edge every arrival goes through — boot, `/new`,
+        # `/resume`, `/new remote <peer>`, a notification click, a remote takeover
+        # are all `_adopt_session` calls, which is the same reason the line above
+        # lives here. `/new remote` is the case that made the omission visible
+        # (re-shot sidebar evidence, mesh lane): the session is minted on the peer
+        # and stood in inside one keystroke, and the sidebar was never told, so on
+        # a populated store the row the pane said the user was in sat below the
+        # fold. The sidebar owns the reveal itself (`set_current` -> `_reveal`,
+        # the list's own scroll rule); all this edge owes it is the fact.
+        self._session_sidebar.set_current(self._adopted_session_id)
         # The latch belongs to the BINDING, not to the app: a swapped-in
         # session is cold again and owes its own engage. Its declaration has
         # always said a swap resets it, but nothing did — harmless while the
@@ -15330,6 +15449,84 @@ class OperatorApp(App[None]):
         # without remembering the symbol.
         self._resume_session(arg.strip() or RESUME_LATEST, notice)
 
+    def _open_session_or_refuse(self, session_id: str, root: Path) -> bool:
+        """OPEN ``session_id`` as a remote viewer when ANOTHER DEVICE holds it.
+
+        THE ONE GUARD BEHIND EVERY WAY A USER NAMES A SESSION THEY ARE NOT ON
+        (UX round 5, U27), and it used to stop at a sentence: the sidebar's pick
+        and ``/resume`` both printed ``<id> is running on <device> — /network
+        sessions --peer …`` because nothing in production could open a remote
+        session (mesh build plan §0, finding 2). It now OPENS it: a viewer whose
+        owner is the peer (``session.remote_open``), adopted by the same code as
+        a local attach, so prompts, steering, ``/stop``, ``/model``, ``/rename``
+        and every routed slash execute on the peer's runtime.
+
+        The name says what the caller needs, because the name is what a future
+        reader greps for: it OPENS the session when another device holds it and
+        REFUSES it with a sentence when that device is unreachable — a ``True``
+        is the WHOLE outcome for that id and the caller must start nothing of its
+        own (the U27 lesson: the pick used to start a local navigation anyway and
+        print the local store's failure over the top). It was called
+        ``_announce_remote_session`` until round 1's NIT 2: it had stopped
+        announcing anything, and a reader looking for "who opens a remote
+        session" would not have found it under that name.
+
+        CACHE-ONLY ON THE HIT, ONE READ ON THE MISS (UX round 3, U20):
+        ``remote_row_for`` reads the producer the sidebar's poll fills, and pays a
+        read only when this device holds no directory for the id, so a local
+        resume never waits on a peer.
+
+        AN UNREACHABLE PEER IS REFUSED WITH ITS REASON, not opened into a viewer
+        that can never bind (``mesh-ui.md`` §1.3 degraded states): the sentence
+        names the device, the reason in words, and the one command that
+        diagnoses the link. It is ``remote_open.unreachable_peer_sentence`` — the
+        SAME composer the desktop backend answers the same state with, so one
+        situation is described one way on both surfaces.
+        """
+        from local_operator.session.remote_open import (
+            remote_row_for,
+            unreachable_peer_sentence,
+        )
+
+        row = remote_row_for(session_id, root)
+        if row is None:
+            return False
+        if not row.reachable:
+            self._system_notice(unreachable_peer_sentence(session_id, row), "warning")
+            return True
+        self._run_session_transition(self._open_remote_session(session_id, row, root))
+        return True
+
+    async def _open_remote_session(self, session_id: str, row: Any, root: Path) -> None:
+        """Build the peer's viewer and adopt it as the current session.
+
+        COLD, exactly like a local ``lop`` boot: nothing runs on the peer until
+        the user does something, and the first act binds it through the remote
+        owner. A failure to build the viewer (a relay that stopped between the
+        pick and here) is reported with the device named, and the current
+        session is left exactly as it was.
+        """
+        from local_operator.resume import UNNAMED_DEVICE
+        from local_operator.session.remote_open import open_remote_viewer
+
+        async def refuse_takeover() -> Any:
+            raise RuntimeError("a remote viewer never takes over a session")
+
+        device = row.owner_label or UNNAMED_DEVICE
+        try:
+            remote = await open_remote_viewer(
+                session_id, config_dir=root, takeover=refuse_takeover, row=row
+            )
+        except Exception as error:  # noqa: BLE001 — reported, never raised into the loop
+            logger.debug("could not open the remote session", exc_info=True)
+            self._system_notice(f"could not open {session_id} on {device}: {error}", "warning")
+            return
+        if remote is None:
+            self._system_notice(f"{session_id} is no longer listed on {device}", "warning")
+            return
+        await self._adopt_built_viewer(remote)
+        self._system_notice(f"opened {session_id} on {device}", "info")
+
     def _resume_session(
         self, resume_id: str, notice: NoticeFn, *, preserve_outgoing: bool = False
     ) -> None:
@@ -15363,6 +15560,18 @@ class OperatorApp(App[None]):
         except Exception:
             concrete = resume_id
         if concrete != RESUME_LATEST:
+            # A SESSION ON ANOTHER DEVICE IS NOT RESUMABLE FROM HERE YET (review
+            # round 4 MINOR 3, and UX round 5 U27 made it the SAME guard the
+            # sidebar's own pick asks). The producer puts a peer's sessions in
+            # this list, so a row selected from the sidebar names one — and
+            # without the guard the resume factory would look it up in THIS
+            # machine's store, fail, and report a missing session about a session
+            # that is running perfectly well one device over. The sentence, the
+            # cache policy and the cold-cache fallback all live in
+            # `_open_session_or_refuse`, so this arm and the pick cannot answer
+            # one session two ways.
+            if self._open_session_or_refuse(concrete, config_dir()):
+                return
             owner = live_runtime_pid(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
                 # Discovery scans the filesystem; run it as a worker so the
@@ -16315,7 +16524,23 @@ class OperatorApp(App[None]):
         # and nothing that still speaks in the present tense.
         if retry_notice is not None and retry_notice.is_attached:
             self._transcript_view().remove_block(retry_notice)
+        await self._adopt_built_viewer(remote, attach_behind=attach_behind)
 
+    async def _adopt_built_viewer(self, remote: Any, *, attach_behind: bool = False) -> None:
+        """Swap an already-built viewer in for the current session, in one frame.
+
+        Extracted from :meth:`_attach_or_refuse` so a REMOTE viewer (mesh slice V,
+        :meth:`_open_remote_session`) is adopted by literally the same code as a
+        local attach — the gates, the outgoing session's offer-back, the ledger
+        reset — rather than by a second copy that drifts.
+
+        ``attach_behind`` is the paint-first flag :meth:`_attach_or_refuse`
+        decides (a cold facade painted IN FRONT OF a live owner, #1474's
+        paint-first resume): only that caller can know it, so it is passed in
+        rather than read back off ``remote``. A remote mesh viewer is already
+        bound when it arrives and never paints first, hence the ``False``
+        default for that caller.
+        """
         detach_gates = getattr(self._session, "detach_viewer_gates", None)
         if callable(detach_gates):
             await cast(Callable[[], Awaitable[None]], detach_gates)()
@@ -16430,6 +16655,8 @@ class OperatorApp(App[None]):
         session: nothing lists it, so a user who did not copy the id has only
         `/resume` and the picker's Archived toggle to find it again.
         """
+        if self._route_lifecycle_to_peer("archive" if archived else "unarchive", False):
+            return
         session_id = self._resumable_session_id()
         if not session_id:
             # No transcript yet, so no id any resume path would accept. Saying
@@ -16471,6 +16698,85 @@ class OperatorApp(App[None]):
         # adds `/unarchive` to the composer, un-archiving takes it away.
         self._refresh_offered_commands()
 
+    def _remote_owner_facts(self) -> tuple[str, str, str] | None:
+        """``(session_id, device_id, device_name)`` when the CURRENT session is a peer's.
+
+        Read from the viewer's own owner (its placement names the home device),
+        so the answer is the one the facade already acts on — never a second
+        lookup that could disagree with where prompts are going.
+        """
+        session = self._session
+        if session is None or getattr(session, "runtime_locality", "") != "another-machine":
+            return None
+        owner = getattr(session, "_owner", None)
+        facts = getattr(owner, "facts", None)
+        device_id = str(getattr(facts, "device_id", "") or "")
+        if not device_id:
+            placement = getattr(owner, "placement", None)
+            device_id = str(getattr(placement, "home_device", "") or "")
+        if not device_id:
+            return None
+        return (
+            str(session.session_id),
+            device_id,
+            str(getattr(facts, "device_name", "") or ""),
+        )
+
+    def _route_lifecycle_to_peer(self, action: str, confirmed: bool) -> bool:
+        """Run ``/archive``, ``/unarchive`` or ``/delete`` ON THE PEER for a remote session.
+
+        Returns whether it took the command. The local handlers write THIS
+        device's ``archived-sessions.json`` and remove THIS device's directory —
+        both wrong for a conversation another device owns (design §8.3: never
+        write the local archive index for a remote id). The owner's own
+        implementation runs instead (``mobility.lifecycle`` →
+        ``archive_change``/``delete_session`` on the peer), and its sentence is
+        printed VERBATIM — including a refusal's guard sentence — because the
+        owner is the only side that can see why it said no.
+
+        ``/delete`` keeps its two-step shape: bare is the OWNER's rehearsal, and
+        only ``/delete yes`` sends ``confirmed``.
+        """
+        owner = self._remote_owner_facts()
+        if owner is None:
+            return False
+        session_id, device_id, device_name = owner
+        label = device_name or device_id
+
+        async def run() -> None:
+            from local_operator.network import mobility
+
+            try:
+                detail = await asyncio.to_thread(
+                    mobility.lifecycle,
+                    session_id,
+                    action=action,  # type: ignore[arg-type]
+                    peer=device_id,
+                    confirmed=confirmed,
+                )
+            except Exception as error:  # noqa: BLE001 — a sentence, never a crash
+                logger.debug("remote lifecycle failed", exc_info=True)
+                self._system_notice(f"{label} could not be asked to {action} it: {error}", "error")
+                return
+            message = str(detail.get("message") or "")
+            if not detail.get("ok"):
+                self._system_notice(f"{label} refused: {message or 'no reason given'}", "warning")
+                return
+            if action == "delete" and not confirmed:
+                self._system_notice(
+                    f"{message} Nothing was deleted. /delete yes deletes it on {label}.",
+                    "warning",
+                )
+                return
+            self._system_notice(f"{message} ({label})" if message else f"done on {label}", "info")
+            if action == "delete":
+                # The conversation no longer exists anywhere; land somewhere sane,
+                # exactly as the local delete does.
+                self._cmd_new("", self._notice)
+
+        self.run_worker(run(), group="session-delete", exit_on_error=False)
+        return True
+
     def _cmd_delete(self, arg: str, notice: NoticeFn) -> None:
         """``/delete [yes]`` — remove the current conversation for good.
 
@@ -16499,13 +16805,15 @@ class OperatorApp(App[None]):
         from local_operator.paths import config_dir
         from local_operator.session.cleanup import delete_session
 
+        confirmed = arg.strip().casefold() == "yes"
+        if self._route_lifecycle_to_peer("delete", confirmed):
+            return
         session_id = self._resumable_session_id()
         if not session_id:
             notice(
                 "this conversation has nothing saved yet — there is nothing to delete", "warning"
             )
             return
-        confirmed = arg.strip().casefold() == "yes"
 
         async def delete() -> None:
             try:
@@ -16560,11 +16868,11 @@ class OperatorApp(App[None]):
                 self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
             else:
                 notice(f"deleted {session_id}", "info")
-            self._cmd_new(notice)
+            self._cmd_new("", notice)
 
         self.run_worker(delete(), group="session-delete", exit_on_error=False)
 
-    def _cmd_new(self, notice: NoticeFn) -> None:
+    def _cmd_new(self, arg: str, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
 
         There was no way to do this: ``/clear`` wipes the SCREEN and keeps the
@@ -16574,13 +16882,186 @@ class OperatorApp(App[None]):
         relaunching, which also throws away the terminal state, the MCP
         connections and the warm imports.
 
-        Implemented through the resume factory with ``None`` rather than a
-        second factory: ``create_session`` already branches on
-        ``args.resume is not None``, so this is the same code path a cold
-        launch takes, which is exactly what "new session" should mean. The
-        ledger is rebuilt from the session that boots, as it is on every
-        reload, which for a conversation with no history is an empty screen.
+        ``arg`` IS READ NOW, and reading it is the fix this signature exists
+        for: it used to be dropped, so ``/new remote devon`` started an ordinary
+        local session and said nothing about it — the argument had a meaning (the
+        remote form, ``docs/design/mesh-ui.md`` §1.4) and the surface silently
+        ignored it. The grammar:
+
+        * ``/new`` or ``/new <word>`` — today's behaviour, byte for byte. The
+          single word is the DESKTOP picker's selection (``sessions.new``'s
+          ``selected=args``), which this terminal has never acted on; it is also
+          why the registry's new shape accepts one token as well as the two-token
+          remote form.
+        * ``/new remote <peer> [prompt]`` — create the session ON ``<peer>``,
+          with any trailing text as its first prompt, and OPEN it here.
+
+        THE REMOTE FORM OPENS WHAT IT CREATED (QA round 1 integration, Q-INT-2),
+        which is what the local form has always done: ``/new`` rebuilds the app onto
+        the session it just made (``_start_new_local_session``), so a user who types
+        ``/new`` and then a prompt is addressing the session they named. The remote
+        form used to stop at the receipt — the session was born on the peer and the
+        pane stayed on the LOCAL conversation it was showing, so the next prompt, a
+        steer and the next prompt after that all landed in a session the user had
+        not named while the pane said ``running bash`` about it. The adoption is
+        ``_adopt_created_remote_session``, below.
         """
+        tail = arg.strip()
+        if tail:
+            pieces = tail.split(maxsplit=1)
+            if pieces[0].casefold() == "remote":
+                self._cmd_new_remote(pieces[1] if len(pieces) > 1 else "", notice)
+                return
+        self._start_new_local_session(notice)
+
+    def _cmd_new_remote(self, tail: str, notice: NoticeFn) -> None:
+        """``/new remote <peer> [prompt]`` — create the session on ANOTHER device.
+
+        THE CLI OWNS THE WHOLE ACT, and this handler does not re-implement a line
+        of it: ``lop network sessions --peer <peer> --create`` is the session
+        plane's own verb (the relay asks the peer, the peer mints the id, spawns
+        and admits), and it is what the agent guide drives. Two reasons it is
+        spelled here rather than called in-process: the spawn takes seconds to
+        tens of seconds (its own budget is 120 s), which is far past a frame, and
+        the refusal vocabulary — an unreachable peer, a refused grant, a peer that
+        never answers — is the CLI's, so the sentence the user reads is the same
+        one the guide's output carries.
+
+        REACHABILITY IS NOT PRE-FLIGHTED. ``/network doctor``'s probing is a
+        person's deliberate act, and a create that dials as a check and then dials
+        again to act would pay the peer-probe budget twice for one keystroke. The
+        create IS the check: an unreachable peer is refused by the relay with the
+        reason it measured, and that reason is printed verbatim.
+
+        The peer is resolved against THIS device's member lists (``network/peers``,
+        a disk read) rather than dialed, so the words the picker offered and the
+        words this accepts are one list even with the relay stopped. A name that
+        is ambiguous across two networks refuses and names the ids instead of
+        guessing which membership the user meant.
+        """
+        from local_operator.network.peers import resolve_peer, split_peer_token
+
+        pieces = tail.split(maxsplit=1)
+        if not pieces:
+            # The bare word deserves a sentence, not a local session: a user who
+            # typed `remote` meant a peer and has not named one.
+            notice("Use /new remote <peer>, or /new for a session on this device.", "error")
+            return
+        token = pieces[0]
+        prompt = pieces[1].strip() if len(pieces) > 1 else ""
+        name, device_hint = split_peer_token(token)
+        matches = resolve_peer(device_hint or name)
+        if device_hint:
+            matches = [peer for peer in matches if peer.device_id == device_hint] or matches
+        if not matches:
+            notice(f"No peer named {token}. /network peers lists them.", "error")
+            return
+        if len({peer.device_id for peer in matches}) > 1:
+            ids = ", ".join(sorted({peer.device_id for peer in matches}))
+            notice(f"{name} is in more than one network — name the peer by id: {ids}", "warning")
+            return
+        peer = matches[0]
+        # THE RECEIPT ECHOES WHAT IT IS GIVEN, SO IT IS GIVEN THE USER'S WORD
+        # (QA round 11 Q-R11-2 / UX round 2 U12). ``lop network sessions --peer
+        # <x> --create`` prints ``created on <x>`` and repeats ``--peer <x>`` in
+        # its remedy, and this passed ``peer.device_id`` — so the ONE surface
+        # where the user typed a name answered in the 34-character wire token it
+        # exists to hide, and the remedy's copy-pasteable command carried it too.
+        # ``peer.token`` is ``name or device_id``: the name when there is one,
+        # which is also exactly the word the picker inserted and the handler
+        # resolved a line above.
+        #
+        # …BUT ONLY WHILE IT STILL RESOLVES TO THIS ONE DEVICE. An id-addressed
+        # create for a peer whose NAME is ambiguous across two networks would
+        # otherwise be refused by the relay's own ambiguous-peer refusal — the
+        # receipt would stop a create that works today. Falling back to the id
+        # there costs the friendly word and nothing else.
+        addressing = peer.token
+        if len({match.device_id for match in resolve_peer(addressing)}) != 1:
+            addressing = peer.device_id
+        # NO `--name` HERE, and its absence is the fix rather than an omission
+        # (UX round 3, U19). This used to pass ``peer.label``, so the session the
+        # user created from a device row was TITLED with the device's own name:
+        # the sidebar then painted a session row reading `pixel-8` underneath the
+        # `⇄ pixel-8` heading that already said which device holds it — two
+        # adjacent lines, one a device and one a session, and a name no user
+        # typed. It also survived a restart, because the name was on disk.
+        #
+        # Unnamed is the honest state and it is the one the LOCAL path already
+        # has: a bare `/new` starts an untitled session, the row paints the shared
+        # `Untitled conversation` string, and the session is named when the user
+        # names it or the owner's own auto-namer titles the first substantive
+        # turn. Nothing is lost by it — the peer tier's heading carries the
+        # device, which is what the bogus name was duplicating.
+        argv = ["sessions", "--peer", addressing, "--create"]
+        if prompt:
+            argv += ["--prompt", prompt]
+        self._run_network_cli(
+            argv,
+            notice,
+            timeout=PEER_CALL_TIMEOUT_S,
+            verb="create a remote session",
+            on_settled=partial(self._adopt_created_remote_session, peer),
+        )
+
+    async def _adopt_created_remote_session(self, peer: Any, result: NetworkRun) -> None:
+        """OPEN the session the create just minted on ``peer``, once the CLI answered.
+
+        ``peer`` is a ``network.peers.KnownPeer`` (the handler resolves it above and
+        the mesh package stays function-local in this module), annotated ``Any`` for
+        the reason ``_open_remote_session``'s row is: importing the type here would
+        put a mesh import on the TUI's module path for an annotation.
+
+        A REFUSAL ADOPTS NOTHING and is already reported: the CLI's own sentence is
+        the receipt, and there is no id to open.
+
+        THE ID COMES FROM THE RECEIPT. ``created_session_id`` reads it out of the
+        line ``lop network sessions --create`` already prints, which is the only
+        channel the CLI gives this surface — a second ``--json`` call for the same
+        fact would print a payload into the transcript (see that function's
+        docstring).
+        """
+        if not result.ok:
+            return
+        session_id = created_session_id(result.lines)
+        if not session_id:
+            self._system_notice(
+                f"{peer.label} answered without naming the session it created, so "
+                f"nothing was opened here — /network sessions --peer {peer.token} "
+                "lists what that device holds.",
+                "warning",
+            )
+            return
+        from local_operator.paths import config_dir
+        from local_operator.session.peer_rows import peer_session_rows
+
+        # ONE FORCED CATALOGUE READ, because the session was minted a moment ago and
+        # the peer catalogue is cached for ``peer_rows._TTL_S`` (20 s) against the
+        # sidebar's poll: a cache-first lookup would miss the row it was just
+        # handed, and the miss reads as "this device cannot open what it just made".
+        # ``ttl_s=0`` re-asks the relay once — the same fan-out the sidebar's next
+        # poll pays — and costs nothing when the row is already there.
+        try:
+            await asyncio.to_thread(peer_session_rows, config_dir(), ttl_s=0)
+        except Exception:  # noqa: BLE001 — an unreadable catalogue is the guard's own miss
+            logger.debug("could not re-read the peer catalogue", exc_info=True)
+        # THE ONE GUARD every other way of naming a remote session uses, so its
+        # cache policy, its unreachable-peer sentence and its transition are not
+        # re-derived here (``/resume`` reaches it through the same call).
+        if self._open_session_or_refuse(session_id, config_dir()):
+            return
+        # THE PANE MUST NOT IMPLY THE REMOTE SESSION IS BEING DRIVEN, and it is not
+        # driving it: say where the session went and how to get to it, naming the
+        # session the user is actually standing in (Q-INT-2's second half).
+        here = self._adopted_session_id or "this device's own session"
+        self._system_notice(
+            f"{session_id} was created on {peer.label} but this device's catalogue does "
+            f"not list it yet, so this terminal is still on {here} — /resume {session_id} "
+            "opens it.",
+            "warning",
+        )
+
+    def _start_new_local_session(self, notice: NoticeFn) -> None:
         if self._resume_factory is None:
             self._system_notice("new session unavailable: no session-capable launcher", "warning")
             return
@@ -20905,6 +21386,13 @@ class OperatorApp(App[None]):
         `mobile/daemon.py` bounds the identical call the same way.
         """
         if session is None:
+            return
+        if getattr(session, "runtime_locality", "") == "another-machine":
+            # A REMOTE RUNTIME IS NEVER OFFERED BACK (mesh cell 1.2, mobility
+            # §3.3). "I engaged this and am leaving unused" is a claim only a
+            # viewer on the runtime's own machine can make: this terminal did not
+            # start the peer's runtime, and quitting here must never be what ends
+            # it. The peer's own residency drain still decides when it exits.
             return
         retire = getattr(session, "retire_if_unused", None)
         if not callable(retire):
@@ -26128,6 +26616,22 @@ class OperatorApp(App[None]):
             except Exception as exc:  # noqa: BLE001 — the error IS the answer
                 loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
                 return
+            if task is None:
+                # REFUSED WITH A SENTENCE INSTEAD OF A SWITCH (UX round 5, U27):
+                # `_select_sidebar_session` returns `None` for a session ANOTHER
+                # DEVICE holds, having named the device it is running on. The ack
+                # this endpoint owes its caller means DISPLAYED, and nothing is —
+                # so this is the same failure a navigation that does not land
+                # answers with, and the caller's spawn fallback runs for the click
+                # that asked for a window. Reading the return value is also what
+                # keeps `started` and `settled` off a task that was never created.
+                loop.call_soon_threadsafe(
+                    _set_unless_done,
+                    future,
+                    None,
+                    RuntimeError(f"could not display {session_id}"),
+                )
+                return
             started = task
 
             def settled(_task: "asyncio.Task[None]") -> None:
@@ -28006,6 +28510,14 @@ class OperatorApp(App[None]):
         someone who cannot see them — the same argument ``/settings`` and
         ``/theme`` make about config.yml.
         """
+        # THE MOBILITY FORM IS DISCRIMINATED BY ``--to`` AND BY NOTHING ELSE
+        # (``mesh-ui.md`` §1.7): a path can look like an id and an id like a path,
+        # so the shape of the first token must never decide. Without ``--to`` the
+        # command below is today's, byte for byte.
+        mobility = parse_move_to(arg)
+        if mobility is not None:
+            self._cmd_move_session(mobility, notice)
+            return
         session = self._session
         if session is None:
             # A rejected command changed nothing, so the boot composition must
@@ -28059,6 +28571,213 @@ class OperatorApp(App[None]):
             MovePickerScreen(targets, current=cwd, complete=_complete, self_target=_self_target),
             _move_choice,
         )
+
+    def _cmd_move_session(self, request: "MoveTo", notice: NoticeFn) -> None:
+        """``/move [<id>] --to <peer|local> [--keep]`` — move a SESSION between devices.
+
+        THE CLI OWNS THE PROTOCOL (``lop sessions move … --json``, slice M's
+        frozen ``session_move`` contract) and this surface renders it: the phase
+        transcript while it runs, the receipt or the refusal after. Run as a
+        subprocess for the reason ``/new remote`` is: a move takes seconds to
+        minutes, far past a frame, and its refusal vocabulary is the relay's.
+
+        MOVING THE SESSION YOU ARE IN (plan §0 finding 9, slice M §9): an
+        attached viewer blocks the owner's exclusive retire, and this TUI's
+        viewer IS attached. So the current session is LEFT first — the TUI
+        switches to a fresh local session, which disposes the viewer and its
+        socket — and only then is the move run. A session with a turn in flight
+        is refused before anything is touched: the owner would refuse it anyway,
+        and leaving it first would strand the user on an empty screen for a move
+        that was never going to happen. On ``committed`` the moved session is
+        reopened where it now lives: attached-remote for ``--to <peer>``, local
+        for ``--to local``.
+        """
+        current = str(getattr(self._session, "session_id", "") or "")
+        target_id = request.session_id or current
+        if request.error:
+            self._system_notice(request.error, "error")
+            return
+        if not target_id:
+            body, kind = self._no_session_notice()
+            self._system_notice(body, kind)
+            return
+        if getattr(self, "_move_in_flight", False):
+            self._system_notice("a move is already running.", "warning")
+            return
+        leaving = target_id == current
+        if leaving and self._turn_is_live():
+            self._system_notice(
+                f"Could not move {target_id}: a turn is still running. Nothing changed. "
+                "esc first, or wait for it to finish.",
+                "error",
+            )
+            return
+        # THIS TUI'S OWN HOLD ON THE SESSION (M's deferred lease refusal, the TUI
+        # half): a sidebar source parked on the id is an attached viewer too, and
+        # the owner's exclusive fence would refuse the move naming "another
+        # terminal" — this one. Refused here in words that say which terminal,
+        # before anything moves; the relay-side backstop covers every other holder.
+        held = self._sidebar_sources.get(target_id)
+        if not leaving and held is not None and not held.retired:
+            self._system_notice(
+                f"Could not move {target_id}: this terminal is still holding it open in the "
+                "sidebar. Open it and run /move --to from inside it, or wait a moment for "
+                "the sidebar to let it go. Nothing changed.",
+                "error",
+            )
+            return
+        self._move_in_flight = True
+        phase_notice = NoticeBlock(self._move_phase_text(target_id, request, []), "info")
+        self._append_block(phase_notice, ends_empty_state=False)
+
+        async def run() -> None:
+            try:
+                if leaving:
+                    # DETACH FIRST: the move cannot retire a runtime this viewer
+                    # is attached to. `/new`'s own transition is the one that
+                    # disposes a viewer cleanly (and offers an unused LOCAL
+                    # runtime back — never a remote one, see
+                    # `_retire_unused_runtime`).
+                    await self._leave_for_move()
+                result = await asyncio.to_thread(
+                    run_session_move, target_id, request.to, keep=request.keep
+                )
+            finally:
+                self._move_in_flight = False
+            self._publish_move_result(target_id, request, result, phase_notice, left=leaving)
+
+        self.run_worker(run(), thread=False, group="session-move", exit_on_error=False)
+
+    async def _leave_for_move(self) -> None:
+        """Swap the current session out for a fresh local one, and wait for it."""
+        if self._resume_factory is None:
+            return
+        self._session_factory = lambda: self._resume_factory(None)  # type: ignore[misc]
+        await self._reload_session()
+
+    def _move_phase_text(self, session_id: str, request: "MoveTo", phases: list[str]) -> str:
+        """The live phase line: where the move is, in the contract's own order."""
+        steps = []
+        for phase in MOVE_PHASE_ORDER:
+            mark = "✓" if phase in phases else "·"
+            steps.append(f"{mark} {phase.replace('_', ' ')}")
+        verb = "copying" if request.keep else "moving"
+        return f"{verb} {session_id} to {request.to} — " + "  ".join(steps)
+
+    def _publish_move_result(
+        self,
+        session_id: str,
+        request: "MoveTo",
+        result: dict[str, Any],
+        phase_notice: NoticeBlock,
+        *,
+        left: bool = False,
+    ) -> None:
+        """Restate the phase row as the receipt, then reopen the session where it lives.
+
+        ``left`` says this move was entered from INSIDE the session being moved,
+        so the request had to leave it first (``_leave_for_move``) — and that is
+        the fact every branch below needs. On a refusal it decides both the
+        sentence ("Nothing changed" is FALSE, because locally the TUI did leave)
+        and the way back (without one, the user is dropped onto an empty local
+        session by a command that reported nothing happened). On a success it is
+        already implied; the reopen is the same one either way.
+        """
+        phases = [str(item.get("phase") or "") for item in result.get("phases") or ()]
+        if not result.get("ok"):
+            reached = str(result.get("phase_reached") or "")
+            changed = bool(result.get("changed"))
+            if left and changed:
+                # THE HALF-COMMITTED CASE, where round 1's sentence was simply
+                # false. ``changed=True`` means the contract says the move already
+                # DID something — the CLI's own message for the
+                # ``deadline_exceeded`` refusal says the handoff was committed, and
+                # its ``--keep`` variant warns that asking again would make another
+                # copy — so "it did not move" would contradict the refusal printed
+                # in the same sentence. What is true, and all the user needs, is
+                # where they are now and that the move may have gone through.
+                tail = (
+                    f" You are back on {session_id}; this move may already have gone "
+                    "through, so check before asking again."
+                )
+            elif left:
+                # THE USER WAS MOVED OFF THE SESSION TO GET HERE. Saying
+                # "Nothing changed" would be a lie about a screen the user can
+                # see, and the caller would be left on a fresh local session with
+                # no statement of where the one they were in went — so the tail
+                # names the way back this method then takes. Order matters in the
+                # sentence: the refusal, then the truth about the local state.
+                tail = f" You are back on {session_id} — it did not move."
+            elif changed:
+                tail = ""
+            else:
+                tail = " Nothing changed."
+            message = str(result.get("message") or "the move was refused")
+            text = f"Could not move {session_id}: {message}.{tail}".replace("..", ".")
+            if reached in MOVE_PHASE_ORDER:
+                # A PARTIAL MOVE KEEPS ITS PHASE ROW: which step it reached is
+                # the fact the user needs to know what state the two devices are in.
+                phases = list(MOVE_PHASE_ORDER[: MOVE_PHASE_ORDER.index(reached) + 1])
+                phase_notice.restate(self._move_phase_text(session_id, request, phases), "error")
+            elif phase_notice.is_attached:
+                # A REFUSAL BEFORE ANY PHASE is one sentence, not two: a row of
+                # four empty steps painted red beside it only repeats "nothing
+                # happened" in a second, louder register (seen in the frame).
+                self._transcript_view().remove_block(phase_notice)
+            self._system_notice(text, "error")
+            if left:
+                # THE WAY BACK, and the reason the sentence above is true: every
+                # refusal that arrives AFTER the leave (``busy``,
+                # ``digest_mismatch``, ``relay_unavailable``,
+                # ``session_unreachable``, and the ``deadline_exceeded`` one built
+                # with ``changed=True``) has already left the session, and none of
+                # them moves it. Reopening where it LIVES is the one answer that
+                # covers both placements the pick knows: a peer's id opens
+                # attached-remote, a local id resumes.
+                self._reopen_where_the_session_lives(session_id)
+            return
+        phase_notice.restate(self._move_phase_text(session_id, request, phases), "info")
+        to_block = result.get("to_device") or {}
+        target = str(to_block.get("name") or to_block.get("device_id") or request.to)
+        new_id = str(result.get("new_session_id") or session_id)
+        if result.get("mode") == "keep":
+            receipt = f"Copied {session_id} to {target} as {new_id}; the original is untouched."
+        elif request.to == "local":
+            from_block = result.get("from_device") or {}
+            source = str(from_block.get("name") or from_block.get("device_id") or "the peer")
+            receipt = (
+                f"Moved {session_id} home from {source} (the copy there was deleted; "
+                "--keep would have left it)."
+            )
+        else:
+            receipt = f"Moved {session_id} to {target}. It runs there now."
+        self._system_notice(receipt, "info")
+        if str(result.get("phase") or "") not in ("committed", "done"):
+            return
+        # REOPEN WHERE IT LIVES. The sidebar's pick path already knows both
+        # answers: a peer's id opens attached-remote (`_open_session_or_refuse`),
+        # a local id resumes. The peer cache is dropped first so the pick does
+        # not answer from a listing taken before the move committed.
+        self._reopen_where_the_session_lives(new_id)
+
+    def _reopen_where_the_session_lives(self, session_id: str) -> None:
+        """Switch to ``session_id`` by sidebar navigation — the ONE way back.
+
+        Extracted when the refusal path needed it too (round 1, V3): a move
+        entered from inside a session leaves it FIRST, so every refusal that
+        arrives afterwards owes the user the same return the success path gives
+        them. Two spellings of it would let the success path keep a fix the
+        refusal path lost, which is exactly how this was missed — the success
+        branch had it, the refusal branch returned before reaching it.
+
+        ``clear_cache()`` first, and for the reason the success path always did:
+        the pick answers from the peer listing, and a listing taken before the
+        move is exactly the stale one this is recovering from.
+        """
+        from local_operator.session.peer_rows import clear_cache
+
+        clear_cache()
+        self._select_sidebar_session(session_id)
 
     def _apply_move(self, raw: str, notice: NoticeFn) -> None:
         """Validate ``raw`` and move the session to it, or say why not.
@@ -31727,6 +32446,19 @@ class OperatorApp(App[None]):
         # pictures. They expand downstream instead, in
         # ``_submit_command_prompt``, after that walk has run — same property,
         # one step later, for a reason the walk itself imposes.
+        #
+        # ``/new`` is the SECOND divergence, and the opposite one: its registry
+        # row keeps ``consumes_prompt`` False (the argument is a peer's name, and
+        # engaging `/new` mid-draft must not reassemble the draft into it — see
+        # `PROMPT_POLICY` in tests/unit/tui/test_slash_echo.py), yet the trailing
+        # text of the ``remote <peer> <text>`` form IS a prompt — the REMOTE
+        # session's first. So the flag cannot be what decides this one, and the
+        # raw ``arg`` reached ``--prompt`` as the literal chip: a 300-line paste
+        # arrived at the peer as ``[Paste #1, 300 lines]`` (review round 4,
+        # MAJOR-1, reproduced against the real editor with a passing `/fork`
+        # control). Dispatching it with ``prompt_arg`` is the fix, exactly as
+        # `/fork` is dispatched; the splice is a no-op for the legacy
+        # single-token form, so ``/new foo`` is untouched.
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
 
@@ -32002,7 +32734,14 @@ class OperatorApp(App[None]):
         elif command == "/update":
             self._cmd_update(notice)
         elif command == "/new":
-            self._cmd_new(notice)
+            # ``prompt_arg``, NOT ``arg``: the trailing text of the remote form is
+            # the peer's first prompt, so a collapsed ``[Paste #1, 300 lines]``
+            # chip has to become its payload before anything reads it — the same
+            # splice `/fork`, `/goal`, `/loop` and `/btw` take. The registry flag
+            # is False (the argument is a peer's name, not this terminal's
+            # prompt), which is exactly why the splice is spelled here rather
+            # than derived from it (review round 4, MAJOR-1).
+            self._cmd_new(prompt_arg, notice)
         elif command == "/resume":
             self._cmd_resume(arg, notice)
         elif command == "/fork":
@@ -32092,6 +32831,12 @@ class OperatorApp(App[None]):
             self._cmd_login(arg, notice)
         elif command == "/mobile":
             self._cmd_mobile(arg, notice)
+        # Beside `/mobile` and for the same reason: both answer "what is this
+        # machine's connectivity", and both keep every network call off the loop
+        # through a worker. Placed next to it so a reader looking for one finds
+        # the other.
+        elif command == "/network":
+            self._cmd_network(arg, notice)
         elif command == "/logout":
             self._cmd_logout(arg, notice)
         elif command == "/credential":
@@ -34875,7 +35620,7 @@ class OperatorApp(App[None]):
         notice, so the hotkey degrades exactly as the slash command does rather
         than dying differently.
         """
-        self._cmd_new(self._notice)
+        self._cmd_new("", self._notice)
 
     def action_keymap_resume(self) -> None:
         """The remappable "resume" hotkey — ``ctrl+s`` unless remapped.
@@ -39088,6 +39833,103 @@ class OperatorApp(App[None]):
             picker.set_choices(self._analytics_choices())
             picker.set_notice("")
             return
+        if message.command == "network":
+            # THE ROWS COME FROM THE VOCABULARY, not from a second list here: a
+            # word the picker offers that the handler refuses (or the reverse) is
+            # the drift ``NETWORK_SUBCOMMANDS`` exists to prevent, and the test
+            # that pins the two sets equal reads both through this one table.
+            # `detail` stays empty — none of these verbs has live state to show,
+            # and a column that always reads "—" teaches the eye to skip it.
+            picker.set_choices(
+                [
+                    ArgumentChoice(name=word, description=help_text)
+                    for word, help_text in network_subcommand_rows()
+                ]
+            )
+            picker.set_notice("")
+            return
+        if message.command == "new":
+            # THERE IS NO KEYWORD-ONLY ROW WHILE A PEER ROW EXISTS. There used to
+            # be a leading `remote` row ("Create it on another device") which was
+            # the row the picker PRE-SELECTED — and pressing Enter on it left the
+            # buffer holding a bare `remote`, which the handler refuses with "Use
+            # /new remote <peer>…". A user who took the row the UI put under the
+            # cursor was told the syntax they had just been offered. The design's
+            # own rule is the fix: the ROW CARRIES THE WHOLE ARGUMENT
+            # (`remote <peer>`), so with peers listed every row runs, and the
+            # first Enter fills a working command.
+            #
+            # Reachability is not shown as a state here because it is not known
+            # here — the create call answers it with the peer's own reason, and a
+            # fabricated "reachable" column would be the one lie this surface
+            # could tell.
+            #
+            # THE PAINTED NAME IS THE DEVICE, AND THE ROW STILL INSERTS THE
+            # ARGUMENT (design round 2, D15). The value (`name`) has to stay the
+            # whole `remote <peer>` argument — the picker completes with it, and a
+            # row that filled a bare peer word would run a LOCAL session, which is
+            # the U4 defect one round back — so the display is carried separately
+            # and the row reads as a device selection instead of a repeated
+            # keyword. The description column used to repeat the label for a named
+            # peer (`remote damian-mbp` / `damian-mbp`) while the two facts a
+            # person is actually choosing between — which network the device is
+            # in, what role it holds — were absent: the network is named here, the
+            # role is the detail column, and the unnamed case says the shared
+            # `unnamed device` string (D8) rather than ellipsizing a hex id in both
+            # columns.
+            #
+            # WHICH OF THE TWO CARRIES THE ID (design round 3, D25). The ROW does
+            # not show the peer's id — its `display` is the device's name, or the
+            # shared `unnamed device` string, and the id is not a fact anyone picks
+            # by. The row's VALUE still IS the id for a peer that has no name,
+            # because `remote <token>` is the only argument that addresses one —
+            # so selecting that row puts the token in the composer, and the preview
+            # then paints it in full. That preview is the honest wire value the
+            # create call receives; the sentence used to leave the second half out
+            # and was contradicted by the frame the moment the cursor moved.
+            peer_choices: list[ArgumentChoice] = []
+            try:
+                from local_operator.network.peers import known_peers
+
+                peers = known_peers()
+            except Exception:  # noqa: BLE001 — a picker never fails on the mesh being absent
+                peers = []
+            from local_operator.resume import UNNAMED_DEVICE
+
+            seen: set[str] = set()
+            for peer in peers:
+                token = peer.token
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                peer_choices.append(
+                    ArgumentChoice(
+                        name=f"remote {token}",
+                        display=peer.name or UNNAMED_DEVICE,
+                        description=peer.network_name,
+                        detail=peer.role,
+                    )
+                )
+            # NO ROWS IS THE HONEST OFFER WHEN THERE IS NO PEER, AND THE NOTICE
+            # IS THEN NOT SUPPRESSED (design round 2, D16). The bare `remote` row
+            # this used to paint was there "to be SEEN rather than to be RUN" — and
+            # it was the row the picker PRE-SELECTED, so the first Enter a new user
+            # presses ran it and landed on a red "Use /new remote <peer>…". That is
+            # U4's defect in the state EVERY user starts in. The row also bought
+            # nothing: an empty list still paints its notice (`set_notice` sends
+            # the dock up with no rows), so the one string that says how a first
+            # peer comes to exist — the sentence this surface is the only place to
+            # say — reaches the screen either way, and now nothing is under the
+            # cursor to run.
+            picker.set_choices(peer_choices)
+            if peer_choices:
+                picker.set_notice("")
+            else:
+                # ``set_notice_rungs`` installs the notice itself (widest rung
+                # first, resolved against the row's real budget at paint time),
+                # which is what keeps the remedy whole as the pane narrows.
+                picker.set_notice_rungs(NO_PEERS_NOTICE_RUNGS)
+            return
         if message.command == "goal":
             # A GATED ROW SET, one row per act the LIVE state allows: `/goal`'s
             # argument is free text (the objective the model is given), so this
@@ -39813,6 +40655,560 @@ class OperatorApp(App[None]):
         # Do not cancel an in-flight enrollment to start a second one: a thread
         # already talking to the cloud cannot be cancelled with its awaiter.
         self.run_worker(run(), group="mobile-setup")
+
+    # -- /network -----------------------------------------------------------
+
+    def _cmd_network(self, arg: str, notice: NoticeFn) -> None:
+        """``/network [verb …]`` — this device's mesh, through the CLI's own verbs.
+
+        EVERY VERB RUNS THE CLI, and none of them re-derives a guard: the family's
+        epochs, tombstones, audit lines and refusal sentences live in
+        ``network/cli.py`` (the one implementation four front ends share), so this
+        handler is a front end in the same sense `bash` is — it decides which
+        command to spell and reads back what it said.
+
+        THE DESTRUCTIVE VERBS NEED THEIR WORD. ``disconnect``, ``member rm``,
+        ``rm`` and ``panic`` are the four acts whose effect lands on OTHER devices
+        (or deletes this device's membership), and each takes a typed token rather
+        than a keystroke: ``yes`` for the three that can be undone by re-inviting
+        or re-joining, and the NETWORK'S OWN NAME for ``panic``, because a panic
+        rotates the secret and every other device must then be re-admitted —
+        irreversible by the same command, which is what the repo's typed
+        confirmations are for (``mesh-ui.md`` §1.5). A missing or wrong token
+        prints the rehearsal and runs nothing.
+
+        THE INSTALLATION VERBS ARE NOT HERE (``serve``, ``start``, ``stop``,
+        ``restart``, ``uninstall``): they install, supervise or remove a
+        LaunchAgent, and a composer row that boots out the operator's relay — or
+        deletes this device's identity keypair — is the one-keystroke class of
+        mistake the confirmation above exists to prevent. ``NETWORK_SUBCOMMANDS``
+        does not carry them either, so the picker cannot offer one.
+        """
+        pieces = arg.split()
+        verb = pieces[0].casefold() if pieces else "ls"
+        if verb not in NETWORK_SUBCOMMANDS:
+            self._system_notice(
+                f"Use /network <{'|'.join(NETWORK_SUBCOMMANDS)}> — /network alone lists this "
+                "device's networks",
+                "warning",
+            )
+            return
+        rest = pieces[1:]
+        if verb in ("ls", "status"):
+            self._open_network_screen(verb)
+            return
+        if verb == "join":
+            self._network_join_notice(rest)
+            return
+        if verb == "peers":
+            self._dispatch_network_cli(rest, ["peers"], notice, verb="peers")
+            return
+        if verb == "log":
+            argv = ["log", "--limit", "20"] + (["--network", rest[0]] if rest else [])
+            self._dispatch_network_cli(rest[:1], argv, notice, verb="log")
+            return
+        if verb == "doctor":
+            argv = ["doctor"] + (["--peer", rest[0]] if rest else [])
+            self._dispatch_network_cli(rest[:1], argv, notice, verb="doctor")
+            return
+        if verb == "sessions":
+            # The session plane, from the composer: what `/new remote <peer>`
+            # created is otherwise invisible on every surface (review round 4,
+            # MINOR 3, and design D5/§1.2's deferred producer). The verb's own
+            # guards, epochs and audit lines are the CLI's, like every other row
+            # in this family, so this arm decides only the argv and the budget.
+            # The tail is passed through because the same verb lists
+            # (`--peer`/`--all-peers`), creates (`--create`) and acts on
+            # (`--engage`/`--stop`) a session — one implementation, no second
+            # session-plane API in the TUI.
+            mutating = any(token in {"--create", "--engage", "--stop"} for token in rest)
+            self._dispatch_network_cli(
+                rest,
+                ["sessions", *rest],
+                notice,
+                verb="sessions",
+                timeout=PEER_CALL_TIMEOUT_S if mutating else LISTING_TIMEOUT_S,
+            )
+            return
+        if verb == "new":
+            # THE WHOLE TAIL IS THE NAME. `init`'s positional is free text
+            # (`network/cli.py`), and slicing it to the first word silently
+            # created a network called "My" from `/network new My Fancy Net` —
+            # rc 0, a success receipt, no warning (review round 4, MINOR 2).
+            # The picker cannot produce these lines; typing is exactly how a
+            # person names a network.
+            self._dispatch_network_cli(
+                rest, ["init", " ".join(rest)], notice, verb="new", needs=1, tail=True
+            )
+            return
+        if verb == "invite":
+            argv = ["invite", "--role", "drive"] + (["--network", rest[0]] if rest else [])
+            self._dispatch_network_cli(rest[:1], argv, notice, verb="invite")
+            return
+        if verb == "show":
+            self._dispatch_network_cli(rest[:1], ["show", *rest[:1]], notice, verb="show")
+            return
+        if verb == "rename":
+            # THE TARGET IS RESOLVED AS A PREFIX (Q-R10-4), so the name `new`
+            # accepts is the name `rename` can address: `/network rename Gamma
+            # Mesh Gamma Renamed` relabels `Gamma Mesh`, where the first-token
+            # rule answered "not in a network called 'Gamma'" for a network the
+            # user had just created.
+            target, tail = self._network_split(rest)
+            if not target or not tail:
+                self._system_notice("Use /network rename <network> <new name>", "warning")
+                return
+            self._dispatch_network_cli(
+                rest,
+                ["rename", target, " ".join(tail)],
+                notice,
+                verb="rename",
+                needs=1,
+                tail=True,
+            )
+            return
+        if verb == "trust":
+            self._dispatch_network_cli(rest[:1], ["trust", *rest[:1]], notice, verb="trust")
+            return
+        if verb == "rm":
+            # ...and the same prefix resolution, so `/network rm Gamma Mesh yes`
+            # forgets the network the user named rather than looking for `Gamma`
+            # (Q-R10-4). The rehearsal and the argv are built from the SPLIT, so
+            # the sentence and the command cannot name different networks.
+            target, tail = self._network_split(rest)
+            self._network_confirm_then(
+                [target, *tail],
+                notice,
+                verb="rm",
+                needs=1,
+                token="yes",
+                argv=["rm", target] if target else [],
+                rehearsal=(
+                    f"/network rm forgets {target or 'a network'} ON THIS DEVICE only: "
+                    "the other devices keep the network and this one stops answering it. "
+                    "Run /network disconnect first if the point is to leave."
+                ),
+            )
+            return
+        if verb == "member":
+            self._network_member(rest, notice)
+            return
+        if verb == "disconnect":
+            self._network_disconnect(rest, notice)
+            return
+        if verb == "panic":
+            self._network_panic(rest, notice)
+            return
+
+    def _dispatch_network_cli(
+        self,
+        rest: list[str],
+        argv: list[str],
+        notice: NoticeFn,
+        *,
+        verb: str,
+        needs: int = 0,
+        tail: bool = False,
+        timeout: float = QUICK_TIMEOUT_S,
+        usage: str = "",
+    ) -> None:
+        """Check the token count, then run the argv. One place, so no verb can forget it.
+
+        The arity check is here rather than per verb because a verb that ran with
+        a missing argument would get the CLI's own refusal for a DIFFERENT reason
+        (``_resolve('')`` resolving to the single network, or the parser refusing
+        an absent positional with an argparse traceback in stderr) — neither of
+        which is the sentence a user who typed half a command should read.
+
+        ``tail`` says the tokens PAST ``needs`` are free text belonging to the
+        last argument rather than surplus words to refuse. It exists because two
+        verbs in this family take a human name (``new``, ``rename``) and a
+        name is a sentence, not a token: refusing `/network new My Fancy Net`
+        would be a second way to lose it, and silently taking the first word —
+        what the first cut did — was the worse one (review round 4, MINOR 2).
+        """
+        if len(rest) < needs or (len(rest) > needs > 0 and not tail):
+            self._system_notice(
+                usage or f"That is not a complete /network {verb} command",
+                "warning",
+            )
+            return
+        self._run_network_cli(argv, notice, timeout=timeout)
+
+    def _network_confirm_then(
+        self,
+        rest: list[str],
+        notice: NoticeFn,
+        *,
+        verb: str,
+        needs: int,
+        token: str,
+        argv: list[str],
+        rehearsal: str,
+    ) -> None:
+        """The typed confirmation: rehearse, then run on the exact token.
+
+        ONE implementation for the three word-confirmed verbs, so the rehearsal
+        sentence and the accepted token cannot drift apart. The rehearsal is a
+        WARNING notice — it is the half-typed state of a command, not a refusal of
+        one the user got wrong.
+        """
+        if len(rest) < needs:
+            self._system_notice(f"That is not a complete /network {verb} command", "warning")
+            return
+        if len(rest) == needs:
+            self._system_notice(
+                f"{rehearsal} To confirm, run: /network {verb} "
+                + " ".join(rest[:needs])
+                + f" {token}",
+                "warning",
+            )
+            return
+        if rest[needs].casefold() != token:
+            self._system_notice(f"Type {token} to confirm — nothing was run.", "warning")
+            return
+        self._run_network_cli(argv, notice)
+
+    def _network_member(self, rest: list[str], notice: NoticeFn) -> None:
+        """``/network member rm <network> <device> [yes]`` — revoke, behind a confirmation.
+
+        Revocation is the tab's "remove a device from a network" on the terminal
+        side, and it is the most consequential act in the family: the member is
+        tombstoned, the network SECRET is rotated and the epoch is bumped, so the
+        other devices must be told and the revoked device can never reconnect
+        without a fresh invite (R5). Hence ``yes``.
+        """
+        if len(rest) < 2 or rest[0].casefold() != "rm":
+            self._system_notice(
+                "Use /network member rm <network> <device> — /network show lists the members",
+                "warning",
+            )
+            return
+        # THE NETWORK IS A PREFIX AND THE DEVICE IS THE WHOLE REMAINDER (Q-R10-4),
+        # which is the only split that addresses a network whose name contains a
+        # space without breaking a device LABEL that contains one. A trailing
+        # `yes` is the confirmation, so it is stripped before the split and put
+        # back as the position `_network_confirm_then` reads.
+        tail = rest[1:]
+        confirmed = bool(tail) and tail[-1].casefold() == "yes"
+        spec = tail[:-1] if confirmed else tail
+        network, device = self._network_split(spec)
+        device_name = " ".join(device)
+        if not network or not device_name:
+            self._system_notice(
+                "Use /network member rm <network> <device> — /network show lists the members",
+                "warning",
+            )
+            return
+        self._network_confirm_then(
+            [network, device_name, *(["yes"] if confirmed else [])],
+            notice,
+            verb="member rm",
+            needs=2,
+            token="yes",
+            argv=["member", "rm", network, device_name],
+            rehearsal=(
+                f"Revoking {device_name} from {network} rotates the network secret: every "
+                "remaining device is re-keyed, and the revoked device is refused at its "
+                "next connect until it is invited again."
+            ),
+        )
+
+    def _network_disconnect(self, rest: list[str], notice: NoticeFn) -> None:
+        """``/network disconnect [network] [yes]`` — leave, and stop trusting.
+
+        The bare form resolves to the only network when there is exactly one
+        (§1.5), which is what makes the incident control reachable in one command;
+        with several it lists them instead of guessing which one the user meant.
+        """
+        # THE CONFIRMATION TOKEN IS `yes`, AND IT IS THE LAST TOKEN (Q-R10-4).
+        # With a name that may contain spaces, "everything before a trailing
+        # `yes` is the network" is the only split that keeps
+        # `/network disconnect Gamma Mesh yes` addressable at all; the bare
+        # `/network disconnect yes` is the same rule with an empty name, which is
+        # what resolves to the single network below.
+        confirmed = bool(rest) and rest[-1].casefold() == "yes"
+        spec = rest[:-1] if confirmed else rest
+        if spec:
+            network_arg, _tail = self._network_split(spec)
+            confirm_at = len(spec)
+        else:
+            network_arg = ""
+            confirm_at = 0
+        argv = ["disconnect"] + ([network_arg] if network_arg else [])
+        target = network_arg or self._network_only_name()
+        if target is None:
+            # TWO DIFFERENT SITUATIONS, two different sentences: with several
+            # networks the user must pick one, and with none there is nothing to
+            # leave — telling someone "you are in more than one network" when they
+            # are in none sends them looking for a network that does not exist.
+            if self._network_records():
+                self._system_notice(
+                    "This device is in more than one network — name the one to leave: "
+                    "/network ls lists them",
+                    "warning",
+                )
+            else:
+                self._system_notice(
+                    "This device is in no network — /network new <name> creates one",
+                    "warning",
+                )
+            return
+        if len(rest) <= confirm_at:
+            self._system_notice(
+                f"Leaving {target} stops this device trusting the network, closes its links "
+                "and deletes its local secret; the audit trail is kept. To confirm, run: "
+                f"/network disconnect{' ' + network_arg if network_arg else ''} yes",
+                "warning",
+            )
+            return
+        if rest[confirm_at].casefold() != "yes":
+            self._system_notice("Type yes to confirm — nothing was run.", "warning")
+            return
+        self._run_network_cli(argv, notice)
+
+    def _network_panic(self, rest: list[str], notice: NoticeFn) -> None:
+        """``/network panic <network> <name>`` — typed confirmation of the NAME.
+
+        Not a yes/no, and the difference is the design's: a panic rotates the
+        secret, so every OTHER device must be re-invited before it can come back.
+        That is irreversible by the same command, which is the class of act this
+        repo confirms by TYPING the thing (§1.5, the same shape as
+        ``sessions cleanup --force``). The rehearsal therefore spells the exact
+        line to run, with the network's own name in it.
+        """
+        if not rest:
+            self._system_notice(
+                "Use /network panic <network> — it rotates the secret for every device",
+                "warning",
+            )
+            return
+        network_arg = rest[0]
+        name = self._network_name_for(network_arg)
+        if name is None:
+            self._system_notice(
+                f"No network named {network_arg} on this device — /network ls lists them",
+                "error",
+            )
+            return
+        if len(rest) < 2:
+            self._system_notice(
+                f"Panic on {name} broadcasts a revoke and rotates the secret: every other "
+                "device must be re-admitted with /network invite. To confirm, run: "
+                f"/network panic {network_arg} {name}",
+                "warning",
+            )
+            return
+        if rest[1] != name:
+            self._system_notice(
+                f"Type the network's name ({name}) to confirm — nothing was run.",
+                "warning",
+            )
+            return
+        self._run_network_cli(["panic", network_arg], notice)
+
+    def _network_join_notice(self, rest: list[str]) -> None:
+        """``/network join`` cannot run here, and says so instead of half-running.
+
+        Pairing is a two-screen ceremony with a HUMAN in the middle: this device
+        prints its own derived code, the human reads the code the OTHER device
+        shows, and a mismatch burns the invite rather than warning (R3, and
+        ``network/cli.py::_cmd_join``'s own docstring is the authority). The CLI
+        hosts that on a TTY — ``--sas-stdin`` exists only behind the test-mode
+        environment variable, so there is no non-interactive path for a widget to
+        drive, and a subprocess with no stdin would fail rather than pair.
+
+        So the row stays (the vocabulary is the CLI's) and its answer is the
+        command to run, which is the same call the installation verbs get. The
+        alternative — a composer that appears to start a pairing and cannot finish
+        it — leaves an invite burned and a user with no idea why.
+        """
+        token = rest[0] if rest else "<token>"
+        self._system_notice(
+            "Pairing needs a terminal: this device shows a code for the other device's "
+            f"human to read, and a mismatch burns the invite. Run: lop network join {token}",
+            "warning",
+        )
+
+    def _network_records(self) -> list[Any]:
+        """This device's network records, or ``[]``. Disk only, never a dial."""
+        try:
+            from local_operator.network import store
+
+            return list(store.list_networks())
+        except Exception:  # noqa: BLE001 — a listing never fails on the mesh being absent
+            return []
+
+    def _network_only_name(self) -> str | None:
+        """The single network's ID, or ``None`` when the choice is ambiguous."""
+        records = self._network_records()
+        return records[0].network_id if len(records) == 1 else None
+
+    def _network_name_for(self, target: str) -> str | None:
+        """The NAME a typed confirmation must match, or ``None`` when there is no such network.
+
+        Matched the way the CLI's own ``_resolve`` matches — id first, then name —
+        so the token the rehearsal prints is the token this accepts.
+        """
+        for record in self._network_records():
+            if record.network_id == target:
+                return record.name or record.network_id
+        for record in self._network_records():
+            if record.name == target:
+                return record.name or record.network_id
+        return None
+
+    def _network_target(self, tokens: list[str]) -> tuple[str, list[str]] | None:
+        """``(the network these tokens address, the tokens left over)``, or ``None``.
+
+        THE TARGET IS A PREFIX, NOT A TOKEN (QA round 10, Q-R10-4). ``/network new``
+        takes the WHOLE tail as a name (review round 4), so a network can be called
+        ``Gamma Mesh`` — and every verb that ADDRESSES one still sliced ``rest[0]``,
+        so the name the sibling verb happily created was unreachable:
+        ``/network rename Gamma Mesh Gamma Renamed`` answered *this device is not in
+        a network called 'Gamma'* while ``lop network rename "Gamma Mesh" …`` renamed
+        the same pair. The same first-token rule limited ``rm``, ``disconnect`` and
+        ``member rm``.
+
+        LONGEST PREFIX FIRST, matched the way :meth:`_network_name_for` matches (id
+        first, then name), so the two verbs agree about what a token means: a network
+        genuinely called ``Gamma`` beside one called ``Gamma Mesh`` is still
+        addressable by either, because the LONGEST leading run that names something
+        wins and the rest is the verb's own argument. ``None`` when nothing in the
+        prefix names a network, which is how a caller knows to pass the first token
+        through and let the CLI refuse it in its own words.
+        """
+        records = self._network_records()
+        for length in range(len(tokens), 0, -1):
+            candidate = " ".join(tokens[:length])
+            for record in records:
+                if record.network_id == candidate:
+                    return candidate, tokens[length:]
+            for record in records:
+                if record.name == candidate:
+                    return candidate, tokens[length:]
+        return None
+
+    def _network_split(self, tokens: list[str]) -> tuple[str, list[str]]:
+        """The split above, degrading to the first token so the CLI can refuse it.
+
+        A verb whose network name the user mistyped must hear from the CLI, whose
+        refusal names the network it could not find — the same sentence the CLI
+        prints for the same typo. Inventing a second refusal here is how the two
+        surfaces came to disagree in the first place (Q-R10-4).
+        """
+        split = self._network_target(tokens)
+        if split is not None:
+            return split
+        return (tokens[0] if tokens else ""), tokens[1:]
+
+    def _open_network_screen(self, verb: str) -> None:
+        """Push the mesh panel. Push-before-read, like ``/info`` and ``/session``.
+
+        The first frame is disk-only (``capture_local``), so the screen is useful
+        with the relay stopped — the state people open it in — and the worker's
+        dialing fills the verified half afterwards.
+        """
+        from local_operator.tui.widgets.network_panel import (
+            NetworkScreen,
+            capture_local,
+        )
+
+        try:
+            local = capture_local()
+        except Exception:  # noqa: BLE001 — never take the session down for a panel
+            return self._system_notice("the mesh panel could not read this device", "warning")
+        self.push_screen(NetworkScreen(local, scroll_to=verb))
+
+    def on_network_command_requested(self, message: NetworkCommandRequested) -> None:
+        """The panel's ``d``/``shift+P``: put the typed command in the composer.
+
+        UNSUBMITTED, and without its confirmation token: the incident controls are
+        words a human types, so the panel's job is to save the typing of the verb
+        and the network id — never to run the act. The user reads the line, adds
+        whatever the confirmation asks for, and presses Enter themselves.
+        """
+        message.stop()
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — no composer to fill is not a crash
+            return
+        editor.load_text(message.command)
+        editor.focus()
+
+    def _run_network_cli(
+        self,
+        argv: list[str],
+        notice: NoticeFn,
+        *,
+        timeout: float = QUICK_TIMEOUT_S,
+        verb: str = "",
+        on_settled: Callable[[NetworkRun], Awaitable[None]] | None = None,
+    ) -> None:
+        """Run one ``lop network`` call off the loop and report what it said.
+
+        NO TWO CALLS AT ONCE: the relay serialises its own control socket, and a
+        second listing queued behind the first would each pay the peer-probe
+        budget for one answer. The flag is a boolean rather than a lock because
+        the second caller's correct answer is a sentence, not a wait.
+
+        ``on_settled`` is the CALLER's own follow-up on a call that has already
+        reported itself, awaited here so a verb whose receipt is not the whole act
+        can carry on with the result — ``/new remote`` opens the session it just
+        created (Q-INT-2). It runs AFTER ``_publish_network_run``, never before:
+        the verb's own sentence is what the user is owed first, and a follow-up
+        that painted over it would replace the CLI's receipt with its own.
+        """
+        if getattr(self, "_network_action_busy", False):
+            self._system_notice("a network command is already running.", "warning")
+            return
+        self._network_action_busy = True
+        label = verb or argv[0]
+
+        async def run() -> None:
+            try:
+                result = await asyncio.to_thread(run_network, argv, timeout=timeout)
+            finally:
+                self._network_action_busy = False
+            self._publish_network_run(result, label)
+            if on_settled is not None:
+                await on_settled(result)
+
+        # `run_worker(..., thread=False)`: the call itself is a blocking subprocess
+        # and it is off the loop by `asyncio.to_thread` INSIDE the coroutine, so
+        # this coroutine yields rather than blocks — the same shape ``_cmd_mobile``
+        # uses for its own service calls.
+        self.run_worker(run(), thread=False, group="network")
+
+    def _publish_network_run(self, result: NetworkRun, label: str) -> None:
+        """The receipt: the CLI's own lines, or its own refusal sentence."""
+        if result.timed_out:
+            self._system_notice(
+                f"/network {label} did not finish in time; the relay may be unresponsive "
+                "— /network doctor diagnoses it",
+                "error",
+            )
+            return
+        lines = result.lines
+        if not lines:
+            # Silent success is still a success: `rename`/`trust` print a receipt,
+            # but an exit-0 call that printed nothing must not be reported as a
+            # failure, and must not be reported as nothing either.
+            self._system_notice(
+                f"/network {label} finished with no output (exit {result.returncode})",
+                "info" if result.ok else "error",
+            )
+            return
+        if result.ok:
+            text = Text()
+            for line in lines:
+                text.append(line + "\n")
+            self._append_block(RichBlock(text))
+            return
+        # A refusal prints its sentence on stderr with the coloured wrapper the
+        # CLI strips for us (``network_cli``); the LAST line is the sentence, and
+        # the earlier ones are argparse's own usage text for a bad flag.
+        self._system_notice(lines[-1], "error")
 
     # -- login / logout -----------------------------------------------------
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
@@ -41477,38 +42873,56 @@ class OperatorApp(App[None]):
         args: str,
         images: list[Any] | None = None,
         *,
-        locality: str = "local",
+        locality: str | None = None,
         consumers: Iterable[str] | None = None,
         # ``None`` = "not said", read conservatively: only the LOCAL path omits
         # it, and that path is a pane that owns its gate, whose answer the local
         # call sites pass explicitly (agent review round 4, R4-3).
         may_loosen: bool | None = None,
+        # ``None`` = "not said", also read conservatively. The capabilities the
+        # CONNECTION resolved, forwarded by the registrant's seam for the same
+        # reason ``locality`` and ``may_loosen`` are: it is a property of the
+        # callers's connection, not of the command. Read by the delete-scoped
+        # verbs only — see ``_delete_scope_refusal``.
+        capabilities: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
-        The owner-side backend for a follower's ``route_shared_slash``: instead
-        of running the command's UI (which would paint in the OWNER's
-        transcript and leave the invoking terminal with a transport receipt),
-        this produces a :class:`SlashResult`-shaped dict the invoker renders
-        locally. Every product string below is built by the same handler a
-        local session would run, so the follower's receipt is byte-for-byte
-        the standard vocabulary. ``kind`` is ``notice`` for a printed line,
-        ``block`` for a renderable payload, ``noop`` when the follower opens
-        its own picker. Async because the MCP grant path starts a browser
-        round trip, and local model activation refreshes capacity off the UI loop.
+                The owner-side backend for a follower's ``route_shared_slash``: instead
+                of running the command's UI (which would paint in the OWNER's
+                transcript and leave the invoking terminal with a transport receipt),
+                this produces a :class:`SlashResult`-shaped dict the invoker renders
+                locally. Every product string below is built by the same handler a
+                local session would run, so the follower's receipt is byte-for-byte
+                the standard vocabulary. ``kind`` is ``notice`` for a printed line,
+                ``block`` for a renderable payload, ``noop`` when the follower opens
+                its own picker. Async because the MCP grant path starts a browser
+                round trip, and local model activation refreshes capacity off the UI loop.
 
-        ``locality`` is the invoking client's declared position (see
-        ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
-        opened here is in front of a user at THIS machine, which is true of
-        every client today and false for a future relayed remote device.
+                ``locality`` is the invoking client's declared position (see
+                ``ClientLocality``), and ``None`` means the caller did not say
+                (round 2, R2-1): every gate reads that as RELAYED rather than as
+                local, so a carrier that forgets to forward it refuses instead of
+                running a verb against the owner's machine. Two readers now: the
+                ``/mcp`` grant verbs, where a browser opened here is in front of a
+                user at THIS machine, and the delete-scoped verbs, which the mesh
+                vocabulary reserves for ``delete`` (``_delete_scope_refusal``).
 
-        Only the commands a follower routes land here; process/terminal
-        commands stay local and never reach this dispatcher.
+        NOT THE SAME FIELD AS ``SessionRow.locality`` (review round 4, NIT 2),
+        and the two are named apart here rather than re-spelled: this one is
+        WHERE THE CALLER IS, and the row's is WHERE THE SESSION LIVES
+        (``"local"``/``"remote"``, ``mesh-ui.md`` §1.3). They mean different
+        things on the same vocabulary, so a future caller passing one for the
+        other is a live hazard — this paragraph is what makes the difference
+        readable at the place a caller would be tempted.
 
-        ``consumers`` is which action-carrying receipts the invoking client
-        renders itself; see :meth:`_complete_unconsumed_action`.
+                Only the commands a follower routes land here; process/terminal
+                commands stay local and never reach this dispatcher.
+
+                ``consumers`` is which action-carrying receipts the invoking client
+                renders itself; see :meth:`_complete_unconsumed_action`.
         """
-        result = await self._slash_result(command, args, images, locality, may_loosen)
+        result = await self._slash_result(command, args, images, locality, may_loosen, capabilities)
         result = self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -41584,8 +42998,9 @@ class OperatorApp(App[None]):
         command: str,
         args: str,
         images: list[Any] | None,
-        locality: str = "local",
+        locality: str | None = None,
         may_loosen: bool | None = None,
+        capabilities: frozenset[str] | None = None,
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
@@ -41633,6 +43048,17 @@ class OperatorApp(App[None]):
             # permission branch for connections that CAN loosen (#1310), and no gate
             # catches the swap — see the twin in ``session/runtime/serving.py``.
             return self._approvals_slash_result(args, SlashResult, may_loosen=may_loosen)
+        # THE DELETE-SCOPED VERBS ARE GATED HERE, on the same predicate the
+        # detached runtime's dispatch uses (``session/runtime/serving.py``,
+        # imported rather than restated so the two hosts cannot drift). A
+        # session is owned either by a runtime or by this app, and a follower
+        # must get the same answer from both: ``/archive``, ``/unarchive`` and
+        # ``/delete`` produce the effect ``net_session_lifecycle`` reserves for
+        # ``delete``, while the row that carries them is authorised on ``slash``
+        # — which a ``drive`` member holds WITHOUT ``delete``.
+        refusal = self._delete_scope_refusal(command, locality, capabilities, SlashResult)
+        if refusal is not None:
+            return refusal
         if command == "archive":
             return self._archive_slash_result(True, SlashResult)
         if command == "unarchive":
@@ -41651,6 +43077,30 @@ class OperatorApp(App[None]):
             ),
             style="warning",
         )
+
+    @staticmethod
+    def _delete_scope_refusal(
+        command: str,
+        locality: str | None,
+        capabilities: frozenset[str] | None,
+        SlashResult: Any,
+    ) -> Any | None:
+        """The refusal for a delete-scoped verb this CONNECTION may not run, else ``None``.
+
+        THE DECISION AND THE SENTENCE ARE NOT HERE: both live in
+        ``network.types.delete_scope_refusal``, which all three hosts call so they
+        cannot drift (round 2, R2-5; round 1 had the same three lines in three
+        files). This wrapper only wraps the sentence in this host's ``SlashResult``.
+        The import is function-local for the reason the sibling import in
+        ``_complete_unconsumed_action`` is: the TUI reaches the runtime's package
+        lazily rather than at module scope.
+        """
+        from local_operator.network.types import delete_scope_refusal
+
+        text = delete_scope_refusal(command, locality, capabilities)
+        if text is None:
+            return None
+        return SlashResult(kind="notice", text=text, style="warning")
 
     def _archive_slash_result(self, archived: bool, SlashResult: Any) -> Any:
         """``/archive`` and ``/unarchive`` for a viewer attached to THIS owner.
@@ -41751,7 +43201,7 @@ class OperatorApp(App[None]):
         if not confirmed:
             # Same single source as the local host above (review round 3, R3-2).
             return SlashResult(kind="notice", text=outcome.rehearsal(), style="warning")
-        self._cmd_new(self._notice)
+        self._cmd_new("", self._notice)
         return SlashResult(
             kind="notice",
             text=f"deleted {session_id}",
@@ -42154,7 +43604,15 @@ class OperatorApp(App[None]):
             style="info",
         )
 
-    async def _mcp_slash_result(self, arg: str, SlashResult: Any, locality: str = "local") -> Any:
+    async def _mcp_slash_result(
+        self,
+        arg: str,
+        SlashResult: Any,
+        # ``None`` = "not said", read the same fail-closed way as the delete-scoped
+        # gate one call over (round 2, R2-1): a browser cannot be opened in front of
+        # a caller we cannot place.
+        locality: str | None = None,
+    ) -> Any:
         parts = arg.split()
         if not parts:
             block = self._mcp_block()
@@ -42222,7 +43680,7 @@ class OperatorApp(App[None]):
             self._session,
             sub,
             parts[1],
-            browser_is_reachable=locality != "remote",
+            browser_is_reachable=locality == "local",
             notify=lambda body, style: self._system_notice(body, cast("NoticeKind", style)),
             spawn=self._spawn_mcp_grant,
         )
@@ -47190,7 +48648,7 @@ def _notifications_listing(
     """
     from rich.cells import cell_len
 
-    from local_operator.resume import format_age
+    from local_operator.resume import UNTITLED_CONVERSATION, format_age
     from local_operator.tui.widgets.session_picker import COMPLETION_MARKERS
     from local_operator.tui.widgets.tool_card import truncate_cells
 
@@ -47205,7 +48663,7 @@ def _notifications_listing(
         # the taxonomy: "✓ name —  · 2h" would read as a missing column.
         kind = f" — {entry.completion_kind}" if entry.completion_kind else ""
         tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
-        label = entry.row.name or "Untitled conversation"
+        label = entry.row.name or UNTITLED_CONVERSATION
         if budget <= 0:
             # Zero is "no opinion" (the caller could not measure), which keeps
             # the untruncated name exactly as ``/stop all``'s listing does.

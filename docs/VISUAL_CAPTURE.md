@@ -47,6 +47,138 @@ forces them open to manufacture a page. Providers, jobs and analytics use
 synthetic data in the **real OperatorApp** with production CSS, not CSS-less
 unit-test hosts. They validate rendering, not live provider authentication.
 
+Two additions to that matrix are worth naming here, because each was a state a
+review round had to rebuild a rig to look at (design round 4, D26/D29):
+
+- `sidebar_shot.py silent` and `silent-two` — a peer that answered nothing, so
+  its whole section is the heading `⇄ <device> (unreachable)` with no rows under
+  it. Neither is a fixture the row producer can express, because the state is
+  precisely the ABSENCE of rows: the script calls `set_silent_peers` itself and
+  refuses to write a frame whose headings are missing or painted below
+  `⌥ Subagent Runs`. Capture at **100x45** — at 100x30 the frame stops before the
+  subagent tier, and the tier is half of what the case asserts.
+- `mesh_sidebar_shot.py` — the ONE capture built from a real mesh (two config
+  roots, two identities, two relays on loopback, a live link) rather than from
+  hand-stamped rows, which is what makes a row-producer regression fail here
+  instead of shipping (`Q-R10-1`). It drives `sidebar_shot.py peers-focus`, so
+  the census rasterizes it at that script's own nominal 800x510 (a 100x30 grid at
+  the 8x17 preset). THAT IS NOT THE PIXEL SIZE OF THE COMMITTED PNG, and reading
+  the two as one size is what design round 5's D33 caught — see "A fresh capture
+  against a committed PNG" below, which is the only place the committed pixels
+  are stated. It also refuses a frame whose model chip is still `connecting…`,
+  the mid-connect transient one run in three produced (D30).
+
+Both `silent` cases and the mesh case are in the committed inventory, so the
+next round re-derives them with `visual_gallery.py --case …` instead of writing
+another rig. Pairing in the mesh case is written into both stores rather than
+negotiated (no pty, no second human), so it is evidence about the transport and
+the rendering, never about the pairing ceremony.
+
+### A fresh capture against a committed PNG: state the zoom, or the check lies
+
+The census and the committed `static/*.png` artifacts are **the same frame at two
+different scales**, and nothing used to say so (design round 5, D33).
+`visual_gallery.py` rasterizes at native size — `rsvg-convert OUT.svg -o OUT.png`,
+no zoom — so a 100x30 case writes 800x510 while the artifact it is compared
+against is bigger:
+
+| committed artifact | census grid | census raster | committed pixels | zoom |
+| --- | --- | --- | --- | --- |
+| `tui-mesh-sidebar.png` | 100x30 | 800x510 | 1440x918 | 1.8 |
+| `tui-mesh-network.png` | 100x30 | 800x510 | 1440x918 | 1.8 |
+| `tui-mesh-picker.png` | 110x34 | 880x578 | 1584x1041 | 1.8 (height rounded up) |
+
+1440 px is also exactly twice the 720 px the sidebar's README `<img>` pins, so
+that figure lands on one image pixel per device pixel on a 2x display — the motive
+`credential_readme_shot.py` documents for its own two frames. The picker's 1584 px
+is nothing so neat: it is 1.8x its own 880 px grid, and the README pins that figure
+at 620.
+
+So a comparison must normalize the scale FIRST. Rendering the fresh SVG at the
+artifact's own zoom is the cheap half: `rsvg-convert -z 1.8 OUT.svg -o OUT.png`
+then diff against the committed PNG, which for the picker is exact (verified
+2026-09-22: AE=0). Skipping it does not produce a small difference — it produces
+a difference that is entirely about scale. Measured on the picker's own pair, with
+the same bytes at the same zoom on both sides: upscaling the 880x578 census raster
+to the artifact's 1584x1041 and diffing reports **3.1% of pixels differing where
+the honest answer is zero**. The height is a `ceil` (110x34 at 1.8 is 1040.4), so
+the two images do not even share an integer ratio on both axes; a check that
+assumes one is comparing like with like is measuring the rescale filter, not the
+app.
+
+`tests/unit/tui/test_visual_gallery.py` pins the table above against the actual
+committed PNGs' pixel dimensions, so a re-shoot at another zoom fails there and in
+the `README` at once instead of quietly invalidating every comparison made off
+these frames.
+
+A CENSUS THAT CANNOT FIRE IS WORSE THAN NO CENSUS, and this export makes that easy
+to write (design round 5, D32). The check that pins the splash's update row was
+first written as `"latest is v" in exported`, which is FALSE on a frame that paints
+the row, for two independent reasons: `terminal_svg` gives every grapheme cluster
+its own `<tspan>`, and the spaces it writes are U+00A0 — the row reassembles to
+`'!\xa0latest\xa0is\xa0v0.62.2\xa0—\xa0/update\n'`. Both censuses now read rows
+through `visual_capture.svg_text_runs_by_row`, which groups runs by baseline and
+folds no-break space to a plain space, and
+`tests/unit/tui/test_visual_capture.py` pins both halves on a real export so the
+next census author inherits the parse instead of the trap.
+
+THE SAME FRAME ARRIVES IN TWO FORMS, AND THE PARSE MUST AGREE ON BOTH (design round
+6, D34). The censuses read `App.export_screenshot`'s RAW text, while the artifact on
+disk is the `terminal_svg` projection of the same frame. The raw form escapes
+Textual's padding as the XML ENTITY `&#160;` — 201 of them in the picker frame, and
+ZERO literal U+00A0 bytes — and the ElementTree round-trip inside `terminal_svg`
+DECODES it, so the artifact carries 200 literal U+00A0 and no entity. A parse that
+folded only the literal form therefore reported one row ABSENT on the export and
+PRESENT on the artifact beside it — measured on one frame of the splash: `hits=0`
+against `hits=1` — while the census that believed the first wrote the artifact
+anyway. `svg_text_runs_by_row` now XML-unescapes the body before folding, and the
+picker's census was re-run on a frame that paints the row (it refuses, and writes
+nothing) and on the pinned one (it passes).
+
+The two forms also differ in a second way that matters to a row count: the raw
+export carries Rich's own chrome row, which `terminal_svg` strips — 34 rows against
+33 on the picker's frame. So pin the ROW, never a row count.
+
+TWO MORE MACHINE VALUES WERE IN THESE FRAMES, and both are now PINNED rather than
+recorded (design round 6, D35 and D36). Both were measured on 2026-09-22 at head
+`2d2ebcd0`:
+
+* **The version row.** The committed copy read `v0.59.11` and a fresh capture of the
+  SAME commit read `v0.62.1`: one row, bbox `x408..1179 y558..765`, and the cause was
+  not a commit — `pyproject.toml` is 0.62.1 at both heads, while this worktree's
+  `.venv` dist-info was rewritten when the fleet's shared interpreter was rebuilt.
+  `new_remote_shot.py` reads the row through an `importlib.metadata` call, i.e. from
+  the capturing INSTALL; `_pin_version` replaces that seam with a pinned value, the
+  same shape as the peers and the DNS probe.
+* **The cwd.** The welcome splash prints `os.getcwd()`, so the directory the probe is
+  launched from is part of the picture — the committed copy carried
+  `/Users/damian/local-operator-worktrees/mesh-network`, which is why the AE=0 above
+  was byte-exact only from the repository root. Measured by comparing the committed
+  PNG against a capture from another directory, per row at the artifact's zoom: grid
+  rows 15-21 (the version, model and cwd rows, the blank row and the keymap rows)
+  each moved left by 159 px — 419 to 260 — and the cwd row is the widest of them,
+  which is why the block re-centered as a whole; grid row 31, the composer's status
+  band, grew with it (the band printed the cwd's last component: `⌂ before` where the
+  committed frame reached `⌂ mesh-network`, so the band's right edge sat at x=588
+  instead of 1237). Everything between — the picker's own rows — was byte-identical.
+  `_pin_cwd` does what the page fixture already does (`scripts/pages_shot.py`): the
+  capture runs in a directory under this probe's own re-homed `HOME`, so the rows
+  read `~/workspace` and `⌂ ~/workspace` and nothing machine-specific is in the
+  frame. The two captures are the same bytes from the repository root and from `~`
+  (52973 bytes each), which is the property the AE=0 comparison needed.
+
+The rule this leaves behind is the general one, not the picker's: a shipped frame
+carries what the APP draws, never what the capturing machine happens to hold — and
+the version row is why, because it is the same class of value as the cwd and had
+already drifted with no commit behind it. Checked as a class rather than fixed as a
+one-off: `tui-mesh-sidebar.png` and `tui-mesh-network.png` carry NO version and NO
+cwd row (censused, 29 rows each, zero machine-looking rows), and the picker was
+re-shot in this round — `static/tui-mesh-picker.png`, `rsvg-convert -z 1.8`, still
+1584x1041, with 1.28% of its pixels differing from the previous copy, confined to
+grid rows 15-22 and 31. `scripts/eager_boot_shot.py`, which is a gallery case rather
+than a committed artifact, still paints the version, the update row and the cwd; it
+is named here so the next round that touches it pins them the same way.
+
 ## What changed
 
 Textual exports the real compositor through Rich. Rich's default SVG is a

@@ -60,6 +60,12 @@ from local_operator.resume import (
     write_goal_record,
 )
 
+#: The ownership stamp's name, imported rather than spelled again: the file this
+#: deny-list excludes and the file the resolver reads must be the same string, and
+#: a second literal here is how they would come apart (§1.2). ``placement`` is
+#: stdlib-only, so this keeps the module's no-beyond-stdlib import discipline.
+from local_operator.session.placement import MESH_STAMP_NAME
+
 logger = logging.getLogger(__name__)
 
 #: The boot-prompt sidecar: the message ``/fork <message>`` injects as the
@@ -142,11 +148,19 @@ COPIED_SIDECARS: tuple[str, ...] = (
 #:   sentinels meaning "a sweep has already considered this directory". Copying
 #:   one into a directory no sweep has ever seen is a lie that suppresses a
 #:   future backfill.
+#: - ``mesh.json``: the mesh ownership stamp (``session/placement.py``). A copy
+#:   would make the FORK claim its parent's ``home_device`` and ``placement`` — a
+#:   live session advertising itself as owned by another device, and a row the
+#:   resolver (``network/projection.resolve_owner``) then routes to that device.
+#:   INV-1 says one device owns a session; a fork with an inherited stamp is the
+#:   counterexample that arrives without any move having happened
+#:   (``mesh-session-mobility.md`` §1.2).
 EXCLUDED_SIDECARS: tuple[str, ...] = (
     ".session.pid",
     "subagent-roster.v1.json",
     "origin-scan.json",
     "title-scan.json",
+    MESH_STAMP_NAME,
 )
 
 

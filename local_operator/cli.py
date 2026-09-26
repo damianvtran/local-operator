@@ -46,7 +46,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
@@ -541,6 +541,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_secret_parser(subparsers)
 
+    # Mesh networks (design: docs/design/mesh-network.md). Same stdlib-only
+    # registration rule as tunnels/secrets: the peer listener, the crypto and the
+    # config store are imported by the verb that needs them, so `lop --version` and
+    # `lop network --help` pay for none of it. `parents=[parent_parser]` keeps the
+    # position-independent globals (--debug, --agent) working on these subcommands.
+    from local_operator.network.cli import add_parser as add_network_parser
+
+    add_network_parser(subparsers, parent_parser)
+
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
     # Security.framework, the CNG stack or `cryptography`, and the verbs that do
@@ -739,6 +748,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="with --all, cap the stored rows listed; positive (default: 50)",
     )
+    # THE MESH'S TWO LISTING FLAGS (mesh-session-mobility.md §9.3). Both default
+    # off, so a client that does not ask gets exactly today's answer — which is
+    # what keeps `lop sessions --json` byte-identical on a device with no network.
+    sessions_parser.add_argument(
+        "--peer",
+        default=None,
+        metavar="DEVICE",
+        help="list the sessions held by one peer device (its own catalogue, over the mesh)",
+    )
+    sessions_parser.add_argument(
+        "--all-peers",
+        action="store_true",
+        help="also list the sessions other devices in this network are holding",
+    )
     # `lop sessions cleanup`: the explicit, previewable way to run the session
     # cleanup policy. An optional sub-subcommand (dest defaults to None) so
     # bare `lop sessions` keeps listing.
@@ -854,6 +877,83 @@ def build_cli_parser() -> argparse.ArgumentParser:
         ),
     )
     reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions move`: hand a conversation to another device, or bring one
+    # home. A sub-subcommand rather than a flag on `sessions` because it is an
+    # ACTION on one conversation, and because the mesh's own question ("where does
+    # this live?") is answered by the listing it is reached through.
+    #
+    # THE DIRECTION IS THE PROTOCOL (mesh-session-mobility.md §6.7): the device
+    # that will HOLD the conversation issues the move, so `--to local` is this
+    # device pulling and `--to <peer>` is it asking the peer to pull. There is no
+    # push verb, and adding one would be a second copy path with its own bugs.
+    move_parser = sessions_subparsers.add_parser(
+        "move",
+        help="Move a conversation to another device, or bring one home",
+        description=(
+            "Hand a conversation to another device (`--to build-box`), or bring one "
+            "that lives elsewhere back here (`--to local`). The conversation keeps "
+            "its id and the copy on the device it left is deleted, unless `--keep` "
+            "is given, which leaves the original running and mints a NEW id for the "
+            "copy. A session with a turn in flight is refused, not interrupted."
+        ),
+        parents=[parent_parser],
+    )
+    move_parser.add_argument("session", help="the conversation id to move")
+    move_parser.add_argument(
+        "--to",
+        required=True,
+        metavar="DEVICE",
+        help="a peer device (id or name), or `local` to bring the conversation here",
+    )
+    move_parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="copy and leave the original running; the copy gets a new id and a fork marker",
+    )
+    move_parser.add_argument(
+        "--wait",
+        type=_non_negative_int,
+        nargs="?",
+        # A BARE `--wait` MEANS "AS LONG AS THE SESSION COULD PLAUSIBLY BE BUSY",
+        # capped at the design's 30 minutes (§6.4). `-1` is the sentinel the
+        # dispatch turns into `mobility.MOVE_MAX_WAIT_S`; spelling the number here
+        # would make this module import the mesh at parser-build time, which is
+        # paid by `lop --version`.
+        const=-1,
+        default=0,
+        metavar="SECONDS",
+        help="re-check a busy conversation every 5s, up to SECONDS (bare: up to 30 min)",
+    )
+    move_parser.add_argument(
+        "--from-replica",
+        action="store_true",
+        help=(
+            "recover the last copy this device synced as a NEW session, for when the "
+            "device that held it is gone"
+        ),
+    )
+    move_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions sync`: pull the latest cut of a conversation another device
+    # owns into this device's replica store. Explicit because the automatic cadence
+    # (debounced pushes, a pull on attach) is not something a person can wait for.
+    sync_parser = sessions_subparsers.add_parser(
+        "sync",
+        help="Pull a copy of a conversation another device owns",
+        description=(
+            "Bring this device's copy of a conversation it does not own up to date. "
+            "The copy is stored outside the session store and is never opened as a "
+            "session; `lop sessions move <id> --to local --from-replica` recovers it "
+            "as a new one."
+        ),
+        parents=[parent_parser],
+    )
+    sync_parser.add_argument("session", help="the conversation id to pull")
+    sync_parser.add_argument(
+        "--owner", default="", metavar="DEVICE", help="the peer that holds it (default: ask)"
+    )
+    sync_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -1570,8 +1670,18 @@ def _propagate_global_flags(parser: argparse.ArgumentParser) -> None:
                 "--yolo",
                 action="store_true",
                 default=argparse.SUPPRESS,
-                help="Auto-approve all tool executions (read/write/exec tiers)"
-                " without prompting",
+                help=(
+                    # A VERB THAT REFUSES THE FLAG SAYS SO instead of advertising it:
+                    # ``network sessions --create`` declines ``yolo`` on both ends (a
+                    # session on another device must not run unattended), so the global
+                    # sentence would promise this verb something the product will not do
+                    # (QA round 1, Q3). The verb marks itself; see ``network.cli``.
+                    "Refused for this verb's peer create: a session on another device "
+                    "cannot start unattended, so the flag is accepted and then declined"
+                    if getattr(subparser, "yolo_is_refused", False)
+                    else "Auto-approve all tool executions (read/write/exec tiers)"
+                    " without prompting"
+                ),
             )
             subparser.add_argument(
                 "--resume",
@@ -2486,7 +2596,17 @@ def browser_command(args: argparse.Namespace) -> int:
                 print("Invalid session id; no action taken.")
                 return 1
             try:
-                result = asyncio.run(cleanup_exact(sessions / args.session_id, args.generation))
+                # THE CONFIG ROOT TRAVELS WITH THE CALL (review round 3, NIT 1): the
+                # cleanup path takes the execution lease directly, and the move guard it
+                # consults must be asked about the store THIS session belongs to rather
+                # than one derived from the path shape.
+                result = asyncio.run(
+                    cleanup_exact(
+                        sessions / args.session_id,
+                        args.generation,
+                        config_dir=sessions.parent,
+                    )
+                )
             except Exception as exc:
                 # The bridge and lease errors already carry operator-grade
                 # sentences naming the command that fixes them; printing the
@@ -4070,6 +4190,346 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+#: The keys a REMOTE row is filled out to, so the merged list has ONE shape.
+#: Taken from the local builder's published set rather than invented here: a
+#: consumer that reads ``lop sessions --json`` with ``--all-peers`` must not have
+#: to branch per row, and a missing key on the remote half is exactly the "absent
+#: is not a claim" trap the desktop row model documents.
+_REMOTE_ROW_FILL: dict[str, Any] = {
+    "rss_bytes": None,
+    "footprint_bytes": None,
+    "uptime_s": None,
+    "heartbeat_age_s": None,
+    "version": "",
+    "source_ref": "",
+    "subagents_running": None,
+    "subagents_queued": None,
+    "last_activity_s": None,
+    "completion_kind": "",
+    "completion_reason": "",
+    "leaving": "",
+}
+
+
+#: The code for "the device you named is the reason": the relay ANSWERED, and
+#: that device is either not in the network or in it and not answering. It is also
+#: what an unknown name answers, which is the shape QA round 1 pinned.
+_CODE_PEER_UNREACHABLE = "peer_unreachable"
+
+#: The code for "this device's relay answered an error about the listing", the
+#: family's word for a relay that answered "no" (`network.cli._relay_call`'s
+#: ``relay_refused``). Kept distinct from ``relay_unavailable`` because they want
+#: different remedies: one is a relay to restart or un-wedge, the other is a relay
+#: that was reached and declined.
+_CODE_RELAY_REFUSED = "relay_refused"
+
+#: The refusal for the one case where the sentence's OWN module is what is
+#: missing: `network.cli` could not be imported, so this device's mesh code — not
+#: its relay process — is the reason no peer could be asked. Named rather than
+#: guessed at, and worded with the family's own remedy, so an operator still has a
+#: next step (`network.cli._relay_unavailable_message` exists for every other case).
+_MESH_UNLOADABLE_SENTENCE = (
+    "this device's mesh code could not be loaded, so no peer could be asked; "
+    "reinstall it with `lop-update` and check `lop network doctor`"
+)
+
+
+def _local_relay_refusal() -> _RemoteListing:
+    """This device's own relay being the reason no peer could be asked.
+
+    ONE VOICE (QA round 5, Q-R5-1). The code and the sentence are IMPORTED from
+    `network.cli` — the module `lop network peers` ships them from — rather than
+    restated here: a `--json` consumer branches on the code, and a copy is how a
+    family comes to read as two voices (the same reason the session verbs inside
+    `network.cli` share ``CODE_RELAY_UNAVAILABLE``). The import is at CALL time
+    because this module is the entry point every `lop` run loads, and the mesh must
+    stay off that path.
+
+    ``_relay_unavailable_message`` consults this device's own relay record, so the
+    refusal distinguishes a relay that is not running from one that is running and
+    not answering (a wedged relay: a different incident with a different remedy).
+    """
+    try:
+        # Imported as a MODULE rather than by name: the two names below are the
+        # family's one spelling of this refusal, and reaching for them by attribute
+        # keeps this module's own import surface out of the mesh package (the entry
+        # point every `lop` run loads must not pull the mesh in).
+        from local_operator.network import cli as family_cli
+
+        return _RemoteListing(
+            [],
+            [],
+            refusal=family_cli._relay_unavailable_message(),
+            code=family_cli.CODE_RELAY_UNAVAILABLE,
+        )
+    except Exception:  # noqa: BLE001 — the sentence's own module is the missing one
+        return _RemoteListing([], [], refusal=_MESH_UNLOADABLE_SENTENCE, code="relay_unavailable")
+
+
+class _RemoteListing(NamedTuple):
+    """What the relay said about the peers: rows, why the rest are missing, and —
+    when the listing could not be taken — the sentence and code to refuse with.
+
+    ``notes`` is why this is a type rather than a bare list. An ``--all-peers``
+    listing that returned ``[]`` could not be told from "every peer is
+    unreachable", and an unreachable peer's reason is a sentence the human needs
+    (QA round 1, F-2). The notes go to stderr so the JSON document on stdout keeps
+    its published shape. ``refusal`` is non-empty when the caller must refuse
+    instead of printing a table, for EITHER flag, and ``code`` says WHICH component
+    is the reason — a named peer (``peer_unreachable``) or this device's own relay
+    (``relay_unavailable``/``relay_refused``). Both travel together because a
+    refusal that blames the wrong component is its own defect (Q-R5-1).
+    """
+
+    rows: list[dict[str, Any]]
+    notes: list[str]
+    refusal: str = ""
+    code: str = _CODE_PEER_UNREACHABLE
+
+
+def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListing | None:
+    """Sessions held by other devices, read through this device's relay.
+
+    Asked of the RELAY because that is the only process holding peer links and
+    the only one that speaks the mesh. ``None`` means "the relay answered, and
+    nobody by that name is in the network" — distinct from an empty listing,
+    which is "asked, and it holds nothing": the first is why the caller reports a
+    sentence and a non-zero exit, and collapsing them would make an unreachable
+    device look empty.
+
+    A MISSING OUTCOME IS NOT AN EMPTY ANSWER, AND A REFUSAL MUST NOT BLAME THE
+    WRONG COMPONENT (QA round 5, Q-R5-1). This used to degrade a LOCAL relay
+    outage to ``[]`` for ``--all-peers`` — which the front end printed as "no
+    active lop sessions" with rc 0, a lying emptiness an operator cannot tell from
+    "no remote sessions" — and to ``peer_unreachable`` for a named ``--peer``,
+    blaming a peer for a fault on this machine. The three cases are now told apart
+    and each names its own component:
+
+    * this device's relay could not be asked (no relay record, a control socket
+      that did not answer, or a mesh that would not even load) is the family's
+      ``relay_unavailable`` refusal — the same code and sentence ``lop network
+      peers`` ships;
+    * the relay answered an error frame ABOUT THE LISTING is ``relay_refused``;
+    * the relay answered a reply THIS BUILD CANNOT READ — over the control socket's
+      own line bound, or not a JSON object at all — is refused with the control
+      client's own named code (``frame_too_large``/``frame_unreadable``) rather than
+      re-worded as a relay that stayed silent (QA round 8, Q-R8-1: the federated
+      catalogue passes a HANDSHAKE frame's cap at ~17 sessions, and reporting that as
+      a wedged relay named the wrong component and prescribed the wrong remedy);
+    * the relay answered and the DEVICE named is the reason (not in the network,
+      or in it and not answering) stays ``peer_unreachable``.
+
+    Retried a round later the degradation is what it always was, in the words QA
+    round 5 filed it under: a missing outcome may not render as SUCCESS or as
+    SILENCE, and a refusal must not blame the wrong component. Neither an empty
+    list nor a peer sentence may stand in for a relay this device never got an
+    answer from.
+    """
+    try:
+        from local_operator.network import relay, store
+        from local_operator.network.types import MeshRefusal
+    except Exception:  # noqa: BLE001 — a mesh that cannot load is no mesh
+        return _local_relay_refusal()
+    try:
+        record = store.find_own_relay()
+        # NO RELAY RECORD IS NOT AN EMPTY PEER SET: it is this device's relay being
+        # the reason nothing could be asked, which is the same condition `lop network
+        # peers` refuses on (its own ``_relay_call`` finds no record and refuses).
+        if record is None:
+            return _local_relay_refusal()
+        # The relay PROBES each peer here, so the client waits out the relay's own
+        # listing budget instead of timing out on it and reporting a running relay
+        # as absent. One home for that deadline: `relay.LISTING_CLIENT_TIMEOUT_S`.
+        reply = relay.control_request(
+            record, "peer_session_rows", timeout=relay.LISTING_CLIENT_TIMEOUT_S
+        )
+        if reply is None:
+            # The record was there and the socket answered nothing: a stopped or
+            # wedged relay, and `_relay_unavailable_message`'s probe says which.
+            return _local_relay_refusal()
+        if reply.get("op") == "error":
+            return _RemoteListing(
+                [],
+                [],
+                refusal=str(reply.get("message") or "this device's relay refused the listing"),
+                code=_CODE_RELAY_REFUSED,
+            )
+        if reply.get("op") != "ack":
+            # Neither the op's ack nor its own error frame: a relay this build does
+            # not know, which is still THIS device's relay being the reason.
+            return _local_relay_refusal()
+        payload = reply.get("detail") or {}
+        remote = list(payload.get("sessions") or [])
+        blocks = payload.get("peers") or {}
+        # THE WORDS, NOT THE TOKEN, on the third surface that printed it (UX round 5
+        # U28; QA round 21 Q-R21-1 for the compound shape). These notes and the
+        # refusal below are what ``lop sessions --peer/--all-peers`` writes to
+        # stderr, and they printed the relay's ``reason`` field raw — so a peer whose
+        # several addresses failed differently said
+        # ``unreachable: 127.0.0.1:0 connect_failed:OSError; …``, an address and a
+        # Python class name in place of a fact. ``resume.peer_reason_words`` is the
+        # gloss the federated listing and the sidebar already read, so the three
+        # surfaces of one peer's reachability cannot drift into three vocabularies —
+        # and it is never empty, so the old ``no reason recorded`` fallback is gone
+        # with it rather than kept beside a second spelling of the same absence.
+        from local_operator.resume import peer_reason_words
+
+        notes = [
+            f"{str((block or {}).get('name') or device_id)}: unreachable "
+            f"({peer_reason_words(str((block or {}).get('reason') or ''))})"
+            for device_id, block in blocks.items()
+            if isinstance(block, dict) and not block.get("reachable")
+        ]
+        if peer:
+            wanted = str(peer).lower()
+            # WHICH DEVICE IS MEANT, resolved against the PEER BLOCKS rather than the
+            # rows. Matching rows alone made a KNOWN device with an empty catalogue
+            # read as an unknown one ("no device called ... is reachable"), and the
+            # old name map dropped the device-id key, so asking BY ID — how a script
+            # asks, and what a row carries — never matched at all.
+            matched = ""
+            block: dict[str, Any] = {}
+            for device_id, candidate in blocks.items():
+                candidate = candidate if isinstance(candidate, dict) else {}
+                if wanted in (
+                    str(device_id).lower(),
+                    str(candidate.get("name") or "").lower(),
+                ):
+                    matched = str(device_id)
+                    block = candidate
+                    break
+            if not matched:
+                # The relay ANSWERED and knows no such device: the peer is the
+                # reason, so this is the peer's own code (and `None` lets the caller
+                # say which name was not found).
+                return None
+            if not block.get("reachable"):
+                return _RemoteListing(
+                    [],
+                    notes,
+                    refusal=(
+                        f"{block.get('name') or matched} is in the network but cannot be "
+                        f"reached from here "
+                        f"({peer_reason_words(str(block.get('reason') or ''))})"
+                    ),
+                )
+            remote = [
+                item
+                for item in remote
+                if str((item.get("peer") or {}).get("device_id") or "") == matched
+            ]
+        rows = [{**_REMOTE_ROW_FILL, **dict(item)} for item in remote if isinstance(item, dict)]
+        return _RemoteListing(rows, notes)
+    except MeshRefusal as refused:
+        # A REFUSAL THIS DEVICE'S RELAY PRODUCED IS REPORTED AS ITSELF (QA round 8,
+        # Q-R8-1). The handler below turns anything it does not recognise into
+        # ``_local_relay_refusal()``, whose sentence is about a relay that did NOT
+        # ANSWER — so a named refusal (``control_request``'s ``frame_too_large`` and
+        # ``frame_unreadable``, and anything else that raises out of the relay call)
+        # would be re-worded as a wedged relay: the wrong component, and the wrong
+        # remedy. The code and the sentence travel together because they are the pair
+        # this front end prints.
+        return _RemoteListing([], [], refusal=refused.sentence, code=refused.code)
+    except Exception:  # noqa: BLE001 — a broken mesh must not break a listing
+        # A mesh that raised under us is this device's own component failing to
+        # produce an answer — never a fact about a peer (Q-R5-1).
+        return _local_relay_refusal()
+
+
+def _sessions_move_words(result: dict[str, Any], *, session_id: str, to: str) -> list[str]:
+    """The human lines for a move, from the contract's own fields.
+
+    THE SENTENCE NAMES BOTH DEVICES, because a move is the one command where being
+    wrong about which end is which loses a conversation
+    (``mesh-session-mobility.md`` §6.8). The refusal's message is the owner's own
+    words — the busy sentence includes the reason ONLY the owning machine can see —
+    and the ``--keep`` case says out loud that the original is still running, since
+    that is the flag's whole point.
+    """
+    if not result.get("ok"):
+        lines = [str(result.get("message") or "the move was refused")]
+        if result.get("changed"):
+            lines.append(
+                "That handoff may already have been committed, so run this again rather "
+                "than retrying from scratch."
+            )
+        return lines
+    to_block = result.get("to_device") or {}
+    from_block = result.get("from_device") or {}
+    target = str(to_block.get("name") or to_block.get("device_id") or to)
+    source = str(from_block.get("name") or from_block.get("device_id") or "another device")
+    new_id = str(result.get("new_session_id") or session_id)
+    if result.get("mode") == "keep":
+        return [
+            f"Copied {session_id} to {target} as {new_id}.",
+            f"The original is still running on {source} and the two are separate now.",
+        ]
+    if result.get("recovered"):
+        return [
+            f"Recovered {session_id} as {new_id} from the copy last synced here.",
+            "It is a new conversation: work done on the device that held it since that "
+            "copy is not in it.",
+        ]
+    return [f"Moved {session_id} to {target} ({result.get('phase')})."]
+
+
+def sessions_move_command(args: argparse.Namespace) -> int:
+    """``lop sessions move`` — the CLI face of the mesh's move protocol.
+
+    Runs THROUGH THIS DEVICE'S RELAY (``network/mobility.py``): the relay holds the
+    peer links and is the only process that speaks the mesh, so a CLI that dialled
+    a peer itself would be a second implementation of the protocol. A device with
+    no relay gets a refusal naming that, never a silent no-op.
+    """
+    import json as _json
+
+    from local_operator.network import mobility
+
+    session_id = str(args.session)
+    wait_s = mobility.MOVE_MAX_WAIT_S if int(args.wait) < 0 else float(args.wait)
+    result = mobility.request_move(
+        session_id,
+        to=str(args.to),
+        keep=bool(args.keep),
+        wait_s=wait_s,
+        from_replica=bool(args.from_replica),
+    )
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0 if result.get("ok") else 1
+    lines = _sessions_move_words(dict(result), session_id=session_id, to=str(args.to))
+    if result.get("ok"):
+        for line in lines:
+            print(line)
+        return 0
+    for line in lines:
+        print(line, file=sys.stderr)
+    return 1
+
+
+def sessions_sync_command(args: argparse.Namespace) -> int:
+    """``lop sessions sync`` — pull this device's replica of a peer's session."""
+    import json as _json
+
+    from local_operator.network import sync as sync_mod
+
+    result = sync_mod.request_sync(
+        str(args.session), owner=str(getattr(args, "owner", "") or "") or None
+    )
+    if getattr(args, "json", False):
+        print(_json.dumps(result, indent=2, sort_keys=True, default=str))
+        return 0 if result.get("ok") else 1
+    if not result.get("ok"):
+        print(str(result.get("message") or "the sync was refused"), file=sys.stderr)
+        return 1
+    print(
+        f"Synced {result.get('session_id')} from "
+        f"{result.get('owner_device') or 'its owner'} "
+        f"({result.get('bytes')} bytes, {result.get('mode')} of the transcript)."
+    )
+    return 0
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -4084,6 +4544,15 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "reclaim":
         return sessions_reclaim_command(args)
+
+    # The two mesh verbs. Both reach the relay, so both are refusals rather than
+    # no-ops on a device with no relay running — which is the state of every
+    # install that has never joined a network.
+    if getattr(args, "sessions_command", None) == "move":
+        return sessions_move_command(args)
+
+    if getattr(args, "sessions_command", None) == "sync":
+        return sessions_sync_command(args)
 
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer
@@ -4102,6 +4571,66 @@ def sessions_command(args: argparse.Namespace) -> int:
     # in full, and a stored cap means nothing without ``--all`` asking for them.
     # ``None`` lets ``collect`` apply its own stored cap.
     rows = session_rows(config_dir(), include_stored=args.all, stored_limit=args.limit)
+
+    # THE FEDERATED LISTING (§9.1/§9.3). Both flags default off, so nothing below
+    # runs and the local listing is byte-identical to what it was before the mesh
+    # existed — the zero-peer regression at the CLI boundary. ``--peer`` names ONE
+    # device and lists ITS catalogue (the question "what is build-box running?")
+    # rather than merging, because mixing local rows into that answer would hide
+    # the device the question was about.
+    remote_rows: list[dict[str, Any]] = []
+    peer_name = getattr(args, "peer", None)
+    if peer_name or getattr(args, "all_peers", False):
+        listing = _remote_listing(peer=str(peer_name or ""), all_peers=bool(args.all_peers))
+        # A REFUSAL IS A REFUSAL FOR EITHER FLAG (QA round 5, Q-R5-1). This branch
+        # used to fire for a NAMED peer only, so an ``--all-peers`` whose relay could
+        # not be asked fell through to the rows below and printed "no active lop
+        # sessions" with rc 0 — an emptiness the operator cannot tell from "no remote
+        # sessions", and the same defect the session verbs inside `network.cli` were
+        # fixed for in round 4. ``listing.code`` names the component: a peer
+        # (``peer_unreachable``) or this device's own relay
+        # (``relay_unavailable``/``relay_refused``).
+        if listing is None or listing.refusal:
+            message = (
+                listing.refusal
+                if listing is not None
+                else f"no device called {peer_name!r} is reachable over the mesh from here"
+            )
+            code = (
+                listing.code if listing is not None and listing.refusal else _CODE_PEER_UNREACHABLE
+            )
+            if args.json:
+                # ``--json`` MEANS THE CALLER PARSES THIS, so a refusal has to be a
+                # document. stdout used to be empty with rc=1 and the sentence only
+                # on stderr, which a parser reads as a crash or as no answer at all
+                # (QA round 1, F-5).
+                print(_json.dumps({"ok": False, "code": code, "message": message}))
+            else:
+                print(message, file=sys.stderr)
+            return 1
+        remote_rows = listing.rows if listing else []
+        # WHY a peer contributes no rows, for the human. Stderr, so an ``--all-peers
+        # --json`` consumer keeps its unchanged stdout contract (QA round 1, F-2).
+        for note in listing.notes if listing else []:
+            print(note, file=sys.stderr)
+        if peer_name:
+            rows = []
+        # THE MERGE IS "MINE, THEN EVERYONE ELSE'S", AND AN ID APPEARS ONCE (Q-XH-7).
+        # ``relay.federated_rows`` deliberately includes the answering device's OWN
+        # rows with ``locality: "local"`` — the sidebar and ``lop network sessions``
+        # read that shape and need one list — so appending the federated half to the
+        # local half printed every LIVE local session twice (one id, two identical
+        # rows, same pid, 4/4 repeats on a real device). The local half wins the
+        # collision because it is the richer row (pid, rss, the fenced stall fields)
+        # and because it is the half this command owns. A row the local half does NOT
+        # carry is still kept: `federated_rows` lists this device's STORED sessions
+        # too, and a plain `--all-peers` (no `--all`) shows the local half only live
+        # ones — so a blanket "drop locality == local" would have hidden exactly the
+        # cold sessions a peer listing is most likely to be consulted about.
+        seen_ids = {str(row.get("session_id") or "") for row in rows}
+        rows = rows + [
+            row for row in remote_rows if str(row.get("session_id") or "") not in seen_ids
+        ]
 
     if args.json:
         print(_json.dumps(rows, indent=2))
@@ -4186,6 +4715,22 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the turn the drain is finishing (U1/U2, PR #1141).
     leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
     show_leaving = any(leaving.values())
+    # WHICH DEVICE holds a row, present only when some row is remote. Without it
+    # a merged listing is ambiguous in the one way that matters: the PID column
+    # would name a process on another machine with nothing saying so.
+    peers = {
+        row["session_id"]: (
+            "local"
+            if str(row.get("locality") or "local") != "remote"
+            else str(
+                (row.get("peer") or {}).get("name")
+                or (row.get("peer") or {}).get("device_id")
+                or "?"
+            )
+        )
+        for row in rows
+    }
+    show_peer = any(str(row.get("locality") or "") == "remote" for row in rows)
     # The same rule as LEAVING and WHY above, and the same reason it must be a
     # SEPARATE column rather than part of that one: a session mid-update is alive,
     # accepting messages, and about to run them (``types.UPDATING``) — the operator
@@ -4218,6 +4763,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
+    if show_peer:
+        header += f" {'DEVICE':<{PEER_COLUMN_WIDTH}}"
     if show_updating:
         header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
     if show_held:
@@ -4240,6 +4787,16 @@ def sessions_command(args: argparse.Namespace) -> int:
         needs = _fit_cell(row.get("pending") or "", NEEDS_COLUMN_WIDTH)
         stored = row["state"] == "stored"
         state = _state_cell(row["state"])
+        # A remote row has no local uptime or heartbeat: those are facts of a
+        # process on ANOTHER machine, and the peer's catalogue does not carry
+        # them. They read "—" beside the DEVICE column that says where the row's
+        # process actually is, rather than a fabricated zero.
+        uptime = "—" if stored or row["uptime_s"] is None else _format_duration(row["uptime_s"])
+        heartbeat = (
+            "—"
+            if stored or row["heartbeat_age_s"] is None
+            else _format_duration(row["heartbeat_age_s"])
+        )
         line = (
             f"{state:<{STATE_COLUMN_WIDTH}} "
             f"{('—' if stored else str(row['pid'])):>7} "
@@ -4247,8 +4804,12 @@ def sessions_command(args: argparse.Namespace) -> int:
             f"{_pad_cell(name, CONVERSATION_COLUMN_WIDTH)} "
             f"{_pad_cell(model, MODEL_COLUMN_WIDTH)} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
-            f"{('—' if stored else _format_duration(row['uptime_s'])):>8} "
-            f"{('—' if stored else _format_duration(row['heartbeat_age_s'])):>7}"
+            # A remote row has no local uptime or heartbeat: those are facts of
+            # a process on ANOTHER machine, and the peer's catalogue does not
+            # carry them. They read "—" beside the DEVICE column that says where
+            # the row's process actually is, rather than a fabricated zero.
+            f"{uptime:>8} "
+            f"{heartbeat:>7}"
         )
         if show_stored:
             stamp = row["last_activity_s"]
@@ -4266,6 +4827,19 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+        if show_peer:
+            # The device name is authored by ANOTHER machine (a member row's
+            # ``name``), so it is fitted by cells like the other foreign text on
+            # this line rather than sliced by characters.
+            # NOT ``held``: that name is this function's map of the STALLED column
+            # (``held = {session_id: bool(stall_held)}``, read as ``held.get(...)``
+            # further down the same row). This cell is a fitted string, so reusing
+            # the name silently replaced that map with a str — a column that then
+            # raised on every row carrying both marks. Caught by the fold's
+            # convergence round, not by either side alone: each branch used the
+            # name correctly on its own.
+            peer_cell = _fit_cell(peers.get(row["session_id"]) or "?", PEER_COLUMN_WIDTH)
+            line += f" {_pad_cell(peer_cell, PEER_COLUMN_WIDTH)}"
 
         if show_updating:
             # The cell is RENDERED from the row's pair through the ONE phase reader
@@ -5782,6 +6356,12 @@ UPDATING_COLUMN_WIDTH = 26
 NEEDS_COLUMN_WIDTH = 8
 CONVERSATION_COLUMN_WIDTH = 24
 MODEL_COLUMN_WIDTH = 24
+
+#: Width of the PEER column — the device a remote row belongs to. On the
+#: LEAVING/WHY precedent: the column appears ONLY when some row is remote,
+#: so a local-only listing is re-flowed by nothing (mesh §9.2's budget rule
+#: applied to a terminal).
+PEER_COLUMN_WIDTH = 18
 
 
 #: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
@@ -8207,10 +8787,18 @@ def _preflight_api_key(
     try:
         import asyncio
 
-        from local_operator.providers.auth_store import AuthStore
+        from local_operator.network.credentials import build_auth_store
         from local_operator.providers.registry import credential_provider_id
 
-        auth_store = AuthStore(config_dir=config_dir)
+        # THE STORE THE SESSION WILL USE, not a plain ``AuthStore`` (mesh credentials,
+        # QA round 1, Q3). On a device that borrows a login from another device the
+        # plain store holds no row, so a foreground ``lop exec`` refused to start with
+        # "RADIENT_API_KEY is required" while ``exec --background`` and the TUI — which
+        # build the session's store — ran fine. ``build_auth_store`` returns the very
+        # same ``AuthStore`` on a device that borrows nothing, and lists a synthetic
+        # row for a borrowable key otherwise; either way this stays a presence check
+        # with no network call, which is the rule this function's docstring states.
+        auth_store = build_auth_store(config_dir)
         try:
             storage_provider = credential_provider_id(canonical)
             if auth_store.list_credentials(provider=storage_provider):
@@ -8603,25 +9191,72 @@ def main() -> int:
             try:
                 args.resume = resolve_resume_id(config_dir(), str(args.resume))
             except ResumeNotFound as error:
-                print(f"\033[31m{error}\033[0m", file=sys.stderr)
-                # With the age: a column of bare 12-hex ids gives the reader
-                # nothing to choose between, and the recency the listing already
-                # sorted by is the one fact that makes them recognisable.
-                # Ten explicitly: this is an error path printing to stderr after
-                # a typo'd id, where a short list of the most recent sessions is
-                # the help and the whole store would bury it. ``recent_sessions``
-                # returns everything by default, so the cap belongs here where a
-                # reader can see the listing is deliberately short.
-                available = recent_sessions(config_dir(), limit=RESUME_RECOVERY_LISTING)
-                if available:
-                    now = time.time()
-                    print("recent sessions (newest first):", file=sys.stderr)
-                    for session_id, mtime in available:
-                        print(
-                            f"  {session_id}   {format_age(now - mtime)}",
-                            file=sys.stderr,
-                        )
-                return 1
+                # A CONVERSATION ANOTHER DEVICE HOLDS IS NOT A TYPO. The resolver
+                # above only answers for a directory on THIS disk, so a peer's id
+                # reached the "no session to resume" sentence and the listing of
+                # this machine's recent conversations — while the TUI's OWN
+                # ``/resume`` opened the same id as a remote viewer, because that
+                # path asks the peer-projection guard first. That is one situation
+                # described two ways on two surfaces of the same build, and it made
+                # a shell ``lop --resume <peer's id>`` impossible against a session
+                # the sidebar lists perfectly well.
+                #
+                # THE LOOKUP IS THE SAME PRODUCER THE SIDEBAR READS
+                # (``remote_open.remote_row_for``: cache-first, one cached
+                # projection read on a miss, and nothing at all on a machine in no
+                # network), so what the user can SEE is what resumes. The id is
+                # deliberately left AS TYPED rather than resolved: it names a
+                # conversation this device does not hold, and the viewer factory
+                # below is what opens it.
+                from local_operator.session.remote_open import (
+                    remote_row_for,
+                    unreachable_peer_sentence,
+                )
+
+                remote_row = remote_row_for(str(args.resume), config_dir())
+                if remote_row is None:
+                    print(f"\033[31m{error}\033[0m", file=sys.stderr)
+                    # With the age: a column of bare 12-hex ids gives the reader
+                    # nothing to choose between, and the recency the listing already
+                    # sorted by is the one fact that makes them recognisable.
+                    # Ten explicitly: this is an error path printing to stderr after
+                    # a typo'd id, where a short list of the most recent sessions is
+                    # the help and the whole store would bury it. ``recent_sessions``
+                    # returns everything by default, so the cap belongs here where a
+                    # reader can see the listing is deliberately short.
+                    available = recent_sessions(config_dir(), limit=RESUME_RECOVERY_LISTING)
+                    if available:
+                        now = time.time()
+                        print("recent sessions (newest first):", file=sys.stderr)
+                        for session_id, mtime in available:
+                            print(
+                                f"  {session_id}   {format_age(now - mtime)}",
+                                file=sys.stderr,
+                            )
+                    return 1
+                if not remote_row.reachable:
+                    # The peer is the reason this id does not open, and the TUI
+                    # refuses exactly this state with exactly this sentence.
+                    print(
+                        f"\033[31m{unreachable_peer_sentence(str(args.resume), remote_row)}\033[0m",
+                        file=sys.stderr,
+                    )
+                    return 1
+                # AND NOTHING IS PRINTED FOR THE OPENABLE CASE, deliberately. This
+                # arm used to announce "lives on <device> — opening it remotely",
+                # which was a PROMISE THIS METHOD CANNOT KEEP: whether a viewer can
+                # be hosted is decided LATER and elsewhere (`session_factory`'s
+                # remote branch, gated on `has_ui` — and `has_ui` depends on
+                # `use_tui`/`isatty`, which this pre-check does not know yet).
+                # Measured with the output piped: the line was printed, the factory
+                # then had no front end to host the viewer, and the run died with
+                # `ResumeNotFound` — a promise followed by a traceback.
+                #
+                # WHERE THE WORDS BELONG: `session_factory` opens the viewer when a
+                # front end exists (the TUI paints the peer's conversation, which is
+                # the statement), and answers the run that cannot host one with a
+                # sentence naming the device and the way in that works there. One
+                # decider, one message, and no claim made before the decision.
 
             # Cold live-session resumes now stay on the ordinary TUI launch
             # path. ``create_session(has_ui=True)`` returns a AttachedSession when
@@ -8844,6 +9479,10 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "network":
+            from local_operator.network.cli import main as network_main
+
+            return network_main(args)
         elif args.subcommand == "operator":
             from local_operator.operator.cli import main as operator_main
 
@@ -9418,6 +10057,47 @@ def main() -> int:
                     # server, and the mobile daemon's own attach path. Those
                     # are not the TUI and are deliberately left alone.
                     raise RuntimeError("a viewer never takes over a session")
+
+                if resume_id:
+                    # A PEER'S SESSION IS OPENED AS ITS VIEWER, through the SAME
+                    # seam the TUI's sidebar pick and its ``/resume`` use
+                    # (``session.remote_open.open_remote_viewer``), so a shell
+                    # ``lop --resume <peer's id>`` reaches what the terminal's own
+                    # resume reaches. Without it the id fell through to the LOCAL
+                    # cold viewer below — a viewer for a conversation this device
+                    # does not hold, whose first write would engage a runtime HERE
+                    # under somebody else's id, the INV-1 two-writer case the seam
+                    # exists to make unreachable.
+                    #
+                    # IT ANSWERS ``None`` WITH NO DIAL when this device holds the
+                    # directory or runs no relay, so the local path below pays
+                    # nothing for this check — the same zero-peer property the
+                    # TUI's guard and the desktop pool rely on.
+                    from local_operator.resume import UNNAMED_DEVICE
+                    from local_operator.session.remote_open import (
+                        open_remote_viewer,
+                        remote_row_for,
+                        unreachable_peer_sentence,
+                    )
+
+                    peer_row = await asyncio.to_thread(remote_row_for, session_id, config_directory)
+                    if peer_row is not None:
+                        if not peer_row.reachable:
+                            raise ValueError(unreachable_peer_sentence(session_id, peer_row))
+                        try:
+                            peer_viewer = await open_remote_viewer(
+                                session_id,
+                                config_dir=config_directory,
+                                takeover=take_over,
+                                row=peer_row,
+                            )
+                        except Exception as error:  # noqa: BLE001 — reported, not swallowed
+                            raise ValueError(
+                                f"could not open {session_id} on "
+                                f"{peer_row.owner_label or UNNAMED_DEVICE}: {error}"
+                            ) from error
+                        if peer_viewer is not None:
+                            return peer_viewer
 
                 record = None
                 if resume_id:

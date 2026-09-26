@@ -46,6 +46,7 @@ from local_operator.server.routes import (
     desktop_claim,
     desktop_lifecycle,
     desktop_mcp,
+    desktop_mesh,
     desktop_profiles,
     desktop_radient,
     desktop_runtimes,
@@ -663,6 +664,15 @@ app.include_router(desktop_wakes.router)
 # collides with no template above it, and declaration order is what decides a
 # collision if one is ever introduced.
 app.include_router(desktop_runtimes.router)
+# The MESH surface (`features.peers`/`features.session_transfer`): the peer catalogue,
+# the networks tab's read, invite/remove, the transfer route and `include_peers`
+# listings. Registered after every module above it for the reason each block above
+# gives — FastAPI matches in declaration order — and its templates
+# (`/v1/desktop/peers`, `/v1/desktop/networks`, `/v1/desktop/networks/{net}/…`,
+# `/v1/desktop/sessions/{id}/transfer`) collide with no template declared earlier:
+# the sessions router has no single-segment `/v1/desktop/{...}` path and no `/transfer`
+# child, and no block above declares `/peers` or `/networks`.
+app.include_router(desktop_mesh.router)
 
 # Add CORS middleware
 app.add_middleware(

@@ -3233,19 +3233,34 @@ def test_the_prompt_copy_is_wired_at_the_surfaces_that_can_show_it() -> None:
     test_the_signature_prompt_copy_is_painted_where_a_human_can_read_it`` — so the
     chain is covered end to end: this cell says the argument is passed, that one
     says the argument is used.
+
+    THE CONSTRUCTION SITE MOVED, and the fold that moved it is why this cell now
+    accepts two callees (fold of ``main`` into ``feat/mesh-network``): the pane no
+    longer names ``AttachClient`` at all, because a viewer's class is the OWNER's
+    decision (``LocalOwner.make_client`` builds ``AttachClient``, a remote owner
+    builds ``RemoteSessionClient``), and both implementations forward ``**kwargs``
+    to their client. The claim this cell guards was always about the ARGUMENT
+    rather than the callee, so pinning the ``make_client`` attribute keeps the
+    identical teeth — drop the callback and this fails — while the type-named
+    shape would have made it assert the opposite of the mesh's design.
     """
     client_source = (_TESTS_ROOT / "local_operator" / "session" / "attached.py").read_text(
         encoding="utf-8"
     )
     tree = ast.parse(client_source)
+    # Either spelling of "this is a client construction": the type name, and the
+    # owner factory the mesh introduced. A scan that matched neither is reported as
+    # the empty scan it is (below) rather than passing silently.
     calls = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "AttachClient"
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == "AttachClient")
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == "make_client")
+        )
     ]
-    assert calls, "the pane no longer constructs an AttachClient here; re-argue this pin"
+    assert calls, "the pane no longer constructs a client here; re-argue this pin"
     assert any(
         keyword.arg == "on_operator_prompt" for call in calls for keyword in call.keywords
     ), "the attached pane does not pass on_operator_prompt, so the copy is a log line again"

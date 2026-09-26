@@ -36,6 +36,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "failover",
         "mcp",
         "mobile",
+        "network",
         "peer-messaging",
         "qwencloud",
         "scratchpad",
@@ -308,6 +309,67 @@ def test_mobile_guide_requires_a_password_delivery_ask() -> None:
     assert "lop mobile install" in body
     assert "Show it once" not in body
     assert "context window" in body
+
+
+def test_network_guide_names_the_human_step_and_the_real_commands() -> None:
+    """The mesh playbook (R19). An agent that invents a pairing flag, or that
+    offers to place a session on a peer this build cannot place, is the failure
+    this guide exists to prevent — so the commands it names must be the CLI's,
+    the human step must be marked as the human's, and the unbuilt surfaces must
+    be named as unbuilt rather than implied.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://network")
+    assert body is not None
+
+    # The setup sequence, in the CLI's own spelling.
+    assert "lop network init" in body
+    assert "lop network invite --role drive --json" in body
+    assert "lop network join @<token-file>" in body
+    assert "lop network peers --json" in body
+    # R3: the human reads the code off the screen; the agent may not finish it.
+    assert "You cannot do this step" in body
+    assert "code" in body and "fingerprint" in body
+    # R17's controls, with the rule that guards them.
+    assert "lop network panic" in body
+    assert "never as a retry after a failed command" in body
+    # THE SESSION PLANE IS NAMED AS BUILT, because it is: the relay serves
+    # net_session_create/engage/stop/lifecycle and the CLI drives them. The guide
+    # used to tell agents the opposite ("Not yet available in this build") while
+    # those verbs worked, which is the failure R19 exists to prevent, in the other
+    # direction (QA round 1, F-8).
+    assert "lop network sessions --all-peers --json" in body
+    assert "--create --name" in body
+    # THE SESSION PLANE'S REFUSALS AND ITS STOP CONTRACT (QA round 5, Q-R5-1 and
+    # Q-R5-2). The codes are what a `--json` consumer branches on, and they are
+    # documented in the family's own vocabulary — `relay_unavailable` is the SAME
+    # refusal `peers` ships, `peer_unreachable` is reserved for a peer the relay
+    # actually asked. A guide that taught an agent to read a busy stop's `skipped`
+    # as a success, or to retry a genuinely unreachable peer, would be the failure
+    # R19 exists to prevent.
+    assert "relay_unavailable" in body
+    assert "relay_refused" in body
+    assert "peer_unreachable" in body
+    assert "stop_unreported" in body
+    assert "A STOP THAT DID NOT ACT EXITS NON-ZERO" in body
+    assert "--stop <session> --force" in body
+    # ...and what is still NOT built is named as unbuilt rather than implied.
+    assert "IN THIS BUILD" in body
+    assert "lop exec --peer" in body and "lop send --peer" in body
+    assert "lop sessions move" in body
+    # A dial-only device is a supported configuration, and the guide must say so
+    # rather than let an agent read an unreachable peer as a fault (F-2).
+    assert "DIAL-ONLY DEVICES" in body
+    # The doctor's summary key means the mesh, not the command (F-8's sibling).
+    assert "ok` is FALSE whenever" in body
+    # Brokering is still unbuilt, and `--purge`'s scope is still spelled out.
+    assert "--purge-identity" in body and "does not" in body
+    # The two-phase pair the design sketches does not exist in this CLI, so the
+    # guide must not teach it.
+    assert "join --confirm" not in body
+    # Shareable prompt text: no machine-shaped absolute paths, and no home dir.
+    assert "/Users/" not in body
+    assert "/home/" not in body
 
 
 def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:

@@ -1082,11 +1082,36 @@ def read_inventory(directory: Path) -> list[dict[str, Any]]:
     return rows
 
 
-async def cleanup_exact(directory: Path, generation: str) -> BrowserCleanupResult:
+def _session_config_root(directory: Path) -> Path | None:
+    """The config root when ``directory`` is ``<config>/sessions/<id>``, else ``None``.
+
+    CHECKED rather than assumed (review round 3, NIT 1): the guess this replaces was
+    ``directory.parent.parent`` for any path at all, which silently produced an unrelated
+    root for a caller that passed something else. A path this build cannot place in the
+    session layout is not a session, and ``cleanup_exact`` says what it does about that.
+    """
+    parent = Path(directory).parent
+    return parent.parent if parent.name == "sessions" else None
+
+
+async def cleanup_exact(
+    directory: Path,
+    generation: str,
+    *,
+    config_dir: Path | None = None,
+) -> BrowserCleanupResult:
     """Explicit operator recovery of ONE terminal generation, never a sweep.
 
     The execution lease rejects live/uncertain owners. A dead PID only permits
     acquiring that lease; matching durable terminal intent is still mandatory.
+
+    ``config_dir`` IS REQUESTED, NOT DERIVED (review round 3, NIT 1). The move guard used to
+    take ``directory.parent.parent`` positionally, so a caller passing anything but
+    ``<config>/sessions/<id>`` got a root that belonged to no config — no guard and no
+    error, the one shape in which a safety check fails open. A caller that knows its store
+    passes it (``cli`` does); one that does not gets the layout CHECKED, and a directory
+    this build cannot place under ``<config>/sessions/`` consults no guard because nothing
+    can be handing over a path that is not a session's.
     """
     from local_operator.session_lease import acquire_session_lease
 
@@ -1102,6 +1127,21 @@ async def cleanup_exact(directory: Path, generation: str) -> BrowserCleanupResul
     eligible, reason = cleanup_disposition(value)
     if not eligible:
         return BrowserCleanupResult("unresolved", reason)
+    # THE HANDOFF GUARD, CONSULTED HERE BECAUSE THIS IS THE ONE OTHER LEASE ACQUIRER
+    # (review round 2, MINOR 1). Every product opener goes through
+    # ``session_factory._prepare``, which refuses a session whose move is in flight; this
+    # path takes the lease directly, so a cleanup that lands between the move's lease
+    # re-check and its delete could become a second writer on a transcript that device is
+    # about to hand over. ``.browser-resource.json`` is all this holder writes, which is
+    # why the reviewer rated it a minor — but the refusal costs one sentence and the
+    # window is not worth keeping.
+    from local_operator.session.placement import handoff_guard_refusal
+
+    root = Path(config_dir) if config_dir is not None else _session_config_root(directory)
+    if root is not None:
+        moving = handoff_guard_refusal(root, directory.name)
+        if moving:
+            return BrowserCleanupResult("unresolved", moving)
     lease = acquire_session_lease(directory)
     try:
         # Constructed INSIDE the lease so it reads the generation the lease just

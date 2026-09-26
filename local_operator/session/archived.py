@@ -160,6 +160,14 @@ def set_archived(config_dir: Path, session_id: str, archived: bool) -> bool:
     archive keeps un-archiving itself". The wire carries the state the caller
     wants so a retry lands on the same state.
 
+    AND IT RETURNS THE STATE IT WAS ASKED FOR, never "did the file change": those
+    are two different questions and this function answers only the first. The
+    second is :func:`archive_change`'s first element, which the mesh's lifecycle
+    receipt needs to describe what the OWNER's index did; while the two shared one
+    return value, a restore that emptied the peer's index was reported to the
+    caller as ``changed: false`` — "was already restored here" — for a call that
+    had just changed it (QA round 1 integration, Q-INT-4).
+
     A NO-OP WRITES NOTHING, in both directions. That is what keeps a re-archive
     from REORDERING the list (the store is newest-first, so an unconditional
     re-archive of an id already in it would move the order to a retry) and,
@@ -174,11 +182,20 @@ def set_archived(config_dir: Path, session_id: str, archived: bool) -> bool:
     than here, so this stays the boolean the pin store's verb returns and the
     routes stay a one-line echo.
     """
-    return archive_change(config_dir, session_id, archived)[0]
+    archive_change(config_dir, session_id, archived)
+    return archived
 
 
 def archive_change(config_dir: Path, session_id: str, archived: bool) -> tuple[bool, list[str]]:
-    """``set_archived``, plus the ids the CAP dropped to make room.
+    """Did the index CHANGE, plus the ids the CAP dropped to make room.
+
+    THE FIRST ELEMENT IS ABOUT THE FILE, not about the state that was asked for
+    (that echo is :func:`set_archived`'s, and the split is documented there): a
+    caller reporting a consequence to a user — the mesh's ``lifecycle`` receipt
+    appends "already archived/restored here" when nothing changed — has to be able
+    to say whether the owner's index moved. A no-op change is a definite NO in both
+    directions, and a write that did not land is a no as well, because nothing
+    changed on disk (the eviction clause below is conditional for the same reason).
 
     ``ARCHIVED_LIMIT`` is a bound on the FILE, and the bound is paid by the
     OLDEST entry — which reappears in the picker, the sidebar, the desktop
@@ -198,7 +215,7 @@ def archive_change(config_dir: Path, session_id: str, archived: bool) -> tuple[b
     current = read_archived(directory)
     if archived:
         if session_id in current:
-            return True, []
+            return False, []
         entries = [session_id, *current]
     else:
         if session_id not in current:
@@ -208,9 +225,10 @@ def archive_change(config_dir: Path, session_id: str, archived: bool) -> tuple[b
     if not _write_archived(directory, entries):
         # Nothing changed on disk, so nothing was evicted EITHER — reporting the
         # ids the slice computed would promise a revocation of the archive that
-        # did not happen (review round 2, NIT-2).
-        return archived, []
-    return archived, evicted
+        # did not happen (review round 2, NIT-2) — and nothing CHANGED, which is
+        # this element's own claim about the file.
+        return False, []
+    return True, evicted
 
 
 def eviction_clause(evicted: Sequence[str]) -> str:

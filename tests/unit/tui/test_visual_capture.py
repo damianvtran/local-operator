@@ -15,6 +15,7 @@ from scripts.visual_capture import (
     CaptureProfile,
     save_capture,
     settle_status_line,
+    svg_text_runs_by_row,
     terminal_svg,
 )
 
@@ -58,6 +59,55 @@ def test_grapheme_shaping_and_following_ascii_origin(cluster: str) -> None:
     assert spans[0].get("x") == "0"
     assert spans[1].text == "X"
     assert spans[1].get("x") == str(8 * cell_len(cluster))
+
+
+def test_a_phrase_is_read_back_from_the_export_that_split_it() -> None:
+    """A census must reassemble the row, IN EITHER FORM THE SAME FRAME ARRIVES IN.
+
+    THE TRAP THIS FILE HAS BEEN WRITTEN INTO TWICE. The first version (design round
+    5, D32) asserted `"latest is v" in exported`, TRUE-MATCHING NOTHING on a frame
+    that paints the row, for two independent reasons — ``terminal_svg`` gives every
+    grapheme cluster its own ``<tspan>``, and the spaces are U+00A0 — measured on the
+    pre-pin capture of the splash, whose banner reassembles to
+    ``'!\\xa0latest\\xa0is\\xa0v0.62.2\\xa0—\\xa0/update\\n'`` and scored 0 hits as a raw
+    substring search.
+
+    The second version (design round 6, D34) read rows correctly but pinned only ONE
+    of the two forms: this test fed ``svg_text_runs_by_row`` the ``terminal_svg``
+    output, while the shot scripts census ``App.export_screenshot``'s RAW text. The
+    two differ exactly where the fold happens — the raw export escapes Rich's padding
+    as the entity ``&#160;``, and the ElementTree round-trip inside ``terminal_svg``
+    DECODES it, so the artifact written to disk carries literal U+00A0 and no entity.
+    One frame therefore reached two verdicts: the row scored 0 hits on the export the
+    census reads and 1 on the artifact beside it, so the census could never fire and
+    the banner shipped anyway. Both forms are pinned here, on one export, so the next
+    author inherits a parse that agrees with itself rather than one that agrees with
+    the file they happened to open.
+    """
+    console = Console(width=20, height=1, record=True)
+    console.print("latest is v", end="")
+    exported = console.export_svg()
+    artifact = terminal_svg(exported, 20, 1, CaptureProfile())
+
+    # THE TWO FORMS OF ONE FRAME, asserted on the bytes each pairing produces; if a
+    # future Rich or ElementTree stops escaping (or starts), this fails here rather
+    # than disarming every census.
+    assert "&#160;" in exported and "\u00a0" not in exported, exported
+    assert "\u00a0" in artifact and "&#160;" not in artifact, artifact
+    assert "latest is v" not in exported, "the export no longer splits this row"
+
+    for form, text in (("export (what a census reads)", exported), ("artifact", artifact)):
+        rows = svg_text_runs_by_row(text)
+        assert any("latest is v" in "".join(runs) for runs in rows), (form, rows)
+
+    # THE TWO FORMS DIFFER IN A SECOND WAY, and either one alone is enough to make a
+    # census lie: the escaping asserted above, and Rich's own chrome row, which
+    # ``terminal_svg`` strips. 2 rows against 1 on this frame (34 against 33 on the
+    # picker's), which is why the pinned fact is the ROW in both forms rather than a
+    # row count.
+    assert svg_text_runs_by_row(exported)[0] == ["latest is v"]
+    assert len(svg_text_runs_by_row(exported)) == 2, svg_text_runs_by_row(exported)
+    assert svg_text_runs_by_row(artifact) == [["latest is v"]]
 
 
 @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])

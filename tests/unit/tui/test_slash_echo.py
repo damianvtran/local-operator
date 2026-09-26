@@ -43,6 +43,10 @@ from tests.unit.tui.test_app_pilot import FakeProviderController, FakeSession, _
 ECHO_POLICY = {
     "help": False,
     "mobile": False,  # infrastructure status is its own receipt, never model input
+    # Same rule, one noun over: the listing or the receipt IS the answer, and the
+    # family's output goes to a block (a multi-line receipt) or a notice (one
+    # sentence), never into a prompt.
+    "network": False,
     "exit": False,
     "clear": False,
     # Opens a picker, and nothing here reaches the model. The receipt is
@@ -157,6 +161,11 @@ ECHO_POLICY = {
 #: a new command must state whether its argument is a prompt.
 PROMPT_POLICY = {
     "mobile": False,
+    # Not a prompt: the argument is a peer's name (or `remote <peer>`), and the
+    # trailing text of the remote form becomes the REMOTE session's first prompt —
+    # it is never consumed as this terminal's own prompt, so engaging `/new`
+    # mid-draft must not reassemble the draft into it.
+    "network": False,
     "help": False,
     "exit": False,
     "clear": False,

@@ -149,7 +149,16 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # clickable links, so there is nothing for a proxy to add; and
             # `/notifications`, whose affordance on the desktop is the sidebar's
             # OWN control, and a destination the renderer has no adapter for is a
-            # row that is offered and then dead-ends (the `/mobile` lesson).
+            # row that is offered and then dead-ends (the `/mobile` lesson); and
+            # `/network`, whose desktop home is not a slash-command destination
+            # at all but the networks-and-devices tab (`docs/design/mesh-ui.md`
+            # §2.8's node graph), which this pass does not build. The decision is
+            # stated on the `network` entry in `slash_commands.py` and pinned by
+            # the literal below, so a future reader sees an intent rather than an
+            # omission. THE TAB WILL CONSUME a destination that renders a LIVE
+            # node graph (networks, member devices, link state) — not a receipt of
+            # a CLI run, which is why no existing destination name fits and one
+            # must be added with the tab.
             # `/info` used to be the
             # other one — its every field describes the PROCESS AND HOST it
             # runs in (install prefix, resolved import path, pid, control port,
@@ -168,7 +177,7 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
             # A literal, and updating it is the review prompt: a command that
             # lands in this set without a decision to withhold it is a command
             # silently missing from the desktop.
-            assert withheld == {"links", "mobile", "notifications"}
+            assert withheld == {"links", "mobile", "network", "notifications"}
             assert len(catalog) == len(SLASH_COMMANDS) - len(withheld)
             # The literal is DELIBERATE, unlike its three neighbours. The
             # catalogue's `aliases` are copied straight off `spec.aliases`

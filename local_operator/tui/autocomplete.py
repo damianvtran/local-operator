@@ -154,7 +154,31 @@ class ArgumentShape(Enum):
     #: against ``MCP_SUBCOMMANDS`` and ``SERVER_NAME_RE``. At most two tokens, so
     #: ``/mcp logout`` is the command while ``/mcp logout seems to cause a crash``
     #: is prose.
+    #:
+    #: A row may declare its OWN vocabulary instead (:attr:`SlashCommand.
+    #: subcommands`), which is what makes ``/network ls`` this shape rather than a
+    #: second enum member: the two readers — the route's validator and the
+    #: desktop catalogue's ``argument_words`` — go through
+    #: :func:`slash_commands.command_argument_words`, so the vocabulary a row
+    #: declares is the one both accept. The two-token cap is the SHAPE's and does
+    #: not change with the vocabulary (``/network disconnect please`` is prose,
+    #: which is the safe direction for a guard whose job is to keep a control from
+    #: becoming paid chat); a row needing a longer argument names it in a shape of
+    #: its own rather than widening this one.
     SUBCOMMAND = "subcommand"
+    #: ``remote <peer>`` — a peer device named by id or by the name this device
+    #: knows it under, optionally holding the peer's id in the same token
+    #: (``remote devon#9f2c``). One token is ALSO accepted, and that is the
+    #: legacy half rather than a concession: ``/new <word>`` is the desktop's
+    #: new-session picker selection (``selected=args``), so a shape that demanded
+    #: the two-token form would plan ``/new foo`` as PROSE and spend a paid turn
+    #: on a control the user typed deliberately.
+    #:
+    #: The vocabulary is LIVE (the peer catalogue, or the offline member lists
+    #: when the relay is down — see ``network/peers.py``), so this is the one shape
+    #: whose validator resolves a name against something outside the registry, the
+    #: way :attr:`PROVIDER` resolves against the provider registry.
+    REMOTE_PEER = "remote_peer"
     #: The command owns its trailing text, whatever it says — a handler or a form
     #: field takes it (a session title, a working directory, a path), one of the
     #: two booleans above already carries it, or the route REFUSES it because
@@ -304,6 +328,23 @@ class SlashCommand:
     #: ``test_slash_goal_loop_flags`` pins the flag against the registry, so a
     #: third party has to state its choice the way the other fields' pins do.
     name_argument: bool = field(default=False, kw_only=True)
+    #: This command's own SUBCOMMAND vocabulary, for
+    #: :attr:`ArgumentShape.SUBCOMMAND` rows that are not MCP's.
+    #:
+    #: A field rather than a second ``ArgumentShape`` member, because the shape
+    #: answers "what IS the text after the word" (a subcommand and its argument)
+    #: while this answers "which words are subcommands of THIS command" — and the
+    #: two questions have one answer each, not a cross product. The alternative was
+    #: a member per command family, which grows the enum every time a grouped
+    #: command lands and makes every reader switch on the command's NAME instead.
+    #:
+    #: Read by :func:`slash_commands.command_argument_words`, which is the ONE
+    #: derivation both the route's validator and the desktop catalogue consult —
+    #: so the word a handler accepts and the word a picker offers cannot drift.
+    #: Empty means "not declared": an MCP row, whose vocabulary is
+    #: ``session.frontend_state.MCP_SUBCOMMANDS``, is unchanged by this field's
+    #: existence (one list, resolved lazily at the same place it always was).
+    subcommands: tuple[str, ...] = field(default_factory=tuple, kw_only=True)
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -373,6 +414,16 @@ class ArgumentChoice:
     #: Paints ``detail`` in the danger tint when the state is a problem the user
     #: should notice (a server that failed, a credential that cannot be read).
     alert: bool = False
+    #: What the NAME column PAINTS when it must differ from :attr:`name`.
+    #:
+    #: ``name`` is the VALUE — the text choosing this row puts in the buffer, so
+    #: for ``/new``'s device picker it is the whole argument (``remote pixel-8``).
+    #: That is exactly what must NOT be painted there: the leading keyword is
+    #: identical on every row, so it spends the column that has to answer "which
+    #: device am I choosing" restating the command the user just typed, and an
+    #: id-shaped value ellipsizes inside it. Empty (the default, and every list
+    #: but this one) means "paint ``name``", so no existing row changes.
+    display: str = ""
 
     @property
     def names(self) -> tuple[str, ...]:

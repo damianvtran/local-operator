@@ -47,7 +47,11 @@ def _spy(app: OperatorApp) -> list[Any]:
     """
     fired: list[Any] = []
 
-    def _new(notice: Any) -> None:
+    def _new(arg: str, notice: Any) -> None:
+        # The ARGUMENT is part of the signature since `/new` learned to read it
+        # (`/new remote <peer>`); this spy replaces the handler, so it has to keep
+        # the call shape the dispatcher uses or the chord's test fails on a
+        # signature rather than on the dispatch it is about.
         fired.append("new")
 
     def _resume(arg: str, notice: Any) -> None:

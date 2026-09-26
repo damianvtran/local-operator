@@ -4152,6 +4152,27 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
     promises ``get_api_key``) fall back to the original wording, which is the
     correct message whenever the answer is genuinely unknown.
     """
+    # A STORE THAT KNOWS THE REAL REASON SAYS IT FIRST. The mesh-aware store
+    # (``network.credentials.store``) lists a synthetic row for a credential it
+    # borrows from another device, so the row count below would diagnose an
+    # offline owner as "rate limited, a token refresh failed…" — sending the user
+    # to wait out a limit that does not exist. Its broker has already written the
+    # true sentence, naming the owner device and the local remedy. Duck-typed
+    # rather than a Protocol import: this module must not import the network
+    # package, and every other store simply lacks the method.
+    reason_for = getattr(auth, "no_credential_reason", None)
+    if callable(reason_for):
+        try:
+            reason = reason_for(provider)
+        except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
+            reason = None
+        if isinstance(reason, str) and reason:
+            # Kind ``unknown`` with no status renders the sentence verbatim (see
+            # ``ProviderError.__str__``): it is already written for a person, and a
+            # "rate limit or quota exceeded:" label in front would be the lie this
+            # branch exists to remove. Retryable, like a block: the owner coming
+            # back is exactly the kind of change the loop-back sweep can find.
+            return ProviderError(None, reason, retryable=True, kind="unknown")
     rows: list["StoredCredential"] = []
     if isinstance(auth, CredentialLister):
         try:

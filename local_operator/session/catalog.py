@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from local_operator.info.model import format_duration
-from local_operator.resume import SessionRow
+from local_operator.resume import UNTITLED_CONVERSATION, SessionRow
 from local_operator.session.archived import archived_ids
 from local_operator.session.creation import (
     CREATED_AT_NAME,
@@ -854,6 +854,39 @@ def session_directory_name(session_id: str) -> bool:
     )
 
 
+def live_state_from_flags(source: object) -> str:
+    """The row state a RUNNING session's own two flags imply — one reading, two halves.
+
+    ``SessionRecord.detached`` is stamped ``True`` at a runtime's construction and
+    cleared when a terminal attaches (``session/runtime/server.py``), so the field
+    means NOBODY IS WATCHING. It is not the ``attached`` state token and never
+    implies one — the two are inverses, and reading it the other way painted every
+    stored or unwatched peer session ``○`` "Open" (``session/peer_rows.py``),
+    including rows with no runtime behind them at all: the relay stamps its stored
+    half ``detached: True`` because nothing can be watching a session that is not
+    running. ONE HOME for the reading is what stops that happening twice, the same
+    way :func:`status_of` is one home for the precedence — a second expression
+    beside this one is an expression free to drift.
+
+    ``getattr`` with defaults, like the live-state fields around it, because this
+    runs on the poll loop behind ``/resume``: both producers of these rows publish
+    the field (a registry record, and the relay's live and stored halves of a
+    federated row), so an absent one is a record from a build that predates it, and
+    the default it lands on is the one every caller has always used.
+
+    ``wedged`` is NOT decided here: that word is the registry's verdict for "the
+    owner stopped reporting" rather than a reading of these flags, and each caller
+    asks for it first. Nor is "does this row have a runtime at all" — the local
+    half answers that with "a record for this id exists" and the peer half with the
+    peer's own ``stored`` word, one level up from here.
+    """
+    if bool(getattr(source, "busy", False)):
+        return "busy"
+    if not bool(getattr(source, "detached", False)):
+        return "attached"
+    return "idle"
+
+
 #: The live-decoration reads whose failure leaves a row's defaults UNKNOWN
 #: rather than FALSE, and the one spelling each of them rides the wire under.
 #:
@@ -1031,7 +1064,7 @@ def decorate_rows(
                     SessionRow(
                         session_id,
                         float(getattr(record, "started_at", 0.0) or 0.0),
-                        str(getattr(record, "conversation_name", "") or "Untitled conversation"),
+                        str(getattr(record, "conversation_name", "") or UNTITLED_CONVERSATION),
                         created_at=session_created_at(session_dir),
                         degraded=degraded,
                         # Stamped from the store's own answer, never the
@@ -1063,12 +1096,11 @@ def decorate_rows(
             # working. The tooltip says exactly that, with the age beside it.
             if state == "wedged":
                 live_state = "wedged"
-            elif getattr(record, "busy", False):
-                live_state = "busy"
-            elif not getattr(record, "detached", False):
-                live_state = "attached"
             else:
-                live_state = "idle"
+                # The flags decide, through the ONE home for that reading: the peer
+                # half of this same list asks the same question of the row the
+                # relay federated, and the two must not answer it differently.
+                live_state = live_state_from_flags(record)
             pending = getattr(record, "pending", None) or None
             # Only a LIVE record has a kind. A cold row keeps "" so the picker
             # says nothing rather than claiming a session is still an exec run
@@ -1118,6 +1150,15 @@ def decorate_rows(
                 # from an earlier decoration of the same row would outlive the
                 # failure it described.
                 degraded=degraded,
+                # AND WHERE IT LIVES, which for everything this function can see
+                # is HERE. The local scan reads this machine's own store, so
+                # "local" is a fact the READ proves rather than a default being
+                # restated — and it is stamped at the one join point the design
+                # names (``mesh-ui.md`` §1.3) so a future peer-projection pass
+                # that APPENDS remote rows marks them in the same breath. A row
+                # already carrying a locality is left alone: this decorator reads
+                # one source and must not overwrite what another one established.
+                locality=row.locality or "local",
             )
         )
     return sorted(updated, key=lambda row: 0 if row.pending else 1)

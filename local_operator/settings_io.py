@@ -593,6 +593,21 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Where a notification click sends you when the desktop app is not running.",
     ),
+    # NEW_LAUNCH, honestly: the audit keys are read when the audit WRITER is built,
+    # and the writer is built once per relay process (``AuditLog.from_config``);
+    # ``max_handshakes`` is read when ``NetworkSettings.from_config`` builds the
+    # relay's settings. A LIVE label would promise an effect the code cannot deliver
+    # — the open file handle already exists, and the accept loop's cap is a
+    # constructor argument. The repo's rule is that a scope label says when a change
+    # lands, not when the user would like it to.
+    Section(
+        "network",
+        "Mesh network",
+        Scope.NEW_LAUNCH,
+        "Bounds for `lop network`: audit retention, how many unauthenticated "
+        "connections the relay will hold at once, session-copy cadence and how long "
+        "a borrowed login lives. All take effect when the relay restarts.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -3076,6 +3091,125 @@ SETTINGS: tuple[Setting, ...] = (
         # every click into a terminal with nothing on screen or in the log
         # saying why. Rejecting it here keeps the user in front of the field.
         validate_value=_validate_desktop_launch_command,
+    ),
+    # -- network (the mesh audit log) ---------------------------------------
+    # Defaults mirror ``local_operator/network/audit.py``'s module constants, which
+    # is what ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins: a
+    # registry default that disagrees with the reader's is a painted lie nothing
+    # else reports. The numbers and their arithmetic (why 8 MiB compressed, why 5
+    # generations, why 90 days) are justified in mesh-incident-response.md §4.5.
+    Setting(
+        key="network.audit.max_bytes",
+        path=("network", "audit", "max_bytes"),
+        section="network",
+        label="Audit size per generation",
+        kind=Kind.INT,
+        default=8_388_608,
+        minimum=65_536,
+        maximum=1_073_741_824,
+        help=(
+            "Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly "
+            "55k records; the five-generation ceiling is therefore ~40 MiB."
+        ),
+    ),
+    Setting(
+        key="network.audit.generations",
+        path=("network", "audit", "generations"),
+        section="network",
+        label="Audit generations kept",
+        kind=Kind.INT,
+        default=5,
+        minimum=1,
+        maximum=50,
+        help="Rotated files kept before the oldest is pruned and that pruning is recorded.",
+    ),
+    Setting(
+        key="network.audit.max_age_days",
+        path=("network", "audit", "max_age_days"),
+        section="network",
+        label="Audit age cap (days)",
+        kind=Kind.FLOAT,
+        default=90.0,
+        minimum=1.0,
+        maximum=3650.0,
+        help=(
+            "Age and size both rotate, because age binds on a quiet install and size "
+            "on a busy one. Export with `lop network log --export` before pruning."
+        ),
+    ),
+    # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
+    # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
+    # is held only until a handshake resolves, so this bounds neither `max_links`
+    # nor an established link; past the cap a connection is dropped at accept with
+    # no reply, and each drop is one audit record per window. Both ends read their
+    # OWN value, so raising it on one device does not raise it on the other.
+    #
+    # The default mirrors ``local_operator/network/relay.py``'s
+    # ``DEFAULT_MAX_HANDSHAKES``, which is what ``_consumer_defaults()`` in
+    # tests/unit/test_settings_io.py pins: a registry default that disagrees with
+    # the reader's is a painted lie nothing else reports.
+    Setting(
+        key="network.max_handshakes",
+        path=("network", "max_handshakes"),
+        section="network",
+        label="Concurrent handshakes",
+        kind=Kind.INT,
+        default=8,
+        minimum=1,
+        maximum=1024,
+        help=(
+            "Unauthenticated connections this relay will hold at once. A pairing "
+            "holds one for the seconds until the code is typed; anything past the "
+            "cap is dropped at accept, with no reply frame."
+        ),
+    ),
+    # -- network.sync / network.credentials (mesh build plan P0) ---------------
+    # Declared by P0 so the sync and credentials slices never edit this file (the
+    # plan's conflict rule). Defaults mirror the READERS' module constants —
+    # ``network/sync.py`` SYNC_DEBOUNCE_S / SYNC_TICK_S and
+    # ``network/credentials/__init__.py`` GRANT_TTL_S — which ``_consumer_defaults()``
+    # in tests/unit/test_settings_io.py pins. Relay-restart scope like the rest of
+    # the section: the watcher and the broker read them when the relay starts.
+    Setting(
+        key="network.sync.debounce_s",
+        path=("network", "sync", "debounce_s"),
+        section="network",
+        label="Sync quiet period (s)",
+        kind=Kind.FLOAT,
+        default=30.0,
+        minimum=1.0,
+        maximum=3600.0,
+        help=(
+            "Seconds a session's transcript must stay unchanged before its owner "
+            "tells devices holding a copy to pull. A session going idle pushes at "
+            "once, so its final message is never held back by this."
+        ),
+    ),
+    Setting(
+        key="network.sync.tick_s",
+        path=("network", "sync", "tick_s"),
+        section="network",
+        label="Sync check interval (s)",
+        kind=Kind.FLOAT,
+        default=15.0,
+        minimum=1.0,
+        maximum=3600.0,
+        help="How often the owner checks copied sessions for changes: one file stat each.",
+    ),
+    Setting(
+        key="network.credentials.grant_ttl_s",
+        path=("network", "credentials", "grant_ttl_s"),
+        section="network",
+        label="Borrowed login lifetime (s)",
+        kind=Kind.FLOAT,
+        default=900.0,
+        minimum=60.0,
+        maximum=3600.0,
+        help=(
+            "The longest a device may use a login it borrowed from its owner before "
+            "asking again, and so how long a revoked or offline owner's login keeps "
+            "working elsewhere. Never longer than the token itself."
+        ),
     ),
 )
 

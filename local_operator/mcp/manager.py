@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     from mcp.types import CallToolResult, ListToolsResult, PaginatedRequestParams, Tool
 
     from local_operator.mcp.auth import ManagedAuthStore
+    from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth
 
 logger = logging.getLogger(__name__)
 
@@ -3112,16 +3113,28 @@ class McpManager:
 
     def _build_oauth_auth(
         self, url: str, cfg: MCPServerConfig, *, interactive: bool = False
-    ) -> OAuthClientProvider | None:
-        """Build an ``OAuthClientProvider`` for a server that can authenticate.
+    ) -> OAuthClientProvider | BrokeredBearerAuth | None:
+        """The auth this server's HTTP client is built with.
 
-        ``interactive`` decides whether the flow may open a browser (only an
-        explicit login). The provider is primed with the endpoints the
-        proactive refresh discovered, so a mid-session in-flow refresh targets
-        the real token endpoint.
+        TWO SHAPES, decided by where the grant lives:
 
-        The eligibility test is the SAME for a background connect and an
-        explicit login. An interactive login that needs the question answered
+        * the ``OAuthClientProvider`` built below — the local case, byte-identical to
+          the path before credential brokering existed; and
+        * ``network.credentials.mcp_bearer.BrokeredBearerAuth`` — a server whose grant
+          lives on ANOTHER device this one is a holder for, when this device has no
+          local row at all.
+
+        THE BROKERED BRANCH IS NOT IN THE REFRESH, and the design's hook point was
+        wrong here (build plan §0 finding 6): ``ensure_mcp_oauth_fresh`` returns
+        ENDPOINTS, not tokens, and tokens reach the wire through the SDK
+        ``OAuthClientProvider`` built here. So a brokered MCP credential is a
+        DIFFERENT ``httpx2.Auth`` injected at this seam — it never builds a provider,
+        never touches ``McpTokenStorage``, and never binds the loopback callback port
+        the local flow needs.
+
+        ``interactive`` decides whether the LOCAL flow may open a browser (only an
+        explicit login). The eligibility test is the SAME for a background connect
+        and an explicit login. An interactive login that needs the question answered
         by the network has already had it answered by
         :func:`~local_operator.mcp.auth.probe_oauth_capability` before reaching
         here, and that probe records its result in the challenge ledger this
@@ -3138,6 +3151,15 @@ class McpManager:
         # observed OAuth challenge) so it names no config source and every
         # format benefits equally.
         from local_operator.mcp.auth import server_is_oauth_capable
+
+        # THE BROKERED BRANCH, taken ONLY when this device has no local grant for the
+        # server AND a placement entry names another device as its owner. Both halves
+        # matter: a local row always wins (the local path below is byte-identical,
+        # which is the non-regression guarantee), and a device with no placement at
+        # all never reaches here because its store carries no mesh client.
+        brokered = self._brokered_mcp_auth(url)
+        if brokered is not None:
+            return brokered
 
         if not server_is_oauth_capable(cfg, self._effective_auth_store()):
             return None
@@ -3168,6 +3190,41 @@ class McpManager:
         if flow is not None:
             self._oauth_flows[url] = flow
         return provider
+
+    def _brokered_mcp_auth(self, url: str) -> Any:
+        """A borrowed bearer for an MCP server whose grant lives elsewhere, or ``None``.
+
+        ``server_has_stored_grant`` is the local-wins test, and it is asked FIRST: a
+        device that HAS a grant for this server must keep using it — both because that
+        is the account the operator signed in with here, and because the local path is
+        the one whose behaviour this slice promises not to change.
+        """
+        store = self._effective_auth_store()
+        client = getattr(store, "mesh_client", None)
+        if client is None:
+            return None
+        # Function-local, like every other cross-package import on this path: the MCP
+        # package must stay importable where the network package's heavier siblings
+        # are not, and this branch is only ever reached on a device that brokers.
+        from local_operator.network.credentials.types import credential_key_for_mcp
+
+        key = credential_key_for_mcp(url)
+        if not client.should_borrow(key):
+            return None
+        try:
+            from local_operator.mcp.auth import server_has_stored_grant
+
+            if server_has_stored_grant(url, store):
+                return None
+        except Exception:  # noqa: BLE001 — an unreadable store must not invent a borrow
+            return None
+        # Imported HERE, not at module scope: this module keeps a lazy-SDK property
+        # (see _TRANSPORT_EXC_DETAIL), and the brokered auth subclasses ``httpx2.Auth``.
+        # Reaching this line requires a mesh client, so the dependency arrives only on
+        # a device that actually borrows.
+        from local_operator.network.credentials.mcp_bearer import BrokeredBearerAuth
+
+        return BrokeredBearerAuth(url=url, key=key, client=client)
 
     async def _challenge_error(
         self,
