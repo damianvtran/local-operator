@@ -8890,27 +8890,47 @@ class OperatorApp(App[None]):
         if not self._liveness_probe.due(self._liveness_probe_last, now=now):
             return
         self._liveness_probe_last = now
-        before = owner_liveness(session, now=now)
         self.run_worker(
-            self._reprobe_liveness(source, session, before),
+            self._reprobe_liveness(source, session, self._liveness_row_text(session, now=now)),
             group="liveness-probe",
             exclusive=False,
             exit_on_error=False,
         )
 
-    async def _reprobe_liveness(
-        self, source: SessionInteraction, session: Any, before: OwnerLiveness
-    ) -> None:
-        """One bounded probe, and a repaint ONLY when the verdict moved.
+    def _liveness_row_text(self, session: Any, *, now: float | None = None) -> str:
+        """The exact string the row would paint for ``session`` right now.
 
-        Repainting on every tick would repaint the band five times a minute for a
-        verdict that had not changed — and the row is the session's identity, so
-        that is churn the operator can see for nothing.
+        THE REPAINT GATE IS ON THIS STRING, NOT ON THE VERDICT ENUM, and the
+        difference is the whole feature. A FAILED probe deliberately touches
+        nothing, so before and after are both STALE and an enum comparison says
+        "nothing changed" — which meant the one verdict the row exists to report
+        was the one that could never be painted: measured on the real app with a
+        silent owner and no other input, six probes over 1800 s produced ZERO
+        repaints and the row only appeared if the operator switched
+        conversations. Comparing the RENDERED text keeps the correct property
+        (a failed probe does not clear the stamp) while letting the failing arm
+        repaint, because the *rendering* changes as the age grows: STALE at 4 m
+        and STALE at 10 m are different rows even though they are one state.
+        """
+        verdict = owner_liveness(session, now=now)
+        if verdict is OwnerLiveness.LIVE:
+            return ""
+        return liveness_text(verdict, now=now, verified_at=getattr(session, "verified_at", None))
+
+    async def _reprobe_liveness(
+        self, source: SessionInteraction, session: Any, before: str
+    ) -> None:
+        """One bounded probe, and a repaint when the ROW WOULD CHANGE.
+
+        The age is why a repaint is owed even when the probe failed: an owner that
+        stays silent makes ``Not answering · 4m`` become ``Not answering · 5m``,
+        and a gate that only watched the state would freeze the row at the budget
+        boundary forever.
         """
         await self._liveness_probe.tick(session)
         if not self._is_current(source):
             return
-        if owner_liveness(session) is before:
+        if self._liveness_row_text(session) == before:
             return
         self._show_sidebar_connection(source)
 
