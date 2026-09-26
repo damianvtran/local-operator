@@ -369,7 +369,6 @@ async def test_the_reason_log_and_refresh_watch_run_on_the_cancellation_path(
     generator before either ran, which is why the teardown reason was unreadable
     in production and why presence could be left asserted after a dropped relay.
     """
-    monkeypatch.setenv(module.STREAM_REASON_TRACE_ENV, "1")
     app, pool = _app(tmp_path)
     sid = await pool.create(str(tmp_path))
 
@@ -384,7 +383,10 @@ async def test_the_reason_log_and_refresh_watch_run_on_the_cancellation_path(
 
     monkeypatch.setattr(bridge, "refresh_watch", spy)
 
-    with caplog.at_level(logging.WARNING, logger="local_operator.server.utils.desktop_sessions"):
+    # AT INFO, which is the level the line is emitted at and therefore exactly
+    # what a run with ``LOG_LEVEL=INFO`` captures. No switch of this module's own
+    # is involved: the knob is the app's logging configuration.
+    with caplog.at_level(logging.INFO, logger="local_operator.server.utils.desktop_sessions"):
         await _teardown(response)
         await asyncio.sleep(0)
 
@@ -394,9 +396,8 @@ async def test_the_reason_log_and_refresh_watch_run_on_the_cancellation_path(
         if "desktop stream ended" in record.getMessage()
     ]
     assert reasons, (
-        "the cancellation path must reach the reason line: with the opt-in set it "
-        "is promoted to WARNING, and without it the line is INFO and reaches no "
-        "log at all on the operator's daemon"
+        "the cancellation path must reach the reason line; it is emitted at INFO, "
+        "so a run with LOG_LEVEL=INFO captures it on the operator's daemon"
     )
     assert "client disconnect" in reasons[-1], (
         "and the vocabulary must name the ordinary case: a dropped transport is a "
@@ -408,24 +409,34 @@ async def test_the_reason_log_and_refresh_watch_run_on_the_cancellation_path(
     )
 
 
-async def test_the_trace_switch_is_off_by_default(tmp_path, monkeypatch, caplog):
-    """F-C is opt-in, and the default is byte-identical to before."""
-    monkeypatch.delenv(module.STREAM_REASON_TRACE_ENV, raising=False)
-    assert module._stream_reason_trace() is False
+async def test_the_reason_is_emitted_at_info_and_needs_no_switch(tmp_path, caplog):
+    """F-C in its shipped form: observable through the app's OWN log level.
 
+    The first draft gave this module a ``LOCAL_OPERATOR_DESKTOP_STREAM_TRACE``
+    switch. That is a second reader of the desktop environment -- which
+    ``test_only_desktop_posture_reads_the_desktop_environment`` forbids -- and a
+    brand-new ambient variable, which
+    ``tests/unit/test_ambient_env_isolation.py`` requires to be scrubbed or
+    explained. Both guards were right and neither needed editing: the reason is
+    emitted at INFO, and ``LOG_LEVEL=INFO`` is already a first-class knob
+    (``local_operator/logger.py``, applied to the root logger by
+    ``configure_console_logging``). This case pins that route instead of a switch.
+    """
     app, pool = _app(tmp_path)
     sid = await pool.create(str(tmp_path))
     response = await _open_stream(app, sid)
-    with caplog.at_level(logging.WARNING, logger="local_operator.server.utils.desktop_sessions"):
+
+    with caplog.at_level(logging.INFO, logger="local_operator.server.utils.desktop_sessions"):
         await _teardown(response)
         await asyncio.sleep(0)
 
-    promoted = [
-        record
-        for record in caplog.records
-        if "desktop stream ended" in record.getMessage() and record.levelno >= logging.WARNING
-    ]
-    assert not promoted, (
-        "an ordinary client disconnect must not be promoted to WARNING unless the "
-        "operator asked for it; a stream ending is a normal event"
+    ended = [record for record in caplog.records if "desktop stream ended" in record.getMessage()]
+    assert ended, "the reason line is emitted at INFO, for a captured level to find"
+    assert ended[-1].levelno == logging.INFO, (
+        "at INFO rather than promoted: a stream ending is a normal event, and "
+        "raising it permanently would bury the WARNINGs that mean something"
+    )
+    assert "STREAM_REASON_TRACE_ENV" not in vars(module), (
+        "and this module owns no env switch for it, which is what keeps the "
+        "desktop environment single-reader and the ambient set unchanged"
     )
