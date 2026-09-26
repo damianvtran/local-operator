@@ -1991,9 +1991,9 @@ async def test_two_sends_then_a_switch_keep_both_rows_in_their_own_view(monkeypa
         users_b, notices_b = _view_rows(view_b)
         assert not _returned_rows(notices_b), ("the other conversation was told", notices_b)
         await _back_to(app, pilot, owner)
-        users, _notices = _view_rows(app._transcript_view())
+        users, notices = _view_rows(app._transcript_view())
         assert users.count("TWO-1") == 1 and users.count("TWO-2") == 1, users
-        assert len(source_a.turn.failed_sends) == 2, "the failures left with the view"
+        assert len(_returned_rows(notices)) == 2, ("one notice per failed message", notices)
         from local_operator.tui.widgets.editor import Editor
 
         assert app.query_one(Editor).text.strip() == "", "a payload returned by itself"
@@ -2065,9 +2065,9 @@ async def test_a_return_while_another_conversation_is_shown_lands_in_its_own(mon
         assert "GONE-H" in _view_rows(view_a)[0], "the row left its parked view"
         assert source_a.draft.text.strip() == "", "a failure must not park a draft"
         await _back_to(app, pilot, owner)
-        users, _notices = _view_rows(app._transcript_view())
+        users, notices = _view_rows(app._transcript_view())
         assert users.count("GONE-H") == 1, users
-        assert len(source_a.turn.failed_sends) == 1, "the failure left with the view"
+        assert len(_returned_rows(notices)) == 1, notices
         assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
 
@@ -2088,9 +2088,8 @@ async def test_a_second_and_third_conversation_never_see_the_return(monkeypatch,
         for view in (view_b, view_c):
             assert not _returned_rows(_view_rows(view)[1]), _view_rows(view)
         await _back_to(app, pilot, owner)
-        users, _notices = _view_rows(app._transcript_view())
-        assert users.count("GONE-3") == 1, users
-        assert len(source_a.turn.failed_sends) == 1, "the failure left with the view"
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-3") == 1 and len(_returned_rows(notices)) == 1, (users, notices)
 
 
 @pytest.mark.asyncio
@@ -2232,21 +2231,22 @@ async def test_a_landing_after_the_row_is_painted_keeps_it_through_the_recommit(
         source_a = app._sidebar_sources["frozen-1"]
         assert await _pump(pilot, lambda: not source_a.active_workers)
         await _back_to(app, pilot, owner)
-        assert source_a.turn.failed_sends, "the failure left with the view"
+        before = app._transcript_view()
+        assert len(_returned_rows(_view_rows(before)[1])) == 1, _view_rows(before)
         # The owner answers: the engage binds and the switch back's connect
-        # worker re-commits the conversation over a fresh replay.
+        # worker re-commits the conversation over a fresh replay. The failure
+        # notice must survive the swap — projected into whatever view the
+        # conversation has in front (`_sync_send_failure_notices` at commit) —
+        # never left behind with the replaced view.
         coldness.cold = False
         frozen.thaw()
         assert await _pump(pilot, lambda: not app._attach_behind_attempts)
-        for _ in range(20):
-            await pilot.pause()
-        # THE RECORD SURVIVES THE REPLACED VIEW: it lives on the interaction,
-        # so the failure's payload and its verbs are still resolvable after the
-        # swap. (The view-level notice projection and the row's re-seed are the
-        # following slices of this change.)
-        (record,) = source_a.turn.failed_sends
-        assert record.text == "GONE-R"
-        assert record.can_send_again is True
+        assert await _pump(
+            pilot, lambda: len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
+        ), (
+            "the failure notice left with the replaced view",
+            _view_rows(app._transcript_view()),
+        )
         assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
 
@@ -2286,11 +2286,13 @@ async def test_the_owner_answering_while_the_user_is_away_is_shown_on_return(mon
         assert app._transcript_view() is not parked.replay.view
         for _ in range(20):
             await pilot.pause()
-        # The rebuilt view's projection arrives with the following slices; what
-        # THIS slice guarantees is that the failure is still resolvable after
-        # the swap — the record lives on the interaction, not the view.
-        (record,) = source_a.turn.failed_sends
-        assert record.text == "GONE-W"
+        # The rebuilt view gets the notice projected into it (the record rides
+        # the interaction; `_sync_send_failure_notices` runs at this commit).
+        # The row's own re-seed is the following slice.
+        assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1, (
+            "the conversation came back without its failure notice",
+            _view_rows(app._transcript_view()),
+        )
         assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
 
@@ -2342,7 +2344,7 @@ async def _returned_then_back_with_carriers_spent(
     _refreeze(frozen)
     for _ in range(5):
         await pilot.pause()
-    assert source.turn.failed_sends, "the failure left with the view"
+    assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
     return source
 
 
@@ -2376,15 +2378,16 @@ async def test_a_bind_by_the_sidebar_connect_after_a_switch_back_settles_the_acc
             rows(),
         )
         # Two statements, one each: the account's session-level outcome and the
-        # message's failure record. Neither may duplicate, and neither may be
+        # message's failure notice. Neither may duplicate, and neither may be
         # erased by the bind's re-commit.
         assert len([n for n in rows() if "is answering again" in n]) == 1, rows()
-        assert len(source.turn.failed_sends) == 1, "the failure left with the view"
+        assert len(_returned_rows(rows())) == 1, rows()
         # Survives the next swaps, one copy each time.
         for _ in range(2):
             await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
             await _back_to(app, pilot, owner)
             assert len([n for n in rows() if "is answering again" in n]) == 1, rows()
+            assert len(_returned_rows(rows())) == 1, rows()
 
 
 @pytest.mark.asyncio
@@ -2409,20 +2412,27 @@ async def test_a_delivered_resend_leaves_no_failure_row_standing(monkeypatch, tm
         source.display_only = False
         sends.gates.clear()
         sends.outcomes.clear()
+        from local_operator.tui.session_presentation import SendFailureNotice
 
-        assert app.query_one(Editor).text.strip() == "", "the payload sat in the composer"
-        # The resend goes through the record's own verb (the notice-driven route
-        # lands with the following slice's carriage).
-        (record,) = source.turn.failed_sends
-        app._resend_failed_send(source, record)
+        # The resend is the notice's own `send again` (the payload is not in the
+        # composer under the boundary rule).
+        notice = next(
+            b for b in app._transcript_view().blocks() if isinstance(b, SendFailureNotice)
+        )
+        notice.focus()
         await pilot.pause()
+        await pilot.press("enter")
         assert await _pump(pilot, lambda: len(sends.gates) == 1)
         sends.gates[0].set()
         assert await _pump(pilot, lambda: [d.strip() for d in sends.delivered] == ["GONE-D"])
         for _ in range(5):
             await pilot.pause()
-        users, _notices = _view_rows(app._transcript_view())
+        users, notices = _view_rows(app._transcript_view())
         assert users.count("GONE-D") == 1, users
+        assert not _returned_rows(notices), (
+            "a failure notice stands above the delivered message",
+            notices,
+        )
         assert app.query_one(Editor).text.strip() == ""
 
 
