@@ -222,6 +222,41 @@ FAILED_ADMISSION_STATUS: AdmissionStatus = "failed"
 #: 1: the architect's cross-reference nit on these two constants).
 WATCH_TTL = 45.0
 
+#: How long a bridge outlives its last viewer's transport, in seconds.
+#:
+#: THE PROBLEM IT SOLVES: the desktop stream is the bridge's only reference
+#: (``DesktopSessions.session`` acquires before the headers and releases in its
+#: ``finally``), so a transport break is a detach, and a detach disposes the
+#: facade and rotates the epoch -- i.e. a full repaint on a reconnect the client
+#: makes ~500 ms later. This window keeps the bridge working ACROSS that break,
+#: which is what turns the reopen's ``gap:false`` into a statement the replay can
+#: actually honour instead of a promise the bridge cannot keep.
+#:
+#: SIZED AGAINST THE CLIENT'S OWN BUDGET, not chosen: the renderer retries at
+#: 500, 1000, 2000, 4000, 8000, 8000 ms (``local-operator-ui``
+#: ``use-canonical-session.ts``), and 20 s covers its first five attempts
+#: (cumulatively 15.5 s) with margin while staying strictly inside ``WATCH_TTL``
+#: below -- one presence assertion carries the whole window, so a dwell longer
+#: than the lease would let presence lapse mid-window.
+#:
+#: ZERO MEANS "NO DWELL", AND IT IS CONTRACT RATHER THAN A TEST HOOK. At zero the
+#: subscription is popped and the last release detaches, in the same call, byte
+#: for byte the old behaviour -- no task is created, ``dwelling`` is never set,
+#: and there is no window in which ``_evictable`` says no. Every existing test
+#: that asserts "the last release detaches" is written against this value, and
+#: ``tests/unit/server/test_desktop_stream_dwell.py`` is what makes it a contract
+#: rather than a convention.
+RECONNECT_DWELL_S = 20.0
+
+#: How often the dwell re-reads the module clock before it lets go.
+#:
+#: The dwell is deadline-driven rather than one ``asyncio.sleep`` precisely so
+#: its expiry is observable from an INJECTED clock: the desktop-session tests
+#: already replace ``module.time`` with a stub, and that is the switch a test
+#: uses to move a dwell into the past instead of waiting one out. Shrinking this
+#: constant with it keeps such a test to a few milliseconds.
+DWELL_TICK_S = 0.25
+
 #: Pace of the lease-driven warm, in three parts, because a warm that cannot
 #: succeed must not become a spawn per heartbeat.
 #:
@@ -1015,6 +1050,22 @@ class DesktopSubscription:
     frontend_replace: bool = False
     expires: float = 0.0
     overflow: bool = False
+    #: False until ``events`` has finished the OPEN handshake -- i.e. until the
+    #: snapshot, and the frames published after its watermark, have been handed
+    #: to the transport. Before that the queue holds only frames the snapshot
+    #: supersedes, so a full queue is EVICTION, not failure (see ``publish``).
+    opened: bool = False
+    #: True once this subscription has lost its transport but is still holding
+    #: the bridge open (see ``_arm_dwell``). A dwelling subscription has no
+    #: reader, so ``publish`` skips it, it keeps its place in ``subscribers``
+    #: (it is what ``refresh_watch`` asserts residency from), and it is not
+    #: evictable.
+    dwelling: bool = False
+    #: When the dwell lets go, on the module's own clock (``time.monotonic()``
+    #: offset). Carried on the subscription rather than inside the task so the
+    #: deadline is INSPECTABLE: a test asserts it and moves it past, instead of
+    #: waiting ``RECONNECT_DWELL_S`` out.
+    dwell_until: float = 0.0
 
 
 class DesktopSessionBridge:
@@ -1058,6 +1109,10 @@ class DesktopSessionBridge:
         #: connection whose cursor cannot reach the old frames anyway.
         self.announced: deque[str] = deque()
         self.subscribers: dict[str, DesktopSubscription] = {}
+        #: The in-flight dwell timers, keyed by subscription id (see
+        #: ``_arm_dwell``). Held so teardown can cancel them: a forgotten bridge
+        #: must leave no task asserting presence on its behalf.
+        self._dwell_tasks: dict[str, asyncio.Task[None]] = {}
         self.users = 0
         #: Whether :meth:`close` has run for this bridge. Read only by the
         #: subscriber-stream end log (C5), to name "bridge dispose" instead of
@@ -1308,7 +1363,7 @@ class DesktopSessionBridge:
                 remote = await self._ensure_facade()
             except BaseException:
                 self.users -= 1
-                if self.users == 0:
+                if self.users == 0 and not self.dwelling:
                     await self._detach()
                 raise
             if read:
@@ -1607,10 +1662,57 @@ class DesktopSessionBridge:
         async with self.lock:
             self.users -= 1
             self.touched = time.monotonic()
-            if self.users == 0:
+            # NOT WHILE A DWELL HOLDS THE BRIDGE. A dwelling subscription has
+            # already lost its transport and is still holding the facade, the
+            # presence assertion and the runtime on the viewer's behalf; a
+            # detach here would dispose exactly what the dwell exists to keep.
+            # See RECONNECT_DWELL_S.
+            if self.users == 0 and not self.dwelling:
                 await self._detach()
 
+    async def _arm_dwell(self, sub: DesktopSubscription) -> None:
+        """Hold the bridge open across one viewer's lost transport.
+
+        Called from ``events``'s ``finally`` when the generator ends for a
+        subscription the bridge did NOT revoke -- a dropped socket, a cancelled
+        ASGI scope, a relay watchdog. See ``RECONNECT_DWELL_S`` for why the
+        window exists and why zero disables it.
+        """
+        sub.dwell_until = time.monotonic() + RECONNECT_DWELL_S
+        self._dwell_tasks[sub.id] = asyncio.create_task(self._end_dwell(sub))
+
+    async def _end_dwell(self, sub: DesktopSubscription) -> None:
+        """Let go when the deadline passes, and detach if nobody came back."""
+        try:
+            # DEADLINE-DRIVEN, ON THE MODULE CLOCK, so an injected clock moves
+            # the expiry instead of a test sleeping the window out: the tick is
+            # what makes ``sub.dwell_until`` observable rather than a private
+            # sleep's business. See DWELL_TICK_S.
+            while True:
+                remaining = sub.dwell_until - time.monotonic()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(remaining, DWELL_TICK_S))
+            async with self.lock:
+                # Identity, not membership: a re-acquire inside the window keeps
+                # the SAME subscription registered (the viewer returned), and a
+                # pop by id would then evict a live viewer's own subscription.
+                if self.subscribers.get(sub.id) is sub:
+                    self.subscribers.pop(sub.id, None)
+                if self.users == 0 and not self.dwelling:
+                    await self._detach()
+            with contextlib.suppress(ConnectionError, RuntimeError):
+                await self.refresh_watch()
+        finally:
+            self._dwell_tasks.pop(sub.id, None)
+
     async def _detach(self) -> None:
+        # A DWELL CANNOT OUTLIVE THE FACADE IT WAS HOLDING. Every dwell task is
+        # cancelled before anything is disposed, because a surviving one would
+        # wake on a bridge that no longer holds a runtime, pop a subscription
+        # from a pool entry a later open has rebuilt, and assert presence for a
+        # viewer nobody can reach. `close()` routes through here too.
+        self._cancel_dwells()
         if self.watch_task is not None:
             self.watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1701,8 +1803,34 @@ class DesktopSessionBridge:
         self._closing = True
         for sub in self.subscribers.values():
             self._disconnect(sub)
+        self._cancel_dwells()
         async with self.lock:
             await self._detach()
+
+    @property
+    def dwelling(self) -> bool:
+        """Whether any subscription is holding this bridge across a lost transport.
+
+        Read by ``release``/``acquire`` (do not detach under a dwell) and by
+        ``DesktopSessions._evictable`` (a dwelling bridge is the LAST resort, see
+        ``_evict_one``). False whenever the dwell is disabled, because nothing
+        ever sets the flag at ``RECONNECT_DWELL_S == 0``.
+        """
+        return any(sub.dwelling for sub in self.subscribers.values())
+
+    def _cancel_dwells(self) -> None:
+        """Drop every dwelling subscription and cancel its timer.
+
+        Called by teardown (``close``/``_detach``) rather than by the dwell
+        itself: a bridge being disposed must leave nothing asserting presence on
+        its behalf, and a dwell task outliving ``_detach`` would re-pop a
+        subscription from a pool a later open has already rebuilt.
+        """
+        for task in self._dwell_tasks.values():
+            task.cancel()
+        self._dwell_tasks.clear()
+        for sub_id in [s.id for s in self.subscribers.values() if s.dwelling]:
+            self.subscribers.pop(sub_id, None)
 
     def _disconnect(self, sub: DesktopSubscription) -> None:
         sub.overflow = True
@@ -1711,6 +1839,24 @@ class DesktopSessionBridge:
             sub.queue.get_nowait()
         sub.queued_bytes = 0
         sub.queue.put_nowait(None)
+
+    def _evict_oldest(self, sub: DesktopSubscription) -> None:
+        """Drop the OLDEST frame from ``sub``'s queue, freeing its bytes.
+
+        The pre-open half of the overflow policy: every frame such a subscriber
+        holds is at or below the watermark the snapshot it is still waiting for
+        will carry, so the oldest one is SUPERSEDED rather than lost. It can
+        never meet the ``None`` sentinel -- a disconnected subscriber has
+        ``overflow = True`` and is skipped by the caller.
+        """
+        item = sub.queue.get_nowait()
+        # The `None` sentinel cannot reach here -- a disconnected subscriber has
+        # `overflow = True` and the caller skips it -- but the queue's item type
+        # admits it, so the guard is written where the reader can see it rather
+        # than left to the comment above.
+        assert item is not None
+        _, size = item
+        sub.queued_bytes -= size
 
     def publish(self, kind: str, payload: dict[str, Any], *, replay: bool = True) -> None:
         """Put one frame on every live subscriber, and normally into replay.
@@ -1749,12 +1895,33 @@ class DesktopSessionBridge:
                 _, removed = self.replay.popleft()
                 self.replay_bytes -= removed
         for sub in self.subscribers.values():
-            if sub.overflow:
+            if sub.overflow or sub.dwelling:
                 continue
             if sub.queue.full() or sub.queued_bytes + size > REPLAY_BYTES:
-                # Never silently discard a semantic event. Closing forces an
-                # authoritative gap snapshot on reconnect, and revokes presence.
-                self._disconnect(sub)
+                if sub.opened:
+                    # A READER that is behind: backpressure, unchanged. Closing
+                    # forces an authoritative gap snapshot on reconnect, and
+                    # revokes presence -- which is why a subscription the bridge
+                    # revoked this way must never dwell (see ``events``).
+                    self._disconnect(sub)
+                else:
+                    # A subscriber still waiting for its OPEN handshake. Every
+                    # frame it holds is at or below the watermark that snapshot
+                    # will carry, because ``snapshot()`` reads its state and its
+                    # sequence with nothing awaiting between them -- so the
+                    # oldest frame here is SUPERSEDED by the snapshot, not a
+                    # semantic event this policy silently discards.
+                    #
+                    # WITHOUT THIS, A COLD ENGAGE KILLS ITS OWN STREAM: the
+                    # subscriber is registered before the response headers exist
+                    # and nothing reads its queue until the handshake has built
+                    # its snapshot, so the engage's burst (hundreds to thousands
+                    # of frames) fills a 256-slot queue that has no reader, the
+                    # server disconnects, and the client's reconnect pays a fresh
+                    # cold engage that publishes the next burst.
+                    self._evict_oldest(sub)
+                    sub.queue.put_nowait((frame, size))
+                    sub.queued_bytes += size
             else:
                 sub.queue.put_nowait((frame, size))
                 sub.queued_bytes += size
@@ -2544,9 +2711,13 @@ class DesktopSessionBridge:
             self.attention_served_stale = True
         except (sqlite3.Error, OSError):
             pass
-        state = self.state()
-        seq, epoch = self.sequence, self.epoch
-        cursor = state["snapshot"].get("history_cursor")
+        # THE GATE READS THE STORE'S OWN FIELD RATHER THAN A STATE CLONE, because
+        # the clone is now taken LAST (see the watermark note above the return).
+        # ``self.remote.frontend_state`` is the store object itself
+        # (``session/attached.py``) and ``history_cursor`` is a real field on it,
+        # so this is the same predicate the clone answered.
+        remote = self.remote
+        cursor = remote.frontend_state.history_cursor if remote is not None else None
         history: dict[str, Any] = {"entries": [], "has_more": False, "cursor_missing": False}
         # The gate is about the STATE, not about bounding the page, and the empty
         # page it produces is a signal a reader ACTS on: "no history cursor, so
@@ -2565,7 +2736,6 @@ class DesktopSessionBridge:
         # that sees a non-empty page beside ``cold_reason`` knows this backend
         # fills it and skips the duplicate fetch, and an older one reconciles
         # on an empty page only, which a cold open with rows no longer is.
-        remote = self.remote
         # A PEER'S PAGE IS SERVED WHATEVER THE CURSOR SAYS, and the difference is
         # where the rows come from. The cursor gate above exists because this method
         # must not bound the page it reads from the journal by a FRONTEND watermark
@@ -2611,6 +2781,22 @@ class DesktopSessionBridge:
             # ``read_transcript_page`` for the inclusive-boundary rule it still
             # applies when a caller asks for one.
             history = await self.history()
+        # THE WATERMARK IS READ WITH THE STATE IT DESCRIBES, AND NOTHING AWAITS
+        # BETWEEN THEM. Both reads used to sit ABOVE the ``history()`` await, so
+        # this frame's ``seq`` was a watermark older than the last suspension in
+        # its own construction -- and a subscriber that dropped everything at or
+        # below it would have dropped frames the snapshot does not contain.
+        #
+        # That ordering is what makes the pre-open supersession in :meth:`events`
+        # provably lossless rather than merely plausible: at the moment this
+        # returns, every frame still in a subscriber's queue was published before
+        # the ``self.state()`` below (no await follows it, so ``publish`` cannot
+        # interleave), hence every one of them has ``seq <= this frame's seq`` and
+        # is already inside ``frontend``. Do NOT introduce an await between these
+        # two lines and the ``return``; ``tests/unit/server/test_desktop_sessions.py``
+        # pins it.
+        state = self.state()
+        seq, epoch = self.sequence, self.epoch
         return {
             "session_id": self.session_id,
             "epoch": epoch,
@@ -2791,16 +2977,51 @@ class DesktopSessionBridge:
         if self.watch_task is None or self.watch_task.done():
             self.watch_task = asyncio.create_task(self._expire_watches())
 
-    def _live_leases(self) -> list[DesktopSubscription]:
+    def _live_leases(self, *, include_dwelling: bool = False) -> list[DesktopSubscription]:
         """The subscriptions holding a LIVE lease. Caller holds ``watch_lock``.
 
         Extracted rather than inlined into :meth:`refresh_watch`, because the
         lease-driven warm's retry loop has to re-ask exactly this question on
         every pass — a second copy of the filter is how the trigger and its
         retry would come to disagree about what "a live visible lease" means.
+
+        A DWELLING SUBSCRIPTION IS EXCLUDED BY DEFAULT, and the flag is the
+        whole reason this is a question rather than a list. :meth:`refresh_watch`
+        asks "who is this bridge still asserting to the owner", and during a
+        dwell the answer must INCLUDE the returning viewer, or the runtime exits
+        under the window the dwell exists to cover. ``in_flight_reason`` asks
+        "may this daemon leave", and a viewer that has ALREADY lost its
+        transport may not pin a build update for ``RECONNECT_DWELL_S``: the
+        successor daemon serves the reconnect, and the announcement is what the
+        client is already reacting to. Counting the dwell there would make every
+        update wait the dwell out, per session — and ``server/retire.py``'s drain
+        is exactly what a dwell would then be holding shut.
         """
         now = time.monotonic()
-        return [s for s in self.subscribers.values() if not s.overflow and s.expires > now]
+        live: list[DesktopSubscription] = []
+        for sub in self.subscribers.values():
+            if sub.overflow:
+                continue
+            if sub.dwelling:
+                # A VIEWER THAT HAS LOST ITS TRANSPORT IS NOT A LIVE LEASE,
+                # whatever its lease clock still says. This is why the flag is a
+                # parameter rather than a filter on `expires`: a dwelling
+                # subscription keeps the lease it was given while the relay was
+                # up, so excluding it only once `expires` had passed would let a
+                # dwell pin a build update for the REST OF THE LEASE -- up to
+                # WATCH_TTL, more than twice the dwell itself.
+                #
+                # `tests/unit/server/test_serve_retire.py` is the end-to-end form
+                # of that, and it is what caught this: a route-held relay's own
+                # lease made the drain unemptiable, which is the circular valve
+                # that file exists to prevent ("the record could not say let go
+                # until the client had let go").
+                if include_dwelling:
+                    live.append(sub)
+                continue
+            if sub.expires > now:
+                live.append(sub)
+        return live
 
     async def refresh_watch(self) -> None:
         """Recompute the aggregate watch lease, and warm for a VISIBLE one.
@@ -2819,12 +3040,25 @@ class DesktopSessionBridge:
         (round-2 review MAJOR-1, argued at the gate below).
         """
         async with self.watch_lock:
-            live = self._live_leases()
+            live = self._live_leases(include_dwelling=True)
             remote = self.remote
             if remote is None:
                 return
-            visible = any(s.visible for s in live)
-            can_notify = any(s.can_notify for s in live)
+            # WHAT A DWELL ASSERTS, AND WHAT IT REFUSES TO CLAIM. The dwell
+            # exists to keep the runtime resident across a lost transport, and
+            # term 3 of the runtime's own residency rule wants a fresh lease AND
+            # `desktop_visible or desktop_can_notify`. So the aggregate has to
+            # come from the dwelling sub -- but claiming `visible` for a viewer
+            # that has GONE would tell the notification ladder a person is
+            # reading a session they have walked away from, and suppress exactly
+            # the rung that matters most here: "a turn finished while my window
+            # was reconnecting". `can_notify` is the half that keeps the runtime
+            # alive without making that claim, and `_visible_attach_surfaces`
+            # stays empty.
+            visible = any(s.visible for s in live if not s.dwelling)
+            can_notify = any(s.can_notify for s in live if not s.dwelling) or any(
+                s.dwelling for s in live
+            )
             # RECORDED ON EVERY BEAT, COLD OR NOT, and gating only the WARM on
             # `visible` is what makes the record correct rather than sloppy.
             # `_dial` re-asserts whatever was recorded last (TTL-bounded), so a
@@ -3489,6 +3723,39 @@ class DesktopSessionBridge:
                 [f for f, _ in self.replay if after_seq < f["seq"] <= cutoff] if not gap else []
             )
             snapshot = await self.snapshot()
+            # THE PRE-OPEN WINDOW ENDS HERE, AND IT IS CLOSED SYNCHRONOUSLY.
+            # ``snapshot()``'s state and sequence are its last reads with nothing
+            # awaiting between them, so no frame can have been published after
+            # the watermark this loop compares against -- which is what makes the
+            # split below exact rather than a race: everything at or below the
+            # watermark is already inside ``frontend`` and is dropped as
+            # superseded, and anything above it is newer than the snapshot and
+            # must be delivered after it.
+            #
+            # The frames are drained BEFORE ``open`` is yielded, and ``opened``
+            # is set before the first yield of the handshake, so the overflow
+            # policy switches to backpressure at the same moment the subscriber
+            # stops being able to lose anything by eviction.
+            disconnected = False
+            # NOT `pending`: `events`'s `finally` uses that name for the
+            # exception still propagating through it (main's C5 diagnostic), and
+            # two different values under one name in one function is the kind of
+            # trap a reader pays for later. The rename is this branch's, so
+            # main's block stays byte-identical.
+            pending_frames: list[dict[str, Any]] = []
+            while True:
+                try:
+                    item = sub.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is None:  # ``close()``/``_disconnect`` ran mid-build
+                    disconnected = True
+                    break
+                frame, size = item
+                sub.queued_bytes -= size
+                if frame["seq"] > snapshot["seq"]:
+                    pending_frames.append(frame)
+            sub.opened = True
             yield {
                 "session_id": self.session_id,
                 "epoch": self.epoch,
@@ -3506,6 +3773,11 @@ class DesktopSessionBridge:
             for frame in replay:
                 yield frame
             yield snapshot
+            for frame in pending_frames:
+                yield frame
+            if disconnected:
+                yield {"type": "gap", "session_id": self.session_id}
+                return
             while True:
                 try:
                     item = await asyncio.wait_for(sub.queue.get(), timeout=15)
@@ -3520,7 +3792,6 @@ class DesktopSessionBridge:
                 if frame["seq"] > cutoff:
                     yield frame
         finally:
-            self.subscribers.pop(sub.id, None)
             # ONE LINE PER ENDED SUBSCRIBER STREAM, NAMING THE REASON (C5).
             # The drop storm this fix addresses had no readable cause anywhere:
             # the runtime logged the socket dying, the app logged nothing, and
@@ -3530,7 +3801,12 @@ class DesktopSessionBridge:
             # ``_disconnect``, or the exception (if any) still propagating
             # through this ``finally``: ``GeneratorExit``/``CancelledError``
             # are the ordinary client teardown, anything else is a relay
-            # error. Instrumentation only; the cleanup below is unchanged.
+            # error. Instrumentation only, and the POP is the only part of the
+            # cleanup this branch changed: where C5 logged and then dropped the
+            # subscription, the dwell below may now HOLD it instead (see
+            # RECONNECT_DWELL_S). The reason vocabulary is unchanged and still
+            # says what ended the stream; what happens next is the dwell's
+            # business.
             pending = sys.exc_info()[1]
             if self._closing:
                 reason, level = "bridge dispose", logging.INFO
@@ -3549,6 +3825,24 @@ class DesktopSessionBridge:
                 sub.id[:8],
                 reason,
             )
+            # THE TRANSPORT IS GONE; THE BRIDGE NEED NOT BE. The stream is the
+            # bridge's only reference, so before the dwell this pop WAS a detach:
+            # the facade disposed, the epoch rotated and the client's ~500 ms
+            # reconnect paid for a full re-engage and a mandatory gap. Holding the
+            # subscription for RECONNECT_DWELL_S is what makes the reopen's
+            # `gap:false` a statement the replay can honour.
+            #
+            # `not sub.overflow` is not tidiness: an overflowed subscription is one
+            # the BRIDGE revoked -- a reader that fell behind, or a bridge closing
+            # -- and dwelling on it would invert the relief valve and keep a
+            # closing bridge alive. What dwells is a subscription that lost its
+            # transport with nothing against it. `sub.id in self.subscribers`
+            # excludes one another path already removed.
+            if RECONNECT_DWELL_S > 0 and not sub.overflow and sub.id in self.subscribers:
+                sub.dwelling = True
+                await self._arm_dwell(sub)
+            else:
+                self.subscribers.pop(sub.id, None)
             # ASGI disconnect runs inside a cancelled anyio scope. Cleanup must
             # still reach the runtime; otherwise a dead renderer leaves presence
             # asserted until TTL expiry and the bridge never releases its socket.
@@ -5740,24 +6034,83 @@ class DesktopSessions:
         SECOND bridge, since the pool no longer holds the first one. The handout
         count is that window, and asking here keeps the reservation explicit
         instead of leaving it implied by lock ownership.
-        """
-        return bridge.users == 0 and not self._handouts.get(bridge.session_id)
 
-    def _make_room(self) -> None:
-        """Free one bridge slot by evicting the least-recently-touched idle bridge.
+        A DWELLING BRIDGE IS NOT EVICTABLE, and without that term the dwell leaks
+        in the shape ``_handouts`` exists to prevent: such a bridge has
+        ``users == 0``, so ``BRIDGE_COUNT`` pressure could delete it from the pool
+        while the dwell still holds a facade, a presence assertion and a runtime
+        that nothing can reach. See ``_evict_one`` -- a dwelling bridge is still
+        the LAST resort when the pool is genuinely full, but it is taken
+        deliberately, and taking it ends its dwell rather than leaking it.
+        """
+        return (
+            bridge.users == 0 and not bridge.dwelling and not self._handouts.get(bridge.session_id)
+        )
+
+    def _evict_one(self) -> DesktopSessionBridge | None:
+        """The bridge to drop for pool room, or ``None``. Caller holds the lock.
+
+        TWO TIERS, and the order is the point. An ordinary idle bridge
+        (``users == 0``, no handout, not dwelling) has nothing to lose. A
+        DWELLING bridge is the LAST RESORT -- it is holding a runtime for a
+        viewer that may be reconnecting this very second -- so it is taken only
+        when nothing else is available, and taking it ENDS its dwell: the caller
+        closes it, so its viewer gets one honest gap on reconnect instead of
+        being refused the open outright.
+
+        WHY THE SECOND TIER IS NOT OPTIONAL ONCE THE DWELL LANDS: before it,
+        ``users == 0`` implied evictable, so a pool at the cap always had a
+        victim unless ``BRIDGE_COUNT`` sessions were streaming at once. A
+        dwelling bridge can now be unevictable AND idle for ``RECONNECT_DWELL_S``,
+        which makes the refusal arm reachable in a state that used to be
+        impossible -- the buyer of a 20 s reconnect window would become a new way
+        to fail to open a conversation. This trades that refusal for one gap on a
+        viewer that had already lost its transport.
+
+        NOT THE FIX FOR THE REPORTED DEFECT, and it must not be read as one:
+        measured pool occupancy is 25 of 64 at its worst and every daemon restart
+        resets the pool. This closes a pre-existing leak (the plain ``del`` never
+        closed the victim) and keeps this change from adding a refusal.
+        """
+        idle = [b for b in self.bridges.values() if self._evictable(b)]
+        if not idle:
+            idle = [b for b in self.bridges.values() if b.dwelling and not b.users]
+        if not idle:
+            return None
+        victim = min(idle, key=lambda b: b.touched)
+        del self.bridges[victim.session_id]
+        return victim
+
+    def _make_room(self) -> DesktopSessionBridge | None:
+        """Free one bridge slot, returning the bridge it dropped for the CALLER to close.
 
         Caller holds the pool lock. ``_evictable`` is what makes "idle" safe to
         take (the handout window); a pool full of pinned bridges refuses with the
         ValueError its two callers already render as a refusal — the same answer
         whether the incoming bridge is an ordinary session or a draft's.
+
+        IT RETURNS THE VICTIM RATHER THAN CLOSING IT. ``close()`` awaits the
+        bridge's own lock and the owner connection's teardown, and this runs with
+        the POOL lock held, so closing here would hold every other session's open
+        behind one teardown — the multi-second open ``forget``'s own docstring
+        exists to prevent. Both callers are arms of ``session()``, and that
+        method's ``finally`` -- outside the lock -- is what closes it, on the
+        success path and on a failure path alike.
+
+        THE CHOICE IS ``_evict_one``'s, two tiers and all: an ordinary idle bridge
+        first, a DWELLING bridge only as the last resort, and a dwelling victim's
+        dwell ends with it. Main's version of this method made the choice inline
+        and dropped the victim with a bare ``del`` that never closed it -- the
+        pre-existing leak the design's §12 closes -- and with TWO callers now that
+        leak would have had two doors, which is why the choice and the drop live
+        in one place rather than two.
         """
         if len(self.bridges) < BRIDGE_COUNT:
-            return
-        idle = [b for b in self.bridges.values() if self._evictable(b)]
-        if not idle:
+            return None
+        victim = self._evict_one()
+        if victim is None:
             raise ValueError("Too many active desktop sessions")
-        oldest = min(idle, key=lambda b: b.touched)
-        del self.bridges[oldest.session_id]
+        return victim
 
     def _locate_flight(
         self, session_id: str, locate: Callable[[], _LocatedSession]
@@ -5996,6 +6349,10 @@ class DesktopSessions:
         # and decrementing anyway would release ANOTHER caller's reservation —
         # the count is per session, not per caller.
         taken = False
+        # The bridge this open had to drop for pool room, closed AFTER the lock
+        # below is released -- see the close site for why the ordering is not
+        # negotiable. None on every path that did not hit the cap.
+        evicted: DesktopSessionBridge | None = None
         try:
             async with self.lock:
                 # THE HANDOUT IS TAKEN FIRST, while the pool lock is still held,
@@ -6079,7 +6436,11 @@ class DesktopSessions:
                     # lifetime: the pane's /events subscription and /watch beats
                     # are what hold it across the warm.
                     self.assert_admitting()
-                    self._make_room()
+                    # CAPTURED, NOT DROPPED ON THE FLOOR. This arm's victim is
+                    # closed by `session()`'s own `finally`, outside the pool
+                    # lock, exactly as the ordinary arm's is -- main added this
+                    # second door and the close has to be behind both of them.
+                    evicted = self._make_room()
                     bridge = DesktopSessionBridge(
                         self.root,
                         session_id,
@@ -6288,7 +6649,7 @@ class DesktopSessions:
                                 and not (self.root / "sessions" / session_id).is_dir()
                             ):
                                 raise KeyError("Unknown session")
-                            self._make_room()
+                            evicted = self._make_room()
                             bridge = DesktopSessionBridge(
                                 self.root,
                                 session_id,
@@ -6306,6 +6667,30 @@ class DesktopSessions:
             # acquire/release maintain) is what says whether anyone is using it.
             if taken:
                 self._end_handout(session_id)
+            if evicted is not None:
+                # AFTER THE POOL LOCK, AND NOT ONE LINE EARLIER. ``close()``
+                # awaits the bridge's own lock and the owner connection's
+                # teardown, and holding the pool lock across either is the
+                # multi-second open ``forget``'s own docstring exists to prevent.
+                # The ``async with self.lock`` above has already exited by the
+                # time this runs, which is what makes that true.
+                #
+                # IT CLOSES ON THE FAILURE PATH TOO, AND THAT IS WHY IT IS IN A
+                # ``finally`` AT ALL (agent review round 1, MAJOR 3). Sitting
+                # after the ``try`` meant a raise from ``acquire`` -- a failed
+                # bind, a refused handshake -- unwound straight past it, so a
+                # victim evicted for room was left resident with nothing holding
+                # it: the pool no longer knew it, and a later open of that session
+                # built a SECOND bridge while the first still held a facade and a
+                # runtime. Nearly inert for an idle tier-1 victim, and not inert
+                # at all for a tier-2 DWELLING one, whose facade, runtime and
+                # presence assertion would then be unreachable until its dwell
+                # expired.
+                #
+                # Closing is also what the bare ``del`` never did, on either path.
+                # For a dwelling victim it is what ends the dwell (``_evict_one``).
+                with contextlib.suppress(ConnectionError, RuntimeError):
+                    await evicted.close()
         try:
             yield bridge
         finally:
