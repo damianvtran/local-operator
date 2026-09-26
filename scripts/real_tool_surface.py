@@ -96,6 +96,12 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         subagent_comms=_UntypedStub(),
         agent_registry=_UntypedStub(),
         team_registry=_UntypedStub(),
+        # The projects registry is the pair's createIf gate: without it
+        # ``build_project_tool``/``build_project_delete_tool`` return ``None``
+        # and the measured surface is 28 of 30 tools — the exact
+        # "measures a surface no user has" defect this module exists to
+        # prevent (found by the ``context-budget`` job on the projects PR).
+        project_registry=_UntypedStub(),
         ask_user=lambda *args, **kwargs: None,  # pyright: ignore[reportArgumentType]
         # ``ask`` additionally requires an attached interactive surface.
         has_ui=True,
