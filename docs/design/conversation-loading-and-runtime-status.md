@@ -323,51 +323,51 @@ canonical live seed is already available to rebuild the live block
 is a delta the commit already knows how to apply; refusing the whole cache for it
 throws away the cached base — for ~32 ms.
 
-**(b) The larger TUI repeat cost is a whole-store census every 2 seconds, and it
-scales with the store, not the runtime — which is how it couples to the runtime
-count anyway.** `on_mount` arms `set_interval(2.0, self._refresh_sidebar,
-pause=True)` (`tui/app.py:10228`, gated on the sidebar being open). It calls
+**(b) The TUI's 2 s sidebar poll: measured, and a NEGATIVE result.** `on_mount`
+arms `set_interval(2.0, self._refresh_sidebar, pause=True)`
+(`tui/app.py:10228`, gated on the sidebar being open), which calls
 `load_catalog(root, ...)` (`:9903`) inside a worker
-(`await asyncio.to_thread(collect)`, `:9939`), and coder counted that poll on a
-12,200-directory store — the operator's is **12,258**:
+(`await asyncio.to_thread(collect)`, `:9939`) — so it is **not** an event-loop
+stall. An intermediate measurement put this poll at 21,205 `stat` calls /
+221.5-227.1 ms of CPU, and **that number was wrong**: the synthetic store matched
+the operator's *total* directory count without matching its user/subagent split,
+and `_scan_sessions` skips a hidden subagent directory with **zero** syscalls
+(`resume.py:1953-1985`). At his real population — **326 user sessions, 11,492
+subagent dirs, 465 neither, 12,283 in total** — the poll costs:
 
-| | the 2 s poll (`load_catalog`) | a bare `cached_session_rows(root)` |
+| | steady state per 2 s | first poll (one-time) |
 |---|---|---|
-| syscalls | **21,205 `stat` + 3 `scandir`** | 12,802 `stat` + 1 `scandir` |
-| wall | 276.5-311.8 ms | 84.5-136.2 ms |
-| CPU | **221.5-227.1 ms** | 72.5-78.6 ms |
-| first poll | 3,234.7 ms / 1,537.0 ms CPU / 29,604 stats | — |
-| reads | `open=0`, `read_bytes=0` — the cost is entirely the census | — |
+| syscalls | **1,835 `stat` + 3 `scandir`** | 13,726 `stat` |
+| wall / CPU | 64.2-77.3 ms / **54.1-60.9 ms** | 3,819.9 ms / 1,709.2 ms |
+| share | ~**3%** of one core | — |
 
-**Where the 8,403 `stat` calls and ~145 ms of CPU actually are — a correction to
-my own first reading.** The per-row memo is *already* on the poll's path:
-`load_catalog` (`session/catalog.py:1818`) ends in `_hydrate` (`:1914`), whose
-loop is `for row in cached_session_rows(...)` at **`session/catalog.py:1930`**.
-So "the poll does not call the memoised reader" was wrong — the call is one level
-down, which is why grepping `app.py` for the symbol finds nothing. What survives,
-and is the real finding, is one level further up: **`_ranked_candidates`
-(`session/catalog.py:1518`) runs `_scan_sessions(directory, strict=True, ...)`
-(`:1566`) on every poll**, plus decoration and ranking. A bare
-`cached_session_rows(root)` skips that scan; the poll cannot, because the TUI
-needs `include_subagents`, `pinned_hidden_ids` and the ranking.
+Every `stat` is attributed: 652 from `retention.py:390` (two activity files per
+user session, `retention.py:149`), 326 from `resume.py:2040` (the origin marker),
+326 from `catalog.py:1262` (`_memoized_birth`, the `created_at.json` the rank key
+needs), 326 from `creation.py:49` (a memo miss re-stat), 200 from
+`catalog.py:1381` (`_row_stat_key`, the page), 5 one-shot. A bare
+`cached_session_rows(root)` is 1,180 `stat` / 40.1-44.2 ms / 34.5-36.9 ms.
 
-**The change is therefore to memoise or gate `_ranked_candidates`' scan on a
-store-change key** — not to swap in a different reader. The module already does
-this three times (`_ROW_CACHE:1206`, `_BIRTH_MEMO:1243`, `_BINDING_MEMO:1318`,
-each stat-before-read with a documented blind spot), so the discipline exists. Its
-risk is *not* the same as theirs, and the difference is worth stating: those memos
-are safe because a wrong key can only cost a re-read or serve a value that is
-itself stat-validated, whereas **a memo on the ranking can serve a stale ORDER**.
-The key must therefore be the store's own change signal, and the doc that lands
-this must name which fact makes the order change and why the key covers it.
+**No sound cheaper key exists, and the reason is checkable.** Gating the scan (or
+memoising the ranking) on the sessions root's `st_mtime` moves on membership —
+create, remove, rename — but **not** on an append to an existing session's
+transcript, because that moves the *session directory's* mtime, not the root's.
+An append is exactly what reorders an activity-ranked listing, and 4 of the
+operator's 8 user conversations in the last five minutes were appends, so such a
+gate would freeze the ordering of the conversations he is working in. The general
+limit, worth keeping: **there is no cheap observable signal for "some session's
+transcript was appended", because that is a per-file fact and the file lives in a
+directory whose own mtime does not move.** The poll's census is the price of a
+store-wide ranked listing, and at his real population that price is ~60 ms of CPU
+per 2 s. **Do not spend a change on it.**
 
-**How this couples to "several agent runtimes going":** the census is
-O(store directories) and the store only grows. Coder's census of the operator's
-own store shows **26-28 subagent runs starting per five minutes**, each creating
-a session directory that never goes away. So a fleet that runs more agents makes
-the sidebar's fixed 2 s poll permanently slower — not because the runtimes are
-consuming CPU, but because they are consuming *directories*. That is a coupling
-to runtime count, and it is a store-growth coupling rather than a compute one.
+**One related cost that IS worth a look, and it is not this poll.** `/resume`
+with no argument does an uncapped `recent_session_rows(config_dir(), limit=None,
+...)` (`tui/app.py:15366`) **and** a full-store `build_index` (`:15417`)
+**synchronously in the command handler** — on the event loop, unlike the sidebar
+poll above. That is the shape of a real stall and it is store-scale; it is
+recorded here as a finding for the next phase rather than priced, because it was
+measured by coder after this document's ranked list was fixed.
 
 **(c) The speculative warm-up costs 93 ms on the event loop, twice per refresh.**
 The tree measured this and recorded the retraction of the competing explanation
@@ -413,7 +413,7 @@ of them I initially over-priced — the correction is recorded rather than dropp
 | **H-1. The TUI's conversation load path bypasses `session/page_cache.py`** — the page cache's only consumers are the desktop `history` route (`server/utils/desktop_sessions.py:82`) and the TUI's **subagent** pager (`tui/widgets/subagent_view.py:75`). The main load path is `read_saved_preview` (`session/saved_preview.py:39`), which reads raw bytes, and the connect path uses `read_replay_suffix` directly (`attached.py:5337`). | **Smaller than it looks, and I am not going to sell it as more.** The read is *bounded* at `PREVIEW_BYTES = 256 * 1024` (`saved_preview.py:29`), so this is a repeat parse of a fixed window, not of the journal. It repeats on every click and every prewarm cycle; it does not scale with the conversation. Coder's measurement: wiring the page cache in "would buy little on this path". | `grep -n 'page_cache' local_operator/**` → 4 hits, none in `saved_preview.py`; the 256 KB bound at `:29,47-52` |
 | **H-2. The presentation cache misses on `streaming`** (and, deliberately, on a moved `replay_revision` and on any pending gate). | A **31.91 ms** prepare on a switch to a busy conversation, against **0.21 ms** on a hit (coder, 29 switches; 19/19 hits on the non-streaming arm). Real, but jank-scale — see §4.4(a). | `tui/app.py:6552-6588` |
 | **H-3. Nothing is durable across a restart.** The caches are in-process: `_ROW_CACHE` in `catalog.py`, `_sidebar_presentations` in the TUI, and the page cache in `page_cache.py`. A new `serve` or a new TUI pays every cold cost again. | The operator restarts `lop` and re-pays the paint; a second interface (desktop + TUI) never shares a warm page. | `session/page_cache.py` (process-wide, byte-budgeted, not persisted) |
-| **H-4. The sidebar's 2 s poll re-pays a whole-store census that a memoised sibling already answers** (§4.4(b)). | 221.5-227.1 ms of CPU and 21,205 `stat` calls per 2 s at his store size, against 72.5-78.6 ms and 12,802 stats. | `tui/app.py:9903` vs `session/catalog.py:1387` |
+| **H-4. The sidebar's 2 s poll re-pays a whole-store census** (§4.4(b)) — *measured, and deliberately NOT changed*: at the operator's real population it is 1,835 `stat` / 54.1-60.9 ms CPU per 2 s, and **no cheaper change key exists** (an append moves the session directory's mtime, not the sessions root's, and an append is what reorders the listing). | ~3% of one core, continuously, while the sidebar is open. The honest verdict is that this is the price of a store-wide ranked listing. | `tui/app.py:9903`; `resume.py:1953-1985`; the counter-argument in §4.4(b) |
 
 **Two cache layers exist and neither substitutes for the other**, which is worth
 writing down because it is the obvious wrong conclusion to draw: the TUI's
@@ -446,7 +446,7 @@ design input for the shipped page cache).
 | **`Transcript.__init__` whole-journal parse** | inside the cold boot | yes, when cold | 248 ms / 107 MB; **2 287 ms / 261 MB**; 1.37 s / 231 MB |
 | TUI: 256 KB preview parse (+ image hashes) | every TUI switch and prewarm | yes, on the TUI | bounded window, goes around the page cache (H-1) |
 | TUI: prepare on a switch to a **streaming** session | every such switch | yes, on the TUI | 31.91 ms vs 0.21 ms on a cache hit (coder, 29 switches); cache refused (H-2) |
-| TUI: whole-store census | every 2 s while the sidebar is open | yes, on the TUI | **21,205 `stat` + 3 `scandir`, 221.5-227.1 ms CPU** at 12 200 dirs (H-4) |
+| TUI: whole-store census | every 2 s while the sidebar is open | yes, on the TUI, **off-loop** | **1,835 `stat` + 3 `scandir`, 54.1-60.9 ms CPU** at the operator's real split (326 user + 11,492 subagent dirs); first poll 13,726 stats / 1,709.2 ms CPU, one-time (H-4) |
 | TUI: speculative warm-up projection | ≤ `PREWARM_PER_REFRESH` per poll | yes, on the TUI | 93 ms median **on the event loop**, two per refresh |
 | Registry `registry.scan` | sidebar poll, 1 Hz | yes | **one `ps` fork per whole quiet population** when any exist; zero on the healthy path |
 | Wake index read | sidebar poll | yes | one read per list |
@@ -914,38 +914,34 @@ already has for pages). **Independent: yes.**
 **Measurement.** Rows decoded per switch, counted on both sides: the window's
 rows (today) vs **0** on an unchanged-journal hit.
 
-### R9 — Gate the TUI's 2 s whole-store census on a store-change key
+### R9 — The 2 s store census: measured, and DO NOT IMPLEMENT (negative result)
 
-*(added after coder's corrected measurement; the numbering keeps R1-R6 as the
-manager has them)*
+*(ranked third in an earlier draft; re-ranked to a negative result after coder
+re-measured at the operator's real user/subagent split. Kept because a negative
+result that is written down is worth more than one that is re-derived.)*
 
-**What.** `_ranked_candidates` (`session/catalog.py:1518`) calls
-`_scan_sessions(directory, strict=True, ...)` (`:1566`) on **every** poll. The
-hydration memo is already on the poll's path — `load_catalog` (`:1818`) →
-`_hydrate` (`:1914`) → `for row in cached_session_rows(...)` (`:1930`) — so the
-recoverable cost is the scan, decoration and ranking above it, not a missing
-memo. Memoise or gate that scan on the store's own change key, using the
-discipline the module already applies three times (`_ROW_CACHE:1206`,
-`_BIRTH_MEMO:1243`, `_BINDING_MEMO:1318`).
+**The measurement, at his population** (326 user sessions, 11,492 subagent dirs,
+12,283 total): the 2 s poll is **1,835 `stat` + 3 `scandir`, 64.2-77.3 ms wall /
+54.1-60.9 ms CPU** — ~3% of one core, off the event loop, with a one-time first
+poll of 13,726 stats / 1,709.2 ms CPU. The intermediate figure this document
+first carried (21,205 stats / 221.5-227.1 ms CPU) came from a synthetic store
+sized by *total* directory count without matching the split, and `_scan_sessions`
+skips a hidden subagent directory with zero syscalls (`resume.py:1953-1985`).
 
-**Effect.** Up to **8,403 `stat` calls and ~145 ms of CPU per 2 seconds** at the
-operator's store size (21,205 `stat` + 3 `scandir` / 221.5-227.1 ms CPU today,
-against 12,802 `stat` + 1 `scandir` / 72.5-78.6 ms for the scan-free reader). This
-is the largest *repeat* cost on the TUI path, it is paid whenever the sidebar is
-open, and it grows with the store — which is how it couples to the runtime count
-(26-28 new session directories per five minutes).
+**Why no sound fix exists**, which is the part worth keeping: gating the scan (or
+memoising the ranking) on the sessions root's `st_mtime` moves on membership but
+**not** on an append to an existing session's transcript — that moves the session
+directory's mtime. An append is precisely what reorders an activity-ranked
+listing, so such a key would freeze the order of the conversations the operator
+is working in. A memo on the same signal has the identical hole plus a stale
+page. The general limit: **there is no cheap observable signal for "some
+session's transcript was appended"**, because that is a per-file fact and the
+file lives in a directory whose own mtime does not move.
 
-**Risk: low-medium, and the reason is specific.** The module's existing memos are
-safe because a wrong *key* costs a re-read or serves a value that is itself
-stat-validated; **a memo on the RANKING can serve a stale ORDER**. The key must be
-the store's own change signal, and whoever lands this must name which fact makes
-the order change and why the key covers it.
-
-**Blast radius:** `session/catalog.py` + the TUI sidebar poll. **Independent: yes.**
-
-**Measurement.** Syscall counts per poll (`stat`, `scandir`) on a 12,200-directory
-fixture store, plus CPU ms per poll — both load-independent in the way that
-matters, since the cost is `stat` volume and not scheduling.
+**Effect: none. Risk: n/a. Do not implement.** The one store-scale cost in this
+neighbourhood that *is* on the event loop is `/resume`'s uncapped
+`recent_session_rows(..., limit=None)` (`tui/app.py:15366`) plus a full-store
+`build_index` (`:15417`), recorded in §4.4(b) for the next phase.
 
 ### R7 — Make liveness verified, and make the receipts honest ★ rank 6 (correctness, not speed)
 
@@ -992,22 +988,21 @@ because the journal is cold by construction in every sample.
 |---|---|---|---|---|
 | 1 | R1 publish the cold answer | cold attach 1 303-1 470 ms → **127-248 ms** | medium-high | yes |
 | 2 | R2 windowed boot replay | −248 ms / 107 MB; **−2 286 ms / 261 MB** | high | yes |
-| 3 | R9 gate the 2 s store census | **−8 403 `stat`, −~145 ms CPU per 2 s** | low-medium | yes |
-| 4 | R3 warmth 4 → 6 | one cold attach → 30-80 ms per extra slot | low | yes |
-| 5 | R5 prewarm off the loop | removes 93 ms loop stalls, 2/refresh | medium | yes |
-| 6 | R4 TUI cache: the streaming arm | 31.91 ms prepare → 0.21 ms hit | medium | yes |
-| 7 | R7 verified liveness | removes a 45-60 s false-live window | medium | yes |
-| 8 | R8 first-paint headroom | closes the over-budget samples | low-medium | yes |
-| 9 | R6 TUI load path → page cache | bounded repeat parse → **0 rows decoded** | low | yes |
+| 3 | R3 warmth 4 → 6 | one cold attach → 30-80 ms per extra slot | low | yes |
+| 4 | R5 prewarm off the loop | removes 93 ms loop stalls, 2/refresh | medium | yes |
+| 5 | R4 TUI cache: the streaming arm | 31.91 ms prepare → 0.21 ms hit | medium | yes |
+| 6 | R7 verified liveness | removes a 45-60 s false-live window | medium | yes |
+| 7 | R8 first-paint headroom | closes the over-budget samples | low-medium | yes |
+| 8 | R6 TUI load path → page cache | bounded repeat parse → **0 rows decoded** | low | yes |
 
 **Ordering rationale.** R1 before R2 because R1 reaches the target for the thing
 the user actually does (open, switch, watch) without touching the hazardous
 contract; R2 is bigger, riskier, and only strictly required for the first
-*prompt* on a cold session. **R9 (the census) is third on measured effect, not on
-novelty** — it is the largest *recurring* cost any of these changes removes, and
-it is the answer to ask #1's "reduce the amount of repeat work" that the operator
-pays whether or not he opens anything. R3 before R5/R4 because it is one constant
-on the primary interface. R4 and R6 are last on effect and are ranked for
+*prompt* on a cold session. R3 before R5/R4 because it is one constant on the
+primary interface. **R9 is not in the table because it is a negative result** —
+the 2 s census looked like the largest recurring cost in an early draft and
+re-measurement at the operator's real user/subagent split made it ~3% of a core
+with no sound cheaper key (§9 R9). R4 and R6 are last on effect and are ranked for
 completeness rather than for expected gain — both were over-priced in my first
 pass and are corrected above rather than quietly dropped.
 
@@ -1030,8 +1025,10 @@ pass and are corrected above rather than quietly dropped.
 * **Do not gate anything on a per-session cost that scales with the store.** His
   store is 12 258 sessions / 7.3 GB with 26-28 subagent runs per five minutes; a
   design whose per-open cost is O(store) fails at his scale. Every change above
-  is O(journal window) or O(working set) — and R9 removes one place where the
-  O(store) is already being paid every 2 seconds.
+  is O(journal window) or O(working set). R9's negative result shows the corollary:
+  where an O(store) cost is already being paid (the sidebar census), the cheap
+  change key that would remove it does not exist, so the honest answer is to leave
+  it rather than to add a cache that can serve a stale order.
 * **Do not re-propose wiring the page cache into `read_saved_preview` as a
   latency win** (R6). The bypass is real and worth closing for tidiness, but the
   read is bounded at 256 KB, so the honest expectation is "less repeat work",
@@ -1124,7 +1121,8 @@ transcript size — true to ~12 MB, false at 200 MB, where the whole-journal par
 dominates and my `xl` row measures 6.1-11.8 s; (d) that the sidebar poll skips
 `cached_session_rows` — it does not, `load_catalog:1818` → `_hydrate:1914` →
 `cached_session_rows:1930`, and the surviving finding is the unmemoised
-`_scan_sessions` in `_ranked_candidates:1518,1566` (R9). My own first drafts
+`_scan_sessions` in `_ranked_candidates:1518,1566` — it does not, and the surviving
+finding was then re-measured down to a negative result (R9). My own first drafts
 over-priced two items and both are corrected in place rather than removed: the
 TUI cache miss on a streaming target is ~32 ms, not a whole switch (R4), and the
 page-cache bypass in `read_saved_preview` is a bounded 256 KB re-parse, not a
