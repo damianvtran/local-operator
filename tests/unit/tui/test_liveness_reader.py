@@ -450,3 +450,44 @@ async def test_a_standing_row_repaints_as_the_age_grows(tmp_path, monkeypatch):
 
         assert first != second, f"the age froze: {first!r} then {second!r}"
         assert second.startswith("Not answering"), second
+
+
+@pytest.mark.asyncio
+async def test_a_live_fork_outranks_the_liveness_term(tmp_path, monkeypatch):
+    """THE PRECEDENCE, PINNED WHERE A CHANGE TO IT WOULD BE SEEN.
+
+    CI caught this and no local gate did: the connection row is a whole-row
+    TAKEOVER, so a liveness verdict painted there HID the fork indicator on the
+    conversation that owns the live fork — `No owner` where the row must render
+    `forking · esc`, costing the fork the only segment it can be cancelled from.
+    The term fills the GAP; a verdict the app already owns wins.
+
+    Written at the app level against the real band, because the defect was in the
+    precedence at the point of painting rather than in the classification.
+    """
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT
+    from tests.unit.tui.test_app_pilot import _factory
+    from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    app = OperatorApp(lambda: _factory(SidebarRemote("home00000000")))
+    async with app.run_test(size=(120, 36)) as pilot:
+        await _drain(app, pilot)
+        session = await _viewer_facade(tmp_path, quiet_for=600.0)  # an owner that is NOT answering
+        session.has_pending_fork = lambda: True  # type: ignore[method-assign]
+        app._interaction.session = session
+
+        app._probe_foreground_liveness()
+        await _drain(app, pilot)
+
+        row = app._status.render_text(100).plain
+        assert "Not answering" not in row, (
+            f"the liveness term outranked an app-owned verdict: {row!r}"
+        )
+        assert getattr(app._status, "_connection", "") == "", row
+
+        # And the app's own probe still reads the session as unanswerable — the
+        # term is SUPPRESSED here, not mis-classified.
+        assert app._liveness_row_text(session).startswith("Not answering")
+        assert FORK_PENDING_TEXT  # the segment this row must be free to carry

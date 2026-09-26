@@ -9029,7 +9029,19 @@ class OperatorApp(App[None]):
         # is NEVER — it has no stamp because it never dials — and `No owner`
         # painted about a process that IS the owner would be a new
         # confident-wrong statement rather than a fix for an old one.
-        if not status and _is_viewer(source.session):
+        # AND IT YIELDS TO A VERDICT THE APP ALREADY OWNS. The term enters the
+        # GAP, so anything the app can say for itself wins -- the connection row
+        # is a whole-row TAKEOVER, and a takeover over an app-owned indication
+        # hides it. CI caught exactly that: a conversation with a live forked
+        # child and an unanswerable owner rendered `No owner` where it must
+        # render `forking · esc`, costing the fork the only segment it can be
+        # cancelled from. The rule is general rather than a list of exceptions --
+        # anything the app already owns outranks a verdict ABOUT the app's owner
+        # -- so this reads the same probe `_sync_fork_pending` reads, and the
+        # guard is written on a session that may legitimately lack it.
+        fork_probe = getattr(source.session, "has_pending_fork", None)
+        app_owns_a_verdict = bool(fork_probe()) if callable(fork_probe) else False
+        if not status and not app_owns_a_verdict and _is_viewer(source.session):
             verdict = owner_liveness(source.session)
             if verdict is not OwnerLiveness.LIVE:
                 status = liveness_text(
