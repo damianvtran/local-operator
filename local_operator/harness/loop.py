@@ -262,7 +262,7 @@ NOT_RUN_REASON_MAX_CHARS = 200
 # Importing them keeps one spelling for the value the ledger stores.
 FAULT_UNKNOWN_TOOL = "unknown_tool"  # model named a tool that does not exist
 FAULT_DUPLICATE_ID = "duplicate_id"  # model emitted one call id twice
-FAULT_DENIED = "denied"  # the user declined the call
+FAULT_DENIED = "denied"  # refused at the gate (a user's no, or nobody could be asked)
 FAULT_GATE_FAILED = "gate_failed"  # our approval plumbing raised
 FAULT_ABORTED = "aborted"  # the user stopped the turn
 FAULT_SKIPPED = "skipped"  # steering redirected before this call ran

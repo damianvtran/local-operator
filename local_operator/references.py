@@ -92,7 +92,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
 
-from local_operator.harness.approval import ApprovalGate, ask_approval
+from local_operator.harness.approval import (
+    ApprovalGate,
+    ApprovalUnavailableError,
+    ask_approval,
+)
 
 # ``media`` is stdlib-only (struct, dataclasses) and is ALREADY imported
 # unconditionally by ``tools.builtin`` below, so naming it here adds zero
@@ -1614,7 +1618,24 @@ async def _expand(
                 return _too_many(text, notices)
             continue
         seen.add(path)
-        if not await _approved(path, entry.inside, entry.resolvable, request_approval, job_id):
+        try:
+            approved = await _approved(
+                path, entry.inside, entry.resolvable, request_approval, job_id
+            )
+        except ApprovalUnavailableError as exc:
+            # A gate that could not ask anyone declines THIS token and nothing
+            # more — the same degradation a refusal gets, plus the reason in
+            # the notice. The exception must never reach
+            # ``expand_references``'s never-raise catch-all: that arm degrades
+            # by ABORTING the whole expansion (``expanded=False``, the raw
+            # message sent, no reference carried), so one outside or sensitive
+            # ``@ref`` silently dropped every other reference in the same
+            # message — the post-merge regression the typed raise introduced
+            # (review of #1597).
+            declined.add(path)
+            notices.append(f"{token.typed} — not included; approval unavailable ({exc.reason})")
+            continue
+        if not approved:
             declined.add(path)
             notices.append(f"{token.typed} — not included; approval declined")
             continue
