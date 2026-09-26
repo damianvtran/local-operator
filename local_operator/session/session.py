@@ -212,7 +212,7 @@ from local_operator.session.spend import (
 )
 from local_operator.session.spend import recall as recall_spend
 from local_operator.session.spend import serving_identity, writer_stamp
-from local_operator.session.transcript import ENTRY_CUSTOM, Transcript
+from local_operator.session.transcript import ENTRY_CUSTOM, ENTRY_MESSAGE, Transcript
 from local_operator.session.usage_seed import seed_reported_usage
 from local_operator.tools.builtin import (
     open_todos,
@@ -2274,6 +2274,14 @@ class Session:
         #: a recoverable miss into permanent data loss. A restore is a READ of
         #: state that is already on disk; it has nothing new to record.
         self._restoring_attachment = False
+        #: One-shot gate for the late-adoption attempt (see
+        #: :meth:`_adopt_stored_attachment`). The desktop's draft pre-engage
+        #: warms this session BEFORE the attachment sidecar is written (the
+        #: sidecar lands with ``create``, on send), so construction is no longer
+        #: the only moment a stored attachment may reach the prompt. Set on the
+        #: first ``_prepare_system_blocks`` call whether or not anything was
+        #: adopted — the method documents why the window is closed by then.
+        self._attachment_adoption_attempted = False
         #: Stored names the restore could NOT resolve, carried so the next
         #: journal write preserves them instead of erasing them (R1).
         #:
@@ -4210,6 +4218,14 @@ class Session:
         The raw provider remains available for read-only inspection and legacy
         embedders; only production builders opt into this protocol.
         """
+        # A warm runtime's Session is CONSTRUCTED BEFORE its sidecar exists
+        # (the desktop's draft pre-engage warms on the first keystroke, while
+        # ``create`` writes ``attachment.json`` only on send), so this is the
+        # last moment a stored team/agent brief can join the FIRST frozen
+        # prefix rather than arrive as a later delta. No-op once the
+        # conversation has an assistant reply — see
+        # :meth:`_adopt_stored_attachment`.
+        self._adopt_stored_attachment()
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
@@ -5318,7 +5334,16 @@ class Session:
         # (``/agent <name>``) journals the holder — writing that empty goal over
         # the user's durable one. Set straight onto the holder: this is a read
         # of disk state, not a user action, so it must not re-journal.
-        if stored.goal:
+        #
+        # F1 (review round 1): "unconditionally" needs ONE exception — a LIVE
+        # goal set before the first turn (its journal write having failed
+        # silently) is newer than the file, so a stored value that DIFFERS is
+        # skipped and the live goal wins; see ``_apply_stored_attachment`` for
+        # the full why. The goal is applied here rather than only there so it
+        # survives the registry early-return below, which is why the same
+        # per-slot rule has to hold at this seat too.
+        live_goal = self._goal_state.text
+        if stored.goal and (not live_goal or live_goal == stored.goal):
             self._goal_state.set(stored.goal)
         if stored.agent or stored.team:
             from local_operator.session.errors import ProfileRegistryUnavailable
@@ -5347,7 +5372,26 @@ class Session:
         Split out so the suppression flag around it is a plain ``try/finally``
         with no early ``return`` able to skip the reset.
         """
-        if stored.goal:
+        # F1 (review round 1): the sidecar write is BEST-EFFORT — every
+        # mutation reaches ``write_session_attachment`` through
+        # ``_persist_attachment``, and that helper swallows failures by
+        # contract — so the FILE can be stale while the live slots are
+        # current (a live ``/team``, ``/agent`` or ``/goal`` in a warm draft
+        # before the first turn, whose write silently failed). Applying a
+        # stored value that DIFFERS from such a live slot would revert the
+        # attach the operator just made; the live slot must win. Per slot:
+        # when the live value is non-empty and differs from the stored one,
+        # skip the stored value; equal values still apply (idempotent), and a
+        # live-empty slot still takes the stored value. Construction-time
+        # live values are always empty (``_unresolved_*`` are seeded ""
+        # before ``__init__`` calls the restore), so the constructor's
+        # restore is unchanged in effect and this guard binds only on the
+        # late-adoption path.
+        live_team = self.active_team_name or self._unresolved_team
+        live_agent = self._goal_state.agent_name or self._unresolved_agent
+        live_goal = self._goal_state.text
+
+        if stored.goal and (not live_goal or live_goal == stored.goal):
             # Straight onto the holder: ``set_goal`` would re-journal a value
             # that just came off disk, and the restore is not a user action.
             self._goal_state.set(stored.goal)
@@ -5363,7 +5407,7 @@ class Session:
         # is still there (D2/R3). Both of those are also the transient cases the
         # carried-name recovery exists for.
         looked_up_and_absent = True
-        if stored.team:
+        if stored.team and (not live_team or live_team == stored.team):
             team = None
             registry = self.team_registry
             if registry is None:
@@ -5383,7 +5427,7 @@ class Session:
                 # ``active_team`` (what subagents inherit) is restored too, not
                 # just the prompt text.
                 self.attach_team(team)
-        if stored.agent:
+        if stored.agent and (not live_agent or live_agent == stored.agent):
             resolved = None
             try:
                 resolved = self.attach_agent_profile(stored.agent)
@@ -5431,6 +5475,78 @@ class Session:
             self.attachment_restore_notice = (
                 f"could not restore {what}{cause}. Run {commands} to re-attach."
             )
+
+    def _adopt_stored_attachment(self) -> None:
+        """Adopt a stored attachment that landed AFTER construction, before turn one.
+
+        THE warm-draft regression. Since the draft pre-engage pair shipped
+        (runtime #1607 / app #531) the desktop warms a new chat's runtime on
+        the FIRST KEYSTROKE, so the Session is constructed then — while
+        ``attachment.json`` is written only later, by ``DesktopSessions.create``
+        on send. :meth:`_restore_attachment` is the sidecar's construction-time
+        reader, so the warm runtime read nothing, the first message ran on a
+        session the user had launched with a team or an agent, and the brief
+        never reached the model. Pre-regression the order was create→engage —
+        construction read the sidecar and attached — and nothing else re-reads
+        it, so this hook gives a stored attachment one more moment to arrive.
+
+        Called at the TOP of :meth:`_prepare_system_blocks`, before the
+        provider is asked for the blocks, so the adopted brief is part of the
+        FIRST ``system_prefix`` snapshot rather than a ``[session-state]``
+        delta the model must reconcile — the same position the constructor's
+        restore had before the ordering flipped.
+
+        The GUARD is "the conversation has produced no assistant message
+        yet", read off the durable transcript. At this moment the current user
+        message is already durable but the loop has not yet extended the live
+        context with it, so "no user message" would be the wrong trigger; and
+        an assistant row is the journal's proof that this conversation has
+        been ANSWERED, after which the attachment state is whatever the user's
+        ``/team``, ``/agent`` and ``/goal`` since construction have made it
+        (every mutator keeps the sidecar in step). Adopting then could
+        retro-attach a persona the user detached, or re-apply one over bytes
+        already published — so a session WITH assistant history must never
+        adopt here. The pin lives in ``TestLateAdoptionBeforeTheFirstTurn``,
+        ``tests/unit/session/test_attachment_persistence.py``.
+
+        One-shot, and the flag covers both outcomes. In every host the sidecar
+        can appear only between construction and the first turn — ``create``
+        awaits its write before the first message can reach the runtime, and
+        every live mutator writes it as it runs — so one attempt at the first
+        opportunity IS the window. Retrying per provider step would only re-run
+        the restore's re-attach and front-end refresh for an answer already
+        given.
+        """
+        if self._attachment_adoption_attempted:
+            return
+        self._attachment_adoption_attempted = True
+        if self._transcript_has_assistant_message():
+            return
+        self._restore_attachment()
+
+    def _transcript_has_assistant_message(self) -> bool:
+        """Whether the DURABLE conversation has produced any assistant reply.
+
+        Read off the transcript, not the live context: at this call site the
+        loop has not yet extended the context with the current user message
+        (only the journal is guaranteed current), and a journal row survives
+        compaction, pruning and file folding AS A ROW — a blanked one keeps its
+        role and id — so "has this conversation ever been answered" is a
+        question only the journal can settle for its whole life.
+
+        A journal that cannot be read (a reduced host double with no
+        ``entries``) answers TRUE — it closes the adoption window rather than
+        opening it: adoption is an enhancement, and a host without a readable
+        journal must not have its turn fail over it.
+        """
+        try:
+            entries = self._transcript.entries()
+        except Exception:  # noqa: BLE001 — adoption must never fail a turn
+            return True
+        return any(
+            entry.type == ENTRY_MESSAGE and entry.payload.get("role") == "assistant"
+            for entry in entries
+        )
 
     def _resolve_profile_or_specialist(self, name: str) -> tuple[str | None, Any, str, str]:
         """Resolve a NAME to an attachable profile, priority order fixed here.
