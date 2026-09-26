@@ -35,7 +35,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from local_operator.harness.approval import ApprovalUnavailableError
+from local_operator.harness.approval import (
+    APPROVAL_UNAVAILABLE_NOTICE,
+    ApprovalUnavailableError,
+)
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -665,8 +668,14 @@ async def execute_lsp(
         except ApprovalUnavailableError as exc:
             # The headless gate could not ask anyone: render its reason rather
             # than the declined copy below, which is reserved for a user who
-            # answered (same rule as ``read``'s outside-workspace branch).
-            return _error(tool_call_id, "lsp", str(exc))
+            # answered — and under the tool's OWN name, not the read TIER the
+            # gate was asked under (same rule as ``read``'s branch; design
+            # round 1, D1).
+            return _error(
+                tool_call_id,
+                "lsp",
+                APPROVAL_UNAVAILABLE_NOTICE.format(tool="lsp", reason=exc.reason),
+            )
         if not approved:
             return _error(tool_call_id, "lsp", "User declined to inspect this path.")
     if not path.exists():

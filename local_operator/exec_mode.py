@@ -740,6 +740,37 @@ def reject_detached_supervisor_fd(args: ExecArgs) -> str | None:
     return None
 
 
+def _declared_by_profile(name: str | None) -> bool:
+    """Whether the named role's own allow-list answers the deny trap (M2).
+
+    ``--tools`` is not the only declaration that stands as the approval for
+    its own members in an unattended run: a ``lop exec --profile reviewer``
+    run resolves its inventory from the seed's ``tools:`` list
+    (``exec_startup.declared_tool_inventory``), and that list is exactly what
+    approves its write/exec members where nobody can be asked. The advisory
+    must consult the same source of truth, or it tells a run that will work
+    that it will be denied (review round 1, M2).
+
+    Resolution is best-effort and matches the session side by value, not by
+    identity: an unresolvable name resolves to "no declaration" and leaves
+    the advisory on — ``resolve_startup`` refuses such runs before this is
+    reached anyway.
+    """
+    if not name:
+        return False
+    try:
+        from local_operator.agent_profiles import resolve_profile_or_specialist
+        from local_operator.agents import AgentRegistry
+        from local_operator.paths import config_dir
+
+        _kind, profile, _prompt, _display = resolve_profile_or_specialist(
+            name, registry=AgentRegistry(config_dir())
+        )
+    except Exception:  # noqa: BLE001 — an odd registry means "no declaration"
+        return False
+    return profile is not None and bool(profile.tools)
+
+
 def _deny_trapped_advisory(args: ExecArgs) -> str | None:
     """The launch advisory for a run whose approval calls nobody can answer.
 
@@ -747,12 +778,13 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
     is spawned with ``stdin=DEVNULL``, so every write/exec tool call is denied
     by the CLI's headless gate unless one of the flags that makes the run
     answerable is present: ``--control`` (cards park for a supervisor),
-    ``--yolo`` (approve every tier inline), or ``--tools`` (the declaration
-    stands as the approval for its own members exactly where nobody can be
-    asked — see ``exec_startup.apply_startup``). Before this advisory the
-    operator's first evidence of the trap was a transcript of denials for
-    calls no user had seen; this is the same news told BEFORE the run, which
-    is the half that was missing.
+    ``--yolo`` (approve every tier inline), or a tool declaration (``--tools``,
+    or a role whose own allow-list resolves through ``--profile`` — both are
+    the declaration ``exec_startup.apply_startup`` lets stand as the approval
+    exactly where nobody can be asked). Before this advisory the operator's
+    first evidence of the trap was a transcript of denials for calls no user
+    had seen; this is the same news told BEFORE the run, which is the half
+    that was missing.
 
     Returns the two-line advisory to print to stderr, or ``None`` when the run
     can be approved on (a foreground tty) or a flag answers the gate. A tty
@@ -765,13 +797,16 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
 
     if parse_tool_inventory(getattr(args, "tools", None)):
         return None
+    if _declared_by_profile(getattr(args, "profile", None)):
+        return None
     if not args.background and (sys.stdin is not None and sys.stdin.isatty()):
         return None
     return (
         "Warning: this run cannot ask for approval (no terminal attached), so "
-        "write/exec tool calls will be denied.\n"
+        "any tool call that needs approval will be denied.\n"
         "  Remedies: --control parks cards for a supervisor; --yolo auto-approves "
-        "every tier; --tools NAME[,NAME] pre-approves the listed tools."
+        "every tier; --tools NAME[,NAME] pre-approves the listed tools and bounds "
+        "this run's reach to them."
     )
 
 

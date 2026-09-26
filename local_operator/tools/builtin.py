@@ -81,7 +81,11 @@ from rich.cells import cell_len
 from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
-from local_operator.harness.approval import ApprovalUnavailableError, ask_approval
+from local_operator.harness.approval import (
+    APPROVAL_UNAVAILABLE_NOTICE,
+    ApprovalUnavailableError,
+    ask_approval,
+)
 from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_command as _scan_secret_sinks
@@ -10654,9 +10658,15 @@ async def execute_grep(
         try:
             approved = await _check_approval(context, "read", description)
         except ApprovalUnavailableError as exc:
-            # Same rendering rule as ``read`` above: a gate that could not ask
-            # anyone must not be quoted as the user's refusal.
-            return _error(tool_call_id, "grep", str(exc))
+            # Same rendering rule as ``read`` above, and the tool's OWN name:
+            # the gate is asked under the read TIER ("read") because that is
+            # the escalation this call takes, but the card the reader sees
+            # says "grep", so the notice must too (design round 1, D1).
+            return _error(
+                tool_call_id,
+                "grep",
+                APPROVAL_UNAVAILABLE_NOTICE.format(tool="grep", reason=exc.reason),
+            )
         if not approved:
             return _error(tool_call_id, "grep", "User declined to search this path.")
 

@@ -958,7 +958,33 @@ def test_a_deny_trapped_background_launch_advertises_the_remedies(
     err = capsys.readouterr().err
     assert "Background job" in err
     assert "cannot ask for approval" in err
+    assert "any tool call that needs approval will be denied" in err
     assert "--control" in err and "--yolo" in err and "--tools" in err
+    # The reach bound is half of what --tools does, and the one place the
+    # advisory can say so before a run silently loses its other tools.
+    assert "bounds this run's reach to them" in err
+
+
+def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """Review round 1, M2: a role's own allow-list IS a declaration.
+
+    ``--profile reviewer`` resolves the run's inventory from the seed's
+    ``tools:`` list (``exec_startup.declared_tool_inventory``), and in an
+    unattended run that declaration stands as the approval for its members —
+    including ``bash``. The advisory must consult the same source of truth, or
+    it tells a run that will work that it will be denied.
+    """
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 4321
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
+
+    assert exec_mode.run_exec("task", ExecArgs(background=True, profile="reviewer")) == 0
+    assert "cannot ask for approval" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

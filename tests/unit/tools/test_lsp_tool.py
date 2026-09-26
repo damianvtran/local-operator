@@ -358,7 +358,9 @@ async def test_outside_initial_path_names_an_unanswerable_gate(tool, tree, tmp_p
         "c", {"action": "symbols", "path": str(outside)}, None, None, context
     )
     assert result.is_error is True
-    assert "Approval unavailable for 'read'" in result.text
+    # The gate is asked under the read TIER, but the notice names the tool the
+    # reader is looking at (design round 1, D1).
+    assert "Approval unavailable for 'lsp'" in result.text
     assert "declined" not in result.text.lower()
     assert "--yolo" in result.text
 
