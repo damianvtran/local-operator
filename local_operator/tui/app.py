@@ -235,6 +235,13 @@ from local_operator.tui.events import (
 )
 from local_operator.tui.glyphs import display_name
 from local_operator.tui.link_targets import LinkTarget, build_link_targets, is_openable
+from local_operator.tui.liveness import (
+    LIVENESS_PROBE_EVERY_S,
+    LivenessProbe,
+    OwnerLiveness,
+    liveness_text,
+    owner_liveness,
+)
 from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
@@ -8865,6 +8872,48 @@ class OperatorApp(App[None]):
                 source.draft.scroll_anchor_part = anchor.navigation_anchor_part
                 source.draft.scroll_offset = top - anchor.region.y
 
+    def _probe_foreground_liveness(self) -> None:
+        """Ask the FOREGROUND session's owner, then repaint only if it changed.
+
+        The cadence is checked here rather than trusted to the interval, so a
+        coarse timer cannot probe more often than the budget needs. Nothing is
+        asked of a session that is not a viewer (an owner-side `Session` never
+        dials), and the worker is non-exclusive with ``exit_on_error=False``: a
+        probe is a health check, and a health check that can take the app down is
+        worse than the staleness it reports.
+        """
+        source = self._interaction
+        session = getattr(source, "session", None)
+        if session is None or not _is_viewer(session):
+            return
+        now = time.time()
+        if not self._liveness_probe.due(self._liveness_probe_last, now=now):
+            return
+        self._liveness_probe_last = now
+        before = owner_liveness(session, now=now)
+        self.run_worker(
+            self._reprobe_liveness(source, session, before),
+            group="liveness-probe",
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _reprobe_liveness(
+        self, source: SessionInteraction, session: Any, before: OwnerLiveness
+    ) -> None:
+        """One bounded probe, and a repaint ONLY when the verdict moved.
+
+        Repainting on every tick would repaint the band five times a minute for a
+        verdict that had not changed — and the row is the session's identity, so
+        that is churn the operator can see for nothing.
+        """
+        await self._liveness_probe.tick(session)
+        if not self._is_current(source):
+            return
+        if owner_liveness(session) is before:
+            return
+        self._show_sidebar_connection(source)
+
     def _show_sidebar_connection(self, source: SessionInteraction) -> None:
         if not self._is_current(source):
             return
@@ -8935,6 +8984,38 @@ class OperatorApp(App[None]):
                     status = f"{saved} · Answer the question above"
                 else:
                     status = f"{saved} · Reconnect failed · Select again to retry"
+        # LIVENESS FILLS THE GAP; it does not overwrite a better answer.
+        #
+        # `status` is still empty here only for a source that is neither a saved
+        # excerpt nor unable to bind — the ordinary live session — so the term
+        # enters BELOW every existing sentence rather than beside them (designer
+        # §7.3: `STOPPED_SESSION_NOTICE` and `Reconnect failed · Select again to
+        # retry` are more specific and win). It is also the branch the operator's
+        # own case lands in: a SIGSTOPped owner leaves `is_cold` False, so nothing
+        # above has anything to say, which is exactly the lie this row now
+        # corrects.
+        #
+        # GUARDED TO VIEWERS (§7.2): `owner_liveness` on an owner-side `Session`
+        # is NEVER — it has no stamp because it never dials — and `No owner`
+        # painted about a process that IS the owner would be a new
+        # confident-wrong statement rather than a fix for an old one.
+        if not status and _is_viewer(source.session):
+            verdict = owner_liveness(source.session)
+            if verdict is not OwnerLiveness.LIVE:
+                status = liveness_text(
+                    verdict,
+                    verified_at=getattr(source.session, "verified_at", None),
+                )
+                # STALE is PROVISIONAL — a long turn ends, a SIGCONT lands, a
+                # starved loop catches up — so it takes the muted register and NOT
+                # `danger`, which stays the latch's terminal verdict. The same
+                # holds for NEVER, which is the ORDINARY state of a conversation
+                # nothing is serving and must not read as an error.
+                instruction = verdict is not OwnerLiveness.COMING
+                # AND NO SPINNER ON STALE OR NEVER: a spinner claims something is
+                # arriving, and neither state has anything coming. COMING keeps the
+                # glyph, exactly as the connect path does.
+                connecting = verdict is OwnerLiveness.COMING
         if self._status is not None:
             self._status.update(connection=status, connection_muted=instruction)
             # The glyph is what tells the user the app is working rather than
@@ -10226,6 +10307,16 @@ class OperatorApp(App[None]):
     async def on_mount(self) -> None:
         install_markdown_theme()
         self._sidebar_timer = self.set_interval(2.0, self._refresh_sidebar, pause=True)
+        # THE FOREGROUND OWNER PROBE. `verified_at` is written only on a wire
+        # answer and every one of those surfaces is EVENT-DRIVEN, so without this
+        # a healthy but QUIET session's stamp ages past the budget and the band
+        # would say `Not answering · 4m` about a session that is fine — the age
+        # measuring the absence of questions rather than of answers. Off the paint
+        # path by construction: this ticks on the loop, the probe is bounded, and
+        # the paint itself only ever compares a clock.
+        self._liveness_probe = LivenessProbe()
+        self._liveness_probe_last: float | None = None
+        self.set_interval(LIVENESS_PROBE_EVERY_S, self._probe_foreground_liveness)
         self._apply_sidebar_settings()
         try:
             self.console.push_theme(brand_markdown_theme())  # D1 markdown ramp
