@@ -157,8 +157,9 @@ async def ask_approval(
 APPROVAL_UNAVAILABLE_NOTICE = (
     "Approval unavailable for '{tool}': nobody can answer on this run "
     "({reason}), so the call was not run. Run with --yolo to auto-approve "
-    "every tier, name the tool in --tools to pre-approve it, or use --control "
-    "so a supervisor can answer."
+    "every tier, name the tool in --tools to pre-approve it (and limit the "
+    "run's reach to the tools you name), or use --control so a supervisor "
+    "can answer."
 )
 
 

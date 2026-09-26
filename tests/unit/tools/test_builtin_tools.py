@@ -4040,7 +4040,9 @@ async def test_grep_outside_workspace_names_an_unanswerable_gate(tmp_path) -> No
         "c", {"pattern": "needle", "path": str(outside)}, None, None, context
     )
     assert blocked.is_error is True
-    assert "Approval unavailable for 'read'" in blocked.text
+    # The gate is asked under the read TIER, but the notice names the tool the
+    # reader is looking at (design round 1, D1).
+    assert "Approval unavailable for 'grep'" in blocked.text
     assert "User declined" not in blocked.text
 
 

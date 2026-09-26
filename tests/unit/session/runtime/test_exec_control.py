@@ -280,6 +280,80 @@ async def test_yolo_pins_the_gate_against_the_key(isolated_config: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_an_unsupervised_run_reports_the_original_gate(isolated_config: Path) -> None:
+    """Review round 1, M1: no gates installed, so no config-derived posture.
+
+    ``/approvals`` on a run whose gates were never installed describes the
+    session's ORIGINAL headless gate, which is built from ``--yolo`` alone.
+    Before the seed was scoped to supervised runs, a config-``auto`` run with
+    no ``--yolo`` reported "(--yolo is active)" while the deciding gate still
+    denied non-TTY requests — and contradicted the launch advisory this PR
+    prints for the same run.
+    """
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "auto")
+    from local_operator.session.frontend_state import SlashResult
+
+    control = await start_exec_control(FakeSession(), cwd="/tmp", supervised=False)
+    try:
+        assert control.handle._auto_approve is False
+        notice = control.handle._approvals_slash(FakeSession(), "", SlashResult)
+        assert "non-TTY requests deny" in notice.text
+        assert "--yolo is active" not in notice.text
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_unsupervised_yolo_run_reports_yolo(isolated_config: Path) -> None:
+    """The positive control for the cell above: the flag still shows."""
+    from local_operator.session.frontend_state import SlashResult
+
+    control = await start_exec_control(FakeSession(), cwd="/tmp", supervised=False, yolo=True)
+    try:
+        assert control.handle._auto_approve is True
+        notice = control.handle._approvals_slash(FakeSession(), "", SlashResult)
+        assert "--yolo is active" in notice.text
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_seeded_auto_still_follows_a_later_tightening(isolated_config: Path) -> None:
+    """Review round 1, N1: the docstring's "keeps following the file" claim.
+
+    The seed adopts the file at t0; a later disk tightening (auto -> ask) must
+    still move the gate — pinned stays exclusive to ``--yolo``. Driven through
+    ``start_exec_control`` rather than a directly-built handle, so the PR's own
+    promise is the thing under test.
+    """
+    ConfigManager(isolated_config).set_config_value("tool_approval_mode", "auto")
+    control = await start_exec_control(FakeSession(), cwd="/tmp")
+    try:
+        assert control.handle._auto_approve is True
+        from local_operator import settings_io
+        from local_operator.config_watch import process_watcher
+
+        watcher = process_watcher(isolated_config)
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        # A write shaped like another process's, below the notify hook — a
+        # tightening is honoured wherever it came from (issue #1282 covers the
+        # loosening direction only).
+        settings_io._store(ConfigManager(isolated_config), setting.path, "ask")
+        watcher.poll_now()
+        assert control.handle._auto_approve is False
+        # The gate really moved, not just the flag: the next decision parks.
+        parked = asyncio.ensure_future(control.handle._approval_gate("bash", "echo hi"))
+        await asyncio.sleep(0)
+        front = control.handle._fold.projection.pending
+        assert front is not None
+        await control.handle.approval_answer(front.request_id, False, False)
+        assert await parked is False
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
 async def test_the_printed_record_path_is_the_file_this_run_published(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

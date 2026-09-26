@@ -190,20 +190,27 @@ async def start_exec_control(
     the turn cannot park.
 
     The handle's boot value comes from the operator's saved
-    ``tool_approval_mode``, exactly as ``spawn_owned_session`` seeds the same
-    value for phone-started sessions. ``--yolo`` maps to ``auto_approve`` and —
-    being an explicit flag on THIS run rather than a default in a file — pins
-    ``approval_pinned``, so a later ``tool_approval_mode`` edit cannot re-arm
-    the gate this run disabled. An un-flagged run seeds ``auto_approve`` from
-    the file AND keeps following it through ``attach_gate_config_watch`` — the
-    promise the header makes, now true FROM THE FIRST DECISION: the watcher
-    only delivers changes that happen after it subscribes
-    (``ConfigWatcher._prime`` deliberately does not notify subscribers), so
-    before this seed a ``tool_approval_mode: auto`` run parked its first
-    write/exec call until the pending-request timeout denied it — the
-    "User denied approval for 'bash'." incident on a run whose owner had set
-    full-auto. Without ``--yolo`` or ``auto`` the gates park for an attached
-    supervisor — the behavioural difference this module's header calls out.
+    ``tool_approval_mode`` for a SUPERVISED run (``--control``), exactly as
+    ``spawn_owned_session`` seeds the same value for phone-started sessions.
+    ``--yolo`` maps to ``auto_approve`` and — being an explicit flag on THIS
+    run rather than a default in a file — pins ``approval_pinned``, so a later
+    ``tool_approval_mode`` edit cannot re-arm the gate this run disabled. An
+    un-flagged supervised run seeds ``auto_approve`` from the file AND keeps
+    following it through ``attach_gate_config_watch`` — the promise the header
+    makes, now true FROM THE FIRST DECISION: the watcher only delivers changes
+    that happen after it subscribes (``ConfigWatcher._prime`` deliberately
+    does not notify subscribers), so before this seed a ``tool_approval_mode:
+    auto`` run parked its first write/exec call until the pending-request
+    timeout denied it — the "User denied approval for 'bash'." incident on a
+    run whose owner had set full-auto. An UNSUPERVISED run reads no mode at
+    all, because it owns no gates: its decisions are made by the session's
+    ORIGINAL headless gate, which is built from ``--yolo`` alone. Seeding
+    this handle from the file for such a run changed no decision while making
+    ``/approvals`` report "(--yolo is active)" for a run with no ``--yolo``
+    and a gate that still denies non-TTY requests (review round 1, M1).
+    Without ``--yolo`` or ``auto`` a supervised run's gates park for an
+    attached supervisor — the behavioural difference this module's header
+    calls out.
 
     Imports are function-local by contract, not by habit: ``serving`` pulls the
     composition root and ``server`` pulls asyncio, and this package sits on the
@@ -225,30 +232,43 @@ async def start_exec_control(
 
     loop = asyncio.get_running_loop()
     config_directory = config_dir()
-    # THE GATE'S BOOT VALUE, read at t0 rather than left to the watcher.
-    # ``attach_gate_config_watch`` (below, supervised runs) subscribes the
-    # handle to FUTURE ``tool_approval_mode`` changes only —
-    # ``ConfigWatcher._prime`` does not notify subscribers about the state it
-    # starts from — so seeding ``auto_approve`` from ``--yolo`` alone made a
-    # config-``auto`` run ASK from its first decision, and a headless run has
+    # THE GATE'S BOOT VALUE, read at t0 rather than left to the watcher — and
+    # read only when this handle owns gates (``supervised``).
+    #
+    # ``attach_gate_config_watch`` (below) subscribes the handle to FUTURE
+    # ``tool_approval_mode`` changes only — ``ConfigWatcher._prime`` does not
+    # notify subscribers about the state it starts from — so seeding
+    # ``auto_approve`` from ``--yolo`` alone made a config-``auto``
+    # ``--control`` run ASK from its first decision, and a headless run has
     # nobody to ask: the call parked for PENDING_REQUEST_TIMEOUT_S and was
     # denied, with the transcript blaming a user who was never consulted.
     # Mirrors ``spawn_owned_session`` exactly (same key, same default, same
-    # degrade-to-ask): both entry points adopt the operator's saved mode at
-    # boot, and both keep FOLLOWING the file afterwards.
-    try:
-        approval_mode = (
-            str(
-                ConfigManager(config_dir=config_directory).get_config_value(
-                    "tool_approval_mode", "ask"
+    # degrade-to-ask) for the runs whose decisions this handle's gates make,
+    # and those runs keep FOLLOWING the file afterwards.
+    #
+    # An UNSUPERVISED run keeps the value the flag alone gives it. Its
+    # decisions are made by the session's ORIGINAL headless gate, which is
+    # built from ``--yolo`` and never reads the file, so seeding this handle
+    # from a mode the deciding gate ignores changed no decision while making
+    # ``/approvals`` report "(--yolo is active)" for a run with no ``--yolo``
+    # and a gate that still denies non-TTY requests — a false posture on the
+    # one surface the operator consults to check it (review round 1, M1).
+    auto_approve = yolo
+    if supervised and not yolo:
+        try:
+            approval_mode = (
+                str(
+                    ConfigManager(config_dir=config_directory).get_config_value(
+                        "tool_approval_mode", "ask"
+                    )
                 )
+                .strip()
+                .lower()
             )
-            .strip()
-            .lower()
-        )
-    except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
-        logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
-        approval_mode = "ask"
+        except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
+            logger.debug("could not read tool_approval_mode; defaulting to ask", exc_info=True)
+            approval_mode = "ask"
+        auto_approve = approval_mode == "auto"
     handle = ServingSessionHandle(
         session,
         loop,
@@ -256,8 +276,10 @@ async def start_exec_control(
         # ``--yolo`` wins both ways: it approves inline (``auto_approve``) and,
         # being an explicit flag on this run rather than a file value, it pins
         # (``approval_pinned``) — so a later config edit cannot re-arm a gate
-        # the flag disabled. Without it the boot value comes from the file.
-        auto_approve=yolo or approval_mode == "auto",
+        # the flag disabled. Without it a SUPERVISED run's boot value comes
+        # from the file and keeps following it; an unsupervised run's value is
+        # the flag's own (see above).
+        auto_approve=auto_approve,
         approval_pinned=yolo,
         install_gates=supervised,
         # Declared so the §6 registration's store-existence check and the
