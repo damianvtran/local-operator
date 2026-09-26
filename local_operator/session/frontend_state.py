@@ -67,6 +67,7 @@ from local_operator.harness.types import (
     TurnEndEvent,
     Usage,
     _omit_unset_usage_stamp,
+    decode_window_of,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.model.costs import cost_summary, job_cost, turn_cost
@@ -1585,6 +1586,30 @@ def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
         del job["launch_message_id"]
 
 
+def _usage_with_decode_window(usage: Usage) -> dict[str, Any]:
+    """Dump a usage, materialising the decode window the seam stamped privately.
+
+    THE ONLY place the pair becomes a wire field, and it is deliberately called
+    for ``last_usage`` alone. The window rides a private attribute, which pydantic
+    keeps out of ``model_dump`` — that is what makes the channel free (measured:
+    +0 B with the private pair on all 201 objects of the guard's roster shape). It
+    has to be materialised HERE because ``last_usage`` is a ``FrontendUsage`` built
+    from a DUMP (``extra="allow"``), so the value has to be in the dict; validation
+    alone would drop a private attribute silently.
+
+    NOT for ``usage_components``: that list is ``list[FrontendUsage]``, whose
+    ``extra="allow"`` WOULD carry the pair, and 200 of those is the 201-object cost
+    this shape exists to avoid (design §9.3, the two falsified routes). The
+    receipts are safe only because they are dumped from live usages that were never
+    stamped — do not route them through here.
+    """
+    payload = usage.model_dump(mode="json")
+    window = decode_window_of(usage)
+    if window is not None:
+        payload["decode_us"], payload["decode_tokens"] = window
+    return payload
+
+
 def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
     """Drop the per-row keys that must not ride the wire.
 
@@ -2803,7 +2828,7 @@ class FrontendSessionState(BaseModel):
     @field_validator("last_usage", mode="before")
     @classmethod
     def _usage_wire(cls, value: Any) -> Any:
-        return value.model_dump(mode="json") if isinstance(value, Usage) else value
+        return _usage_with_decode_window(value) if isinstance(value, Usage) else value
 
     @field_validator("usage_components", mode="before")
     @classmethod
@@ -6213,7 +6238,7 @@ class FrontendStateStore:
             return None
         state = self._state
         changes: dict[str, Any] = {
-            "last_usage": usage.model_dump(mode="json"),
+            "last_usage": _usage_with_decode_window(usage),
             "context_tokens": usage.context_tokens,
             "context_is_estimate": False if usage.context_tokens else state.context_is_estimate,
         }
@@ -6234,7 +6259,7 @@ class FrontendStateStore:
         state = self._state
         cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
         changes: dict[str, Any] = {
-            "last_usage": usage.model_dump(mode="json"),
+            "last_usage": _usage_with_decode_window(usage),
             "context_tokens": usage.context_tokens or usage.input_tokens or state.context_tokens,
             "context_is_estimate": False,
         }

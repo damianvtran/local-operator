@@ -3201,6 +3201,64 @@ class _ChildModelRequestCounter:
 _OUTPUT_DELTA_TYPES = frozenset({"text_delta", "tool_call_delta", "reasoning_delta"})
 
 
+def _decode_measure(
+    *, decode_us: int, output_deltas: int, output_tokens: int
+) -> tuple[int, int, int]:
+    """The ``(decode_us, decode_tokens, decode_calls)`` a call earns, or zeros.
+
+    TWO consumers read this rule — the ledger snapshot and the ``Usage`` object the
+    seam relays to the frame — and a rule stated twice is a rule that can be stated
+    two ways: an eligibility change that moved one and not the other would put a
+    rate on the band for calls the ledger counts as unmeasured. ``output_deltas >=
+    2`` is the ledger's documented exclusion: a single delta has no window to
+    measure, so a rate from one divides by a duration the provider never spent
+    generating.
+    """
+    eligible = decode_us > 0 and output_deltas >= 2 and output_tokens > 0
+    return (decode_us, output_tokens, 1) if eligible else (0, 0, 0)
+
+
+def _stamp_decode_window(
+    usage: Any,
+    *,
+    first_output_at: float | None,
+    last_output_at: float | None,
+    output_deltas: int,
+) -> None:
+    """Carry the call's decode window on the ``Usage`` the relay already hands on.
+
+    Called where the usage EVENT is handled rather than in the stream's
+    ``finally``, and that is not a detail: the session's ``on_usage`` fires while
+    this generator is suspended at ``yield``, so a stamp applied after the loop is
+    invisible to the frame's build (measured — the consumer's copy had neither
+    value while the same object carried them afterwards). Providers send usage on
+    the final chunk, after the deltas, so the window is closed by the time this
+    runs; the ledger computes its own value from the SAME rule in the ``finally``,
+    so the two cannot disagree about a call.
+
+    The window rides a PRIVATE attribute, which pydantic keeps out of
+    ``model_dump``: the channel costs the attach frame zero bytes, where declaring
+    it as a field cost 9,648 B and then 7,800 B. Best-effort by construction — a
+    frozen usage simply records no window, which every consumer reads as unknown.
+    """
+    window_us = (
+        max(0, int((last_output_at - first_output_at) * 1_000_000))
+        if first_output_at is not None and last_output_at is not None
+        else 0
+    )
+    measured_us, measured_tokens, _ = _decode_measure(
+        decode_us=window_us,
+        output_deltas=output_deltas,
+        output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+    )
+    if not measured_us:
+        return
+    try:
+        usage._decode_window = (measured_us, measured_tokens)
+    except Exception:  # noqa: BLE001 — a frozen usage means "no window", never a raise
+        logger.debug("analytics: usage refused the decode window", exc_info=True)
+
+
 class SessionStreamFn:
     """One conversation's stateful router over a shareable client pool.
 
@@ -5883,6 +5941,14 @@ class SessionStreamFn:
                 usage = getattr(event, "usage", None)
                 if usage is not None:
                     final_usage = usage
+                    # Stamped HERE, before the event is yielded, so the session's
+                    # ``on_usage`` and everything it builds can read the window.
+                    _stamp_decode_window(
+                        usage,
+                        first_output_at=first_output_at,
+                        last_output_at=last_output_at,
+                        output_deltas=output_deltas,
+                    )
                 stop_reason = getattr(event, "stop_reason", None)
                 if stop_reason is not None:
                     outcome = str(stop_reason)
@@ -6027,7 +6093,11 @@ class SessionStreamFn:
             # all of them — dividing one population by the other inflates the
             # rate. ``decode_calls`` counts the contributing calls so a report
             # can state its coverage instead of implying it.
-            eligible = decode_us > 0 and output_deltas >= 2 and int(usage.output_tokens) > 0
+            measured_us, measured_tokens, measured_calls = _decode_measure(
+                decode_us=decode_us,
+                output_deltas=output_deltas,
+                output_tokens=int(usage.output_tokens),
+            )
 
             # Cost is NOT priced here (review C1). The snapshot carries the
             # provider, model id, and every token count, which is everything
@@ -6097,9 +6167,9 @@ class SessionStreamFn:
                     # Ineligible writes 0 to all three, so "no window" is one
                     # value on every surface and the coverage count is what
                     # disambiguates it from a measured zero-length window.
-                    decode_us=decode_us if eligible else 0,
-                    decode_tokens=int(usage.output_tokens) if eligible else 0,
-                    decode_calls=1 if eligible else 0,
+                    decode_us=measured_us,
+                    decode_tokens=measured_tokens,
+                    decode_calls=measured_calls,
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort
