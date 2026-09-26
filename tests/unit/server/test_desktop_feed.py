@@ -3713,3 +3713,40 @@ def test_a_workstream_is_announced_and_an_agent_shell_run_is_not(tmp_path):
     scoped = [frame for frame in frames if frame["type"] == "notification"]
     assert scoped, frames
     assert {frame["session_id"] for frame in scoped} == {parent, workstream}
+
+
+def test_the_feed_does_not_inherit_the_desktop_pre_open_supersession(tmp_path):
+    """The NEIGHBOUR guard for the desktop stream's D1.
+
+    D1 lets a desktop subscription that has not yet opened survive a burst by
+    EVICTING the oldest frame instead of disconnecting, because every frame it
+    holds is superseded by the snapshot it is still waiting for. The machine feed
+    shares the bounds (``REPLAY_COUNT`` / ``REPLAY_BYTES``) but is a DIFFERENT
+    stream with a different publisher -- a poll cadence rather than a cold
+    engage's burst -- and no measurement says it has the same defect, so its
+    policy must stay exactly as it was: an overflowed subscription is told with
+    ``gap{reason:"overflow"}`` and closed.
+
+    The pre-open state is the sharp case, and it is the one this asserts: a
+    subscription NOTHING has read yet is the desktop's eviction window, and the
+    feed must still call it an overflow. The absence of the field D1 added is
+    asserted with it, so a future edit that taught the feed the same trick has to
+    come here and say what measured it.
+    """
+    feed = _feed(tmp_path)
+    subscription = feed.subscribe()
+    assert not hasattr(subscription, "opened"), (
+        "the feed's subscription has no OPEN handshake, so it has no pre-open "
+        "window to supersede frames into"
+    )
+    # Never read: this is the window D1 treats differently on the desktop plane.
+    for _ in range(600):
+        feed._publish("heartbeat", {"ts": 0.0})
+
+    assert subscription.overflow is True, "the feed still overflows rather than evicts"
+    frames = _collect(feed, subscription, limit=400)
+    asyncio.run(feed.close())
+
+    assert frames[-1]["type"] == "gap"
+    assert frames[-1]["payload"]["reason"] == "overflow"
+    assert frames[-1]["payload"]["subscription_id"] == subscription.id
