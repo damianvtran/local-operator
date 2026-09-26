@@ -525,12 +525,13 @@ class NetworkScreen(ModalScreen[None]):
         it where the block's copy painted nowhere.
 
         IT COSTS THE BODY NOTHING. The title's third row is the blank padding row that
-        box already held, and the row is only ever content in a state that has news: ``_repaint`` adds the ``audit-news`` class that swaps that padding for
-        the row (``#network-title.audit-news`` in ``local_operator.tcss``). A steady
-        panel therefore paints exactly what it painted before this row existed — same
-        content, same styles, same bytes, which is the frame the committed README figure
-        and every geometry comparison in the round are made against — and the news state
-        is the same three rows with the sentence in the third. The body is the same in
+        box already held, and the row is only ever content in a state that has news:
+        ``_repaint`` adds the ``audit-news`` class that swaps that padding for the row
+        (``#network-title.audit-news`` in ``local_operator.tcss``). A steady panel
+        therefore paints exactly what it painted before this row existed — same content,
+        same styles, same bytes, which is the frame the committed README figure and
+        every geometry comparison in the round are made against — and the news state is
+        the same three rows with the sentence in the third. The body is the same in
         every audit state, which is what makes "the row is visible" a fact about the
         panel rather than about how much table happens to be above it.
         """
