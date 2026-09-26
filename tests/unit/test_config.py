@@ -598,9 +598,21 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
     """Round 5: the migration ran from ``_load_config`` and a mere
     ``ConfigManager()`` rewrote the operator's live config. The seam is
     ``cli.main`` and NOTHING else may call the migration; the store marker
-    is written only by session construction (its own store) and by the
-    migration (after it succeeds) — never by ConfigManager, never by
-    cleanup's read path."""
+    is written only by session construction (its own store), by the
+    migration (after it succeeds), and by mesh ADOPTION — never by
+    ConfigManager, never by cleanup's read path.
+
+    THE THIRD MARKER SITE, and why it is enumerated here rather than spelled
+    elsewhere: a session moved onto this device arrives as a directory in
+    ``sessions/``, and ``remove_session_dir`` refuses an unmarked store — so a
+    destination that had never created a session locally (a freshly paired
+    second machine, which is the case the mesh exists for) could not delete
+    anything it adopted. Measured on the two-device rig 2026-09-26: the recall
+    committed, wrote its tombstone, called ``remove_session_dir``, logged the
+    refusal and LEFT THE COPY — one id on two devices, which is INV-1. This list
+    is the inventory of every place that may write the marker, so a new one is a
+    reviewed act; ``local_operator/network/mobility.py`` is that act.
+    """
     import ast
 
     package = Path(__file__).resolve().parents[2] / "local_operator"
@@ -625,4 +637,5 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
     assert mark_callers == {
         "local_operator/session_factory.py",
         "local_operator/config_migrations.py",
+        "local_operator/network/mobility.py",
     }, mark_callers

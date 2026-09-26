@@ -624,7 +624,39 @@ def _retire_local_runtime(
             }
         return {"result": "retired", "sentence": ""}
     sentence = answer[len("kept:") :].strip() if answer.startswith("kept:") else answer
-    return {"result": "busy" if sentence else "retired", "sentence": sentence}
+    return {"result": "busy" if sentence else "retired", "sentence": _busy_sentence(sentence)}
+
+
+def _busy_sentence(answer: str) -> str:
+    """The owner's own words for a refused retire, or a sentence when it gave a TOKEN.
+
+    THIS IS WHAT REACHES A PERSON. ``_source_prepare`` returns this string as the
+    refusal's ``message``, and the design's contract for the mesh surface is that
+    every refusal names its cause (``MOVE_REFUSAL_CODES``: "the source has a turn in
+    flight; message is its idle reason verbatim"). Verbatim is right for a reason
+    that is a sentence, and it is what the runtime's ``kept: <why>`` answers
+    normally carry.
+
+    Measured on the two-device rig 2026-09-26: the runtime's ``retire_now`` answered
+    the bare token ``busy`` for a session parked in a turn (the reason word
+    ``may_refresh`` returns for its own notice), and ``lop sessions move`` therefore
+    printed ``{"code": "busy", "message": "busy"}`` — a machine word in the one
+    field a person reads, with no cause and no remedy, beside every sibling refusal
+    that is a full sentence. A token is now rendered into the sentence it stands
+    for; anything that already reads as prose passes through untouched, so this can
+    never overwrite a runtime's own explanation.
+    """
+    reason = answer.strip()
+    if not reason:
+        return ""
+    if " " in reason or reason[-1] in ".!?:;":
+        return reason
+    if reason in {"busy", "working"}:
+        return (
+            "this session is working right now, so nothing was moved; try again when the "
+            "turn finishes, or pass --wait <seconds> to re-check"
+        )
+    return f"this session is not idle ({reason}), so nothing was moved"
 
 
 _EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
@@ -1291,6 +1323,35 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
     # so a crash before the promote can be settled, and inside the session it would
     # be a file every future reader has to learn to ignore.
     (target / "ready.json").unlink(missing_ok=True)
+    # THE STORE MARKER, which is what makes this directory REMOVABLE later.
+    # ``remove_session_dir`` refuses a store that carries no marker, and the marker
+    # is written where a session is CREATED (``session_factory`` calls
+    # ``cleanup.mark_store``); a destination that has never created one — a freshly
+    # paired second machine, which is the case mobility exists for — therefore had
+    # no marker, and the copy it adopted could never be deleted. Measured
+    # 2026-09-26 on the two-device rig: device B adopted a session, then handed it
+    # back on a recall; the source-side commit wrote its tombstone, called
+    # ``remove_session_dir`` and logged ``cleanup="pending"`` (the refusal is
+    # logged at WARNING), so B KEPT the directory — the same id on two devices,
+    # both listing it as a local conversation, which is exactly INV-1. Marking the
+    # store is the honest statement that this device now IS a session store: it
+    # holds one.
+    from local_operator.session.cleanup import mark_store
+
+    mark_store(target.parent)
+    # AND THE ID IS THIS DEVICE'S AGAIN, so any tombstone naming somewhere else is
+    # now a lie about a session this device holds. Measured 2026-09-26 (session-
+    # mobility audit, probe 8): A handed `bc371569005d` to B, recalled it, and A
+    # held the directory with `mesh.json home_device: A` WHILE its tombstone index
+    # still said the id had moved to B — the state the audit's wedged session was
+    # found in, where three verb paths disagreed about where it lived (a local
+    # `--resume` routed the user to the peer, `move --to peer` answered
+    # "already lives on this device", and `--to local` answered "already_local").
+    # A tombstone and a directory for one id are never both true, and the promote
+    # is the instant the directory becomes true.
+    from local_operator.network.projection import forget_tombstone
+
+    forget_tombstone(target_id, config_dir=server.root)
     return True
 
 
@@ -1508,12 +1569,31 @@ def _source_prepare(
         except Exception:  # noqa: BLE001
             existing = None
         if existing:
+            # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
+            # this device is holding may be a handoff that is genuinely under way, or
+            # one whose destination died — and until it is settled, every route to
+            # this conversation answers the same sentence. Measured on the two-device
+            # rig 2026-09-26 (probe 9): the destination's relay was killed mid-copy,
+            # A answered ``deadline_exceeded`` with "Nothing was deleted: this device
+            # still holds the conversation", and SEVEN retries over ten minutes then
+            # read "a handoff ... is already in progress on this device" with no way
+            # to tell what was wrong or what to do; the same move landed the moment
+            # A's relay restarted. The phase and the age are the two facts that make
+            # the state legible (``prepared`` = no bytes were committed anywhere;
+            # ``handing-off`` = monotone, the destination owns the outcome), so they
+            # are NAMED here rather than left for the user to infer from a JSON
+            # journal. The recovery the design's §6.5 table would apply to a stale
+            # entry written by a DEAD relay is deliberately not applied here — this
+            # entry's writer is alive — and that gap is recorded, not guessed at.
+            phase = str(existing.get("phase") or "")
+            age = max(0.0, time.time() - float(existing.get("at") or 0.0))
             return {
                 "result": "refused",
                 "code": "in_progress",
                 "message": (
-                    "a handoff of that conversation is already in progress on this device, "
-                    "so nothing was changed"
+                    "a handoff of that conversation is already in progress on this "
+                    f"device (phase: {phase or 'unknown'}, started {int(age)}s ago), so "
+                    "nothing was changed"
                 ),
                 "session_id": session_id,
             }
@@ -1663,6 +1743,46 @@ def _source_prepare(
     }
 
 
+def _remove_handed_away(root: Path, session_id: str, to_device: str) -> bool:
+    """Remove a session this device has handed to another, by the ONE rm path.
+
+    THE STORE MARKER IS WHY THIS IS A FUNCTION rather than three call sites. A
+    destination that has never CREATED a session carries no
+    ``.local-operator-store`` marker in its ``sessions/`` — ``session_factory``
+    writes it at creation — and ``remove_session_dir`` refuses an unmarked store,
+    correctly: that guard is what stops cleanup from walking into a directory that
+    is not a session store. But a store holding a session ADOPTED BY A MOVE *is* a
+    session store, and this device knows that better than any scanner: it adopted
+    the directory, stamped it with ``mesh.json``, and on a later hand-back is the
+    one handing it away. Measured 2026-09-26 on the two-device loopback rig:
+    without this, the recall's commit wrote its tombstone, called
+    ``remove_session_dir``, logged ``cleanup="pending"``, and LEFT THE DIRECTORY
+    BEHIND — the same id then live on two devices, each listing it as a local
+    conversation, which is exactly INV-1.
+
+    ``mark_store`` is idempotent and best-effort, and it is called from here rather
+    than from ``remove_session_dir`` for the reason that function's own note gives
+    ("the policy must not be able to authorise its own target"): this is the
+    product path that decided the session lives here, which is the same authority
+    ``session_factory`` exercises when it marks a store it just created.
+    """
+    from local_operator.session.cleanup import (
+        MESH_MOVE_POLICY,
+        mark_store,
+        remove_session_dir,
+    )
+
+    directory = Path(root) / "sessions" / session_id
+    mark_store(directory.parent)
+    return remove_session_dir(
+        directory,
+        config_dir=root,
+        policy=MESH_MOVE_POLICY,
+        reason=f"mesh-move: handed to {to_device}",
+        actor=f"mesh:{to_device}",
+    )
+
+
 def _source_commit(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1673,7 +1793,6 @@ def _source_commit(
     makes the destination's retry safe against a commit whose reply was lost.
     """
     from local_operator.network import sync as sync_mod
-    from local_operator.session.cleanup import MESH_MOVE_POLICY, remove_session_dir
     from local_operator.session.placement import (
         HANDOFF_PHASE_HANDING_OFF,
         clear_handoff_entry,
@@ -1809,13 +1928,7 @@ def _source_commit(
         config_dir=server.root,
     )
     directory = Path(server.root) / "sessions" / session_id
-    removed = remove_session_dir(
-        directory,
-        config_dir=server.root,
-        policy=MESH_MOVE_POLICY,
-        reason=f"mesh-move: handed to {to_device}",
-        actor=f"mesh:{to_device}",
-    )
+    removed = _remove_handed_away(Path(server.root), session_id, to_device)
     if removed:
         clear_handoff_entry(server.root, session_id)
     else:
@@ -1868,6 +1981,18 @@ def _destination_invite(
 
     session_id = str(frame["session_id"])
     keep = bool(frame.get("keep"))
+    # THE ``--wait`` THAT WAS DROPPED HERE. The destination's own flow re-probes a
+    # busy owner every ``MOVE_WAIT_POLL_S`` for as long as it is given (the loop in
+    # ``_destination_move``), and this handler passed ``wait_s=0.0`` unconditionally —
+    # so an OFFLOAD never re-probed, whatever ``lop sessions move --to <peer> --wait
+    # N`` the user typed, while the recall route (which passes ``wait_s`` through)
+    # did. Measured on the two-device rig 2026-09-26: a session whose mock runtime
+    # was parked in a 45 s ``sleep`` answered ``--wait 120`` with ``busy`` in 5.09 s,
+    # the turn still running, against the guide's "re-checks ... every five seconds,
+    # up to the design's thirty minutes". The term is the OWNER's (it is the side
+    # that refuses), so it travels with the invite, bounded by the same cap the CLI
+    # applies.
+    wait_s = min(max(0.0, float(frame.get("wait_s") or 0.0)), MOVE_MAX_WAIT_S)
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -1901,7 +2026,7 @@ def _destination_invite(
                 session_id,
                 transport=transport,
                 keep=keep,
-                wait_s=0.0,
+                wait_s=wait_s,
                 owner_device=owner_device,
                 owner_name=owner_name,
                 asked=True,
@@ -2216,7 +2341,6 @@ def _reconcile_source(
     root: Path, session_id: str, entry: dict[str, Any], *, server: "RelayServer | None"
 ) -> dict[str, Any]:
     """The source's half of the table: roll back at ``prepared``, complete after."""
-    from local_operator.session.cleanup import MESH_MOVE_POLICY, remove_session_dir
     from local_operator.session.placement import clear_handoff_entry
 
     to_device = str(entry.get("to_device") or "")
@@ -2236,13 +2360,7 @@ def _reconcile_source(
         return _complete_handoff(root, session_id, entry)
 
     if directory.is_dir():
-        removed = remove_session_dir(
-            directory,
-            config_dir=root,
-            policy=MESH_MOVE_POLICY,
-            reason=f"mesh-move: handed to {to_device}",
-            actor=f"mesh:{to_device}",
-        )
+        removed = _remove_handed_away(root, session_id, to_device)
         if not removed:
             return {"session_id": session_id, "action": "cleanup_pending", "phase": "committed"}
         clear_handoff_entry(root, session_id)
@@ -2254,7 +2372,6 @@ def _reconcile_source(
 def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     """Finish a commit the relay died in the middle of (§6.5 row 3)."""
     from local_operator.network.projection import write_tombstone
-    from local_operator.session.cleanup import MESH_MOVE_POLICY, remove_session_dir
     from local_operator.session.placement import (
         HANDOFF_PHASE_HANDING_OFF,
         clear_handoff_entry,
@@ -2273,14 +2390,7 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
         network_id=str(entry.get("network_id") or ""),
         config_dir=root,
     )
-    directory = Path(root) / "sessions" / session_id
-    removed = remove_session_dir(
-        directory,
-        config_dir=root,
-        policy=MESH_MOVE_POLICY,
-        reason=f"mesh-move: handed to {to_device}",
-        actor=f"mesh:{to_device}",
-    )
+    removed = _remove_handed_away(root, session_id, to_device)
     if removed:
         clear_handoff_entry(root, session_id)
     return {
@@ -2719,6 +2829,10 @@ def _offload(
                 "phase": "invite",
                 "session_id": session_id,
                 "keep": keep,
+                # THE OWNER'S WAIT TRAVELS WITH THE INVITE: the re-probe happens
+                # where the busy answer is produced (the destination's loop), so
+                # a ``--wait`` that stops at this device is a promise nobody keeps.
+                "wait_s": wait_s,
                 "to_device": target_device,
             }
         )
