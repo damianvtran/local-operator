@@ -1274,9 +1274,17 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    in order — the snapshot's `seq` is the watermark, and every delivered frame
    has a `seq` above it.
 4. `snapshot` follows replay, with `{frontend:FrontendSync,history,cold,`
-   `cold_reason,attaching}`. `cold_reason` is the token that says WHICH cold
+   `cold_reason,attaching,verified_at}`. `cold_reason` is the token that says WHICH cold
    (see "A read never needs an answering owner" above); `attaching` says an
-   authenticated dial is retained and its state has not arrived yet. Its
+   authenticated dial is retained and its state has not arrived yet.
+   `verified_at` is the moment a round trip to the owner was last ANSWERED, and it
+   appears ONLY on a live half: a frame with `cold:false` always carries it, and a
+   `cold` frame never does. It is what stops `cold:false` being published off a
+   resident facade's memory of an earlier bind — the state a SIGSTOPped owner
+   used to produce. **No shipped client reads it yet**, so until the passive-frame
+   aging budget lands (R10), a frame can still report a frozen owner as live; the
+   reader's own budget is `LIVE_FRESHNESS_BUDGET_S`
+   (`session/runtime/types.py`). Its
    history page is the transcript's durable tail — the newest ≤100 entries,
    `limit` unchanged — read once for this frame, which is the same unbounded read
    `/history` serves. `has_more` means *older rows exist below the page*, not that

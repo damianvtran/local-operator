@@ -1271,9 +1271,17 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # memory rather than renewing it. An owner ``Session`` serves its own pane
     # in-process, so it holds no attach lease of its own to withdraw. Declared
     # in ``ViewerSessionProtocol`` in the same commit.
-    assert len(viewer_only) == 67, (
+    #
+    # 67 → 69 is honest runtime status (the not-stale contract, design doc §6
+    # rule 1): ``verified_at`` and ``verify_live``. Both are VIEWER-only for the
+    # same reason ``is_cold`` is — they describe a facade's evidence about a
+    # REMOTE owner, and an owner ``Session`` has no dial to answer. Two members
+    # rather than one because a stamp with no way to refresh it cannot tell "the
+    # owner is there" from "the owner was there", which is the exact false-live
+    # the pair exists to remove.
+    assert len(viewer_only) == 69, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 67, and the aggregate floor is set at 40 against that number. A "
+        "says 69, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
