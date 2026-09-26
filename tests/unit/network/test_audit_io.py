@@ -300,7 +300,9 @@ def test_a_stream_row_publishes_at_the_state_change_and_ordinary_rows_still_batc
     never traffic, so "publish this row now" is the kind of change that can quietly
     undo it. What this cell pins is the SHAPE of the exception: an ordinary row is
     still batched (nothing written through, no sync), and a stream's lifecycle row
-    costs ONE ``write(2)`` which also carries whatever else was pending — never an
+    costs ONE flush — one append-open and one ``.write()`` carrying whatever else was
+    pending, counted by ``write_calls`` as one call however many ``write(2)`` syscalls
+    the kernel splits it into — never an
     ``fsync``, because what is owed here is VISIBILITY (a reader must be able to tell
     "not flushed yet" from "no such row"), not survival of a power cut, which stays
     :data:`audit_mod.DURABLE_EVENTS`' job and is unchanged.

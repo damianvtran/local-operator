@@ -1203,6 +1203,23 @@ this section only points at them and names the two exit-code facts the guide nee
                "epoch": 7, "members": 3, "trust": "active"}],
  "log_path": "…/network/audit.jsonl"}
 
+// THE AUDIT BLOCK, `relay`, when the relay ANSWERS (`relay_answering`). These are the
+// fields the human surfaces print — via `relay.audit_status_words`, one renderer for
+// `lop network status`, the TUI's /network panel and the agent digest — and the pair a
+// reader compares after finding a row missing from `audit.jsonl`:
+{"relay": {"pid": 48213,
+           "audit_recorded_through": 13,   // this writer has recorded 13 rows
+           "audit_published_through": 13,  // high-water mark of rows written; a row
+                                           // retention PRUNED keeps its number here
+           "audit_degraded": false,        // a write failed: a LOSS signal
+           "audit_degraded_reason": "",
+           "audit_path": "…/network/audit.jsonl"},
+ "relay_answering": true}
+// With no relay answering, `relay` is null and NO `audit*` key is present. Absence is
+// not zero: a reader that defaulted these to 0 would render every row "not yet
+// written", so the human line prints a sentence instead (`D40`), and the pair is out
+// of reach until the relay answers again.
+
 // lop network peers --json / lop sessions --all-peers --json
 // transport §9.3's aggregation, verbatim:
 {"sessions": [

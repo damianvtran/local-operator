@@ -1,9 +1,15 @@
 """Capture the ``/network`` panel in BOTH of its phases, from one boot.
 
-Usage: python scripts/network_shot.py OUTDIR [100x30]
+Usage: python scripts/network_shot.py OUTDIR [100x30] [steady|lag|degraded|unanswered]
 
 Writes ``network-loading.svg`` (+ ``.geometry.json``) and ``network-loaded.svg``
-(+ ``.geometry.json``) into ``OUTDIR``.
+(+ ``.geometry.json``) into ``OUTDIR``; a non-steady ``AUDIT`` state appends its
+own name to both files, so the canonical pair is never overwritten by a state frame.
+The four states are the audit's, from design round 3's D40: ``steady`` prints no audit
+row at all (the Relay block has no room for one that carries no news), and ``lag``,
+``degraded`` and ``unanswered`` are the three the panel must render — the last of them
+being the ``SIGSTOP`` case, where the payload carries no audit key at all and silence
+would be indistinguishable from a healthy writer.
 
 WHY BOTH, AND WHY ONE PROCESS. The panel is two-phase by design: its first frame
 is this device's own records (a disk read, useful with the relay stopped) and the
@@ -45,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import asyncio  # noqa: E402
 import json  # noqa: E402
 import threading  # noqa: E402
+from typing import Any  # noqa: E402
 
 import scripts.probe_isolation  # noqa: E402, F401
 from local_operator.tui.app import OperatorApp  # noqa: E402
@@ -183,37 +190,92 @@ def _peers_payload() -> str:
     )
 
 
-def _status_payload() -> str:
-    return json.dumps(
-        {
-            "ok": True,
-            "installed": True,
-            "identity_present": True,
-            "relay_running": True,
-            "relay_answering": True,
-            "relay_state": "live",
-            "relay": {"pid": 4711},
-            "log": "~/Library/Logs/local-operator/network.log",
-        },
-        indent=2,
-        sort_keys=True,
-    )
+def _status_payload(audit: str = "steady") -> str:
+    """``lop network status --json`` as the panel's worker reads it.
+
+    THE AUDIT BLOCK IS FIXTURE VALUES, like every other number in this file, but its
+    KEYS are faithful: a relay that answers carries the two counters and the degraded
+    flag, which are what ``relay.audit_status_words`` renders for the panel. That
+    matters for the DEFAULT frame — a fixture with the keys absent and a fixture with
+    the counters equal must both paint no audit row, so the committed figure's AE=0
+    stays evidence about the CONDITIONAL ROW rather than about a missing key (design
+    round 3, D40).
+
+    ``audit`` picks the state, and the three that carry news are the frames the round
+    needs on file:
+
+    * ``steady`` — recorded == published: no row at all, because the Relay block's
+      84x16 region holds a 17-row body and a row that says "nothing is wrong" would
+      cost the row that says something;
+    * ``lag`` — the middle state ``publication_of`` exists to name: recorded, not yet
+      published;
+    * ``degraded`` — a failed write, the LOSS signal, with the writer's own reason;
+    * ``unanswered`` — the relay is running and its control socket does not answer, so
+      the payload carries ``relay: null`` and NO ``audit*`` key (the designer's
+      ``SIGSTOP`` case): the panel must say so in a sentence, never go quiet.
+    """
+    relay: dict[str, Any] = {"pid": 4711}
+    payload: dict[str, Any] = {
+        "ok": True,
+        "installed": True,
+        "identity_present": True,
+        "relay_running": True,
+        "relay_answering": True,
+        "relay_state": "live",
+        "relay": relay,
+        "log": "~/Library/Logs/local-operator/network.log",
+    }
+    if audit == "unanswered":
+        payload["relay_answering"] = False
+        payload["relay_state"] = "wedged"
+        payload["relay"] = None
+    elif audit == "steady":
+        relay.update(
+            audit_recorded_through=13,
+            audit_published_through=13,
+            audit_degraded=False,
+            audit_degraded_reason="",
+        )
+    elif audit == "lag":
+        relay.update(
+            audit_recorded_through=13,
+            audit_published_through=12,
+            audit_degraded=False,
+            audit_degraded_reason="",
+        )
+    elif audit == "degraded":
+        relay.update(
+            audit_recorded_through=13,
+            audit_published_through=12,
+            audit_degraded=True,
+            audit_degraded_reason="[Errno 28] No space left on device",
+        )
+    else:
+        raise SystemExit(f"unknown audit state {audit!r}: steady|lag|degraded|unanswered")
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 async def main() -> None:
     if len(sys.argv) < 2:
-        raise SystemExit("usage: network_shot.py OUTDIR [COLSxROWS]")
+        raise SystemExit("usage: network_shot.py OUTDIR [COLSxROWS] [AUDIT]")
     # Before it is used as a path: a mistyped flag here mkdirs ``--out`` (see the
     # helper's docstring), and it happened in a shared checkout during the round
     # that filed this.
     refuse_flag_shaped_argument(sys.argv[1], what="OUTDIR")
     out = Path(sys.argv[1])
     size = (100, 30)
+    audit = "steady"
     for arg in sys.argv[2:]:
         refuse_flag_shaped_argument(arg, what="SIZE")
         if "x" in arg:
             cols, rows = arg.split("x")
             size = (int(cols), int(rows))
+        else:
+            audit = arg
+    # The states that carry news are the ones design round 3's D40 is about, so they get
+    # their own files rather than overwriting the frame the committed figure is compared
+    # against: the steady pair keeps the canonical names.
+    suffix = "" if audit == "steady" else f"-{audit}"
     out.mkdir(parents=True, exist_ok=True)
 
     # The gate the stub parks on. Set before the second capture, so the
@@ -223,7 +285,9 @@ async def main() -> None:
     def stubbed(args: list[str], **kwargs: object) -> NetworkRun:
         released.wait(timeout=30)
         verb = args[0] if args else "ls"
-        body = {"ls": _ls_payload, "peers": _peers_payload, "status": _status_payload}.get(verb)
+        if verb == "status":
+            return NetworkRun(tuple(args), 0, stdout=_status_payload(audit))
+        body = {"ls": _ls_payload, "peers": _peers_payload}.get(verb)
         return NetworkRun(tuple(args), 0, stdout=body() if body else "")
 
     import local_operator.tui.widgets.network_panel as panel
@@ -238,7 +302,7 @@ async def main() -> None:
         await pilot.pause()
         await pilot.pause()
         # LOADING: the worker is parked, so this is the real first paint.
-        save_capture(app, out / "network-loading.svg")
+        save_capture(app, out / f"network-loading{suffix}.svg")
         # Released, then settled by EVENT rather than by a clock: the panel
         # repaints when the worker's answer lands, and waiting for the worker
         # ends is waiting for the thing that changes the frame.
@@ -246,8 +310,8 @@ async def main() -> None:
         await app.workers.wait_for_complete()
         await pilot.pause()
         await pilot.pause()
-        save_capture(app, out / "network-loaded.svg")
-    print(f"wrote {out}/network-loading.svg and {out}/network-loaded.svg")
+        save_capture(app, out / f"network-loaded{suffix}.svg")
+    print(f"wrote {out}/network-loading{suffix}.svg and {out}/network-loaded{suffix}.svg")
 
 
 if __name__ == "__main__":

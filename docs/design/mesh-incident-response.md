@@ -813,7 +813,44 @@ class AuditWriter:
   at most once per second, and the only other triggers are the buffer filling and
   a durable event. A link moving 10,000 frames a second adds **zero** syscalls
   here, because nothing in a frame path calls this writer — §4.6's first row,
-  asserted in §6.6.
+  asserted in §6.6. The instrument is `write_calls`, and it counts the FLUSH CALLS
+  that actually opened the file and wrote (one append-open plus one `.write()`
+  carrying the batch) rather than `write(2)` syscalls, which a batch past the text
+  layer's 8 KiB buffer can split; the rate bound is a bound on the calls, and it is
+  the number §4.8 measures. *(Agent review round 3, NIT 1 — the wording here used to
+  claim a syscall count no probe on this host without root can take.)*
+- **A stream's lifecycle rows publish at the state change, not on the tick.**
+  `session_stream_opened` / `session_stream_closed` (the writer's
+  `STREAM_LIFECYCLE_EVENTS`) are exactly the rows an operator reads the tail for
+  after a session looks stuck, and leaving them to the heartbeat left the owner's own
+  close row invisible for a measured **14.74 / 14.72 / 14.73 s** — one full 15 s
+  interval, because the close lands just after a flush and an otherwise idle relay
+  has nothing else to drain. They now flush on the transition (measured 0.0006 /
+  0.0015 / 0.0004 s) and still cost no `fsync`.
+- **The lag itself is readable, and here is where.** The relay's `status` answer
+  carries `audit_recorded_through` and `audit_published_through` beside the
+  pre-existing `audit_degraded` / `audit_degraded_reason` / `audit_path`, and the
+  three surfaces a person actually looks at print them in the reader's own words
+  (`relay.audit_status_words` — one renderer, so the CLI, the TUI's `/network` panel
+  and the agent's digest cannot drift): `13 recorded, published through 13` when the
+  two agree, `13 recorded, published through 12 (1 not yet written)` while a row sits
+  behind the tick, `DEGRADED — [Errno 28] No space left on device` after a failed
+  write (the state word first, then the writer's own reason — the same string it
+  already printed to stderr), and **a sentence rather than a silence** when the relay is
+  running but not answering — the state this whole distinction exists for, since a
+  reader who has just found a row missing from `audit.jsonl` is by construction in it
+  (design round 3, D40).
+- **What those two numbers do NOT say.** `published_through` is a **high-water
+  mark**, not presence: everything at or below it went through this writer's own
+  flush, but a row that rotation moved into a `.gz` generation — or that retention
+  has since pruned (§4.5) — keeps its number below the mark, so `file`
+  (`AuditLog.publication_of`) must not be read as "a record with this number is on
+  disk". And with a second process appending to the same `audit.jsonl`, the two
+  counters name a *different* row: the writer seeds its sequence from the file's tail
+  once, at open, and would render numbers of its own from the same seed. That is
+  pre-existing, disclosed in `publication_of`, and left alone here — §4.1's one writer
+  per install is the contract that keeps them sound, and it is why the relay owns the
+  file.
 - **`fsync` is deliberately not per record.** It is called for `DURABLE_EVENTS`
   and on rotation. The reasoning, stated so it is not "fixed" later: the log
   exists to be *readable after* an incident, and losing the last <1 s of ordinary

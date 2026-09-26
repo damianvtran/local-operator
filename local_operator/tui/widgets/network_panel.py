@@ -607,9 +607,31 @@ class NetworkScreen(ModalScreen[None]):
                 return entries
         return list(self.local.networks)
 
+    def _audit_words(self) -> str:
+        """The Relay block's audit row, or ``""`` when the audit has no news.
+
+        ONE PLACE DECIDES, because two things depend on the answer: whether the row is
+        painted at all, and whether the block's own separator blank is spent to pay
+        for it (see :meth:`_report_text`). A second caller computing it again is how
+        the two come to disagree about a row that is either there or not.
+
+        ``omit_steady`` is the panel's own rule (design round 3, D40): the block has
+        no room for a row that carries no news, so a steady writer paints exactly what
+        it painted before this existed.
+        """
+        if self.status_run is None:
+            return ""
+        payload = self.status_run.payload()
+        if payload is None:
+            return ""
+        from local_operator.network.relay import audit_status_words
+
+        return audit_status_words(payload, omit_steady=True)
+
     def _report_text(self, width: int | None = None) -> Text:
         width = self._card_width() if width is None else max(_MIN_CARD_WIDTH, width)
         body = Text()
+        audit_words = self._audit_words()
         if self._focus_relay:
             self._relay_section(body, width)
             body.append("\n")
@@ -622,7 +644,18 @@ class NetworkScreen(ModalScreen[None]):
         body.append("\n")
         self._peers_section(body, width)
         if not self._focus_relay:
-            body.append("\n")
+            # THE NEWS IS PAID FOR OUT OF THE SEPARATOR, NOT OUT OF CONTENT. Measured,
+            # because the arithmetic is the whole reason: `#network-scroll` is an 84x16
+            # region over a 17-row body, so the Relay block's rows are the LAST five and
+            # ``log:`` is already the row below the fold. A news row appended after
+            # ``relay:`` therefore lands in the position ``log:`` occupies — painted
+            # nowhere — which is a silence in exactly the state a reader opens the panel
+            # for (design round 3, D40, whose own ``SIGSTOP`` frame is the evidence).
+            # Spending this blank instead keeps the body at 17 rows in EVERY state: the
+            # row is visible, nothing that was on screen leaves it, and ``virtual_size``
+            # does not grow.
+            if not audit_words:
+                body.append("\n")
             self._relay_section(body, width)
         # NO TRAILING BLANK INSIDE THE SCROLL REGION (design round 1, D2). Every
         # section ends its last row with a newline, so the body's line count was
@@ -913,6 +946,15 @@ class NetworkScreen(ModalScreen[None]):
             body.append(f"  relay:      running, pid {relay.get('pid')} — {state}\n")
         else:
             body.append("  relay:      not running\n")
+        # THE AUDIT ROW, AND WHY IT SITS HERE (design round 3, D40). The order is the
+        # block's: `installed:`, `identity:`, `relay:`, then this, then `log:` — the same
+        # order the CLI prints. It is rendered ONLY when it carries news: a steady writer
+        # paints nothing, because the region has no room for a row that says so and the
+        # row it would cost is one that says something (``omit_steady``). Values at cell
+        # 14, the column the four rows around it already use.
+        audit_words = self._audit_words()
+        if audit_words:
+            body.append(_indented_value("  audit:      ", audit_words, width) + "\n")
         log = str(payload.get("log") or "")
         if log:
             body.append(_indented_value("  log:        ", log, width) + "\n", style="dim")

@@ -170,7 +170,12 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     ls = actions.add_parser("ls", help="Networks this device is in")
     ls.add_argument("--json", action="store_true")
 
-    show = actions.add_parser("show", help="Members, roles, endpoints and audit tail")
+    # Design round 3, D43: the help promised an "audit tail" this path has never
+    # printed — ``--json`` carries ``audit_tail`` and the human path prints the network
+    # line and its member rows only. The tail is dropped from the help rather than
+    # added to the output: ``lop network log`` is the audit's reader, and growing the
+    # human path of a membership command is more than the one line this was filed as.
+    show = actions.add_parser("show", help="Members, roles and endpoints")
     show.add_argument("network")
     show.add_argument("--json", action="store_true")
 
@@ -2745,8 +2750,20 @@ def _cmd_status(args: argparse.Namespace) -> int:
         + ("" if payload["supported"] else "  (no launchd on this platform)"),
         f"identity:   {'present' if payload['identity_present'] else 'missing'}",
         f"relay:      {relay_line}",
-        f"log:        {payload['log']}",
     ]
+    # THE AUDIT LINE, IN THE SAME BLOCK AND AT THE SAME COLUMN as the three above
+    # (every value here starts at cell 12: `installed:`+2, `identity:`+3, `relay:`+6,
+    # `audit:`+6). The counters existed on this command's ``--json`` for two releases
+    # while the human block said nothing about them, which made a lagging writer and a
+    # healthy one the same picture to the reader the numbers are for (design round 3,
+    # D40). It sits ABOVE ``log:`` because it is news about the relay's own state while
+    # the log path is a location — and because the TUI's Relay block shares this order,
+    # so a reader moving between the two surfaces reads the same block twice (the panel
+    # pays for the row out of its own layout; see ``network_panel._report_text``).
+    audit_words = relay_mod.audit_status_words(payload)
+    if audit_words:
+        lines.append(f"audit:      {audit_words}")
+    lines.append(f"log:        {payload['log']}")
     for network in payload.get("networks") or []:
         links = network.get("links")
         count = len(links) if isinstance(links, list) else int(links or 0)
