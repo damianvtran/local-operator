@@ -260,7 +260,16 @@ async def test_a_dwelling_subscription_does_not_hold_the_daemon(tmp_path):
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     bridge = await _arm_dwell(pool, sid)
+    sub = next(iter(bridge.subscribers.values()))
     assert bridge.dwelling
+
+    # A LIVE LEASE, which is the state production is always in: the relay's own
+    # `/watch` renewed it while the transport was up and the dwell does not cancel
+    # it. Without this the case passes for the WRONG REASON -- a fresh
+    # subscription's `expires` is 0.0, so a filter keyed on `expires` would
+    # exclude it whatever the dwell did, and the regression this exists for would
+    # not be observable here at all.
+    sub.expires = module.time.monotonic() + module.WATCH_TTL
 
     assert bridge.users == 0, "the viewer's release already landed"
     assert pool.in_flight_reason() is None, "a dwell must not be a reason this daemon cannot leave"
