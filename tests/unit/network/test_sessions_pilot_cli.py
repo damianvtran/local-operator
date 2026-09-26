@@ -195,9 +195,9 @@ async def test_a_device_without_the_prompt_capability_is_refused_in_words(
             assert "prompt" in member.capabilities, member.capabilities
             member.capabilities = [cap for cap in member.capabilities if cap != "prompt"]
             network_store.save(fresh, server_b.root)
-        assert "prompt" not in (
-            network_store.load(record.network_id, server_b.root).member(a_device_id).capabilities
-        )
+        reloaded = network_store.load(record.network_id, server_b.root).member(a_device_id)
+        assert reloaded is not None
+        assert "prompt" not in reloaded.capabilities
 
         code, out, err = await asyncio.to_thread(
             _run_cli,
@@ -255,10 +255,16 @@ async def test_an_unreachable_peer_fails_fast_and_truthfully(
             "--json",
         )
         assert code == 1, (code, out, err)
+        # NOT a hang, NOT an empty answer, and NOT the transport's own words: the
+        # DEVICE is named as the component that failed, with the command that
+        # diagnoses it. The transport reports a stopped peer and a refused session
+        # with one identical sentence ("the remote owner did not send its state"),
+        # so this code is read from the peer's own catalogue rather than assumed —
+        # which is exactly what makes it deterministic between a cached row and a
+        # fresh one (CI caught the first version answering two ways for one state).
+        assert '"code": "peer_unreachable"' in out, (out, err)
         combined = out + err
-        # NOT a hang, NOT an empty answer: the sentence names the cause and the
-        # command that diagnoses it.
-        assert "unreachable" in combined.lower() or "did not answer" in combined.lower(), combined
+        assert "unreachable" in combined.lower(), combined
         assert "doctor" in combined, combined
     finally:
         await asyncio.to_thread(created.stop)
