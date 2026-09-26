@@ -606,11 +606,12 @@ def wake_receipt_headline(text: str) -> str:
     return head.strip()
 
 
-#: Painted under a child's report that arrived after this session's runtime had
-#: committed to leaving, so the row is durable and no turn ran for it at the time.
-#: The report above it is the child's own words (the same text a delivered row
-#: carries); this line is what says how it arrived, because without it a held row
-#: and a delivered one read identically (UX round 1, U6).
+#: Painted under a child's report that was HELD when it arrived — the delivery
+#: turn it would have opened either fell on the leaving latch or was dropped
+#: before it could run — so the row is durable and no turn ran for it at the
+#: time. The report above it is the child's own words (the same text a delivered
+#: row carries); this line is what says how it arrived, because without it a held
+#: row and a delivered one read identically (UX round 1, U6).
 #:
 #: A FACT ABOUT THE ARRIVAL, NEVER A PRESENT-TENSE CLAIM ABOUT NOW (design review
 #: round 2, D10; UX round 2, U7). The first wording said "held for your next turn …
@@ -632,10 +633,16 @@ def wake_receipt_headline(text: str) -> str:
 #: ``_HARNESS_NOTICE_HEADS`` and needs no entry: that list exists for texts a
 #: persisted row can prove provenance by (the pre-stamp era), while this sentence
 #: is composed at fold time and never persisted.
-HELD_DELIVERY_NOTICE = (
-    "[session warning] held when it arrived — this report reached the session while its "
-    "runtime was leaving, so no turn ran for it at that point"
-)
+#: CAUSE-NEUTRAL AFTER THE DROP ARM JOINED (review round 3, R3-1). The sentence
+#: used to say "this report reached the session while its runtime was leaving",
+#: which the drop arm makes false: that arm is only reachable when the runtime is
+#: NOT leaving (with the latch armed, ``_deliver_job_results`` takes the hold arm
+#: and opens no turn, so the drop gate fires only for the abort-stopped case),
+#: and reading a cause that never happened is worse than reading no cause. Both
+#: arriving causes — the leaving latch and the dropped turn — share the one fact
+#: that is always true, and it is what a reader needs: the report was held, and
+#: no turn ran for it then.
+HELD_DELIVERY_NOTICE = "[session warning] held when it arrived — no turn ran for it at that point"
 
 
 def held_delivery_notice(
@@ -646,9 +653,10 @@ def held_delivery_notice(
     ``None`` for every ``job_result`` row that was DELIVERED, and that is the
     whole point (UX round 1, U6): the two are the same message in every other
     respect, so the ONLY thing that can tell a reader "this one is still waiting
-    for you" from "this one was already answered" is the flag the holding arm
-    writes (``Session._job_result_message(..., held=True)``). A row without it
-    is the ordinary delivery, whose own turn is what acknowledged it.
+    for you" from "this one was already answered" is the flag the arm that held
+    it writes (``Session._job_result_message(..., held=True)``; the leaving
+    latch and the pre-abort drop arm both use it). A row without it is the
+    ordinary delivery, whose own turn is what acknowledged it.
 
     The severity is derived HERE rather than at a renderer, by this module's rule
     for the fold decisions the two surfaces share (see
