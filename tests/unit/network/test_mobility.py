@@ -848,46 +848,77 @@ def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
     here. So the inviter held the request for its whole budget (``wait_s +
     OFFLOAD_CONFIRM_WAIT_S``: 30 s at ``wait_s=0``, 60 s at the CLI's default) and then
     answered "the outcome is unconfirmed" about a move that never started. Measured with
-    the desktop's own pane holding the session: the peer refused 9 times out of 9 in
-    ~3 ms with "This session is open in another terminal or attached client." and the
-    user read a timeout 60 s later. The refusing device now reports it over the link it
-    was invited on, and the wait ends where the refusal happened.
+    the desktop's own pane holding the session: this device's refusal was produced in
+    ~3 ms and the user read a timeout 60 s later. The destination now reports it over the
+    link it was invited on (``_source_refused``), and the wait ends where the refusal
+    happened (``_await_own_progress``'s refusal half).
+
+    DELIBERATELY NOT END-TO-END, the same trade the invite-ack test above records. The rig
+    that dials A->B is this file's load-flaky shape — the fixture's peer answers late on a
+    loaded runner and the move reads ``unreachable``, which is a transport result and not a
+    statement about this property. So the two seams the property is MADE of are driven
+    directly: the report that records the destination's sentence, and the wait that must
+    end on it within a poll instead of a budget. The device-keyed half is pinned here too
+    (a refusal from anybody else must not end a move it did not receive), which is a fact
+    about THIS seam that the dialling version could only reach by standing up a stranger.
     """
     import time
+    from types import SimpleNamespace
 
     server_a, server_b, _host, _port = pair
-    # B'S OWN SETTINGS, so the join records the endpoint B is actually listening on: the
-    # default settings would advertise the CLI's configured port, which nothing is bound
-    # to here — and this is the one rig in this file where A DIALS B (recalls have B dial
-    # A), so an undialable advertisement reads as an unreachable peer rather than as a
-    # fixture detail.
-    _pair(pair, monkeypatch, role="admin", settings=server_b.settings)
-    _owned_session(server_a)
+    # NEVER THE SHARED ``SESSION``: ``_Progress`` is per-relay but lives in that process
+    # keyed by ``id(server)``, so a refusal left under it can outlive the test that wrote it.
+    session_id = "ef56ab12cd34"
+    invited = server_b.identity.device_id
     sentence = (
         "This session is open in another terminal or attached client. "
         "Disconnect that client, then move again."
     )
-    # The owner's own runtime refuses to retire — the "another terminal or attached
-    # client" case, which is ``_retire_local_runtime``'s ``viewed`` outcome.
-    monkeypatch.setattr(
-        mobility,
-        "_retire_local_runtime",
-        lambda root, session_id, deadline_s=0: {"result": "viewed", "sentence": sentence},
-    )
+    progress = mobility.progress_for(server_a)
+    try:
+        # THE REPORT PATH, and the recording is exact: this side never saw the guard that
+        # fired, so the sentence travels VERBATIM (a paraphrase here would be the second
+        # sentence table for one condition that §8.2 exists to prevent).
+        link: Any = SimpleNamespace(device_id=invited)
+        recorded = mobility._source_refused(  # noqa: SLF001
+            server_a, link, {"session_id": session_id, "code": "busy", "message": sentence}
+        )
 
-    budget = mobility.move_bound_s(0.0)
-    started = time.monotonic()
-    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
-    elapsed = time.monotonic() - started
+        assert recorded["result"] == "recorded", recorded
+        assert progress.refusal(session_id, from_device=invited) == ("busy", sentence)
 
-    assert result["ok"] is False, result
-    assert result["code"] == "busy", result
-    assert result["message"] == sentence, "the refusing device's own words, verbatim"
-    assert result["changed"] is False, "nothing moved, so a retry is safe"
-    assert elapsed < budget / 2, (
-        f"the refusal took {elapsed:.1f}s of a {budget:.0f}s budget, so it waited for the "
-        "deadline rather than being told: that is the finding this test exists for"
-    )
+        # AND THE WAIT ENDS ON IT. The budget is the one an offload at ``wait_s=0`` would
+        # otherwise sit out in full; the poll the wait notices it on is 0.2 s.
+        budget = mobility.move_bound_s(0.0)
+        started = time.monotonic()
+        committed, refusal = mobility._await_own_progress(  # noqa: SLF001
+            server_a, session_id, budget=budget, invited=invited
+        )
+        elapsed = time.monotonic() - started
+
+        assert committed is False, "a refusal is not a commit"
+        assert refusal == ("busy", sentence), refusal
+        assert elapsed < 1.0, (
+            f"the refusal took {elapsed:.1f}s of a {budget:.0f}s budget, so it waited for the "
+            "deadline rather than being told: that is the finding this test exists for"
+        )
+
+        # KEYED BY THE DEVICE THAT SENT IT: a member that did not receive this move cannot
+        # end it, so a refusal recorded by anyone else leaves the wait with no answer.
+        progress.forget(session_id)
+        stranger: Any = SimpleNamespace(device_id="ffffffffffff")
+        mobility._source_refused(  # noqa: SLF001
+            server_a,
+            stranger,
+            {"session_id": session_id, "code": "busy", "message": "not this move"},
+        )
+        committed, refusal = mobility._await_own_progress(  # noqa: SLF001
+            server_a, session_id, budget=0.3, invited=invited
+        )
+
+        assert committed is False and refusal is None, refusal
+    finally:
+        progress.forget(session_id)
 
 
 def test_an_offload_receipt_carries_every_phase_the_move_went_through(

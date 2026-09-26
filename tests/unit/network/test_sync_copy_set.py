@@ -345,6 +345,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``run``'s per-runtime subdirectories (``run/mobile``, ``run/host``, ``run/serve``): "
         "the runtime plane's own run directories under the store root",
     ),
+    "local_operator/analytics/recorder.py": (
+        2,
+        "``_RUN_DIRNAME`` (``run``, the same store-root runtime directory as the row "
+        "above) and ``_MAINTENANCE_LOCK_NAME`` under it: "
+        "``<config root>/run/analytics-maintenance.lock`` is the host-wide election "
+        "lock the recorder's hourly retention sweep takes (``maintenance_lock_path``). "
+        "An election sidecar at the store root, beside ``sessions/`` rather than "
+        "inside a session, and the file is not state anything reads back — it is "
+        "created and flocked, so nothing about it belongs to a session's copy set",
+    ),
     "local_operator/session/runtime/viewers.py": (
         1,
         "``run/viewers``: where a viewer's attachment record lands, under the store root",

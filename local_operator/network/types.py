@@ -526,6 +526,57 @@ INNER_OP_CAPABILITY: dict[str, str] = {
     "unwatch_job": "view",  # the matching unsubscribe
     "viewer_watch": "view",  # "someone is displaying this" — residency hint only
     "desktop_watch": "view",  # the desktop's presence lease — same hint, other surface
+    # A GRANTABLE WITHDRAWAL, and the decision is on the merits rather than on
+    # symmetry with the row above it. ``desktop_withdraw`` is the desktop's own
+    # "the pane left, for real" signal, added to the runtime by
+    # ``session/attached.py::withdraw_desktop_watch`` — which REFUSES every other
+    # surface in words ("only a desktop viewer can withdraw a desktop lease") and
+    # is called when the bridge's last live watch lease for THIS session has run
+    # out (``server/utils/desktop_sessions.py::_withdraw_last_lease``). It is the
+    # withdrawal half of the ``desktop_watch`` lease: same connection, same hint,
+    # and main deliberately gave it its own op because no ``desktop_watch`` shape
+    # can carry it (every accepted beat renews the memory, ``(False, False)``
+    # included, so withdrawing is the only way to LOWER the answer).
+    #
+    # REACHABLE FROM A REMOTE DESKTOP SURFACE, which is why this is a decision
+    # rather than a formality. ``session_dial.dial_owner`` authenticates as
+    # ``client: "attach"`` and forwards the VIEWER's own fields, ``surface``
+    # among them (``dial.py`` AUTH_FIELDS; ``projection.py`` sets
+    # ``auth["surface"] = "desktop"`` for a desktop surface and already requires
+    # ``DESKTOP_WATCH_CAPABILITY`` of one). So the mesh's dial lands on the owner
+    # as ``kind == "attach", surface == "desktop"`` and passes the runtime's own
+    # shape gate for this op exactly as its ``desktop_watch`` beats pass it. The
+    # branch supports that surface on purpose; the table must not contradict it.
+    #
+    # THE EFFECT IS A PRESENCE HINT AND NOTHING ELSE. It clears the session-scoped
+    # ``_desktop_attach_seen`` memory and this connection's lease, which
+    # ``attached_surfaces()`` alone reads for the model-facing answer — no
+    # transcript, no durable state, no action, no credential. ``view`` ("watch a
+    # session here") is the narrowest capability whose words cover a viewer ending
+    # its own announcement that it is watching, so this is the same call the
+    # ``event_mute``/``event_unmute`` pair two rows down already records: a pair
+    # split across two decisions leaves the viewer unable to say the thing the
+    # other half depends on.
+    #
+    # THE COST, RECORDED RATHER THAN GLOSSED (the ``acknowledge_attention`` row
+    # below sets this precedent). The memory is SESSION-scoped, not per-connection,
+    # so a remote desktop viewer's withdrawal also clears the fact for the owner's
+    # own surfaces, and the model can read "no interface is attached" while the
+    # operator's local pane is mounted. That falsehood is bounded by the local
+    # bridge's own next beat, which renews it, and by the same 45 s TTL — it is a
+    # hint's worth of churn, corrected rather than durable.
+    #
+    # WHAT REFUSING WOULD COST, and this is what settles it. A missing row is not a
+    # dropped hint: ``_forward_stream_frame`` (relay.py) writes the ``unknown_op``
+    # error back and CLOSES the stream. ``session/attached.py``'s ``_dial`` REPLAYS
+    # this op on the fresh connection whenever a recorded withdrawal exists or the
+    # recorded lease is not live, so the refusal would land on the stream that
+    # re-dial had just opened — the viewer's own reconnect would kill itself, and
+    # every reconnect after it, rather than costing one hint. A view-only
+    # member holding ``desktop_watch`` may say "I am showing this"; to withhold
+    # its matching "I have stopped" would gag a signal it already holds the
+    # authority to send.
+    "desktop_withdraw": "view",
     # event_mute and its UNMUTE are a PAIR and must never be split across two
     # decisions. Both do the same thing to the same connection — ``event_mute``
     # stops delta-grade frames on THIS one, ``event_unmute`` resumes them — so
