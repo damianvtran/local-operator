@@ -2241,12 +2241,18 @@ async def test_a_landing_after_the_row_is_painted_keeps_it_through_the_recommit(
         coldness.cold = False
         frozen.thaw()
         assert await _pump(pilot, lambda: not app._attach_behind_attempts)
-        assert await _pump(
-            pilot, lambda: len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
-        ), (
-            "the failure notice left with the replaced view",
+
+        def settled() -> bool:
+            users, notices = _view_rows(app._transcript_view())
+            return users.count("GONE-R") == 1 and len(_returned_rows(notices)) == 1
+
+        assert await _pump(pilot, settled), (
+            "the failure row or notice left with the replaced view",
             _view_rows(app._transcript_view()),
         )
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-R") == 1, users
+        assert len(_returned_rows(notices)) == 1, notices
         assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
 
@@ -2286,12 +2292,18 @@ async def test_the_owner_answering_while_the_user_is_away_is_shown_on_return(mon
         assert app._transcript_view() is not parked.replay.view
         for _ in range(20):
             await pilot.pause()
-        # The rebuilt view gets the notice projected into it (the record rides
-        # the interaction; `_sync_send_failure_notices` runs at this commit).
-        # The row's own re-seed is the following slice.
-        assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1, (
+        # The rebuilt view is re-seeded from the interaction: the record's row
+        # is re-authored (`_reseed_pending_user_rows`) and its notice projected
+        # (`_sync_send_failure_notices`), so neither is left behind with the
+        # replaced view.
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-W") == 1, (
+            "the conversation came back without its kept row",
+            users,
+        )
+        assert len(_returned_rows(notices)) == 1, (
             "the conversation came back without its failure notice",
-            _view_rows(app._transcript_view()),
+            notices,
         )
         assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
