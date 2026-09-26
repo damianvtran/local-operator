@@ -14,7 +14,7 @@ States, the S4 evidence set:
 - ``turn``   — the same send after ``TurnStarted``: the working line is up
                under the row (behaviours 1 and 4).
 - ``failed`` — a dead runtime answers the send: the row STAYS and the failure
-               notice carries ``send again ⏎ · edit e``; the composer is empty.
+               notice carries ``send again enter · edit e``; the composer is empty.
                This is the behaviour-3 change. Run the SAME script from the
                base commit for the before frame — there the row is withdrawn,
                the text is back in the composer, and the notice says so; with
