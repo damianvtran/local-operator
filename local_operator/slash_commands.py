@@ -11,6 +11,8 @@ command registry to diverge from — an entry without one is not offered on the
 desktop at all (see ``/mobile``).
 """
 
+from typing import Any, Sequence
+
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 
 #: ONE sentence for ONE instruction, carried verbatim by every surface that
@@ -218,6 +220,48 @@ def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
     a blank row.
     """
     return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
+
+
+def project_unavailable_text() -> str:
+    """The ONE sentence both ``/project`` handlers answer a registry-less host with.
+
+    The TUI (``app.py::_cmd_project``) and the owner runtime
+    (``serving.py::_project_slash``) print the same words for the same state —
+    they are two front ends of one command, and a viewer that reported one
+    sentence while the owner reported another would make the same session look
+    like two products.
+    """
+    return "projects are unavailable in this session. Ask the agent to create one."
+
+
+def project_listing_text(projects: Sequence[Any], *, cap: int = 5) -> str:
+    """``N projects: a [status], b [status] +K more`` — the shared listing line.
+
+    ``cap`` keeps ONE line: a receipt, not a table. The full rows are the
+    tool's ``list`` and the projects surfaces' job.
+    """
+    names = [f"{project.name} [{project.status}]" for project in projects[:cap]]
+    tail = "" if len(projects) <= cap else f" +{len(projects) - cap} more"
+    plural = "" if len(projects) == 1 else "s"
+    return f"{len(projects)} project{plural}: " + ", ".join(names) + tail
+
+
+def project_unimplemented_text(word: str) -> str:
+    """The SLICE-1 stand-in sentence for a reserved verb with no handler yet.
+
+    Shared by both handlers for the same reason the sentences above are: the
+    full-page view ships in a later slice, and until it does every surface must
+    say the same thing about which routes act today.
+    """
+    return (
+        f"/project {word} is not in this build yet. For now use /project list, "
+        "the agent's project tool, or the desktop Projects tab."
+    )
+
+
+def project_unknown_word_text(word: str) -> str:
+    """``unknown /project subcommand 'x' — try: ...`` — the refusal both print."""
+    return f"unknown /project subcommand {word!r} — try: " + ", ".join(PROJECT_SUBCOMMANDS)
 
 
 #: Slash commands handled synchronously before any prompt is sent. One

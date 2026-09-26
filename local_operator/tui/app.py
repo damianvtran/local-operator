@@ -183,6 +183,10 @@ from local_operator.slash_commands import (
     SLASH_COMMANDS,
     network_subcommand_rows,
     primary_slash_name,
+    project_listing_text,
+    project_unavailable_text,
+    project_unimplemented_text,
+    project_unknown_word_text,
     slash_command_for,
     unknown_flag_refusal,
 )
@@ -17989,10 +17993,7 @@ class OperatorApp(App[None]):
             return
         registry = getattr(session, "project_registry", None)
         if registry is None or not hasattr(registry, "list_projects"):
-            self._system_notice(
-                "projects are unavailable in this session. Ask the agent to create one.",
-                "warning",
-            )
+            self._system_notice(project_unavailable_text(), "warning")
             return
         word = arg.split(maxsplit=1)[0].casefold() if arg.split() else ""
         if word in {"", "list"}:
@@ -18007,22 +18008,12 @@ class OperatorApp(App[None]):
                     "tool; it links this session automatically."
                 )
                 return
-            names = [f"{project.name} [{project.status}]" for project in projects[:5]]
-            tail = "" if len(projects) <= 5 else f" +{len(projects) - 5} more"
-            plural = "" if len(projects) == 1 else "s"
-            notice(f"{len(projects)} project{plural}: " + ", ".join(names) + tail)
+            notice(project_listing_text(projects))
             return
         if word in PROJECT_SUBCOMMANDS:
-            self._system_notice(
-                f"/project {word} is not in this build yet. For now use /project list, "
-                "the agent's project tool, or the desktop Projects tab.",
-                "warning",
-            )
+            self._system_notice(project_unimplemented_text(word), "warning")
             return
-        notice(
-            f"unknown /project subcommand {word!r} — try: " + ", ".join(PROJECT_SUBCOMMANDS),
-            "warning",
-        )
+        notice(project_unknown_word_text(word), "warning")
 
     def _cmd_team(
         self,

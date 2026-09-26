@@ -5686,6 +5686,14 @@ class ServingSessionHandle(SessionHandle):
             return self._team_slash(session, args, SlashResult)
         if command == "agent":
             return self._agent_slash(session, args, SlashResult)
+        if command == "project":
+            # SLICE 1 STAND-IN, the TUI twin's shape: the listing answers from
+            # the store, every other reserved verb names the surfaces that act
+            # today. A command advertised as `authoritative_session` MUST be
+            # dispatchable here (tests/unit/session/runtime
+            # /test_capability_surface.py routes by that rule), and the
+            # full-page view ships in a later slice.
+            return self._project_slash(session, args, SlashResult)
         if command == "mcp":
             return await self._mcp_slash(session, args, SlashResult, locality)
         if command == "model":
@@ -6316,6 +6324,49 @@ class ServingSessionHandle(SessionHandle):
                 "numbers": context_block_numbers(data, total),
             },
         )
+
+    def _project_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/project`` — the read-only listing; the verbs are slice 3.
+
+        SLICE 1 STAND-IN, named as one and shared with the TUI twin
+        (``app.py::_cmd_project``) down to the sentences
+        (``slash_commands.project_*_text``), so the owner and the viewer cannot
+        report different things about one store: `Session.project_registry` is
+        session state, so the listing is answered here, where that state lives.
+        Nothing here mutates anything.
+        """
+        from local_operator.slash_commands import (
+            PROJECT_SUBCOMMANDS,
+            project_listing_text,
+            project_unavailable_text,
+            project_unimplemented_text,
+            project_unknown_word_text,
+        )
+
+        registry = getattr(session, "project_registry", None)
+        if registry is None or not hasattr(registry, "list_projects"):
+            return SlashResult(kind="notice", text=project_unavailable_text(), style="warning")
+        word = arg.split(maxsplit=1)[0].casefold() if arg.split() else ""
+        if word in {"", "list"}:
+            try:
+                projects = list(registry.list_projects())
+            except Exception as exc:  # noqa: BLE001 — a listing is never worth an error
+                return SlashResult(
+                    kind="notice", text=f"could not list projects: {exc}", style="warning"
+                )
+            if not projects:
+                return SlashResult(
+                    kind="notice",
+                    text="no projects yet. Ask the agent to create one with the project "
+                    "tool; it links this session automatically.",
+                    style="info",
+                )
+            return SlashResult(kind="notice", text=project_listing_text(projects), style="info")
+        if word in PROJECT_SUBCOMMANDS:
+            return SlashResult(
+                kind="notice", text=project_unimplemented_text(word), style="warning"
+            )
+        return SlashResult(kind="notice", text=project_unknown_word_text(word), style="warning")
 
     def _team_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """The routed ``/team``: list, and ATTACH, from the SESSION's registry.
