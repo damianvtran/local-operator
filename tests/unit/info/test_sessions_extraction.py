@@ -185,6 +185,25 @@ EXPECTED = [
         # BYTE of every row for every other cell in this file — the drain has
         # its own cells below.
         "leaving": "",
+        # -- THE MESH'S FIVE KEYS, appended last for the same reason every key
+        # above was appended: the published order is a contract and this
+        # EXTENDS it. Present on EVERY row so no consumer branches on key
+        # existence, and on a device with no network they carry the LOCAL
+        # answer rather than being absent (mesh-session-mobility.md §9.3).
+        "locality": "local",
+        "peer": None,
+        # ``mode: "local"`` rather than absent: the field is always present so a
+        # reader can tell "local" from "written by a build that does not know
+        # about the mesh" (§5.1).
+        "placement": {
+            "mode": "local",
+            "network_id": "",
+            "home_device": "",
+            "policy": "pinned",
+            "stamp_revision": 0,
+        },
+        "origin": None,
+        "last_synced_at": None,
         "updating": "",
         "update_failed": "",
         # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
@@ -234,6 +253,25 @@ EXPECTED = [
         "completion_reason": "",
         # NOT LEAVING — present on every row so the published shape is stable.
         "leaving": "",
+        # -- THE MESH'S FIVE KEYS, appended last for the same reason every key
+        # above was appended: the published order is a contract and this
+        # EXTENDS it. Present on EVERY row so no consumer branches on key
+        # existence, and on a device with no network they carry the LOCAL
+        # answer rather than being absent (mesh-session-mobility.md §9.3).
+        "locality": "local",
+        "peer": None,
+        # ``mode: "local"`` rather than absent: the field is always present so a
+        # reader can tell "local" from "written by a build that does not know
+        # about the mesh" (§5.1).
+        "placement": {
+            "mode": "local",
+            "network_id": "",
+            "home_device": "",
+            "policy": "pinned",
+            "stamp_revision": 0,
+        },
+        "origin": None,
+        "last_synced_at": None,
         "updating": "",
         "update_failed": "",
         # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
@@ -288,6 +326,25 @@ EXPECTED = [
         # default: a record written by an older runtime lists as "not leaving"
         # rather than raising.
         "leaving": "",
+        # -- THE MESH'S FIVE KEYS, appended last for the same reason every key
+        # above was appended: the published order is a contract and this
+        # EXTENDS it. Present on EVERY row so no consumer branches on key
+        # existence, and on a device with no network they carry the LOCAL
+        # answer rather than being absent (mesh-session-mobility.md §9.3).
+        "locality": "local",
+        "peer": None,
+        # ``mode: "local"`` rather than absent: the field is always present so a
+        # reader can tell "local" from "written by a build that does not know
+        # about the mesh" (§5.1).
+        "placement": {
+            "mode": "local",
+            "network_id": "",
+            "home_device": "",
+            "policy": "pinned",
+            "stamp_revision": 0,
+        },
+        "origin": None,
+        "last_synced_at": None,
         "updating": "",
         "update_failed": "",
         # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
@@ -586,12 +643,26 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     assert [row["leaving"] for row in rows[1:]] == ["", ""]
     # THE TRAILING KEY IS THE CONTRACT, so this asserts the rule rather than one
     # column: a field is APPENDED to the published row and never inserted, so the
-    # key order every existing consumer reads is unchanged by it. The measured
-    # pair (``beat_lag_s``/``cpu_since_beat_s``) is the newest extension and
-    # therefore the last two; ``leaving`` and ``updating`` must still be present
-    # and before them, in that order.
+    # key order every existing consumer reads is unchanged by it. TWO append-only
+    # runs met in this fold, and the order asserted below is the one ``collect.py``
+    # actually builds: the mesh's five keys ride between ``leaving`` and the update
+    # window's two (mesh-session-mobility.md §9.3), while the stall readings
+    # (``beat_lag_s``/``cpu_since_beat_s``/``stall_dump``) stay the newest
+    # extension and therefore CLOSE the row. Both runs are pinned here, against
+    # the same ordered list, so neither can be dropped by a later union the way a
+    # union already dropped one claim on this branch.
     assert "leaving" in rows[0] and list(rows[0]).index("leaving") < list(rows[0]).index("updating")
     assert list(rows[0]).index("updating") < list(rows[0]).index("update_failed")
+    # ...AND THE MESH'S FIVE KEYS RIDE IN THE SAME APPEND-ONLY RUN: after
+    # ``leaving``, before the update window's two, present on EVERY row so no
+    # consumer branches on key existence (mesh-session-mobility.md §9.3).
+    for key in ("locality", "peer", "placement", "origin", "last_synced_at"):
+        assert key in rows[0], key
+    assert list(rows[0]).index("leaving") < list(rows[0]).index("locality")
+    assert list(rows[0]).index("last_synced_at") < list(rows[0]).index("updating")
+    # ...AND THE STALL READINGS CLOSE IT, in the order upstream appended them: the
+    # measured pair, then the dump path ``stall_watchdog`` owns. ``stall_dump`` —
+    # not ``update_failed`` — is the trailing key on this head.
     assert list(rows[0]).index("update_failed") < list(rows[0]).index("beat_lag_s")
     assert list(rows[0]).index("beat_lag_s") < list(rows[0]).index("cpu_since_beat_s")
     assert list(rows[0]).index("cpu_since_beat_s") < list(rows[0]).index("stall_dump")

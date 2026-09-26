@@ -877,6 +877,13 @@ _FRONTEND_LOCAL_SLASHES = {
     # and `/theme` make about config.yml. Routed to the runtime it would offer a
     # remote host's directories to someone who cannot see them, and move a
     # session into a path that may not exist here at all.
+    #
+    # The MOBILITY form (`/move … --to <peer|local>`) is frontend-local for a
+    # second reason of its own: it runs `lop sessions move` against THIS device's
+    # relay, and the session it moves is often the one this terminal must first
+    # LEAVE (an attached viewer blocks the owner's exclusive retire). Routed to
+    # the runtime it would ask the session to move itself out from under the
+    # socket carrying the request.
     "move",
     # A fork opens a window on THIS machine and reads THIS machine's config.yml
     # for where to put it — the same argument `/settings` and `/theme` make. On a
@@ -981,6 +988,28 @@ _FRONTEND_LOCAL_SLASHES = {
     "archive",
     "unarchive",
     "delete",
+    # FRONTEND-LOCAL because every verb in the family is a fact about THIS
+    # device's own mesh state: which networks it holds, which members it has
+    # paired with, its own relay's install state, and the identity keypair in
+    # this machine's config root. `lop network` is a client of THIS device's own
+    # relay (`network/cli.py`: every act asks this device's relay, and the relay
+    # asks the peer), so routing the command to an authoritative runtime would
+    # answer about the runtime host's networks while the receipt named this one
+    # -- the wrong-machine split `/info` and `/notifications` refuse.
+    #
+    # AND IT MUST BE ANSWERABLE WITH NO RUNTIME AT ALL. The whole point of the
+    # family is a device that cannot reach its peers (invite, join, doctor,
+    # status, the incident verbs), so a classification that waited for an
+    # authoritative runtime would withhold the diagnosis exactly when the user
+    # needs it. Nothing here reads the model or the conversation, which is what
+    # makes the local answer complete rather than partial.
+    #
+    # This is also what keeps it out of `serving.py::_slash_result`: every
+    # registry entry NOT in this set is advertised `authoritative_session`, and
+    # that advertisement fails `test_capability_surface.py` unless the runtime
+    # dispatches it. A runtime-side `/network` would act on another machine's
+    # mesh, which is why it is not there.
+    "network",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the

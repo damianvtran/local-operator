@@ -26,7 +26,9 @@ from starlette.background import BackgroundTask
 
 from local_operator.harness.types import ModelSpec
 from local_operator.media import SUPPORTED_IMAGE_MIME_TYPES
+from local_operator.network.projection import ProjectionRefusal
 from local_operator.server.desktop import require_desktop
+from local_operator.server.models.desktop_mesh import MESH_ID_PATTERN
 from local_operator.server.models.desktop_sessions import (
     AdmissionStatus,
     AnswerReceipt,
@@ -70,6 +72,8 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
     DraftAlreadyMaterialised,
     LegacySubscriberDuringMove,
+    PeerAttachmentUnavailable,
+    PeerSessionUnreachable,
     SessionDeletionRefused,
     SubagentChildUnavailable,
     move_session,
@@ -490,6 +494,14 @@ async def admit_receipt_request(
     assert remote is not None, "the route binds the runtime before admitting"
     queued = bool(getattr(remote, "is_streaming", False))
     await bridge.acquire()
+    # THE BYTES STAY HERE, WHICH IS WHAT MAKES THE ROW THE OWNER WRITES RESOLVABLE
+    # ON THIS DEVICE (§§2.2: what a local session gets) — and the list this
+    # returns is the one that must be admitted, because the owner journals the
+    # digest of what it RECEIVES. Staged BEFORE the dispatch, because the owner's
+    # turn may journal the row the instant it admits and the read that follows is
+    # not ordered against this call. A LOCAL conversation comes back untouched and
+    # pays nothing (``prepare_peer_images`` returns the list it was given).
+    images = await bridge.prepare_peer_images(images)
     # Non-``None`` only once the dispatch exists: before that the reference is
     # ours alone, with nothing to hand anywhere.
     task: asyncio.Task[tuple[str, bool]] | None = None
@@ -735,12 +747,31 @@ class DraftModel(Input):
 
 class CreateSession(Input):
     request_id: RequestID
-    cwd: str = Field(min_length=1, max_length=4096)
+    #: The folder the conversation runs in, ON THE DEVICE THAT HOSTS IT — this machine
+    #: for a local create, the PEER for one that names ``peer``.
+    #:
+    #: EMPTY IS EXPRESSIBLE, AND ONLY FOR A PEER (review round 1, MINOR 3): absence
+    #: means "the peer decides", which is the rule the peer's own resolver implements
+    #: and documents (``relay._resolve_peer_cwd``: empty → that device's home), and this
+    #: field used to be ``min_length=1``, which made the documented shape unreachable
+    #: through this route. The contract is explicit in both directions: a create naming
+    #: NO peer still has to name a folder, because an empty path resolves against the
+    #: SERVER's working directory — a directory the user never named — so the validator
+    #: below keeps that a 422.
+    cwd: str = Field(default="", max_length=4096)
     target: SessionTarget | None = None
     #: Omitted or null ⇒ today's behaviour, byte for byte: the session is born on
     #: the configured default. This is the ONLY optional admission of the two
     #: routes, and it is what lets an older client keep posting the old body.
     model: DraftModel | None = None
+    #: The DEVICE to create the conversation on (``features.peers``). Omitted means
+    #: this device, and the body is then byte-identical to the pre-mesh one — the
+    #: ``model`` field's own rule (Addendum 1, item 5). The id is shape-checked here
+    #: rather than looked up: the PEER is the only party that can say whether it is a
+    #: member of the network it is being addressed through, and its sentence is the
+    #: one the user should see.
+    peer: str | None = Field(default=None, pattern=MESH_ID_PATTERN)
+
     #: The draft id a mint handed this pane (spec §1.4), when the pane warmed a
     #: new chat before sending. It supplies the ID and the already-running warm;
     #: ``cwd``/``target``/``model`` stay THIS body's and its admissions re-run
@@ -750,6 +781,23 @@ class CreateSession(Input):
     #: is an optimisation, never an authorization surface: unknown, expired or
     #: lost ids fall back to a freshly minted session with every ladder intact.
     draft_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{12}$")
+
+    @model_validator(mode="after")
+    def _a_local_create_still_names_a_folder(self) -> "CreateSession":
+        """Refuse an empty ``cwd`` for a LOCAL create, as a 422 like ``min_length=1``.
+
+        Same status and same shape as the field constraint this replaces; what is new
+        is that the rule is stated where it can also say WHY, because the identical
+        empty value is now legal a few characters to the right. An empty path on the
+        local path resolves to the server's own working directory
+        (``resolve_working_directory``: ``Path("")`` is ``.``), so accepting it would
+        start a user's conversation somewhere nobody named — the failure this whole
+        working-directory admission exists to prevent, arriving through the door the
+        peer's "the peer decides" rule opens.
+        """
+        if not self.peer and not self.cwd:
+            raise ValueError("cwd is required: name the folder this conversation runs in")
+        return self
 
 
 class MoveSession(Input):
@@ -1082,6 +1130,76 @@ def receipts(request: Request) -> DesktopReceipts:
     return value
 
 
+#: Refusals that did NOT leave a session behind on the peer, so a request id stays
+#: usable: a retry after freeing a slot up, or after joining the network, must be able
+#: to run rather than replay a refusal forever. ``relay_unavailable`` and
+#: ``peer_unreachable`` are deliberately NOT here — in both, this device could not
+#: prove the frame never landed, and the one failure that matters most is a retry that
+#: mints a SECOND conversation on the peer. These are recorded instead, and the route
+#: answers 503 (unconfirmed) rather than 409 (nothing changed).
+_CREATE_UNCONFIRMED_CODES = frozenset({"relay_unavailable", "peer_unreachable"})
+
+
+async def _remote_lifecycle(
+    request: Request,
+    session_id: str,
+    *,
+    action: Literal["archive", "unarchive", "delete"],
+    confirm: bool = False,
+) -> dict[str, Any] | None:
+    """Run a lifecycle verb on the OWNER when the row is a peer's, else ``None``.
+
+    ``None`` means "this device's session", and the caller keeps its existing path,
+    which is what makes the branch additive: on a machine in no network the owner
+    lookup answers ``None`` having read no relay, and the local route behaves exactly
+    as it did.
+
+    A REMOTE REFUSAL IS A 409 WITH THE OWNER'S OWN SENTENCE, or 404 for the one code
+    that means the conversation is not there at all. Not 500: nothing failed, and the
+    conversation the user can see exists — the sentence names the condition and its
+    remedy, which is the same argument the local ``session_delete_refused`` arm makes
+    one level down.
+
+    THE DAEMON FORGETS A DELETED ID HERE TOO, for the reason the local delete does:
+    a session that MOVED home and is then deleted on the peer would otherwise stay
+    resident in this process, and this daemon would answer 200 where a fresh one
+    answers 404 (the failure PR #390 fixed on the local path).
+    """
+    from local_operator.server.utils.desktop_mesh import (
+        lifecycle_on_owner,
+        remote_owner,
+    )
+
+    host_root = host(request).root
+    owner = await asyncio.to_thread(remote_owner, host_root, session_id)
+    if owner is None:
+        return None
+    device_id, device_name = owner
+    result = await asyncio.to_thread(
+        lifecycle_on_owner,
+        host_root,
+        session_id,
+        action=action,
+        peer=device_id,
+        confirmed=confirm,
+    )
+    if result.get("ok"):
+        if action == "delete":
+            try:
+                await host(request).forget(session_id)
+            except Exception:  # noqa: BLE001 - forgetting is best effort, never the answer
+                logger.exception("desktop pool could not drop the removed session %s", session_id)
+            return {"session_id": session_id, "deleted": bool(result.get("deleted"))}
+        return {"session_id": session_id, "archived": action == "archive"}
+    code = str(result.get("code") or "session_lifecycle_refused")
+    message = str(result.get("message") or "")
+    if not message:
+        message = f"{device_name or device_id} refused that and said nothing further"
+    raise HTTPException(
+        404 if code == "session_not_found" else 409, {"code": code, "message": message}
+    )
+
+
 def reply(result: Any) -> CRUDResponse[Any]:
     return CRUDResponse(status=200, message="Desktop session result.", result=result)
 
@@ -1283,6 +1401,26 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # the reader distinguishes nothing from it, but it is retryable, and a
         # client that cannot see WHY would have to guess whether to re-probe.
         raise HTTPException(404, {"code": error.code, "message": str(error)}) from None
+    except PeerSessionUnreachable as error:
+        # A PEER HOLDS THIS CONVERSATION AND THIS DEVICE CANNOT REACH THAT DEVICE
+        # (mesh slice DB2). 409 with the family's own code, which is the answer
+        # this id already had while the remote viewer was unwired — the
+        # conversation EXISTS and the row is on the user's screen, so 404 would be
+        # a lie about their own work, and a 5xx would be a lie about the machine.
+        #
+        # THE SENTENCE IS THE TUI'S, CHARACTER FOR CHARACTER, because it is the
+        # same sentence: ``DesktopSessions``'s refusal is built from
+        # ``remote_open.unreachable_peer_sentence``, which is what the TUI's own
+        # pick refuses with, so the two surfaces cannot describe one situation two
+        # ways (``mesh-ui.md`` §1.3's degraded states — the finding that produced
+        # the shared composer).
+        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+    except PeerAttachmentUnavailable as error:
+        # The bytes are on the device that holds the conversation, and this
+        # device's content-addressed store is what the route reads. 409 rather
+        # than 404 for the same reason as above: the image exists, and the reader
+        # is told where it is instead of being told it does not.
+        raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
     except SessionStoreUnavailable as error:
         # The catalogue refused to answer, most often because the store's
         # ``sessions/`` directory could not be walked at all (descriptor
@@ -1467,6 +1605,25 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             },
             headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
         ) from None
+    except ProjectionRefusal as error:
+        # THE MESH'S OWN REFUSAL, which carries a machine ``code`` AND the sentence
+        # the device that refused composed (``network.projection``). Unmapped it was
+        # a 500 with no sentence at all -- measured on this slice's own rig with a
+        # peer whose runtime would not start: the user's send answered "Internal
+        # Server Error" and nothing else.
+        #
+        # 503 RATHER THAN 409, because every code it carries is a RETRY condition
+        # (``session.relay_unavailable``: no answer came back inside the engage
+        # bound, so a first send to a cold session is worth sending again;
+        # ``session.peer_refused``: the peer would not start the session). The 409
+        # ``session_is_remote`` above is the UNOPENABLE case, where retrying changes
+        # nothing; a link that is down is the opposite of that.
+        #
+        # THE SENTENCE TRAVELS VERBATIM, the rule the rest of this ladder follows:
+        # the party that can see which guard fired is the only one that can say what
+        # to do about it, and re-deriving words here is how two surfaces come to
+        # disagree about one machine's state.
+        raise HTTPException(503, {"code": error.code, "message": error.sentence}) from None
     except ConnectionError as error:
         # A cold session that cannot start a runtime reports WHY -- but only when
         # the reason arrives as an `ActionableConnectionError`, whose TYPE is
@@ -1590,6 +1747,7 @@ async def list_sessions(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
     include_archived: bool = Query(default=False),
+    include_peers: bool = Query(default=False),
     # THE SCOPED, PAGED PARAMETERS, all optional and all defaulted so that a
     # request which sends none of them is answered exactly as it was before this
     # existed. Declared as strings rather than as ``Literal``/``max_length``
@@ -1629,6 +1787,7 @@ async def list_sessions(
             limit,
             status_stamps=stamps,
             include_archived=include_archived,
+            include_peers=include_peers,
             scope=scope,
             cursor=cursor or None,
             with_counts=with_counts,
@@ -1656,7 +1815,7 @@ async def list_sessions(
         # disagree about, so ordering the extras by it would put a second
         # ordering authority inside one section and make the app's Pinned list
         # read as catalogue order followed by pin order.
-        sessions = page.rows + page.pinned_off_page
+        sessions = page.rows + page.pinned_off_page + page.remote
         # The sources that could not be read for THIS page. Lifted from the rows
         # rather than plumbed beside them: every row of a poll carries the same
         # verdict (one registry scan answers for the whole listing), so the
@@ -1702,6 +1861,7 @@ async def search_sessions(
     q: str = Query(default="", max_length=256),
     limit: int = Query(default=100, ge=1, le=500),
     include_archived: bool = Query(default=False),
+    include_peers: bool = Query(default=False),
 ):
     """Past conversations matching ``q`` by name, id, or what was SAID in them.
 
@@ -1736,7 +1896,9 @@ async def search_sessions(
     async with errors(request):
         return reply(
             {
-                "sessions": await host(request).search(q, limit, include_archived=include_archived),
+                "sessions": await host(request).search(
+                    q, limit, include_archived=include_archived, include_peers=include_peers
+                ),
                 "query": q,
                 "limit": limit,
             }
@@ -1774,6 +1936,108 @@ async def create_session(body: CreateSession, request: Request):
     """
 
     async def create():
+        if body.peer:
+            # THE PEER MINTS THE ID (``relay._op_session_create``'s rule): an id that
+            # exists in two places at once is the permanent routing ambiguity the
+            # mesh exists to prevent, so this device does not choose one.
+            #
+            # ``cwd`` IS FORWARDED, AND THE PEER CHECKS IT (QA round 1, Q9). The field
+            # names a path on the PEER's disk when a peer is chosen — that is what the
+            # pane's own hint says ("Must exist on <peer>") — and the peer is the only
+            # device that can stat it. This route therefore does NOT admit it here (the
+            # path need not exist on this machine) and does NOT drop it either: dropping
+            # it was measured as a 200 for ``/nonexistent/on/this/mac`` with the
+            # conversation quietly started in the peer's home directory. The peer's
+            # refusal names the peer and comes back as this route's 409, the same status
+            # the local admission gives an unusable directory. An EMPTY ``cwd`` still
+            # means "the peer decides" and becomes the peer's home
+            # (``session/remote_open`` states the same rule for a remote attach).
+            assert spec is not None or body.model is None
+            # Imported here rather than at module scope: the mesh package is a boot
+            # cost this file must not add for every backend, and a create that names
+            # no peer never needs it (``routes/auth.py``'s rule for its own imports).
+            from local_operator.network.types import MeshRefusal
+            from local_operator.server.utils.desktop_mesh import create_on_peer
+            from local_operator.server.utils.desktop_receipts import Unclaimed
+
+            try:
+                detail = await asyncio.to_thread(
+                    create_on_peer,
+                    host(request).root,
+                    body.peer,
+                    cwd=body.cwd,
+                    model=(
+                        {
+                            "provider": spec.provider,
+                            "model_id": spec.model_id,
+                            "reasoning_effort": spec.reasoning_effort,
+                        }
+                        if spec is not None
+                        else None
+                    ),
+                    # THE PICK TRAVELS, and the peer resolves it. The relay on this
+                    # side reconciles the definition first (``definitions.push_to_peer``),
+                    # so this works against a peer that has never seen the profile —
+                    # which is the case this route used to refuse.
+                    target=body.target.model_dump() if body.target else None,
+                )
+            except MeshRefusal as error:
+                document = {
+                    "refused": True,
+                    "code": error.code,
+                    "message": str(error),
+                }
+                if error.code in _CREATE_UNCONFIRMED_CODES:
+                    # THE REQUEST MAY HAVE ARRIVED: the peer stopped answering after
+                    # this device sent the frame, so the session may exist on it. The
+                    # claim is KEPT (returned, not raised) so a retry replays this
+                    # answer instead of minting a second conversation.
+                    return document
+                raise Unclaimed(document) from None
+            # EVERY FIELD THE CALLER NEEDS IS FORWARDED, and the reason is the class of
+            # defect this feature keeps producing: a value the PEER sends that this route
+            # does not put in its own reply is a value that EXISTS and silently
+            # disappears at the boundary (review round 1, MAJOR 2 — the peer has answered
+            # ``warming``/``admitted``/``model`` since Q4b and the desktop saw none of
+            # them, so it could not tell "joining" from "ready" and had no field in
+            # which to tell the truth). The fields are declared on ``CreatedSession``:
+            # adding one here without adding it there drops it again.
+            #
+            # THE BINDING IS THE PEER'S OWN ANSWER, and that is the same rule rather than
+            # an exception to it: a remote session has no LOCAL attachment, it names the
+            # agent or team recorded on the session's own marker, and that marker lives on
+            # the peer — so resolving the name here would be a claim about a store that
+            # does not hold this session. A create that named no target gets the peer's
+            # ``null`` and reports ``None`` for both.
+            peer_reply = detail if isinstance(detail, dict) else {}
+            created: dict[str, Any] = {
+                "session_id": str(peer_reply.get("session_id") or ""),
+                "binding": {
+                    "agent": ((peer_reply.get("agent") or {}) or {}).get("name"),
+                    "team": ((peer_reply.get("team") or {}) or {}).get("name"),
+                },
+                # AN ABSENT ``admitted`` READS AS NOT ADMITTED: the claim it carries is
+                # that an owner exists for the conversation, only the peer can make it,
+                # and a reply that did not say so must not be reported as ready.
+                "admitted": bool(peer_reply.get("admitted")),
+                "warming": bool(peer_reply.get("warming")),
+                "detail": str(peer_reply.get("detail") or ""),
+                # The rest of the peer's receipt, so the renderer can show what it
+                # needs (whether the profile's instructions were applied, and what the
+                # session is actually running on) without a second round trip.
+                "identity": {
+                    "agent": peer_reply.get("agent"),
+                    "team": peer_reply.get("team"),
+                    "model": peer_reply.get("model"),
+                },
+            }
+            model_result = peer_reply.get("model")
+            if isinstance(model_result, dict):
+                created["model"] = {
+                    "applied": bool(model_result.get("applied")),
+                    "detail": str(model_result.get("detail") or ""),
+                }
+            return created
         pool = host(request)
         target = body.target.model_dump() if body.target else None
         session_id = await pool.create(
@@ -1821,36 +2085,65 @@ async def create_session(body: CreateSession, request: Request):
             # nothing), then the target (whose registry build materialises
             # ``<config>/agents``). See ``DesktopSessions.create`` /
             # ``resolve_working_directory``.
-            await asyncio.to_thread(resolve_working_directory, body.cwd)
-            if body.model is not None:
-                # Off the loop: the catalogue it reads is a disk document, and for
-                # an unshipped model the metadata resolver may consult the provider.
-                spec = await asyncio.to_thread(_draft_model_spec, body.model)
-            if body.target is not None:
-                target_row = body.target.model_dump()
-                from local_operator.agents import AgentRegistry
-                from local_operator.server.utils.desktop_profiles import validate_target
-                from local_operator.teams import TeamRegistry
+            #
+            # A PEER CREATE SKIPS THE TWO ADMISSIONS THAT ARE ABOUT THIS MACHINE, and
+            # THE TARGET IS NO LONGER ONE OF ITS REFUSALS. ``cwd`` names a path HERE
+            # and ``target`` names a registry HERE, so neither is validated on this
+            # side: the peer owns the store the session will live in, and it is the
+            # only party that can say whether the name resolves. The model IS admitted
+            # (its catalogue is global, so the same pick is servable on the peer and a
+            # bad one still 422s here) — and the target is validated by the PEER's own
+            # resolution, which refuses by name rather than falling back to its default
+            # agent. Forwarding the target rather than refusing it is the whole point of
+            # the definitions sync: this route used to answer 422 with "pick the target
+            # after moving it home" because a name could not travel.
+            if body.peer:
+                if body.model is not None:
+                    spec = await asyncio.to_thread(_draft_model_spec, body.model)
+            else:
+                await asyncio.to_thread(resolve_working_directory, body.cwd)
+                if body.model is not None:
+                    # Off the loop: the catalogue it reads is a disk document, and for
+                    # an unshipped model the metadata resolver may consult the provider.
+                    spec = await asyncio.to_thread(_draft_model_spec, body.model)
+                if body.target is not None:
+                    target_row = body.target.model_dump()
+                    from local_operator.agents import AgentRegistry
+                    from local_operator.server.utils.desktop_profiles import (
+                        validate_target,
+                    )
+                    from local_operator.teams import TeamRegistry
 
-                await asyncio.to_thread(
-                    validate_target,
-                    AgentRegistry(pool.root),
-                    TeamRegistry(pool.root),
-                    target_row["kind"],
-                    target_row["name"],
-                )
-            if body.draft_id is not None:
-                # The DRAFT id is an admission of its own, decided AFTER the
-                # three body admissions above and BEFORE the claim: a draft that
-                # already became a conversation must refuse its retry with the
-                # refusal — not leave a pending receipt row behind that answers
-                # "outcome indeterminate" to the client's next attempt.
-                # ``assert_draft_unmaterialised`` is read-only (it never spends
-                # the draft; that is ``create``'s job) and ``create`` re-asks it
-                # itself, after its own admissions — so the two call sites cannot
-                # disagree.
-                await asyncio.to_thread(pool.assert_draft_unmaterialised, body.draft_id)
-        return reply(await receipts(request).run(key, body.model_dump(), create))
+                    await asyncio.to_thread(
+                        validate_target,
+                        AgentRegistry(pool.root),
+                        TeamRegistry(pool.root),
+                        target_row["kind"],
+                        target_row["name"],
+                    )
+                if body.draft_id is not None:
+                    # The DRAFT id is an admission of its own, decided AFTER the
+                    # three body admissions above and BEFORE the claim: a draft that
+                    # already became a conversation must refuse its retry with the
+                    # refusal — not leave a pending receipt row behind that answers
+                    # "outcome indeterminate" to the client's next attempt.
+                    # ``assert_draft_unmaterialised`` is read-only (it never spends
+                    # the draft; that is ``create``'s job) and ``create`` re-asks it
+                    # itself, after its own admissions — so the two call sites cannot
+                    # disagree.
+                    await asyncio.to_thread(pool.assert_draft_unmaterialised, body.draft_id)
+        result = await receipts(request).run(key, body.model_dump(), create)
+        if result.get("refused"):
+            # RAISED AFTER THE JOURNAL SETTLED THE CLAIM, the wakes family's rule: a
+            # recorded refusal is what a retry replays, a released one re-runs. The
+            # MESSAGE IS THE PEER'S own sentence, never re-derived here — that device
+            # is the only party that saw which guard or which rung fired.
+            code = str(result.get("code") or "peer_refused")
+            raise HTTPException(
+                503 if code in _CREATE_UNCONFIRMED_CODES else 409,
+                {"code": code, "message": str(result.get("message") or "that device refused")},
+            )
+        return reply(result)
 
 
 @router.post("/v1/desktop/sessions/preview", response_model=CRUDResponse[DraftPreviewPayload])
@@ -2045,6 +2338,28 @@ async def snapshot(session_id: str, request: Request):
     # (``READ_ATTACH_BUDGET_S``) and the cold facade serves it with a
     # ``cold_reason``; the previous envelope answered 503 "Session owner is
     # unavailable" after ~17 s for a runtime whose loop was merely busy.
+    # A PEER'S CONVERSATION IS OPENED BY THIS READ NOW (mesh slice DB2). The row a
+    # click lands on is resolved inside the pool
+    # (``DesktopSessions.session``): a local id answers from its own directory, and
+    # an id ANOTHER DEVICE holds resolves to a bridge whose owner is that device,
+    # so the snapshot serves the peer's transcript over the mesh and every control
+    # act (a prompt, a steer, stop, a model switch) executes on the PEER's runtime.
+    #
+    # WHICH CASES STILL REFUSE, and why each one is a refusal rather than a fault:
+    #
+    # * an UNREACHABLE peer — 409 ``session_is_remote``, carrying
+    #   ``remote_open.unreachable_peer_sentence``: the SAME sentence the TUI refuses
+    #   the same state with. The row is visible, so a 404 would be false about the
+    #   user's own conversation, and a viewer built for a device that cannot answer
+    #   can never bind;
+    # * a peer that is reachable but whose runtime will not serve this surface at
+    #   BIND TIME (an older build without the desktop watch capability, a relay that
+    #   stopped between the row's listing and the dial) — the attach client's own
+    #   vetted sentence, through the ladder's ``ConnectionError`` arm, because a
+    #   runtime that did not answer is a retry rather than a refusal;
+    # * a genuinely unknown id — the shared 404, unchanged, and still answered by
+    #   the same lookup (one ``is_dir`` plus the peer cache, and no socket at all on
+    #   a machine in no network).
     # ``allow_draft``: one of the five doors a new-chat pane may hold before a
     # session exists (spec §1.3); a draft answers the cold/empty shape.
     async with (
@@ -2052,6 +2367,50 @@ async def snapshot(session_id: str, request: Request):
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         return reply(await bridge.snapshot())
+
+
+async def _remote_open_refusal(request: Request, session_id: str) -> None:
+    """Refuse a peer's id IN WORDS when the desktop cannot open it, else do nothing.
+
+    THE ROW A USER CAN SEE MUST NOT READ AS UNKNOWN. With ``include_peers`` a
+    sidebar row can name a conversation another device holds, and a click reaches
+    this route first; without this, the answer was the shared 404 ("Requested
+    session, profile, team or subscription not found") about the user's own
+    conversation — a dead affordance whose sentence is also false. So the id is
+    looked up in the peer projection (cache-only on a hit, one cached read on a
+    miss, and NO relay work at all on a machine in no network) and answered as a
+    409 whose ``message`` names the device and the two ways to work with the
+    conversation today.
+
+    409 RATHER THAN 404, by the rule the delete route states for its own refusals:
+    the conversation exists and the user can see it, so "not found" would be a lie
+    about their own work. The ``code`` is what a renderer branches on; the sentence
+    is what a person reads, and it is written in the same register as the TUI's own
+    remote-session notice (that surface names the device and the way in).
+
+    THE COST ON THE ORDINARY PATH IS ONE CACHE LOOKUP, and this is the important
+    half: every local session answers from the projection's own directory check,
+    which is why this can sit in front of the hottest read on this plane.
+    """
+    from local_operator.server.utils.desktop_mesh import remote_owner
+
+    owner = await asyncio.to_thread(remote_owner, host(request).root, session_id)
+    if owner is None:
+        return
+    device_id, device_name = owner
+    label = device_name or device_id
+    raise HTTPException(
+        409,
+        {
+            "code": "session_is_remote",
+            "message": (
+                f"{session_id} lives on {label}, and this desktop cannot open a "
+                "conversation on another device yet. Move it home with "
+                f"`lop sessions move {session_id} --to local`, or pilot it from the "
+                f"terminal with `/network sessions --peer {label} --engage {session_id}`."
+            ),
+        },
+    )
 
 
 @router.get("/v1/desktop/sessions/{session_id}/history", response_model=CRUDResponse[HistoryPage])
@@ -2363,10 +2722,20 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 async def admit():
                     nonlocal admitted
                     assert bridge.remote is not None
+                    # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
+                    # owner externalises the payload into ITS store, so the row
+                    # carries a digest this device could not resolve (§§2.2).
+                    # ``prepare_peer_images`` bounds each image exactly as the
+                    # owner will, stages THOSE bytes, and returns the list to
+                    # admit — the owner journals what it receives, so sending
+                    # anything else is the defect. Local sessions are untouched.
+                    images = await bridge.prepare_peer_images(
+                        [image.model_dump() for image in body.images]
+                    )
                     detail, duplicate = await bridge.remote.admit_prompt(
                         body.text,
                         command_id=body.request_id,
-                        images=[image.model_dump() for image in body.images],
+                        images=images,
                         steer=body.mode == "steer",
                     )
                     admitted = True
@@ -2533,10 +2902,23 @@ async def command(session_id: str, body: Command, request: Request):
             assert bridge.remote is not None
             await bridge.remote.bind_runtime()
             await bridge.refresh_watch()
+            # THE THIRD DOOR, AND THE ONE THAT ALREADY BOUNDS ON THIS SIDE:
+            # ``decode_images`` IS the owner's ingest (``image_blocks``), so the
+            # blocks sent here are the bytes the owner journals — whether the
+            # RUNTIME completes the command's receipt for itself
+            # (``serving.slash_images``: "the owner completes them through normal
+            # admission, including images") or this host re-admits it below with
+            # the same bounded bytes. Only the write is owed, and it is owed
+            # before the call: the owner can journal the row while this request
+            # is still in flight.
+            slash_images = await decode_images(body.images)
+            await bridge.stage_ingested_images(
+                [{"data_b64": block.data, "mime_type": block.mime_type} for block in slash_images]
+            )
             outcome = await bridge.remote.route_shared_slash(
                 spec.name,
                 body.args,
-                images=await decode_images(body.images),
+                images=slash_images,
             )
             if outcome is None or outcome.get("kind") == "noop":
                 return {"command": spec.name, "result": native_action(spec, session_id, body.args)}
@@ -2859,8 +3241,21 @@ async def archive(session_id: str, body: Archive, request: Request):
     listing: every surface that offers rows filters them out through the scan
     unless its own ``include_archived`` asked for them, so a client cannot
     archive a conversation and keep seeing it in a list it did not ask to change.
+
+    A PEER'S SESSION IS ARCHIVED ON THE PEER, through the owner's own
+    implementation (``mobility.lifecycle``): the archive index is a file beside the
+    session, so writing it here would archive a conversation on a device that does
+    not hold it — and the row the user sees would keep its state while the owner's
+    own listing said the opposite. The 200 keeps this route's contract (the state the
+    caller ASKED for), because that is what the client reconciles its row on, and an
+    owner's refusal carries the owner's own sentence.
     """
     async with errors(request):
+        remote = await _remote_lifecycle(
+            request, session_id, action="archive" if body.archived else "unarchive"
+        )
+        if remote is not None:
+            return reply(remote)
         return reply(await host(request).set_archived(session_id, body.archived))
 
 
@@ -2919,8 +3314,21 @@ async def delete_session_route(session_id: str, body: ConfirmDeletion, request: 
     re-read after a delete, the catalogue lists the surviving conversation and
     nothing else. What a client holds until it re-reads is its own state, not this
     daemon's.
+
+    A PEER'S SESSION IS DELETED ON THE PEER, through the owner's own
+    implementation, and the 409 ``session_delete_refused`` SHAPE IS UNCHANGED: the
+    sentence is the owner's (its guards are the ones that stat the records, the wake
+    index and the spool) and the code is the family's, so a client that already
+    branches on it needs no change. The confirmation is forwarded as the owner's own
+    ``confirmed`` flag, which is what makes a delete without one a dry run rather
+    than a deletion.
     """
     async with errors(request):
+        remote = await _remote_lifecycle(
+            request, session_id, action="delete", confirm=bool(body.confirmed)
+        )
+        if remote is not None:
+            return reply(remote)
         return reply(await host(request).delete(session_id))
 
 

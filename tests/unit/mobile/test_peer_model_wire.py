@@ -23,7 +23,7 @@ from local_operator.mobile.peer_send import (
 )
 from local_operator.mobile.types import validate_control_frame
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.server import _LOCAL_AUTHORITY, RuntimeServer
 from local_operator.tools.builtin import _describe_send_approval, execute_send
 from tests.unit.session.runtime.test_server import (
     FakeHandle,
@@ -52,10 +52,16 @@ class _OldHandle(FakeHandle):
 class _OldRuntime(RuntimeServer):
     """A registrant built before the op: its dispatch answers unknown-op."""
 
-    async def _dispatch(self, op, frame, *, deliver=None):  # noqa: ANN001, ANN202
+    # The override MIRRORS the base signature, ``authority`` included, even
+    # though this host never carries a connection authority of its own: it
+    # stands in for the real dispatch, so a parameter the base gained and the
+    # override dropped would be a call this host cannot be handed at all.
+    async def _dispatch(  # noqa: ANN001, ANN202
+        self, op, frame, authority=_LOCAL_AUTHORITY, *, deliver=None
+    ):
         if op == "peer_set_model":
             raise ValueError(f"unknown op: {op!r}")
-        return await super()._dispatch(op, frame, deliver=deliver)
+        return await super()._dispatch(op, frame, authority, deliver=deliver)
 
 
 def test_the_frame_validator_refuses_a_malformed_switch() -> None:

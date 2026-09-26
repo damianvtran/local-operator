@@ -120,19 +120,28 @@ class CompactionOutcome:
 #: process asking. ``"this-process"`` means the loop runs on this thread pool
 #: and the transcript is written here; ``"this-machine"`` means a separate
 #: process on this host (the ordinary `lop` viewer, reached over a loopback
-#: socket); ``"unknown"`` is the conservative arm for a facade that cannot
-#: prove either — it exists because the honest answer to "is a config write
-#: going to govern this runtime?" is sometimes "cannot tell", and collapsing
-#: that into a bool is what made the predicate it replaces wrong five times.
+#: socket); ``"another-machine"`` means the owner is a runtime on another device,
+#: reached through this device's mesh relay; ``"unknown"`` is the conservative
+#: arm for a facade that cannot prove any of them — it exists because the honest
+#: answer to "is a config write going to govern this runtime?" is sometimes
+#: "cannot tell", and collapsing that into a bool is what made the predicate it
+#: replaces wrong five times.
 #:
-#: There is deliberately no ``"another-machine"`` member. Every listener and
-#: every dialer in this tree binds or dials ``127.0.0.1`` only
-#: (``session/runtime/server.py``, ``viewer_server.py``, ``control.py``,
-#: ``viewer_client.py``, ``mobile/attach_client.py``, ``peer_client.py``,
-#: ``daemon.py``), and ``viewer_server.py`` states it as a security invariant.
-#: A cross-host runtime cannot occur, so naming it would re-create the dead
-#: axis ``is_remote`` named.
-RuntimeLocality = Literal["this-process", "this-machine", "unknown"]
+#: ``"another-machine"`` IS A REAL MEMBER NOW, and the reason the union was
+#: three-valued is the reason it is four rather than three-with-a-lie. The
+#: paragraph that used to stand here said a cross-host runtime "cannot occur"
+#: because every listener and dialer in this tree binds or dials ``127.0.0.1``.
+#: That is still true of every listener — the mesh relay's peer listener is the
+#: one deliberate exception, and it is authenticated end to end — but it is no
+#: longer true of the question this type answers: a ``RemoteOwner``
+#: (``network/projection.py``) attaches a viewer here to a runtime there, over
+#: exactly those loopback sockets chained through the relay. The answer in that
+#: case is known, not merely safe, which is strictly more information than
+#: ``"unknown"``: a config write here will NOT govern that runtime.
+#:
+#: Every ``==`` comparison over this union is therefore load-bearing, and
+#: ``tests/unit/session/test_runtime_locality_union.py`` walks the tree for them.
+RuntimeLocality = Literal["this-process", "this-machine", "another-machine", "unknown"]
 
 #: Where an accepted-but-undelivered gate reply goes, for a host with a surface
 #: for it: the gate's KIND and its IDENTITY, ``(kind, request_id,

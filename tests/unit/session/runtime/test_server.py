@@ -5957,3 +5957,57 @@ async def test_a_bind_still_parked_past_the_grace_hands_off_and_leaves_the_task_
         assert not bind_task.cancelled()
     finally:
         bind_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_the_un_imaged_slash_op_carries_the_connections_authority() -> None:
+    """R2-4: the frame's own carrier delivers `locality`/`capabilities`, not just its imaged twin.
+
+    Every gate on the owner's side is asked with a connection's resolved facts, and
+    a gate that is never given them can only guess. The imaged half of the ``slash``
+    op was pinned by a two-relay test; the UN-IMAGED half — the branch that reaches
+    a TUI-hosted owner's own terminal — had nothing asserting that
+    ``RuntimeServer`` delivers them at all, so mutating the forward to ``{}`` failed
+    one test out of 184 and left this branch unproven.
+
+    A handle double that ACCEPTS the two keywords is the discriminator: a double that
+    does not take them is called the narrow way and cannot show a missing forward.
+    """
+    from local_operator.session.runtime.server import _ClientConn
+
+    seen: list[dict[str, Any]] = []
+
+    class _SlashHandle(FakeHandle):
+        async def slash(  # noqa: ANN001, ANN202
+            self, command, args, *, locality=None, capabilities=None
+        ):
+            seen.append({"command": command, "locality": locality, "capabilities": capabilities})
+            return f"ran /{command}"
+
+    handle = _SlashHandle()
+    server = RuntimeServer(handle, kind="tui")
+    sent: list[dict[str, Any]] = []
+
+    async def capture(target: Any, frame: dict[str, Any]) -> None:  # noqa: ANN001
+        sent.append(frame)
+
+    server._send_to = capture  # type: ignore[assignment]
+    conn = _ClientConn(writer=cast(Any, object()), kind="attach")
+    # The two facts a dialling relay resolves for a member, set the way the auth
+    # path sets them (``locality`` from the frame, ``capabilities`` from the
+    # member row): a ``drive`` member, exactly as the two-relay cells use.
+    conn.locality = "remote"
+    conn.capabilities = frozenset({"list", "view", "prompt", "steer", "stop", "slash"})
+    server._clients[id(conn.writer)] = conn
+
+    await server._on_request(
+        {"op": "slash", "req": 1, "command": "goal", "args": "read the logs"}, conn
+    )
+
+    assert seen == [
+        {
+            "command": "goal",
+            "locality": "remote",
+            "capabilities": frozenset({"list", "view", "prompt", "steer", "stop", "slash"}),
+        }
+    ], seen

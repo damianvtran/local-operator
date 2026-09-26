@@ -62,6 +62,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -584,7 +585,50 @@ def _spawn_runtime(
         handoff.close()
         handle.close()
     setattr(process, "lop_capture_path", capture)
+    _harvest_on_exit(process)
     return process
+
+
+def _harvest_on_exit(process: "subprocess.Popen[bytes]") -> None:
+    """Wait on the child on a daemon thread, so its exit does not leave a zombie.
+
+    THE CHILD IS DETACHED AND NOBODY OWNED ITS EXIT. ``detached_popen_kwargs``
+    gives it its own session, and the engage loop only ever calls ``poll()`` — so a
+    runtime that exits (a loser leaving without the lease, a ``/stop``, an
+    idle-exit, a move's retirement) stayed in the process table as ``<defunct>``
+    under whoever spawned it until THAT process exited. Measured on a real relay
+    across two EC2 peers: three ``Zs`` children of the relay on one device and one
+    on the other, alive as corpses for 18-47 minutes, one per remote engage
+    (cross-host QA, Q-XH-5). A relay is the spawner that lives for weeks, so that is
+    where they piled up.
+
+    WHY A WAITING THREAD RATHER THAN ``SIGCHLD`` OR ``waitpid(-1)``.
+    ``SIGCHLD`` ignored would reap at the kernel, but it is process-wide and this
+    spawner is also every ``lop exec`` and the desktop server: it would change what
+    ``subprocess`` sees for every OTHER child in the process, and a reduced exit
+    status is exactly the shape of a masked failure. ``waitpid(-1)`` has the same
+    reach — it can steal a status some other thread is waiting on. This reaps the
+    ONE child this call created, by pid, and touches nothing else. ``Popen.wait``
+    is safe to run beside the engage loop's ``poll()``: CPython serialises both on
+    the object's own ``_waitpid_lock``, so the loop still reads the true status.
+
+    The thread is a daemon and it blocks until the child exits, so a spawner that
+    exits first (a CLI one-shot) leaves nothing behind and the cost on a long-lived
+    relay is one parked thread per runtime it has started.
+
+    A REDUCED DOUBLE IS NOT A CHILD. Tests pass stand-in process objects through this
+    path (``_Popen`` in test_launch_arbitration has no ``wait``), and this file's own
+    ``remember_operator_cap`` call guards the same way for the same reason: a spawn
+    that cannot name a pid, or a process object that cannot be waited on, is not
+    something this process can reap, and inventing a child here would be the fake
+    driving the product.
+    """
+    wait = getattr(process, "wait", None)
+    pid = getattr(process, "pid", None)
+    if not callable(wait) or not isinstance(pid, int):
+        return
+    thread = threading.Thread(target=wait, name=f"reap-{pid}", daemon=True)
+    thread.start()
 
 
 #: Upper bound on captured child output quoted back to a caller. Enough for a
@@ -759,6 +803,87 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         client.close()
 
 
+def recover_stale_handoff(config_dir: Path, session_id: str) -> list[dict[str, Any]]:
+    """Apply the move's crash recovery to ``session_id``, if nobody live owns the entry.
+
+    THE AUTOMATIC TRIGGER, AND WHY IT HAS TO EXIST IN THE PRODUCT. ``reconcile`` was
+    correct and complete and NOTHING CALLED IT: the crash tests passed only because
+    they invoked it by hand, so a stale ``prepared`` entry left by a relay that died
+    blocked the owner's own conversation until a human happened to run another move
+    of the same id, and a destination stopped just after its ``os.replace`` could
+    not be opened (review round 1, M-3). Recovery now runs on three automatic
+    points: a relay STARTING on this root (``mobility.recover_on_start``), the first
+    ENGAGE of the id (here), and the first MOVE attempt (``local_move_handler``,
+    which already reconciled).
+
+    THE INSTANCE RULE IS THE SAFETY PROPERTY, and it is why this reads the journal
+    before it does anything. An entry is not evidence of a crash: ``prepared`` is
+    the normal state of a move whose copy is being made right now. So an entry
+    written by the relay CURRENTLY running on this root — or one that names no
+    writer at all while a relay is running, where the writer cannot be established
+    — is skipped, because recovering it could roll a live handoff back. Only an
+    entry whose writer is provably not this root's relay is applied, and with no
+    live relay there can be no live move (every phase of one is driven from a
+    relay), so an entry is then a leftover by definition.
+
+    BEST EFFORT BY CONTRACT: it swallows its own failures and reports ``[]``, and the
+    launch guard still refuses afterwards. Refusing is the fail-closed direction;
+    recovering is the convenience, so a recovery that cannot run must never turn a
+    refusal into a spawn.
+    """
+    from local_operator.session.placement import handoff_in_flight
+
+    try:
+        entry = handoff_in_flight(config_dir, session_id)
+    except Exception:  # noqa: BLE001 — an unreadable journal is the guard's refusal
+        return []
+    if not entry:
+        return []
+    # A HANDOFF THAT ALREADY ARRIVED IS NOT IN FLIGHT (review round 2's ``p1c``): ...
+    # asked BEFORE the instance rule, because a promote that landed and raised leaves an
+    # entry owned by the relay that is still running, which every rule below deliberately
+    # skips — and then the conversation sits on this device with an engage refused.
+    try:
+        from local_operator.network import mobility as _mobility
+
+        if _mobility.settle_promoted_handoff(config_dir, session_id):
+            return [{"session_id": session_id, "action": "settled", "phase": "committed"}]
+    except Exception:  # noqa: BLE001 — best effort by contract; the guard still refuses
+        logger.debug("runtime: could not settle a finished handoff for %s", session_id)
+    try:
+        own_instance = _live_relay_instance(config_dir)
+        wrote = str(entry.get("instance_id") or "")
+        if own_instance and (not wrote or wrote == own_instance):
+            # EITHER THIS RELAY'S OWN IN-FLIGHT MOVE, OR AN ENTRY WHOSE WRITER CANNOT
+            # BE ESTABLISHED while a relay is running. Both are skipped, and the
+            # second is the fail-closed direction: with a live relay on this root an
+            # entry that names no instance could be a handoff it is driving right
+            # now (an older build's entry, or one written by hand), and rolling that
+            # back is the sabotage the instance rule exists to prevent. The guard
+            # still refuses an engage, which is the safe answer.
+            return []
+        from local_operator.network import mobility
+
+        return mobility.reconcile(config_dir, only=session_id, own_instance=own_instance)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("runtime: stale-handoff recovery failed for %s", session_id, exc_info=True)
+        return []
+
+
+def _live_relay_instance(config_dir: Path) -> str:
+    """The instance id of the relay running on this root, or ``""`` if none is.
+
+    ``find_own_relay`` answers "is there a relay to TALK to" — a record whose owner
+    has stopped heartbeating is excluded — and that is exactly the question here:
+    a wedged relay is not driving a live handoff, and treating it as absent lets
+    recovery proceed on an entry it can no longer settle.
+    """
+    from local_operator.network import store
+
+    record = store.find_own_relay(config_dir)
+    return str(getattr(record, "instance_id", "") or "")
+
+
 async def engage_runtime(
     session_id: str,
     cwd: str,
@@ -803,6 +928,48 @@ async def engage_runtime(
     reason, where a cancelled task would leak that tempfile and lose it.
     """
     from local_operator.mobile.attach_client import find_runtime_record
+
+    # -----------------------------------------------------------------
+    # INV-1, GUARD 1: A SESSION BEING HANDED AWAY MUST NOT GET A RUNTIME.
+    # -----------------------------------------------------------------
+    # If this id has a move in flight, a runtime started here is the second writer
+    # the whole mobility design exists to make impossible: the destination is about
+    # to own the transcript, and a successor here would append to the same
+    # conversation from a directory that is about to be deleted — two trajectories,
+    # neither aware of the other. This is the SINGLE entry point every engage path
+    # uses (a local viewer's first message, the phone daemon, a scheduled wake,
+    # `lop exec`, and the relay's own `net_session_engage`), so one guard here
+    # covers all of them, and a second guard at any one caller would be a guard
+    # that the others do not have.
+    #
+    # The check is a read of one small JSON file, and it is a READ-ONLY dependency
+    # on a stdlib-only leaf (`session/placement.py`) so it costs nothing on the
+    # boot path. It FAILS CLOSED: a journal that exists but cannot be parsed
+    # refuses, because the two candidate answers are not symmetric — refusing costs
+    # a sentence and a file deletion, while proceeding can spawn a second runtime
+    # for a session mid-handoff.
+    #
+    # A session with NO journal reads as "not in transit", so the ordinary case is
+    # one `stat` — which is why this is a plain call and not `asyncio.to_thread`.
+    # The hand-off is off, the file is absent, and a thread hand-off to answer it
+    # costs more than the answer: this is on the path of every engage, including
+    # every message a user sends to a cold session.
+    from local_operator.session.placement import handoff_guard_refusal
+
+    # RECOVERY FIRST, REFUSAL SECOND (review round 1, M-3). A journal entry left by
+    # a relay that died is not a live handoff, and the guard cannot tell the two
+    # apart — so before it is consulted, any entry whose writer is not a relay still
+    # running on this root gets the §6.5 table applied to it. Without this, a stale
+    # ``prepared`` blocked the owner's own conversation after a restart until
+    # somebody happened to run another move of the same id, and a destination that
+    # died just after its ``os.replace`` stayed stuck with an engage that named the
+    # wrong device. The recovery is best effort by construction: it swallows its own
+    # failures and the guard still refuses afterwards, which is the fail-closed
+    # direction.
+    recover_stale_handoff(config_dir, session_id)
+    handed_off = handoff_guard_refusal(config_dir, session_id)
+    if handed_off:
+        raise RuntimeStartupError(handed_off)
 
     if not getattr(work, "command_id", ""):
         # Identity is what makes a retry safe. A caller that did not supply one

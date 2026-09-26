@@ -18,6 +18,7 @@ import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from functools import lru_cache
+from html import unescape
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -156,6 +157,57 @@ def terminal_svg(svg: str, columns: int, rows: int, profile: CaptureProfile) -> 
     return ET.tostring(root, encoding="unicode")
 
 
+#: One ``<text>`` element of an export, with its baseline ``y`` and its body.
+_TEXT_ELEMENT = re.compile(r'<text[^>]*\by="([\d.]+)"[^>]*>(.*?)</text>', re.S)
+_MARKUP = re.compile(r"<[^>]+>")
+
+
+def svg_text_runs_by_row(svg: str) -> list[list[str]]:
+    """The text of an exported frame, grouped by baseline, oldest row first.
+
+    Returns each row as its styled RUNS, because joining them is the caller's
+    policy: a reader that must not miss a phrase split across two styled spans
+    joins a row, while a reader asking which run holds a glyph must not. The
+    grouping is the part every caller got wrong in its own copy.
+
+    THREE THINGS ABOUT THIS EXPORT DEFEAT A NAIVE MATCH, and a census written
+    without knowing them is a check that can never fire — worse than no census,
+    because it looks like one. All three were measured on 2026-09-22 against this
+    helper's own export of the welcome splash:
+
+    * A ROW IS NOT A SUBSTRING OF THE FILE. ``terminal_svg`` hands every grapheme
+      cluster its own ``<tspan x=…>`` origin, so the row reading
+      ``! latest is v0.62.2 — /update`` is stored as ``>!</tspan><tspan
+      x="248">l``, and ``"latest is v" in svg`` is FALSE on a frame that paints it.
+    * ITS SPACES ARE U+00A0, NOT U+0020. The observed row joins to
+      ``'!\\xa0latest\\xa0is\\xa0v0.62.2\\xa0—\\xa0/update\\n'``, so even after
+      reassembling the row, ``"latest is v" in joined`` is still FALSE. Textual
+      pads cells with no-break space and this export preserves it.
+    * THE SAME FRAME HAS TWO FORMS, AND THIS HELPER IS HANDED BOTH. ``App.
+      export_screenshot`` (what the shot scripts census) escapes that padding as
+      the XML ENTITY ``&#160;`` — 201 of them in a 110x34 frame, and ZERO literal
+      U+00A0 bytes — while ``terminal_svg`` round-trips through ElementTree, which
+      DECODES the entity, so the artifact written to disk carries 200 literal
+      U+00A0 and no entity. A parse that folds only the literal form reports the
+      update row ABSENT on the export and PRESENT on the very same frame's
+      artifact: measured on one frame, ``hits=0`` against ``hits=1``, and the
+      census that believed the first wrote the artifact anyway (design round 6,
+      D34). So the body is XML-unescaped first (which is what the string means — an
+      escaped ``<`` in a frame is a character, not markup) and the no-break space is
+      folded after it, whatever form it arrived in.
+
+    The runs are therefore returned with no-break space folded to a plain space:
+    what a reader of the frame sees is a space, and a census is a comparison
+    against what is on the screen. A caller comparing a token with no spaces
+    (``◆``, ``connecting…``) is unaffected by the fold.
+    """
+    rows: dict[float, list[str]] = {}
+    for y, body in _TEXT_ELEMENT.findall(svg):
+        text = unescape(_MARKUP.sub("", body)).replace("\u00a0", " ")
+        rows.setdefault(float(y), []).append(text)
+    return [rows[y] for y in sorted(rows)]
+
+
 @lru_cache(maxsize=16)
 def font_provenance(profile: CaptureProfile) -> dict[str, Any]:
     """Measure fontconfig's local selection, used by the librsvg gallery path.
@@ -269,8 +321,50 @@ async def settle_status_line(pilot: Any, app: Any, *, tries: int = 200) -> None:
     )
 
 
+def refuse_flag_shaped_argument(value: str, *, what: str) -> None:
+    """Refuse a POSITIONAL that is really a mistyped flag, before it is used as a path.
+
+    WHY THIS EXISTS. ``python scripts/network_shot.py --out frames/`` mkdirs
+    ``--out`` — a directory whose name is a flag — inside whatever directory the
+    script was run from, and the same shape in ``sidebar_shot.py`` writes
+    ``--help.svg``. It happened twice in one review round, in a shared checkout,
+    and was cleaned up by hand both times: a scratch by-product of a capturer is
+    exactly the sort of thing that ends up in a commit nobody read. The author's
+    intent is never ambiguous (nobody has a directory called ``--out``), so the
+    loud refusal costs nothing and the silent directory costs a stray file.
+
+    ``what`` names the argument for the message, because "refusing -x" alone
+    does not tell a reader WHICH positional was wrong.
+    """
+    if value.startswith("-"):
+        raise SystemExit(
+            f"refusing {what} {value!r}: it starts with '-', so it is a mistyped flag "
+            "rather than a path (no capture writes into a directory named after a "
+            "flag). Pass the positional this script documents."
+        )
+
+
 def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | None = None) -> str:
-    """Save a native-size SVG and the cell/box measurements needed to audit it."""
+    """Save a native-size SVG and the cell/box measurements needed to audit it.
+
+    THE MEASUREMENTS DESCRIBE THE SCREEN THE SVG SHOWS, and that has to be said
+    because the first version did not do it: the widget walk used ``app.query``,
+    which Textual's ``App._get_dom_base`` resolves to the **default** screen —
+    "when querying from the app, we want to query the default screen" is its own
+    docstring — while ``app.export_screenshot()`` composites the ACTIVE one. For a
+    modal capture the two are different screens, so the SVG showed the panel and
+    the geometry beside it described the transcript underneath, complete with
+    ``screen.size = [98, 28]`` and no modal widget at all. Two of the mesh round's
+    frames shipped that way, byte-identical to each other and to a screen nobody
+    was looking at, which is strictly worse than shipping no geometry: it passes a
+    glance (design round 1, D1).
+
+    The active screen is named in the ``screen`` block, so a reader can tell WHICH
+    screen a file describes without inferring it from the widget list, and the
+    walk now starts from that same screen so the two can never disagree again. For
+    every capture that pushes no modal (the other 67 scripts) ``app.screen`` IS the
+    default screen, so this is a no-op there.
+    """
     if not app.CSS_PATH:
         raise ValueError("visual evidence requires a real app with its production CSS")
     profile = profile or CaptureProfile.from_env()
@@ -279,9 +373,13 @@ def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | No
         raise ValueError("capture destination must end in .svg; rasterize separately")
     path.parent.mkdir(parents=True, exist_ok=True)
     columns, rows = app.size
+    # Read ONCE, before anything is written: the screenshot, the widget walk and
+    # the ``screen`` block must all describe the same screen, and a screen pushed
+    # or popped mid-capture must not be able to split them.
+    screen = app.screen
     path.write_text(terminal_svg(app.export_screenshot(), columns, rows, profile))
     widgets = []
-    for widget in app.query("*"):
+    for widget in screen.query("*"):
         if not widget.display or not widget.region:
             continue
         widgets.append(
@@ -308,12 +406,13 @@ def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | No
                     for p in ([app.CSS_PATH] if isinstance(app.CSS_PATH, str) else app.CSS_PATH)
                 ],
                 "screen": {
-                    "size": list(app.screen.size),
-                    "virtual_size": list(app.screen.virtual_size),
-                    "region": list(app.screen.region),
+                    "class": screen.__class__.__name__,
+                    "size": list(screen.size),
+                    "virtual_size": list(screen.virtual_size),
+                    "region": list(screen.region),
                     "scrollbar": [
-                        app.screen.show_horizontal_scrollbar,
-                        app.screen.show_vertical_scrollbar,
+                        screen.show_horizontal_scrollbar,
+                        screen.show_vertical_scrollbar,
                     ],
                 },
                 "widgets": widgets,

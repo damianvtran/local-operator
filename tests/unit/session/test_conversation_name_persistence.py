@@ -18,7 +18,14 @@ and each has a test below:
   reach disk without an explicit flush.
 * **Only real changes are journalled.** A generated title that loses to a
   user-set one stores nothing, and re-appending the standing name every turn
-  would grow the transcript for no information.
+  would grow the transcript for no information — with ONE exception: a title the
+  transcript has never heard (a ``--name`` written to the SIDECAR by the mesh
+  relay, a wake's birth title) is journalled once at boot, because the two
+  records of one conversation must not disagree (QA round 13, Q13-1).
+* **The sidecar is the second source, not a cache.** A boot reads the entry
+  first and falls back to ``title.json`` when it cannot answer, so the name the
+  picker paints (``stored_session_title`` reads the sidecar first) is the name
+  the session wears.
 """
 
 from __future__ import annotations
@@ -180,6 +187,16 @@ async def test_an_unreadable_title_entry_never_refuses_the_resume(tmp_path) -> N
 
     Same tolerance ``_load_wake_schedules`` has: a malformed entry yields a
     nameless session, not a resume that fails.
+
+    AND THE OTHER SOURCE IS CONSULTED WHEN THE FIRST CANNOT ANSWER (QA round 13,
+    Q13-1). The title has two records — the transcript entry and the sidecar —
+    and this test used to corrupt only the first while asserting the result was
+    NO name, which is the answer a boot that reads the transcript alone gives.
+    The sidecar still held the name, and ``stored_session_title`` (what the
+    picker paints) reads the SIDECAR FIRST, so the old expectation had the
+    picker and the resumed session disagreeing about one conversation. Both
+    halves are pinned below: the sidecar answers when the entry is unreadable,
+    and a session with neither source usable is nameless rather than refused.
     """
     session = _session(tmp_path)
     await session.async_init()
@@ -193,9 +210,31 @@ async def test_an_unreadable_title_entry_never_refuses_the_resume(tmp_path) -> N
     assert '"text":42' in corrupted, "the entry was not corrupted — the test proves nothing"
     path.write_text(corrupted, encoding="utf-8")
 
-    resumed = _session(tmp_path)
-    assert resumed.conversation_name == ""
-    await resumed.dispose()
+    # The sidecar is the second record, and it still holds the name.
+    from local_operator.resume import TITLE_SIDECAR_NAME
+
+    sidecar = tmp_path / "sess" / TITLE_SIDECAR_NAME
+    assert sidecar.exists(), "the write did not reach the sidecar, so half of this test is void"
+    sidecar_bytes = sidecar.read_text(encoding="utf-8")
+
+    # ...and with the sidecar gone too, the session is NAMELESS rather than
+    # refused — the property this test has always been about. Built FIRST, so the
+    # healing below cannot have repaired the entry before this is measured.
+    sidecar.unlink()
+    nameless = _session(tmp_path)
+    assert nameless.conversation_name == ""
+    await nameless.dispose()
+
+    # With the sidecar back and the entry still unreadable, the session wears the
+    # sidecar's name — the same name `stored_session_title` paints in the picker,
+    # so the two surfaces are back in agreement — and the boot JOURNALS it, which
+    # is what stops the transcript from carrying a corrupt title forever.
+    sidecar.write_text(sidecar_bytes, encoding="utf-8")
+    from_sidecar = _session(tmp_path)
+    assert from_sidecar.conversation_name == "A good title"
+    await from_sidecar.dispose()
+    healed = _name_entries(tmp_path)
+    assert healed[-1]["text"] == "A good title", healed
 
 
 @pytest.mark.asyncio

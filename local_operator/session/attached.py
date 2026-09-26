@@ -110,6 +110,12 @@ from local_operator.session.frontend_state import (
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.model_selection import StoredModelSelection
 from local_operator.session.naming import ConversationName
+
+#: The mesh's ONE injection point into this facade (§3.1). Imported from
+#: ``session/owner.py`` rather than from ``network/`` on purpose: the seam must
+#: import without the network package, because this module is built on the CLI
+#: startup path for every ``lop`` invocation, mesh or not.
+from local_operator.session.owner import SessionOwner, SessionSeed, owner_for
 from local_operator.session.protocol import (
     CompactionOutcome,
     GateUndeliveredHandler,
@@ -984,9 +990,24 @@ class AttachedSession:
         session_id: str,
         takeover_factory: Callable[[], Any],
         surface: str = "terminal",
+        owner: "SessionOwner | None" = None,
+        seed: "SessionSeed | None" = None,
     ) -> None:
         self._config_dir = config_dir
         self._session_id = session_id
+        #: WHERE THIS SESSION'S RUNTIME LIVES, and how to reach it — the ONE
+        #: collaborator the mesh injects (mesh-session-mobility.md §3.1). Three
+        #: calls reach through it: the bind's discovery read, the bind's engage and
+        #: the dial's client construction. A caller that passes nothing gets
+        #: ``LocalOwner``, which is exactly the code this facade ran before the
+        #: seam existed — the zero-peer regression, byte for byte (R16 topology 0).
+        self._owner: SessionOwner = owner_for(owner, config_dir, session_id)
+        #: What a viewer knows about the session before it binds (§3.4). Only a
+        #: REMOTE viewer needs it — the sidebar paints before the bind lands, so a
+        #: viewer with no local transcript would otherwise paint "0 messages" and
+        #: an empty title. ``None`` (every local caller) means "read the store",
+        #: which is what ``cold()`` has always done.
+        self._seed = seed
         self._birth_model: ModelSpec | None = None
         self._model_selection_override = False
         self._takeover_factory = takeover_factory
@@ -1041,9 +1062,18 @@ class AttachedSession:
         #:
         #: The DESKTOP viewer takes the viewer contract too: its host survives
         #: the runtime and re-dials, so owner loss must leave it unbound rather
-        #: than dragging the lease into a process the user cannot see. Every
-        #: other surface keeps the legacy attach contract above.
-        self._can_go_cold = surface == "desktop"
+        #: than dragging the lease into a process the user cannot see.
+        #:
+        #: A REMOTE PLACEMENT TAKES IT UNCONDITIONALLY, and this is a protection
+        #: rather than a preference (§1.3). The takeover factory is the CLI's
+        #: closure that builds a LOCAL in-process session from a LOCAL transcript
+        #: (``cli.py``'s ``session_factory``); for a session whose transcript is on
+        #: another device there is nothing here to take over, and a facade that
+        #: tried would manufacture a second writer for one transcript the first
+        #: time a link blipped — INV-1's counterexample. So owner loss goes cold and
+        #: reports the device, and the mesh passes a ``_no_takeover``-shaped
+        #: factory.
+        self._can_go_cold = surface == "desktop" or not self._owner.placement.is_local
         #: The BUILD the runtime on the other end is running, read off its
         #: discovery record at dial. ``""`` on a facade that has never bound,
         #: and on one bound to a runtime older than the field — the TUI treats
@@ -1144,7 +1174,13 @@ class AttachedSession:
         self.mcp_startup: Any | None = None
         self._history: list[Any] = []
         self._live_history: dict[str, Any] = {}
-        self._display_window_requested = False
+        self._display_window_requested = not self._owner.placement.is_local
+        # (the line above used to be a flat ``False``. A REMOTE VIEWER ALWAYS
+        # ASKS FOR THE WINDOW — §3.4 — because the window is how history arrives
+        # over the wire at all, and a remote viewer without one would take the
+        # legacy local-transcript fallback, which for a remote session is the read
+        # that must not lie. The later `connect`/`cold` assignments still win,
+        # which is what keeps every local caller byte-identical.)
         self.saved_preview_partial = False
         self._runtime_record: SessionRecord | None = None
         self._display_refresh_lock = asyncio.Lock()
@@ -1622,6 +1658,8 @@ class AttachedSession:
         surface: str = "terminal",
         initial_model: ModelSpec | None = None,
         model_selection_override: bool = False,
+        owner: "SessionOwner | None" = None,
+        seed: "SessionSeed | None" = None,
     ) -> "AttachedSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -1644,8 +1682,13 @@ class AttachedSession:
             session_id=session_id,
             takeover_factory=takeover_factory,
             surface=surface,
+            owner=owner,
+            seed=seed,
         )
-        self._cwd = cwd
+        # A remote viewer passes the row's own cwd (or none) — it has no local
+        # transcript to take one from, and §3.4's seed is what keeps its first
+        # paint from reading as an empty conversation.
+        self._cwd = cwd or (seed.cwd if seed is not None else "")
         self._can_go_cold = True
         self._birth_model = initial_model
         self._model_selection_override = model_selection_override
@@ -2601,10 +2644,7 @@ class AttachedSession:
         retained dial in place (``attaching``), which is what the bridge's
         ``cold``/``cold_reason`` pair reports.
         """
-        from local_operator.mobile.attach_client import (
-            dialable_owner_record,
-            find_runtime_record,
-        )
+        from local_operator.mobile.attach_client import dialable_owner_record
 
         # FOREGROUND: an HTTP request is waiting on this acquisition, so it
         # announces itself rather than silently inheriting whatever envelope a
@@ -2643,10 +2683,19 @@ class AttachedSession:
                     # (review round 2, NIT-2).
                     self._note_read_cold_reason(self._runtime_record, self._runtime_pid)
                 return False
-            record, owner = await asyncio.to_thread(
-                find_runtime_record, self._config_dir, self._session_id
-            )
-            if record is None and owner is not None:
+            # THE OWNER SEAM, NOT THE LOCAL REGISTRY (mesh slice DB2). This asked
+            # ``find_runtime_record`` directly, which is a scan of THIS machine's
+            # run directory — so for a session another device holds it answered
+            # "no runtime" about a conversation whose runtime is live on the peer,
+            # and a desktop read could never attach to one (the read attach is the
+            # ONLY route by which a remote viewer's transcript arrives, since
+            # there is no local journal to parse). ``SessionOwner.locate`` is
+            # defined as the same contract for exactly this reason: the local
+            # owner delegates to that same function, so THIS DEVICE'S BEHAVIOUR IS
+            # UNCHANGED, and a remote owner asks the peer and reproduces both of
+            # its states ("no owner" and "an owner that published no record").
+            record, owner = await asyncio.to_thread(self._owner.locate)
+            if record is None and owner is not None and self._owner.placement.is_local:
                 # AN owner EXISTS but published no LIVE record: an older binary, a
                 # registrant that failed, or — the case a read must not call "no
                 # runtime" — a WEDGED record (pid alive, heartbeat stale), which
@@ -2655,6 +2704,15 @@ class AttachedSession:
                 # projection's identity check arbitrates, so one refused dial is
                 # the entire cost, and a stuck owner that recovers on its own is
                 # served instead of being reported as absent.
+                #
+                # LOCAL PLACEMENT ONLY, and that clause is the fix rather than
+                # tidiness: ``dialable_owner_record`` is a pid→record lookup in
+                # THIS machine's run directory, so asking it about a peer's pid
+                # could only ever match a record of some unrelated LOCAL runtime
+                # that happened to reuse the number. A remote owner's own
+                # ``locate`` has already asked the peer both of the questions this
+                # fallback exists for, and its answer is the only one that can be
+                # true here.
                 record = await asyncio.to_thread(dialable_owner_record, self._config_dir, owner)
             if record is None or self._disposed:
                 if budget is not None:
@@ -3564,15 +3622,11 @@ class AttachedSession:
             return
         if not self.is_cold:
             return
-        from local_operator.mobile.attach_client import (
-            dialable_owner_record,
-            find_runtime_record,
-        )
+        from local_operator.mobile.attach_client import dialable_owner_record
         from local_operator.session.runtime.launch import (
             ActionableConnectionError,
             RuntimeStartupError,
             WarmErrand,
-            engage_runtime,
         )
 
         # Computed BEFORE the engage, not after it. A background bind holds
@@ -3586,14 +3640,17 @@ class AttachedSession:
         preempt = None if foreground else self._foreground_arrived
 
         try:
-            await engage_runtime(
-                self._session_id,
-                self._cwd,
-                WarmErrand(
+            # ROUTED THROUGH THE OWNER SEAM (§3.1): "is there a runtime, and whose
+            # job is it to start one?" is a question a local install answers from
+            # ``run/mobile`` and a mesh viewer answers by asking the peer. The
+            # facade does not learn which — it hands over the errand and the
+            # budgets it has always handed over.
+            await self._owner.engage(
+                cwd=self._cwd,
+                warm=WarmErrand(
                     initial_model=self._birth_model,
                     model_selection_override=self._model_selection_override,
                 ),
-                config_dir=self._config_dir,
                 # The engage yields TIME, not the runtime: a candidate it
                 # spawned keeps constructing and the foreground caller's own
                 # engage finds it. See `engage_runtime`'s docstring for why a
@@ -3675,9 +3732,13 @@ class AttachedSession:
             # runtime that retired between attempts publishes a NEW record
             # under a new pid, and redialling the dead one would burn every
             # remaining attempt on a socket that cannot answer.
-            record, owner = await asyncio.to_thread(
-                find_runtime_record, self._config_dir, self._session_id
-            )
+            #
+            # THE OWNER ANSWERS, not the registry: a local owner re-reads
+            # ``find_runtime_record`` exactly as before, and a remote one asks the
+            # peer — reproducing both of its states, because the branch two lines
+            # down turns on the difference between "no owner" and "an owner that
+            # published no live record" (§3.4).
+            record, owner = await asyncio.to_thread(self._owner.locate)
             if self._disposed:
                 # Same rule as the guard at the top of the loop: never
                 # swallow a failure an earlier attempt already produced.
@@ -4220,11 +4281,36 @@ class AttachedSession:
         # viewer was constructed with — that one is the user's choice.
         if not self._cwd:
             self._cwd = str(getattr(record, "cwd", "") or "")
-        client = AttachClient(
+        # THE DIAL'S CLIENT COMES FROM THE OWNER (§3.1), and the callbacks stay
+        # here because they close over THIS facade's state. Which class gets
+        # built is the only thing the owner decides: ``AttachClient`` for a local
+        # runtime, ``RemoteSessionClient`` for one whose endpoint is this device's
+        # relay — and nothing below this line can tell the difference, which is the
+        # property the whole projection rests on.
+        #
+        # ``built`` preserves the callbacks' existing guard exactly. They used to
+        # read ``self._client is client``, which is False until the assignment
+        # after ``_connect_client`` returns; an empty ``built`` reproduces that
+        # window rather than letting a callback fire for a client the facade has
+        # not adopted yet.
+        built: list[AttachClient] = []
+
+        # NOT named ``live``: this function's own body reads the desktop lease
+        # into a ``live`` bool further down, and one name for a callback and a
+        # boolean is a shadowing that nothing but a type checker notices.
+        def once_adopted(handler: Any) -> Any:
+            def wrapped(data: Any) -> Any:
+                if built and self._client is built[0]:
+                    return handler(data)
+                return None
+
+            return wrapped
+
+        client = self._owner.make_client(
             lambda _projection: None,
             on_disconnected,
             events=True,
-            on_event=lambda data: (self._on_wire_event(data) if self._client is client else None),
+            on_event=once_adopted(self._on_wire_event),
             frontend_state=True,
             display_window=self._display_window_requested,
             surface=self._surface,
@@ -4237,25 +4323,22 @@ class AttachedSession:
             # THE declaration, read from the one constant both sides use — see
             # ``ATTACHED_SLASH_CONSUMERS`` for why it is not inlined here.
             slash_consumers=list(ATTACHED_SLASH_CONSUMERS),
-            on_frontend_sync=lambda data: (
-                self._on_frontend_sync(data) if self._client is client else None
-            ),
-            on_frontend_update=lambda data: (
-                self._on_frontend_update(data) if self._client is client else None
-            ),
-            on_retiring=lambda frame: (
-                self._on_retiring_frame(frame) if self._client is client else None
-            ),
+            on_frontend_sync=once_adopted(self._on_frontend_sync),
+            on_frontend_update=once_adopted(self._on_frontend_update),
+            on_retiring=once_adopted(self._on_retiring_frame),
             # THE PRODUCTION WIRING FOR THE PROMPT COPY (UX round 6, U3 = design
             # round 6, D3). This client is the pane a human is standing at when the
             # machine's key raises its presence prompt, so it is the one surface
             # where naming the session and the effect changes a decision. Scoped to
             # THIS client for the same reason `on_retiring` is: a copy about one
             # connection must not paint on a conversation another has adopted.
-            on_operator_prompt=lambda copy: (
-                self._on_operator_prompt(copy) if self._client is client else None
-            ),
+            # Through ``once_adopted`` rather than a second, inline spelling of the
+            # same guard: one guard with two spellings is how the two drift, and
+            # the helper is this fold's single definition of "only the client this
+            # facade has adopted".
+            on_operator_prompt=once_adopted(self._on_operator_prompt),
         )
+        built.append(client)
         try:
             await self._connect_client(client, record, deadline=deadline)
         except BaseException:
@@ -4514,6 +4597,18 @@ class AttachedSession:
         previous = self._display_history
         cold_painted, self._cold_painted_ids = self._cold_painted_ids, None
         if window is None or window.status != "ok":
+            # A REMOTE PLACEMENT REFUSES THE LEGACY FALLBACK (§3.4). The local
+            # replay below reads ``sessions/<id>/transcript.jsonl`` — a file that,
+            # for a session on another device, is either absent or a DIFFERENT
+            # conversation's history wearing the same id. Painting either one is
+            # the one local read that must not lie: "history comes from the wire,
+            # and only the wire". Refused with the remedy named rather than
+            # degrading, because the honest alternative is a session the viewer
+            # cannot open until the peer is updated.
+            if not self._owner.placement.is_local:
+                raise ConnectionError(
+                    "this peer's runtime is too old to serve history over the mesh; update it"
+                )
             # Legacy owners and oversized prose keep the honest full replay.
             self._display_history = None
             self._history_hydrated = True
@@ -7641,25 +7736,43 @@ class AttachedSession:
 
     @property
     def runtime_locality(self) -> RuntimeLocality:
-        """Always ``"this-machine"``, attached or cold.
+        """``"this-machine"`` for a local placement, ``"another-machine"`` remote.
 
-        Attached: ``AttachClient`` dials ``127.0.0.1`` only and the runtime
-        listener binds ``127.0.0.1`` only ("THE security invariant",
-        ``mobile/service.py``), so a reachable runtime is on this host by
-        construction rather than by inference.
+        The answer is PLACEMENT-dependent now, and the sentence that used to
+        stand here is what makes that necessary rather than a widening for its
+        own sake: *"``AttachClient`` dials 127.0.0.1 only and the runtime
+        listener binds 127.0.0.1 only … so a reachable runtime is on this host by
+        construction"*. Every one of those sockets is still loopback — what
+        changed is that a viewer can now reach one through a chain of them
+        (``RemoteSessionClient`` → this device's relay → the link → the peer's
+        relay → the peer's runtime), which is a runtime on another machine reached
+        entirely over loopback sockets (``mesh-session-mobility.md`` §1.3).
 
-        Cold: there is no runtime at all, and the next one this terminal starts
-        is local — which is why a cold viewer must NOT be treated as elsewhere.
-        Answering ``"unknown"`` here would refuse a config write in the single
-        most common moment a user sets a default (see #625).
+        Cold: there is no runtime at all, and the next one THIS viewer starts is
+        local — which is why a cold viewer must not be treated as elsewhere, and
+        why the remote arm is read from the owner rather than from the bind state.
+        Answering ``"unknown"`` for a cold local viewer would refuse a config
+        write in the single most common moment a user sets a default (#625).
 
-        This never returns ``"unknown"``. That arm is for a CALLER that cannot
-        prove locality — the registry scan in ``app.py::_session_runs_elsewhere``
-        has an except branch that must stay conservative. Locality is not
-        re-derived here because a property must not do registry I/O on a path
+        This never returns ``"unknown"``: that arm is for a CALLER that cannot
+        prove locality, and here the answer is known from the owner. Locality is
+        not re-derived here because a property must not do registry I/O on a path
         the status bar reads.
+
+        NO OWNER OBJECT YET: a viewer built by ``__new__`` (the protocol test) or
+        one still inside ``__init__``. There is no remote owner to have been placed
+        elsewhere, so the local answer is the honest one — the same answer the cold
+        arm gives, for the same reason. It is deliberately NOT ``"unknown"``: this
+        property promises never to answer that (readers branch on it, and the
+        ``"another-machine"`` arm exists precisely so that a KNOWN remote answer
+        does not have to be spelled ``"unknown"``), and ``getattr`` rather than a
+        bare ``self._owner`` is what keeps the promise true for every construction
+        path rather than only the one ``__init__`` takes.
         """
-        return "this-machine"
+        owner = getattr(self, "_owner", None)
+        if owner is None:
+            return "this-machine"
+        return "this-machine" if owner.placement.is_local else "another-machine"
 
     # -- SessionProtocol identity/state ------------------------------------
 

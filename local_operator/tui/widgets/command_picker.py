@@ -42,7 +42,7 @@ count.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Callable, NamedTuple, Sequence
+from typing import Any, Callable, NamedTuple, Sequence
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -2200,7 +2200,7 @@ class CommandPicker(Static):
         name, item = self._matches[index]
         styles = self._row_styles(index)
         if isinstance(item, ArgumentChoice):
-            return self._argument_row(name, item, width, styles)
+            return self._argument_row(self._painted_name(name, item), item, width, styles)
         return self._command_row(name, item, width, styles)
 
     def _row_styles(self, index: int) -> _RowStyles:
@@ -2500,8 +2500,11 @@ class CommandPicker(Static):
         for name, item in self._matches:
             if isinstance(item, ArgumentChoice):
                 # No slash and no alias run: an argument row's primary column is
-                # the bare value, which is all that is typeable.
-                cells = cell_len(name)
+                # the bare value, which is all that is typeable — or the string
+                # the row PAINTS in its place when the value is not what a reader
+                # should see (``/new``'s device picker). Measured on the painted
+                # one, so the column is sized for the cells it actually holds.
+                cells = cell_len(self._painted_name(name, item))
             else:
                 aliases = tuple(other for other in item.names if other != name)
                 cells = cell_len(f"/{name}")
@@ -2537,8 +2540,23 @@ class CommandPicker(Static):
         anyway, so letting the floor run away would drop the detail at every
         width and buy nothing.
         """
-        widest = max((cell_len(name) for name, _ in self._matches), default=0)
+        widest = max(
+            (cell_len(self._painted_name(name, item)) for name, item in self._matches), default=0
+        )
         return max(_MIN_NAME_CELLS, min(_PRIMARY_COLUMN_MAX, widest))
+
+    @staticmethod
+    def _painted_name(name: str, item: Any) -> str:
+        """The string the NAME column shows for this match.
+
+        One reader, because three places size or paint that column
+        (:meth:`_primary_column`, :meth:`_name_floor`, :meth:`_argument_row`) and
+        a row painted with one string while the column was measured against
+        another is a truncated row the fit-to-content width promised would fit.
+        """
+        if isinstance(item, ArgumentChoice) and item.display:
+            return item.display
+        return name
 
     # -- window -------------------------------------------------------------
     def _row_budget(self) -> int:

@@ -2992,6 +2992,20 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # toggle carries the archived mark, so two rows differing only here are
         # not the same row on screen.
         "archived",
+        # WHERE THE SESSION LIVES, and it is compared because a link CAN flap while
+        # a list is open: a peer's relay going down or answering again is an event
+        # this machine observes without the user doing anything, and it changes
+        # what the row says — the sidebar's `⇄` mark, its `(unreachable)` heading
+        # and its tooltip's clause are all read off these fields. Two rows
+        # differing only here are therefore not the same row on screen. Seven
+        # fields' worth of repaint is one tuple compare over ~200 rows, and the
+        # only thing that changes it is a device's state rather than a clock.
+        "locality",
+        "owner_device",
+        "owner_device_name",
+        "reachable",
+        "unreachable_reason",
+        "placement_stale",
     )
 
     #: Fields deliberately OUTSIDE the signature, each with the reason it is

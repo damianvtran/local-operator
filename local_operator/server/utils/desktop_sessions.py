@@ -32,6 +32,7 @@ from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import ModelSpec
 from local_operator.resume import (
     ORIGIN_SUBAGENT,
+    SessionRow,
     is_user_session,
     read_session_attachment,
     session_origin,
@@ -79,6 +80,11 @@ from local_operator.session.frontend_state import (
 )
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.page_cache import load_transcript_page
+
+# The ownership stamp and the local default: read once per row to publish the
+# mesh's placement fields, and imported at module level because this module
+# already carries the whole desktop bridge (mesh-session-mobility.md §9.2).
+from local_operator.session.placement import local_placement, read_stamp
 from local_operator.session.restored_rows import record_field, roster_records
 from local_operator.session.retention import DESKTOP_MARKER_NAME, session_activity
 from local_operator.session.runtime import registry
@@ -139,6 +145,20 @@ REPLAY_COUNT = 256
 REPLAY_BYTES = 8 * 1024 * 1024
 SUBSCRIBER_COUNT = 32
 BRIDGE_COUNT = 64
+
+#: How long a READ waits for its attach when the conversation is ANOTHER DEVICE'S.
+#:
+#: ``AttachedSession.READ_FIRST_FRAME_GRACE_S`` (50 ms) is the right envelope for a
+#: LOCAL session and the wrong one for a remote one, which is why this exists
+#: beside it rather than replacing it: a local read has already answered from the
+#: journal on this disk, so waiting buys nothing, while a peer's transcript has no
+#: local copy at all — 50 ms there is a first paint with nothing in it, and the
+#: renderer pays a second round trip (``/history``) to reconcile. Sized to the read
+#: attempt's own budget (``READ_ATTACH_BUDGET_S``): the same envelope the attempt
+#: lives inside, so a snapshot waits at most as long as the dial it is waiting for.
+#: A peer that does not answer inside it gets the cold paint and the ``attaching``
+#: flag exactly as before.
+REMOTE_READ_FIRST_FRAME_GRACE_S = READ_ATTACH_BUDGET_S
 
 #: How many recent one-shot announcements a bridge remembers by correlation id
 #: (see ``DesktopSessionBridge.publish_once``). Sized like the other bounded
@@ -1057,9 +1077,22 @@ class DesktopSessionBridge:
         *,
         retiring: Callable[[], bool] | None = None,
         cwd_unconfirmed: bool = False,
+        remote_row: SessionRow | None = None,
         draft: _Draft | None = None,
     ) -> None:
         self.root, self.session_id, self.cwd = root, session_id, cwd
+        #: A ``resume.SessionRow`` when ANOTHER DEVICE holds this conversation,
+        #: ``None`` for one on this disk. THE ONE FACT THAT MAKES THIS BRIDGE
+        #: REMOTE, and it is read twice below: the facade it builds (a viewer whose
+        #: owner is the peer — never a second writer here, INV-1) and the two reads
+        #: that must NOT be answered from this device's disk (progress receipts and
+        #: the durable transcript).
+        #:
+        #: Taken as the ROW rather than a device id, because the row is what the
+        #: viewer needs seeded: the peer's name for the conversation, its model and
+        #: its cwd come from this one read, and a second lookup would be a second
+        #: chance for the two to disagree.
+        self.remote_row = remote_row
         # Why this bridge must not start a runtime, asked of the daemon's own
         # state rather than cached: the flag flips ONCE, mid-life, when the
         # retirement poll runs (``server/retire.py``), and a bridge built before
@@ -1185,7 +1218,7 @@ class DesktopSessionBridge:
         self.warm_not_before = 0.0
         self.attention_task: asyncio.Task[None] | None = None
         self.attention: dict[str, Any] = {}
-        self.attention_poll_key: tuple[tuple[int, int, int], bool] | None = None
+        self.attention_poll_key: tuple[Any, bool] | None = None
         #: Set for the duration of ``_move_session`` (contract §C). Read by
         #: :meth:`subscribe` so a legacy viewer can neither be left stale by an
         #: in-flight move nor admitted behind its precondition check.
@@ -1344,7 +1377,26 @@ class DesktopSessionBridge:
                     # (``wait`` never cancels what it waits on; a cancelled request
                     # leaves the task running for the other readers and the
                     # stream).
-                    done, _ = await asyncio.wait({task}, timeout=READ_FIRST_FRAME_GRACE_S)
+                    #
+                    # A PEER'S CONVERSATION GETS A LONGER GRACE, and the reason is
+                    # that the grace exists for the OPPOSITE situation. 50 ms is
+                    # right when the durable answer is already on this disk: the
+                    # paint cannot be improved by waiting, because the journal was
+                    # read synchronously a moment ago. For a conversation on
+                    # another device there IS no local durable answer -- the wire
+                    # is the only source -- so a first paint that stops waiting at
+                    # 50 ms is a first paint with NOTHING IN IT, and the renderer
+                    # then spends a second round trip reconciling through
+                    # ``/history``. Waiting up to the read attempt's own budget
+                    # buys the whole transcript in the frame the click asked for,
+                    # and a peer that does not answer inside it still gets the cold
+                    # paint and its ``attaching`` flag exactly as before.
+                    grace = (
+                        REMOTE_READ_FIRST_FRAME_GRACE_S
+                        if self.remote_row is not None
+                        else READ_FIRST_FRAME_GRACE_S
+                    )
+                    done, _ = await asyncio.wait({task}, timeout=grace)
                     if not done:
                         self.read_attach_outran.add(task)
             else:
@@ -1428,36 +1480,83 @@ class DesktopSessionBridge:
     async def _ensure_facade(self) -> AttachedSession:
         """This bridge's facade, constructed cold on first use. Caller holds the lock."""
         if self.remote is None:
-            # The birth selection this conversation was created with, and the
-            # deliberate override that makes the child PIN it (a config
-            # edit must not re-select a conversation the user chose a
-            # model for). Both are ``None``/``False`` for every session
-            # that carries no stored choice, which is every session an
-            # older build created — and for one whose own journal already
-            # owns a selection, so a switched conversation is never
-            # dragged back to the model it was born on (see
-            # :func:`draft_birth_selection`).
-            #
-            # FOR A DRAFT the marker this read would consult does not exist
-            # yet (``create`` has not run), so the spec minted WITH the draft
-            # is the answer: the exact value create will persist into the
-            # marker, validated at the mint by the same authority. Reading
-            # ``session_id`` here instead would birth the first turn on the
-            # configured default — the one outcome the draft's model pick
-            # exists to avoid.
-            if self.draft is not None:
-                birth = self.draft.model
+            if self.remote_row is not None:
+                # A PEER'S CONVERSATION IS OPENED AS ITS VIEWER, through the ONE
+                # seam that turns a peer row into a facade
+                # (``session.remote_open.open_remote_viewer``) — the same call the
+                # TUI's sidebar pick, its ``/resume`` and the shared session
+                # factory make, so the desktop does not get a second spelling of
+                # "another device's session, opened here" that can drift from the
+                # one the mesh tests already drive.
+                #
+                # COLD, WHICH IS THE WHOLE CONTRACT: nothing runs on the peer
+                # until this device does something. The first act that needs a
+                # runtime binds it through the remote owner, and the desktop's own
+                # watch lease is what warms it — never this construction.
+                #
+                # THE THREE THINGS THIS FACADE MUST NOT DO, all of which follow
+                # from the owner being the peer and not this process:
+                # ``cwd=""``, because a directory here means nothing there and an
+                # empty cwd is what lets the peer default to its own; a
+                # ``takeover`` that refuses, because a remote owner sets
+                # ``_can_go_cold`` so owner loss leaves the viewer cold rather
+                # than making this device a SECOND WRITER of somebody else's
+                # transcript (INV-1); and no local transcript read, because a
+                # directory on this disk is at best absent and at worst a
+                # DIFFERENT conversation wearing the same id
+                # (``mesh-session-mobility.md`` §3.4).
+                from local_operator.session.remote_open import open_remote_viewer
+
+                remote_viewer = await open_remote_viewer(
+                    self.session_id,
+                    config_dir=self.root,
+                    takeover=_no_takeover,
+                    row=self.remote_row,
+                    surface="desktop",
+                )
+                if remote_viewer is None:
+                    # The row was resolved a moment ago and the projection has
+                    # moved on since (a move home, a peer that stopped listing
+                    # it). Naming that is the honest answer; the alternative —
+                    # a local facade for an id this device does not hold — is the
+                    # two-writer case the seam exists to prevent.
+                    raise ConnectionError(
+                        f"{self.session_id} is no longer listed on the device that held it"
+                    )
+                remote = remote_viewer
             else:
-                birth = await asyncio.to_thread(draft_birth_selection, self.root, self.session_id)
-            remote = await AttachedSession.cold(
-                self.session_id,
-                config_dir=self.root,
-                cwd=self.cwd,
-                takeover_factory=_no_takeover,
-                surface="desktop",
-                initial_model=birth,
-                model_selection_override=birth is not None,
-            )
+                # The birth selection this draft was created with, and the
+                # deliberate override that makes the child PIN it (a config
+                # edit must not re-select a conversation the user chose a
+                # model for). Both are ``None``/``False`` for every session
+                # that carries no stored choice, which is every session an
+                # older build created — and for one whose own journal already
+                # owns a selection, so a switched conversation is never
+                # dragged back to the model it was born on (see
+                # :func:`draft_birth_selection`).
+                #
+                # FOR A DRAFT the marker this read would consult does not exist
+                # yet (``create`` has not run), so the spec minted WITH the draft
+                # is the answer: the exact value create will persist into the
+                # marker, validated at the mint by the same authority. Reading
+                # ``session_id`` here instead would birth the first turn on the
+                # configured default — the one outcome the draft's model pick
+                # exists to avoid.
+                if self.draft is not None:
+                    birth = self.draft.model
+                else:
+                    birth = await asyncio.to_thread(
+                        draft_birth_selection, self.root, self.session_id
+                    )
+                remote = await AttachedSession.cold(
+                    self.session_id,
+                    config_dir=self.root,
+                    cwd=self.cwd,
+                    takeover_factory=_no_takeover,
+                    surface="desktop",
+                    initial_model=birth,
+                    model_selection_override=birth is not None,
+                )
             self.remote = remote
             # A detached interval has no receipt feed. A new epoch makes
             # that gap explicit even when the runtime itself never died.
@@ -1509,6 +1608,55 @@ class DesktopSessionBridge:
                 remote.subscribe_frontend(self._frontend).unsubscribe,
             ]
         return self.remote
+
+    async def prepare_peer_images(self, images: list[dict[str, str]]) -> list[dict[str, str]]:
+        """What a PEER-bound prompt must SEND, having staged the same bytes here.
+
+        WHY THE DEVICE THAT SENDS MUST ALSO HOLD. A turn's images are
+        content-addressed: the row the OWNER journals references
+        ``{"attachment": <digest>}`` (``transcript._externalize_attachments``),
+        and the only store ``attachment()`` reads on this side is this device's
+        own. A peer-bound prompt's bytes therefore existed nowhere this device
+        can reach — the peer's runtime is another process on another machine and
+        externalises into ITS config dir (``attachments.store_for_transcript_dir``
+        states that rule) — so the conversation the user is LOOKING AT painted a
+        placeholder over the picture they had just sent, one 200 saying
+        ``prompt admitted`` later.
+
+        THE CALLER MUST SEND WHAT THIS RETURNS, not the body it passed in, and
+        that is the whole contract: the owner journals the digest of what it
+        RECEIVES, so the bytes staged here and the bytes sent have to be the same
+        bytes. See :func:`prepare_images_for_owner` for the transform and the
+        invariant it rests on.
+
+        NOTHING HAPPENS FOR A LOCAL SESSION, and the list comes back untouched:
+        this device's runtime externalises into this very store, so bounding here
+        would be work whose only effect is to change bytes the owner was going to
+        bound anyway. Identity rather than ``[]`` so a caller cannot lose an
+        attachment by forgetting which branch it took.
+
+        Runs off the loop: it decodes and re-encodes each image (the same work
+        the owner's ingest does, once per pass) and writes one file per image.
+        """
+        if self.remote_row is None or not images:
+            return images
+        return await asyncio.to_thread(prepare_images_for_owner, self.root, images)
+
+    async def stage_ingested_images(self, payloads: list[dict[str, str]]) -> None:
+        """Stage payloads that are ALREADY the owner's ingest output.
+
+        The third door (``/command``, ``routes/desktop_sessions.py``) does not
+        hand the owner a composer body: it decodes the images with
+        ``decode_images`` — ``image_blocks`` itself — and sends THOSE, so they
+        are already a fixed point and re-running the ingest over them would be a
+        second decode for an answer we hold. Only the write is owed.
+
+        Gated exactly like its sibling: a local conversation's runtime writes this
+        store itself.
+        """
+        if self.remote_row is None or not payloads:
+            return
+        await asyncio.to_thread(stage_images_in_store, self.root, payloads)
 
     async def release(self) -> None:
         async with self.lock:
@@ -2276,9 +2424,7 @@ class DesktopSessionBridge:
         self.publish("frontend.update", payload)
 
     async def refresh_attention(self) -> dict[str, Any]:
-        state = await asyncio.to_thread(
-            AttentionStore(self.root / "attention.db").state, f"session/{self.session_id}"
-        )
+        state = await self._read_attention()
         remote = self.remote
         state["supported"] = bool(
             remote is not None
@@ -2303,6 +2449,29 @@ class DesktopSessionBridge:
                 # completion it ended on last week.
                 await self._maybe_publish_notification(previous, state)
         return state
+
+    async def _read_attention(self) -> dict[str, Any]:
+        """This conversation's completion receipts, from whichever device owns it.
+
+        A PEER'S RECEIPTS COME OFF THE WIRE, and the reason is not symmetry: the
+        local store is keyed ``session/<id>`` on THIS disk, so for a conversation
+        another device holds it is empty by construction -- and publishing that
+        empty read as the session's attention claims "nothing unseen here" about a
+        completion that arrived on the peer, which is exactly the claim the push
+        path is built on. The owner's own state travels in the frontend sync
+        (``FrontendSessionState.attention``), so that is what this bridge reports.
+        Nothing is written to a receipt store here either: ``/seen`` answers a
+        peer's id with the ordinary 404, because acknowledging a peer's completion
+        on this device would clear a mark the peer still holds.
+        """
+        if self.remote_row is not None:
+            remote = self.remote
+            if remote is None:
+                return {}
+            return dict(getattr(remote.frontend_state, "attention", {}) or {})
+        return await asyncio.to_thread(
+            AttentionStore(self.root / "attention.db").state, f"session/{self.session_id}"
+        )
 
     async def _maybe_publish_notification(
         self, previous: dict[str, Any], state: dict[str, Any]
@@ -2433,14 +2602,24 @@ class DesktopSessionBridge:
                 # so gating on the revision alone would pin `supported` to
                 # whatever happened to be true when the bridge attached.
                 remote = self.remote
-                key = (
-                    await asyncio.to_thread(store.revision),
+                supported = bool(
                     remote is not None
-                    and (remote.is_cold or getattr(remote, "supports_completion_ack", False)),
+                    and (remote.is_cold or getattr(remote, "supports_completion_ack", False))
                 )
-                if key != self.attention_poll_key:
+                key: Any
+                if self.remote_row is not None:
+                    # A PEER'S KEY IS THE STATE ITSELF, not this device's store
+                    # revision. The revision is a cheap change-token for a CONTENDED
+                    # SQLite sidecar (whose read can spend 10.8 s of retries), and for
+                    # a remote bridge the read is a dict already in memory -- keying
+                    # on the revision would pay a store read every second to learn
+                    # nothing about the peer.
+                    key = json.dumps(await self._read_attention(), sort_keys=True, default=str)
+                else:
+                    key = await asyncio.to_thread(store.revision)
+                if (key, supported) != self.attention_poll_key:
                     await self._shared_attention_refresh()
-                    self.attention_poll_key = key
+                    self.attention_poll_key = (key, supported)
                 if failing:
                     logger.info(
                         "attention poll recovered for %s after %d failure(s)",
@@ -2468,7 +2647,19 @@ class DesktopSessionBridge:
 
     def state(self) -> dict[str, Any]:
         assert self.remote is not None
-        state = self.remote.frontend_state.model_copy(update={"attention": self.attention})
+        # A PEER'S ATTENTION IS THE OWNER'S, NOT THIS DEVICE'S LAST READ. The
+        # override below publishes the RECEIPT state, and for a remote conversation
+        # the author of that state is the peer's runtime: this bridge's own
+        # ``attention`` copy is only ever the wire's value echoed back (see
+        # ``_read_attention``), so reading it through would be a copy of a copy --
+        # one sync behind at the exact moment a completion moves it, which is the
+        # moment the renderer paints its unread mark.
+        attention = (
+            dict(getattr(self.remote.frontend_state, "attention", {}) or {})
+            if self.remote_row is not None
+            else self.attention
+        )
+        state = self.remote.frontend_state.model_copy(update={"attention": attention})
         return sync_wire_payload(
             FrontendSync(
                 epoch=state.epoch,
@@ -2545,7 +2736,19 @@ class DesktopSessionBridge:
         # that sees a non-empty page beside ``cold_reason`` knows this backend
         # fills it and skips the duplicate fetch, and an older one reconciles
         # on an empty page only, which a cold open with rows no longer is.
-        if cursor or (remote is not None and remote.is_cold):
+        # A PEER'S PAGE IS SERVED WHATEVER THE CURSOR SAYS, and the difference is
+        # where the rows come from. The cursor gate above exists because this method
+        # must not bound the page it reads from the journal by a FRONTEND watermark
+        # -- so when a live owner has published no cursor yet, the honest answer is
+        # to serve nothing and let the reader reconcile. A conversation on another
+        # device has no journal here at all: its page is the WIRE's own window
+        # (``_remote_history``), which is the same rows the paired state was built
+        # from, so there is nothing that could be "inconsistent" with a cursor that
+        # does not exist yet -- and gating it means every first open of a peer's row
+        # pays a second round trip (``/history``) for the transcript the click had
+        # already asked for. Merging is by row id on both sides, which is the rule a
+        # live local owner's snapshot already relies on.
+        if cursor or (remote is not None and (remote.is_cold or self.remote_row is not None)):
             # THE PAGE IS THE JOURNAL'S TAIL. Its upper bound is NOT the frontend
             # cursor above, and that is the fix rather than a detail: this is a
             # read of the TRANSCRIPT, while ``history_cursor`` is a FRONTEND
@@ -2629,7 +2832,18 @@ class DesktopSessionBridge:
         should cost a dict lookup rather than a second decode of the same bytes.
         The reader's contract, its special returns and its ``FileNotFoundError``
         are unchanged; only who pays for the read is.
+
+        A PEER'S CONVERSATION TAKES A DIFFERENT READER (see
+        :meth:`_remote_history`), and it is a different reader rather than a
+        branch inside this one because the two answer from different places: the
+        journal here, the wire there. The contract above -- ``entries``,
+        ``has_more``, ``cursor_missing``, a backward ``before_id`` -- is the same
+        on both, so no caller changes.
         """
+        if self.remote_row is not None:
+            return await self._remote_history(
+                before_id=before_id, through_id=through_id, limit=limit
+            )
         try:
             page = await load_transcript_page(
                 self.root / "sessions" / self.session_id,
@@ -2648,6 +2862,110 @@ class DesktopSessionBridge:
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
         }
+
+    async def _remote_history(
+        self, *, before_id: str | None, through_id: str | None, limit: int
+    ) -> dict[str, Any]:
+        """One page of a PEER's transcript, read off the WIRE.
+
+        WHY NOT ``load_transcript_page``. That reader opens
+        ``<root>/sessions/<id>/transcript.jsonl`` -- which, for a conversation on
+        another device, is either ABSENT or a DIFFERENT conversation wearing the
+        same id, and painting either one is the single local read
+        ``mesh-session-mobility.md`` §3.4 forbids by name ("history comes from the
+        wire, and only the wire"). The peer's own rows are already reachable: the
+        attach's canonical sync carries the newest display window and the owner
+        serves older pages on request, so this projects THAT --
+        ``AttachedSession.history()``, the same list the TUI paints a remote
+        conversation from -- through the entry shape the desktop contract already
+        publishes.
+
+        THE COLD CASE IS AN EMPTY PAGE, NOT A REFUSAL, and that is the renderer's
+        contract rather than leniency: an empty page is its signal to reconcile
+        through ``/history`` (which is this method), and the snapshot beside it
+        carries the ``cold``/``cold_reason``/``attaching`` triple that says WHY
+        there is nothing to paint yet. The attempt below is the SAME bounded read
+        envelope the snapshot pays (``READ_ATTACH_BUDGET_S``), and it never
+        engages: ``attach_existing`` dials an owner that already exists, so a peer
+        with no runtime keeps none -- the desktop's own watch lease is what warms
+        one (:meth:`refresh_watch`).
+
+        ``ts`` IS THE SERVE TIME, AND THAT IS A STATED LIMIT RATHER THAN A CLAIM.
+        The wire carries MESSAGES, not journal rows, and a message has no entry
+        time of its own: decorating one here with the moment this device happened
+        to read it dates the user's own message to whenever they opened the
+        window, and stamping zero paints 1970. The desktop renderer's own
+        ``history_delta`` producer already makes this choice for wire-sourced rows
+        (one arrival stamp per frame, with the follow-up written down in
+        ``transcript-reducer.ts``), so this matches the neighbouring surface
+        instead of inventing a third rule. The fix is an entry ``ts`` on the
+        window DTO, which cannot ride this change: that DTO is ``extra="forbid"``,
+        so a new key breaks every older viewer's validation.
+        """
+        remote = self.remote
+        if remote is None:
+            return {"entries": [], "has_more": False, "cursor_missing": False}
+        if remote.is_cold:
+            with contextlib.suppress(ConnectionError, OSError, TimeoutError):
+                await remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
+        rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
+        page, has_more = _remote_page(rows, limit=limit)
+        if not has_more and remote.history_before_token:
+            # ONE OLDER PAGE PER CALL, not a drain: a reader that scrolls asks
+            # again with the ``before_id`` of its oldest painted row, which is the
+            # same shape the TUI's backward scroll uses. Without this the page
+            # would stop at the loaded window and REPORT that as the end of the
+            # conversation -- rows silently unreachable, which is the defect the
+            # local reader's own ``has_more`` exists to prevent.
+            try:
+                await remote.load_older_display_page()
+            except (RuntimeError, ConnectionError, TimeoutError):
+                pass
+            else:
+                rows = self._remote_rows(remote, before_id=before_id, through_id=through_id)
+                page, has_more = _remote_page(rows, limit=limit)
+                has_more = has_more or remote.history_before_token is not None
+        stamp = time.time()
+        return {
+            "entries": [
+                {
+                    "id": str(getattr(row, "id", "") or ""),
+                    "ts": stamp,
+                    "type": "message",
+                    "payload": _wire_row_payload(row),
+                }
+                for row in page
+            ],
+            "has_more": has_more,
+            "cursor_missing": False,
+        }
+
+    def _remote_rows(
+        self, remote: AttachedSession, *, before_id: str | None, through_id: str | None
+    ) -> list[Any]:
+        """The peer's loaded rows, cut to ``before_id``/``through_id``.
+
+        ``cursor_missing`` is answered FALSE by the caller rather than here: a
+        ``before_id`` the peer's window no longer holds is a real miss, and the
+        contract's word for it is the page being empty. What must NOT happen is
+        the local reader's other answer for the same call -- a page cut short at a
+        cursor -- because there is no local cursor to cut at.
+        """
+        try:
+            rows = list(remote.history())
+        except RuntimeError:
+            # Not hydrated: a peer whose runtime has not answered yet, or one too
+            # old to serve a display window at all (the facade refuses the local
+            # fallback by name). The empty page above is the contract's answer.
+            return []
+        if through_id:
+            cut = next((index for index, row in enumerate(rows) if row.id == through_id), None)
+            if cut is not None:
+                rows = rows[: cut + 1]
+        if before_id:
+            cut = next((index for index, row in enumerate(rows) if row.id == before_id), None)
+            rows = rows[:cut] if cut is not None else []
+        return rows
 
     async def watch(self, subscription_id: str, *, visible: bool, can_notify: bool) -> None:
         sub = self.subscribers.get(subscription_id)
@@ -3532,6 +3850,294 @@ class DesktopSessionBridge:
                 await self.refresh_watch()
 
 
+@dataclass(frozen=True)
+class _LocatedSession:
+    """What one cold lookup resolved: a LOCAL directory, or a PEER's row.
+
+    ONE OBJECT RATHER THAN A TUPLE, because the remote case is not a second kind
+    of cwd: it is a different PLACEMENT, and the two readers below must be able
+    to tell them apart. A sentinel in ``marker_cwd`` (``""``, a magic string)
+    would be a spelling every later reader has to know, and the first one to
+    forget it is the one that starts reading a local transcript for an id whose
+    conversation is on another machine — the read ``mesh-session-mobility.md``
+    §3.4 forbids by name.
+
+    ``remote_row`` is a ``resume.SessionRow`` when a peer holds the id: the row
+    carries the owner device, the reachability verdict and the values the viewer
+    is seeded with (name, model, cwd), so the placement and the seed come from
+    ONE read rather than from two that can disagree.
+    """
+
+    cwd: str
+    #: The MARKER's own cwd, or ``None`` when the directory's value came from the
+    #: checkpoint fallback. Provenance, not decoration — see ``locate()``.
+    marker_cwd: str | None
+    #: Set when a PEER holds this conversation; ``None`` for one on this disk.
+    remote_row: SessionRow | None = None
+
+
+def _remote_page(rows: list[Any], *, limit: int) -> tuple[list[Any], bool]:
+    """The newest ``limit`` rows of ``rows``, and whether older ones remain.
+
+    The same shape ``read_transcript_page`` returns, expressed over the wire's
+    rows: a page is the TAIL of what the caller may see, and ``has_more`` means
+    "rows older than this page exist", never "this page is partial".
+    """
+    page = rows[-limit:] if len(rows) > limit else list(rows)
+    return page, len(rows) > len(page)
+
+
+def _wire_row_payload(row: Any) -> dict[str, Any]:
+    """One wire row projected into the desktop's transcript-entry payload.
+
+    THE SHAPE IS THE DURABLE ENCODER'S, not a new one: ``encode_message_payload``
+    writes every local journal row's payload (``exclude_defaults``, the id left to
+    the entry envelope that carries it, a ``kind`` telling a user/agent message
+    from a host-authored custom row), and the renderer already projects that shape
+    for both its durable pages and its wire deltas. A second spelling here would
+    be a second vocabulary for one screen.
+
+    THE IMAGE BYTES STAY INLINE, deliberately, and this is the one place the shape
+    differs from a local row's: a local row externalises a large block into THIS
+    device's store and leaves a digest, and this device has no digest to resolve
+    for a peer's conversation (that store is on the peer). The wire carried the
+    bytes inline for exactly that reason, so leaving them inline is what keeps the
+    image visible instead of degrading it to the "no longer in the transcript"
+    placeholder.
+    """
+    from local_operator.harness.types import CustomMessage
+    from local_operator.session.transcript import (
+        CUSTOM_KIND_CUSTOM,
+        CUSTOM_KIND_MESSAGE,
+    )
+
+    kind = CUSTOM_KIND_CUSTOM if isinstance(row, CustomMessage) else CUSTOM_KIND_MESSAGE
+    payload = row.model_dump(mode="json", exclude_defaults=True, exclude={"id"})
+    return {"kind": kind, **payload}
+
+
+class PeerSessionUnreachable(Exception):
+    """A PEER holds this conversation and this device cannot reach that device.
+
+    THE ONE CASE THE DESKTOP STILL REFUSES TO OPEN, and it is a refusal rather
+    than a failure on purpose (``mesh-ui.md`` §1.3): the row is visible, the
+    conversation exists, and a viewer built for it could never bind — so the
+    answer names the device, the reason in words and the remedy, and the route
+    maps it to the 409 ``session_is_remote`` the row already had.
+
+    TYPED HERE RATHER THAN RAISED AS AN HTTP EXCEPTION, because the pool is not a
+    route: the desktop routes, the phone daemon and the tests all reach it, and
+    the status belongs to whoever is speaking HTTP. ``service/routes`` maps it;
+    the sentence it carries is ``remote_open.unreachable_peer_sentence``, which is
+    the SAME composer the TUI refuses this exact state with — one situation,
+    one description, two surfaces.
+    """
+
+    code = "session_is_remote"
+
+    def __init__(self, session_id: str, row: SessionRow) -> None:
+        from local_operator.session.remote_open import unreachable_peer_sentence
+
+        super().__init__(unreachable_peer_sentence(session_id, row))
+        self.session_id = session_id
+        self.row = row
+
+
+class PeerAttachmentUnavailable(Exception):
+    """A row references an attachment that lives on the PEER's disk.
+
+    An image block in a peer's conversation references a digest in the store of
+    the device that holds the conversation, and this device cannot read that
+    store: the durable read here is the LOCAL content-addressed store, which is
+    empty for an id no local session directory exists for. So the answer is a
+    sentence rather than a traceback — a broken ``<img>`` beside a 500 tells the
+    user nothing, while this names the device and the reason the bytes are not
+    here.
+
+    DISTINCT FROM THE ORDINARY 404, which stays for a digest that resolves
+    nowhere at all on a LOCAL conversation: this one is about where the
+    conversation lives, not about a missing file.
+    """
+
+    code = "attachment_on_peer"
+
+    def __init__(self, session_id: str, row: SessionRow) -> None:
+        from local_operator.resume import UNNAMED_DEVICE
+
+        device = row.owner_label or UNNAMED_DEVICE
+        super().__init__(
+            f"{session_id}'s images are kept on {device}, which holds that "
+            "conversation; this desktop can only read attachments out of its "
+            "own store today, so this one cannot be shown here yet."
+        )
+        self.session_id = session_id
+        self.row = row
+
+
+#: How many times the OWNER's own ingest may be re-applied before the bytes this
+#: device sends are declared a fixed point of it.
+#:
+#: TWO IS THE MEASURED NORM: one pass bounds the image (``IMAGE_INGEST_MAX_EDGE``
+#: / the byte cap / a baked-in EXIF rotation), the second confirms the result is
+#: what the ladder returns for itself. The third is headroom for the one corner
+#: that is not obviously idempotent on inspection — line art, whose edge cap is
+#: ``IMAGE_MAX_EDGE`` and which could in principle come back as a JPEG that no
+#: longer reads as line art. Rather than argue the corner away, the loop is
+#: bounded and the corner is handled by :func:`_settle_on_the_owner_ingest`'s
+#: fallback below.
+_INGEST_SETTLE_PASSES = 3
+
+
+def _owner_ingest_once(payload: dict[str, str]) -> dict[str, str] | None:
+    """The bytes the OWNER's runtime would keep for this payload, or ``None``.
+
+    THE ONE DEFINITION OF THE TRANSFORM, imported rather than restated, and that
+    is the whole point of this function: ``session.runtime.server.image_blocks``
+    is what every incoming image goes through before admission
+    (``serving._image_blocks_async``), so asking IT what the owner will keep
+    cannot drift from what the owner actually keeps. It is also where the mime
+    comes from — the CONTENT, never the client's declared type.
+
+    ``None`` means the owner would DISCARD this image (``image_blocks`` drops
+    undecodable entries rather than failing the turn), which is a fact the caller
+    needs: sending bytes the owner will throw away is an attachment the user
+    watched leave and will never see again.
+
+    Lazy import, for the reason ``routes/desktop_sessions.decode_images`` states
+    about its own: the runtime's server module is a boot cost this one must not
+    add for every desktop backend.
+    """
+    from local_operator.session.runtime.server import image_blocks
+
+    blocks = image_blocks([{"data_b64": payload["data_b64"], "mime_type": payload["mime_type"]}])
+    if not blocks:
+        return None
+    block = blocks[0]
+    return {"data_b64": block.data, "mime_type": block.mime_type}
+
+
+def _settle_on_the_owner_ingest(
+    payload: dict[str, str],
+) -> tuple[dict[str, str], tuple[dict[str, str], ...]] | None:
+    """``(bytes to send, extra payloads to stage)`` for one image, or ``None``.
+
+    WHY A FIXED POINT RATHER THAN ONE PASS. The invariant the read depends on is
+    that the digest this device stages EQUALS the digest the owner journals, and
+    the owner journals ``image_blocks(what we sent)``. So what we send must be a
+    fixed point of that function: then the owner's ingest returns our bytes
+    unchanged, and the two digests are the same name by CONSTRUCTION rather than
+    by the coincidence that the shipped composer happens to bound at the same
+    1024 px (``bound-image.ts``'s ``IMAGE_MAX_EDGE``). One pass gets most images
+    there — including the 1025 px screenshot and the EXIF-rotated JPEG, whose
+    re-encode bakes the rotation into the pixels — and the second pass is the
+    proof rather than an assumption.
+
+    THE FALLBACK, for the pass bound being reached: the bytes to send are still
+    the last output, and the ONE payload the owner would make of them is staged
+    alongside, so whichever of the two names the owner's row carries resolves
+    here. It costs one blob in a corner nothing has reached, and it is strictly
+    better than a read that 409s on some photos.
+    """
+    current = dict(payload)
+    for _ in range(_INGEST_SETTLE_PASSES):
+        settled = _owner_ingest_once(current)
+        if settled is None:
+            return None
+        if settled == current:
+            return current, ()
+        current = settled
+    return current, ((_owner_ingest_once(current) or current),)
+
+
+def stage_images_in_store(root: Path | None, payloads: list[dict[str, str]]) -> None:
+    """Write already-owner-shaped payloads into ``root``'s attachment store.
+
+    THE READERS THIS IS FOR are ``DesktopSessions.attachment`` and its per-child
+    twin, and neither is a decoration: they are how a transcript row that carries
+    ``{"attachment": <digest>}`` becomes pixels on this device. A row written on
+    a PEER carries a digest whose bytes live in the peer's store (its runtime
+    externalised them into its own config dir — see
+    ``attachments.store_for_transcript_dir``), so a prompt this device SENT is a
+    picture this device could no longer show.
+
+    ONLY WHAT THE OWNER WILL EXTERNALIZE, gated by the same floor the transcript's
+    writer uses (``transcript._ATTACHMENT_FLOOR_BYTES``) rather than by a second
+    copy of the number. Under the floor the payload stays INLINE in the row and
+    every reader already has it; staging it would be a blob nothing references —
+    exactly the churn that floor exists to prevent.
+
+    Best effort, and silent: ``AttachmentStore.put`` is documented to answer
+    ``None`` instead of raising for undecodable input, a read-only home or a full
+    disk, and a mirror that could not be written must not fail a prompt the owner
+    would have admitted. The consequence of a miss is the refusal this device
+    answers with today (``PeerAttachmentUn``), never a lost turn.
+    """
+    from local_operator.session.transcript import _ATTACHMENT_FLOOR_BYTES
+
+    store = AttachmentStore(Path(root) / ATTACHMENTS_DIRNAME if root is not None else None)
+    for payload in payloads:
+        data = payload.get("data_b64") or ""
+        if not isinstance(data, str) or len(data) < _ATTACHMENT_FLOOR_BYTES:
+            continue
+        try:
+            store.put(data, str(payload.get("mime_type") or "image/png"))
+        except OSError as exc:  # noqa: PERF203 — one bad image costs that image
+            logger.debug("peer image could not be staged locally: %s", exc)
+
+
+def prepare_images_for_owner(
+    root: Path | None, images: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Bound every wire image as the OWNER will, stage that, and hand back what to send.
+
+    THE RETURN VALUE IS THE FIX. This is not a mirror bolted beside the request —
+    it is the request's images, transformed on the way out: what this returns is
+    what the caller must put in the frame, and it is the same bytes that were
+    staged. Staging the raw wire payload instead was the round-1 defect: the
+    owner does not promise to keep what it is given, so for anything over
+    ``IMAGE_INGEST_MAX_EDGE`` (1024 px) or carrying an EXIF ``Orientation`` tag it
+    journals the digest of its OWN re-encode, and the device that sent the
+    picture still could not read it back.
+
+    THE INVARIANT, stated so a future reader can check it rather than trust it:
+    the digest IS the content key, and the bytes we send are a fixed point of the
+    owner's ingest (see :func:`_settle_on_the_owner_ingest`), so the name written
+    here and the name the owner's row carries are the same name for the same
+    bytes. What would break it: a reference that is not the content key (a
+    per-install id, a path); a store rooted where ``attachment`` does not look;
+    or the owner's ingest gaining a transform that is not a fixed point of
+    itself — a new ladder rung that re-encodes what it is given — which would
+    make this side's settled bytes diverge again.
+
+    An image the owner would DISCARD is dropped here rather than sent, because
+    the alternative is the same silent loss one layer down.
+
+    ``marker`` rides along when the producer knew one, so a sender-side refusal
+    still names the chip the user is looking at (``attach_client._refit_images``
+    reads it). The bytes it maps to are the bounded ones, which is what the
+    owner journals — the marker is a UI fact, not a payload one.
+    """
+    prepared: list[dict[str, str]] = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        data = image.get("data_b64") or image.get("data")
+        if not isinstance(data, str) or not data:
+            continue
+        settled = _settle_on_the_owner_ingest(
+            {"data_b64": data, "mime_type": str(image.get("mime_type") or "image/png")}
+        )
+        if settled is None:
+            logger.debug("a peer-bound image was dropped: the owner's ingest refuses it")
+            continue
+        send, extra = settled
+        stage_images_in_store(root, [send, *extra])
+        if image.get("marker") is not None:
+            send = {**send, "marker": image["marker"]}
+        prepared.append(send)
+    return prepared
+
+
 class SessionDeletionRefused(ValueError):
     """A hard guard refused an explicit deletion, and nothing was removed.
 
@@ -3936,6 +4542,14 @@ class SessionPage:
     rows: list[dict[str, Any]]
     pinned_off_page: list[dict[str, Any]]
     truncated: bool
+    #: The sessions OTHER devices hold, present only for a listing that asked for
+    #: them (``include_peers``). A SEPARATE FIELD rather than concatenated here, and
+    #: the route concatenates: ``rows`` is the page a ``limit`` describes and
+    #: ``truncated`` is a verdict about it, so folding a population that no ``limit``
+    #: governs into the same list would make the count mean two things — the trap
+    #: ``pinned_off_page`` already documents one level up. ``truncated`` says nothing
+    #: about these rows, deliberately: a peer's catalogue is not this device's history.
+    remote: list[dict[str, Any]] = field(default_factory=list)
     #: The position to resume this page from, or ``None`` at the end of the scope.
     #: Defaulted rather than required so a caller that only reads ``rows`` (the
     #: existing tests and the TUI's own path) keeps constructing this unchanged.
@@ -4075,7 +4689,7 @@ class DesktopSessions:
         #: by a waiter (``asyncio.shield``), so it still settles and still
         #: publishes.
         self._locate_flights: dict[
-            str, tuple[asyncio.AbstractEventLoop, asyncio.Task[tuple[str, str | None]]]
+            str, tuple[asyncio.AbstractEventLoop, asyncio.Task[_LocatedSession]]
         ] = {}
         # Whether the DAEMON this pool serves has LATCHED against new work, asked
         # rather than cached: the answer changes once, mid-life, and both the
@@ -4577,6 +5191,16 @@ class DesktopSessions:
         digest in it. The bearer already authorises the whole desktop surface,
         so this is not an escalation — but it is not per-session scoping
         either, and the URL shape reads as though it were.
+
+        A PEER'S CONVERSATION GETS A SENTENCE, NOT A 404 (see
+        :class:`PeerAttachmentUnavailable`). Its images live in the store of the
+        device that HOLDS it, and the durable read here is this device's own
+        store, which is empty for an id no local directory exists for — so the
+        honest answer names the device and says the bytes are not here, which is
+        what a broken ``<img>`` beside a 500 never did. The route still resolves
+        the digest from THIS store first, because a conversation that has ever
+        held a local copy (a moved session, a synced replica) serves its images
+        here exactly as a local one does.
         """
 
         def read() -> tuple[bytes, str]:
@@ -4591,7 +5215,21 @@ class DesktopSessions:
                 raise KeyError("Unknown session")
             path = self.root / "sessions" / session_id
             if not path.is_dir() or not is_user_session(path):
-                raise KeyError("Unknown session")
+                from local_operator.session.remote_open import remote_row_for
+
+                row = remote_row_for(session_id, self.root)
+                if row is None:
+                    raise KeyError("Unknown session")
+                # THIS DEVICE'S STORE FIRST: the digest is content-addressed, so a
+                # session that moved here (or one this device holds a copy of)
+                # has the bytes under the same name, so hanging the lookup on
+                # the id's placement before looking would take a working image
+                # away from a conversation that can serve it.
+                resolved_elsewhere = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
+                if resolved_elsewhere is None:
+                    raise PeerAttachmentUnavailable(session_id, row)
+                data_b64, mime_type = resolved_elsewhere
+                return base64.b64decode(data_b64), mime_type
             resolved = AttachmentStore(self.root / ATTACHMENTS_DIRNAME).get(digest)
             if resolved is None:
                 raise KeyError("Unknown attachment")
@@ -5014,11 +5652,20 @@ class DesktopSessions:
         status_stamps: tuple[str, dict[str, int]] | None = None,
         *,
         include_archived: bool = False,
+        include_peers: bool = False,
         scope: CatalogueScope | None = None,
         cursor: str | None = None,
         with_counts: bool = False,
     ) -> SessionPage:
         """One page of rows, plus the pinned rows the page does not carry.
+
+        ``include_peers`` appends the sessions OTHER devices hold, as
+        ``SessionPage.remote`` — the transport's federated catalogue
+        (``session.peer_rows``, the same TTL-cached projection the sidebar's peer
+        heading groups on). It is FALSE by default and the default is the contract:
+        a client that did not ask for peers receives the byte-identical answer it
+        always did, which is what lets a pre-mesh renderer and every existing test
+        keep reading this route unchanged.
 
         ``limit`` IS THE PAGE SIZE and the truncation verdict is computed here,
         because the two are one question: the caller used to ask for
@@ -5081,6 +5728,12 @@ class DesktopSessions:
         excluded_drafts = self._draft_listing_exclusions()
 
         def rows() -> SessionPage:
+            # IMPORTED HERE, not at module scope: the desktop's mesh reads pull the
+            # network package onto every ``lop serve`` boot, and a listing that did
+            # not ask for peers must not pay for it (the same rule ``routes/auth.py``
+            # states for its own lazy imports).
+            from local_operator.server.utils.desktop_mesh import remote_session_rows
+
             # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
             # so the catalogue can resolve the pins the page will not carry.
             # `read_pins` already applies both the store's own read-time prune
@@ -5166,6 +5819,11 @@ class DesktopSessions:
             for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
                 stored = read_session_attachment(self.root / "sessions" / entry.id)
+                # Read once per row: the ownership stamp is the durable carrier of
+                # placement, and its ABSENCE is the statement "no mesh has ever
+                # governed this session" — which is the value the row publishes
+                # rather than a guess (§1.2).
+                stamp = read_stamp(self.root, entry.id)
                 row.update(
                     {
                         "active": entry.active,
@@ -5191,6 +5849,35 @@ class DesktopSessions:
                         # client deriving the listing-level ``degraded`` should
                         # not have to handle both.
                         "degraded": list(entry.row.degraded),
+                        # -- the mesh's fields, from the session's own stamp
+                        # (mesh-session-mobility.md §9.2). A device with no network
+                        # writes the LOCAL answer rather than omitting them, so
+                        # the shape is stable and a renderer never branches on key
+                        # existence. The peer half of the federation is the
+                        # transport's ``include_peers`` (§9.5); the KEYS are this
+                        # document's, and they are here so a remote row needs no
+                        # second shape when that lands.
+                        "locality": "local",
+                        # The nested block is the TRANSPORT's shape and stays for
+                        # the surfaces that read it (the TUI's rows); the desktop
+                        # groups from the FLAT fields below (Addendum 2 B), and a
+                        # local row publishes them as the local answer rather than
+                        # omitting them — for the reason ``pinned`` gives, a row
+                        # that moved home must be able to UNSET a stale remote mark.
+                        "peer": None,
+                        "owner_device": "",
+                        "owner_device_name": "",
+                        "reachable": True,
+                        "unreachable_reason": "",
+                        "placement": (
+                            stamp.placement.to_json()
+                            if stamp is not None
+                            else local_placement().to_json()
+                        ),
+                        "origin": (
+                            dict(stamp.origin) if stamp is not None and stamp.origin else None
+                        ),
+                        "last_synced_at": None,
                     }
                 )
                 if attention_degraded and DECORATION_ATTENTION not in row["degraded"]:
@@ -5223,12 +5910,24 @@ class DesktopSessions:
                 next_cursor=page.next_cursor,
                 cursor_missing=page.cursor_missing,
                 counts=_counts_payload(page.counts),
+                # THE PEER HALF, read in THIS worker thread and only when asked:
+                # the projection dials this device's relay, which is a socket read
+                # the request's own loop must not pay, and a listing that did not
+                # ask for peers costs nothing at all — not even the module import.
+                # ``pins`` is the request's own read, so a remote row's pin and a
+                # local row's pin come from one snapshot.
+                remote=(remote_session_rows(self.root, pins=pins) if include_peers else []),
             )
 
         return await asyncio.to_thread(rows)
 
     async def search(
-        self, query: str, limit: int, *, include_archived: bool = False
+        self,
+        query: str,
+        limit: int,
+        *,
+        include_archived: bool = False,
+        include_peers: bool = False,
     ) -> list[dict[str, Any]]:
         """Past conversations matching ``query``, each carrying its pin state.
 
@@ -5247,9 +5946,13 @@ class DesktopSessions:
         """
 
         def rows() -> list[dict[str, Any]]:
+            # Lazy for ``list``'s reason: the mesh projection drags the network
+            # package in, and a search that did not ask for peers must not pay it.
+            from local_operator.server.utils.desktop_mesh import remote_session_rows
+
             matches = search_store(self.root, query, limit=limit, include_archived=include_archived)
             pins = set(read_pins(self.root))
-            return [
+            hits = [
                 {
                     "id": match.row.id,
                     "name": match.row.name,
@@ -5267,9 +5970,46 @@ class DesktopSessions:
                     # not return one at all, so every hit of a default search is
                     # `false` and the key exists for the answer that is not.
                     "archived": bool(match.row.archived),
+                    # THE FLAT LOCALITY FIELDS, local values included — the same
+                    # six keys the catalogue carries them on, for the same merge
+                    # reason: a search hit is the one row a client can SYNTHESISE
+                    # the catalogue never sent, and a synthesised row with no
+                    # ``locality`` would keep whatever mark the row it replaces had.
+                    "locality": "local",
+                    "owner_device": "",
+                    "owner_device_name": "",
+                    "reachable": True,
+                    "unreachable_reason": "",
                 }
                 for match in matches
             ]
+            if not include_peers:
+                return hits
+            # THE PEER HALF, and it is a FILTER rather than a second search: a
+            # peer's transcript is not on this disk, so a remote hit can only ever
+            # match by name or id (``body_match`` stays False — never a body match
+            # this device cannot prove) and is ranked with the same tiers the local
+            # half uses: name is rank 0, id is rank 1. Appended AFTER the local
+            # hits, so every remote row sorts below every row this device searched.
+            needle = query.strip().casefold()
+            for row in remote_session_rows(self.root, pins=pins, query=query):
+                hits.append(
+                    {
+                        "id": row["id"],
+                        "name": row["name"],
+                        "mtime": row["mtime"],
+                        "rank": 0 if needle and needle in str(row["name"]).casefold() else 1,
+                        "body_match": False,
+                        "pinned": bool(row.get("pinned")),
+                        "archived": bool(row.get("archived")),
+                        "locality": "remote",
+                        "owner_device": row.get("owner_device") or "",
+                        "owner_device_name": row.get("owner_device_name") or "",
+                        "reachable": bool(row.get("reachable")),
+                        "unreachable_reason": row.get("unreachable_reason") or "",
+                    }
+                )
+            return hits
 
         return await asyncio.to_thread(rows)
 
@@ -5373,8 +6113,8 @@ class DesktopSessions:
         return victim
 
     def _locate_flight(
-        self, session_id: str, locate: Callable[[], tuple[str, str | None]]
-    ) -> asyncio.Task[tuple[str, str | None]]:
+        self, session_id: str, locate: Callable[[], _LocatedSession]
+    ) -> asyncio.Task[_LocatedSession]:
         """The cold LOOKUP for ``session_id``, shared by every concurrent caller.
 
         Call under the pool lock, so two callers cannot both decide they are the
@@ -5394,7 +6134,7 @@ class DesktopSessions:
         task = asyncio.create_task(asyncio.to_thread(locate))
         self._locate_flights[session_id] = (loop, task)
 
-        def forget(settled: asyncio.Task[tuple[str, str | None]]) -> None:
+        def forget(settled: asyncio.Task[_LocatedSession]) -> None:
             # Identity-checked: a later caller may already have replaced this
             # entry on a fresh loop, and dropping THAT one would lose its flight.
             current = self._locate_flights.get(session_id)
@@ -5603,7 +6343,7 @@ class DesktopSessions:
         if not SESSION_ID.fullmatch(session_id):
             raise KeyError("Unknown session")
         bridge: DesktopSessionBridge | None = None
-        flight: asyncio.Task[tuple[str, str | None]] | None = None
+        flight: asyncio.Task[_LocatedSession] | None = None
         # ``taken`` rather than an unconditional release in the ``finally``: a
         # caller whose LOCK ACQUISITION is cancelled never incremented the count,
         # and decrementing anyway would release ANOTHER caller's reservation —
@@ -5712,72 +6452,115 @@ class DesktopSessions:
                 else:
                     path = self.root / "sessions" / session_id
 
-                    def locate() -> tuple[str, str | None]:
-                        """This session's opening directory, and the MARKER's own value.
+                    def locate() -> _LocatedSession:
+                        """This session's opening directory — or the PEER that holds it.
 
-                        The second element is provenance, not decoration: it is what
+                        The marker element is provenance, not decoration: it is what
                         lets the caller ask
                         :func:`_cwd_is_unconfirmed` whether the directory is a
                         durable claim a failed move could have written (the marker),
                         or the checkpoint fallback for a pre-checkpoint transcript,
                         which has no marker to doubt.
-                        """
-                        if not path.is_dir() or not is_user_session(path):
-                            raise KeyError("Unknown session")
-                        # Through the TOLERANT reader, not ``json.loads``: a marker this
-                        # code cannot parse (a hand edit, an interrupted write, a
-                        # directory where the document should be) is a document with no
-                        # cwd, and a session whose marker has no readable cwd still opens
-                        # here — on the checkpoint fallback below — instead of failing the
-                        # open with a 409/404 raised out of a parse error. Round 1 of
-                        # #1110 wrote the coverage for a malformed marker and found the
-                        # strict read behind it (R3).
-                        stored = read_desktop_marker(path)
-                        if (
-                            not (path / DESKTOP_MARKER_NAME).exists()
-                            and session_activity(path) is None
-                        ):
-                            # M1's SECOND LEG (round-1 review): a directory with NO
-                            # marker document at all, no transcript and no mail
-                            # spool must not open as a session. That is what a
-                            # draft's engage leaves behind (residue measured as
-                            # ``.execution-lease`` + ``.session.pid``, or the empty
-                            # directory a drained runtime leaves), and before this
-                            # check the checkpoint fallback below answered such a
-                            # directory with a phantom bridge on ``root.parent`` —
-                            # 200s on every door for an id no create can ever make
-                            # a session again (measured: ``probe_residue_locate``).
-                            #
-                            # EXISTENCE OF THE MARKER PATH, not readability: a
-                            # marker that is present but unreadable — garbage, an
-                            # interrupted write, a directory where the document
-                            # should be — keeps its own contract (the tolerant
-                            # reader answers it on the fallback below, review
-                            # round 1 of #1110), so only the document's total
-                            # ABSENCE is evidence of nothing.
-                            raise KeyError("Unknown session")
-                        marker_cwd = (stored or {}).get("cwd")
-                        if isinstance(marker_cwd, str) and marker_cwd:
-                            return marker_cwd, marker_cwd
-                        # The cold facade restores cwd from the durable canonical
-                        # checkpoint. This fallback is only used by pre-checkpoint
-                        # transcripts, whose historical launch directory is unknown.
-                        from local_operator.session.frontend_state import (
-                            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
-                        )
 
-                        # A ONE-ROW read, not a ``Transcript(path)``: constructing the
-                        # transcript JSON-decodes the whole journal (2059.5 ms on the
-                        # operator's 261 MB conversation — the A/B table in
-                        # ``docs/evidence/session-load-central-cache``), and this branch
-                        # runs on every bridge creation for a session that carries no
-                        # ``desktop.json`` marker. The reader answers from the tail
-                        # backward and never creates the directory.
-                        checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
-                        return (
-                            str((checkpoint or {}).get("state", {}).get("cwd") or self.root.parent),
-                            None,
-                        )
+                        THE REMOTE ARM IS HERE, and this is the ONLY place the pool
+                        decides that a session is another device's: every desktop
+                        route resolves a session through this method, so one
+                        decision covers the snapshot, the history page, the event
+                        stream, the send path and the control verbs — the same
+                        argument ``_ensure_facade`` makes for holding the only
+                        bridge construction in the tree.
+
+                        WHAT IT DOES NOT COST. A LOCAL ID NEVER DIALS: the
+                        directory is checked first, and that is the order the
+                        session's own durability asks for (a conversation moved home
+                        has a directory HERE, and the peer cache can still hold a
+                        listing for it for one TTL). ``remote_row_for`` is
+                        cache-first, so the row the sidebar's poll already read is a
+                        tuple scan, and a miss pays ONE cached projection read —
+                        which is the read the route in front of this method used to
+                        make on EVERY snapshot call, including the local ones. On a
+                        machine in no network it answers ``None`` without opening a
+                        socket, so an unknown id still costs one ``is_dir`` and still
+                        answers the shared 404.
+                        """
+                        if path.is_dir() and is_user_session(path):
+                            # Through the TOLERANT reader, not ``json.loads``: a marker this
+                            # code cannot parse (a hand edit, an interrupted write, a
+                            # directory where the document should be) is a document with no
+                            # cwd, and a session whose marker has no readable cwd still opens
+                            # here — on the checkpoint fallback below — instead of failing the
+                            # open with a 409/404 raised out of a parse error. Round 1 of
+                            # #1110 wrote the coverage for a malformed marker and found the
+                            # strict read behind it (R3).
+                            stored = read_desktop_marker(path)
+                            if (
+                                not (path / DESKTOP_MARKER_NAME).exists()
+                                and session_activity(path) is None
+                            ):
+                                # M1's SECOND LEG (round-1 review): a directory with NO
+                                # marker document at all, no transcript and no mail
+                                # spool must not open as a session. That is what a
+                                # draft's engage leaves behind (residue measured as
+                                # ``.execution-lease`` + ``.session.pid``, or the empty
+                                # directory a drained runtime leaves), and before this
+                                # check the checkpoint fallback below answered such a
+                                # directory with a phantom bridge on ``root.parent`` —
+                                # 200s on every door for an id no create can ever make
+                                # a session again (measured: ``probe_residue_locate``).
+                                #
+                                # EXISTENCE OF THE MARKER PATH, not readability: a
+                                # marker that is present but unreadable — garbage, an
+                                # interrupted write, a directory where the document
+                                # should be — keeps its own contract (the tolerant
+                                # reader answers it on the fallback below, review
+                                # round 1 of #1110), so only the document's total
+                                # ABSENCE is evidence of nothing.
+                                raise KeyError("Unknown session")
+                            marker_cwd = (stored or {}).get("cwd")
+                            if isinstance(marker_cwd, str) and marker_cwd:
+                                return _LocatedSession(marker_cwd, marker_cwd)
+                            # The cold facade restores cwd from the durable canonical
+                            # checkpoint. This fallback is only used by pre-checkpoint
+                            # transcripts, whose historical launch directory is unknown.
+                            from local_operator.session.frontend_state import (
+                                FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+                            )
+
+                            # A ONE-ROW read, not a ``Transcript(path)``: constructing the
+                            # transcript JSON-decodes the whole journal (2059.5 ms on the
+                            # operator's 261 MB conversation — the A/B table in
+                            # ``docs/evidence/session-load-central-cache``), and this branch
+                            # runs on every bridge creation for a session that carries no
+                            # ``desktop.json`` marker. The reader answers from the tail
+                            # backward and never creates the directory.
+                            checkpoint = read_latest_custom(path, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+                            return _LocatedSession(
+                                str(
+                                    (checkpoint or {}).get("state", {}).get("cwd")
+                                    or self.root.parent
+                                ),
+                                None,
+                            )
+                        from local_operator.session.remote_open import remote_row_for
+
+                        row = remote_row_for(session_id, self.root)
+                        if row is None:
+                            raise KeyError("Unknown session")
+                        if not row.reachable:
+                            # REFUSED BEFORE ANYTHING IS BUILT, and with the SAME
+                            # sentence the TUI refuses the same state with (the
+                            # composer lives in ``remote_open``): a viewer built for
+                            # an unreachable peer can never bind, so the honest
+                            # answer is the one that names the device, the reason and
+                            # the diagnosing command. The route maps it to the same
+                            # 409 ``session_is_remote`` this id answered before the
+                            # open path existed.
+                            raise PeerSessionUnreachable(session_id, row)
+                        # cwd="" and NOT a local path: a directory on this machine
+                        # means nothing on the peer, and an empty cwd is what lets the
+                        # peer default to its own (``RemoteOwner.engage`` forwards
+                        # nothing when the caller supplied nothing).
+                        return _LocatedSession("", None, row)
 
                     # THE LOOKUP FIRST, so an unknown session stays 404 on a latched
                     # daemon too: that is what lets "the 503 is the LATCH answering" be
@@ -5805,7 +6588,7 @@ class DesktopSessions:
                 # attach held the pool-wide lock. Nothing below touches pool state
                 # except in the guarded section, and the handout taken above is
                 # what keeps this bridge out of the eviction path meanwhile.
-                cwd, marker_cwd = await asyncio.shield(flight)
+                located = await asyncio.shield(flight)
                 self.assert_admitting()  # THE REFUSAL, before anything is built
                 # THE BRIDGE THE SHARED LOOKUP WENT ON TO BUILD, read WITHOUT the
                 # pool lock — and that read is safe precisely because of the
@@ -5824,7 +6607,11 @@ class DesktopSessions:
                     # shorten. Only reached when this caller is the one that builds
                     # the bridge (or lost the race to build it).
                     unconfirmed = await asyncio.to_thread(
-                        _cwd_is_unconfirmed, self.root, session_id, marker_cwd, cwd
+                        _cwd_is_unconfirmed,
+                        self.root,
+                        session_id,
+                        located.marker_cwd,
+                        located.cwd,
                     )
                     async with self.lock:
                         # Re-read rather than assume: two concurrent cold callers both
@@ -5846,15 +6633,30 @@ class DesktopSessions:
                             # bookkeeping frames only, and it asks the same question
                             # ``locate()`` asks — so a conversation RE-CREATED under
                             # the same id passes it exactly as it did the first time.
-                            if not (self.root / "sessions" / session_id).is_dir():
+                            #
+                            # A REMOTE ID HAS NO DIRECTORY TO RE-CHECK, deliberately:
+                            # the peer holds it, the projection this lookup read is
+                            # the only evidence there is, and a stat here would be a
+                            # second, weaker answer about another device's disk. What
+                            # can move in the same window is the placement itself (a
+                            # ``/move`` home landing between the lookup and here),
+                            # and that is a race the cache's own TTL closes with the
+                            # peer's next listing — the peer is the authority on what
+                            # it holds, and a session that arrives home is opened
+                            # locally from the next request on.
+                            if (
+                                located.remote_row is None
+                                and not (self.root / "sessions" / session_id).is_dir()
+                            ):
                                 raise KeyError("Unknown session")
                             evicted = self._make_room()
                             bridge = DesktopSessionBridge(
                                 self.root,
                                 session_id,
-                                cwd,
+                                located.cwd,
                                 retiring=self.retiring_probe,
                                 cwd_unconfirmed=unconfirmed,
+                                remote_row=located.remote_row,
                             )
                             self.bridges[session_id] = bridge
             assert bridge is not None  # resolved above: either found or built

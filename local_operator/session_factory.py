@@ -3554,6 +3554,39 @@ async def _prepare(
     from local_operator.session.retention import claim_session
     from local_operator.session_lease import acquire_session_lease
 
+    if transcript_dir.parent.name == "sessions":
+        # B-M1'S OTHER HALF: A SESSION MID-HANDOFF IS NOT OPENED HERE EITHER.
+        #
+        # Ownership is acquired at this boundary, and this boundary is where every
+        # open path in the product meets: ``lop -r <id>``, ``lop exec``, the TUI's
+        # in-process open and a booting runtime all reach the lease through here,
+        # NOT through the relay's engage guard. So an opener arriving between a
+        # move's ``prepare`` and its commit took the lease, and the commit — which
+        # only looked at ``prepare`` — deleted the directory out from under it
+        # (review round 1, B-M1). Two consequences, both fixed by refusing BEFORE
+        # the acquire: the move's commit now finds no live holder, and a refusal
+        # here cannot leave a lease claim behind for a runtime that never started
+        # (which is what made a move fail with "open in another process" after a
+        # single refused resume).
+        #
+        # Recovery runs first, so a journal entry left by a relay that died does not
+        # brick the conversation (M-3).
+        from local_operator.session.placement import handoff_guard_refusal
+        from local_operator.session.runtime.launch import (
+            RuntimeStartupError,
+            recover_stale_handoff,
+        )
+
+        # The ROOT the journal actually lives under, derived from the directory
+        # itself rather than from the registry: a relocated store (``--config-dir``,
+        # an isolated test root, a scratch clone) writes its journal beside its own
+        # ``sessions/``, and asking the registry would read another install's.
+        handoff_config_dir = transcript_dir.parent.parent
+        recover_stale_handoff(handoff_config_dir, transcript_dir.name)
+        handed_off = handoff_guard_refusal(handoff_config_dir, transcript_dir.name)
+        if handed_off:
+            raise RuntimeStartupError(handed_off)
+
     # Sole-writer ownership is acquired at the shared construction boundary,
     # before transcript creation. Edge checks remain useful UX, but only O_EXCL
     # can make two simultaneous cold resumes safe. Agent training directories
@@ -3661,9 +3694,16 @@ async def _prepare(
     )
     spec = model_configuration.spec
 
-    from local_operator.providers.auth_store import AuthStore
+    # ONE CONSTRUCTION SITE, and ``build_auth_store`` returns the very same
+    # ``AuthStore`` on a device that borrows nothing — no network, no placement, or
+    # nothing shared with this device (build plan §5, design §5.1). It swaps in
+    # ``network.credentials.store.MeshAwareAuthStore`` only when another device owns
+    # a credential this one is a holder for, which is the only state in which the
+    # broker rung can fire. ``AuthStore`` is still imported here because the rest of
+    # this module's annotations name it.
+    from local_operator.network.credentials import build_auth_store
 
-    auth_store = AuthStore(config_dir=config_manager.config_dir)
+    auth_store = build_auth_store(config_manager.config_dir)
     # A fork inherits its PARENT's provider cache key. The fork's transcript is
     # a byte-identical copy, so its first request reproduces the parent's cached
     # prefix exactly and should be routed to it rather than opening a fresh one.
@@ -4789,39 +4829,82 @@ async def create_session(
     # invent another attach UI. Headless/exec callers still take the lease and
     # get the existing refusal: they have no full front end to host the facade.
     resume_id = getattr(args, "resume", None)
-    if has_ui and resume_id is not None and not _force_local_takeover:
+    if resume_id is not None and not _force_local_takeover:
         from local_operator.mobile.attach_client import find_runtime_record
         from local_operator.session.attached import AttachedSession
+        from local_operator.session.remote_open import (
+            open_remote_viewer,
+            remote_row_for,
+            unreachable_peer_sentence,
+        )
 
         root = Path(agent_registry.config_dir)
-        record, owner = await asyncio.to_thread(find_runtime_record, root, str(resume_id))
-        if owner is not None and owner != os.getpid():
-            if record is None or record.protocol < 4:
-                raise ValueError(
-                    f"session {resume_id} is open in an older Local Operator process "
-                    f"(pid {owner}); update or close it, then resume again"
-                )
+        # A SESSION ANOTHER DEVICE HOLDS IS NOT LOOKED UP HERE (mesh build plan §0
+        # finding 2), and WHICH RUN CAN OPEN IT is decided in one place rather than
+        # in a caller's claim about itself. The peer lookup is cache-first and pays
+        # one ``is_dir`` for a local id, so asking it unconditionally is the cheap
+        # half of the same question the CLI's pre-check already asked.
+        peer_row = await asyncio.to_thread(remote_row_for, str(resume_id), root)
+        if peer_row is not None and not has_ui:
+            # NO FRONT END, SO NO VIEWER: a headless REPL or `--message` run hosts no
+            # attach UI, which is the rule the takeover refusal below states for the
+            # local case. Falling through instead reached ``resume_dir`` and reported
+            # "no session '<a peer's id>' to resume" — a TYPO on a conversation the
+            # sidebar lists — after the CLI's own pre-check had already promised to
+            # open it (measured, with the output piped).
+            label = peer_row.owner_label or peer_row.owner_device
+            if not peer_row.reachable:
+                raise ValueError(unreachable_peer_sentence(str(resume_id), peer_row))
+            raise ValueError(
+                f"{resume_id} lives on {label}, and this run has no full-screen front "
+                f"end to open a viewer in. Drive it with `lop network sessions --peer "
+                f"{label} --engage {resume_id}`, or bring it home with `lop sessions "
+                f"move {resume_id} --to local`."
+            )
+        if has_ui:
 
-            async def takeover_factory() -> "SessionProtocol":
-                # Owner death is the one time this process may try the writer
-                # path. The lease is still the arbiter: racing followers call
-                # this concurrently, one wins, losers get SessionLeaseHeldError
-                # and AttachedSession rediscovers the winner.
-                return await create_session(
-                    args,
-                    config_manager,
-                    agent_registry,
-                    has_ui=True,
-                    cwd=effective_cwd,
-                    _force_local_takeover=True,
-                )
+            async def refuse_takeover() -> "SessionProtocol":
+                raise RuntimeError("a remote viewer never takes over a session")
 
-            return await AttachedSession.connect(
-                record,
+            remote_viewer = await open_remote_viewer(
                 str(resume_id),
                 config_dir=root,
-                takeover_factory=takeover_factory,
+                takeover=refuse_takeover,
+                # THE ROW ALREADY RESOLVED, so the placement and the seed come from
+                # one read: a second lookup here would be a second chance for the
+                # two to disagree about which device holds the conversation.
+                row=peer_row,
             )
+            if remote_viewer is not None:
+                return remote_viewer
+            record, owner = await asyncio.to_thread(find_runtime_record, root, str(resume_id))
+            if owner is not None and owner != os.getpid():
+                if record is None or record.protocol < 4:
+                    raise ValueError(
+                        f"session {resume_id} is open in an older Local Operator process "
+                        f"(pid {owner}); update or close it, then resume again"
+                    )
+
+                async def takeover_factory() -> "SessionProtocol":
+                    # Owner death is the one time this process may try the writer
+                    # path. The lease is still the arbiter: racing followers call
+                    # this concurrently, one wins, losers get SessionLeaseHeldError
+                    # and AttachedSession rediscovers the winner.
+                    return await create_session(
+                        args,
+                        config_manager,
+                        agent_registry,
+                        has_ui=True,
+                        cwd=effective_cwd,
+                        _force_local_takeover=True,
+                    )
+
+                return await AttachedSession.connect(
+                    record,
+                    str(resume_id),
+                    config_dir=root,
+                    takeover_factory=takeover_factory,
+                )
 
     plan = await _prepare(
         args,

@@ -65,6 +65,65 @@ class SessionRow(BaseModel):
     #: The renderer's ``SessionCatalogueRow`` is this shape's hand-written
     #: mirror, so this key is a change to a second file as well as this one.
     pinned: bool
+    #: -- THE MESH'S FIVE KEYS (mesh-session-mobility.md §9.2). Additive and
+    #: defaulted, so every existing client reads exactly what it read before;
+    #: they are DECLARED here rather than left to ``extra="allow"`` so the shape
+    #: a renderer can rely on is written down where the rest of it is.
+    #:
+    #: ``locality`` and ``peer`` are the transport's two, and ONLY ``locality`` is a
+    #: field every row carries an answer in: ``"local"`` for a row on this device,
+    #: ``"remote"`` for one another device holds. ``peer`` is ``null`` on the rows THIS
+    #: model describes, both halves: ``remote_session_rows`` mints each remote row from
+    #: the flat fields and never sets the nested block, because a client that grouped by
+    #: ``peer.name`` filed every remote row under one heading in the first review
+    #: (Addendum 2 B), and this device's own catalogue publishes ``"peer": None`` beside
+    #: its flat fields. So a reader must take ``peer: null`` as "this row carries no
+    #: nested block" and never as "this row is local": ``locality`` is the only field
+    #: that answers which it is, and it is always present.
+    #:
+    #: AND IT IS NOT A CLAIM ABOUT EVERY SURFACE (QA delta, Q-D5). The transport's own
+    #: federated row REQUIRES the block and carries it on every remote row
+    #: (``network/projection.py::to_row_json``) — that is the shape ``lop network
+    #: sessions --peer/--all-peers --json`` prints, and the shape ``cli.sessions_command``
+    #: reads ``peer.name`` from for its PEER column. Two shapes on purpose: this model and
+    #: the renderer that mirrors it group from the FLAT fields, the federated row carries
+    #: the block, and an earlier revision of this comment generalised this surface's rule
+    #: to "the federated listing" in both directions (first wrong about remote rows,
+    #: Q-INT-5; then wrong about the listing, Q-D5).
+    locality: Literal["local", "remote"] = "local"
+    peer: dict[str, Any] | None = None
+    #: -- THE FLAT LOCALITY FIELDS (mesh build plan, Addendum 2 B). The renderer
+    #: groups and labels from THESE, not from the nested ``peer`` block: with only
+    #: the nested shape every remote row was filed under one heading, because the
+    #: client reads ``owner_device`` and nothing else. They are declared here —
+    #: rather than left to ``extra="allow"`` — for the reason ``pinned`` gives:
+    #: this model is the contract a renderer mirrors by hand.
+    #:
+    #: PRESENT WITH A VALUE ON EVERY ROW, local ones included (``""``/``""``/
+    #: ``True``/``""``), which is the merge rule the row shape follows everywhere:
+    #: a client's merge is "an absent key is not a claim", so a row that MOVED home
+    #: would otherwise keep its stale ``remote`` mark and stay filed under a peer it
+    #: no longer lives on.
+    owner_device: str = ""
+    owner_device_name: str = ""
+    #: Whether the owning device answered THIS poll (always true for a local row).
+    reachable: bool = True
+    #: One sentence when ``reachable`` is false, in the backend's words — the
+    #: relay's protocol tokens are glossed at this boundary
+    #: (``resume.peer_reason_words``) so no renderer keeps a glossary of its own.
+    unreachable_reason: str = ""
+    #: Where the session runs (``local``/``peer``/``pool``) and the policy that
+    #: governs it, from the session's own ``mesh.json``. Always present for a row
+    #: this build writes, so a reader can tell "local" from "written by a build
+    #: that does not know about the mesh" (§5.1).
+    placement: dict[str, Any] | None = None
+    #: How it got here: ``moved`` (id preserved, ownership transferred) or
+    #: ``fork`` (a ``--keep`` copy). ``None`` is no provenance claim, and the row
+    #: then shows no "copy of…" subtitle.
+    origin: dict[str, Any] | None = None
+    #: R22's visible half: when this device last pulled a ``--keep`` copy it does
+    #: not own. ``None`` on a row this device holds.
+    last_synced_at: float | None = None
     #: Whether this conversation is archived: ALWAYS PRESENT, with both values,
     #: on every row — `pinned`'s rule and `pinned`'s reason.
     #:
@@ -361,6 +420,18 @@ class SessionSearchRow(BaseModel):
     #: otherwise. Dropping the key would make the two answers indistinguishable
     #: to a client merging hits into the rows it holds.
     archived: bool
+    #: -- THE FLAT LOCALITY FIELDS, the catalogue's six keys on the search's own
+    #: row (Addendum 2, B). DECLARED RATHER THAN LEFT TO ``extra``, and that is
+    #: the whole reason they are here: this model does not allow extras, so a
+    #: projection that set them would have had them SILENTLY DROPPED from the
+    #: answer — the client would see a search hit with no ``locality`` while the
+    #: same conversation carried one in the catalogue, which is exactly the
+    #: disagreement the field exists to prevent.
+    locality: Literal["local", "remote"] = "local"
+    owner_device: str = ""
+    owner_device_name: str = ""
+    reachable: bool = True
+    unreachable_reason: str = ""
 
 
 class SessionSearch(BaseModel):
@@ -377,10 +448,72 @@ class SessionSearch(BaseModel):
     limit: int = 100
 
 
+class CreatedSessionModel(BaseModel):
+    """Whether the model a create ASKED for reached the runtime, and why not.
+
+    ONE PRODUCER'S PAIR, so one model: the peer's create reports ``applied`` together
+    with the sentence for whatever it could not do (a runtime that is still joining, a
+    ``set_model`` that refused), and ``detail`` is that device's own words passed
+    through verbatim — an empty ``detail`` is "nothing to report", never "no reason".
+
+    ``applied=False`` is an ORDINARY answer and not a failure of the create: with no
+    first prompt there is nothing that needs a runtime yet, which is the whole of Q4b.
+    """
+
+    applied: bool = False
+    detail: str = ""
+
+
 class CreatedSession(BaseModel):
     binding: dict[str, str | None] = Field(default_factory=dict)
     session_id: str
     replayed: bool = False
+    #: Who the new conversation runs as, for a create that named an agent or a team,
+    #: plus the two facts a renderer cannot derive: whether the profile's
+    #: instructions were actually applied, and what the session is running on when a
+    #: profile overrode a requested model. ``None`` for a create that named neither —
+    #: so the local path's answer and every older client's body are unchanged.
+    #:
+    #: A NAMED FIELD rather than a loose key: the route returns through this model,
+    #: which drops what it does not declare, so an undeclared dict would have reached
+    #: the client as nothing and the peer's honest half ("its instructions are not
+    #: attachable") would have been silently lost.
+    identity: dict[str, Any] | None = None
+    #: THE RUNTIME IS STILL JOINING (QA round 1, Q4b). The conversation exists, the id
+    #: is durable and the caller owns it, but no owner has come up to answer a prompt
+    #: yet: a prompt sent now is REFUSED by the peer (``OwnerUnreachable``), so a
+    #: surface that offers one is offering a failure.
+    #:
+    #: IT HAS TO BE DECLARED HERE TO EXIST AT ALL. This route declares
+    #: ``response_model=CRUDResponse[CreatedSession]``, so FastAPI validates the reply
+    #: against this model — a field the producer sends and this model does not declare
+    #: is SILENTLY DROPPED on the way out. The peer has answered with
+    #: ``warming: true, admitted: false, model: {applied: false}`` since Q4b and a
+    #: desktop client saw none of it: this class is the boundary where the whole
+    #: feature keeps losing fields, which is why every one of them is here.
+    warming: bool = False
+    #: Whether the device that HOSTS the conversation has an owner for it yet. READ IT
+    #: WITH ``warming``, because the two absences are not the same fact:
+    #:
+    #: * ``admitted=False, warming=True`` — still joining. Ask again shortly; the
+    #:   conversation is fine and the model will be applied when the runtime arrives.
+    #: * ``admitted=False, warming=False`` — the peer could not bring a runtime up at
+    #:   all, and ``detail`` is its own sentence about why.
+    #:
+    #: ``True`` is the LOCAL answer and every path that has no peer admission gate: a
+    #: conversation created here is held by this process and is promptable at once, so
+    #: a client that read the default as "not ready" would disable a composer that
+    #: works.
+    admitted: bool = True
+    #: The peer's OWN sentence about the create, verbatim and ``""`` when it reported
+    #: nothing. It carries the complaints ``warming``/``admitted`` cannot — an engage
+    #: that failed after the directory existed — which is the third field of the same
+    #: producer reply and would otherwise be dropped at this boundary too.
+    detail: str = ""
+    #: The model result (``applied``/``detail``), defaulting to "nothing was asked for
+    #: and nothing was applied" — which is what a local create with no ``model`` field
+    #: honestly reports.
+    model: CreatedSessionModel = Field(default_factory=CreatedSessionModel)
 
 
 class DraftReceipt(BaseModel):
