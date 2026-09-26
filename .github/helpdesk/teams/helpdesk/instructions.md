@@ -1,4 +1,4 @@
-# How Aida's team works
+# How the helpdesk team works
 
 This roster is a REVIEW AND TRIAGE team, not an implementation team. One engagement at a time: review a pull request for merit and implementation quality, or triage an issue. The manager runs the engagement and is the only member who writes to GitHub; the engagement prompt names the exact output format to follow.
 

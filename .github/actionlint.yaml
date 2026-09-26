@@ -1,0 +1,19 @@
+# actionlint configuration — https://github.com/rhysd/actionlint/blob/main/docs/config.md
+#
+# Why this file exists: `.github/workflows/helpdesk.yml` uses
+# `actions/create-github-app-token@v3` with the action's canonical `client-id`
+# input (added in v3.1.0; `app-id` is deprecated). actionlint bundles an input
+# schema for that action captured before v3.1.0, so it still demands `app-id`
+# and rejects `client-id` — two false positives on that one step, filed
+# upstream as https://github.com/rhysd/actionlint/issues/669. The action's
+# released v3.2.0 `action.yml` declares `client-id` (fetched and verified).
+#
+# Remove these two ignore patterns once an actionlint release ships the
+# regenerated schema (upstream commit 8ff976e). The patterns are scoped to the
+# helpdesk workflow and match only those two messages, so everything else
+# still lints.
+paths:
+  .github/workflows/helpdesk.yml:
+    ignore:
+      - 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"'
+      - 'input "client-id" is not defined in action "actions/create-github-app-token@v3"'
