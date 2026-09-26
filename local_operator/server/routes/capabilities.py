@@ -131,6 +131,19 @@ async def capabilities():
                 # field, and a pick that silently did nothing would be worse than
                 # a chip that never offered itself).
                 "draft_selection": 1,
+                # The new-chat pane's DRAFT PRE-ENGAGE: `POST
+                # /v1/desktop/sessions/draft` mints an id the pane may subscribe,
+                # watch and warm before any session exists, and `create` accepts
+                # it back so the first send never pays the engage. Its own key
+                # rather than a bump of `draft_selection`, by the rule that entry
+                # states: this gates NOTHING a renderer already shows — warming
+                # is an optimisation on a send path the client already has — so
+                # a renderer that does not see it simply never mints and pays
+                # the cold engage exactly as today (the same policy as
+                # `session_catalogue`'s warm version). A renderer gated on this
+                # key must also degrade silently on `sessions.draft` failure:
+                # the warm is speculation, never a reason to block a send.
+                "session_draft_warm": 1,
                 "lifecycle": 1,
                 # Watch leases route notification delivery; they never mark read.
                 # Named for this map's convention (`<subsystem>: <version>`); the

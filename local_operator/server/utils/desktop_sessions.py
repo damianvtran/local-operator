@@ -80,7 +80,7 @@ from local_operator.session.frontend_state import (
 from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.page_cache import load_transcript_page
 from local_operator.session.restored_rows import record_field, roster_records
-from local_operator.session.retention import DESKTOP_MARKER_NAME
+from local_operator.session.retention import DESKTOP_MARKER_NAME, session_activity
 from local_operator.session.runtime import registry
 from local_operator.session.session_search import search_store
 from local_operator.session.transcript import (
@@ -1006,6 +1006,7 @@ class DesktopSessionBridge:
         *,
         retiring: Callable[[], bool] | None = None,
         cwd_unconfirmed: bool = False,
+        draft: _Draft | None = None,
     ) -> None:
         self.root, self.session_id, self.cwd = root, session_id, cwd
         # Why this bridge must not start a runtime, asked of the daemon's own
@@ -1146,6 +1147,14 @@ class DesktopSessionBridge:
         #: bridge that watched the failure is discarded by the eviction and
         #: restart paths this flag exists to cover (review round 3, MAJOR-1).
         self.cwd_unconfirmed = cwd_unconfirmed
+        #: The registered draft this bridge was built for, or ``None`` for a
+        #: session resolved from its own directory (spec §1.3). Read ONLY by
+        #: :meth:`_ensure_facade`, for the birth selection: a draft has no marker
+        #: yet — ``create`` writes it later — so the spec MINTED with, which
+        #: ``create`` is about to persist, is what the first engage must be born
+        #: on. Scoped to this bridge's life: a later bridge for the same id
+        #: resolves through the marker create wrote.
+        self.draft = draft
 
     def has_legacy_subscriber(self) -> bool:
         """Whether any LIVE subscriber cannot consume ``frontend.replace``."""
@@ -1364,7 +1373,7 @@ class DesktopSessionBridge:
     async def _ensure_facade(self) -> AttachedSession:
         """This bridge's facade, constructed cold on first use. Caller holds the lock."""
         if self.remote is None:
-            # The birth selection this draft was created with, and the
+            # The birth selection this conversation was created with, and the
             # deliberate override that makes the child PIN it (a config
             # edit must not re-select a conversation the user chose a
             # model for). Both are ``None``/``False`` for every session
@@ -1373,7 +1382,18 @@ class DesktopSessionBridge:
             # owns a selection, so a switched conversation is never
             # dragged back to the model it was born on (see
             # :func:`draft_birth_selection`).
-            birth = await asyncio.to_thread(draft_birth_selection, self.root, self.session_id)
+            #
+            # FOR A DRAFT the marker this read would consult does not exist
+            # yet (``create`` has not run), so the spec minted WITH the draft
+            # is the answer: the exact value create will persist into the
+            # marker, validated at the mint by the same authority. Reading
+            # ``session_id`` here instead would birth the first turn on the
+            # configured default — the one outcome the draft's model pick
+            # exists to avoid.
+            if self.draft is not None:
+                birth = self.draft.model
+            else:
+                birth = await asyncio.to_thread(draft_birth_selection, self.root, self.session_id)
             remote = await AttachedSession.cold(
                 self.session_id,
                 config_dir=self.root,
@@ -3665,6 +3685,72 @@ def _counts_payload(census: ScopeCensus | None) -> dict[str, Any] | None:
     }
 
 
+#: How long a minted draft stays resolvable, in seconds. Long enough to cover a
+#: user typing a first message (the mint fires on the pane's first keystroke),
+#: short enough that an abandoned pane's registry entry does not outlive the
+#: runtime a warm for it started (that runtime's own idle drain is the shorter
+#: clock; this is the backstop for a pane that closed before any warm).
+DRAFT_TTL_S = 1800.0
+
+#: How many registered drafts ONE daemon holds. Minting at the cap evicts the
+#: OLDEST, the same "bounded, and the newest is the one in use" reasoning as
+#: ``BRIDGE_COUNT`` — with the same honest cost: an evicted draft's warm is
+#: wasted (its runtime drains unowned) and its ``create`` falls back to a fresh
+#: id, exactly as an expired one does.
+DRAFT_COUNT_MAX = 32
+
+
+@dataclass
+class _Draft:
+    """One minted, not-yet-materialised new-chat pane; in-memory only.
+
+    THE STATE IS DELIBERATELY MINIMAL (spec §1.2): the birth selection ``create``
+    will persist into the marker, the cwd the pane's bridge opens on, and when
+    it was minted. A minted but never-warmed pane costs one dict entry — no
+    directory, no marker, no runtime record (mint writes no files).
+
+    NO ``target``, AND NO ``request_id``, DELIBERATELY (round-1 review N1). The
+    create body stays authoritative for ``cwd``/``target``/``model`` — the
+    draft supplies the ID and the warm and nothing else (spec §1.4) — and retry
+    safety is the ROUTE's receipt row (``draft:<request_id>``), which a replay
+    answers without ever touching this registry. Storing either would read as
+    load-bearing state that nothing loads; ``target`` is still VALIDATED by
+    ``mint_draft`` (its admission is a parameter, not a stored field) because
+    the mint documents the same refusals ``create`` gives.
+
+    ``model`` is the NORMALISED spec (``_draft_model_spec``'s answer), never the
+    raw wire selection: it is the same type ``draft_birth_selection`` reads back
+    out of the marker after ``create`` writes it, and it is handed to the facade
+    in exactly that shape.
+    """
+
+    draft_id: str
+    cwd: str
+    model: ModelSpec | None
+    created: float
+
+
+class DraftAlreadyMaterialised(ValueError):
+    """``create`` named a draft id whose session already exists on disk.
+
+    THE REFUSAL, not a fallback: minting fresh here would answer a create that
+    named a conversation with a DIFFERENT, empty one, and "create onto an
+    existing conversation" must never answer with someone else's id (spec
+    §1.4). The draft cannot be "used" either — it was consumed by the create
+    that materialised it — so the only honest answer is to say so.
+
+    A ``ValueError`` so it rides the route ladder's refusal arms, with its own
+    child of that ladder rendering it as the 422 the spec fixes; ``code`` is the
+    machine contract and the sentence names the remedy (open the conversation
+    the draft already became).
+    """
+
+    code = "draft_already_materialised"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class DesktopSessions:
     """Bounded adapter cache; canonical identity lives in the session directory."""
 
@@ -3703,6 +3789,25 @@ class DesktopSessions:
         # must see it. Defaulted so the many reduced ``DesktopSessions(root)``
         # constructions (tests, embedded apps) behave exactly as before.
         self.retiring_probe = retiring or _never_retiring
+        #: This daemon's registered DRAFTS, by draft id (spec §1.2). IN-MEMORY
+        #: ONLY and lost on restart by design — a draft is a warm intent, not
+        #: durable state, so the UI's stale id simply hits the "unknown" rule
+        #: and its create mints fresh. Mutated only from the event loop and
+        #: never across an ``await`` (mint, ``create``'s consume, TTL pruning),
+        #: so every read-then-write is atomic on the loop and no lock is needed
+        #: — the pool lock answers a different question (which bridges are
+        #: resident), and taking it here would put a dict lookup on every
+        #: ordinary door call behind it.
+        self.drafts: dict[str, _Draft] = {}
+        #: Ids whose create has CONSUMED the draft and not yet published the
+        #: marker (added at consumption, discarded when ``persist`` returns or
+        #: raises). The window is sub-millisecond-to-low-milliseconds here
+        #: (round-2 review R2-1) and it exists so a door ask inside it keeps
+        #: serving the pane's resident bridge: without it, ``session()``'s
+        #: dead-draft branch read "entry gone, no marker" as death while the
+        #: truthful reading was "create is in flight". Loop-only mutation, like
+        #: ``self.drafts``.
+        self._materialising: set[str] = set()
 
     def assert_admitting(self) -> None:
         """Raise ``DaemonRetiring`` when this daemon has LATCHED against new work.
@@ -4337,8 +4442,24 @@ class DesktopSessions:
         *,
         target: dict[str, str] | None = None,
         model: dict[str, str | None] | None = None,
+        draft_id: str | None = None,
     ) -> str:
-        """Create a draft session's record.
+        """Create a draft session's record, optionally materialising a warm draft.
+
+        ``draft_id`` is the id a mint handed the pane (spec §1.4). It supplies
+        the ID and the already-running warm — NOTHING else: ``cwd``/``target``/
+        ``model`` stay the body's, and admissions above re-run for them exactly
+        as before. Resolution is single-use with three outcomes:
+
+        * REGISTERED (and unexpired) → the id is used and consumed HERE, before
+          any write, so a second create naming it can never reuse it;
+        * unknown/expired/evicted/lost → a fresh id is minted and the create
+          proceeds: the warm was wasted, the send still works;
+        * unregistered but already MATERIALISED (a create ran for it and its
+          marker is on disk — e.g. the renderer re-sent after a daemon restart)
+          → refused with :class:`DraftAlreadyMaterialised`, because both
+          alternatives answer wrongly: minting fresh would answer a request
+          that named a conversation with a different, empty one.
 
         ``model`` is the caller-validated birth selection (see the route), stored
         in the session's own marker so the FIRST turn can be born on it. It is
@@ -4360,11 +4481,39 @@ class DesktopSessions:
                 target["kind"],
                 target["name"],
             )
-        session_id = uuid.uuid4().hex[:12]
+        session_id: str | None = None
+        from_draft = False
+        if draft_id is not None:
+            if self._draft_for(draft_id) is not None:
+                # Consumed BEFORE the write, so no later create can REUSE the id.
+                # A second create racing this one on a DIFFERENT request id (the
+                # same id is the receipt journal's business) sees an unregistered
+                # id and mints fresh until the marker lands, when it gets the
+                # typed refusal — the MARKER, not the registry entry, is what
+                # makes an id materialised.
+                del self.drafts[draft_id]
+                session_id = draft_id
+                from_draft = True
+                # R2-1: the materialising window OPENS here — the entry is gone
+                # but the marker is not published until ``persist`` returns,
+                # and ``session()`` must not read that gap as death (see the
+                # field's comment).
+                self._materialising.add(draft_id)
+            else:
+                self.assert_draft_unmaterialised(draft_id)
+        if session_id is None:
+            session_id = uuid.uuid4().hex[:12]
         path = self.root / "sessions" / session_id
 
         def persist() -> None:
-            path.mkdir(parents=True, mode=0o700)
+            # ``exist_ok`` ONLY for a materialising draft: the deferred engage
+            # may already have written the session directory's residue
+            # (``.execution-lease`` + ``.session.pid``; measured — the engage
+            # boots the runtime in the draft's own directory, and the warm is
+            # the entire point of the draft). The marker written below is what
+            # MATERIALISES the session. A fresh id keeps today's exclusivity
+            # and refuses a directory it did not expect.
+            path.mkdir(parents=True, mode=0o700, exist_ok=from_draft)
             if target:
                 write_session_attachment(path, **binding, goal="")
                 stored = read_session_attachment(path)
@@ -4391,8 +4540,169 @@ class DesktopSessions:
             # the bytes, the mode or the fields.
             write_desktop_marker(path, directory, model=model)
 
-        await asyncio.to_thread(persist)
+        try:
+            await asyncio.to_thread(persist)
+        finally:
+            # The materialising window CLOSES here, on success or failure
+            # (R2-1): until the marker is on disk the id is neither a draft
+            # (consumed) nor a session (unmaterialised), and a door ask in
+            # between keeps serving the pane's resident bridge. On failure the
+            # id stays spent and NOT materialising — the next ask drops the
+            # dead bridge and 404s, and a retried create mints fresh — which is
+            # the correct end state for a consume that will never publish.
+            if from_draft and session_id is not None:
+                self._materialising.discard(session_id)
         return session_id
+
+    async def mint_draft(
+        self,
+        cwd: str,
+        *,
+        target: dict[str, str] | None = None,
+        model: ModelSpec | None = None,
+    ) -> str:
+        """Register one new-chat draft; return the id a create may name.
+
+        THE MINT WRITES NOTHING AND STARTS NOTHING (spec §0.2): the engage is the
+        pane's own warm request once its events subscription holds the bridge,
+        through the one lifetime that already exists. A mint that started an
+        engage would need a second lifetime (pool-owned) to get right and would
+        buy no latency the warm does not already buy — and it would make
+        abandonment semantics a new problem instead of the existing one
+        (detach cancels an in-flight warm; the runtime drains unowned).
+
+        The admissions ``create`` applies are re-run here rather than trusted
+        from the route — this callable's own contract, stated beside ``create``'s
+        identical copy. ``target`` validation builds the registries ``create``
+        would build anyway; the cwd check is a pure ``stat``.
+
+        NO ``request_id`` PARAMETER, AND NO STORED COPY (round-1 review N1):
+        retry safety is the ROUTE's receipt row (``draft:<request_id>``), and a
+        replayed mint answers from that journal without this registry ever
+        being consulted — the stored value had no reader anywhere.
+
+        THE CWD IS STORED RESOLVED (the same value ``create`` writes into the
+        marker): the bridge this draft later resolves opens on it, and the warm
+        dials it. A relative path resolved against whatever cwd the daemon
+        happens to hold at some later request would be a second answer to a
+        question the marker already answers one way.
+        """
+        self.assert_admitting()
+        directory = resolve_working_directory(cwd)
+        if target:
+            from local_operator.agents import AgentRegistry
+            from local_operator.server.utils.desktop_profiles import validate_target
+            from local_operator.teams import TeamRegistry
+
+            await asyncio.to_thread(
+                validate_target,
+                AgentRegistry(self.root),
+                TeamRegistry(self.root),
+                target["kind"],
+                target["name"],
+            )
+        self._prune_drafts()
+        while len(self.drafts) >= DRAFT_COUNT_MAX:
+            oldest = min(self.drafts.values(), key=lambda draft: draft.created)
+            del self.drafts[oldest.draft_id]
+        draft_id = uuid.uuid4().hex[:12]
+        self.drafts[draft_id] = _Draft(
+            draft_id=draft_id,
+            cwd=str(directory),
+            model=model,
+            created=time.monotonic(),
+        )
+        return draft_id
+
+    def assert_draft_unmaterialised(self, draft_id: str) -> None:
+        """Refuse a ``draft_id`` that names an ALREADY-MATERIALISED session.
+
+        READ-ONLY (no durable effect), and public for ``create``'s route: its
+        pre-flight asks this BEFORE the receipt is claimed, so a refused create
+        leaves no pending row behind — the route's own contract — while
+        ``create`` re-asks it for any caller that reaches the pool directly.
+        One predicate, so the two call sites cannot drift.
+
+        A REGISTERED draft passes: it is unmaterialised by definition, and
+        consuming it belongs to ``create`` itself — a probe must never spend a
+        draft. Materialisation is read off the MARKER (``desktop.json``), not
+        the directory: the engage's residue directory holds no marker (measured:
+        exactly ``.execution-lease`` + ``.session.pid``), so "a directory
+        exists" would refuse every warmed draft its create — the one path this
+        whole feature exists to serve.
+        """
+        if self._draft_for(draft_id) is not None:
+            return
+        if (self.root / "sessions" / draft_id / DESKTOP_MARKER_NAME).is_file():
+            raise DraftAlreadyMaterialised(
+                "This draft already became a conversation. Open it instead of creating it again."
+            )
+
+    def _prune_drafts(self) -> None:
+        """Drop every expired draft.
+
+        Called by ``mint_draft`` BEFORE the cap does its work, so eviction only
+        ever takes an entry that is still alive and the two rules cannot combine
+        to drop a useable draft while a dead one sits in the registry.
+        Loop-only mutation, never across an await (``self.drafts``).
+        """
+        deadline = time.monotonic() - DRAFT_TTL_S
+        for draft_id in [key for key, draft in self.drafts.items() if draft.created < deadline]:
+            del self.drafts[draft_id]
+
+    def _draft_for(self, session_id: str) -> _Draft | None:
+        """The registered, unexpired draft ``session_id`` names, or ``None``.
+
+        EXPIRY IS ANSWERED WHERE IT IS ASKED (spec §1.2's "resolved as
+        unknown"): a draft older than :data:`DRAFT_TTL_S` is dropped here rather
+        than by a sweeper, so the registry ages out even when nobody mints
+        again. Loop-only mutation, never across an await (``self.drafts``).
+        """
+        draft = self.drafts.get(session_id)
+        if draft is None:
+            return None
+        if time.monotonic() - draft.created > DRAFT_TTL_S:
+            del self.drafts[session_id]
+            return None
+        return draft
+
+    def _draft_listing_exclusions(self) -> set[str]:
+        """Ids no listing may carry: drafts not yet materialised, however known.
+
+        spec §1.6's "never listed" must hold for the WARM window too (QA round
+        2, Q-2): the catalogue's live branch (``decorate_rows(include_live=True)``)
+        appends a row for any id with a runtime record and a session directory,
+        and a bound draft has both — so a bound warm was listed as "Untitled
+        conversation" while the doors called the id unknown. The exclusion is
+        computed HERE rather than inside the catalogue because the pool is what
+        knows a draft, in two states:
+
+        * REGISTERED entries, resolved through ``_draft_for`` so an expired one
+          is not kept alive by this read (the listing is a place expiry is
+          asked — the same rule the doors follow);
+        * DRAFT-BORN RESIDENT BRIDGES whose marker has not appeared — the pane's
+          ``/events`` hold keeps one for an id whose registry entry may already
+          be gone.
+
+        The MARKER is the one fact that says the draft became a conversation:
+        once it exists the id lists by the ordinary rules, whatever a stale
+        bridge reference still says. Loop-only, like every read of these two
+        fields. ``list()`` calls it at the LISTING BOUNDARY and passes the set
+        into ``catalogue_page``'s ranking→window step, so the exclusion and the
+        scan see one moment and a page refills from behind an excluded row
+        (round-2 review C1).
+        """
+        excluded: set[str] = set()
+        for session_id in list(self.drafts):
+            if self._draft_for(session_id) is not None:
+                excluded.add(session_id)
+        for session_id, bridge in self.bridges.items():
+            if (
+                bridge.draft is not None
+                and not (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
+            ):
+                excluded.add(session_id)
+        return excluded
 
     async def binding(self, session_id: str) -> dict[str, str | None]:
         def read() -> dict[str, str | None]:
@@ -4469,6 +4779,13 @@ class DesktopSessions:
         this reason.
         """
 
+        # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2). The exclusion
+        # set is computed HERE, on the loop — ``_draft_for`` prunes an expired
+        # entry, which is loop-only mutation — and passed into the catalogue's
+        # ranking→window step inside the worker thread below, so the exclusion
+        # and the scan describe one moment.
+        excluded_drafts = self._draft_listing_exclusions()
+
         def rows() -> SessionPage:
             # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
             # so the catalogue can resolve the pins the page will not carry.
@@ -4499,6 +4816,17 @@ class DesktopSessions:
                 # below as a phantom row with no section to belong to.
                 include_archived=include_archived,
                 with_counts=with_counts,
+                # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2), and the
+                # exclusion is handed INTO the catalogue's ranking→window step:
+                # the window, the truncation verdict, ``next_cursor`` and the
+                # census are all computed over the filtered list, so a page
+                # REFILLS from behind an excluded row (round-2 review C1 — a
+                # post-hoc filter over the assembled page answered a store with
+                # 4 sessions + 1 bound draft with 1 row at ``limit=2`` and an
+                # EMPTY page at ``limit=1``). A cursor stays a rank POSITION, so
+                # the walk tolerates this set changing between pages exactly as
+                # it already tolerated deletions.
+                exclude_ids=excluded_drafts,
             )
             entries = page.entries
             page_entries = entries[:limit]
@@ -4675,6 +5003,22 @@ class DesktopSessions:
         """
         return bridge.users == 0 and not self._handouts.get(bridge.session_id)
 
+    def _make_room(self) -> None:
+        """Free one bridge slot by evicting the least-recently-touched idle bridge.
+
+        Caller holds the pool lock. ``_evictable`` is what makes "idle" safe to
+        take (the handout window); a pool full of pinned bridges refuses with the
+        ValueError its two callers already render as a refusal — the same answer
+        whether the incoming bridge is an ordinary session or a draft's.
+        """
+        if len(self.bridges) < BRIDGE_COUNT:
+            return
+        idle = [b for b in self.bridges.values() if self._evictable(b)]
+        if not idle:
+            raise ValueError("Too many active desktop sessions")
+        oldest = min(idle, key=lambda b: b.touched)
+        del self.bridges[oldest.session_id]
+
     def _locate_flight(
         self, session_id: str, locate: Callable[[], tuple[str, str | None]]
     ) -> asyncio.Task[tuple[str, str | None]]:
@@ -4814,7 +5158,7 @@ class DesktopSessions:
 
     @contextlib.asynccontextmanager
     async def session(
-        self, session_id: str, *, read: bool = False
+        self, session_id: str, *, read: bool = False, allow_draft: bool = False
     ) -> AsyncIterator[DesktopSessionBridge]:
         """Hand out this session's bridge — or refuse, once the daemon has LATCHED.
 
@@ -4860,6 +5204,23 @@ class DesktopSessions:
         leaving, and keeping that answer stable is what makes "the 503 is the
         LATCH answering" a readable control in the evidence rather than an
         artefact of routing.
+
+        ``allow_draft`` opts THIS CALLER into resolving a REGISTERED draft id
+        (spec §1.3). Off is the default and off is the containment: an id that
+        names a registered draft is refused exactly as an unknown one, so only
+        the five routes that pass the flag — ``snapshot``, ``history``,
+        ``watch``, ``warm`` and ``events``, the pane's own read, lease and
+        engage legs — can ever see a draft. A draft id unlocks nothing else:
+        every other route stays refused, ``create`` remains the only writer,
+        and every refusal ladder still runs against the materialised session.
+        The id is not an authorization surface.
+
+        When the flag is on and the id IS a registered draft, the bridge is
+        built from the draft's own spec instead of ``locate()``: there is no
+        directory to read (mint writes none), and nothing durable to confirm
+        until ``create`` materialises the id — which is also what lets the
+        pane's ``/events`` subscription hold the bridge, and therefore the
+        engage, across the warm.
 
         WHAT THE POOL LOCK DECIDES, AND WHAT IT NO LONGER DOES. ``self.lock`` is
         the pool's single answer to one question — *which bridges are resident,
@@ -4909,8 +5270,85 @@ class DesktopSessions:
                 # turn the pool into one that can only refuse at ``BRIDGE_COUNT``.
                 self._take_handout(session_id)
                 taken = True
+                # THE DRAFT REGISTRY IS ASKED BEFORE THE CACHED LOOKUP, and the
+                # containment check gates BOTH branches below: a door that did
+                # not opt in must refuse a registered draft even when its bridge
+                # is already resident (the pane's /events built one), and it must
+                # refuse it rather than let the cold lookup decide — a warmed
+                # draft's residue directory would otherwise resolve through the
+                # checkpoint fallback with the WRONG cwd. For every ordinary id
+                # this is one dict lookup.
+                draft = self._draft_for(session_id)
+                if draft is not None and not allow_draft:
+                    raise KeyError("Unknown session")
                 bridge = self.bridges.get(session_id)
-                if bridge is None:
+                doomed: DesktopSessionBridge | None = None
+                if bridge is not None and draft is None and bridge.draft is not None:
+                    # M1 (round-1 review): THE BRIDGE OUTLIVING ITS DRAFT. A
+                    # draft-born bridge stays resident while its pane keeps the
+                    # /events stream open (or a beat's lease holds it), and
+                    # ``_draft_for`` DELETES the entry the moment it is expired —
+                    # after which the containment above cannot fire and this
+                    # branch used to serve a NON-opted caller: snapshot/history
+                    # 200, commands/interrupt/working-directory 200, and ``POST
+                    # messages`` reached ``_ensure_bound(foreground=True)``,
+                    # i.e. a mutating route engaging a materialising draft
+                    # (measured by round-1 review, repro_expired_draft_bridge.py).
+                    #
+                    # THE THIRD STATE, ADDED BY ROUND-2 REVIEW (R2-1): CREATE
+                    # IN FLIGHT. Consumption deletes the entry a beat before the
+                    # marker is published, and in that window neither fact below
+                    # is true — the draft is not dead and the marker is not late
+                    # — so ``_materialising`` (set at consumption, cleared when
+                    # persist returns or fails) suppresses both outcomes and the
+                    # ask keeps serving this bridge, which also keeps
+                    # ``bridge.draft`` for the facade's birth spec until the
+                    # marker can answer for it.
+                    #
+                    # MATERIALISED (the marker is on disk) is the opposite fact:
+                    # the draft BECAME a conversation and the id is an ordinary
+                    # session from here, so the dead reference is cleared and
+                    # the marker is the birth source for any later facade.
+                    # Otherwise the bridge is dropped with ``forget``'s own
+                    # consequences — nothing may serve the id, exactly as on the
+                    # expiry row — and its close runs AFTER this lock, for
+                    # ``forget``'s reason (the close takes the bridge's lock).
+                    if session_id not in self._materialising:
+                        if (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file():
+                            bridge.draft = None
+                        else:
+                            self.bridges.pop(session_id, None)
+                            self._locate_flights.pop(session_id, None)
+                            doomed, bridge = bridge, None
+                if doomed is not None:
+                    # Refused below, where the owed close can run outside this lock.
+                    pass
+                elif bridge is not None:
+                    # Asked on the WARM path too, and that is not redundancy: the cache
+                    # is a cache of the same door, so without this a refusal would be
+                    # one a client could walk past by never having gone cold.
+                    self.assert_admitting()
+                elif draft is not None:
+                    # THE DRAFT'S OWN BUILD, under the pool lock and with no I/O
+                    # at all: mint writes no directory, and once the engage has
+                    # made its residue there is still nothing ``locate()`` could
+                    # answer that the registered spec does not — the draft IS the
+                    # evidence while it is registered. The bridge is ordinary
+                    # from here (evictable once unheld, counted by BRIDGE_COUNT),
+                    # and the engage it may start runs through the ordinary
+                    # lifetime: the pane's /events subscription and /watch beats
+                    # are what hold it across the warm.
+                    self.assert_admitting()
+                    self._make_room()
+                    bridge = DesktopSessionBridge(
+                        self.root,
+                        session_id,
+                        draft.cwd,
+                        retiring=self.retiring_probe,
+                        draft=draft,
+                    )
+                    self.bridges[session_id] = bridge
+                else:
                     path = self.root / "sessions" / session_id
 
                     def locate() -> tuple[str, str | None]:
@@ -4934,6 +5372,29 @@ class DesktopSessions:
                         # #1110 wrote the coverage for a malformed marker and found the
                         # strict read behind it (R3).
                         stored = read_desktop_marker(path)
+                        if (
+                            not (path / DESKTOP_MARKER_NAME).exists()
+                            and session_activity(path) is None
+                        ):
+                            # M1's SECOND LEG (round-1 review): a directory with NO
+                            # marker document at all, no transcript and no mail
+                            # spool must not open as a session. That is what a
+                            # draft's engage leaves behind (residue measured as
+                            # ``.execution-lease`` + ``.session.pid``, or the empty
+                            # directory a drained runtime leaves), and before this
+                            # check the checkpoint fallback below answered such a
+                            # directory with a phantom bridge on ``root.parent`` —
+                            # 200s on every door for an id no create can ever make
+                            # a session again (measured: ``probe_residue_locate``).
+                            #
+                            # EXISTENCE OF THE MARKER PATH, not readability: a
+                            # marker that is present but unreadable — garbage, an
+                            # interrupted write, a directory where the document
+                            # should be — keeps its own contract (the tolerant
+                            # reader answers it on the fallback below, review
+                            # round 1 of #1110), so only the document's total
+                            # ABSENCE is evidence of nothing.
+                            raise KeyError("Unknown session")
                         marker_cwd = (stored or {}).get("cwd")
                         if isinstance(marker_cwd, str) and marker_cwd:
                             return marker_cwd, marker_cwd
@@ -4966,11 +5427,14 @@ class DesktopSessions:
                     # instead of paying a second full parse, and one session therefore
                     # cannot be built twice.
                     flight = self._locate_flight(session_id, locate)
-                else:
-                    # Asked on the WARM path too, and that is not redundancy: the cache
-                    # is a cache of the same door, so without this a refusal would be
-                    # one a client could walk past by never having gone cold.
-                    self.assert_admitting()
+            if doomed is not None:
+                # M1's close, outside the pool lock (``forget``'s rule): the
+                # draft this bridge was born of is gone and the id never became
+                # a conversation, so a resident bridge nothing can reach would
+                # be the leak ``forget`` exists to prevent. Refused exactly as
+                # an unknown id is, on every door.
+                await doomed.close()
+                raise KeyError("Unknown session")
             if flight is not None:
                 # THE SLOW HALVES, BOTH OUTSIDE THE POOL LOCK. This is the change
                 # that stops one conversation's open from being every other
@@ -5023,12 +5487,7 @@ class DesktopSessions:
                             # the same id passes it exactly as it did the first time.
                             if not (self.root / "sessions" / session_id).is_dir():
                                 raise KeyError("Unknown session")
-                            if len(self.bridges) >= BRIDGE_COUNT:
-                                idle = [b for b in self.bridges.values() if self._evictable(b)]
-                                if not idle:
-                                    raise ValueError("Too many active desktop sessions")
-                                oldest = min(idle, key=lambda b: b.touched)
-                                del self.bridges[oldest.session_id]
+                            self._make_room()
                             bridge = DesktopSessionBridge(
                                 self.root,
                                 session_id,
