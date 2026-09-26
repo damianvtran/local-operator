@@ -39,6 +39,7 @@ from local_operator.network import relay, store
 from local_operator.network.credentials import placement as placement_mod
 from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.types import BrokerError, Grant
+from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_credentials_owner import (  # noqa: F401 — fixtures by import
     STUB_PROVIDER,
     RotatingIdP,
@@ -67,15 +68,6 @@ def _lop_network(*argv: str) -> int:
     from local_operator.network import cli as network_cli
 
     return network_cli.main(_parser().parse_args(["network", *argv]))
-
-
-def _wait_for(predicate: Any, *, timeout: float = 15.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return bool(predicate())
 
 
 @pytest.fixture()
@@ -213,7 +205,9 @@ def test_a_frame_that_cannot_be_answered_costs_the_owner_nothing(mesh: Any) -> N
         }
     )
     assert sent
-    assert _wait_for(lambda: link.stray_replies > strays), "the owner never answered at all"
+    assert net_fixtures.wait_for(
+        lambda: link.stray_replies > strays
+    ), "the owner never answered at all"
     assert mesh.idp.posts == [], "an unmatchable request spent the owner's refresh token"
     assert _audit(mesh.a, "credential.grant") == []
 
@@ -292,7 +286,7 @@ def test_an_offline_owner_is_named_with_when_it_was_last_seen(mesh: Any) -> None
     # WAIT OUT THE SHUTDOWN GAP rather than race it (review round 3, F2): ``stop``
     # shuts the owner's worker pool ~50 ms before it closes links, and this test is
     # about an owner that is GONE. The gap itself is its own test below.
-    assert _wait_for(lambda: not any(link.alive for link in mesh.b.links.values()))
+    assert net_fixtures.wait_for(lambda: not any(link.alive for link in mesh.b.links.values()))
     offline = _borrower_client(mesh).request_grant_sync(STUB_PROVIDER, session_id="sess-2")
     assert isinstance(offline, BrokerError), offline
     assert offline.code == "owner_offline", offline

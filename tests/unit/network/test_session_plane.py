@@ -42,6 +42,7 @@ from local_operator.network import audit as audit_mod
 from local_operator.network import dial as session_dial
 from local_operator.network import projection, relay, store
 from local_operator.session.cleanup import mark_store
+from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures by import
     _init_network,
     _pair,
@@ -585,7 +586,7 @@ def test_a_promptless_create_is_still_a_row_on_both_devices(
         # answers BEFORE its runtime is up (``relay._warm_after_create``), so reading
         # ``served`` straight out of the ack is a race, and the "idle exit" this test
         # simulates starts from a runtime that is actually running.
-        assert _wait_for(
+        assert net_fixtures.wait_for(
             lambda: session_id in served, 60.0
         ), "the peer's runtime never came up for the created session"
         served[session_id].stop()
@@ -724,7 +725,7 @@ def test_the_name_survives_the_hand_over_to_the_catalogue(
         transcript.write_text("", encoding="utf-8")
         # THE RUNTIME JOINS IN THE BACKGROUND for a promptless create, so this waits for
         # the one it is about to stop rather than assuming the ack proved it was up.
-        assert _wait_for(
+        assert net_fixtures.wait_for(
             lambda: session_id in served, 60.0
         ), "the peer's runtime never came up for the created session"
         served[session_id].stop()
@@ -872,7 +873,7 @@ def _create_named_session_on_a_real_peer(
             # instead of reading it out of the ack. A warm that FAILS leaves the session
             # cold and records ``session.create.warm_failed`` in the peer's audit log,
             # which is what this failure names rather than waiting forever.
-            assert _wait_for(lambda: created.session_id in served, 60.0), (
+            assert net_fixtures.wait_for(lambda: created.session_id in served, 60.0), (
                 "the relay never brought up a runtime for the new session; a warm that "
                 "fails says so in the peer's audit record `session.create.warm_failed`"
             )
@@ -1578,15 +1579,6 @@ class _StreamClient:
             pass
 
 
-def _wait_for(predicate: Any, timeout_s: float = 10.0) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return predicate()
-
-
 def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1646,13 +1638,13 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
                 acked = frame
                 break
         assert acked is not None and acked["op"] == "ack", acked
-        assert _wait_for(lambda: served[SESSION].handle.prompts() == ["hello from B"]), served[
-            SESSION
-        ].handle.calls
+        assert net_fixtures.wait_for(
+            lambda: served[SESSION].handle.prompts() == ["hello from B"]
+        ), served[SESSION].handle.calls
 
         # QUIT: the viewer socket goes away, exactly as a quitting TUI leaves it.
         client.close()
-        assert _wait_for(
+        assert net_fixtures.wait_for(
             lambda: not any(stream.session_id == SESSION for stream in server_b._streams.values())
         ), "the opening relay did not notice the viewer leaving"
 
@@ -1661,7 +1653,7 @@ def test_the_stream_is_a_pass_through_and_quitting_it_leaves_the_peer_running(
         from local_operator.session.runtime import registry
 
         calls_after_quit = len(served[SESSION].handle.calls)
-        assert _wait_for(
+        assert net_fixtures.wait_for(
             lambda: bool(
                 [
                     rec
@@ -1750,6 +1742,28 @@ def _owner_stream_table(server: relay.RelayServer, session_id: str) -> list[Any]
     ]
 
 
+def _owner_stream_audit_rows(server: relay.RelayServer, event: str) -> list[dict[str, Any]]:
+    """``server``'s own audit rows for ``event`` written with ``role: owner``.
+
+    ``tail()`` flushes the writer's buffer first, so a row this process has already
+    APPENDED is visible here and a row it has not appended yet is not. That is exactly
+    why the callers below WAIT on their read instead of taking one: the relay acts
+    before it reports. ``_close_stream`` pops the table entry and closes the dial, and
+    only then calls ``_report_stream_closed`` (see relay.py) — so both of the
+    socket-release waits above can pass while the row is still pending on the relaying
+    thread. Reading once here made the cell depend on that gap being microseconds wide,
+    and a shard runner descheduled the reporter instead: ``owner_closes == []`` at head
+    3d19009e6, reproduced here with 100 ms injected at the report (the lane's report on
+    #1348 carries the sweep).
+    """
+    server.audit.flush()
+    return [
+        row
+        for row in server.audit.tail(limit=500)
+        if row.get("event") == event and (row.get("detail") or {}).get("role") == "owner"
+    ]
+
+
 @pytest.mark.parametrize("how", _VIEWER_LEAVES)
 def test_a_viewer_leaving_releases_the_owner_s_stream(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, how: str
@@ -1823,7 +1837,7 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
 
         # THE OWNER'S HALF IS UP: one stream for this session, with a live socket to
         # the runtime. This is the state that used to outlive the viewer.
-        assert _wait_for(lambda: _owner_stream(server_a, SESSION) is not None)
+        assert net_fixtures.wait_for(lambda: _owner_stream(server_a, SESSION) is not None)
         owner_stream = _owner_stream(server_a, SESSION)
         assert owner_stream is not None
         assert owner_stream.dial is not None, "the owner did not dial its own runtime"
@@ -1855,31 +1869,33 @@ def test_a_viewer_leaving_releases_the_owner_s_stream(
 
         # THE OWNER RELEASES: its table loses the stream and its runtime socket is
         # closed, with no manual command on either side.
-        assert _wait_for(
+        assert net_fixtures.wait_for(
             lambda: not _owner_stream_table(server_a, SESSION), timeout_s=15
         ), f"the owner still holds a stream after a {how} viewer left"
-        assert _wait_for(
+        assert net_fixtures.wait_for(
             lambda: owner_stream.dial.sock.fileno() == -1, timeout_s=5
         ), f"the owner's relay→runtime socket is still open after a {how} viewer left"
 
         # COUNTS THAT BALANCE, which is how the leak was found in the first place.
-        # A's OWN log is the instrument, flushed first: the server writes through the
-        # instance the fixture built, and a second reader would see only what that one
-        # had already spilt to disk.
-        server_a.audit.flush()
-        events = server_a.audit.tail(limit=500)
-        owner_opens = [
-            row
-            for row in events
-            if row.get("event") == "session_stream_opened"
-            and (row.get("detail") or {}).get("role") == "owner"
-        ]
-        owner_closes = [
-            row
-            for row in events
-            if row.get("event") == "session_stream_closed"
-            and (row.get("detail") or {}).get("role") == "owner"
-        ]
+        # A's OWN log is the instrument: the server writes through the instance the
+        # fixture built, and a second reader would see only what that one had already
+        # spilt to disk. The read WAITS FOR THE PAIR, because the row it asserts on is
+        # written after everything the two waits above assert — see
+        # `_owner_stream_audit_rows`. The bound is the backstop for a row that never
+        # arrives (a real defect, which then fails with the counts in the message),
+        # not a budget the reporting thread is expected to fit inside.
+        def _owner_pair() -> list[int]:
+            return [
+                len(_owner_stream_audit_rows(server_a, name))
+                for name in ("session_stream_opened", "session_stream_closed")
+            ]
+
+        assert net_fixtures.wait_for(lambda: _owner_pair() == [1, 1], timeout_s=15), (
+            f"the owner's trail never paired one open with one close after a {how} "
+            f"viewer left: {_owner_pair()} (opened, closed)"
+        )
+        owner_opens = _owner_stream_audit_rows(server_a, "session_stream_opened")
+        owner_closes = _owner_stream_audit_rows(server_a, "session_stream_closed")
         assert len(owner_opens) == 1, owner_opens
         assert len(owner_closes) == 1, owner_closes
         # THE MACHINE FIELD, NOT ONLY THE DETAIL (agent review round 1, MAJOR 1). The
@@ -2036,7 +2052,7 @@ def test_the_owner_s_close_row_reaches_the_file_it_writes(
         )
         assert opened["op"] == "ack", opened
         assert viewer.recv() is not None, "no welcome through the stream"
-        assert _wait_for(lambda: _owner_stream(server_a, SESSION) is not None)
+        assert net_fixtures.wait_for(lambda: _owner_stream(server_a, SESSION) is not None)
         viewer.close()
 
         path = store.audit_path(server_a.root)
@@ -2057,7 +2073,7 @@ def test_the_owner_s_close_row_reaches_the_file_it_writes(
                     return row
             return None
 
-        assert _wait_for(lambda: _owner_close_row() is not None, timeout_s=20), (
+        assert net_fixtures.wait_for(lambda: _owner_close_row() is not None, timeout_s=20), (
             "the owner's close row never reached the file it writes: an operator "
             "reading audit.jsonl cannot see that the release happened or why"
         )
