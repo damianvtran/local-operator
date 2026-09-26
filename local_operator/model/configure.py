@@ -6017,6 +6017,32 @@ class SessionStreamFn:
                 self._descendant_request_counter.end()
             # In a ``finally`` so an aborted/failed stream (which still cost
             # input tokens) is recorded too — best-effort and never raising.
+            ledger_window_us = (
+                max(0, int((last_output_at - first_output_at) * 1_000_000))
+                if first_output_at is not None and last_output_at is not None
+                else 0
+            )
+            if final_usage is not None:
+                # RE-STAMP, with the COMPLETE window, and this is not belt-and-
+                # braces: the event-time stamp closes the window at the last delta
+                # the seam had seen when the USAGE FRAME arrived, and a provider
+                # may send usage before its final deltas (`text → usage →
+                # tool_call_delta…` is an ordinary shape, since tool-call argument
+                # deltas count as output). Measured, those two moments disagreed by
+                # 3.6x on that shape, and the early value was `None` when usage
+                # arrived after a single delta — i.e. the band would have
+                # contradicted the ledger about the same call, which is the one
+                # invariant §9.3 states. Free to fix: the window rides a PRIVATE
+                # attribute, so re-writing it costs the wire nothing, and the
+                # event-time value stays as a provisional reading for anything
+                # that looked mid-stream. Readers that come later — the frame's own
+                # refresh, the turn observer — see this complete one.
+                _stamp_decode_window(
+                    final_usage,
+                    first_output_at=first_output_at,
+                    last_output_at=last_output_at,
+                    output_deltas=output_deltas,
+                )
             self._record_usage(
                 request,
                 component_chars,
@@ -6038,11 +6064,7 @@ class SessionStreamFn:
                 # ``first_output_at is None`` means the stream produced no
                 # output deltas at all, which is "no window" (0 microseconds),
                 # not a zero-length one.
-                decode_us=(
-                    max(0, int((last_output_at - first_output_at) * 1_000_000))
-                    if first_output_at is not None and last_output_at is not None
-                    else 0
-                ),
+                decode_us=ledger_window_us,
                 output_deltas=output_deltas,
             )
 
