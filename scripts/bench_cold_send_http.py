@@ -443,7 +443,7 @@ def _one_run(
             )
             result["mint_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
             assert minted.status_code == 200, minted.text
-            draft_id = minted.json()["result"]["draft_id"]
+            draft_id = str(minted.json()["result"]["draft_id"])
             result["draft_id"] = draft_id
             stream = stack.enter_context(_DraftStream(base, headers, draft_id))
             subscription_id = stream.wait_subscription()
