@@ -281,6 +281,40 @@ RECONNECT_DWELL_S = 20.0
 #: constant with it keeps such a test to a few milliseconds.
 DWELL_TICK_S = 0.25
 
+#: Opt-in switch for the per-stream teardown REASON, which is otherwise invisible.
+#:
+#: The reason vocabulary ("client disconnect" / "subscriber overflow" / "relay
+#: error" / "bridge dispose") is the only thing that can say WHY a stream ended,
+#: and on the operator's machine it reaches no log at all: the module's lines are
+#: INFO and the app captures WARNING and above -- measured, 0 ``[INFO]
+#: local_operator`` lines against 9,687 WARNING+ ones. That is not a defect this
+#: module can fix, because the level is the app's logging configuration.
+#:
+#: So the opt-in is PER EMISSION and bounded to ONE line per stream end, never per
+#: frame: with this set, that line is emitted at WARNING and therefore survives
+#: the app's configuration. Without it the line keeps its own level and the
+#: default is byte-identical to before. Set it for a QA run and unset it after --
+#: a stream ending is a normal event, and promoting it permanently would bury the
+#: WARNINGs that mean something.
+STREAM_REASON_TRACE_ENV = "LOCAL_OPERATOR_DESKTOP_STREAM_TRACE"
+
+#: Truthy spellings for a flag read from the environment. Matches the convention
+#: the rest of the tree uses for an opt-in switch, so an agent does not have to
+#: learn a second one.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _stream_reason_trace() -> bool:
+    """Whether the per-stream reason line should be promoted to WARNING.
+
+    Read at each emission rather than captured at import, so a test can set it
+    with ``monkeypatch.setenv`` and a QA run can turn it on for one daemon
+    without a code change. One ``os.environ`` read per stream END, which is a
+    handful per minute even in a storm -- never per frame.
+    """
+    return os.environ.get(STREAM_REASON_TRACE_ENV, "").strip().lower() in _TRUTHY
+
+
 #: Pace of the lease-driven warm, in three parts, because a warm that cannot
 #: succeed must not become a spawn per heartbeat.
 #:
@@ -1137,6 +1171,14 @@ class DesktopSessionBridge:
         #: ``_arm_dwell``). Held so teardown can cancel them: a forgotten bridge
         #: must leave no task asserting presence on its behalf.
         self._dwell_tasks: dict[str, asyncio.Task[None]] = {}
+        #: When the last subscriber STREAM ended, and whether the bridge itself
+        #: revoked that stream (overflow). The dwell's policy evaluated from a
+        #: TIMESTAMP rather than from a generator's ``finally`` -- see
+        #: ``note_stream_ended`` and ``_within_stream_grace``. ``None`` until a
+        #: stream has ended, which is what keeps a response that was never
+        #: consumed (the route's ``BackgroundTask`` path) detaching immediately.
+        self.stream_ended_at: float | None = None
+        self.stream_ended_overflowed = False
         self.users = 0
         #: Whether :meth:`close` has run for this bridge. Read only by the
         #: subscriber-stream end log (C5), to name "bridge dispose" instead of
@@ -1731,6 +1773,58 @@ class DesktopSessionBridge:
             return
         await asyncio.to_thread(stage_images_in_store, self.root, payloads)
 
+    def note_stream_ended(self, sub: DesktopSubscription) -> None:
+        """Record that ``sub``'s stream just ended, for the order-independent guard.
+
+        CALLED BY THE ROUTE'S WRAPPER, NOT BY ``events``'s ``finally``, and the
+        placement is the point (F-B). The route's ``finally`` is the one that
+        always runs -- it is the frame that owes the pool a release, so a
+        cancellation cannot skip it -- whereas the generator's ``finally`` is at
+        the mercy of a finalizer that can be late, skipped, or destroyed. This
+        method is therefore the bridge's own record of "a stream ended here, just
+        now", and ``release``/``_end_dwell`` consult ``_within_stream_grace`` to
+        refuse the detach that would rotate the epoch under a reconnecting client.
+
+        WITHOUT THE LOCK, deliberately: it writes two scalars and awaits nothing,
+        so there is no suspension point for a reader to interleave with. Taking
+        ``self.lock`` here would mean the release it is meant to precede could
+        queue behind a detach already in progress, which is the ordering this
+        exists to remove.
+        """
+        self.stream_ended_at = time.monotonic()
+        self.stream_ended_overflowed = sub.overflow
+
+    def _within_stream_grace(self) -> bool:
+        """Whether the dwell window still covers this bridge, read from the clock.
+
+        F-B, and the belt to F-A's braces. ``release``/``_end_dwell`` ask this
+        before detaching at ``users == 0``, so the policy survives a generator
+        finalizer that never runs -- the failure mode that produced 31 epochs from
+        35 opens, where the dwell armed *after* the release had already detached.
+
+        FOUR BOUNDS, each of which is a detach that must still happen:
+
+        * **Zero disables it**, exactly as ``RECONNECT_DWELL_S == 0`` disables the
+          dwell: no window, no grace, detach immediately. Contract, not a hook.
+        * **An overflowed end is excluded.** Reusing the same ``sub.overflow`` the
+          dwell arm uses, because an overflowing subscriber is one the BRIDGE
+          revoked -- it must still be disconnected, and holding the bridge alive
+          for it would invert the relief valve.
+        * **``close()`` beats the window**, structurally rather than by a check:
+          ``close`` calls ``_detach`` directly and neither consults this, so a
+          session delete or a plane shutdown detaches even if the last stream
+          ended a millisecond ago.
+        * **It is a release-time policy, never a property of the bridge.** Nothing
+          in ``_evictable``, ``_live_leases`` or ``in_flight_reason`` reads it, so
+          a 20 s timestamp can never pin a build update or reserve a pool slot
+          against an ordinary idle bridge.
+        """
+        if RECONNECT_DWELL_S <= 0 or self.stream_ended_at is None:
+            return False
+        if self.stream_ended_overflowed:
+            return False
+        return time.monotonic() - self.stream_ended_at < RECONNECT_DWELL_S
+
     async def release(self) -> None:
         async with self.lock:
             self.users -= 1
@@ -1740,7 +1834,14 @@ class DesktopSessionBridge:
             # presence assertion and the runtime on the viewer's behalf; a
             # detach here would dispose exactly what the dwell exists to keep.
             # See RECONNECT_DWELL_S.
-            if self.users == 0 and not self.dwelling:
+            #
+            # AND NOT WITHIN THE WINDOW OF A STREAM THAT JUST ENDED, even when no
+            # dwell flag was ever armed. This is the order-independent half: the
+            # generator's ``finally`` may not have run yet (or at all) when a
+            # cancelled teardown releases, and the detach it would cause rotates
+            # the epoch under a client that is reconnecting this second. See
+            # ``note_stream_ended``.
+            if self.users == 0 and not self.dwelling and not self._within_stream_grace():
                 await self._detach()
 
     async def _arm_dwell(self, sub: DesktopSubscription) -> None:
@@ -1772,7 +1873,21 @@ class DesktopSessionBridge:
                 # pop by id would then evict a live viewer's own subscription.
                 if self.subscribers.get(sub.id) is sub:
                     self.subscribers.pop(sub.id, None)
-                if self.users == 0 and not self.dwelling:
+                # The same two refusals as ``release``, and they are NOT equally
+                # load-bearing. ``not self.dwelling`` is the one that decides
+                # here: a second viewer that arrived inside this window armed its
+                # own dwell, so it is still held. The grace term is DEFENSIVE and
+                # is not independently reachable as a decider -- at every wake the
+                # grace has already expired for the stream that armed THIS dwell,
+                # because the stamp is taken before the close and therefore before
+                # the deadline it is compared with (see the route's ``stream``),
+                # and any LATER stream end either armed its own dwell or was an
+                # overflow, which this term excludes as well. It is kept because
+                # the refusal it makes is the correct one if that ordering ever
+                # changes, and MEASURED as unpinned: deleting it fails no case in
+                # ``tests/unit/server/test_desktop_stream_teardown.py``, which is
+                # recorded in the PR body rather than implied by this comment.
+                if self.users == 0 and not self.dwelling and not self._within_stream_grace():
                     await self._detach()
             with contextlib.suppress(ConnectionError, RuntimeError):
                 await self.refresh_watch()
@@ -3912,6 +4027,14 @@ class DesktopSessionBridge:
                 reason, level = f"relay error: {type(pending).__name__}", logging.WARNING
             else:
                 reason, level = "client disconnect", logging.INFO
+            if _stream_reason_trace():
+                # F-C: one line per stream END, promoted only when asked for. The
+                # reason that this is needed at all is upstream of this module --
+                # the app's captured level is WARNING, so the vocabulary never
+                # reaches a log -- and the reason it is per-emission rather than a
+                # logger level is that raising this module's logger would change
+                # every line in it, not just the one that answers the question.
+                level = logging.WARNING
             logger.log(
                 level,
                 "desktop stream ended for %s (sub=%s): %s",
