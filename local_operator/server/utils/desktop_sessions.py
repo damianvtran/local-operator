@@ -1373,6 +1373,25 @@ class DesktopSessionBridge:
             # ``verified_at``" is a property of the frame rather than a hope, and
             # a reader that needs "now" has the stamp it must age itself (§6
             # rule 2: age is the reader's, never the writer's).
+            #
+            # WHAT THIS STAMP DOES NOT YET DO, and the next reader of this
+            # function is the one who needs it: **no shipped client reads
+            # ``verified_at``** — `git grep verified_at origin/main` in
+            # `local-operator-ui` returns nothing, and so does a search for
+            # ``"(warm|warming)"`` — so nothing ages this stamp in the field.
+            # A frozen owner therefore still yields a live frame, and it was
+            # measured: a frame served **21.0/21.1 s** after the owner was
+            # SIGSTOPped still carried `cold:false, cold_reason:null,
+            # attaching:false, verified_at=<the old stamp>`, with nothing
+            # degrading it. The rule this site enforces is "no live claim
+            # WITHOUT an answered round trip", which holds; "no live claim on a
+            # STALE round trip" is the passive-frame aging budget (R10) and is
+            # deliberately not here. Until R10 lands, a passive frame can still
+            # show a frozen owner as live. The reader's own budget, when one
+            # exists, is ``session/runtime/types.py``'s
+            # ``LIVE_FRESHNESS_BUDGET_S``; the control route does not wait for
+            # that budget — ``DesktopSessionBridge.warm`` asks and bounds the
+            # ask at ``WARM_VERIFY_BUDGET_S``.
             "verified_at": verified_at,
         }
 

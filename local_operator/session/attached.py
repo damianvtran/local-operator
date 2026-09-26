@@ -2495,12 +2495,31 @@ class AttachedSession:
     def _note_wire_answer(self) -> None:
         """Record that the owner answered. Called ONLY on a wire answer.
 
-        Private and called from exactly two kinds of place: a completed frontend
-        sync (:meth:`_await_frontend`) and an answered liveness probe
-        (:meth:`verify_live`). Adding a third caller is the way this contract is
-        broken, so the check is what the answer CAME FROM rather than where the
-        code sits: a path that can run with no dial, or with a dial that never
-        answered, must not call this.
+        Private, and called ONLY on a wire answer. THREE WIRE SURFACES, and the
+        enumeration is the contract — a count here goes wrong the next time one
+        is added, and a reader who "restored" a count by deleting a caller would
+        re-break the read path the third one exists for:
+
+        * a completed frontend sync — :meth:`_await_frontend`, both its arms;
+        * a landing sync that settles after the read already answered — the
+          ``pending_sync`` await in :meth:`_await_late_sync`, which receives the
+          owner's ``FrontendSync`` directly and does NOT pass through
+          ``_await_frontend``;
+        * a received display refresh — the install inside
+          :meth:`_refresh_display_history`, which likewise arrives without that
+          await. Stamping only the first surface turned HEALTHY read-attached
+          owners cold: a frame that refuses ``cold:false`` without a stamp is
+          right, but a facade stamped on one path only is not.
+          ``tests/unit/server/test_desktop_read_without_owner.py::test_a_healthy_owner_is_still_a_live_read``
+          is that regression's guard;
+
+        plus :meth:`verify_live`, the ``ping`` probe, which is the definition of
+        the freshness rather than a fourth surface.
+
+        The check is what the answer CAME FROM rather than where the code sits:
+        a path that can run with no dial, or with a dial that never answered,
+        must not call this. That is why it is NOT in ``_finish_sync``, whose
+        seven callers include two COLD paths.
         """
         self._verified_at = time.time()
 
