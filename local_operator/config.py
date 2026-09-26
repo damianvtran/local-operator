@@ -95,6 +95,27 @@ def _package_version() -> str:
     return answer
 
 
+#: The top-level keys ``Config`` models. EVERY setting is read from ``values``
+#: (``ConfigManager.get_value`` / ``get_nested_value``), and ``version``/``metadata``
+#: are the two the file carries beside it. A key outside this set is not read by
+#: anything — which is worth stating in one place, because two behaviours hinge on
+#: it: ``_load_config`` says so on stderr, and ``_write_config`` carries it through
+#: rather than deleting it. Both were a bug: a hand-written
+#: ``network: {advertise_hosts: ["203.0.113.7:4097"]}`` — the dotted key
+#: ``network.advertise_hosts`` as YAML, which is how the mesh docs spell it — was
+#: invisible to the reader AND erased by the next write, so an operator's declared
+#: address did nothing and then vanished (leaving only the cleanup migration's
+#: ``config.yml.pre-cleanup-migration.<stamp>`` backup behind).
+_MODELLED_TOP_LEVEL = ("version", "metadata", "values")
+
+#: ``(path, keys)`` already reported, so the warning below is once per process per
+#: key set rather than once per ``ConfigManager`` — a session's construction path
+#: builds five of them (see :func:`_package_version`), and five identical lines is
+#: noise where one is information. The file's own ``stat`` is deliberately NOT part
+#: of the key: an unrelated rewrite must not re-report a key the operator has not
+#: touched yet, and once they move or delete it the warning stops on its own.
+_UNMODELLED_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+
 #: One parsed ``config.yml`` per path, keyed by what ``fstat`` said about the
 #: bytes it was parsed from. See :func:`_parse_config_stream`.
 _PARSED: dict[str, tuple[tuple[int, ...], Any]] = {}
@@ -176,6 +197,65 @@ def _parse_config_stream(path: Path, stream: Any) -> Any:
         if unchanged:
             _PARSED[name] = (key, deepcopy(loaded))
     return loaded
+
+
+def _unmodelled_top_level(path: Path) -> Dict[str, Any]:
+    """Top-level keys of the config file that this store has no field for.
+
+    Read from the FILE, not from the live ``Config``, because ``Config`` holds only
+    the modelled keys — that is what makes them unmodelled. An unreadable or
+    unparseable file answers ``{}``: every caller is on a path that already reports
+    that condition with its own message (``ConfigManager._load_config`` moves a bad
+    file aside; ``_write_config`` is about to overwrite it), and a second complaint
+    from here would be the louder of the two for no reason.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            parsed = _parse_config_stream(path, stream)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {key: value for key, value in parsed.items() if key not in _MODELLED_TOP_LEVEL}
+
+
+def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> None:
+    """Say ONCE per process that a top-level key is not a setting, and where one lives.
+
+    The half of this that makes it a fix rather than a note: the key does nothing
+    (every setting is read from ``values``), so an operator who wrote it — or who
+    followed a sentence in the mesh docs that spells the path in dots — has to be
+    TOLD, because the file gives no sign. ``_write_config`` keeps the key so the
+    edit survives to be moved; this names it and its ``values:`` home, which is the
+    spelling ``settings_io`` writes and ``get_nested_value`` reads.
+
+    A library caller constructing ``ConfigManager`` in a loop reports once per key
+    set (``_UNMODELLED_WARNED``), and the message is a WARNING rather than the
+    ``print`` the version check beside it uses: this one belongs in the log the
+    operator can find later, and the version check is about the file being NEWER
+    than the build, which the user has to see while it happens.
+    """
+    unmodelled = sorted(key for key in config_dict if key not in _MODELLED_TOP_LEVEL)
+    if not unmodelled:
+        return
+    seen = (str(path), tuple(unmodelled))
+    if seen in _UNMODELLED_WARNED:
+        return
+    _UNMODELLED_WARNED.add(seen)
+    homes = ", ".join(f"values.{key}" for key in unmodelled)
+    named = (
+        f"key {unmodelled[0]}"
+        if len(unmodelled) == 1
+        else "keys " + ", ".join(unmodelled)
+    )
+    logger.warning(
+        "%s has top-level %s, which this store does not read: every setting lives "
+        "under `values:`, so the key does nothing. It is left in place rather than "
+        "deleted — move it to %s (or set it in /settings) to make it take effect.",
+        path,
+        named,
+        homes,
+    )
 
 
 class Config:
@@ -634,6 +714,8 @@ class ConfigManager:
                     if key not in config_dict["values"]:
                         config_dict["values"][key] = deepcopy(value)
 
+            _report_unmodelled_top_level(self.config_file, config_dict)
+
             return Config(config_dict)
 
     # LOADING IS READ-ONLY. A migration used to live here, run from
@@ -671,6 +753,20 @@ class ConfigManager:
 
         config["metadata"]["last_modified"] = datetime.now().isoformat()
 
+        # Every setting is read from `values`, so a key beside it is inert — and
+        # `_write_config` writes the file back from `vars(self.config)`, which holds
+        # only the modelled keys, so before this the inert key was also DELETED by
+        # the next write. Read from DISK rather than remembered from load, because
+        # the file is the only place that still has the key once `Config` has been
+        # constructed, and because a key the operator removed by hand must stop being
+        # carried through at the next write. The parse is the cached one
+        # (`_parse_config_stream`), so a write pays a dict lookup when the file has
+        # not moved since the read that preceded it, against the `yaml.dump` + fsync
+        # it is about to do.
+        document: Dict[str, Any] = dict(config)
+        for key, value in _unmodelled_top_level(self.config_file).items():
+            document.setdefault(key, value)
+
         # ATOMIC. This was a plain `open(..., "w")`, which truncates the file
         # before it writes a byte: a crash, a full disk, or a kill between the
         # truncate and the flush left config.yml empty or half-written, and the
@@ -701,7 +797,7 @@ class ConfigManager:
         )
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as f:
-                yaml.dump(config, f, default_flow_style=False)
+                yaml.dump(document, f, default_flow_style=False)
                 f.flush()
                 os.fsync(f.fileno())
             if preserve_mode is not None:

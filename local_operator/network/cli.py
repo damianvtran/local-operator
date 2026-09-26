@@ -166,6 +166,22 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "token", nargs="?", default="", help="A token, @path, or nothing for the newest"
     )
     join.add_argument("--host", default="", help="Override the endpoint to dial")
+    # THE OTHER HALF OF `init --advertise-host`, and the one an operator needs most:
+    # the inviter can name its address when it creates the network, but a JOINER
+    # could only do so by hand-editing `network.advertise_hosts` into config.yml —
+    # which took no effect at all until this release (see `settings_io`, the
+    # `network` section). Without it, a joining device behind a tunnel published
+    # nothing dialable and every peer that later tried to reach it got `no_endpoint`.
+    join.add_argument(
+        "--advertise-host",
+        action="append",
+        default=[],
+        dest="advertise_hosts",
+        help=(
+            "host:port peers should use to reach THIS device (repeatable), in "
+            "preference order; add a tunnel or public address here"
+        ),
+    )
     join.add_argument("--verify", action="store_true", help="Compare the 160-bit fingerprint")
     join.add_argument("--emit-sas", action="store_true", help="Print this device's code, then wait")
     # THE TWO-PHASE PAIR (design §1.4.3). ``--park`` opens the ceremony and waits for a
@@ -1939,6 +1955,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
             identity=identity,
             settings=settings,
             args=args,
+            declared_hosts=tuple(args.advertise_hosts or []),
             wire=wire,
             Handshake=Handshake,
             Credential=Credential,
@@ -2020,6 +2037,7 @@ def _join_one(
     identity: Any,
     settings: Any,
     args: argparse.Namespace,
+    declared_hosts: tuple[str, ...] = (),
     **helpers: Any,
 ) -> tuple[list[str], dict[str, Any]] | str | None:
     """One dial attempt: handshake, the human step, then admission.
@@ -2030,6 +2048,13 @@ def _join_one(
     "nothing was listening at 52.27.70.210:4200" and "the handshake stopped with
     ConnectionResetError" are different problems, and the second is what a refused
     or already-redeemed token looks like from here (QA round 1, F-4).
+
+    ``declared_hosts`` is ``--advertise-host``, threaded as an argument rather than
+    read off ``args`` because this driver also runs from tests that build their own
+    ``Namespace`` for the flags the ceremony needs (``tests/unit/network/
+    test_relay_e2e.py``): an attribute read here would make those rigs carry a flag
+    they do not exercise. Empty means "declare nothing" — the detected addresses
+    are published either way — and the CLI is the only caller that passes more.
     """
     import socket
 
@@ -2059,7 +2084,12 @@ def _join_one(
     # inviter copies the hello's list onto our member row, and `listen` is what
     # every later reader of this record sees. Deriving them separately is how the
     # record came to claim the INVITER's address (QA round 1, F-7).
-    advertised = relay_mod.advertise_endpoints(settings)
+    #
+    # `declared_hosts` leads that list, exactly as it does for `init` (mesh-
+    # transport-identity §10.4): the joiner is the device that most often has no
+    # dialable address of its own — that is usually WHY it is joining rather than
+    # hosting — and a tunnel or public address is something only its operator knows.
+    advertised = relay_mod.advertise_endpoints(settings, declared=declared_hosts)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         handshake = Handshake.new(
