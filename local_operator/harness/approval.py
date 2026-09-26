@@ -173,10 +173,13 @@ class ApprovalUnavailableError(RuntimeError):
     "User denied approval for 'bash'." into the transcript of a headless run
     whose bash call nobody had been consulted about.
 
-    Call sites catch this type and render ``str(exc)`` — a
-    :data:`APPROVAL_UNAVAILABLE_NOTICE` naming the real cause and the
-    remedies — in place of their declined copy: the loop's tier gate and the
-    builtin ``_check_approval`` callers (``read``/``grep``/``lsp``).
+    Call sites catch this type and render it in place of their declined copy,
+    naming the real cause: the loop's tier gate and the builtin
+    ``_check_approval`` callers (``read``/``grep``/``lsp``) render
+    ``str(exc)`` — a :data:`APPROVAL_UNAVAILABLE_NOTICE` carrying the cause
+    and the remedies — while ``references``' per-token ``@`` expansion renders
+    only ``exc.reason``, keeping its token line terse because the run-level
+    notices carry the remedies (review round 1, finding 5).
     """
 
     def __init__(self, tool_name: str, reason: str) -> None:

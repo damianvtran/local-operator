@@ -232,13 +232,24 @@ def resolve_startup(args: Any) -> Any:
             raise ValueError(f"No team named {args.team!r}; use 'lop teams list'")
     if getattr(args, "profile", None):
         from local_operator.agent_profiles import resolve_profile_or_specialist
-        from local_operator.agents import AgentRegistry
+        from local_operator.agents import AgentRegistry, agents_store_present
         from local_operator.paths import config_dir
 
-        if (
-            resolve_profile_or_specialist(args.profile, registry=AgentRegistry(config_dir()))[0]
-            is None
-        ):
+        config_root = config_dir()
+        # GUARDED, and it is the FIRST writer on the launch path (review round
+        # 1, finding 2): the registry CONSTRUCTOR creates ``config_dir`` and
+        # ``config_dir/agents`` (then runs migrations), so building one just to
+        # validate a NAME wrote the operator's roots on every ``--profile`` run
+        # — before the advisory probe downstream could even reach its
+        # fresh-root branch. With no store on disk there are no registered
+        # roles to shadow the packaged seeds with, so ``registry=None``
+        # resolves the same names; a root whose roles live only in a legacy
+        # ``agents.json`` still constructs, because the registry is the code
+        # that reads — and migrates — it. Shared predicate
+        # (``agents_store_present``), so both writers agree on what "a store is
+        # present" means.
+        registry = AgentRegistry(config_root) if agents_store_present(config_root) else None
+        if resolve_profile_or_specialist(args.profile, registry=registry)[0] is None:
             # NOT 'lop agents list': that lists legacy AgentData records, which
             # is the --agent/--agent-id world this flag is distinct from. On a
             # fresh config it prints "No agents found." while --profile reviewer
