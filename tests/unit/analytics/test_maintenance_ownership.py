@@ -39,7 +39,11 @@ import pytest
 
 from local_operator.analytics import recorder as recorder_module
 from local_operator.analytics.model import CallSnapshot
-from local_operator.analytics.recorder import AnalyticsRecorder, maintenance_lock_path
+from local_operator.analytics.recorder import (
+    _PRUNE_INTERVAL_S,
+    AnalyticsRecorder,
+    maintenance_lock_path,
+)
 from local_operator.analytics.store import _WAL_SIZE_LIMIT_BYTES, AnalyticsStore
 
 #: How long a test will wait for work the code under test has ALREADY been told
@@ -186,14 +190,18 @@ def _fake(**kwargs) -> tuple[AnalyticsStore, "_CountingStore"]:
 def _hour_turns(*recorders: AnalyticsRecorder) -> None:
     """Model an hour passing for the per-process timers.
 
-    The gate is ``now - self._last_prune >= 3600``, and setting the stamp to
-    ``0.0`` is exactly what an hour of monotonic time does to it — on any clock
-    that has been up for an hour, which is every clock this runs on. Driving the
-    gate this way keeps the test off the process-wide ``time`` module, which
-    several other threads in a pytest worker are using at the same moment.
+    The gate is ``now - self._last_prune >= 3600``. The stamp is set RELATIVE to
+    the current monotonic clock rather than to ``0.0``, and that distinction cost
+    three CI runs: ``0.0`` only opens the gate on a host whose monotonic clock has
+    already passed an hour, which is true on a developer machine that has been up
+    for days and FALSE in a fresh CI container, where ``time.monotonic()`` is
+    still measuring the container's own young uptime. The gate then never opened,
+    the writer thread never reached the sweep, and the two cells that wait on it
+    failed with "the writer thread never reached the sweep" — a diagnostic that
+    pointed at the thread rather than at the stamp.
     """
     for rec in recorders:
-        rec._last_prune = 0.0
+        rec._last_prune = time.monotonic() - _PRUNE_INTERVAL_S - 1.0
 
 
 def _age_claim(root: Path, seconds: float) -> None:
