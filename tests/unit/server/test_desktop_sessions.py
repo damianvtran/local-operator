@@ -1806,10 +1806,51 @@ async def test_a_warm_on_an_already_engaged_session_starts_nothing(tmp_path):
             def close(self) -> None:
                 pass
 
+            async def request_ack_with_duplicate(self, op, **kwargs):
+                # The cheap path is still cheap, but it is no longer FREE of the
+                # owner: `warm` must now HEAR from the runtime before it calls
+                # the session warm (see the silent-owner test below). One op on
+                # an open socket, which is what the engaged case costs.
+                assert op == "ping"
+                return ("pong", False)
+
         bridge.remote._client = BoundClient()  # type: ignore[assignment]
         bridge.remote._ready_for_events = True
         assert await bridge.warm() == "warm"
         assert bridge.warm_task is None
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_a_warm_on_a_silent_owner_declines_and_starts_no_second_runtime(tmp_path):
+    """A viewer that LOOKS bound is not evidence that the owner is answering.
+
+    ``is_cold`` is three local reads with no round trip in it, so a SIGSTOPped
+    owner leaves it False for as long as the socket stays open — the measured
+    false-live this receipt used to publish as ``200 {"state": "warm"}``. The
+    receipt must decline the claim, and must NOT schedule an engage: this
+    session already has an owner, so a second one would be a duplicated runtime
+    rather than a repair.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        assert bridge.remote is not None
+
+        class SilentClient:
+            connected = True
+
+            def close(self) -> None:
+                pass
+
+            async def request_ack_with_duplicate(self, op, **kwargs):
+                raise TimeoutError("owner did not answer")
+
+        bridge.remote._client = SilentClient()  # type: ignore[assignment]
+        bridge.remote._ready_for_events = True
+        assert bridge.remote.is_cold is False, "the premise: the viewer still looks live"
+        assert await bridge.warm() == "warming"
+        assert bridge.warm_task is None, "a silent owner must not be given a second runtime"
     await pool.close()
 
 

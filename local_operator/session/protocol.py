@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 130 public members and a POSITIVE
+    than stylistic. This protocol carries 132 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -673,7 +673,11 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     owner needed a surface to say so (``set_gate_undelivered_handler``), 129
     once the dock band needed ``frontend_revision`` to skip a roster
     re-derivation nothing moved under, 130 once the desktop withdrawal needed
-    ``withdraw_desktop_watch``), so
+    ``withdraw_desktop_watch``, 132 once an honest status needed the pair the
+    not-stale contract turns on — ``verified_at`` (when the owner last ANSWERED)
+    and ``verify_live`` (the ``ping`` round trip that refreshes it), which is one
+    rung adding two members because a stamp with no way to refresh it cannot
+    distinguish "the owner is there" from "the owner was there"), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -757,6 +761,46 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         So it does NOT distinguish never-bound from lost. A caller needing
         that reads ``degraded_reason`` or ``runtime_pid``; a caller asking
         "is a turn reachable right now" wants exactly this.
+        """
+        ...
+
+    @property
+    def verified_at(self) -> float | None:
+        """When a round trip to this viewer's owner was last ANSWERED, or ``None``.
+
+        THE EVIDENCE TERM BESIDE :attr:`is_cold`, and it exists because that
+        predicate cannot carry the claim on its own: it is three local reads with
+        no round trip in it, so a viewer whose owner has been SIGSTOPped still
+        reads live for as long as its socket stays open — the kernel keeps the
+        connection and nothing observable locally changes. A host that publishes
+        "this session is live" must read this, not just ``is_cold``.
+
+        ``None`` means NEVER VERIFIED and is deliberately distinct from stale: a
+        cold viewer carries no stamp at all. Nothing on the writer side expires
+        it — a reader applies its own age budget
+        (``runtime.types.LIVE_FRESHNESS_BUDGET_S``) — so an owner that dies
+        mid-update leaves a stamp that stops advancing rather than a fresh false
+        "current".
+
+        NOT a replacement for :attr:`owner_reachable` ("is there an owner to
+        ask") or for the ``_ready_for_events`` sync term, and no resync clears
+        it: clearing one on a display refresh would turn a live, mid-refresh
+        viewer cold, which is the same class of lie in the other direction.
+        """
+        ...
+
+    async def verify_live(self, timeout: float) -> bool:
+        """Ask the owner to answer, and stamp the verification if it does.
+
+        The instrument is the attach protocol's existing ``ping`` op, tagged
+        *"list — liveness only"* and exempt from the owner's op chain so a health
+        probe is answered while mutations queue. Returns ``True`` when the owner
+        answered inside ``timeout``.
+
+        An unanswered probe returns ``False`` and TOUCHES NOTHING: the previous
+        stamp stays where it was, so a failure narrows the staleness window
+        instead of clearing it — a clear would read as a fresh classification
+        and turn a merely-slow owner cold.
         """
         ...
 
