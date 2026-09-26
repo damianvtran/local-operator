@@ -6274,11 +6274,12 @@ async def test_the_projects_registry_reaches_the_session_and_its_tools(
         ConfigManager(tmp_config_dir),
         AgentRegistry(tmp_config_dir),
     )
+    built = cast(Session, session)
     try:
-        registry = session.project_registry
+        registry = built.project_registry
         assert isinstance(registry, ProjectRegistry)
         assert registry.config_dir == tmp_config_dir
-        assert session._build_tool_context().project_registry is registry
-        assert {"project", "project_delete"} <= {tool.name for tool in session._tools}
+        assert built._build_tool_context().project_registry is registry
+        assert {"project", "project_delete"} <= {tool.name for tool in built._tools}
     finally:
         await session.dispose()
