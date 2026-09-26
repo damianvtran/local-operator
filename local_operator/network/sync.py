@@ -46,6 +46,7 @@ whatever has run.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import json
 import logging
@@ -1198,16 +1199,23 @@ def build_manifest(
     try:
         raw = transcript.read_bytes()
     except OSError as exc:
-        # TWO ABSENCES, AND THE USER IS TOLD WHICH (QA delta, Q-D4). The sentence used
-        # to be the OSError itself — "… has no transcript to sync on this device
-        # ([Errno 2] No such file or directory: '…/transcript.jsonl')" — which reads as
-        # an internal fault, while the ordinary case is a conversation created moments
-        # ago whose runtime has not written its first row yet: the transcript appears
-        # about 10 s later and the identical move then succeeds (measured on two real
-        # devices; the runtime writes that first row as it finishes starting up). So the
-        # wait is named as a wait, with the retry that resolves it, and a session that
-        # is genuinely not here keeps saying that instead of blaming a warm-up it has
-        # nothing to do with.
+        # THREE FAILURES, AND EACH GETS ITS OWN FACT (QA delta, Q-D4; Aida round 2, finding 2).
+        # This ``except`` catches every errno, not only a missing file, so the wait sentence
+        # is gated on ``ENOENT`` — measured with the directory present in both cases: a
+        # ``transcript.jsonl`` that is a directory (EISDIR) and one this process may not read
+        # (EACCES) both got "try again in a few seconds", which for those never resolves and
+        # threw away the one fact the old sentence did carry. The wait is named as a wait
+        # only where waiting is what fixes it: the ordinary case is a conversation created
+        # moments ago whose runtime has not written its first row yet — the transcript appears
+        # about 10 s later and the identical move then succeeds (measured on two real devices;
+        # the runtime writes that first row as it finishes starting up). Anything else carries
+        # the reason it could not be read.
+        if exc.errno != errno.ENOENT:
+            raise SyncRefused(
+                "no_session",
+                f"{session_id} has a transcript on this device that could not be read "
+                f"({exc}), so there is nothing to send",
+            ) from exc
         if not directory.is_dir():
             raise SyncRefused(
                 "no_session", f"this device does not hold {session_id}, so there is nothing to send"

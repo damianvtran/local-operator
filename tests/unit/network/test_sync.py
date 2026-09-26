@@ -385,6 +385,49 @@ def test_a_session_this_device_does_not_hold_reads_differently_from_a_cold_one(
     assert "this device does not hold abc123" in refusal.value.message
 
 
+def test_a_transcript_that_is_not_a_file_is_not_reported_as_a_wait(tmp_path: Path) -> None:
+    """Aida round 2, finding 2: only a MISSING transcript is a wait.
+
+    The enclosing ``except OSError`` catches every errno, not only ``ENOENT``, so the wait
+    sentence is gated on it: a ``transcript.jsonl`` that is a directory (``EISDIR``) never
+    resolves by trying again in a few seconds, and printing the warm-up advice for it both
+    lies and throws away the one fact the old sentence carried. The session directory is
+    present here, which is exactly the distinction the first version of this sentence got
+    wrong.
+    """
+    source = tmp_path / "owner"
+    (source / "sessions" / "abc123" / "transcript.jsonl").mkdir(parents=True)
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.build_manifest(source, "abc123")
+
+    assert refusal.value.code == "no_session"
+    assert "could not be read" in refusal.value.message
+    assert "try again in a few seconds" not in refusal.value.message
+
+
+def test_an_unreadable_transcript_is_not_reported_as_a_wait(tmp_path: Path) -> None:
+    """The same gate for ``EACCES``: a permission problem is not a warm-up either."""
+    if os.geteuid() == 0:  # pragma: no cover - root ignores the mode bits
+        pytest.skip("running as root: mode bits do not deny a read")
+    source = tmp_path / "owner"
+    directory = source / "sessions" / "abc123"
+    directory.mkdir(parents=True)
+    transcript = directory / "transcript.jsonl"
+    transcript.write_text(_row(1, "a turn"), encoding="utf-8")
+    transcript.chmod(0)
+
+    try:
+        with pytest.raises(sync.SyncRefused) as refusal:
+            sync.build_manifest(source, "abc123")
+    finally:
+        transcript.chmod(0o600)
+
+    assert refusal.value.code == "no_session"
+    assert "could not be read" in refusal.value.message
+    assert "try again in a few seconds" not in refusal.value.message
+
+
 def test_an_interrupted_copy_never_leaves_a_partial_file_behind(tmp_path: Path) -> None:
     """THE COST OF STAGING, STATED: a cut-off copy is not reused, and no partial file shows.
 

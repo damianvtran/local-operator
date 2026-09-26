@@ -819,17 +819,21 @@ def _destination_move(
     owner_device: str,
     owner_name: str,
     asked: bool = False,
-    target_id: str = "",
+    adopt_under_id: str = "",
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
     Returns ``(result, refusal, new_id)``. ``asked`` distinguishes the offload
     (the owner invited us, so no status/prepare handshake is owed) from a recall.
 
-    ``target_id`` is the id a ``keep`` copy must be adopted under, for the one caller
+    ``adopt_under_id`` is the id a ``keep`` copy must be adopted under, for the one caller
     that has to name it BEFORE this function runs: an invite acks the id the pull will
     use, so the inviter's receipt names a session that will exist (QA delta, Q-D2).
-    Empty means "mint one here", which is what every uninvited caller does.
+    Empty means "mint one here", which is what every uninvited caller does. It is NOT
+    called ``target_id``: that name belongs to the id this session is adopted under
+    (``session_id`` for a move, the mint for a copy), and one parameter holding both
+    meanings is how the receipt and the directory drifted apart in the first place
+    (Aida round 2, nit 4).
 
     The phases are reported as they happen, and the caller's contract only requires
     that a SUCCESS reports an openable phase — so a move that stopped at
@@ -932,7 +936,6 @@ def _destination_move(
         note("prepared")
         break
 
-    invited_id = target_id
     target_id = session_id
     if keep:
         # ONE MINT, AND IT IS THIS DEVICE'S (QA delta, Q-D2). A ``--keep`` copy is
@@ -942,13 +945,7 @@ def _destination_move(
         # "no device in this network holds …". The invited path therefore hands its
         # own mint down (``_destination_invite``), because its ack has to carry the id
         # before this thread has run at all.
-        #
-        # ``invited_id`` IS READ OFF THE PARAMETER FIRST because ``target_id`` is this
-        # name's SECOND meaning from the line above — the id the session is adopted
-        # under — and an ``or`` against the parameter would silently be an ``or``
-        # against ``session_id`` (measured: the receipt named the source id and the copy
-        # was minted under another).
-        target_id = invited_id or fork_mod.new_session_id()
+        target_id = adopt_under_id or fork_mod.new_session_id()
     staging = sync_mod.staging_dir(server.root, target_id)
     try:
         sync_mod.sync_from(
@@ -1910,7 +1907,7 @@ def _destination_invite(
                 asked=True,
                 # THE ID THE ACK ALREADY CARRIED, so the copy is adopted under the id
                 # the inviter was told about rather than a second, unreachable one.
-                target_id=new_id,
+                adopt_under_id=new_id,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -2618,7 +2615,9 @@ class _NullTransport:
         )
 
 
-def _peer_may_not_take(link: "PeerLink", session_id: str, label: str) -> SessionMoveRefusal | None:
+def _peer_may_not_take(
+    link: "PeerLink", session_id: str, *, device_id: str, label: str
+) -> SessionMoveRefusal | None:
     """A refusal for a peer this device does not admit to move, or ``None``.
 
     WHY THE INVITER LOOKS BEFORE IT INVITES (QA delta, Q-D3). Every frame a pull
@@ -2637,10 +2636,15 @@ def _peer_may_not_take(link: "PeerLink", session_id: str, label: str) -> Session
     have admitted. It is a pre-check and not a second guard: what it removes is the
     WAIT, never the decision, which stays in the authoriser.
 
-    The remedy is named because a refusal's job is to say what would change the
-    answer — the grant that widens this peer's authority is the operator's, not the
-    retrying user's. The verb and its argument order are ``lop network member
-    grant|revoke <network> <device> <capability>``'s own.
+    THE COMMAND IN THE REMEDY NAMES THE DEVICE **ID**, and that is not cosmetic (Aida
+    round 2, finding 1): ``lop network member grant`` takes an id — ``cli._cmd_member_caps``
+    passes ``args.device`` straight to ``set_member_capabilities``, which matches
+    ``record.member(device_id)`` — while the name/tail resolver
+    (``cli._resolve_device``) is wired into ``credential share`` and not into this verb.
+    Measured through the real handler with a peer named ``laptop``: the name form
+    answers rc=1 ``laptop is not an active member of …`` and grants nothing, the id form
+    answers rc=0. So the advice prints the id and the sentence keeps the NAME as prose,
+    which is the one distinction that makes the remedy runnable.
     """
     if "move" in link.role_capabilities():
         return None
@@ -2649,7 +2653,7 @@ def _peer_may_not_take(link: "PeerLink", session_id: str, label: str) -> Session
         "not_authorised",
         f"{label} may not take sessions from this device (it does not hold the 'move' "
         f"capability here), so {session_id} was not offered to it. Grant it with "
-        f"`lop network member grant <network> {label} move` if that was the intent.",
+        f"`lop network member grant <network> {device_id} move` if that was the intent.",
     )
 
 
@@ -2696,11 +2700,17 @@ def _offload(
         link = _link_for_move(server, target_device, target_name)
     except Moved as refusal:
         return _move_refusal(session_id, "unreachable", refusal.message)
-    blocked = _peer_may_not_take(link, session_id, target_name or target_device)
-    if blocked is not None:
-        return blocked
     progress = progress_for(server)
     progress.forget(session_id)
+    # THE PRE-CHECK SITS BELOW THE BOOKKEEPING, not above it (Aida round 2, finding 3):
+    # every other exit from this function has already cleared the session's in-memory
+    # phases and refusal, and an early return that skipped that would be the one path
+    # leaving a stale refusal on a session this device never asked about.
+    blocked = _peer_may_not_take(
+        link, session_id, device_id=target_device, label=target_name or target_device
+    )
+    if blocked is not None:
+        return blocked
     transport = LinkTransport(server, link, session_id)
     try:
         accepted = transport.ask(
