@@ -2347,10 +2347,11 @@ def test_soft_death_sigterm_handler_reaps_then_chains(monkeypatch):
 
 
 def test_agents_list_hides_the_seed_provenance_marker(capsys) -> None:
-    """F9: `seed:<name>` records that a role was installed from a packaged
-    starter, so `agent op='reset'` knows it may restore it. It is bookkeeping
-    this listing's reader cannot act on, and it does not belong in a
-    human-facing inventory beside tags they wrote."""
+    """F9 + the sync stamps: `seed:<name>` records that a role was installed
+    from a packaged starter (so `agent op='reset'` knows it may restore it),
+    and `seed_version:`/`seed_sha256:` are the sync baseline (`agents sync`).
+    All three are bookkeeping this listing's reader cannot act on, and none
+    belongs in a human-facing inventory beside tags they wrote."""
     registry = MagicMock()
     agent = MagicMock()
     agent.name = "reviewer"
@@ -2360,7 +2361,13 @@ def test_agents_list_hides_the_seed_provenance_marker(capsys) -> None:
     agent.hosting = ""
     agent.model = ""
     agent.description = "Reviewing a merge request"
-    agent.tags = ["role", "seed:reviewer", "tools:read,grep"]
+    agent.tags = [
+        "role",
+        "seed:reviewer",
+        "seed_version:1.0.0",
+        "seed_sha256:" + "0" * 64,
+        "tools:read,grep",
+    ]
     agent.categories = ["role"]
     registry.list_agents.return_value = [agent]
 
@@ -2368,7 +2375,30 @@ def test_agents_list_hides_the_seed_provenance_marker(capsys) -> None:
 
     output = capsys.readouterr().out
     assert "seed:reviewer" not in output
+    assert "seed_version" not in output
+    assert "seed_sha256" not in output
     assert "Tags: role, tools:read,grep" in output, "the tags a human set still show"
+
+
+def test_agents_list_shows_a_hub_marker(capsys) -> None:
+    """A hub marker names the marketplace listing the row came from, which is
+    a thing a reader can act on (`agents pull --id`), so it stays visible."""
+    registry = MagicMock()
+    agent = MagicMock()
+    agent.name = "hunter"
+    agent.id = "h-1"
+    agent.created_date = "now"
+    agent.version = "1.0.0"
+    agent.hosting = ""
+    agent.model = ""
+    agent.description = ""
+    agent.tags = ["role", "hub:abc-123"]
+    agent.categories = ["role"]
+    registry.list_agents.return_value = [agent]
+
+    assert agents_list_command(argparse.Namespace(page=1, perpage=10), registry) == 0
+
+    assert "hub:abc-123" in capsys.readouterr().out
 
 
 # --- qwencloud-ticket: the two-store surface (PR 2, slice B) -----------------
