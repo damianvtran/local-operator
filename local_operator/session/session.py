@@ -11370,11 +11370,13 @@ class Session:
                 await self._deliver_job_results([(job_id, text, job)], messages=[message])
                 self.refresh_frontend_state()
                 return
-            # Publish the bumped history generation so a live viewer can pull
-            # the row now; without this the row waits for the next full state
-            # refresh (the settle's own job-roster delta is scoped to the
-            # roster fields). AFTER the deferral lands, so a refresh that
-            # raises cannot skip the delivery of record.
+            # Publish the refreshed frontend state so the canonical delta
+            # carries this row: the store publishes ``history_cursor`` (the
+            # newest entry id), which is the field a viewer's history
+            # reconciliation reads. The settle's own job-roster delta is scoped
+            # to the roster fields, so without this the row would ride no frame
+            # until the next full state refresh. AFTER the deferral lands, so a
+            # refresh that raises cannot skip the delivery of record.
             self._deferred_job_results[job_id] = (job, text, message)
             self.refresh_frontend_state()
             return
@@ -11412,6 +11414,19 @@ class Session:
         """
         if not results:
             return
+        if messages is not None and len(messages) != len(results):
+            # Pairing is positional (``zip``) in both arms, so a mismatch would
+            # silently TRUNCATE the batch and could pair a message with the
+            # wrong result. Only a programming error reaches here; rebuild the
+            # rows rather than dropping or mispairing one (review round 1,
+            # R1-5).
+            logger.error(
+                "job delivery message pairing is out of sync (%d message(s) for "
+                "%d result(s)); rebuilding the rows",
+                len(messages),
+                len(results),
+            )
+            messages = None
         if self._leaving_deliveries:
             # THE DEPARTURE LATCH. A job delivery is NOT an admission, which is
             # what makes this arm necessary: ``ServingSessionHandle.begin_drain``
