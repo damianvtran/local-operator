@@ -300,6 +300,34 @@ async def test_an_unanswerable_gate_declines_only_its_token(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_spellings_of_an_unanswerable_path_share_the_cause(tmp_path: Path) -> None:
+    """A second spelling repeats the cause the first token recorded.
+
+    The dedupe arm replays the stored clause, not a fixed one: with a bare
+    ``set`` holding no cause, one path typed twice under the headless gate
+    produced "approval unavailable (no terminal is attached)" followed by
+    "approval declined" — a decliner who never existed, contradicting the
+    line above it inside one notices list (review round 1, MINOR / D1). The
+    twin case — a gate that really declines — is pinned by
+    ``test_a_declined_path_is_not_advertised_under_another_spelling``.
+    """
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    gate = UnanswerableGate()
+
+    result = await expand_references(
+        "check @.env and also @./.env", str(tmp_path), request_approval=gate
+    )
+
+    assert result.expanded is False
+    assert result.notices == [
+        "@.env — not included; approval unavailable (no terminal is attached)",
+        "@./.env — not included; approval unavailable (no terminal is attached)",
+    ]
+    # The duplicate is settled by dedupe, not by a second ask of the gate.
+    assert len(gate.asks) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_dotenv_inside_the_workspace_still_asks_for_approval(tmp_path):
     """The one guard ``read`` does not have. ``read`` is a deliberate act by an
     agent under instructions; ``@`` expansion is automatic and silent."""

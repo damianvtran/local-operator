@@ -773,17 +773,29 @@ def _declared_by_profile(name: str | None) -> bool:
         return False
     try:
         from local_operator.agent_profiles import resolve_profile_or_specialist
-        from local_operator.agents import AgentRegistry
+        from local_operator.agents import AgentRegistry, agents_store_present
         from local_operator.paths import config_dir
 
         config_root = config_dir()
         # GUARDED so a best-effort probe cannot WRITE: ``AgentRegistry``'s
-        # constructor creates ``config_dir/agents`` when it is missing, and a
-        # launch-path check has no business creating directories (post-merge
-        # review of #1597). No agents directory means no registered roles for
-        # the registry to resolve, so the packaged seeds — the case this probe
-        # exists for — resolve the same without one.
-        registry = AgentRegistry(config_root) if (config_root / "agents").exists() else None
+        # constructor creates ``config_dir`` and ``config_dir/agents`` when
+        # missing (then runs its migrations), and a launch-path check has no
+        # business creating directories (post-merge review of #1597; round 1,
+        # finding 2). ``agents_store_present`` counts BOTH shapes — the
+        # per-agent tree and a legacy ``agents.json`` — so a legacy root still
+        # resolves its registered roles here rather than being reported as
+        # "no declaration" (round 1, finding 3); a truly fresh root constructs
+        # nothing and the packaged seeds resolve without a registry. The same
+        # predicate guards the sibling writer in
+        # ``exec_startup.resolve_startup``, which fires before this probe.
+        #
+        # Flagged for review, not settled here: on a legacy ``agents.json``
+        # root the construction this predicate permits still runs the
+        # registry's migrations — a write triggered by a name check. That
+        # migration is what the session side runs too, so name resolution
+        # stays identical; whether a launch-time CHECK should be what triggers
+        # a migration is a question for the store's design, not this probe.
+        registry = AgentRegistry(config_root) if agents_store_present(config_root) else None
         _kind, profile, _prompt, _display = resolve_profile_or_specialist(name, registry=registry)
     except Exception:  # noqa: BLE001 — an odd registry means "no declaration"
         return False

@@ -985,6 +985,13 @@ def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
 
     assert exec_mode.run_exec("task", ExecArgs(background=True, profile="reviewer")) == 0
     assert "cannot ask for approval" not in capsys.readouterr().err
+    # The probe's fresh-root branch is only reachable because the FIRST writer
+    # on this path — resolve_startup's name check — no longer builds a
+    # registry (review round 1, finding 2): a fresh root must still hold no
+    # store once the whole launch-to-advisory ordering has run.
+    root = tmp_path / "config"
+    assert not (root / "agents").exists()
+    assert not (root / "agents.json").exists()
 
 
 def test_the_profile_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1004,6 +1011,32 @@ def test_the_profile_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     assert advisory is None, "the reviewer seed declares tools: the run is answerable"
     assert not (root / "agents").exists()
+
+
+def test_resolve_startup_creates_no_agents_store_for_a_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A name check must not build a registry — that was the launch-path writer.
+
+    ``run_exec`` calls ``resolve_startup`` BEFORE the advisory probe, and the
+    check used to construct ``AgentRegistry`` unconditionally for
+    ``--profile`` — so a fresh root had ``agents/`` before the probe ran, the
+    probe's fresh-root branch was production-unreachable, and the operator's
+    roots were written on every ``lop exec --profile`` run (review round 1,
+    finding 2). ``registry=None`` resolves the packaged seeds identically;
+    a root with a store present still constructs (see
+    ``test_the_profile_probe_writes_nothing``'s sibling case).
+    """
+    from local_operator.exec_startup import resolve_startup
+
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    assert resolve_startup(ExecArgs(profile="reviewer")) is None
+
+    assert not (root / "agents").exists()
+    assert not (root / "agents.json").exists()
+    assert not root.exists(), "a name check must not create the config root"
 
 
 @pytest.mark.parametrize(
