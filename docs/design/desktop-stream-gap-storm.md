@@ -278,6 +278,29 @@ in the snapshot's `frontend` — which is `self.state()` under the same clone th
 must *not* be dropped are those published after the capture, and none can exist
 before the drain.
 
+**The one assumption that sentence rests on, stated so it is checkable: a frame's
+state mutation precedes its `publish`.** That is the store's own ordering —
+`FrontendStateStore.apply_update` installs and *then* notifies its subscribers
+(`session/frontend_state.py:5413-5430`; the degraded arm does the same at
+`:5262-5266`) — and it is what makes "already reflected in `frontend`" true
+rather than hopeful. Two consequences worth knowing:
+
+* For a `frontend.update` or `attention` frame the substitution is exact: the
+  frame's content is in the canonical state the snapshot carries.
+* For an `event` frame it is *not* exact, and this is the drop rule's only real
+  cost: an event whose semantic effect the snapshot does not echo — the two
+  derived latches the UI keeps from `TERMINAL_EVENTS` and `DURABLE_ROUND_ENDINGS`
+  (`local-operator-ui` `use-canonical-session.ts:1310-1320`) — is dropped rather
+  than delivered after the snapshot. The durable ROWS it describes are covered by
+  the page plus the `/history` reconcile the client fires on *every* snapshot
+  (`:957-976`), and in-flight calls are covered by the snapshot's live seed; what
+  is left is a latch on a viewer that has just been handed authoritative state,
+  which is a smaller wrong than the alternative. The alternative — deliver
+  `event` frames and drop only the superseded kinds — was rejected because it
+  needs a frame-kind taxonomy and re-opens the unbounded pre-open queue for the
+  one family a burst can be made of; and the behaviour it would restore is
+  exactly what the pre-D1 code did while it was disconnecting these streams.
+
 ### 3.3 What this does not do, on purpose
 
 * **`_disconnect` stays for an opened subscriber.** A subscriber that has its
@@ -713,19 +736,37 @@ the route. `bridge.events(...)` is a plain async generator and can be driven wit
    assert `not sub.overflow`, assert `sub.queue` drained, and assert that every
    frame yielded after the snapshot has `seq > snapshot["seq"]` while no frame
    with `seq <= snapshot["seq"]` is yielded at all.
-2. `test_the_pre_open_drop_is_exactly_the_watermark` — patch `snapshot()` to a
-   wrapper that records `bridge.sequence` around its own body, publish a frame
-   from inside the `history()` read, and assert the dropped set is exactly the
-   frames with `seq <= snapshot["seq"]` and that the frame published during the
-   read is delivered (it is newer than the watermark).
+2. `test_the_watermark_is_read_after_the_history_page` — **the guard for §3.2a,
+   and the half of the drop rule that has an observable boundary.** Wrap
+   `history()` so that it publishes one frame from inside the read and records
+   `bridge.sequence` immediately afterwards, drive the handshake, and assert
+   three things: (a) the published frame's `seq` is **at or below**
+   `snapshot["seq"]` — the capture is last, so a frame published during the page
+   read is *inside* the watermark, not newer than it; (b) that frame is **not
+   yielded** — it is superseded, and its effect is already inside
+   `snapshot["payload"]["frontend"]`; (c) the snapshot's frontend is the state as
+   of that capture (the frame's own mutation is present), which is what makes the
+   drop a delivery rather than a loss.
+   *(Corrected in review: an earlier draft of this item asserted the opposite —
+   that a frame published during the read is newer than the watermark. That was
+   written against the pre-§3.2a ordering, where the state capture preceded the
+   page read. With the capture last it is false, and the implementation is
+   right.)*
 3. `test_a_slow_reader_after_the_handshake_is_still_disconnected` — the existing
    `test_slow_subscriber_overflow_is_explicit_and_bounded` (`:138-156`) with
    `sub.opened` set by one `anext`, asserting `overflow`, the `gap` frame and
    `StopAsyncIteration`. **Kept as-is in spirit; the burst variant above is its
    twin** and the pair is what pins the boundary.
-4. `test_nothing_awaits_between_the_snapshot_state_and_its_watermark` — the guard
-   for §3.2a: monkeypatch `history()` to publish a frame, and assert the snapshot
-   frame's `seq` is greater than that frame's seq (i.e. the capture is last).
+4. `test_the_delivery_boundary_is_strictly_above_the_watermark` — the other half,
+   and the only part of the rule no natural publish can exercise: nothing awaits
+   between the state capture and the drain, so a frame with `seq > snapshot["seq"]`
+   can never be produced by publishing during the handshake. Build one by hand
+   instead — put `(frame, size)` straight on `sub.queue` with
+   `frame["seq"] == snapshot["seq"] + 1` **before** the generator resumes — and
+   assert it **is** yielded, after the snapshot, while the same frame at
+   `frame["seq"] == snapshot["seq"]` is **not**. That is the regression guard for
+   the `>` in `if frame["seq"] > snapshot["seq"]`, and (with item 2) it is what
+   pins the capture-last ordering rather than merely describing it.
    A regression that moves the capture back above the read fails this.
 
 ### T2 — the reconnect dwell (`tests/unit/server/test_desktop_stream_dwell.py`, new)
