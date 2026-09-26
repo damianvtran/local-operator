@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import enum
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from local_operator.session.runtime.types import LIVE_FRESHNESS_BUDGET_S
@@ -221,7 +222,11 @@ class LivenessProbe:
         :meth:`verify_live` (it never dials), and calling one would be asking a
         process about itself.
         """
-        verify = getattr(session, "verify_live", None)
+        # Annotated rather than inferred: `getattr` types this `object`, and
+        # `callable()` narrows it for the RUNTIME check without giving pyright an
+        # `Awaitable` to accept, which is a real error and not a checker
+        # preference -- this is the type the guard is asserting.
+        verify: Callable[[float], Awaitable[bool]] | None = getattr(session, "verify_live", None)
         if not callable(verify):
             return False
         self.probes += 1
