@@ -40,14 +40,24 @@ unrecoverable — a panic, a removal, a rotation — are written through immedia
 
 WHAT A READER OF THE FILE SEES FOLLOWS FROM THAT, and it is the thing an independent
 verifier gets wrong. While the relay runs, ``audit.jsonl`` lags the log's own memory
-by at most one heartbeat (the relay's own interval, 15 s): a row recorded a moment ago
-is
+by up to one second of batching, or up to one heartbeat (the relay's own interval,
+15 s) when the machine is otherwise idle: a row recorded a moment ago is
 appended to the buffer and is not in the file yet, so reading the file is reading the
 last PUBLISHED state rather than the last event. Once the relay stops, nothing
 drains the tail until the next record or a ``close()``. A reader in ANOTHER process
 inherits exactly this lag — ``lop network log`` included, because it reads the same
 file and cannot drain a buffer it does not own — so a verification that must see the
 tail should trigger one more event, or stop the relay, before it counts rows.
+
+TWO THINGS CUT THAT LAG DOWN, and the second is what makes it OBSERVABLE. A stream's
+own rows publish at the moment the stream's state changes
+(:data:`STREAM_LIFECYCLE_EVENTS`) rather than at the next tick, because "did the
+release happen, and why" is the question an incident reader is asking about a pipe
+that just ended, and 15 s of a row that exists being indistinguishable from a row
+that does not is long enough to conclude a stream was never closed. And a writer
+answers :meth:`AuditLog.publication_of` for any sequence number, so a reader that
+finds nothing in the file can tell "recorded, not published yet" from "no such row"
+instead of inferring one from the other.
 
 RETENTION IS BY SIZE AND BY AGE with a fixed number of compressed generations, so
 the steady-state footprint is bounded by construction rather than by tuning. The
@@ -391,6 +401,33 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
     }
 )
 
+#: Events that are PUBLISHED at their own moment rather than at the next tick: the two
+#: halves of a viewer's pipe.
+#:
+#: WHY THESE AND NOT OTHERS. A stream's open and close answer the one question an
+#: incident reader asks about a pipe that just ended — did the release happen, and why
+#: — and until it is published, a row that EXISTS is indistinguishable in the file from
+#: a row that does not. Measured on the pre-fix head over three runs, the owner's close
+#: row took 14.74 / 14.72 / 14.73 s to reach ``audit.jsonl``: one full 15 s heartbeat,
+#: because the close lands just after a flush and nothing else on an otherwise idle
+#: relay drains the buffer. The bound the cell used to carry was 20 s, which is 1.24x
+#: the product's own publication latency — a cell that cannot tell a working relay from
+#: one whose publication had doubled (agent review round 2, NIT 2).
+#:
+#: PUBLISHED, NOT SYNCED, AND NOT PER ROW. This is a ``flush`` — one ``write(2)`` of the
+#: batch — and never an ``fsync``: nothing here claims to survive a power cut, which is
+#: the whole of what :data:`DURABLE_EVENTS` is for. The cost is bounded by the STREAM
+#: COUNT and by nothing else: a stream opens and closes when a viewer attaches and
+#: leaves, both human-scale events, so an idle relay writes nothing at all (no timer
+#: fires when nothing happened) and a busy one pays at most two extra writes per stream
+#: rather than one per row. That is the operator's own bound for this subsystem —
+#: "proper logs and forensics with sane retention but not too much disk IO" — and it is
+#: why neither of the two rejected shapes is here: a per-row write-through would put the
+#: disk cost back on traffic, and a timer would write on an idle machine.
+STREAM_LIFECYCLE_EVENTS: frozenset[str] = frozenset(
+    {"session_stream_opened", "session_stream_closed"}
+)
+
 OUTCOMES = ("ok", "refused", "failed", "partial")
 ACTOR_KINDS = ("human", "agent", "relay", "unknown")
 
@@ -446,6 +483,10 @@ class AuditLog:
     BUFFER_BYTES = AUDIT_BUFFER_BYTES
     TICK_S = AUDIT_TICK_S
     DURABLE_EVENTS = DURABLE_EVENTS
+    #: Class-level like ``DURABLE_EVENTS``, because these two tables are the writer's
+    #: POLICY and :meth:`record` reads them off the instance — so a caller (or a test)
+    #: can state a narrower one without a second writer.
+    STREAM_LIFECYCLE_EVENTS = STREAM_LIFECYCLE_EVENTS
 
     @classmethod
     def from_config(cls, root: Path | None = None, *, enabled: bool = True) -> AuditLog:
@@ -490,6 +531,13 @@ class AuditLog:
         self._buffer: list[str] = []
         self._buffered_bytes = 0
         self._seq = _last_sequence(self._path)
+        #: The other half of ``_seq``: the highest ``seq`` this writer has actually
+        #: written to the file. The two together are what let a reader tell an
+        #: unflushed row from one that does not exist — see :meth:`publication_of` —
+        #: and the gap between them on a quiet relay used to be a whole heartbeat with
+        #: nothing saying so. Seeded from the file, because rows already on disk are
+        #: published whatever this process has done.
+        self._published_seq = self._seq
         self._last_flush = time.monotonic()
         #: Two MEASURED counters, because §4.8's bounds are asserted against them
         #: rather than estimated: ``write_calls`` counts the ``write(2)``s this writer
@@ -521,6 +569,65 @@ class AuditLog:
     def max_age_days(self) -> float:
         """The age bound, in days, as this writer resolved it."""
         return self._max_age_s / (24 * 60 * 60.0)
+
+    @property
+    def published_through(self) -> int:
+        """The highest ``seq`` THIS WRITER has put in the file; 0 when it has none.
+
+        THE BOUNDARY, NOT A COUNT, AND IT IS ABOUT THIS WRITER. Every record numbered
+        at or below it has been written by this log, and the rows above it are either
+        still in its buffer or were never recorded by it — :meth:`publication_of` is
+        the one-answer form of that. The counter is seeded from ``audit.jsonl`` when the
+        writer opens it, so it starts at whatever the file already held; a row some
+        OTHER process appends afterwards is not this writer's to report, which is a
+        distinction that only matters because the file has more than one writer in
+        practice (see :meth:`publication_of`).
+
+        A FAILED WRITE IS THE ONE CASE THIS OVERSTATES IT. ``flush`` drains the buffer
+        before it opens the file, so a batch lost to an ``OSError`` is a hole this
+        counter cannot see; ``degraded`` is the flag that says the trail is incomplete,
+        and it is set on exactly that path.
+        """
+        with self._write_lock:
+            return self._published_seq
+
+    @property
+    def recorded_through(self) -> int:
+        """The highest ``seq`` this writer has RECORDED, published or still buffered."""
+        with self._write_lock:
+            return self._seq
+
+    def publication_of(self, seq: int) -> str:
+        """Where the record numbered ``seq`` is: ``file``, ``buffered`` or ``unknown``.
+
+        THE MIDDLE ANSWER IS THE ONE THIS EXISTS FOR, and it is the difference between
+        a reader and a guess. ``file`` means it is in ``audit.jsonl`` and a reader's
+        answer is final (unless ``degraded``). ``buffered`` means this writer has
+        RECORDED it and has not published it, so a reader that reads the file and finds
+        nothing is seeing the LAG rather than an absence — which is the state an
+        operator reading ``audit.jsonl`` during an incident cannot otherwise
+        distinguish from a row that never existed, and it is why stream lifecycle rows
+        are published at the state change instead (see
+        :data:`STREAM_LIFECYCLE_EVENTS`). ``unknown`` means this writer never recorded
+        that number: there is no such row, and no amount of waiting will produce one.
+
+        In-process, because it is this writer's own memory that answers the middle
+        case: a reader in ANOTHER process holds its own ``AuditLog`` and must take the
+        numbers from the one that owns the file — ``lop network status`` carries them
+        (``relay``'s ``audit_published_through`` / ``audit_recorded_through``) for
+        exactly that reader. THE ANSWER IS ABOUT THIS WRITER'S OWN COUNTER, so it is
+        sound while the relay is the file's only writer, which the module docstring
+        states as the contract; a second process appending to the same file would
+        render sequence numbers of its own from the same seed (``_last_sequence`` is
+        read once, at open), and the ``seq`` a reader is asking about would no longer
+        identify one row.
+        """
+        with self._write_lock:
+            if seq <= self._published_seq:
+                return "file"
+            if seq <= self._seq:
+                return "buffered"
+            return "unknown"
 
     # -- writing ------------------------------------------------------------
 
@@ -555,6 +662,18 @@ class AuditLog:
                 # operator asked to be bounded.
                 self.flush()
                 self.sync()
+                return
+            if event.event in self.STREAM_LIFECYCLE_EVENTS:
+                # A STREAM'S OWN ROWS PUBLISH WHEN THE STREAM'S STATE CHANGES, which is
+                # why this branch is here and not at a call site: both halves of a pane's
+                # pipe — the owner's and the opener's, the open and the close — carry the
+                # whole of what a reader wants from them the moment they happen, and any
+                # one emitter that forgot would put the row back on the heartbeat with a
+                # 15 s window in which it is indistinguishable from a row that does not
+                # exist (:data:`STREAM_LIFECYCLE_EVENTS` has the measurement and the cost
+                # argument). PUBLISHED, NOT SYNCED, and the flush also resets the tick, so
+                # the fall-through below would find nothing left to do.
+                self.flush()
                 return
             elapsed = time.monotonic() - self._last_flush
             if self._buffered_bytes >= self.BUFFER_BYTES or elapsed >= self.TICK_S:
@@ -591,6 +710,12 @@ class AuditLog:
                 with self._path.open("a", encoding="utf-8") as handle:
                     handle.write(payload)
                 self.write_calls += 1
+                # EVERYTHING RENDERED SO FAR IS NOW IN THE FILE. Each rendered record
+                # either joined this batch (and has just been written) or was a rotation
+                # record, which ``_write_rotation_record`` writes to the file directly,
+                # so ``_seq`` is the honest upper bound of what the file holds. This is
+                # the boundary :meth:`publication_of` answers on.
+                self._published_seq = self._seq
                 self._last_flush = time.monotonic()
                 # Checked AGAIN after the write: a single flush can carry many records
                 # (that is the point of batching), so checking only beforehand would

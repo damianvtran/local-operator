@@ -289,3 +289,78 @@ def test_the_writer_counts_the_calls_the_probe_reports(root: Path) -> None:
     assert log.write_calls == 2, log.write_calls
     assert log.syncs == 1, log.syncs
     assert len(_records(store.audit_path(root))) == 6
+
+
+def test_a_stream_row_publishes_at_the_state_change_and_ordinary_rows_still_batch(
+    root: Path,
+) -> None:
+    """A7 SURVIVES THE EXCEPTION: it is per STREAM, not per row, and it is a flush.
+
+    The audit's whole growth argument is that disk cost follows SEMANTIC events and
+    never traffic, so "publish this row now" is the kind of change that can quietly
+    undo it. What this cell pins is the SHAPE of the exception: an ordinary row is
+    still batched (nothing written through, no sync), and a stream's lifecycle row
+    costs ONE ``write(2)`` which also carries whatever else was pending — never an
+    ``fsync``, because what is owed here is VISIBILITY (a reader must be able to tell
+    "not flushed yet" from "no such row"), not survival of a power cut, which stays
+    :data:`audit_mod.DURABLE_EVENTS`' job and is unchanged.
+
+    Measured on the pre-fix head, the owner's close row took 14.7416 / 14.7417 /
+    14.7436 s to reach the file; on this head it takes 0.0006 / 0.0015 / 0.0004 s,
+    which is the whole of the difference this table makes.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    log = audit_mod.AuditLog(root)
+    path = store.audit_path(root)
+    log.record(audit_mod.AuditEvent(event="link_opened", detail={"role": "dialer"}))
+    # NOT WRITTEN THROUGH: the tick has not elapsed and the buffer is far from full.
+    assert log.write_calls == 0, log.write_calls
+    assert _records(path) == [], _records(path)
+
+    log.record(
+        audit_mod.AuditEvent(
+            event="session_stream_closed",
+            cause="policy",
+            detail={"stream": "s_1", "peer": "d_x", "role": "owner", "cause": "viewer-left"},
+        )
+    )
+    # ONE write, and it holds BOTH rows: the lifecycle flush publishes the batch it is
+    # part of rather than a special-purpose second file, which is why the cost is one
+    # write per stream and not one per row.
+    assert log.write_calls == 1, log.write_calls
+    assert [row["event"] for row in _records(path)] == ["link_opened", "session_stream_closed"]
+    assert log.syncs == 0, "a lifecycle row was SYNCED: it owes visibility, not durability"
+
+
+def test_a_reader_can_tell_an_unflushed_row_from_one_that_does_not_exist(root: Path) -> None:
+    """THE DISTINCTION THE FILE CANNOT MAKE ON ITS OWN, and why it lives here.
+
+    A reader of ``audit.jsonl`` — an operator with `jq`, or ``lop network log`` in
+    another process, which cannot drain a buffer it does not own — sees the last
+    PUBLISHED state. A row this writer has recorded and not yet flushed is therefore
+    absent from the file, and absent is exactly what a row that was never recorded
+    looks like. That ambiguity is what ``publication_of`` answers, and the cell drives
+    all three of its answers on one writer: ``buffered`` for the row that exists and is
+    not out yet, ``unknown`` for a number this writer never issued, ``file`` once the
+    flush has happened. The first two are the pair that mattered — before this, both of
+    them read as "not in the file".
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    log = audit_mod.AuditLog(root)
+    path = store.audit_path(root)
+    log.record(audit_mod.AuditEvent(event="link_opened", detail={"role": "dialer"}))
+    held = log.recorded_through
+
+    # EXISTS AND IS NOT OUT YET — and the file agrees it is not there, which is what
+    # makes this the ambiguous case rather than a restatement of the answer.
+    assert log.publication_of(held) == "buffered", log.publication_of(held)
+    assert log.published_through < held <= log.recorded_through
+    assert [row for row in _records(path) if row.get("seq") == held] == [], _records(path)
+
+    # NEVER RECORDED: a DIFFERENT answer, to the same question, on the same writer.
+    assert log.publication_of(held + 1) == "unknown", log.publication_of(held + 1)
+
+    log.flush()
+    assert log.publication_of(held) == "file", log.publication_of(held)
+    assert log.published_through >= held
+    assert log.publication_of(held + 1) == "unknown", "a flush published a row it never had"

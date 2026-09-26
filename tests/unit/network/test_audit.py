@@ -122,6 +122,15 @@ def test_the_taxonomy_is_closed_and_self_consistent() -> None:
     for kind in audit_mod.EVENT_KINDS:
         assert kind == kind.strip().lower()
     assert "handshake_refused" in audit_mod.EVENT_KINDS
+    # AND THE PUBLICATION TABLE NAMES REAL EVENTS, DISJOINT FROM THE DURABLE ONE. A
+    # typo here would not fail anything at runtime: ``record`` would simply never
+    # match it and the row would go back to the heartbeat — the 15 s window this table
+    # exists to close — which is a defect no reader of the log could see.
+    assert audit_mod.STREAM_LIFECYCLE_EVENTS <= audit_mod.EVENT_KINDS
+    assert not (audit_mod.STREAM_LIFECYCLE_EVENTS & audit_mod.DURABLE_EVENTS), (
+        "a lifecycle row is not a durable one: if it were in both, the fsync branch would "
+        "win and the row would be synced per stream rather than merely published"
+    )
 
 
 def test_a_stream_close_renders_a_machine_cause_from_the_enum(root: Path) -> None:

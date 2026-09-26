@@ -8955,6 +8955,15 @@ class RelayServer:
             ],
             "audit_degraded": self.audit.degraded,
             "audit_degraded_reason": self.audit.degraded_reason,
+            # HOW FAR THE FILE HAS GOT, against how far this log has got, exposed
+            # because the reader that needs the difference is the one that CANNOT see
+            # it: an operator (or an agent) reading ``audit.jsonl`` from another
+            # process holds no buffer and no ``AuditLog`` the writer owns, so between
+            # the two numbers here it can tell a row that is recorded and unflushed —
+            # still coming — from one that was never recorded. Without them the file's
+            # silence is the same answer either way.
+            "audit_published_through": self.audit.published_through,
+            "audit_recorded_through": self.audit.recorded_through,
             "audit_path": str(store.audit_path(self.root)),
             "log_path": str(log_path()),
             "uptime_s": round(time.time() - self.started_at, 1),
