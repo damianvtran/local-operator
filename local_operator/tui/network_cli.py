@@ -51,6 +51,17 @@ QUICK_TIMEOUT_S = 20.0
 #: machine can bound (``network/cli.py`` passes 120 s and 240 s respectively).
 PEER_CALL_TIMEOUT_S = 260.0
 
+#: Verbs that DRIVE a session on a peer — ``/network sessions --send`` and its
+#: two siblings. They are not one round trip: the CLI waits for the OPEN and BIND
+#: of a viewer (120 s, which is where a stored session engages a runtime over
+#: there) and then, for ``--send``, for the owner's TERMINAL turn outcome (300 s
+#: more). A child bound at the budget above would cut the call part-way through
+#: a wait the verb itself promises, and the composer would show a timeout about a
+#: command that was still working — the failure ``LISTING_TIMEOUT_S``'s own
+#: comment exists to prevent, one level down. So this sits ABOVE what the CLI
+#: promises to wait, and the CLI's numbers are the terms it holds up.
+PILOT_CALL_TIMEOUT_S = 480.0
+
 #: The refusal sentences ``network/cli.py`` prints are ANSI-coloured for a human
 #: watching a terminal. A notice is the wrong place for an escape sequence — a
 #: captured string must be the sentence, not the sentence plus paint.

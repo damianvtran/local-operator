@@ -163,6 +163,21 @@ over a paired mesh. From a shell:
 | `lop network sessions --peer <id> --archive <session>` | hide it on the device that holds it |
 | `lop network sessions --peer <id> --unarchive <session>` | restore it there |
 | `lop network sessions --peer <id> --delete <session> [--yes]` | delete it where it lives — a dry run until `--yes` |
+| `lop network sessions --peer <id> --send <session> <text>` | deliver a TURN to a conversation that is already there, and wait for its outcome |
+| `lop network sessions --peer <id> --steer <session> <text>` | inject into the turn that session is running there |
+| `lop network sessions --peer <id> --slash <session> /<command> [args]` | run a slash command in that session, ON its device |
+
+THE THREE PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is the
+one that starts a new one). They open the same viewer the TUI's sidebar pick and `lop
+--resume <a peer's id>` open, so what they act on is the OWNER's runtime: a routed
+slash changes the peer's own record (a rename is visible in that device's listing),
+and `--send` waits for the owner's terminal turn outcome rather than returning on
+admission. The text is the positional — or stdin, for a body with newlines in it —
+and, like every verb here, the tail may also be typed as `/network sessions …` from
+inside a session. `--send` exits 0 only for a turn that REACHED its end; a turn that
+failed there, is still running, or was queued for a retiring runtime exits 1 with
+`outcome` naming which (`failed`, `running`, `queued`) so a script cannot read a
+delivery as a completion.
 
 EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
 acting on one (QA round 5, Q-R5-1):
@@ -183,6 +198,18 @@ acting on one (QA round 5, Q-R5-1):
   without the field it is a receipt for, so whether the peer acted is UNKNOWN:
   restart the relay and ask again, and do not read the answer as a failure of the
   act.
+- `turn_not_running` — a `--steer` reached a session that is not running a turn
+  there, so there was nothing for it to correct. The sentence names the two ways
+  forward (`--send` to start a turn, `--slash` to change the session); nothing was
+  written to the peer.
+- `session_unknown` — the named device ANSWERED and holds no such conversation (its
+  own listing is the sentence's second half). Distinct from `peer_unreachable` on
+  purpose: one means "ask again when it is back", the other means "that id is not
+  there".
+- `session_unreachable` — the peer accepted the act and then its runtime stopped
+  answering (a stopped or wedged session there, or a bind that could not be
+  completed). Nothing on this side changed, and the peer's own sentence is carried
+  verbatim.
 
 `--all-peers` merges the rows it could read and NAMES the peers it could not
 (`<device>: unreachable (<reason>)` on stderr), so a partial listing is never
