@@ -160,6 +160,18 @@ There is no "run as root" surface: a surface starts as the user's own shell so
   app refuses reads and screenshots while it is on, but the app cannot tell "a
   read that should have been refused" from any other read — so honour it.
 
+## Installing a program the task needs
+
+A tool the machine lacks — a codec for video or audio work, a converter, a CLI a
+task assumes — is acquired through a surface, and that has its own playbook:
+`guide://system-tools`. Read it before starting an install. It carries the
+detect-first step (a `command not found` is evidence about one shell, not about
+the machine), the `ask` that comes before anything privileged runs, the
+per-platform commands, and the verify step. This page is the console half:
+create the surface, read it, answer the installer's own questions with `keys` or
+`input`, and leave `sudo`'s password prompt to the user — or pass a stored
+credential by `secret_ref`.
+
 ## When a call is refused
 
 Every refusal is typed; do not substring-match a message, and do not retry a

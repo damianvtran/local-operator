@@ -212,6 +212,23 @@ def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
     assert "UAC" in body
 
 
+def test_installing_a_missing_tool_is_reachable_from_the_console_surfaces() -> None:
+    """The install playbook has to be reachable from the surfaces that lead to it.
+
+    A session that knows the console exists but not where installing belongs
+    either gives up or improvises, and the console guide plus the console prompt
+    note are the two things it reads before the first install. Pinned because
+    nothing else would notice a deletion: the guide corpus still resolves, and
+    the missing-command advisory only fires after a shell has already failed.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    console = resolver("guide://console")
+
+    assert console is not None
+    assert "guide://system-tools" in console
+    assert "guide://system-tools" in render_template("system.md", {"has_console": True})
+
+
 @pytest.mark.asyncio
 async def test_registered_agent_metadata_surfaces_only_generic_guide(
     tmp_path: Path,

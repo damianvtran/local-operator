@@ -121,6 +121,55 @@ agent uses `ask` with the exact command and what it will change. Surfaces start 
 the user's own shell (never root), so `sudo`'s prompt lands where the user can
 answer it.
 
+## Installing a program a task needs
+
+The console is also where a missing program is installed, and **nothing installs
+silently**. The harness approving a tool call is not the user approving a change
+to their machine, so the order is ask first, install second — and a declined
+install is an answer, not an obstacle.
+
+What to expect, in order:
+
+1. **The question.** `ask` names the package, what it is for, the exact command,
+   roughly how big it is, and whether a password will be needed — for example
+   *"I need FFmpeg to convert your video. It is not installed; I would install it
+   with `brew install ffmpeg` (about 100 MB with its dependencies), removable
+   later with `brew uninstall ffmpeg`. Homebrew is already set up, so no
+   administrator password is needed. Shall I go ahead?"* The question is the
+   authorisation for the change; the tool-call approval is not.
+2. **The install, in a surface.** The package manager runs in a console surface —
+   the only place that can host its progress output and its prompts. The pane can
+   stay closed while it works and the surface keeps running.
+3. **`sudo`, if it is needed.** The surface is the user's own shell, never root,
+   so `sudo`'s prompt appears there and **the user types the password into it**.
+   Keystrokes into a pty are not recorded, so the password does not enter the
+   surface's output, the transcript or the record. The agent never types it; if
+   the user has stored one, the agent can pass it by name (`secret_ref`) and
+   never see the value.
+4. **Prompts the agent cannot answer.** macOS's Command Line Tools dialog and
+   Windows's UAC consent dialog are drawn by the OS: the pty cannot see them and
+   the agent cannot click them. An installer's own agreement or licence prompt is
+   the user's consent too. The agent's job in all three cases is to say what is
+   on the screen, hand it to the user, and wait.
+5. **The receipt.** When it finishes the agent reports the package, the command
+   that ran, the version now installed, and the undo line
+   (`brew uninstall ffmpeg`, `sudo apt remove ffmpeg`, `winget uninstall …`) —
+   and verifies by running the tool on the real task, not by finding the binary.
+
+The full playbook is `guide://system-tools`: detect, decide, explain, `ask`, run,
+verify — with the per-platform paths. Homebrew on macOS (including installing
+Homebrew itself, which does need the administrator password, and can stall behind
+the developer-tools dialog); the distribution's own manager on Linux, where root
+is granted with `sudo` — or a static build into the user's home directory when it
+is not; `winget` or `scoop` on Windows, where `scoop` needs no elevation and a
+newly installed tool usually appears only in a **new** shell.
+
+What the agent is told never to do: install anything without the `ask`, type or
+pipe in a password, accept licences on the user's behalf, add package
+repositories on its own initiative, make an install permanent in shell config
+without asking, or install a terminal emulator to route around a machine that
+has no console.
+
 ## Capture
 
 `screenshot` returns `rendered: "displayed"` (the app photographed its own window,
