@@ -353,7 +353,8 @@ async def test_the_dwelling_bridge_is_the_last_resort(tmp_path, monkeypatch):
     # must end with it rather than leaking a facade nothing can reach.
     await chosen.close()
     last = pool._evict_one()
-    assert last is dwelling, "with only dwelling bridges left, it is the last resort"
+    assert last is not None, "with only dwelling bridges left, there is still a victim"
+    assert last is dwelling, "and it is the last resort"
     await last.close()
     assert not last.dwelling, "and taking it ends the dwell"
     assert not last._dwell_tasks and last.remote is None
