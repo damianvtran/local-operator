@@ -28,7 +28,9 @@ Read this first, because it changes what the next phase should build:
 > specific than the request implies:
 >
 > 1. **First paint is already decoupled from the runtime on both interfaces.**
->    It is at the budget (200-297 ms p50) and needs ~2x headroom, not a redesign.
+>    It is at the budget (200-490 ms p50 across coder's four small profiles and
+>    this document's p90 and xl rows — 490.0 and 789.0 ms) and needs ~2x headroom,
+>    not a redesign.
 > 2. **The live overlay is not slow because of compute contention.** It is slow
 >    because a cold runtime is *spawned and booted* (1.3-1.5 s quiet, 4.4-4.9x
 >    over budget) while a warm one answers in 30-80 ms (4-10x under budget). This
@@ -76,7 +78,7 @@ Read this first, because it changes what the next phase should build:
 | 1 | "Optimize runtime attach to interfaces and reduce the amount of repeat work" | **Partly built, partly real.** The attach *bind* is off the owner's loop and works in all four owner states; the lock-held-across-attach defect is fixed. What is genuinely repeated is (a) a **cold spawn + whole-journal parse** on every attach whose runtime was reaped, and (b) on the TUI, a **256 KB journal parse per switch/prewarm** that goes around the existing page cache. | §4.2, §4.4, §4.5 |
 | 2 | "Can the UI cache across conversation switches, and where does the cache belong?" | **Already answered, twice.** The desktop has a process-wide page cache (`session/page_cache.py`) plus a resident-bridge pool; the TUI has a 12-slot prepared-presentation cache plus a 1 Hz speculative warm-up. The open question is not *whether* to cache but **where the existing caches do not reach** — §4.5 names three holes. | §4.5 |
 | 3 | "Study DSH and take what applies" | Done — §8. Four patterns transfer (list reads that never open a body; live-preferred but non-activating reads; an explicit `asOfSeq` watermark per value; a cache that may be *stale but never ahead*). Three do not, and the reason is that DSH's projection registry folds events **synchronously in one process**, which lop's per-session runtime processes cannot do. | §8 |
-| 4 | "Instant conversation loading, under 300 ms, measured" | **Met on a warm runtime (30-80 ms), missed by 4.4-4.9x on a cold one (1.3-1.5 s), and first paint is at the budget (200-297 ms p50) rather than under it.** Both halves are measured; both have a named cause. | §5 |
+| 4 | "Instant conversation loading, under 300 ms, measured" | **Met on a warm runtime (30-80 ms), missed by 4.4-4.9x on a cold one (1.3-1.5 s), and first paint is at the budget, not under it (200-490 ms p50 across small profiles; 789.0 ms on the 200 MB shape).** Both halves are measured; both have a named cause. | §5 |
 
 ### What is already solved and must not be re-proposed
 
@@ -225,9 +227,13 @@ documents the same cost and the mechanism that already avoids it:
 
 **Two terms, and they need different fixes.**
 
-* **A fixed term — spawn + boot.** Coder's probe: the pid appears
-  **126.9-248.4 ms** after the click, and the engage completes at
-  **1303-1470 ms**. So ~0.1-0.25 s is "make a process exist", and **~1.05-1.25 s
+* **A fixed term — spawn + boot.** Coder's probe (three attachments, tiny/p50
+  fixtures, load 66.9-70.5 — and it states no session size, which is the limit of
+  the figure): the pid appears **126.9-248.4 ms** after the click, and the engage
+  completes at **1303-1470 ms**. **This is a small-profile fact, not a property of
+  the shape:** the reviewer measured the pid at **2 622.6 ms** on xl
+  (207 MB / 18 301 rows, load 68.7), so the spawn term scales too and no
+  "127-248 ms" claim may be carried onto the 261 MB conversation. So ~0.1-0.25 s is "make a process exist", and **~1.05-1.25 s
   is boot inside it**. The boot is `create_session`
   (`serving.py:7896`), which the tree itself records as "one long SYNCHRONOUS
   stretch" — its own measurement is **median 165.7 ms of contiguous loop stall
@@ -267,7 +273,10 @@ both defaults are in force.
 in perspective:
 
 ```
-sessions_total          12 258
+sessions_total          12 258      (mine, read-only, first census)
+                        12 283      (coder, later: 326 user + 11 492 subagent + 465 neither)
+                                    -- a 25-directory gap, i.e. the store GREW between
+                                    the two censuses; neither is stale, they are dated
 transcript bytes total   7 320 MB
 touched last 5 min           34   (8 user sessions + 26 subagent runs)
 touched last 10 min          36   (8 user + 28 subagent)
@@ -312,7 +321,8 @@ was parked; the docstring records that the strict all-stamps-equal form "made
 nearly every click cold" and that this was fixed. Coder measured the two arms on
 29 switches: **19 of 19 revisits of a non-streaming, gate-free session hit the
 cache at 0.21 ms**, while a switch to a **streaming** target returns `False`
-(`:6585-6586`) and pays **31.91 ms**. So the cache works, and the arm that matters
+(`:6585-6586`) and pays **31.91 ms** (one streaming switch out of the 29 that
+were not non-streaming hits; coder, load 66.9-70.5). So the cache works, and the arm that matters
 is the streaming one — the one that fires exactly when several runtimes are
 going.
 
@@ -422,8 +432,8 @@ of them I initially over-priced — the correction is recorded rather than dropp
 
 | Hole | What it costs | Evidence |
 |---|---|---|
-| **H-1. The TUI's conversation load path bypasses `session/page_cache.py`** — the page cache's only consumers are the desktop `history` route (`server/utils/desktop_sessions.py:82`) and the TUI's **subagent** pager (`tui/widgets/subagent_view.py:75`). The main load path is `read_saved_preview` (`session/saved_preview.py:39`), which reads raw bytes, and the connect path uses `read_replay_suffix` directly (`attached.py:5337`). | **Smaller than it looks, and I am not going to sell it as more.** The read is *bounded* at `PREVIEW_BYTES = 256 * 1024` (`saved_preview.py:29`), so this is a repeat parse of a fixed window, not of the journal. It repeats on every click and every prewarm cycle; it does not scale with the conversation. Coder's measurement: wiring the page cache in "would buy little on this path". | two live consumers of `load_transcript_page`, and neither is this one, none in `saved_preview.py`; the 256 KB bound at `:29,47-52` |
-| **H-2. The presentation cache misses on `streaming`** (and, deliberately, on a moved `replay_revision` and on any pending gate). | A **31.91 ms** prepare on a switch to a busy conversation, against **0.21 ms** on a hit (coder, 29 switches; 19/19 hits on the non-streaming arm). Real, but jank-scale — see §4.4(a). | `tui/app.py:6552-6588` |
+| **H-1. The TUI's conversation load path bypasses `session/page_cache.py`** — `load_transcript_page` has exactly two consumers: the desktop `history` route (`server/utils/desktop_sessions.py:82`) and the TUI's **subagent** pager (`tui/widgets/subagent_view.py:75`). (A third module imports the cache, `session/history_window.py:22`, but for `retained_bytes` — its own display-page budget at `:230` — not for pages, so it does not move the conclusion; the review was right that my earlier "4 hits" count was a broken bash glob.) The main load path is `read_saved_preview` (`session/saved_preview.py:39`), which reads raw bytes, and the connect path uses `read_replay_suffix` directly (`attached.py:5337`). | **Smaller than it looks, and I am not going to sell it as more.** The read is *bounded* at `PREVIEW_BYTES = 256 * 1024` (`saved_preview.py:29`), so this is a repeat parse of a fixed window, not of the journal. It repeats on every click and every prewarm cycle; it does not scale with the conversation. Coder's measurement: wiring the page cache in "would buy little on this path". | two live consumers of `load_transcript_page`, and neither is this one, none in `saved_preview.py`; the 256 KB bound at `:29,47-52` |
+| **H-2. The presentation cache misses on `streaming`** (and, deliberately, on a moved `replay_revision` and on any pending gate). | A **31.91 ms** prepare on a switch to a busy conversation, against **0.21 ms** on a hit (coder, 29 switches at load 66.9-70.5: 19/19 hits on the non-streaming arm, so the streaming arm is ≤10 switches and the figure is quoted at **n=1**). Real, but jank-scale — see §4.4(a). | `tui/app.py:6552-6588` |
 | **H-3. Nothing is durable across a restart.** The caches are in-process: `_ROW_CACHE` in `catalog.py`, `_sidebar_presentations` in the TUI, and the page cache in `page_cache.py`. A new `serve` or a new TUI pays every cold cost again. | The operator restarts `lop` and re-pays the paint; a second interface (desktop + TUI) never shares a warm page. | `session/page_cache.py` (process-wide, byte-budgeted, not persisted) |
 | **H-4. The sidebar's 2 s poll re-pays a whole-store census** (§4.4(b)) — *measured, and deliberately NOT changed*: at the operator's real population it is 1,835 `stat` / 54.1-60.9 ms CPU per 2 s, and **no cheaper change key exists** (an append moves the session directory's mtime, not the sessions root's, and an append is what reorders the listing). | ~3% of one core, continuously, while the sidebar is open. The honest verdict is that this is the price of a store-wide ranked listing. | `tui/app.py:9903`; `resume.py:1953-1985`; the counter-argument in §4.4(b) |
 
@@ -478,7 +488,7 @@ My run and coder's agree on the shape and disagree in an instructive place —
 | p50 (~0.7 MB) | 237.5 ms (81.7-681.7) | 2/5 | 68.4 ms (35.0-502.6) | 200.8 ms |
 | p90 (~1.6 MB) | **490.0 ms** (71.2-671.6) | 4/5 | 187.7 ms (31.6-310.8) | 274.9 ms |
 | p99 (~6 MB) | 147.7 ms (78.5-516.3) | 1/5 | 100.9 ms (27.2-186.4) | 244.0 ms |
-| **xl (~200 MB)** | **789.0 ms** (738.3-933.5) | **5/5** | 75.3 ms (52.0-558.8) | — |
+| **xl (~200 MB)** | **789.0 ms** (738.3-933.5) | **5/5** | 75.3 ms (52.0-558.8) | **1 768.9 ms** (n=1, load 68.7) |
 | m5000 (~12 MB) | — | — | — | 297.3 ms |
 
 **Read the spread, not the medians.** Both runs were taken at load 74-98 and the
@@ -832,11 +842,16 @@ Read from the checkout at
 (v0.1.7-rc.2 packages). **The live GUI could not be inspected from this session
 and I am not going to pretend otherwise**: `GET http://127.0.0.1:3080/` returns
 `401 dsh web authentication required` without the launch token (the documented
-browser-trust fence, `dsh-client-connection`), and this session has no
-Chrome/Chromium binary for the browser panel. So this section is a **source
-study** — package READMEs and shipping code — not an observed-UI study. That is a
-real limit on ask #3's evidence and the next phase should close it with a
-rendered capture.
+browser-trust fence, `dsh-client-connection`). **The stated reason in revision 0
+of this document was wrong and is corrected here:** it claimed no browser binary
+was available, but the panel runs in this fleet (Chrome is at
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`) — the real fence
+is the launch token alone. So this section is a **source study** — package
+READMEs and shipping code — not an observed-UI study, and that limitation is **one
+launch token away from being closed** rather than structural. The reviewer makes
+the point sharply: RR1-4's claim (that `attaching` has no renderer consumer) is
+exactly the kind of claim a rendered capture would settle, so the next phase
+should spend the token.
 
 ### 8.1 Transferable
 
@@ -848,6 +863,8 @@ rendered capture.
 | **Stale, never ahead** | "The session log remains authoritative: a crash can leave a checkpoint stale, but never ahead of committed events." (`dsh-session-projection-cache`) | The correctness rule for §6 rule 5, already written in words that fit lop's journal exactly. |
 | **Cached rows lose to live rows, whatever the watermark** | "a cached list block, viewed from the projection cache for a cold Session, **yields to the connected Session's baseline whatever watermark it carries**." | A one-line precedence rule that resolves the hard case in a cache-plus-live design: the live answer wins on conflict, unconditionally. Adopt verbatim. |
 | **Generation semantics on reconnect** | "every generation opens with a complete process-local baseline, so reconnect replaces projection state instead of treating transient values as durable events"; "the first control stream waits for generation readiness, so its opening values cannot precede invalidation." | lop already has epochs and a `frontend.replace`; DSH's contribution is the *ordering rule* (subscribe-first, then page, then repair gaps through a tail page) and the sequencing that makes a delayed baseline unable to clobber a newer value. lop's `desktop_sessions.py` already implements the queueing half; the ordering rule is worth stating as a test. |
+| **Revision-classed assembly — the rule R4 needs** | "Replacement windows and revision gaps rebuild from the complete loaded window; **contiguous append, prepend, and Assistant-settlement revisions use incremental assembly**." (`dsh-client-ui-conversation/README.md:32`) | This is a *better* invalidation predicate than §9 R4's, and the review is right that the doc listed only the weaker "identity stability". R4 currently refuses the cached presentation on `streaming`; DSH's rule says refuse on a **non-contiguous revision class** and carry on incrementally for contiguous append/prepend/settlement — i.e. the streaming arm is exactly the *incremental* case. Adopt as R4's predicate. |
+| **Restore validation for a durable cache** | "a restored row is discarded when its `stateVersion` does not match or when it claims events past the stored end", with `restoreFloor` anchoring the tail read (`dsh-session-projection/README.md:95`) | The rule that makes a *persisted* cache safe, and §8.1 previously stopped at "stale, never ahead". H-3's hole is precisely "nothing is durable across a restart", so a durable lop page cache must adopt this pair: discard on version mismatch, discard on a claimed position past the stored end. |
 | **Identity stability suppresses jitter** | "returns one identity-stable Conversation binding … It does not open another event source"; "Client list refreshes retain unchanged row objects and reuse the items array when order and values match." | Directly answers "reduce UI jitter": a switch that produces the *same* objects produces no repaint. lop's `_sidebar_presentation_current` is the analogue and it is *stricter* (it refuses on streaming) — see §9 R4. |
 | **Optimistic local echo on submit** | "`session.beginSubmission` inserts one into `SessionSnapshot.pendingSubmissions` **synchronously, before the caller serializes and prompts**, so a conversation UI can show the message on the submit click's own frame." | The operator's other complaint is "new message sending". Whatever the engine costs, the *echo* must not wait for an engage. This is cheap and transferable, and it is worth checking whether lop's send path paints before the round trip. |
 
@@ -1257,9 +1274,10 @@ during a display refresh the session must NOT be reported cold.
 
 ### R8 — First-paint headroom in its own right
 
-**What.** First paint is at the budget (200-297 ms p50, p95 over on 3 of 5
-profiles) and `validate` is 84% of it. It is cold-spawn-coupled, so R3 moves it;
-the residual items are the 50 ms attention wait
+**What.** First paint is at the budget (200-490 ms p50; the xl row measured
+789.0 ms here and 1 768.9 ms in the review's single sample — so **this item is not
+scoped until xl is re-run at n>=5**, §4.7) and `validate` is 84% of it. It is cold-spawn-coupled, so R3 moves it. The residual
+items are the 50 ms attention wait
 (`ATTENTION_SNAPSHOT_WAIT_S`), the duplicate tail read between snapshot and
 `/history`, and the xl row — **now including the cold-facade cost that R1 used to
 claim: 1 768.9 ms on xl (reviewer, n=1) / 738-934 ms (mine)**, which the page
@@ -1416,9 +1434,10 @@ signature — it was small-sample contamination, and the steady-state medians ar
 transcript size — true to ~12 MB, false at 200 MB, where the whole-journal parse
 dominates and my `xl` row measures 6.1-11.8 s; (d) that the sidebar poll skips
 `cached_session_rows` — it does not, `load_catalog:1818` → `_hydrate:1914` →
-`cached_session_rows:1930`, and the surviving finding is the unmemoised
-`_scan_sessions` in `_ranked_candidates:1518,1566` — it does not, and the surviving
-finding was then re-measured down to a negative result (R9). My own first drafts
+`cached_session_rows:1930`; the finding that survived that correction — the
+unmemoised `_scan_sessions` in `_ranked_candidates:1518,1566` — was then
+re-measured at the operator's real user/subagent split and became a recorded
+negative result (R9). My own first drafts
 over-priced two items and both are corrected in place rather than removed: the
 TUI cache miss on a streaming target is ~32 ms, not a whole switch (R4), and the
 page-cache bypass in `read_saved_preview` is a bounded 256 KB re-parse, not a
