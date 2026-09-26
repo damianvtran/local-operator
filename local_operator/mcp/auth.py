@@ -3425,6 +3425,27 @@ def _oauth_discovery_negative_is_fresh(server_url: str) -> bool:
     return True
 
 
+#: Statuses that mean "ask again", NOT "the answer is no". A 429 is the server
+#: rate-limiting us and a 408 is its own timeout; both say nothing about whether
+#: this deployment publishes metadata, so neither may be folded into the
+#: "refused" count that a definitive negative is built from. Without this, a
+#: PRM-429 followed by an honest ASM-404 cached an answered negative for the full
+#: TTL — the same false-negative class as review R1-1, reached through a status
+#: code rather than the transport. Reported as review R2-2.
+_RETRYABLE_DISCOVERY_STATUSES = frozenset({408, 429})
+
+
+def _refuses_metadata(status_code: int) -> bool:
+    """Does ``status_code`` say "no metadata HERE", as opposed to "ask again"?
+
+    A 4xx means "not at this URL" — the discovery walk's own semantics, mirrored
+    from the SDK — and ``404`` is the ordinary shape of it. The two RETRYABLE
+    exceptions are carved out because they are transient by definition, and
+    folding them into a definitive negative is what R2-2 found.
+    """
+    return 400 <= status_code < 500 and status_code not in _RETRYABLE_DISCOVERY_STATUSES
+
+
 async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
     """The actual PRM/ASM fetch; :func:`discover_oauth_endpoints` caches it.
 
@@ -3478,9 +3499,12 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                 # "not at this URL, try the next"; anything else non-200 means
                 # the server declined to answer the metadata question, so the
                 # probe is not definitive however the ASM leg goes on to answer.
-                if 400 <= response.status_code < 500:
+                if _refuses_metadata(response.status_code):
                     continue
                 if response.status_code != 200:
+                    # Includes the RETRYABLE statuses: a 429 or 408 is the server
+                    # declining to answer right now, so the probe is not
+                    # definitive and the next connect must ask again.
                     prm_unusable = True
                     continue
                 try:
@@ -3505,7 +3529,7 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                     continue
                 # Mirror the SDK's fallback semantics: a 4xx means "try the next
                 # discovery URL"; anything else non-200 means "stop looking".
-                if 400 <= response.status_code < 500:
+                if _refuses_metadata(response.status_code):
                     asm_refused += 1
                     continue
                 if response.status_code != 200:

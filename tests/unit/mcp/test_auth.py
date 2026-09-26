@@ -1742,6 +1742,54 @@ class TestOAuthEndpointDiscovery:
         ), "the second probe made no request: a PRM 5xx was cached as an answered negative"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [408, 429])
+    async def test_a_retryable_status_is_never_cached_as_an_answered_negative(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        """Review R2-2. 429 and 408 mean "ask again", not "the answer is no".
+
+        A 429 is the server rate-limiting us and a 408 is its own timeout; neither
+        says anything about whether this deployment publishes metadata. Folding
+        them into the "refused" count built a definitive negative out of a
+        transient condition, so PRM-429 + ASM-404 was cached for the whole TTL and
+        every connect in that window skipped the probe.
+
+        Asserted as a CALL COUNT: the second probe must still reach the network.
+        """
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        auth_mod._DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.clear()
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            requests.append(url)
+            # PRM: transient. ASM: an honest "not here", which is what made the
+            # old rule call the whole probe definitive.
+            if "oauth-protected-resource" in url or "resource-metadata" in url:
+                return httpx.Response(status)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched_client)
+        assert await auth_mod.discover_oauth_endpoints(self.URL) is None
+        before = len(requests)
+        assert await auth_mod.discover_oauth_endpoints(self.URL) is None
+        assert len(requests) > before, (
+            f"a PRM {status} was cached as an answered negative: the second probe "
+            "made no request"
+        )
+
+    @pytest.mark.asyncio
     async def test_discovery_returns_none_when_asm_missing(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
