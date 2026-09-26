@@ -685,6 +685,29 @@ usage-shaped dicts, the keys only under `$.snapshot.last_usage`), and the guard'
 go red rather than ship a broken attach. The harm of the wrong pricing was a
 follow-up that could not be built, not a broken frame.
 
+**A second route that does NOT fit, measured the same way (2026-09-26, later the
+same day).** The obvious hook — declare the pair on the base `Usage` and have the
+model seam stamp the object it already relays — was implemented and then
+measured, and it costs the frame **once per roster row**. Two reasons compound:
+the field is in the SCHEMA of every usage on the wire, so nothing drops it from
+`jobs[i].usage` the way a `FrontendUsage`-only field was dropped; and the relay
+assigns the stamped object to the assistant message AFTER the stream loop
+(`loop.py:2641` → `:2835` → `subagent.py:1464` → `:1536`), so the window lands on
+the very object `_accumulate_usage` copies into each job row. Measured through
+`sync_wire_payload`: 1 row +39 B (2 occurrences), 20 rows +780 B (21), **200 rows
++7,800 B (201 occurrences)** — ~46x over the 168 B of slack, i.e. the recorded
+attach failure at `frontend_state.py:132-140`. The omission rule cannot help,
+because an ELIGIBLE call's pair is set by definition: it drops only the unset
+pair, which is the one that was never a cost.
+
+The lesson is worth more than the route: `test_attach_frame_size.py` stayed GREEN
+through that implementation (123 passed) because its 200 rows are built from an
+UNSTAMPED `Usage` — the guard measures the without-column and never the
+with-column. So the follow-up's first test is not "add the fields and see if the
+guard notices"; it is an occurrence assertion **with stamped rows**, added to that
+file, which is the only thing that makes any of the numbers above a guard rather
+than a measurement someone has to remember.
+
 **The re-priced form, which fits.** Put the two scalars on
 **`FrontendSessionState`** rather than on the per-receipt type: one occurrence per
 frame, ~48 B against 168 B of slack. That is also the HONEST shape rather than a
