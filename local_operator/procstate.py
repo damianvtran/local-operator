@@ -37,13 +37,10 @@ written twice before and got the zombie case right in only one of the two.
 
 from __future__ import annotations
 
-import contextlib
 import os
-import re
 import subprocess
 import sys
-import threading
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
@@ -621,42 +618,18 @@ def _ps_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
         )
     except Exception:  # noqa: BLE001 — an unprobeable set is treated as alive
         return {}
-    return _samples_from_lines(result.stdout or "")
-
-
-def _sample_of(state: str, start_time: str) -> ProcessSample:
-    """The ONE construction of a :class:`ProcessSample` from a ``ps`` rendering.
-
-    Both layouts of a ``ps`` read — the per-list ``pid=,state=,lstart=`` that
-    :func:`_ps_samples` forks for, and the whole-table
-    :data:`PROCESS_TABLE_KEYWORDS` that :meth:`ProcessTable.sample` reads without
-    a second fork — come through here. That is what makes the batched reader a
-    change of POPULATION rather than a second opinion: the zombie vocabulary
-    (:func:`_is_zombie_state`) and the birth-token normalization (``lstart`` is
-    whitespace-collapsed, never parsed) each have exactly one spelling, so a row
-    read from the table and a row read from the per-list probe are equal by
-    construction and not by coincidence.
-    """
-    return ProcessSample(
-        zombie=_is_zombie_state(state),
-        birth=" ".join(start_time.split()) or None,
-    )
-
-
-def _samples_from_lines(text: str) -> dict[int, ProcessSample]:
-    """Every parseable row of a ``pid=,state=,lstart=`` read (``_PS_SAMPLE_KEYWORDS``).
-
-    ``pid=`` suppresses the header; ``state`` is padded to its column, so the line
-    splits into pid, state, and the five fields of ``lstart``. A row that does not
-    split that way is SKIPPED, which is what makes a ``ps`` that rendered something
-    unexpected indistinguishable from a probe that returned nothing.
-    """
     samples: dict[int, ProcessSample] = {}
-    for line in text.splitlines():
+    # ``pid=`` suppresses the header; ``state`` is padded to its column, so the
+    # line splits into pid, state, and the five fields of ``lstart``.
+    for line in result.stdout.splitlines():
         fields = line.split(None, 2)
         if len(fields) != 3 or not fields[0].isdigit():
             continue
-        samples[int(fields[0])] = _sample_of(fields[1], fields[2])
+        rendered = " ".join(fields[2].split())
+        samples[int(fields[0])] = ProcessSample(
+            zombie=_is_zombie_state(fields[1]),
+            birth=rendered or None,
+        )
     return samples
 
 
@@ -690,364 +663,16 @@ def _proc_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
     return samples
 
 
-# ---------------------------------------------------------------------------
-# ONE read of the whole process table
-# ---------------------------------------------------------------------------
-#
-# WHY THIS EXISTS. Three separate questions in this package are answered by
-# forking `ps`, and two of them are answered PER CALL SITE rather than per
-# machine: "what is this pid's parent" (``reclaim.ancestor_pids``, one fork per
-# ANCESTOR HOP) and "which of these pids are zombies" (one fork per record
-# POPULATION, so one per foreign root scanned, plus one per roster). The desktop
-# runtime roster pays all of them on every poll, and it already forks `ps` once
-# for the census and once for the environment dump — so the per-pid readers are
-# forks spent to ask questions the census read could have carried.
-#
-# Measured on the reference host before this existed: `GET /v1/desktop/runtimes`
-# forked 11 processes per poll — one `lsof`, one census `ps`, one `ps -Eww`, FIVE
-# `ps -o ppid= -p <pid>` (the ancestry walk) and THREE
-# `/bin/ps -o pid=,state=,lstart= -p <pids>` (two foreign-root scans and the
-# roster's own batch) — for 286.1 ms of CPU per poll, of which 240.8 ms was
-# CHILD CPU that ``time.process_time()`` cannot see. Eight of the eleven go away
-# when the table below answers them, with no change to any value a caller reads.
-#
-# WHAT IT IS NOT. This is a SNAPSHOT and it is never cached across compositions:
-# a table is read once per :func:`process_table_scope` and dies with it, because
-# the freshness guarantee :func:`zombie_states` documents (an alive -> zombie
-# transition must be visible as soon as the owner stops beating) is a property of
-# when the answer was sampled, not of how many forks it cost. A scope lives for
-# one composition — a few hundred milliseconds — and the next one re-reads.
-
-#: The `ps` keywords for one read of the whole process table.
-#:
-#: ``command`` IS LAST, and that is the whole of the layout: it is the only column
-#: that may itself contain spaces, so it has to absorb the rest of the line
-#: (``ps`` also pads a non-final column, which would silently truncate an argv the
-#: spawn contract is matched against). Everything before it is fixed-arity —
-#: ``lstart`` is the only column that spans more than one token, and ``ps``
-#: renders it as exactly five (weekday, month, day, ``HH:MM:SS``, year), the same
-#: assumption :data:`_PS_SAMPLE_KEYWORDS` already rests on.
-#:
-#: ``-e`` IS NOT OPTIONAL and its absence is silent: ``ps`` with an ``-o`` list but
-#: no selection flag lists only the processes on the CURRENT TERMINAL, which is one
-#: or two rows rather than the machine — measured here as a table of 2 rows for a
-#: host with 1028 processes, i.e. an empty census that reads exactly like a machine
-#: running nothing. ``-e`` is also what the census this read replaces spells, so
-#: the two select the same population by construction.
-#:
-#: The columns are the union of what the two readers need — the census's
-#: ``pid``/``ppid``/``etime``/``time``/``command`` and the sample probe's
-#: ``state``/``lstart`` — so that ONE fork answers both, which is the point of
-#: this section. ``LC_ALL``/``TZ`` are pinned for the child exactly as they are
-#: for :func:`_ps_samples`, and for the same reason: ``lstart`` is rendered in the
-#: table's locale and time zone, and two callers with different environments would
-#: otherwise sample DIFFERENT tokens for the SAME live process.
-PROCESS_TABLE_KEYWORDS = "pid=,ppid=,etime=,time=,state=,lstart=,command="
-
-#: How long one read of the whole table may take.
-#:
-#: The SAME bound — and the same reason — as ``reclaim.CENSUS_TIMEOUT_S``: this
-#: read IS the census on every path that uses it (the roster and the route's
-#: ceiling are stated in terms of it), and a wedged ``ps`` must cost one
-#: supervisor slice rather than the loop. It is deliberately NOT the 1 s of
-#: :func:`_ps_samples`, whose population is a handful of pids rather than a
-#: machine. The two constants are pinned equal by a test
-#: (``test_the_table_timeout_is_the_census_timeout``) because this module may not
-#: import ``reclaim`` — it is a leaf by contract, with no local imports at all.
-PROCESS_TABLE_TIMEOUT_S = 5.0
-
-#: One row of :data:`PROCESS_TABLE_KEYWORDS`. ``lstart`` is the five-token group
-#: and ``command`` is everything after it, verbatim — the same rendering the
-#: census parser sees, whitespace included, so a command column read here is
-#: byte-identical to one read by the census alone.
-_TABLE_ROW = re.compile(
-    r"^\s*(?P<pid>\d+)\s+(?P<ppid>\d+)\s+(?P<etime>\S+)\s+(?P<cpu>\S+)"
-    r"\s+(?P<state>\S+)\s+(?P<lstart>\S+\s+\S+\s+\S+\s+\S+\s+\S+)"
-    r"(?:\s+(?P<command>.*))?$"
-)
-
-
-@dataclass(frozen=True)
-class ProcessTableRow:
-    """One process, as ONE line of the table read rendered it.
-
-    Every field is the rendering, not an interpretation: ``etime`` and ``cpu`` are
-    the strings ``ps`` printed (``reclaim.etime_seconds`` is the interpreter, and
-    it lives in ``reclaim`` because this module has no local imports), and
-    ``lstart`` is the unparsed start-time text. A caller that needs a number parses
-    it where that parser already lives, so there is still exactly one spelling of
-    each conversion.
-    """
-
-    pid: int
-    ppid: int
-    etime: str
-    cpu: str
-    state: str
-    lstart: str
-    command: str
-
-
-@dataclass(frozen=True)
-class ProcessTable:
-    """ONE ``ps`` read of the whole process table, and the answers it holds.
-
-    The three accessors here are the three questions this package used to fork
-    per call site for, each answered with the same vocabulary the per-pid probe
-    uses — ``ppid_of`` for the ancestry walk, ``sample``/``samples`` for the
-    zombie and birth questions, and the census columns for the caller that
-    interprets them (:func:`reclaim.runtime_processes`).
-
-    **ABSENCE IS ABSENCE, NOT A VERDICT.** A pid this table does not name is a pid
-    that was not in the process table at the instant it was read, and every
-    accessor reports that as ``None``/absent rather than inventing an answer — the
-    same direction a failed probe takes, which is what lets each caller keep its
-    own fail-closed rule. Nothing here raises, and nothing here caches.
-    """
-
-    rows: Mapping[int, ProcessTableRow]
-
-    def ppid_of(self, pid: int) -> int | None:
-        """This pid's parent, or ``None`` when the table does not name it."""
-        row = self.rows.get(pid)
-        return None if row is None else row.ppid
-
-    def sample(self, pid: int) -> ProcessSample | None:
-        """The pid's zombie answer and birth token, from THIS one read."""
-        row = self.rows.get(pid)
-        if row is None:
-            return None
-        return _sample_of(row.state, row.lstart)
-
-    def samples(self, pids: Iterable[int]) -> dict[int, ProcessSample]:
-        """The same answer for a pid SET, keyed like :func:`process_samples`."""
-        found: dict[int, ProcessSample] = {}
-        for pid in pids:
-            sample = self.sample(pid)
-            if sample is not None:
-                found[int(pid)] = sample
-        return found
-
-    def zombie_states(self, pids: Iterable[int]) -> dict[int, bool]:
-        """The zombie verdict for a pid set, with :func:`zombie_states`'s contract.
-
-        Same shape as the module-level function it stands in for: a pid the probe
-        could not answer is ABSENT from the result, and the caller decides what
-        absence means. The verdict itself is produced by the same
-        :func:`_is_zombie_state`, so the two paths cannot disagree about what a
-        ``ps`` state field means.
-        """
-        verdicts: dict[int, bool] = {}
-        for pid in pids:
-            sample = self.sample(pid)
-            if sample is not None:
-                verdicts[int(pid)] = sample.zombie
-        return verdicts
-
-
-def parse_process_table(text: str) -> dict[int, ProcessTableRow]:
-    """Every parseable row of a :data:`PROCESS_TABLE_KEYWORDS` read.
-
-    A row whose ``lstart`` group does not match is SKIPPED rather than guessed at,
-    which is the direction that costs a caller an answer instead of costing it a
-    wrong one: a pid absent from the table is read exactly as a pid absent from a
-    failed probe, so a `ps` that rendered something unexpected degrades every
-    caller to its own fail-closed rule instead of feeding it a misparsed row.
-    """
-    rows: dict[int, ProcessTableRow] = {}
-    for line in text.splitlines():
-        match = _TABLE_ROW.match(line)
-        if match is None:
-            continue
-        rows[int(match.group("pid"))] = ProcessTableRow(
-            pid=int(match.group("pid")),
-            ppid=int(match.group("ppid")),
-            etime=match.group("etime"),
-            cpu=match.group("cpu"),
-            state=match.group("state"),
-            lstart=" ".join(match.group("lstart").split()),
-            command=match.group("command") or "",
-        )
-    return rows
-
-
-def process_table(*, timeout_s: float = PROCESS_TABLE_TIMEOUT_S) -> ProcessTable:
-    """One ``ps`` invocation, every process, every column either reader needs.
-
-    Never raises: a table that could not be read comes back EMPTY, and every
-    consumer of it falls back to the per-pid probe it used before this existed.
-    That is the fail-closed direction — an empty table must not be read as "this
-    machine has no processes".
-    """
-    if is_windows():
-        return ProcessTable(rows={})
-    try:
-        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["/bin/ps", "-e", "-o", PROCESS_TABLE_KEYWORDS],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-            env={**os.environ, **_PS_PINNED_ENV},
-        )
-    except Exception:  # noqa: BLE001 — an unreadable table is a fallback, not an error
-        return ProcessTable(rows={})
-    return ProcessTable(rows=parse_process_table(result.stdout or ""))
-
-
-# ---------------------------------------------------------------------------
-# The batch scope: one table read, for the length of one composition
-# ---------------------------------------------------------------------------
-#
-# WHY A SCOPE AND NOT A PARAMETER. Three of the four readers that need this table
-# are inside this package and could take it as an argument. The fourth is
-# ``registry.scan``, which answers the zombie question for a POPULATION it only
-# knows after it has parsed the records — so a table handed to it would have to be
-# handed to every one of its ~30 callers to reach the two that have one, and the
-# population that makes the batching worth doing (one per FOREIGN ROOT scanned, so
-# up to ``roster.FOREIGN_ROOT_LIMIT``) is known only to the roster that called it.
-#
-# The scope is the narrow version of that: it is THREAD-LOCAL, so it cannot leak
-# between the roster's worker thread and the event loop, and it is entered and left
-# by the composition that owns it (:func:`roster.build_roster`, and the route
-# around both of its calls), so the answers it serves are all sampled at one
-# instant inside one answer. Nothing outside a scope changes behaviour: with no
-# scope active every probe below forks exactly what it forked before.
-#
-# TWO WAYS TO CONSULT IT, and the difference is a failure mode rather than a
-# convenience. `current_process_table` READS the table if nothing has yet (the
-# census and the ancestry walk genuinely need one, and a composition that reaches
-# either of them has to read the process table anyway). `peek_process_table` does
-# NOT read — it hands back the table the scope has already got, or ``None``. The
-# questions that peek are the ones that were previously answered by a SMALLER read
-# with a SHORTER bound (a ``ps -p <list>`` at 1 s), and forcing a whole-machine
-# read for them would widen that bound to five seconds on the one path where it
-# matters: a caller that injected its own census (the tests, and any caller with its
-# own cache) would pay a fork it never asked for, and a machine whose table read
-# times out would answer its zombie question from nothing instead of from the probe
-# it used to take.
-_SCOPE = threading.local()
-
-
-class _TableScope:
-    """The table one scope answers from, read on FIRST DEMAND rather than on entry.
-
-    Lazy for a reason that is not only cost: a composition whose process table was
-    injected (the tests, and any caller with its own read) never ASKS for one, so it
-    never spends the fork at all. An eager read would put a real ``ps`` in front of
-    every roster test on the machine.
-    """
-
-    def __init__(self, table: ProcessTable | None) -> None:
-        self._table = table
-
-    def peek(self) -> ProcessTable | None:
-        return self._table
-
-    def read(self) -> ProcessTable:
-        if self._table is None:
-            self._table = process_table()
-        return self._table
-
-
-def _readable(table: ProcessTable | None) -> ProcessTable | None:
-    """A table WITH ROWS, or ``None``: an empty read is a failed read.
-
-    One spelling of the rule, because every reader below depends on it and the
-    direction matters. ``process_table`` returns an empty table for a host with no
-    ``ps``, a Windows host and a read that timed out — none of which is evidence
-    that the machine has no processes. Every caller therefore treats "no rows"
-    exactly as "no table at all" and takes the per-pid probe it took before this
-    existed, which is the same fail-closed answer a failed probe has always
-    produced. Both accessors below apply it, so no reader has to remember to.
-    """
-    return table if (table is not None and table.rows) else None
-
-
-def current_process_table() -> ProcessTable | None:
-    """The table the ACTIVE scope answers from, reading it if this is the first
-    reader that needs one.
-
-    ``None`` outside a scope, and ``None`` for a table that came back EMPTY (see
-    :func:`_readable`). Calling this may spend the scope's single ``ps`` fork, which
-    is why only the two readers whose data IS the process table call it — the
-    census and the ancestry walk. Every other question peeks
-    (:func:`peek_process_table`) so that a composition which was handed its own
-    answers does not pay for a read nobody needs.
-    """
-    scope = getattr(_SCOPE, "active", None)
-    return None if scope is None else _readable(scope.read())
-
-
-def peek_process_table() -> ProcessTable | None:
-    """The table the active scope has ALREADY read, or ``None`` — never a read.
-
-    The distinction from :func:`current_process_table` is the whole reason both
-    exist: a question that used to be answered by a ``ps -p <list>`` (the zombie
-    bit, the birth token) must not be able to force a whole-machine read, because
-    doing so would replace a 1 s bound with a 5 s one and spend a fork on a
-    composition that had already been given its answers.
-    """
-    scope = getattr(_SCOPE, "active", None)
-    return None if scope is None else _readable(scope.peek())
-
-
-@contextlib.contextmanager
-def process_table_scope(table: ProcessTable | None = None) -> Iterator[ProcessTable | None]:
-    """Answer this block's per-pid questions from ONE process-table read.
-
-    Re-entrant, and a nested scope REUSES the outer table rather than reading a
-    second one: the roster opens a scope around its whole composition, the route
-    opens one around both of its calls, and the two must not cost two forks or
-    sample two different instants.
-
-    The table is yielded so a caller that wants it directly (the census, and the
-    tests) can hold it; every reader picks it up through
-    :func:`current_process_table`. What is yielded is what those accessors would
-    return, EMPTY READS INCLUDED: ``None`` when no table was supplied or needed, and
-    ``None`` for a table that came back with no rows, so a caller cannot mistake a
-    failed read for a machine with no processes.
-    """
-    outer = getattr(_SCOPE, "active", None)
-    scope = outer if (outer is not None and table is None) else _TableScope(table)
-    previous = outer
-    _SCOPE.active = scope
-    try:
-        yield _readable(scope.peek())
-    finally:
-        if previous is None:
-            try:
-                del _SCOPE.active
-            except AttributeError:  # pragma: no cover - only if a nested scope unwound oddly
-                pass
-        else:
-            _SCOPE.active = previous
-
-
 def process_samples(pids: Iterable[int]) -> dict[int, ProcessSample]:
     """Both facts for a pid set, from the platform's ONE probe.
 
     Windows answers ``{}`` rather than probing (see :func:`birth_scheme`), which
     is the same answer the current implementation gives and the reason its
     callers read absence as "not a zombie".
-
-    Inside a :func:`process_table_scope` the answer comes from the table's one
-    read — but ONLY where the table's start-time rendering IS this platform's
-    birth token. That condition is not a detail: the table renders ``ps``'s
-    ``lstart``, this platform's token on macOS/BSD is that same rendering, and on
-    Linux it is ``/proc``'s ``starttime`` ticks. Serving an ``lstart`` string under
-    the ``proc-starttime-v1`` scheme would make two samples of the SAME process
-    compare UNEQUAL, which is the one dangerous direction this module exists to
-    prevent ("the writer is gone" lets a second runtime take a live transcript).
-    So on a ``/proc`` host the birth question keeps its fork-free ``/proc`` read
-    and only the zombie question is batched — see :func:`zombie_states`.
     """
     wanted = sorted({int(pid) for pid in pids if int(pid) > 0})
     if not wanted or is_windows():
         return {}
-    table = _readable(peek_process_table())
-    if table is not None and birth_scheme() == BIRTH_SCHEME_PS_LSTART:
-        return table.samples(wanted)
     if os.path.isdir("/proc"):
         return _proc_samples(wanted)
     return _ps_samples(wanted)
@@ -1186,23 +811,8 @@ def zombie_states(pids: Iterable[int]) -> dict[int, bool]:
     that a pid is a corpse with one answer and a stranger with another. On macOS
     this also means the identity tag rides the fork this batch was already
     spending, rather than a second fork beside it.
-
-    Inside a :func:`process_table_scope` the verdicts come from that scope's ONE
-    read of the whole table, which is how the ~11 forks a desktop roster poll used
-    to cost (three of them batches like this one, one per foreign root scanned)
-    become the one the census was already spending. THE VOCABULARY DOES NOT MOVE:
-    a state field is read by :func:`_is_zombie_state` on both paths, so the batched
-    answer and the per-list answer cannot drift into two opinions about what a
-    ``ps`` state means — only about how many forks it took to ask. Freshness is
-    untouched for the same reason the batch above was chosen over memoisation: the
-    scope's table is read during the composition that asks, so the answer is as
-    fresh as the unbatched one, and it is one sample for every caller inside that
-    composition instead of one sample each.
     """
     wanted = sorted({int(pid) for pid in pids if int(pid) > 0})
-    table = _readable(peek_process_table())
-    if table is not None:
-        return table.zombie_states(wanted)
     return {pid: sample.zombie for pid, sample in process_samples(wanted).items()}
 
 

@@ -12,31 +12,11 @@ runtime through the discovery record the runtime publishes. On the reference hos
 not learn they existed — the exact gap this route closes (see the architecture
 report's §6, and ``roster``'s module docstring for the four sources it composes).
 
-**Why the work happens in a worker thread.** The composition forks ``ps``, forks
-``lsof`` and opens up to one socket per runtime. None of that may run on the event
-loop: this daemon serves every other desktop request on the same loop, and a
-wedged runtime that makes a connect block would turn one roster poll into a stall
-for every session in the product.
-
-**How many forks, and why it is now three.** This endpoint used to fork ELEVEN
-processes per poll: one ``lsof``, one census ``ps``, one ``ps -Eww``, FIVE
-``ps -o ppid= -p <pid>`` (the ancestry walk is one fork per hop) and THREE
-``/bin/ps -o pid=,state=,lstart= -p <pids>`` (one per record population — a foreign
-root scanned is a batch of its own, and there are up to
-``roster.FOREIGN_ROOT_LIMIT`` of them). Measured on the reference host that was
-286.1 ms of CPU per poll — 45.3 ms of it this process and **240.8 ms of it
-children**, which ``time.process_time()`` cannot see, so the first report of this
-path under-counted it 7.5x. At the observed ~1.4 Hz that is 24.0 cpu-s/min for one
-polling client against 3.19 cpu-s/min for a whole live ``lop serve``.
-
-Every per-pid reader above is now answered from ONE read of the process table,
-opened as a ``roster.process_table_scope`` around both calls below. What is left is
-the three forks that are not per-pid: the socket table, the table read itself
-(which IS the census, with the state and start-time columns appended) and the
-environment dump. The values every reader sees are unchanged — a state field is
-read by the same ``procstate`` parser and a census row by the same ``reclaim``
-interpreter on both paths — and the whole composition is compared against the
-per-pid form by ``tests/unit/session/runtime/test_batched_process_table.py``.
+**Why the work happens in a worker thread.** The composition forks ``ps`` (~140 ms
+measured), forks ``lsof`` (~200 ms) and opens up to one socket per runtime. None of
+that may run on the event loop: this daemon serves every other desktop request on
+the same loop, and a wedged runtime that makes a connect block would turn one
+roster poll into a stall for every session in the product.
 
 **Why it is bounded, and what the bound returns.** The two things that grow with
 the machine — the connects — run inside one wall deadline, enforced rather than
@@ -96,19 +76,12 @@ def _collect(root: Path, *, probe: bool, budget_s: float) -> RuntimeRoster:
     # composition's own would not affect.
     from local_operator.session.runtime import roster as composition
 
-    # ONE PROCESS-TABLE READ FOR BOTH CALLS. ``read_fleet`` needs the process table
-    # for the ancestry a sweep may not touch, and ``build_roster`` needs it for the
-    # census and for every zombie batch; the scope around both means those are ONE
-    # fork instead of the eleven this route used to spend per poll (see the module
-    # docstring). ``build_roster`` opens its own scope, which REUSES this one, so a
-    # caller that reaches it without this line still gets the batching.
-    with composition.process_table_scope():
-        # The fleet is read HERE and handed to the composition rather than being read
-        # inside it, for one reason: whether the socket table could be read at all is a
-        # property of the fleet, and a caller that has to say so in the response must not
-        # read the table a second time to find out.
-        fleet = composition.read_fleet(root, sockets=composition.socket_evidence())
-        rows = composition.build_roster(root, probe=probe, budget_s=budget_s, fleet=fleet)
+    # The fleet is read HERE and handed to the composition rather than being read
+    # inside it, for one reason: whether the socket table could be read at all is a
+    # property of the fleet, and a caller that has to say so in the response must not
+    # read the table a second time to find out.
+    fleet = composition.read_fleet(root, sockets=composition.socket_evidence())
+    rows = composition.build_roster(root, probe=probe, budget_s=budget_s, fleet=fleet)
     sources: list[str] = []
     if any(row.has_record for row in rows):
         sources.append("run/mobile")

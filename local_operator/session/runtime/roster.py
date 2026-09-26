@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_operator.procstate import process_table_scope, zombie_states
+from local_operator.procstate import zombie_states
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.reclaim import (
     REFUSAL_GONE,
@@ -293,44 +293,7 @@ def build_roster(
     point of enumerating all three. Rows are sorted by pid so a client polling the
     roster sees a stable order it can diff, and so two runtimes of the same session
     (a successor and a leaving predecessor) read adjacently.
-
-    **ONE PROCESS-TABLE READ FOR THE WHOLE COMPOSITION.** The body below runs inside
-    a ``procstate.process_table_scope``, so the four things that used to fork ``ps``
-    on this path — the ancestry walk (one fork per hop), the census, the zombie
-    batch for this store's records and the zombie batch inside EVERY foreign-root
-    ``registry.scan`` — are answered from a single read of the whole table. The
-    scope is the whole of the change: no reader below decides anything differently,
-    and with no scope active each of them forks exactly what it forked before, which
-    is why the batching reaches the call site this module does not own
-    (``registry.scan``'s batch, whose population is only known inside the scan). A
-    caller that injects its own ``processes`` and ``env_of`` never asks a question
-    that needs a table, so it never spends the fork.
     """
-    with process_table_scope():
-        return _compose_roster(
-            root,
-            probe=probe,
-            budget_s=budget_s,
-            fleet=fleet,
-            processes=processes,
-            env_of=env_of,
-            connect=connect,
-            now=now,
-        )
-
-
-def _compose_roster(
-    root: Path | None,
-    *,
-    probe: bool,
-    budget_s: float,
-    fleet: Fleet | None,
-    processes: Sequence[RuntimeProcess] | None,
-    env_of: Callable[[int], str] | None,
-    connect: Callable[[int, float], bool] | None,
-    now: float | None,
-) -> list[RosterRow]:
-    """``build_roster``'s body, inside the batch scope it opens. See above."""
     from local_operator.session.runtime.reclaim import process_envs
 
     moment = time.time() if now is None else now
