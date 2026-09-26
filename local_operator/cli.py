@@ -183,15 +183,23 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # first, so it must not be the one place that still answers from the stale
     # channel. See :func:`local_operator.update.installed_version`.
     #
-    # That call is made by :class:`_LazyVersionAction`, at the moment the flag is
-    # PARSED, rather than here while the parser is BUILT. ``action="version"``
-    # takes an already-formatted string, so building this parser had to resolve
-    # the version for every invocation — and ``local_operator.update`` imports
-    # ``ssl``/``urllib.request``/``http.client``, measured here at 47.5 ms of CPU
-    # for the module and ~56 ms cumulative (see the note that used to sit on this
-    # line, which priced the same import at ~28 ms on an older baseline). Every
-    # `lop sessions`, `lop status` and `lop config` paid that to build a string
-    # it never printed.
+    # RESOLVED EAGERLY, and that is a cost this parser accepts deliberately. The
+    # call above runs while the parser is BUILT, so every `lop sessions`,
+    # `lop status` and `lop config` pays ``local_operator.update``'s import —
+    # measured at 47.5 ms of CPU for the module — to build a string it never
+    # prints. ``local_operator.update`` imports ``ssl``/``urllib.request``/
+    # ``http.client`` on the way.
+    #
+    # A lazy action was written, measured and WITHDRAWN (review R2-3): leaving
+    # ``action.version`` as None until the flag was parsed broke
+    # `tests/unit/test_update.py::test_cli_version_flag_reports_the_running_build`,
+    # which reads that attribute off the PARSER to pin that the value comes
+    # through ``installed_version()`` rather than a raw metadata call — and a raw
+    # call cannot see a running checkout's version. A property resolving on read
+    # satisfies the test but narrows a plain ``str`` attribute the type gate
+    # rejects. So the ~20 ms stays on the table, recorded rather than re-tried:
+    # the shape that would work is a resolver the flag's own action calls, and it
+    # needs a test that reads the attribute the way that cell does.
     parser.add_argument(
         "--version",
         action="version",
