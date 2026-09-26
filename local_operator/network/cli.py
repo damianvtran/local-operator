@@ -2435,6 +2435,49 @@ def _pilot_last_reply(viewer: Any) -> str:
     return ""
 
 
+def _pilot_peer_block(peer: str) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
+    """The named peer's own catalogue block, or the refusal that stopped the read.
+
+    Read through this device's relay, which is the only thing that knows whether a
+    peer is answering — and read on FAILURE paths only, so an act that works never
+    pays a second fan-out for a distinction it does not need.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        answer = _relay_answer("peer_session_rows", timeout=_listing_timeout())
+    except MeshRefusal as refusal:
+        # THIS DEVICE'S OWN RELAY is the component that failed, and its sentence
+        # already names it and the remedy.
+        return None, (refusal.code, refusal.sentence)
+    for device_id, entry in (answer.get("peers") or {}).items():
+        if device_id == peer or str(entry.get("name") or "") == peer:
+            return entry, None
+    return None, None
+
+
+def _pilot_unreachable_sentence(session_id: str, peer: str, block: dict[str, Any] | None) -> str:
+    """The one sentence for "this device cannot tell you about that peer".
+
+    Composed here rather than at each raise site because the two callers — an id
+    that resolved to nothing, and a dial that failed — must not describe one
+    situation two ways; that is the rule
+    ``remote_open.unreachable_peer_sentence`` already follows one layer down.
+    """
+    from local_operator.resume import peer_reason_words
+
+    if block is None:
+        return (
+            f"{peer} is not a device this network knows — `lop network peers` lists the "
+            "members this device can see"
+        )
+    reason = peer_reason_words(str(block.get("reason") or ""))
+    return (
+        f"{peer} is unreachable ({reason}), so nothing about {session_id} can be answered "
+        f"from here: `lop network doctor --peer {peer}` diagnoses the link"
+    )
+
+
 def _pilot_unresolved(session_id: str, peer: str) -> tuple[str, str]:
     """The refusal an id that resolved to no peer row actually deserves.
 
@@ -2444,45 +2487,38 @@ def _pilot_unresolved(session_id: str, peer: str) -> tuple[str, str]:
     (the conversation may well be there — telling the user it is not would be a
     claim this side cannot support), or the device answered and holds no such id (a
     real "no", and a different next step).
-
-    The resolver answers ``None`` for all three, so this asks the peer's own
-    catalogue — and it is called ONLY on that failure path, so a pilot act that
-    works pays nothing for the distinction.
     """
-    from local_operator.network.types import MeshRefusal
-    from local_operator.resume import peer_reason_words
-
-    try:
-        answer = _relay_answer("peer_session_rows", timeout=_listing_timeout())
-    except MeshRefusal as refusal:
-        # THIS DEVICE'S OWN RELAY is the component that failed, and its sentence
-        # already names it and the remedy.
-        return refusal.code, refusal.sentence
-    blocks = answer.get("peers") or {}
-    matched = [
-        entry
-        for device_id, entry in blocks.items()
-        if device_id == peer or str(entry.get("name") or "") == peer
-    ]
-    if not matched:
-        return (
-            "peer_unreachable",
-            f"{peer} is not a device this network knows — `lop network peers` lists the "
-            "members this device can see",
-        )
-    if not matched[0].get("reachable"):
-        reason = peer_reason_words(str(matched[0].get("reason") or ""))
-        return (
-            "peer_unreachable",
-            f"{peer} is unreachable ({reason}), so whether {session_id} is held there "
-            f"cannot be answered from here: `lop network doctor --peer {peer}` diagnoses "
-            "the link",
-        )
+    block, refusal = _pilot_peer_block(peer)
+    if refusal is not None:
+        return refusal
+    if block is None or not block.get("reachable"):
+        return "peer_unreachable", _pilot_unreachable_sentence(session_id, peer, block)
     return (
         "session_unknown",
         f"{peer} does not hold {session_id}: `lop network sessions --peer {peer}` lists "
         "what it does hold",
     )
+
+
+def _pilot_dial_failure(session_id: str, peer: str, message: str) -> tuple[str, str]:
+    """Which component actually failed when a dial or a bind went wrong.
+
+    THE TRANSPORT CANNOT TELL THESE APART, and it says so in one sentence: a peer
+    that is not there at all and a peer whose session refused both arrive as "the
+    remote owner did not send its state". They want different next steps — `lop
+    network doctor` for the first, that device's own words for the second — so the
+    peer's reachability is READ rather than assumed, and the code follows what the
+    catalogue says. A reachable peer keeps the transport's sentence verbatim: it is
+    the honest report of a runtime that stopped answering.
+    """
+    block, refusal = _pilot_peer_block(peer)
+    if refusal is not None:
+        # The relay could not be asked a second time; the FIRST failure is still
+        # the caller's answer, so the transport's sentence is kept.
+        return "session_unreachable", message
+    if block is None or not block.get("reachable"):
+        return "peer_unreachable", _pilot_unreachable_sentence(session_id, peer, block)
+    return "session_unreachable", message
 
 
 def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
@@ -2592,6 +2628,13 @@ async def _pilot_act(
             f"{peer} did not open {session_id} within {PILOT_BIND_TIMEOUT_S:.0f}s; "
             f"`lop network doctor --peer {peer}` diagnoses the link",
         ) from exc
+    except ConnectionError as exc:
+        # THE OPEN IS A DIAL TOO, and it fails for the same two reasons the bind
+        # below does — a peer that is gone, or a peer whose runtime refused. An
+        # unhandled `ConnectionError` here would surface as a traceback, which is
+        # the one thing this family never does with a refusal.
+        code, sentence = await asyncio.to_thread(_pilot_dial_failure, session_id, peer, str(exc))
+        raise MeshRefusal(code, sentence) from exc
     if viewer is None:
         # Between the row read and here the id stopped being a peer's row (moved
         # away, tombstoned). Refuse rather than let the id fall through to a local
@@ -2610,9 +2653,13 @@ async def _pilot_act(
                 f"`lop network doctor --peer {peer}` diagnoses the link",
             ) from exc
         except ConnectionError as exc:
-            # The owner's own refusal, verbatim: a stopped session, a runtime that
-            # cannot start, a capability this device does not hold.
-            raise MeshRefusal("session_unreachable", str(exc)) from exc
+            # The owner's own refusal or a transport that stopped answering — and
+            # WHICH device that was is a fact to read, not to assume; see
+            # ``_pilot_dial_failure``.
+            code, sentence = await asyncio.to_thread(
+                _pilot_dial_failure, session_id, peer, str(exc)
+            )
+            raise MeshRefusal(code, sentence) from exc
         if verb == "send":
             return await _pilot_send(viewer, session_id, peer, text)
         if verb == "steer":
@@ -2769,8 +2816,13 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
         # said rather than dressing it up as one.
         payload.update(ok=True, outcome="answered", text=str(receipt))
         return payload, [f"/{command} on {session_id}: {receipt}"]
+    # THE RECEIPT'S OWN FIELDS, and only them: ``SlashResult`` is
+    # ``kind``/``text``/``style``/``data`` (``session/frontend_state.py``), so a
+    # fallback to any other key would be this side inventing a field the owner
+    # never sends — and reading a mesh ``detail`` here is exactly the raw-token
+    # leak ``test_reason_surfaces`` exists to catch.
     style = str(receipt.get("style") or "")
-    said = str(receipt.get("text") or receipt.get("detail") or "").strip()
+    said = str(receipt.get("text") or "").strip()
     payload.update(
         ok=style != "error",
         outcome="ran" if style != "error" else "refused",
