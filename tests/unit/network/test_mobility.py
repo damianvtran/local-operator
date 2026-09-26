@@ -249,6 +249,54 @@ def test_keep_mints_a_new_id_and_leaves_the_source_running(
     assert read_handoff_journal(server_a.root) == {}
 
 
+def test_a_keeps_receipt_names_the_copy_the_destination_actually_made(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA delta, Q-D2: the id a ``--keep`` receipt prints is a session that exists.
+
+    The INVITED path is the one that drifted, and this is the shape the user hits from
+    the CLI (``lop sessions move <id> --to <peer> --keep``): the destination mints the
+    id it adopts the copy under while it pulls, but the ack that answers the invite is
+    sent before that pull runs — so it carried a SECOND, invented mint. The receipt
+    named a session no device held, and the follow-up the tool's own words invite
+    (``move <that id> --to local``) answered "no device in this network holds …".
+    Two ids, one directory; the ack now hands the pull the id it must adopt under, and
+    the test proves the receipt is FOLLOWABLE by moving the copy again with it.
+    """
+    server_a, server_b, _host, _port = pair
+    # B'S OWN SETTINGS, as for every rig here where A DIALS B: the default settings
+    # advertise the CLI's configured port, which nothing is bound to in this fixture, so
+    # the join would record an undialable endpoint and the move would read as an
+    # unreachable peer rather than as the shape under test.
+    _pair(pair, monkeypatch, role="admin", settings=server_b.settings)
+    source = _owned_session(server_a)
+    before = _transcript(server_a.root, SESSION)
+
+    result = _move(
+        server_a, SESSION, to=server_b.identity.device_id, keep=True, monkeypatch=monkeypatch
+    )
+
+    assert result["ok"] is True, result
+    assert result["mode"] == "keep"
+    new_id = str(result["new_session_id"])
+    assert new_id and new_id != SESSION, result
+    # THE ID ON THE RECEIPT IS THE DIRECTORY THE DESTINATION MADE. Read off disk rather
+    # than from the row:
+    copy = server_b.root / "sessions" / new_id
+    assert copy.is_dir(), sorted(item.name for item in (server_b.root / "sessions").iterdir())
+    assert (copy / "transcript.jsonl").read_bytes() == before
+    assert source.is_dir() and _transcript(server_a.root, SESSION) == before
+
+    # FOLLOWABLE, which is the property the user depends on: the very id the receipt
+    # printed is one a later move can act on. This is the QA's own follow-up (`move
+    # <claimed id> --to local`, run on the device the copy was sent FROM), and it is the
+    # one that answered "no device in this network holds …" while the receipt named an
+    # invented id.
+    followed = _move(server_a, new_id, monkeypatch=monkeypatch)
+    assert followed["ok"] is True, followed
+    assert (server_a.root / "sessions" / new_id / "transcript.jsonl").read_bytes() == before
+
+
 def test_a_busy_source_refuses_with_its_own_sentence_and_mutates_nothing(
     pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -381,6 +429,55 @@ def test_a_peer_without_the_move_capability_is_refused(
 
     assert read_tombstones(server_a.root) == {}
     assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA delta, Q-D3: a capability fact answered as one, and without asking anyone.
+
+    With the peer admitted ``drive``, every frame its pull sends lands here and is
+    refused by the authoriser — so the invite went out, the peer's first ask was
+    refused at t+0.4 s, and the user was told 31.77 s later that the move "did not
+    finish in time": a deadline receipt, and advice ("ask again") no retry can
+    satisfy, because a capability is a decision. THIS device already knew: the peer's
+    member row here is what the authoriser reads. So the invite is never sent, the
+    refusal names the peer and the capability, and it carries the one piece of advice
+    that changes the answer.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair(pair, monkeypatch, role="drive", settings=server_b.settings)
+    _owned_session(server_a)
+    invited: list[str] = []
+    real = mobility.LinkTransport.ask
+
+    def counting(self: Any, frame: dict[str, Any]) -> dict[str, Any]:
+        invited.append(str(frame.get("phase") or frame.get("action") or ""))
+        return real(self, frame)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", counting)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False, result
+    # ``not_authorised`` is the family's code for "a device lacks the 'move'
+    # capability", so a front end branches on the same refusal the authoriser makes.
+    assert result["code"] == "not_authorised", result
+    sentence = str(result["message"])
+    assert "device-b may not take sessions from this device" in sentence, sentence
+    assert "does not hold the 'move' capability here" in sentence, sentence
+    assert "lop network member grant" in sentence, sentence
+    assert result["changed"] is False, result
+    # NO INVITE WAS SENT: the refusal is this device's own answer, and the peer was
+    # never asked for something it cannot do. Structural, not timed — the clock is
+    # what the old receipt got wrong.
+    assert invited == [], f"the peer was invited anyway: {invited}"
+    # NOTHING MOVED, ON EITHER DEVICE.
+    assert (server_a.root / "sessions" / SESSION).is_dir()
+    assert not (server_b.root / "sessions" / SESSION).exists()
+    from local_operator.network.projection import read_tombstones
+
+    assert read_tombstones(server_a.root) == {}
 
 
 def test_a_move_already_on_this_device_is_refused_with_a_sentence(

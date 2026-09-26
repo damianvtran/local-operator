@@ -341,6 +341,50 @@ def test_a_torn_tail_row_is_not_served(tmp_path: Path) -> None:
     assert grown["transcript"]["total_bytes"] > len(complete)
 
 
+def test_a_session_with_no_transcript_yet_is_refused_as_a_wait(tmp_path: Path) -> None:
+    """QA delta, Q-D4: the ordinary case is a WAIT, not an internal fault.
+
+    A conversation created a moment ago has its directory here and no transcript until
+    its runtime finishes starting up — measured on two real devices: the file appears
+    about 10 s later and the identical move then succeeds, so the first recall of a
+    fresh session is a race with a warm-up and not a dead end. The refusal used to BE
+    the ``OSError`` — "... has no transcript to sync on this device ([Errno 2] No such
+    file or directory: '.../transcript.jsonl')" — which reads as a broken install and
+    sends the reader to a path instead of to the retry that resolves it.
+    """
+    source = tmp_path / "owner"
+    (source / "sessions" / "abc123").mkdir(parents=True)
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.build_manifest(source, "abc123")
+
+    assert refusal.value.code == "no_session"
+    sentence = refusal.value.message
+    assert "has no transcript on this device yet" in sentence
+    assert "try again in a few seconds" in sentence
+    # THE ERRNO IS NOT THE RECEIPT: no path, no errno number, nothing a reader has to
+    # translate into a fact about their conversation.
+    assert "Errno" not in sentence and "transcript.jsonl" not in sentence
+
+
+def test_a_session_this_device_does_not_hold_reads_differently_from_a_cold_one(
+    tmp_path: Path,
+) -> None:
+    """The same ``no_session`` code, a different fact — nothing here at all.
+
+    Kept apart from the warm-up case above because the retry advice is only true for
+    one of them: a session this device does not hold will not appear in a few seconds.
+    """
+    source = tmp_path / "owner"
+    source.mkdir()
+
+    with pytest.raises(sync.SyncRefused) as refusal:
+        sync.build_manifest(source, "abc123")
+
+    assert refusal.value.code == "no_session"
+    assert "this device does not hold abc123" in refusal.value.message
+
+
 def test_an_interrupted_copy_never_leaves_a_partial_file_behind(tmp_path: Path) -> None:
     """THE COST OF STAGING, STATED: a cut-off copy is not reused, and no partial file shows.
 

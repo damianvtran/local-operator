@@ -1198,8 +1198,25 @@ def build_manifest(
     try:
         raw = transcript.read_bytes()
     except OSError as exc:
+        # TWO ABSENCES, AND THE USER IS TOLD WHICH (QA delta, Q-D4). The sentence used
+        # to be the OSError itself — "… has no transcript to sync on this device
+        # ([Errno 2] No such file or directory: '…/transcript.jsonl')" — which reads as
+        # an internal fault, while the ordinary case is a conversation created moments
+        # ago whose runtime has not written its first row yet: the transcript appears
+        # about 10 s later and the identical move then succeeds (measured on two real
+        # devices; the runtime writes that first row as it finishes starting up). So the
+        # wait is named as a wait, with the retry that resolves it, and a session that
+        # is genuinely not here keeps saying that instead of blaming a warm-up it has
+        # nothing to do with.
+        if not directory.is_dir():
+            raise SyncRefused(
+                "no_session", f"this device does not hold {session_id}, so there is nothing to send"
+            ) from exc
         raise SyncRefused(
-            "no_session", f"{session_id} has no transcript to sync on this device ({exc})"
+            "no_session",
+            f"{session_id} has no transcript on this device yet, so there is nothing to "
+            f"send. A conversation created a moment ago writes its first row when its "
+            f"runtime starts, so try again in a few seconds.",
         ) from exc
     safe = raw if whole_transcript else _safe_region(raw)
     total = len(safe)
