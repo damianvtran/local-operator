@@ -3903,17 +3903,41 @@ class DesktopSessionBridge:
             # business.
             pending = sys.exc_info()[1]
             if self._closing:
-                reason, level = "bridge dispose", logging.INFO
+                reason = "bridge dispose"
             elif sub.overflow:
-                reason, level = "subscriber overflow", logging.INFO
+                reason = "subscriber overflow"
             elif pending is not None and not isinstance(
                 pending, (GeneratorExit, asyncio.CancelledError)
             ):
-                reason, level = f"relay error: {type(pending).__name__}", logging.WARNING
+                reason = f"relay error: {type(pending).__name__}"
             else:
-                reason, level = "client disconnect", logging.INFO
-            logger.log(
-                level,
+                reason = "client disconnect"
+            # WARNING, NOT INFO, FOR THE REASON ``server/retire.py`` ALREADY
+            # RECORDS: the daemon's console logging runs at ``LOG_LEVEL``'s
+            # default WARNING, so three of these four reasons were written and
+            # never captured -- measured on the operator's daemon, 0 ``[INFO]
+            # local_operator`` lines in ``backend-service.log`` against 9,687
+            # WARNING+ ones. A line nobody sees is not a notice, and there is no
+            # second log to read: the daemon's stdout and stderr both land in that
+            # one file, and ``serve-1111.log`` does not exist.
+            #
+            # WHAT IT SETTLES. The stream churn has two candidate drivers and on
+            # the operator's machine they are INDISTINGUISHABLE: the relief valve
+            # disconnecting a viewer (``subscriber overflow``) and the
+            # cancelled-teardown ordering that destroyed the facade before the
+            # dwell could arm (``client disconnect`` at the storm's cadence). Both
+            # rotate the epoch through the same ``_detach``, and the shipped client
+            # names the SSE close cause nowhere, so neither leaves a client-side
+            # trace. The words below are that discriminator, and the vocabulary is
+            # deliberately unchanged -- what changes is only whether it survives to
+            # a log.
+            #
+            # ONE LINE PER STREAM END, NEVER PER FRAME: the rate is the churn's
+            # rate (seconds apart at its worst, a handful per hour on a healthy
+            # daemon), and the app already rotates the file. Raising ``LOG_LEVEL``
+            # instead would capture every INFO line in the package to answer one
+            # question; this promotes the one line that answers it.
+            logger.warning(
                 "desktop stream ended for %s (sub=%s): %s",
                 self.session_id,
                 sub.id[:8],
