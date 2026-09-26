@@ -588,7 +588,15 @@ async def test_fit_never_collapses_a_flat_team_to_a_box() -> None:
 
 @pytest.mark.asyncio
 async def test_legend_toggles_with_question_mark() -> None:
-    """U5/U6 — `?` reveals the glyph legend + (declared) gloss in-mode."""
+    """U5 — `?` reveals the glyph legend in-mode, and it is ONE row.
+
+    The `(declared)` gloss U6 added beside it is gone, and with it the second
+    row that existed only to keep that gloss from being ellipsis-clipped: a
+    nested team is launchable now (``task(agent="team:<name>")``, BEN-7-D2), so
+    the tag disclaimed a capability that is live. Asserted ABSENT rather than
+    merely unasserted, because the title tag and the gloss were two render sites
+    and a future edit could restore either.
+    """
     session = FakeSession()
     session.team_registry = _nested_registry()
     app = OperatorApp(lambda: _factory(session))
@@ -605,8 +613,13 @@ async def test_legend_toggles_with_question_mark() -> None:
         assert view._legend.display is True
         legend_text = view._legend.render()
         plain = legend_text.plain if hasattr(legend_text, "plain") else str(legend_text)
+        title = view._title_text.plain
     assert "manager" in plain
-    assert "declared" in plain
+    assert "declared" not in plain
+    assert "\n" not in plain, f"the legend must stay one row: {plain!r}"
+    # The title's team-boundary tag is the other render site.
+    assert "declared" not in title
+    assert title.startswith("team org · org chart · zoom:")
 
 
 @pytest.mark.asyncio
