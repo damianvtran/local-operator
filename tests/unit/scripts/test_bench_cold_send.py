@@ -88,7 +88,7 @@ def test_the_declaration_reader_takes_the_cold_and_draft_live_pages(
         assert request.url.path == "/v1/desktop/sessions/synthetic/mcp"
         return httpx.Response(status, json={"result": {"data": data}})
 
-    report: dict = {}
+    report: dict[str, str | None] = {}
     with httpx.Client(
         base_url="http://benchmark.invalid", transport=httpx.MockTransport(response)
     ) as client:

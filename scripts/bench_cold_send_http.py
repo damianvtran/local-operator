@@ -363,10 +363,11 @@ class _DraftStream:
 def _read_declaration(
     client: Any, session_id: str, *, allow_live: bool
 ) -> tuple[list[str] | None, bool, str | None]:
-    """One read of the declaration page, as ``(names, known)``.
+    """One read of the declaration page, as ``(names, known, page)``.
 
     ``known`` is False when the page is neither shape that can carry a
-    declaration; ``names`` is None then too. The two ACCEPTABLE shapes:
+    declaration; ``names`` is None then too. ``page`` is the shape the verdict
+    came from (``"cold"``/``"live"``) and is only meaningful when known. The two ACCEPTABLE shapes:
 
     * the COLD page (``cold: true``) — what the control arm requires, because
       verification must not warm the path it is measuring; and
@@ -398,7 +399,7 @@ def _declared_servers(
     *,
     settle_s: float = 0.0,
     allow_live: bool = False,
-    report: dict[str, Any] | None = None,
+    report: dict[str, str | None] | None = None,
 ) -> list[str] | None:
     """The MCP servers the RUNNING session sees declared, asked of the session.
 
@@ -523,7 +524,7 @@ def _one_run(
         created_body = created.json()
         session_id = created_body["result"]["session_id"]
 
-        declaration_report: dict[str, Any] = {}
+        declaration_report: dict[str, str | None] = {}
         declared = _declared_servers(
             client,
             session_id,
