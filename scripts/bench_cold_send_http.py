@@ -377,20 +377,33 @@ def _read_declaration(
       the warm worked best as `unknown`, and the exit path then reported a
       mismatch that had not happened. The draft arm's warm is its own work, so
       reading the live page warms nothing new.
+
+    Every shape step sits inside one guard, so a malformed page is a VERDICT
+    (unreadable) rather than a traceback (round-2 review R2-2).
     """
     try:
         listed = client.get(f"/v1/desktop/sessions/{session_id}/mcp")
         listed.raise_for_status()
         data = listed.json()["result"]["data"]
+        # EVERY shape step stays inside ONE guard (round-2 review R2-2): a page
+        # that does not parse — a list where the data should be, a server entry
+        # that is not a mapping, a mapping with no ``name`` — is UNREADABLE,
+        # not a traceback. That is the contract this reader exists for: the
+        # settle loop retries an unreadable answer, and a crash would abort the
+        # campaign instead of recording a row.
+        live = data.get("cold") is not True
+        if live and not allow_live:
+            return None, False, None
+        servers = data.get("servers")
+        if not isinstance(servers, list):
+            return None, False, None
+        return (
+            sorted(str(server["name"]) for server in servers),
+            True,
+            "live" if live else "cold",
+        )
     except Exception:  # noqa: BLE001 — a record we could not read is not a result
         return None, False, None
-    live = data.get("cold") is not True
-    if live and not allow_live:
-        return None, False, None
-    servers = data.get("servers")
-    if not isinstance(servers, list):
-        return None, False, None
-    return sorted(str(server["name"]) for server in servers), True, ("live" if live else "cold")
 
 
 def _declared_servers(

@@ -54,6 +54,8 @@ from local_operator.server.utils.desktop_sessions import (
     DraftAlreadyMaterialised,
 )
 from local_operator.session.attached import AttachedSession
+from local_operator.session.runtime import registry as runtime_registry
+from local_operator.session.runtime.types import SessionRecord
 
 #: The session-id shape a minted draft must have (``SESSION_ID`` in the pool).
 DRAFT_ID_SHAPE = re.compile(r"[a-f0-9]{12}\Z")
@@ -818,3 +820,158 @@ async def test_a_materialised_drafts_bridge_becomes_an_ordinary_session_bridge(d
     again = await client.get(f"/v1/desktop/sessions/{draft_id}")
     assert again.status_code == 200, again.text
     assert pool.bridges[draft_id].draft is None, "the dead draft reference was not cleared"
+
+
+# ---------------------------------------------------------------------------
+# R2 (round-2 review): create-in-flight keeps serving; a bound draft stays
+# unlisted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_create_in_flight_keeps_the_panes_bridge_serving(draft_app, monkeypatch) -> None:
+    """R2-1: consumption precedes the marker; the gap is not death.
+
+    ``create`` deletes the registry entry a beat before ``persist`` publishes
+    the marker, and a door ask inside that window used to hit the M1 dead-draft
+    branch (entry gone, no marker -> pop + close + 404) — a rare, transient
+    regression the M1 fix itself introduced. The window is opened
+    DETERMINISTICALLY here: the marker writer blocks until the test releases
+    it, so the middle state is observable instead of raced for.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    engaged: list[str] = []
+
+    async def record_engage(self: Any, *, foreground: bool = True) -> None:
+        engaged.append(f"foreground={foreground}")
+
+    monkeypatch.setattr(AttachedSession, "_ensure_bound", record_engage)
+    draft_id = await _mint(client, root)
+    resident = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert resident.status_code == 200
+
+    import threading
+
+    blocked = threading.Event()
+    release = threading.Event()
+    real_writer = module.write_desktop_marker
+
+    def slow_writer(path, *args, **kwargs):
+        blocked.set()
+        assert release.wait(timeout=15.0), "the test never released the marker write"
+        return real_writer(path, *args, **kwargs)
+
+    monkeypatch.setattr(module, "write_desktop_marker", slow_writer)
+    create_call = asyncio.create_task(pool.create(str(root), draft_id=draft_id))
+    try:
+        await _until(blocked.is_set, why="the create never reached the marker write")
+        # The window is OPEN: consumed, marker not yet published.
+        assert draft_id not in pool.drafts
+        assert pool.bridges[draft_id].draft is not None, "the birth spec was cleared early"
+        during = await client.get(f"/v1/desktop/sessions/{draft_id}")
+        assert during.status_code == 200, during.text
+        # The other realistic caller is the 15 s beat, and a beat needs a
+        # REGISTERED subscription — register one the way the pane's /events
+        # stream does, then drive the REAL watch route with it. (The pool call
+        # that gets the bridge is itself in-window: same door, same answer.)
+        async with pool.session(draft_id, read=True, allow_draft=True) as bridge:
+            sub = bridge.subscribe()
+        beat = await client.post(
+            f"/v1/desktop/sessions/{draft_id}/watch",
+            json={"subscription_id": sub.id, "visible": True, "can_notify": False},
+        )
+        assert beat.status_code == 200, beat.text
+    finally:
+        release.set()
+    created_id = await create_call
+    assert created_id == draft_id
+    after = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert after.status_code == 200, after.text
+    assert pool.bridges[draft_id].draft is None, "the marker did not clear the draft reference"
+
+
+def _publish_record(root: Path, session_id: str, name: str) -> Path:
+    """A REAL live record for ``session_id``, keyed by this test process's pid.
+
+    The draft-Q-2 phantom row comes from the catalogue's live branch, which
+    reads exactly these records; the real ones are published by a runtime, and
+    a unit test must not spawn one — so the record is constructed and published
+    through the same writer, with a live pid (this process) and a fresh
+    heartbeat, which is what ``registry.classify`` reads as ``live``.
+    """
+    record = SessionRecord(
+        pid=os.getpid(),
+        kind="daemon",
+        session_id=session_id,
+        conversation_name=name,
+        cwd=str(root),
+        model_label="",
+        control_port=0,
+        control_key="",
+    )
+    return runtime_registry.publish(record, root)
+
+
+@pytest.mark.asyncio
+async def test_a_bound_drafts_live_record_is_not_listed(draft_app) -> None:
+    """Q-2 (QA round 2): the catalogue's live branch must not carry a draft.
+
+    A bound warm publishes a runtime record, and ``decorate_rows`` appends a
+    row for any record whose id has a session directory — so the draft listed
+    as "Untitled conversation" while the doors called the id unknown. The
+    record is published for real (a live pid and a fresh heartbeat), and the
+    control is the same machinery over an ordinary session's id, which must
+    still list: the fix filters DRAFTS, not live rows.
+    """
+    client, app, root = draft_app
+    pool = app.state.desktop_sessions
+    draft_id = await _mint(client, root)
+    _write_warm_residue(root, draft_id)
+    # The pane's bridge, so both of the filter's draft states are live at once.
+    resident = await client.get(f"/v1/desktop/sessions/{draft_id}")
+    assert resident.status_code == 200
+    control_id = await pool.create(str(root))
+
+    # The record really is one the live branch would read: the scan classifies
+    # it as anything-but-stale, which is the source the phantom row came from.
+    _publish_record(root, draft_id, "Untitled conversation")
+    try:
+        scanned = [rec.session_id for rec, state in runtime_registry.scan(root) if state != "stale"]
+        assert draft_id in scanned, "the probe's own record was not live; the cell would be blind"
+        page = await pool.list(limit=20)
+        assert draft_id not in {row["id"] for row in page.rows}, "a bound draft was listed"
+    finally:
+        runtime_registry.unpublish(os.getpid(), root)
+
+    # The same machinery over an ordinary session's id still appends its row:
+    # the filter must not be "no live rows at all".
+    _publish_record(root, control_id, "Untitled conversation")
+    try:
+        page = await pool.list(limit=20)
+        assert control_id in {row["id"] for row in page.rows}, "ordinary live rows went missing"
+    finally:
+        runtime_registry.unpublish(os.getpid(), root)
+
+    # Runtime exit: the record is gone, the residue directory stays — still
+    # nothing, which is the state QA measured clean before and after.
+    page = await pool.list(limit=20)
+    assert draft_id not in {row["id"] for row in page.rows}
+
+    # Materialised: the marker is the fact that makes the id ordinary, and the
+    # row appears by the normal rules even while the stale bridge reference
+    # still sits there (the filter must stand down on the MARKER, not on the
+    # bridge).
+    created = await client.post(
+        "/v1/desktop/sessions",
+        json={"request_id": str(uuid.uuid4()), "cwd": str(root), "draft_id": draft_id},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["result"]["session_id"] == draft_id
+    _publish_record(root, draft_id, "Untitled conversation")
+    try:
+        page = await pool.list(limit=20)
+        assert draft_id in {row["id"] for row in page.rows}, "the materialised id stayed hidden"
+        assert control_id in {row["id"] for row in page.rows}
+    finally:
+        runtime_registry.unpublish(os.getpid(), root)

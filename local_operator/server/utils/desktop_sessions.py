@@ -3799,6 +3799,15 @@ class DesktopSessions:
         #: resident), and taking it here would put a dict lookup on every
         #: ordinary door call behind it.
         self.drafts: dict[str, _Draft] = {}
+        #: Ids whose create has CONSUMED the draft and not yet published the
+        #: marker (added at consumption, discarded when ``persist`` returns or
+        #: raises). The window is sub-millisecond-to-low-milliseconds here
+        #: (round-2 review R2-1) and it exists so a door ask inside it keeps
+        #: serving the pane's resident bridge: without it, ``session()``'s
+        #: dead-draft branch read "entry gone, no marker" as death while the
+        #: truthful reading was "create is in flight". Loop-only mutation, like
+        #: ``self.drafts``.
+        self._materialising: set[str] = set()
 
     def assert_admitting(self) -> None:
         """Raise ``DaemonRetiring`` when this daemon has LATCHED against new work.
@@ -4485,6 +4494,11 @@ class DesktopSessions:
                 del self.drafts[draft_id]
                 session_id = draft_id
                 from_draft = True
+                # R2-1: the materialising window OPENS here — the entry is gone
+                # but the marker is not published until ``persist`` returns,
+                # and ``session()`` must not read that gap as death (see the
+                # field's comment).
+                self._materialising.add(draft_id)
             else:
                 self.assert_draft_unmaterialised(draft_id)
         if session_id is None:
@@ -4526,7 +4540,18 @@ class DesktopSessions:
             # the bytes, the mode or the fields.
             write_desktop_marker(path, directory, model=model)
 
-        await asyncio.to_thread(persist)
+        try:
+            await asyncio.to_thread(persist)
+        finally:
+            # The materialising window CLOSES here, on success or failure
+            # (R2-1): until the marker is on disk the id is neither a draft
+            # (consumed) nor a session (unmaterialised), and a door ask in
+            # between keeps serving the pane's resident bridge. On failure the
+            # id stays spent and NOT materialising — the next ask drops the
+            # dead bridge and 404s, and a retried create mints fresh — which is
+            # the correct end state for a consume that will never publish.
+            if from_draft and session_id is not None:
+                self._materialising.discard(session_id)
         return session_id
 
     async def mint_draft(
@@ -4641,6 +4666,41 @@ class DesktopSessions:
             return None
         return draft
 
+    def _draft_listing_exclusions(self) -> set[str]:
+        """Ids no listing may carry: drafts not yet materialised, however known.
+
+        spec §1.6's "never listed" must hold for the WARM window too (QA round
+        2, Q-2): the catalogue's live branch (``decorate_rows(include_live=True)``)
+        appends a row for any id with a runtime record and a session directory,
+        and a bound draft has both — so a bound warm was listed as "Untitled
+        conversation" while the doors called the id unknown. The exclusion is
+        computed HERE rather than inside the catalogue because the pool is what
+        knows a draft, in two states:
+
+        * REGISTERED entries, resolved through ``_draft_for`` so an expired one
+          is not kept alive by this read (the listing is a place expiry is
+          asked — the same rule the doors follow);
+        * DRAFT-BORN RESIDENT BRIDGES whose marker has not appeared — the pane's
+          ``/events`` hold keeps one for an id whose registry entry may already
+          be gone.
+
+        The MARKER is the one fact that says the draft became a conversation:
+        once it exists the id lists by the ordinary rules, whatever a stale
+        bridge reference still says. Loop-only, like every read of these two
+        fields.
+        """
+        excluded: set[str] = set()
+        for session_id in list(self.drafts):
+            if self._draft_for(session_id) is not None:
+                excluded.add(session_id)
+        for session_id, bridge in self.bridges.items():
+            if (
+                bridge.draft is not None
+                and not (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file()
+            ):
+                excluded.add(session_id)
+        return excluded
+
     async def binding(self, session_id: str) -> dict[str, str | None]:
         def read() -> dict[str, str | None]:
             stored = read_session_attachment(self.root / "sessions" / session_id)
@@ -4716,6 +4776,12 @@ class DesktopSessions:
         this reason.
         """
 
+        # DRAFTS ARE NEVER LISTED (spec §1.6; QA round 2's Q-2). The exclusion
+        # set is computed HERE, on the loop — ``_draft_for`` prunes an expired
+        # entry, which is loop-only mutation — and read inside the worker
+        # thread below, so the filter and the scan describe one moment.
+        excluded_drafts = self._draft_listing_exclusions()
+
         def rows() -> SessionPage:
             # ONE ``read_pins`` per request, and it is read BEFORE the catalogue
             # so the catalogue can resolve the pins the page will not carry.
@@ -4747,7 +4813,12 @@ class DesktopSessions:
                 include_archived=include_archived,
                 with_counts=with_counts,
             )
-            entries = page.entries
+            # THE DRAFT ROWS ARE DROPPED HERE, before the page slice so the page
+            # still fills to ``limit`` from the rows that may be shown. The
+            # catalogue's own truncation verdict and counts were taken before
+            # this filter, so excluding a row can only ever OVER-report "more"
+            # for one poll — it can never hide a row a client should see.
+            entries = [entry for entry in page.entries if entry.id not in excluded_drafts]
             page_entries = entries[:limit]
             # A PINNED ROW THE PAGE DOES NOT CARRY, and the filter is on the id
             # rather than on the projected row's flag so it runs before the
@@ -5214,6 +5285,16 @@ class DesktopSessions:
                     # i.e. a mutating route engaging a materialising draft
                     # (measured by round-1 review, repro_expired_draft_bridge.py).
                     #
+                    # THE THIRD STATE, ADDED BY ROUND-2 REVIEW (R2-1): CREATE
+                    # IN FLIGHT. Consumption deletes the entry a beat before the
+                    # marker is published, and in that window neither fact below
+                    # is true — the draft is not dead and the marker is not late
+                    # — so ``_materialising`` (set at consumption, cleared when
+                    # persist returns or fails) suppresses both outcomes and the
+                    # ask keeps serving this bridge, which also keeps
+                    # ``bridge.draft`` for the facade's birth spec until the
+                    # marker can answer for it.
+                    #
                     # MATERIALISED (the marker is on disk) is the opposite fact:
                     # the draft BECAME a conversation and the id is an ordinary
                     # session from here, so the dead reference is cleared and
@@ -5222,12 +5303,13 @@ class DesktopSessions:
                     # consequences — nothing may serve the id, exactly as on the
                     # expiry row — and its close runs AFTER this lock, for
                     # ``forget``'s reason (the close takes the bridge's lock).
-                    if (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file():
-                        bridge.draft = None
-                    else:
-                        self.bridges.pop(session_id, None)
-                        self._locate_flights.pop(session_id, None)
-                        doomed, bridge = bridge, None
+                    if session_id not in self._materialising:
+                        if (self.root / "sessions" / session_id / DESKTOP_MARKER_NAME).is_file():
+                            bridge.draft = None
+                        else:
+                            self.bridges.pop(session_id, None)
+                            self._locate_flights.pop(session_id, None)
+                            doomed, bridge = bridge, None
                 if doomed is not None:
                     # Refused below, where the owed close can run outside this lock.
                     pass
