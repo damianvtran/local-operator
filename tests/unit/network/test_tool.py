@@ -625,6 +625,5 @@ def test_the_agent_digest_does_not_call_a_wedged_relay_not_running() -> None:
     assert any("relay not answering" in line for line in lines), lines
 
     stopped = dict(wedged, relay_running=False, relay_answering=False, relay_state="stopped")
-    assert any(
-        line == "relay:     not running" for line in net_tool._render("status", stopped)  # noqa: SLF001
-    ), lines
+    stopped_lines = net_tool._render("status", stopped)  # noqa: SLF001 — the renderer under test
+    assert any(line == "relay:     not running" for line in stopped_lines), stopped_lines
