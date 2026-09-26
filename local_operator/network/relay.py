@@ -2154,8 +2154,12 @@ def audit_status_words(payload: Mapping[str, Any], *, omit_steady: bool = False)
         # line lands outside the block's fixed three rows, which round 4 measured as the
         # block growing 3 -> 8 rows and the scrolled region collapsing 6 -> 1 at 50x18.
         # The CLI and the digest have room; the row has to be one row on all three, or
-        # the panel is the surface where it fails, and 67 cells is what fits that one
-        # row everywhere the panel is captured.
+        # the panel is the surface where it fails. THE ROW is one row at every width the
+        # panel is captured at; what the sentence needs is a WINDOW. The whole 67 cells
+        # sit on it from 98 columns up, where the card is 81 and the value budget — the
+        # card minus the 14-cell label — is 67; below that the row keeps the cells it has
+        # and marks the cut. At the 80x24 capture the card is 65, so the row shows 50 of
+        # the sentence's 67 cells with a trailing ``…`` for the rest.
         return "unavailable — relay not answering; audit.jsonl holds the last state"
     return ""
 
