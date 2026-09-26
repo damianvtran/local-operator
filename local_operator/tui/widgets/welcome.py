@@ -424,7 +424,6 @@ TIPS: tuple[str, ...] = (
     "/fork branches; /fork <message> starts divergent work",
     "/settings → Fork → Where a fork opens sets placement",
     "Under cmux, Where it opens sets workspace or surface",
-    "lop detects terminal or multiplexer, then picks placement",
     # The classification layer's two facts: how to stop it and how to give one
     # of its legs a credential. Appended at the END of the literal group rather
     # than interleaved, so the pinned opening tip stays `TIPS[0]` and the
@@ -460,6 +459,56 @@ TIPS: tuple[str, ...] = (
     # takes a slot from the pool rather than adding one.
     "lop config edit classification.auto false turns hints off",
     "lop login <radient|typesafe|openrouter> enables hints",
+    # THE MESH'S OWN ENTRY, and it TOOK A SLOT rather than adding one: both
+    # budgets were spent before it (see the note above). Which slot, and why.
+    #
+    # The retired entry is `lop detects terminal or multiplexer, then picks
+    # placement` — the placement cluster's third member, and the only entry in
+    # the pool whose subject is the MECHANISM rather than something a person
+    # does, names or changes. What that costs is recorded here rather than
+    # glossed: the clause also carried the cluster's capability-shaped
+    # reassurance ("not cmux-only"), which is why
+    # `test_fork_tips_cover_commands_and_settings` used to assert it — that test
+    # now asserts the two survivors and its docstring says where the third
+    # clause went. Everything the cluster ACTS on survives: the setting's route
+    # (`TIPS[9]`) and the multiplexer case that needs the other spelling
+    # (`TIPS[10]`) are the two facts a reader can use, and the clause that went
+    # was the one the rotation could do nothing with.
+    #
+    # The alternatives were each worse, and each for a reason already written
+    # down in this file. `lop config edit classification.auto false turns hints
+    # off` is the OTHER 57-cell entry that sets `TIP_MIN_WIDTH`, so retiring it
+    # would drop the pinned 59-cell floor — the one number here that no change
+    # may move (`test_keymap_pilot.py`). The keyed entries earn their slots
+    # because a remappable key has no picker, unlike every slash command in the
+    # pool. And retiring another SLASH tip would take away a headline command's
+    # only passive advertisement, which is the class this entry is joining
+    # rather than leaving — the mesh is the one slash family whose existence
+    # nothing else in the app states.
+    #
+    # The cluster keeps its ring positions: `TIPS[9]` and `TIPS[10]` are
+    # untouched, and this entry is appended at the END of the literal group,
+    # which is the placement rule the classification pair above already records
+    # — nothing before it moves.
+    #
+    # WHY THE MESH EARNS ONE, by the pool's own test: it is a capability with no
+    # second discovery route. Nothing else in the app says it exists until you
+    # are already in a network — the sidebar grows its `⇄` group only once a peer
+    # does, and `/network` is a word you must know in order to type — so a device
+    # that has never paired has no surface that mentions pairing, while this row
+    # is the one thing every launch crosses.
+    #
+    # IT IS A COMMAND, like the rest of the slash group, and it names the FIRST
+    # step rather than describing the feature: the panel `/network new <name>`
+    # opens carries the rest of the path (create → invite → join, and which
+    # device runs which) in its own empty state, so this row's whole job is to
+    # get a person there. The command is real: `_cmd_network`'s `new` arm takes
+    # the whole tail as the network's name.
+    #
+    # WIDTH: 55 cells of content, 57 painted — under the 57-cell content budget
+    # the two 59-painted entries set, so the threshold does not move (measured,
+    # not estimated).
+    "/network new <name> makes a mesh other devices can join",
     # The KEYED entries. Held as templates in the pool and substituted at
     # render (`_resolve_tip`), which is what keeps them true after a remap —
     # a literal chord here would become a lie the moment the user changed it,

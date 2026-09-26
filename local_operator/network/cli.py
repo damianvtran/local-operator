@@ -1626,7 +1626,19 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             f"token written to {path}",
             "it is single use and is not printed: read that file, or run this with a TTY "
             "and --print",
-            f"then, on the other device: lop network join @{path}"
+            # THE PATH THIS LINE USED TO NAME WAS THIS DEVICE'S OWN, in a command
+            # for the OTHER one: `@{path}` there resolves against a filesystem
+            # that does not have the file, so the line read as one step when the
+            # trip is two — carry the file across, then run. The guide's pairing
+            # step 3 and the README's getting-started both already spell it that
+            # way ("hand that file to the other machine out of band"), and they
+            # are right: `--print` is the only alternative channel and it is
+            # refused on a non-TTY stdout, which is every TUI front end of this
+            # family (network_cli.run_network gives the child a pipe on purpose).
+            # So the file IS the channel, and the line has to say so. The
+            # `--host` half still rides along, because that value is genuinely
+            # this device's own answer.
+            "then, on the other device: lop network join @<the file, carried across>"
             + (f" --host {payload['hosts'][0]}" if payload.get("hosts") else ""),
         ],
     )

@@ -86,7 +86,8 @@
       "plain"
     ],
     "network_shot.py": [
-      "both"
+      "both",
+      "unpaired"
     ],
     "new_remote_shot.py": [
       "with-peers",

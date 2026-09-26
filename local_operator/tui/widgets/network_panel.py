@@ -855,7 +855,20 @@ class NetworkScreen(ModalScreen[None]):
     def _device_section(self, body: Text, width: int) -> None:
         self._header(body, "This device")
         if not self.local.identity_present:
-            body.append("  no identity yet — /network new <name> creates one\n", style="yellow")
+            # THE RELAY IS PART OF THIS LINE'S FACT, not a separate complaint.
+            # `init` starts the relay on the way past (the TUI's `/network new`
+            # passes no `--no-start`), so the state the Relay block reports
+            # further down — `installed: no` / `relay: not running` — is the
+            # same act this line is naming, and saying it here is what keeps the
+            # frame from reading as a fault list. The sentence no longer repeats
+            # the Networks block's own remedy word for word: the two rows are
+            # two subjects (this device's identity, and the mesh), and a reader
+            # who meets the same command twice under different headings cannot
+            # tell whether the second one is a second step.
+            body.append(
+                "  no identity yet — /network new <name> mints it and starts the relay\n",
+                style="yellow",
+            )
         else:
             # LABEL FIRST, then the abbreviated id (design round 1, D6). The line
             # used to lead with the full 34-cell id, putting the longest token on
@@ -948,8 +961,40 @@ class NetworkScreen(ModalScreen[None]):
             note = ""
         self._header(body, "Networks", note)
         if not entries:
+            # THE EMPTY STATE IS WHERE THE PAIRING PATH IS TAUGHT, and it is
+            # ORDERED because the commands are: on a device with no network,
+            # `/network invite` is refused (`name a network: this device is in
+            # none`) — so an empty state that names only `invite` hands the
+            # reader a command that fails, and one that names `invite` BELOW
+            # `new` with nothing marking the order relies on the reader
+            # guessing which comes first. Both were true of the frame this
+            # replaces, which is the state every device starts in.
+            #
+            # WHY HERE AND NOT IN THE PEERS BLOCK, which is where pairing is
+            # otherwise discussed: a peer is what a SECOND device becomes, so
+            # the three commands only make sense once a network exists, and
+            # this is the one block that is empty exactly while they are the
+            # next thing to do. The Peers block keeps its one-line remedy,
+            # which now reads as the second step of the path above it rather
+            # than as an instruction that arrives before its own first step.
+            #
+            # ONE ROW, NOT THREE, and that is a measured budget rather than a
+            # taste call: at 100x30 this frame had exactly one row of slack in
+            # the scroll viewport (a 15-row body in a 16-row viewport), and the
+            # three-row draft of this sequence pushed the body to 17 — which
+            # raised `network-scroll`'s virtual size past its real one, put a
+            # vertical scrollbar on the screen, and clipped the Relay block's
+            # `log:` path, the one row a support request needs. The frame checks
+            # in `mesh-ui.md` §4.1 read a scrollbar appearing as a defect for
+            # exactly this reason. So the path is said in one row, and the
+            # joining device's own spelling rides on it rather than under it.
             body.append(
                 "  no networks on this device — /network new <name> creates one\n", style="dim"
+            )
+            body.append(
+                "  then /network invite mints a token; lop network join @<file>"
+                " on the other device\n",
+                style="dim",
             )
             return
         for index, entry in enumerate(entries):

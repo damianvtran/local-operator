@@ -743,6 +743,42 @@ def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
     assert "no peers yet" in text, text
 
 
+def test_the_unpaired_empty_state_teaches_the_whole_pairing_path() -> None:
+    """A device with no identity and no networks is where every device starts,
+    and the frame it painted named two commands with nothing between them.
+
+    The ORDER is the property, not the wording. On this device `/network invite`
+    is refused outright — ``name a network: this device is in none`` — so an
+    empty state that offers `invite` first (the Peers row below it does name it)
+    hands the reader a command that fails, and one that named `new` alone under
+    two headings left the other half of the path unstated: a token, written to a
+    file, redeemed by the OTHER device with a command this one never prints.
+    That second half is the whole of pairing and it is the reason the empty
+    state is a sequence rather than a sentence.
+
+    The device row is asserted NOT to repeat the Networks row's clause: two rows
+    carrying the same remedy verb under two headings read as two steps, which is
+    the defect the sequence above is meant to remove rather than to add to.
+    """
+    from local_operator.tui.widgets.network_panel import (
+        NetworkLocal,
+        build_network_report,
+    )
+
+    local = NetworkLocal(device_id="", device_name="", identity_present=False, relay_state="")
+    text = build_network_report(local).plain
+
+    networks = text.split("Networks", 1)[1].split("Peers", 1)[0]
+    create = networks.index("/network new")
+    invite = networks.index("/network invite")
+    join = networks.index("lop network join")
+    assert create < invite < join, networks
+
+    device_rows = [line for line in text.splitlines() if "no identity yet" in line]
+    assert len(device_rows) == 1, text
+    assert "creates one" not in device_rows[0], device_rows[0]
+
+
 # ---------------------------------------------------------------------------
 # Design round 3 D23 / UX round 3 U22 — the pending word, and the log path's indent
 # ---------------------------------------------------------------------------
