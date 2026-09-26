@@ -53,6 +53,7 @@ from local_operator.ecosystem_instructions import (
     log_ecosystem_provenance,
     read_ecosystem_instructions,
 )
+from local_operator.harness.approval import ApprovalUnavailableError
 from local_operator.harness.rows import is_harness_notice_row
 from local_operator.harness.types import AgentMessage, Message
 
@@ -774,7 +775,10 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     is an interactive y/N prompt — which can only happen on a tty; headless
     runs deny, so a background job never hangs waiting for input it will
     never get. A non-tty denial is NEVER silent (CL-04): the user must see
-    why the tool was rejected and how to change it (``--yolo``).
+    why the tool was rejected and how to change it (``--yolo``) — printed to
+    stderr, and raised as :class:`ApprovalUnavailableError` so the transcript
+    names the real cause rather than attributing the refusal to a user who was
+    never asked.
 
     A full-screen front end must REPLACE this gate with its own surface
     (``SessionProtocol.set_approval_handler``); the check below is the safety
@@ -811,7 +815,19 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
                 f"(tool '{tool_name}')",
                 file=sys.stderr,
             )
-            return False
+            # Then REFUSE IN A TYPED WAY rather than returning ``False``.
+            # Every call site renders a ``False`` as "User denied approval ..."
+            # — its copy for a person who answered, which is a lie here: this
+            # gate never reached a person. Only THIS gate raises, because it is
+            # the one that KNOWS there is no terminal to ask on; an interactive
+            # gate keeps returning ``False`` for a real refusal. The call sites
+            # catch this type and render the reason and the remedies instead
+            # (see ``harness/loop.py`` and ``tools/builtin.py``).
+            #
+            # The CL-04 notice above stays exactly as it was, and on purpose:
+            # it is what a stderr reader can act on while the transcript shows
+            # the same refusal, and its spelling is pinned by tests.
+            raise ApprovalUnavailableError(tool_name, "no terminal is attached")
         if _fullscreen_app_owns_terminal():
             # error, not warning: reaching this branch means a front end that owns
             # the terminal did not install an approval handler, which is a wiring

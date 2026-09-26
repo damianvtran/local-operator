@@ -341,6 +341,31 @@ async def test_outside_initial_path_requires_approval(tool, tree, tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_outside_initial_path_names_an_unanswerable_gate(tool, tree, tmp_path) -> None:
+    """Same rendering rule as the read tool: a gate that could not ask anyone
+    must not be reported as the user declining — the reason and remedies go
+    into the result instead."""
+    from local_operator.harness.approval import ApprovalUnavailableError
+
+    outside = tmp_path.parent / "unanswerable-lsp.py"
+    outside.write_text("def secret():\n    return 1\n")
+
+    async def unanswerable(tool_name: str, description: str) -> bool:
+        raise ApprovalUnavailableError(tool_name, "no terminal is attached")
+
+    context = ToolContext(cwd=str(tree), request_approval=unanswerable)
+    result = await tool.execute(
+        "c", {"action": "symbols", "path": str(outside)}, None, None, context
+    )
+    assert result.is_error is True
+    # The gate is asked under the read TIER, but the notice names the tool the
+    # reader is looking at (design round 1, D1).
+    assert "Approval unavailable for 'lsp'" in result.text
+    assert "declined" not in result.text.lower()
+    assert "--yolo" in result.text
+
+
+@pytest.mark.asyncio
 async def test_outside_initial_path_works_only_after_approval(tool, tree, tmp_path) -> None:
     outside = tmp_path.parent / "approved-lsp.py"
     outside.write_text("def allowed():\n    return 1\n")
