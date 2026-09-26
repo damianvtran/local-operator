@@ -440,8 +440,34 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+#: The call's decode window, carried BESIDE the fields rather than among them.
+#:
+#: PRIVATE, and that is the whole design (design §9.3, third shape, measured):
+#: pydantic keeps a private attribute out of ``model_dump``, so the window travels
+#: from the model seam to the frame for ZERO wire bytes — where declaring it as a
+#: field cost 9,648 B and then 7,800 B, because a field is in the schema of every
+#: value that shares it (a 200-cap list, and 200 roster rows). Measured on the
+#: guard's own roster shape: the private pair on all 201 objects is +0 B, and
+#: materialising it on the frame's ``last_usage`` value alone is +39 B at ONE
+#: occurrence.
+#:
+#: TWO LEASHES on that. The seam must stamp it where the usage EVENT is handled,
+#: not in the stream's ``finally``: ``on_usage`` fires while that generator is
+#: suspended at ``yield``, so a late stamp is invisible to the frame's build (and
+#: the ledger computes its own, complete value from the same rule). And the
+#: consumers must materialise it on ``last_usage`` ONLY — ``usage_components`` is a
+#: list of ``FrontendUsage``, whose ``extra="allow"`` WOULD carry it, so a pair put
+#: on an object that also feeds that list resurrects the 201-object cost.
+_DECODE_WINDOW_ATTR = "_decode_window"
+
+
 class Usage(BaseModel):
     """Token accounting reported by a provider (or estimated locally)."""
+
+    #: ``(decode_us, decode_tokens)`` for this call, or unset. See
+    #: :data:`_DECODE_WINDOW_ATTR` — private so it costs the wire nothing, and read
+    #: through :func:`decode_window_of` so a future shape change is one function.
+    _decode_window: tuple[int, int] | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -3030,3 +3056,21 @@ StreamEvent = (
     | StreamEndEvent
     | StreamModelEvent
 )
+
+
+def decode_window_of(usage: Any) -> tuple[int, int] | None:
+    """The decode window stamped on ``usage``, or ``None`` when it has none.
+
+    The one reader of :data:`_DECODE_WINDOW_ATTR`, so the wrap in
+    ``session/frontend_state`` and any test can ask the same question without
+    spelling the attribute — and so a shape change here is one edit rather than a
+    grep. ``None`` means "no measured window", which every surface already renders
+    as unknown rather than as zero.
+    """
+    window = getattr(usage, _DECODE_WINDOW_ATTR, None)
+    if not window or len(window) != 2:
+        return None
+    decode_us, decode_tokens = int(window[0]), int(window[1])
+    if decode_us <= 0 or decode_tokens <= 0:
+        return None
+    return (decode_us, decode_tokens)
