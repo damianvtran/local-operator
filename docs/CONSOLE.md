@@ -124,9 +124,9 @@ answer it.
 ## Installing a program a task needs
 
 The console is also where a missing program is installed, and **nothing installs
-silently**. The harness approving a tool call is not the user approving a change
-to their machine, so the order is ask first, install second — and a declined
-install is an answer, not an obstacle.
+silently**: the agent asks first — the exact command, what it changes — and a
+declined install is an answer, not an obstacle. The rule as the agent reads it,
+and the per-platform paths, are in `guide://system-tools`.
 
 What to expect, in order:
 
@@ -142,10 +142,10 @@ What to expect, in order:
    stay closed while it works and the surface keeps running.
 3. **`sudo`, if it is needed.** The surface is the user's own shell, never root,
    so `sudo`'s prompt appears there and **the user types the password into it**.
-   Keystrokes into a pty are not recorded, so the password does not enter the
-   surface's output, the transcript or the record. The agent never types it; if
-   the user has stored one, the agent can pass it by name (`secret_ref`) and
-   never see the value.
+   Keystrokes into a pty are not recorded, so a password typed at an echo-off
+   prompt (as `sudo` uses) does not enter the surface's output, the transcript or
+   the record. The agent never types it; if the user has stored one, the agent
+   can pass it by name (`secret_ref`) and never see the value.
 4. **Prompts the agent cannot answer.** macOS's Command Line Tools dialog and
    Windows's UAC consent dialog are drawn by the OS: the pty cannot see them and
    the agent cannot click them. An installer's own agreement or licence prompt is

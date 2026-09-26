@@ -168,9 +168,11 @@ task assumes — is acquired through a surface, and that has its own playbook:
 detect-first step (a `command not found` is evidence about one shell, not about
 the machine), the `ask` that comes before anything privileged runs, the
 per-platform commands, and the verify step. This page is the console half:
-create the surface, read it, answer the installer's own questions with `keys` or
-`input`, and leave `sudo`'s password prompt to the user — or pass a stored
-credential by `secret_ref`.
+create the surface, read it, and answer the installer's mechanical prompts with
+`keys` or `input` (a bucket choice, an output path). Everything that is a
+consent is the user's, never yours: an agreement or licence prompt, `sudo`'s
+password (or a stored credential by `secret_ref`), and a UAC or developer-tools
+dialog are theirs to answer.
 
 ## When a call is refused
 
