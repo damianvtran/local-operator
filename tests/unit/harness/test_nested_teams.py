@@ -439,16 +439,71 @@ def test_a_depth_one_resume_message_is_origin_main_bytes(tmp_path, teams, monkey
     assert seen["effective_prompt"] == ORIGIN_MAIN_ORG_TASK_BYTES
 
 
-def test_a_resumed_pod_worker_keeps_the_pod_team(tmp_path, teams, monkeypatch):
+@pytest.mark.asyncio
+async def test_a_resumed_pod_worker_keeps_the_pod_team(tmp_path, teams, monkeypatch):
+    """Resumed under its LIVE lead (D5), stamped with pod's text, not org's.
+
+    The carried facts are also what survive a restart: the snapshot/restore
+    leg re-reads them off the sidecar rather than the live record."""
+    root = make_root(tmp_path, teams)
+    org = teams.get_team_by_name("org")
+    pod = teams.get_team_by_name("pod")
+    assert org is not None and pod is not None
+    lead, _, _ = await build(root, "team:pod", "job-lead")
+    comms = root.subagent_comms
+    comms.attach("job-lead", lead, tmp_path / "job-lead")
+    comms.record_launch(
+        "job-w",
+        "w",
+        parent_job_id="job-lead",
+        agent_role="coder",
+        team_name="pod",
+        team_lineage=(org.id, pod.id),
+        depth=2,
+    )
+    _settle(comms, "job-w", tmp_path)
+    seen = _resume_spy(monkeypatch)
+    new_id, error = comms.resume("job-w", "carry on")
+    assert error is None and new_id == "job-new"
+    assert seen["parent_session"] is lead
+    target = seen["target"]
+    assert isinstance(target, LaunchTarget)
+    assert target.team is not None and target.team.name == "pod"
+    assert target.depth == 2 and target.team_lineage == (org.id, pod.id)
+    text = seen["effective_prompt"]
+    assert isinstance(text, str)
+    assert text.startswith(
+        pod.member_preamble("coder") + escalation_preamble("pod manager (job job-lead)")
+    )
+    assert "[team: org]" not in text
+
+    restored = SubagentComms(root)
+    restored.restore(comms.snapshot())
+    carried = restored._carried_launch(restored._records["job-w"])
+    assert (carried.team_name, carried.team_lineage, carried.depth) == (
+        "pod",
+        (org.id, pod.id),
+        2,
+    )
+    assert carried.reports_to == "pod manager (job job-lead)"
+    await lead.dispose()
+    await root.dispose()
+
+
+def test_an_orphaned_pod_worker_resumes_on_the_root_but_keeps_its_pod(tmp_path, teams, monkeypatch):
+    """D5 addendum 2 (manager ruling 2026-09-26): the fallback, not a refusal.
+
+    A resume whose parent is gone re-parents the JOB onto the root — refusing
+    would delete the recovery ``_inherited_model`` exists for — while the child
+    keeps the team, lineage and depth its own record carries. So a pod worker
+    resumed after its lead died comes back under pod's preamble, not org's.
+    """
     root = make_root(tmp_path, teams)
     org = teams.get_team_by_name("org")
     pod = teams.get_team_by_name("pod")
     assert org is not None and pod is not None
     comms = root.subagent_comms
-    comms.record_launch(
-        "job-lead", "lead", agent_role="team:pod", team_name="pod", team_lineage=(org.id, pod.id)
-    )
-    comms._records["job-lead"].depth = 1
+    comms.record_launch("job-lead", "lead", agent_role="team:pod", team_name="pod")
     comms.record_launch(
         "job-w",
         "w",
@@ -461,23 +516,20 @@ def test_a_resumed_pod_worker_keeps_the_pod_team(tmp_path, teams, monkeypatch):
     _settle(comms, "job-lead", tmp_path)
     _settle(comms, "job-w", tmp_path)
     seen = _resume_spy(monkeypatch)
-    # Across a restart too: the facts ride the sidecar.
-    revived = SubagentComms(root)
-    revived.restore(comms.snapshot())
-    for registry in (comms, revived):
-        seen.clear()
-        new_id, error = registry.resume("job-w", "carry on")
-        assert error is None and new_id == "job-new"
-        target = seen["target"]
-        assert isinstance(target, LaunchTarget)
-        assert target.team is not None and target.team.name == "pod"
-        assert target.depth == 2 and target.team_lineage == (org.id, pod.id)
-        text = seen["effective_prompt"]
-        assert isinstance(text, str)
-        assert text.startswith(
-            pod.member_preamble("coder") + escalation_preamble("pod manager (job job-lead)")
-        )
-        assert "[team: org]" not in text
+
+    new_id, error = comms.resume("job-w", "carry on")
+
+    assert error is None and new_id == "job-new"
+    # The job is the root's; the team is still pod's.
+    assert seen["parent_session"] is root
+    target = seen["target"]
+    assert isinstance(target, LaunchTarget)
+    assert target.team is not None and target.team.name == "pod"
+    assert target.depth == 2 and target.team_lineage == (org.id, pod.id)
+    text = seen["effective_prompt"]
+    assert isinstance(text, str)
+    assert text.startswith(pod.member_preamble("coder"))
+    assert "[team: org]" not in text
 
 
 def test_a_legacy_record_resumes_under_the_roots_team(tmp_path, teams):
