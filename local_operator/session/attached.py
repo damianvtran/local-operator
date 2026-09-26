@@ -1413,6 +1413,7 @@ class AttachedSession:
         # tree (and `TeamRegistry.__init__` runs crash recovery), which a
         # session that never types `/team` must not pay at boot.
         self._team_registry_cache: Any | None = None
+        self._project_registry_cache: Any | None = None
         self._agent_registry_cache: Any | None = None
         # FAILURE is latched as well as success (R3). Returning None out of the
         # `except` without recording it left the cache empty, so the next read
@@ -1435,6 +1436,7 @@ class AttachedSession:
         # recovery cooldown (`_READ_RECOVERY_COOLDOWN_S`), deliberately: one
         # retry convention in the codebase, not a second one invented here.
         self._team_registry_failed_at: float | None = None
+        self._project_registry_failed_at: float | None = None
         self._agent_registry_failed_at: float | None = None
 
     def _within_registry_cooldown(self, failed_at: float | None) -> bool:
@@ -1481,6 +1483,34 @@ class AttachedSession:
                 self._team_registry_failed_at = time.monotonic()
                 return None
         return self._team_registry_cache
+
+    @property
+    def project_registry(self) -> Any | None:
+        """The projects on this machine, read from the viewer's own config dir.
+
+        The sibling of :attr:`team_registry` and written for the same reason:
+        the TUI and the desktop entity routes read registries off the SESSION
+        object, and an ``AttachedSession`` that lacked this property would make
+        every ``/project`` surface answer "unavailable" on the viewer path
+        while working on an in-process ``Session`` — the exact regression that
+        comment block above records for teams and agents.
+
+        Same lazy construction, same degrade-one-feature guard, same cooldown
+        latch: ``ProjectRegistry.__init__`` is read-only (it creates nothing)
+        but still walks the store once, so a session that never types
+        ``/project`` must not pay it at boot.
+        """
+        if self._project_registry_cache is None:
+            if self._within_registry_cooldown(self._project_registry_failed_at):
+                return None
+            from local_operator.projects import ProjectRegistry
+
+            try:
+                self._project_registry_cache = ProjectRegistry(self._config_dir)
+            except Exception:  # noqa: BLE001 — one feature must not break the session
+                self._project_registry_failed_at = time.monotonic()
+                return None
+        return self._project_registry_cache
 
     @property
     def agent_registry(self) -> Any | None:

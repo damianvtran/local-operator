@@ -629,6 +629,9 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # ORDER of a fully-capable inventory.
             agent_registry=object(),
             team_registry=object(),
+            # Presence-only, same rule as the two above: `project`/
+            # `project_delete` are createIf-gated on a store being attached.
+            project_registry=object(),
         )
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)

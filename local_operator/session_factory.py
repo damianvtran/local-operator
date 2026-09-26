@@ -3752,6 +3752,7 @@ async def _prepare(
     # nothing else — `list_variables` advertised itself and then read a bare
     # process-env store, in every session.
     variable_store = _build_variable_store(effective_cwd, config_manager)
+    from local_operator.projects import ProjectRegistry
     from local_operator.teams import TeamRegistry
 
     # R7-2: the session must start even when `teams/` cannot be read.
@@ -3783,6 +3784,19 @@ async def _prepare(
             f"\033[1;33mWarning: teams are unavailable this session: {exc}\033[0m",
             file=sys.stderr,
         )
+    # The projects registry gets the same degrade-one-feature handling, for the
+    # same reason: a store the user may never have touched must not take down
+    # the whole boot. `ProjectRegistry` construction is read-only (it creates
+    # nothing), so this guard covers a genuinely unreadable `projects/`.
+    project_registry: ProjectRegistry | None
+    try:
+        project_registry = ProjectRegistry(config_dir)
+    except Exception as exc:  # noqa: BLE001 — one feature must not fail boot
+        project_registry = None
+        print(
+            f"\033[1;33mWarning: projects are unavailable this session: {exc}\033[0m",
+            file=sys.stderr,
+        )
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,
@@ -3794,6 +3808,7 @@ async def _prepare(
         # host without one keeps working off the packaged starters.
         agent_registry=agent_registry,
         team_registry=team_registry,
+        project_registry=project_registry,
         web_search_settings=config_manager.get_config_value("web_search", None),
         web_fetch_settings=config_manager.get_config_value("web_fetch", None),
     )
@@ -3890,6 +3905,7 @@ async def _prepare(
         variables=variable_store,
         agent_registry=agent_registry,
         team_registry=team_registry,
+        project_registry=project_registry,
         # Provenance distinguishes deliberate resume flags from persisted
         # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,
