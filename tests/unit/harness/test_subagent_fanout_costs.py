@@ -326,7 +326,7 @@ def _capture_deliveries(parent: Session) -> list[list[str]]:
     """Each delivery TURN, as the list of job ids it carried."""
     turns: list[list[str]] = []
 
-    async def record(results: list[tuple[str, str, Any]]) -> None:
+    async def record(results: list[tuple[str, str, Any]], **_: Any) -> None:
         if results:
             turns.append([job_id for job_id, _text, _job in results])
 

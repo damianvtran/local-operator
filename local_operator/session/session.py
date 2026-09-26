@@ -2222,7 +2222,13 @@ class Session:
         #: that outlives that window would find nothing to re-look-up (review
         #: round 1, R1-1). Holding the object keeps ``consumed`` observable
         #: too, since ``wait`` flips it on this same instance.
-        self._deferred_job_results: dict[str, tuple[Any, str]] = {}
+        #:
+        #: ALSO holds the ``CustomMessage`` whose row was made durable at settle
+        #: time (2026-09-26 incident): the turn-end batch hands the model THAT
+        #: object rather than minting a twin, because a twin would be a second
+        #: transcript row -- dedup is by message id -- and because re-journaling
+        #: the same row must stay a no-op wherever it is retried.
+        self._deferred_job_results: dict[str, tuple[Any, str, CustomMessage]] = {}
         #: Armed by the serving handle when this session's runtime has COMMITTED
         #: to leaving (``retire_job_deliveries_to_transcript``, called from
         #: ``ServingSessionHandle.begin_drain`` / ``begin_retire``). While it is
@@ -11263,11 +11269,16 @@ class Session:
     async def _on_job_completed(self, job_id: str, text: str, job: Any) -> None:
         """Auto-deliver one settled model-owned job back into the conversation.
 
-        Only when the session is IDLE: a running turn already owns the
+        WHOSE DELIVERY IS BEING DECIDED, because the two halves now differ.
+        The MODEL's hand-over is idle-only: a running turn already owns the
         conversation (its model either waited or can 'jobs'), and
-        steering-injecting a result nobody asked for mid-turn is noise. Only
-        model-registered job types (task, backgrounded bash): host jobs keep
-        their own delivery. A job the wait tool already returned is marked
+        steering-injecting a result nobody asked for mid-turn is noise. The
+        HUMAN's copy is not: the row is journaled durably the moment the job
+        settles even while a turn streams, because a turn can run for many
+        hours and holding the row to its end bunched a marathon turn's every
+        completion at its tail (2026-09-26 incident; see the streaming branch).
+        Only model-registered job types (task, backgrounded bash): host jobs
+        keep their own delivery. A job the wait tool already returned is marked
         consumed and stays quiet, or the same result would arrive twice.
         """
         if self._disposed or job is None:
@@ -11292,24 +11303,68 @@ class Session:
             await self._deliver_job_results([(job_id, text, job)])
             return
         if self._is_streaming:
-            # DEFERRED, never dropped. Returning here used to be the whole
-            # story, on the theory that a streaming turn "either waited or can
-            # 'jobs'". It frequently does neither: a model launches a batch,
-            # does other work, and ends its turn with "I'll wait for the
-            # children to report back" -- and every child that settled while
-            # that turn was still streaming was then never delivered by
-            # anything. The parent sat idle forever with finished children
-            # (reproduced: two children settling during the parent's own tool
-            # call produced ZERO deliveries after the turn ended). That is the
-            # "session wedged waiting on its subagents" report. The turn's
-            # ``finally`` now re-offers these once it is idle, and the
-            # ``consumed`` re-check there keeps a result the turn DID collect
-            # through ``wait`` from arriving twice.
-            self._deferred_job_results[job_id] = (job, text)
+            # DEFERRED for the MODEL, DURABLE for the HUMAN. The batch below
+            # still hands the model one result row per job at the turn's end --
+            # the semantics this path was built for (dropping these, the
+            # pre-deferral behaviour, left a parent idle forever with finished
+            # children: "session wedged waiting on its subagents", reproduced
+            # with two children settling during the parent's own tool call).
+            # What changes here is WHO waits for that end: only the model.
+            #
+            # WHY (2026-09-26 incident). One real turn ran 23.5 h (opened
+            # 09-25 09:29, ended 09-26 09:06:51). Every completion inside that
+            # window -- two backgrounded bash jobs, three subagent children,
+            # settled 11:37 through 19:31 -- was held in this dict, and all
+            # five flushed together the next morning at 09:06:52. The operator
+            # read the result as "an aggregation of job completed notices"
+            # bunched at the end of the conversation; the notices are supposed
+            # to appear as the jobs complete.
+            #
+            # The batch re-sends THIS message object rather than minting a
+            # twin (see ``_deferred_job_results``), and every write path dedups
+            # by message id, so the early row and the model's batch are one
+            # row. Deliberately NOT parked in ``_pending_context_journal``:
+            # the batch hands the message to the loop as an INITIAL, and the
+            # loop extends the live context with initials -- parking it here
+            # too would put the same row into the context twice.
+            #
+            # Best-effort: a failed early write must not fail the settle path
+            # or the deferral, which is still the delivery of record.
+            message = self._job_result_message(job_id, text, job)
+            try:
+                await self._transcript.append_message(message)
+            except Exception:  # noqa: BLE001 -- visibility must not fail the delivery
+                logger.warning(
+                    "could not journal job %s's result early; the turn-end batch "
+                    "still delivers it",
+                    job_id,
+                    exc_info=True,
+                )
+            if not self._is_streaming:
+                # The turn ENDED while the row was being written. Parking the
+                # entry now would strand it: the finally-flush has already run
+                # and seen an empty dict, so nothing would pick this up until
+                # the NEXT turn's finally -- the very lateness this change is
+                # here to remove. Deliver it as the idle arrival it now is.
+                await self._deliver_job_results([(job_id, text, job)], messages=[message])
+                self.refresh_frontend_state()
+                return
+            # Publish the bumped history generation so a live viewer can pull
+            # the row now; without this the row waits for the next full state
+            # refresh (the settle's own job-roster delta is scoped to the
+            # roster fields). AFTER the deferral lands, so a refresh that
+            # raises cannot skip the delivery of record.
+            self._deferred_job_results[job_id] = (job, text, message)
+            self.refresh_frontend_state()
             return
         await self._deliver_job_results([(job_id, text, job)])
 
-    async def _deliver_job_results(self, results: list[tuple[str, str, Any]]) -> None:
+    async def _deliver_job_results(
+        self,
+        results: list[tuple[str, str, Any]],
+        *,
+        messages: list[CustomMessage] | None = None,
+    ) -> None:
         """Queue settled jobs' results for one fresh turn -- or for the next one.
 
         One turn for the whole batch, not one per job: N children that settle
@@ -11319,6 +11374,14 @@ class Session:
         single live delivery has always produced -- so every consumer that reads
         one (the transcript, the stopped-work residue check, the TUI) sees the
         rows it already understands.
+
+        ``messages`` carries rows that ALREADY EXIST on the transcript: the
+        streaming path journals each settled job's row the moment it settles
+        (see ``_on_job_completed``), so the batch hands the model those exact
+        objects instead of minting twins -- a twin would be a SECOND row, since
+        dedup is by message id, and the early row is the one already on the
+        operator's screen. When omitted (every non-deferred caller) the rows are
+        built here, exactly as before.
 
         The COUNT is one, the CARRIER is not always a turn: while this session's
         runtime has committed to leaving the batch is written durably instead
@@ -11356,13 +11419,27 @@ class Session:
             # unreachable; the branch that could write a held row as DELIVERED
             # is the one that must not exist, so the held build lives here and
             # the latch is tested once.
-            held = [
-                self._job_result_message(job_id, text, job, held=True)
-                for job_id, text, job in results
-            ]
+            held = (
+                messages
+                if messages is not None
+                else [
+                    self._job_result_message(job_id, text, job, held=True)
+                    for job_id, text, job in results
+                ]
+            )
+            # A message that was journaled at settle time (before the latch)
+            # keeps its delivered shape: the hold skips a row that is already
+            # durable and never rewrites one (the transcript is append-only).
+            # The marker exists to tell a report the operator NEVER SAW arrive
+            # from one whose turn answered it; a row they watched land already
+            # carries that signal itself, and the marker's first clause ("held
+            # when it arrived") would be false on it.
             await self._hold_job_results_for_next_turn(results, held)
             return
-        messages = [self._job_result_message(job_id, text, job) for job_id, text, job in results]
+        if messages is None:
+            messages = [
+                self._job_result_message(job_id, text, job) for job_id, text, job in results
+            ]
         self._spawn_background(self._prompt_messages(list(messages)))
 
     async def _hold_job_results_for_next_turn(
@@ -11398,21 +11475,28 @@ class Session:
         failed: list[tuple[str, str]] = []
         reason = ""
         for (job_id, _text, job), message in zip(results, messages):
-            try:
-                await self._transcript.append_message(message)
-            except Exception as exc:  # noqa: BLE001 - one lost row must not lose the batch
-                logger.error(
-                    "could not persist the result of job %s for the next turn "
-                    "(the runtime is leaving)",
-                    job_id,
-                    exc_info=True,
-                )
-                # The ID travels with the label: the row's own remedy is
-                # addressed by id, and a reader who is shown only a label has
-                # nothing to substitute into it (UX round 2, U9).
-                failed.append((job_id, str(getattr(job, "label", job_id) or job_id)))
-                reason = reason or (str(exc) or exc.__class__.__name__)
-                continue
+            # A row journaled at settle time (the streaming early write) is
+            # already durable; re-appending would file a second line under the
+            # same entry id. It still parks below: this process has no further
+            # delivery turn (the latch forbids one), so the parked copy is what
+            # any still-unwinding boundary in THIS process can read before the
+            # leaving runtime goes.
+            if not self._transcript.has_entry(message.id):
+                try:
+                    await self._transcript.append_message(message)
+                except Exception as exc:  # noqa: BLE001 - one lost row must not lose the batch
+                    logger.error(
+                        "could not persist the result of job %s for the next turn "
+                        "(the runtime is leaving)",
+                        job_id,
+                        exc_info=True,
+                    )
+                    # The ID travels with the label: the row's own remedy is
+                    # addressed by id, and a reader who is shown only a label has
+                    # nothing to substitute into it (UX round 2, U9).
+                    failed.append((job_id, str(getattr(job, "label", job_id) or job_id)))
+                    reason = reason or (str(exc) or exc.__class__.__name__)
+                    continue
             self._append_or_park_journal(message)
         if failed:
             await self._journal_held_delivery_failure(failed, reason)
@@ -11567,6 +11651,15 @@ class Session:
         read on that same object: a result the turn collected with ``wait`` is
         not delivered a second time. Never raises into the turn's ``finally``.
 
+        THE BATCH REUSES THE ROWS ALREADY ON THE TRANSCRIPT. Each entry's
+        ``CustomMessage`` was journaled the moment its job settled (see
+        ``_on_job_completed``), so the batch hands the model those same objects
+        (``messages=`` in ``_deliver_job_results``); minting fresh ones here
+        would put a second row in the transcript for every result, because
+        dedup is by message id. A result the turn collected with ``wait`` is
+        skipped by the ``consumed`` re-check as before -- its early row stays,
+        which is the point: the operator saw the completion land.
+
         THE BATCH IS NOT DROPPED WHEN THE DISPOSAL GOT HERE FIRST (review round
         1, MAJOR-1). ``dispose`` reaches an in-flight turn before this flush can
         run whenever its bounded wait for that turn expires (a teardown with a
@@ -11584,11 +11677,13 @@ class Session:
         pending = list(self._deferred_job_results.items())
         self._deferred_job_results.clear()
         results: list[tuple[str, str, Any]] = []
-        for job_id, (job, text) in pending:
+        messages: list[CustomMessage] = []
+        for job_id, (job, text, message) in pending:
             try:
                 if getattr(job, "consumed", False):
                     continue
                 results.append((job_id, text, job))
+                messages.append(message)
             except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
                 logger.warning("deferred job delivery failed for %s", job_id, exc_info=True)
         if self._disposed and not self._leaving_deliveries:
@@ -11596,7 +11691,7 @@ class Session:
             # old behaviour stands: nothing is delivered.
             return
         try:
-            await self._deliver_job_results(results)
+            await self._deliver_job_results(results, messages=messages)
         except Exception:  # noqa: BLE001 - a delivery must not fail the turn's teardown
             logger.warning("deferred job delivery failed", exc_info=True)
 
