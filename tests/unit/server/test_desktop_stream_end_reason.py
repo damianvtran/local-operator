@@ -57,12 +57,27 @@ async def _one_ended_stream(
             sub = bridge.subscribe()
             stream = bridge.events(sub, epoch=bridge.epoch, after_seq=0)
             await anext(stream)  # the open frame: the handshake has begun
-            for n in range(burst):
-                bridge.publish("event", {"n": n})
+            if burst:
+                for n in range(burst):
+                    bridge.publish("event", {"n": n})
+                # DRAIN THE BURST THROUGH THE DELIVERY LOOP. Pulling only the open
+                # frame leaves the generator suspended at its own yield while the
+                # published frames sit unread in the subscriber queue, and the
+                # loop a per-frame leak would live in never runs (review round 1,
+                # finding 1). The snapshot is yielded first, then each frame in
+                # publish order.
+                handshake = await asyncio.wait_for(anext(stream), timeout=5)
+                assert handshake["type"] == "snapshot", handshake
+                for n in range(burst):
+                    frame = await asyncio.wait_for(anext(stream), timeout=5)
+                    assert frame["payload"] == {"n": n}, frame
             if overflow:
-                # The relief valve, exactly as the bridge does it: it revokes its
-                # own subscriber, which is what makes the reason `subscriber
-                # overflow` rather than `client disconnect`.
+                # The relief valve's own revoke -- the same `_disconnect` that
+                # `close()` and the byte-budget branch of `publish` use -- which
+                # is what makes the reason `subscriber overflow` rather than
+                # `client disconnect`. That the byte budget REACHES this call is
+                # driven in `test_desktop_stream_handshake.py` (the burst-after-
+                # handshake case); this helper pins the reason MAPPING only.
                 bridge._disconnect(sub)
             await stream.aclose()
         await asyncio.sleep(0)
@@ -122,21 +137,23 @@ async def test_the_reason_is_one_line_per_stream_end(tmp_path, caplog):
     )
 
 
-async def test_the_capture_level_is_what_makes_it_readable(caplog):
-    """The counterfactual, so the promotion cannot be reverted quietly.
+async def test_the_capture_level_is_what_makes_it_readable(tmp_path, caplog):
+    """The counterfactual, driven through the PRODUCT this time.
 
-    This is the operator's daemon in miniature: a WARNING-level capture keeps the
-    promoted line and drops the INFO one. If a captured level below WARNING ever
-    became the default, this case would be the place that says so.
+    Review round 1, finding 2: the earlier shape logged two hand-written strings
+    through the stdlib logger, so it would have held against any implementation of
+    ``events()`` -- including one that emitted nothing. Here the stream is the
+    real one and the capture is the daemon's own: a WARNING-level capture sees the
+    promoted line, so reverting the emission to INFO fails this case as it fails
+    the three above.
     """
-    logger = logging.getLogger(LOGGER)
-    with caplog.at_level(logging.WARNING, logger=LOGGER):
-        logger.info("desktop stream ended for x (sub=deadbeef): client disconnect")
-        logger.warning("desktop stream ended for x (sub=deadbeef): client disconnect")
+    ended = await _one_ended_stream(tmp_path, caplog)
 
-    seen = [r for r in caplog.records if "desktop stream ended" in r.getMessage()]
-    assert len(seen) == 1, (
-        "a default-level capture keeps the WARNING and drops the INFO, which is the "
-        "measurement this change responds to"
+    assert len(ended) == 1, (
+        f"a WARNING-level capture must see exactly the one promoted line for one "
+        f"stream end; saw {len(ended)}"
     )
-    assert seen[0].levelno == logging.WARNING
+    assert ended[0].levelno == logging.WARNING, (
+        "and the record is at WARNING, not INFO: that level is what decides "
+        "whether a daemon's default capture keeps it"
+    )
