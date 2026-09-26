@@ -6460,10 +6460,7 @@ class OperatorApp(App[None]):
         # (design §4b.8 — this list may not do what the echo buffer does).
         while len(source.turn.failed_sends) > FAILED_SEND_BOUND:
             self._edit_failed_send(source, source.turn.failed_sends[0], focus=False)
-        if self._is_current(source):
-            notice = SendFailureNotice(source.token, record)
-            record.notice = notice
-            self._append_block(notice)
+        self._sync_send_failure_notices(source)
 
     @staticmethod
     def _send_failure_unknown_delivery(session: Any, error: BaseException) -> bool:
@@ -6485,6 +6482,37 @@ class OperatorApp(App[None]):
         if getattr(session, "owns_runtime", True):
             return False
         return isinstance(error, (ConnectionError, TimeoutError, OSError))
+
+    def _sync_send_failure_notices(self, source: SessionInteraction) -> None:
+        """Project this source's failure notices into whichever view it owns.
+
+        MIRRORS `_sync_draft_recoveries`, and exists for the same hazard: a
+        parked conversation's records outlive the view they were painted into,
+        and a notice may be (re)painted only while ITS source is the one on
+        screen. Appending through `self._transcript_view()` from a failure
+        that lands while another conversation is in front is the
+        wrong-transcript defect the attach-behind rounds were spent removing;
+        the parked record waits here and is projected on reveal.
+        """
+        if not self._is_current(source):
+            return
+        view = self._transcript_view()
+        remaining: list[SendFailureNotice] = []
+        for block in [b for b in view.blocks() if isinstance(b, SendFailureNotice)]:
+            if block.source_token != source.token or not any(
+                record is block.record for record in source.turn.failed_sends
+            ):
+                view.remove_block(block)
+                if block.record is not None and block.record.notice is block:
+                    block.record.notice = None
+            else:
+                remaining.append(block)
+        for record in source.turn.failed_sends:
+            if any(block.record is record for block in remaining):
+                continue
+            notice = SendFailureNotice(source.token, record)
+            record.notice = notice
+            self._append_block(notice)
 
     def on_send_failure_notice_requested(self, message: SendFailureNotice.Requested) -> None:
         """One of a failed send's verbs, from its notice row.
@@ -6585,11 +6613,7 @@ class OperatorApp(App[None]):
         ]
         if returned and not record.unknown_delivery:
             self._retire_failed_send_rows(record)
-        notice, record.notice = record.notice, None
-        if notice is not None:
-            view = _owning_transcript(notice)
-            if view is not None:
-                view.remove_block(notice)
+        self._sync_send_failure_notices(source)
 
     def _retire_failed_send_rows(self, record: FailedSend) -> None:
         """Take a failed send's painted rows down, wherever they were painted.
@@ -8948,6 +8972,11 @@ class OperatorApp(App[None]):
             )
             self._restore_sidebar_aside(source)
             self._sync_draft_recoveries(source)
+            # The records' notices ride the same reveal discipline as the draft
+            # offers above: a failure that landed while this conversation was
+            # parked has its notice projected HERE, into the view it owns, and
+            # one that landed while current was already painted.
+            self._sync_send_failure_notices(source)
             for text, kind in source.notices:
                 self._system_notice(text, kind)
             source.notices.clear()
