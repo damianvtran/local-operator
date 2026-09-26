@@ -40,6 +40,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -81,7 +82,7 @@ class DeadSession(FakeSession):
         raise ConnectionError("owner socket unreachable: [Errno 61] Connect call failed")
 
 
-def _metrics(app: OperatorApp, state: str, size: tuple[int, int]) -> dict:
+def _metrics(app: OperatorApp, state: str, size: tuple[int, int]) -> dict[str, Any]:
     """The numbers behind the pixels, read off the live widgets and compositor."""
     view = app.query_one(TranscriptView)
     editor = app.query_one(Editor)
@@ -122,7 +123,7 @@ async def _settle(pilot, *, turns: int = 150) -> None:  # noqa: ANN001
 
 async def main() -> None:
     if len(sys.argv) < 2:
-        print(__doc__.splitlines()[0], file=sys.stderr)
+        print((__doc__ or "").splitlines()[0], file=sys.stderr)
         raise SystemExit(2)
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)

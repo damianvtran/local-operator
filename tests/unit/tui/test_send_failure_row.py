@@ -239,7 +239,7 @@ async def test_the_attach_behind_class_keeps_its_row_too() -> None:
     """
     session = _raising_session(lambda: ConnectionError("owner did not send its state"))
     session.attach_behind = True  # type: ignore[attr-defined]
-    session.is_cold = True
+    session.is_cold = True  # type: ignore[attr-defined]
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         editor = await _boot(pilot, app)

@@ -6679,12 +6679,22 @@ class OperatorApp(App[None]):
         view being replaced, and a later `edit`/`send again` must retire what is
         actually on screen.
         """
-        from local_operator.tui.session_presentation import append_image_blocks
+        from local_operator.tui.session_presentation import (
+            ReplayTarget,
+            append_image_blocks,
+        )
 
         def reseed(text: str, images: list[Any], marker_text: str) -> tuple[Any, list[Any]]:
             user_block = UserBlock(text, len(images))
             blocks.append(user_block)
-            image_blocks = append_image_blocks(_BlockSink(blocks), images, marker_text=marker_text)
+            # `append_image_blocks` declares the `ReplayTarget` protocol, whose
+            # other members are the resume bookkeeping a MOUNTED target needs;
+            # the sink is a collect-only stand-in for the single method this
+            # call reaches (`_append_block`), so the cast states the one thing
+            # this call site needs rather than faking the whole protocol.
+            image_blocks = append_image_blocks(
+                cast(ReplayTarget, _BlockSink(blocks)), images, marker_text=marker_text
+            )
             return user_block, image_blocks
 
         for record in source.turn.failed_sends:
