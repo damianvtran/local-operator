@@ -31,6 +31,7 @@ how the app routes messages internally.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from functools import partial
 from types import SimpleNamespace
@@ -64,6 +65,7 @@ from local_operator.tui.events import (
 )
 from local_operator.tui.widgets import tool_card as card_mod
 from local_operator.tui.widgets import transcript as transcript_mod
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import format_duration
 from local_operator.tui.widgets.transcript import (
     DEFAULT_ACTIVITY,
@@ -1053,3 +1055,55 @@ async def test_a_session_switch_mid_turn_lifts_the_line_too() -> None:
         await pilot.pause()
         assert _working(app) is not None, "the resumed session got no working line"
         assert _is_last(app)
+
+
+@pytest.mark.asyncio
+async def test_the_band_hands_the_wait_to_the_line_without_a_second_claim() -> None:
+    """Behaviours 2 and 4: ONE register at a time, and the handoff stays honest.
+
+    The pre-turn window is the BAND's by design — mounting the line at submit
+    would add a clock with no session-side anchor and a claim nothing has been
+    admitted for — and the working line takes over at ``TurnStarted``. The two
+    halves are asserted in one run: before it, no line in the transcript and the
+    band's own ``working``; after it, exactly one line carrying the ladder's
+    word, at the foot.
+    """
+    session = FakeSession()
+    gate = asyncio.Event()
+
+    async def parked(text, images=None, **kwargs):  # noqa: ANN001, ANN201
+        await gate.wait()
+
+    session.prompt = parked  # type: ignore[assignment]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.text = "what does this show?"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert _working(app) is None, "a work line claimed a turn that had not started"
+        status = app._status
+        assert status is not None
+        band_text = status.render_text(120).plain
+        assert "working" in band_text, band_text
+
+        app.post_message(TurnStarted())
+        await pilot.pause()
+        line = _working(app)
+        assert line is not None, "the handoff produced no line"
+        assert line.activity == DEFAULT_ACTIVITY, line.activity
+        assert _is_last(app), "the line must land at the foot, not bury the message"
+
+        # Release the parked send and let its worker finish INSIDE the app's
+        # life: a worker cancelled at teardown posts its abandon against a
+        # screen that has already detached.
+        gate.set()
+        await pilot.pause()
