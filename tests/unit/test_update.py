@@ -428,9 +428,23 @@ def test_perform_upgrade_runs_detected_argv(tmp_path: Path, branded_image) -> No
     # ``prefix`` is passed on every call because a successful UV_TOOL upgrade
     # now writes ``.lop-source`` at the prefix; without it this test would
     # drop a marker into the developer's own ``sys.prefix``.
+    #
+    # The uv argv carries the checked version as an ``==`` pin and
+    # ``--refresh-package`` (2026-09-26, the stale-index incident): the in-place
+    # shape must install exactly what the fresh check resolved, or fail loudly.
     out = perform_upgrade(target="0.28.0", kind=InstallKind.UV_TOOL, run=run, prefix=tmp_path)
     assert out == "0.28.0"
-    assert seen == [["uv", "tool", "install", "--force", "local-operator"]]
+    assert seen == [
+        [
+            "uv",
+            "tool",
+            "install",
+            "--force",
+            "--refresh-package",
+            "local-operator",
+            "local-operator==0.28.0",
+        ]
+    ]
 
     seen.clear()
     perform_upgrade(target="0.28.0", kind=InstallKind.PIPX, run=run, prefix=tmp_path)

@@ -2445,15 +2445,21 @@ def install_into_generation(
        references a generation until the flip, so a tree being built is
        invisible to every reader — and reserving it with ``os.mkdir`` is what
        keeps a second install from aimng uv at the same path;
-    2. write ``.lop-source`` into the new tree, so the marker is in place BEFORE
+    2. when a ``version`` was announced, verify the tree's OWN dist-info agrees
+       with it. The version is a claim until the tree agrees: on 2026-09-26 the
+       fresh PyPI check said 0.63.3 while uv installed 0.63.2 from its cached
+       index, and the run flipped ``current`` onto the wrong tree (see the
+       guard's comment below);
+    3. write ``.lop-source`` into the new tree, so the marker is in place BEFORE
        the generation becomes visible to any reader (and so "no marker" means
        "still installing" for :func:`prune_generations`);
-    3. flip ``current``;
-    4. write the stable launchers and the daemon shim.
+    4. flip ``current``;
+    5. write the stable launchers and the daemon shim.
 
-    A failure at step 1 or 2 removes the tree and raises: nothing observable has
-    changed — the pointer never moved — and the caller reports the installer's
-    own error. Step 4 is best-effort by design: the build is already current at
+    A failure at step 1, 2 or 3 removes the tree and raises: nothing observable
+    has changed — the marker and the pointer never moved — and the caller
+    reports what stopped it (the installer's own error, or the version
+    refusal). Step 5 is best-effort by design: the build is already current at
     that point, and a machine whose sandbox denies a write must not be told the
     upgrade failed. PRUNING IS THE CALLER'S, not this function's: it is a
     deletion, and every caller that wants it says so where it can report what
@@ -2472,7 +2478,9 @@ def install_into_generation(
         raise UpdateError(generation_layout_refusal())
     token = commit[:12] or version or "pypi"
     generation = _reserve_generation(token)
-    argv = installer_argv(InstallKind.UV_TOOL)
+    # The pin and --refresh-package are PyPI-index defences, so they ride the
+    # PyPI shape only: a source install resolves the tree it was handed.
+    argv = installer_argv(InstallKind.UV_TOOL, version=version if source is None else "")
     if source is not None:
         # ``--from <dir> local-operator`` is the invocation that gets uv to
         # resolve the project under ``dir`` and read its name from the tree.
@@ -2487,6 +2495,30 @@ def install_into_generation(
     try:
         if code != 0:
             raise UpdateError(f"installer exited {code}")
+        if version:
+            # THE TREE MUST AGREE WITH THE ANNOUNCED VERSION BEFORE ANYTHING CAN
+            # SEE IT (2026-09-26). The version the caller resolved (a fresh
+            # PyPI check, or a snapshot's pyproject) and the version the
+            # installer actually put in the tree are two independent reads, and
+            # uv's side can answer from cached index metadata: measured that
+            # day, the check fetched 0.63.3 2.5 minutes after publication while
+            # ``uv tool install`` resolved 0.63.2, and the run ended exit 0
+            # with ``current`` on a 0.63.2 tree whose marker claimed a 0.63.3
+            # build. The dist-info is the one place the two claims meet, so a
+            # tree that disagrees is refused HERE — before the marker and the
+            # flip — and the handler below removes it.
+            found = _distribution_at(_generation_install_root(generation))
+            found_version = found.version if found is not None else "no local-operator distribution"
+            if found_version != version:
+                # This raise lands in the failure handler below, which removes
+                # the tree: the marker is never written and the flip never
+                # happens, so nothing was made current and ``current`` still
+                # names the previous build.
+                raise UpdateError(
+                    f"refusing to make it current: the built tree carries "
+                    f"{found_version}, not the {version} this update resolved — "
+                    "nothing was made current"
+                )
         write_source_marker(
             _generation_install_root(generation),
             version=version,
@@ -4491,6 +4523,7 @@ def installer_invocation(
     kind: InstallKind,
     *,
     executable: str | None = None,
+    version: str = "",
 ) -> tuple[list[str], str | None]:
     """``(argv, executable)`` for the installer of ``kind``.
 
@@ -4512,6 +4545,11 @@ def installer_invocation(
     ``secrets/client.py`` uses for the broker. ``executable=`` is honoured for
     the argv-only case the pip kind had before, so a caller pinning an
     interpreter still pins it.
+
+    ``version`` is the version the caller RESOLVED and announced (a fresh PyPI
+    check, or a snapshot's own ``pyproject.toml``); it reaches only the uv kind
+    today, as the ``==`` pin in the branch below, and is empty-able on purpose:
+    a caller with no resolved version keeps the invocation it always had.
     """
     if kind is InstallKind.UV_TOOL:
         # Re-install with --force rather than `uv tool upgrade`:
@@ -4520,6 +4558,31 @@ def installer_invocation(
         # version pin (`specifier = "==..."` in uv-receipt.toml causes "Nothing to upgrade").
         # `uv tool install --force local-operator` always fetches and replaces with
         # the latest PyPI distribution regardless of previous installation receipt.
+        #
+        # AND PIN THE RESOLVED VERSION, WITH --refresh-package (2026-09-26).
+        # Unpinned, "latest" is resolved by uv from ITS cache of the simple
+        # index — a different read from the fresh PyPI JSON check that named the
+        # version being announced. PyPI serves that index with ``Cache-Control:
+        # max-age=600, public``, so for up to ten minutes after a release the
+        # two reads can disagree: measured that day, the check fetched 0.63.3
+        # 2.5 minutes after publication, ``uv tool install --force
+        # local-operator`` resolved 0.63.2 from its cached index, and the update
+        # printed "installed 0.63.3" with exit 0 over a 0.63.2 tree. The
+        # ``local-operator==<version>`` pin makes uv install EXACTLY the version
+        # the check resolved, or fail loudly; ``--refresh-package
+        # local-operator`` revalidates that one package's cached index metadata
+        # so the pin resolves against the live index instead of a stale copy.
+        # No version to pin — keep the unpinned invitation.
+        if version:
+            return [
+                "uv",
+                "tool",
+                "install",
+                "--force",
+                "--refresh-package",
+                "local-operator",
+                f"local-operator=={version}",
+            ], None
         return ["uv", "tool", "install", "--force", "local-operator"], None
     if kind is InstallKind.PIPX:
         return ["pipx", "upgrade", "local-operator"], None
@@ -4535,14 +4598,18 @@ def installer_argv(
     kind: InstallKind,
     *,
     executable: str | None = None,
+    version: str = "",
 ) -> list[str]:
     """The installer's argv alone, for callers that only print or compare it.
 
     Spawning callers use :func:`installer_invocation`: printing an argv is a
     legitimate use of the list on its own, running one is not, because the pip
     path's argv[0] is a label and needs the interpreter beside it.
+
+    ``version`` is forwarded to :func:`installer_invocation`; the uv kind turns
+    a resolved version into the 2026-09-26 ``==`` pin.
     """
-    return installer_invocation(kind, executable=executable)[0]
+    return installer_invocation(kind, executable=executable, version=version)[0]
 
 
 def installer_label(kind: InstallKind) -> str:
@@ -4653,8 +4720,10 @@ def perform_upgrade(
     touches the pointer.
 
     Ordering is deliberate and load-bearing: the marker is written only after
-    the installer has exited 0, because its mtime is the signal a runtime uses
-    to decide the install has settled.
+    the installer has exited 0 and — on the generation path — the built tree's
+    own metadata agrees with the announced version (see
+    :func:`install_into_generation` step 2), because its mtime is the signal a
+    runtime uses to decide the install has settled.
     """
     detected = kind if kind is not None else install_kind(prefix=prefix, executable=executable)
     if detected is InstallKind.EDITABLE:
@@ -4705,7 +4774,15 @@ def perform_upgrade(
                 for line in prune_notice_lines(plan):
                     logger.info("%s", line)
         return target
-    argv, image = installer_invocation(detected, executable=executable)
+    argv, image = installer_invocation(
+        detected,
+        executable=executable,
+        # uv takes the pin here too (2026-09-26, the stale-index incident): a
+        # platform without the generation layout must not be the one place
+        # where uv installs a different version than the fresh check resolved.
+        # pip and pipx are deliberately unchanged — this change is uv-scoped.
+        version=target if detected is InstallKind.UV_TOOL else "",
+    )
     if run is not None:
         # The injected runner sees the argv alone: it is a seam for tests and for
         # callers that observe the installer, not a way to spawn anything.
