@@ -80,13 +80,42 @@ async def test_bare_stop_ends_the_session_and_keeps_the_transcript() -> None:
         receipt = [n for n in _notices(app) if n.startswith("stopped")]
         assert receipt, _notices(app)
         assert "/resume sess reopens it" in receipt[0]
-        # The next prompt names the way back rather than "still starting".
+        # The next prompt names the way back rather than "still starting", and
+        # — under the boundary rule — its row KEEPS the message with `edit`
+        # alone offered (there is no session to send into; the old shape left
+        # the text only in the composer history).
         app._submit_prompt("again?")
         await pilot.pause()
         assert session.prompts == []
-        assert _notices(app)[-1] == (
+        row = _notices(app)[-1]
+        assert row == (
             "this session was stopped — your message was not sent; /resume sess reopens it"
+            " — edit e"
+        ), row
+        assert "send again" not in row, row
+        assert "again?" in [
+            b.text() for b in app.query_one(TranscriptView).blocks() if isinstance(b, UserBlock)
+        ], "the row for the message was withdrawn"
+
+        # `edit` is the way back the row offers, and it works: the payload
+        # loads the composer behind the seam the restore funnel documents.
+        from local_operator.tui.app import RESTORE_SEAM
+        from local_operator.tui.widgets.editor import Editor
+
+        notice_block = next(
+            b
+            for b in app.query_one(TranscriptView).blocks()
+            if isinstance(b, NoticeBlock) and getattr(b, "_text", "") == row
         )
+        notice_block.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        for _ in range(100):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if app.query_one(Editor).text:
+                break
+        assert app.query_one(Editor).text == "again?" + RESTORE_SEAM, app.query_one(Editor).text
 
 
 @pytest.mark.asyncio

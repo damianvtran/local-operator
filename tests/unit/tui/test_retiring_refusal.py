@@ -52,7 +52,6 @@ from local_operator.tui.app import (
     _retiring_notice_text,
 )
 from local_operator.tui.events import UserMessageStart
-from local_operator.tui.session_presentation import DraftRecoveryNotice
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import (
     QUEUED_ROW_TEXT,
@@ -123,44 +122,55 @@ async def _boot(pilot: Any, app: OperatorApp) -> Editor:
     return editor
 
 
-async def _send(pilot: Any, editor: Editor, text: str) -> None:
+async def _send(pilot: Any, app: OperatorApp, editor: Editor, text: str) -> None:
+    """Type + Enter, then wait for the refusal to land on its failure record.
+
+    Under the boundary rule the landing is NOT the composer refilling (the
+    superseded preference) — the payload stays on the record — so the record
+    itself is what says the prompt worker has settled.
+    """
     editor.text = text
     await pilot.pause()
     await pilot.press("enter")
-    # The refusal is painted by the prompt worker, after it settles.
     for _ in range(100):
         await pilot.pause()
         await asyncio.sleep(0.01)
-        if editor.text:
+        if app._interaction.turn.failed_sends:
             return
 
 
 @pytest.mark.asyncio
-async def test_a_drain_refusal_hands_the_message_back_and_retracts_its_row() -> None:
-    """D1/U1: the text survives, and nothing claims it was delivered."""
+async def test_a_drain_refusal_keeps_its_row_and_offers_the_two_verbs() -> None:
+    """D1/U1 under the boundary rule: the row survives and the fate is stated.
+
+    SUPERSEDES the withdraw-and-return this cell used to pin. The refusal is
+    real, but the message is the user's and keeps its place; what the round-3
+    findings still own is the SENTENCE — recomposed by the same writer
+    (``_retiring_notice_text``) with the composer claim swapped for the fact
+    that is now true ("Your message was not sent") — and the notice adds the two
+    verbs, so the payload moves only when the user says so (``edit``).
+    """
     session = _retiring_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "now summarise the build staleness fix")
+        await _send(pilot, app, editor, "now summarise the build staleness fix")
 
-        assert editor.text == "now summarise the build staleness fix" + RESTORE_SEAM, (
-            "text was dropped, or came back without the seam that keeps the next "
-            "thought separable"
-        )
-        assert _user_texts(app) == [], "a row stood for a message nobody received"
+        assert editor.text == "", "the payload returned to the composer by itself"
+        assert _user_texts(app) == [
+            "now summarise the build staleness fix"
+        ], "the row for a refused message was withdrawn (superseded preference)"
 
         notices = _notices(app)
         assert len(notices) == 1, [n._text for n in notices]
-        # THE PRODUCT COMPOSES THIS: identical to the writer the viewer calls,
-        # and the properties the round-3 copy finding turned on are pinned
-        # separately so a future edit has to argue with them (design round 3,
-        # D1): one dash, and a terminal clause — never the word `composer`
-        # alone on the last row at 60 columns.
-        assert notices[0]._text == _retiring_notice_text(RuntimeRetiring())
-        assert notices[0]._text.count("\u2014") == 1, notices[0]._text
-        assert notices[0]._text.endswith(RuntimeRetiring.TAIL), notices[0]._text
-        assert "Your message is back in the composer" in notices[0]._text
+        # THE PRODUCT COMPOSES THIS: the sentence is identical to the writer the
+        # viewer calls, and the composer claim it used to carry is now the fact
+        # the boundary rule makes true.
+        sentence = _retiring_notice_text(RuntimeRetiring())
+        assert notices[0]._text.startswith(sentence), notices[0]._text
+        assert notices[0]._text.endswith("send again \u23ce · edit e"), notices[0]._text
+        assert "Your message was not sent" in notices[0]._text
+        assert "back in the composer" not in notices[0]._text, notices[0]._text
         # Amber `!`, not the red ✗ of a terminal failure: this state resolves
         # itself and the message cost the user nothing (design round 1, D3).
         # `_token`/`_glyph` are where `NoticeBlock` keeps the resolved kind and
@@ -184,13 +194,16 @@ async def test_an_uncategorised_refusal_from_an_older_runtime_is_recovered_too()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "is the build still moving?")
+        await _send(pilot, app, editor, "is the build still moving?")
 
-        assert editor.text == "is the build still moving?" + RESTORE_SEAM, "text was dropped"
-        assert _user_texts(app) == [], "a row stood for a message nobody received"
+        assert editor.text == "", "the payload returned to the composer by itself"
+        assert _user_texts(app) == [
+            "is the build still moving?"
+        ], "the row for a refused message was withdrawn (superseded preference)"
         notices = _notices(app)
         assert [n._text for n in notices] == [
-            f"{_LEGACY_RETIRING_REFUSAL}. Your message is back in the composer."
+            f"{_LEGACY_RETIRING_REFUSAL}. Your message was not sent."
+            " — send again \u23ce · edit e"
         ], [n._text for n in notices]
 
 
@@ -207,53 +220,55 @@ def test_the_retiring_predicate_answers_the_type_and_the_old_wording() -> None:
 
 
 @pytest.mark.asyncio
-async def test_following_the_refusal_inside_the_window_does_not_stack_rows() -> None:
-    """U1's measurement: two presses used to leave TWO rows for one message.
+async def test_following_the_refusal_does_not_stack_rows_or_seams() -> None:
+    """U1's measurement, restated for the boundary rule.
 
-    The refusals themselves repeat, because the user was told to send it again
-    and the window is the runtime's to close — but each press withdraws its own
-    echo before returning the draft, so the transcript never accumulates rows
-    for messages nobody received.
+    Two presses used to leave TWO rows for one message and, after round 5's fix,
+    a seam per press. Under the boundary rule the composer stays EMPTY after the
+    refusal — the retry lives on the row — so the accumulation surface is the
+    transcript: pressing Enter with nothing to send adds nothing, and the row's
+    own `send again` retires-then-resubmits in one handler (J1), so a second
+    failed attempt lands on the same single row.
 
-    AND WHAT THE COMPOSER DOES, in two corrections. Round 4 (UX U1): this path
-    does NOT park on the second press — it cannot, because the submit clears the
-    editor and the restore always finds it empty and refills. The cell that
-    claimed otherwise ASSIGNED ``editor.text`` before each press, so it never
-    reached the state its comment named; the presses below are real. Round 5
-    (design D1): refilling must not append a seam that is already there, or
-    following the notice's own "send it again" grows the draft by a blank line
-    per press — the composer went from 1 row to 3 and the transcript paid a row
-    for each attempt. So the assertion below is that the composer is EXACTLY the
-    same after every press, which is the cell that fails if the guard is
-    removed.
+    THE SEAM GUARD IS STILL EXERCISED — by `edit` in the next-thought cell
+    below, and by the resend replay in `test_send_failure_row.py`.
     """
     session = _retiring_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "the build is moving")
-        assert editor.text == "the build is moving" + RESTORE_SEAM, editor.text
+        await _send(pilot, app, editor, "the build is moving")
+        assert editor.text == "", editor.text
+        assert _user_texts(app) == ["the build is moving"]
+        assert len(_notices(app)) == 1
 
-        # Pressed for real: the composer already holds the returned draft, so
-        # this IS the operator following "send it again" — and the seam must not
-        # accumulate (design round 5, D1). The submit's own strip takes the
-        # trailing seam out of the MESSAGE; the accepted snapshot keeps it, and
-        # the restore is what must not add a second.
+        # Pressed for real with an empty composer: nothing to send, nothing may
+        # grow (the superseded shape refilled the composer, and this press is
+        # how the old cell made it accumulate).
         for _ in range(2):
             await pilot.press("enter")
-            for _ in range(100):
+            for _ in range(20):
                 await pilot.pause()
                 await asyncio.sleep(0.01)
-                if editor.text == "the build is moving" + RESTORE_SEAM:
-                    break
-            assert (
-                editor.text == "the build is moving" + RESTORE_SEAM
-            ), "the seam accumulated: " + repr(editor.text)
-            assert not [
-                b for b in _blocks(app) if isinstance(b, DraftRecoveryNotice)
-            ], "this path cannot park: the refill always wins"
+        assert editor.text == "", editor.text
+        assert _user_texts(app) == ["the build is moving"], _user_texts(app)
+        assert len(_notices(app)) == 1, [n._text for n in _notices(app)]
 
-        assert _user_texts(app) == [], _user_texts(app)
+        # And the row's own route: `send again` on the notice.
+        (notice,) = _notices(app)
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(100):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if app._interaction.turn.failed_sends:
+                break
+        assert _user_texts(app) == ["the build is moving"], (
+            "the replay's own failure stacked a second row",
+            _user_texts(app),
+        )
+        assert len(_notices(app)) == 1, [n._text for n in _notices(app)]
         assert session.prompts == [], "a refused message reached the runtime"
 
 
@@ -297,8 +312,23 @@ async def test_the_next_thought_cannot_weld_onto_the_returned_draft() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "summarise the build staleness fix")
-        assert editor.text.endswith(RESTORE_SEAM), editor.text
+        await _send(pilot, app, editor, "summarise the build staleness fix")
+        assert editor.text == ""
+
+        # The restore is now the user's deliberate act (`e` on the notice) —
+        # and it still lands behind the seam, because the weld hazard is
+        # unchanged in kind: a returned draft and the next thought must stay
+        # separable.
+        (notice,) = _notices(app)
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        for _ in range(100):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if editor.text:
+                break
+        assert editor.text == "summarise the build staleness fix" + RESTORE_SEAM, editor.text
 
         await pilot.press("a", "n", "d")
         assert (
@@ -506,15 +536,16 @@ async def test_the_refusal_face_agrees_with_the_notice_on_a_pre_key_runtime(
         monkeypatch.setattr(app, "_start_runtime_engage", lambda *, reason: None)
         app._on_runtime_draining(phrase)
         await pilot.pause()
-        await _send(pilot, editor, "a message sent mid-drain")
+        await _send(pilot, app, editor, "a message sent mid-drain")
 
         rows = [n._text for n in _notices(app)]
         assert rows[0] == SIGNAL_DRAIN_NOTICE, rows
-        assert rows[1] == _retiring_notice_text(refusal), rows
+        assert rows[1].startswith(_retiring_notice_text(refusal)), rows
+        assert rows[1].endswith("send again \u23ce · edit e"), rows
         assert rows[1].startswith(RuntimeRetiring.HEAD_SIGNALLED), rows
         assert all("newer build" not in text for text in rows), rows
-        assert editor.text == "a message sent mid-drain" + RESTORE_SEAM, editor.text
-        assert _user_texts(app) == [], _user_texts(app)
+        assert editor.text == "", editor.text
+        assert _user_texts(app) == ["a message sent mid-drain"], _user_texts(app)
 
 
 @pytest.mark.asyncio

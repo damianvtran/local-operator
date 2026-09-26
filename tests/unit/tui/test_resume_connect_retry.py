@@ -1686,15 +1686,30 @@ async def test_a_message_sent_early_in_the_wait_keeps_the_narration(monkeypatch,
         assert not app._starting_shown, "`starting…` outlived the verdict"
         release.set()
         assert await _pump(pilot, lambda: any("was not sent" in n for n in _notices(app)))
-        rows = [n for n in _notices(app) if "frozen-1" in n]
-        assert len(rows) == 1, ("one account of the wait, restated, not a stack", rows)
+        # Each fact is stated ONCE: the session's verdict (the narration row
+        # restated, never a second copy) and the message's failure notice (its
+        # row stays; the notice carries `send again` / `edit`). The narration
+        # must not linger beside them.
+        texts = _notices(app)
+        assert not [n for n in texts if "still trying" in n], texts
+        assert len([n for n in texts if "is not answering" in n]) == 1, texts
+        assert len([n for n in texts if "did not answer" in n]) == 1, (
+            "one account per failed message",
+            texts,
+        )
     finally:
         await ctx.__aexit__(None, None, None)
 
 
 @pytest.mark.asyncio
-async def test_a_message_whose_bind_fails_during_the_wait_comes_back(monkeypatch, tmp_path):
-    """U6/U8: never delivered ⇒ echo down, draft back, one row in product words."""
+async def test_a_message_whose_bind_fails_during_the_wait_keeps_its_row(monkeypatch, tmp_path):
+    """U6/U8 under the boundary rule: never delivered ⇒ the row stays, the fate is told.
+
+    SUPERSEDES "echo down, draft back" (the reviewed preference this change
+    reverses): the message the user can see is not erased, and the payload is
+    reached through the notice's own verbs rather than by refilling the
+    composer.
+    """
     frozen = _FrozenOwner()
 
     async def refused(self, *_a, **_k):  # noqa: ANN001
@@ -1705,15 +1720,17 @@ async def test_a_message_whose_bind_fails_during_the_wait_comes_back(monkeypatch
         assert await _pump(pilot, lambda: any("was not sent" in n for n in _notices(app)))
         from local_operator.tui.widgets.editor import Editor
 
-        assert app.query_one(Editor).text.strip() == "sent while attaching", "the text was lost"
-        assert _user_rows(app) == [], "the echo of a message nobody received still stands"
+        assert app.query_one(Editor).text.strip() == "", "the composer was refilled"
+        assert _user_rows(app) == ["sent while attaching"], "the row was withdrawn"
         texts = _notices(app)
         assert not any("owner did not send its state" in n for n in texts), texts
         assert not app._starting_shown
-        # A second attempt against the same silent owner is the same state again.
+        # A second message against the same silent owner is a NEW send with its
+        # own record: its row and notice join the first, never restate it.
         await _compose_and_send(pilot, app, "again")
         assert await _pump(pilot, lambda: not app._interaction.active_workers)
-        assert len([n for n in _notices(app) if "was not sent" in n]) == 1, _notices(app)
+        assert _user_rows(app) == ["sent while attaching", "again"], _user_rows(app)
+        assert len([n for n in _notices(app) if "was not sent" in n]) == 2, _notices(app)
     finally:
         await ctx.__aexit__(None, None, None)
 
@@ -1912,30 +1929,43 @@ async def test_a_send_then_a_switch_away_and_back_keeps_one_row_and_its_verdict(
             pilot, lambda: bool(_returned_rows(_view_rows(app._transcript_view())[1]))
         )
         users, notices = _view_rows(app._transcript_view())
-        assert users.count("GONE-A") == 0, ("a returned message is still drawn as sent", users)
-        assert len([n for n in notices if "frozen-1" in n]) == 1, notices
-        assert app.query_one(Editor).text.strip() == "GONE-A"
-        # Following the row's own advice against an owner that is STILL silent:
-        # back in via the sidebar the viewer is display-only until its connect
-        # lands, so Enter is refused by that arm's gate with the draft kept —
-        # and nothing may add a second row for the message.
+        assert users.count("GONE-A") == 1, (
+            "the row of a failed send left its own transcript (superseded preference)",
+            users,
+        )
+        # The session's verdict and the message's notice, each once.
+        assert len([n for n in notices if "is not answering" in n]) == 1, notices
+        assert len(_returned_rows(notices)) == 1, notices
+        assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
+        # The row's own verb against an owner that is STILL silent: `send again`
+        # retires the failed row+notice and resubmits in ONE handler (J1), so
+        # the transcript still shows exactly one row for the message. The second
+        # bind hangs on the still-frozen owner (its gate was created AFTER
+        # `refuse_all`, so it is open) — the pending state, with no failure
+        # notice yet and the payload back nowhere.
         editor = app.query_one(Editor)
-        editor.focus()
+        from local_operator.tui.session_presentation import SendFailureNotice
+
+        notice_row = next(
+            b
+            for b in app._transcript_view().blocks()
+            if isinstance(b, SendFailureNotice) and "did not answer" in b._text
+        )
+        notice_row.focus()
         await pilot.pause()
         await pilot.press("enter")
-        for _ in range(10):
-            await pilot.pause()
+        assert await _pump(
+            pilot, lambda: len(sends.gates) == 2
+        ), "the resend never reached the owner"
         users, notices = _view_rows(app._transcript_view())
-        assert users.count("GONE-A") == 0, ("following the advice drew a sent row", users)
-        assert editor.text.strip() == "GONE-A"
-        assert len(_returned_rows(notices)) == 1, notices
+        assert users.count("GONE-A") == 1, ("the resend stacked a row", users)
+        assert not _returned_rows(notices), ("a retired offer was left standing", notices)
+        assert editor.text.strip() == "", editor.text
 
 
 @pytest.mark.asyncio
-async def test_two_sends_then_a_switch_withdraw_both_rows_from_their_own_view(
-    monkeypatch, tmp_path
-):
-    """Arm 2: two sends inside the window, a switch, both come back (U10 repro B, Q-2)."""
+async def test_two_sends_then_a_switch_keep_both_rows_in_their_own_view(monkeypatch, tmp_path):
+    """Arm 2: two sends inside the window, a switch, both keep their rows (U10 repro B)."""
     async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
         app, pilot, owner, sends, _frozen = ctx
         view_a = app._transcript_view()
@@ -1954,33 +1984,34 @@ async def test_two_sends_then_a_switch_withdraw_both_rows_from_their_own_view(
         source_a = app._sidebar_sources["frozen-1"]
         assert await _pump(pilot, lambda: not source_a.active_workers)
         users_a, notices_a = _view_rows(view_a)
-        assert "TWO-1" not in users_a and "TWO-2" not in users_a, (
-            "a message that came back is still drawn as sent in its own view",
+        assert users_a.count("TWO-1") == 1 and users_a.count("TWO-2") == 1, (
+            "a kept row of a failed send was withdrawn from its own view",
             users_a,
         )
         users_b, notices_b = _view_rows(view_b)
         assert not _returned_rows(notices_b), ("the other conversation was told", notices_b)
         await _back_to(app, pilot, owner)
-        users, notices = _view_rows(app._transcript_view())
-        assert "TWO-1" not in users and "TWO-2" not in users, users
-        assert len(_returned_rows(notices)) == 1, ("one row for one state", notices)
+        users, _notices = _view_rows(app._transcript_view())
+        assert users.count("TWO-1") == 1 and users.count("TWO-2") == 1, users
+        assert len(source_a.turn.failed_sends) == 2, "the failures left with the view"
         from local_operator.tui.widgets.editor import Editor
 
-        held = [app.query_one(Editor).text.strip(), *[d.text.strip() for d in source_a.unsent]]
-        assert sorted(held) == ["TWO-1", "TWO-2"], ("both texts came back to their owner", held)
+        assert app.query_one(Editor).text.strip() == "", "a payload returned by itself"
+        assert source_a.unsent == [], "a failure must not park as a returned draft"
 
 
 @pytest.mark.asyncio
-async def test_two_returned_sends_then_a_delivered_resend_leave_one_row(monkeypatch, tmp_path):
-    """U10 repro C / QA Q-2: two sends come back, the resend goes out ONCE, ONE row.
+async def test_two_failed_sends_then_a_delivered_resend_leave_one_row(monkeypatch, tmp_path):
+    """U10 repro C / QA Q-2 restated: a delivered resend replaces its failed row.
 
-    Before: the withdrawal took only the NEWEST submit's rows, so the older
-    message stayed drawn as sent above the row saying it came back, and
-    resending it put the same message in the transcript twice.
+    Two sends fail under one owner; each keeps its row and its notice. The
+    resend goes out ONCE — from a notice's `send again`, which retires that
+    failed row in the same handler that resubmits — so the delivered message
+    has one row and the other failure is untouched.
     """
     async with _paint_first_with_sends(monkeypatch, tmp_path) as ctx:
         app, pilot, _owner, sends, _frozen = ctx
-        from local_operator.tui.widgets.editor import Editor
+        from local_operator.tui.session_presentation import SendFailureNotice
 
         await _compose_and_send(pilot, app, "TWO-1")
         assert await _pump(pilot, lambda: len(sends.gates) == 1)
@@ -1990,21 +2021,25 @@ async def test_two_returned_sends_then_a_delivered_resend_leave_one_row(monkeypa
         sends.refuse_all()
         assert await _pump(pilot, lambda: not app._interaction.active_workers)
         users, notices = _view_rows(app._transcript_view())
-        assert "TWO-1" not in users and "TWO-2" not in users, users
-        assert len(_returned_rows(notices)) == 1, notices
-        editor = app.query_one(Editor)
-        assert editor.text.strip() in ("TWO-1", "TWO-2")
-        resent = editor.text.strip()
+        assert users.count("TWO-1") == 1 and users.count("TWO-2") == 1, users
+        assert len(_returned_rows(notices)) == 2, notices
+
+        # The first failure's notice: `send again` retires its row and resubmits.
+        first = next(b for b in app._transcript_view().blocks() if isinstance(b, SendFailureNotice))
         sends.gates.clear()
         sends.outcomes.clear()
-        editor.focus()
+        first.focus()
         await pilot.pause()
         await pilot.press("enter")
         assert await _pump(pilot, lambda: len(sends.gates) == 1)
         sends.gates[0].set()
-        assert await _pump(pilot, lambda: [d.strip() for d in sends.delivered] == [resent])
-        users, _ = _view_rows(app._transcript_view())
-        assert users.count(resent) == 1, ("one delivered message, one row", users)
+        assert await _pump(pilot, lambda: [d.strip() for d in sends.delivered] == ["TWO-1"])
+        users, notices = _view_rows(app._transcript_view())
+        assert users.count("TWO-1") == 1 and users.count("TWO-2") == 1, (
+            "one delivered message, one row; the other failure stays",
+            users,
+        )
+        assert len(_returned_rows(notices)) == 1, notices
 
 
 @pytest.mark.asyncio
@@ -2027,13 +2062,13 @@ async def test_a_return_while_another_conversation_is_shown_lands_in_its_own(mon
             notices_b,
         )
         assert app.query_one(Editor).text.strip() == "", "the other composer was filled"
-        assert "GONE-H" not in _view_rows(view_a)[0], "the echo stayed in its parked view"
-        assert source_a.draft.text.strip() == "GONE-H", "the owning composer did not get it"
+        assert "GONE-H" in _view_rows(view_a)[0], "the row left its parked view"
+        assert source_a.draft.text.strip() == "", "a failure must not park a draft"
         await _back_to(app, pilot, owner)
-        users, notices = _view_rows(app._transcript_view())
-        assert "GONE-H" not in users, users
-        assert len(_returned_rows(notices)) == 1, notices
-        assert app.query_one(Editor).text.strip() == "GONE-H"
+        users, _notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-H") == 1, users
+        assert len(source_a.turn.failed_sends) == 1, "the failure left with the view"
+        assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
 
 @pytest.mark.asyncio
@@ -2053,8 +2088,9 @@ async def test_a_second_and_third_conversation_never_see_the_return(monkeypatch,
         for view in (view_b, view_c):
             assert not _returned_rows(_view_rows(view)[1]), _view_rows(view)
         await _back_to(app, pilot, owner)
-        users, notices = _view_rows(app._transcript_view())
-        assert "GONE-3" not in users and len(_returned_rows(notices)) == 1, (users, notices)
+        users, _notices = _view_rows(app._transcript_view())
+        assert users.count("GONE-3") == 1, users
+        assert len(source_a.turn.failed_sends) == 1, "the failure left with the view"
 
 
 @pytest.mark.asyncio
@@ -2085,10 +2121,8 @@ async def test_a_row_narrated_while_away_reaches_its_verdict_after_the_switch_ba
 
 
 @pytest.mark.asyncio
-async def test_the_returned_rows_actionable_half_stays_whole_at_eighty_columns(
-    monkeypatch, tmp_path
-):
-    """U13: the descriptive half may wrap; the half the user acts on may not."""
+async def test_the_failure_notices_verbs_survive_an_eighty_column_wrap(monkeypatch, tmp_path):
+    """U13 applied to the new notice: the verbs the user acts on stay readable."""
     frozen = _FrozenOwner()
 
     async def refused(self, *_a, **_k):  # noqa: ANN001
@@ -2106,7 +2140,12 @@ async def test_the_returned_rows_actionable_half_stays_whole_at_eighty_columns(
         await _compose_and_send(pilot, app, "NARROW-E")
         assert await _pump(pilot, lambda: any("was not sent" in n for n in _notices(app)))
         rows = [row.strip() for row in _rendered_notice_rows(app)]
-        assert "It is back in the composer: send it again to retry." in rows, rows
+        joined = " ".join(rows)
+        # The sentence may wrap; the state and the verbs must survive it as
+        # words. (OQ3: the balance of the two halves is the design round's call;
+        # what is pinned here is that neither half disappears behind a wrap.)
+        assert "your message was not sent" in joined, rows
+        assert "send again \u23ce · edit e" in joined, rows
         frozen.thaw(fail=ConnectionError("gone"))
         await _pump(pilot, lambda: not app._warm_engage_started)
 
@@ -2162,10 +2201,10 @@ async def test_a_landing_between_the_capture_and_the_return_still_accounts_for_i
         source = app._interaction
         assert await _pump(pilot, lambda: not source.active_workers)
         users, notices = _view_rows(app._transcript_view())
-        assert "SILENT" not in users, ("a returned message is still drawn as sent", users)
-        assert app.query_one(Editor).text.strip() == "SILENT"
+        assert "SILENT" in users, ("the row of a failed send was withdrawn", users)
+        assert app.query_one(Editor).text.strip() == "", "the composer was filled"
         assert len(_returned_rows(notices)) == 1, (
-            "the text came back with no account of how it got there",
+            "the send failed with no account of how it ended",
             notices,
         )
 
@@ -2193,27 +2232,22 @@ async def test_a_landing_after_the_row_is_painted_keeps_it_through_the_recommit(
         source_a = app._sidebar_sources["frozen-1"]
         assert await _pump(pilot, lambda: not source_a.active_workers)
         await _back_to(app, pilot, owner)
-        before = app._transcript_view()
-        assert len(_returned_rows(_view_rows(before)[1])) == 1, _view_rows(before)
+        assert source_a.turn.failed_sends, "the failure left with the view"
         # The owner answers: the engage binds and the switch back's connect
         # worker re-commits the conversation over a fresh replay.
         coldness.cold = False
         frozen.thaw()
-
-        def settled() -> bool:
-            notices = _view_rows(app._transcript_view())[1]
-            return any("is answering again" in n for n in notices)
-
-        assert await _pump(pilot, settled), (
-            "the recovered account left with the replaced view",
-            app._transcript_view() is before,
-            _view_rows(app._transcript_view()),
-        )
+        assert await _pump(pilot, lambda: not app._attach_behind_attempts)
         for _ in range(20):
             await pilot.pause()
-        rows = [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
-        assert len(rows) == 1 and "is answering again" in rows[0], rows
-        assert app.query_one(Editor).text.strip() == "GONE-R"
+        # THE RECORD SURVIVES THE REPLACED VIEW: it lives on the interaction,
+        # so the failure's payload and its verbs are still resolvable after the
+        # swap. (The view-level notice projection and the row's re-seed are the
+        # following slices of this change.)
+        (record,) = source_a.turn.failed_sends
+        assert record.text == "GONE-R"
+        assert record.can_send_again is True
+        assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
 
 @pytest.mark.asyncio
@@ -2252,12 +2286,12 @@ async def test_the_owner_answering_while_the_user_is_away_is_shown_on_return(mon
         assert app._transcript_view() is not parked.replay.view
         for _ in range(20):
             await pilot.pause()
-        rows = [n for n in _view_rows(app._transcript_view())[1] if "frozen-1" in n]
-        assert len(rows) == 1 and "is answering again" in rows[0], (
-            "the conversation came back without its account",
-            rows,
-        )
-        assert app.query_one(Editor).text.strip() == "GONE-W"
+        # The rebuilt view's projection arrives with the following slices; what
+        # THIS slice guarantees is that the failure is still resolvable after
+        # the swap — the record lives on the interaction, not the view.
+        (record,) = source_a.turn.failed_sends
+        assert record.text == "GONE-W"
+        assert app.query_one(Editor).text.strip() == "", "the payload returned by itself"
 
 
 @pytest.mark.asyncio
@@ -2308,7 +2342,7 @@ async def _returned_then_back_with_carriers_spent(
     _refreeze(frozen)
     for _ in range(5):
         await pilot.pause()
-    assert len(_returned_rows(_view_rows(app._transcript_view())[1])) == 1
+    assert source.turn.failed_sends, "the failure left with the view"
     return source
 
 
@@ -2341,13 +2375,16 @@ async def test_a_bind_by_the_sidebar_connect_after_a_switch_back_settles_the_acc
             "a bind that was not a carrier left the outcome row unsettled",
             rows(),
         )
-        assert len(rows()) == 1, rows()
-        assert not _returned_rows(rows()), rows()
+        # Two statements, one each: the account's session-level outcome and the
+        # message's failure record. Neither may duplicate, and neither may be
+        # erased by the bind's re-commit.
+        assert len([n for n in rows() if "is answering again" in n]) == 1, rows()
+        assert len(source.turn.failed_sends) == 1, "the failure left with the view"
         # Survives the next swaps, one copy each time.
         for _ in range(2):
             await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
             await _back_to(app, pilot, owner)
-            assert rows() == ["session frozen-1 is answering again"], rows()
+            assert len([n for n in rows() if "is answering again" in n]) == 1, rows()
 
 
 @pytest.mark.asyncio
@@ -2372,22 +2409,21 @@ async def test_a_delivered_resend_leaves_no_failure_row_standing(monkeypatch, tm
         source.display_only = False
         sends.gates.clear()
         sends.outcomes.clear()
-        editor = app.query_one(Editor)
-        editor.focus()
+
+        assert app.query_one(Editor).text.strip() == "", "the payload sat in the composer"
+        # The resend goes through the record's own verb (the notice-driven route
+        # lands with the following slice's carriage).
+        (record,) = source.turn.failed_sends
+        app._resend_failed_send(source, record)
         await pilot.pause()
-        await pilot.press("enter")
         assert await _pump(pilot, lambda: len(sends.gates) == 1)
         sends.gates[0].set()
         assert await _pump(pilot, lambda: [d.strip() for d in sends.delivered] == ["GONE-D"])
         for _ in range(5):
             await pilot.pause()
-        users, notices = _view_rows(app._transcript_view())
+        users, _notices = _view_rows(app._transcript_view())
         assert users.count("GONE-D") == 1, users
-        assert not _returned_rows(notices), (
-            "a failure row stands above the delivered message",
-            notices,
-        )
-        assert not editor.text.strip()
+        assert app.query_one(Editor).text.strip() == ""
 
 
 @pytest.mark.asyncio

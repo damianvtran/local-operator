@@ -22,6 +22,7 @@ from local_operator.tui.session_interaction import SessionDraft
 from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.transcript import (
     NoticeBlock,
+    NoticeKind,
     TranscriptBlock,
     TranscriptView,
 )
@@ -294,7 +295,38 @@ class OlderHistoryNotice(NoticeBlock, can_focus=True):
         self.action_older()
 
 
-class DraftRecoveryNotice(NoticeBlock, can_focus=True):
+class HeldPayloadNotice(NoticeBlock, can_focus=True):
+    """Shared base for the rows that hold a payload a send could not consume.
+
+    Two rows share one shape — an offer that says WHICH payload it affects,
+    names the key that operates it, and is RESTATED in place rather than
+    appended again (one payload never grows a second row).
+    :class:`DraftRecoveryNotice` offers a parked draft back to the composer;
+    :class:`SendFailureNotice` carries the fate of a painted message whose send
+    failed, with its resolution verbs.
+
+    The conventions are the transcript's, not this row's invention: focusable
+    with the ``interactive-notice`` styling, click stops at the row (a click is
+    aimed AT the row, not past it), and Enter is the primary verb — the same
+    shape :class:`OlderHistoryNotice` established for a row whose copy would
+    otherwise have to recite its own controls.
+    """
+
+    def __init__(self, text: str, kind: NoticeKind, *, source_token: str) -> None:
+        super().__init__(text, kind)
+        self.source_token = source_token
+        self.add_class("interactive-notice")
+
+    def action_default(self) -> None:
+        """Enter's verb. Subclasses own it; the base has no primary offer."""
+        raise NotImplementedError
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.action_default()
+
+
+class DraftRecoveryNotice(HeldPayloadNotice):
     """The offer to put an undelivered draft back in the composer.
 
     Reached when the composer is NOT empty at the moment a send fails — the
@@ -336,10 +368,8 @@ class DraftRecoveryNotice(NoticeBlock, can_focus=True):
             self.notice = notice
 
     def __init__(self, source_token: str, draft: SessionDraft) -> None:
-        super().__init__(self._label_for(draft), "note")
-        self.source_token = source_token
+        super().__init__(self._label_for(draft), "note", source_token=source_token)
         self.draft = draft
-        self.add_class("interactive-notice")
 
     @staticmethod
     def _label_for(draft: SessionDraft) -> str:
@@ -374,9 +404,75 @@ class DraftRecoveryNotice(NoticeBlock, can_focus=True):
     def action_restore(self) -> None:
         self.post_message(self.Requested(self))
 
-    def on_click(self, event: events.Click) -> None:
-        event.stop()
+    def action_default(self) -> None:
         self.action_restore()
+
+
+class SendFailureNotice(HeldPayloadNotice):
+    """The fate of a painted message whose send failed, with its two verbs.
+
+    THE ROW THAT REPLACES "the message is back in the composer". Under the
+    boundary rule a failure raised after the row was painted keeps the row on
+    the transcript, and this notice states what happened beneath it plus the
+    two ways out: ``send again`` replays the payload under the ordinary submit
+    path, ``edit`` returns it through the existing restore funnel. Both were
+    previously automatic (the withdraw-and-restore branches) and are now the
+    user's deliberate choice — the payload has one home, and it is this row's
+    record.
+
+    RENDERED FROM THE RECORD, never from the error: the record (``FailedSend``
+    in ``session_interaction``) is what the verbs act on, it is what a resend
+    re-arms, and it is why a second failure restates THIS row in place rather
+    than appending a second one below it.
+
+    ONE ACTION SET, TWO SHAPES. A class with no session to send into (a stopped
+    viewer, a bare ``/stop``) offers ``edit`` alone and Enter means edit there:
+    an Enter that answered with nothing would be a focus stop that lies.
+    """
+
+    BINDINGS = [
+        # Enter owns the PRIMARY verb: `send again` wherever the class allows
+        # it, `edit` where there is no session to send into (see action_resolve).
+        Binding("enter", "resolve", "Send again", show=False),
+        Binding("e", "edit", "Edit", show=False),
+    ]
+
+    class Requested(Message):
+        """One of the notice's verbs, by name: ``"send_again"`` or ``"edit"``."""
+
+        def __init__(self, notice: SendFailureNotice, action: str) -> None:
+            super().__init__()
+            self.notice = notice
+            self.action = action
+
+    def __init__(self, source_token: str, record: Any) -> None:
+        super().__init__(self._label_for(record), record.kind, source_token=source_token)
+        self.record = record
+
+    @staticmethod
+    def _label_for(record: Any) -> str:
+        """``<the class's sentence> — send again ⏎ · edit e``.
+
+        The sentence states the fate and the cause (it is the class's own copy,
+        with no composer claim — the payload is not in the composer under the
+        boundary rule); the keys are last because they are the part no user can
+        discover from the pixels, the same reason ``DraftRecoveryNotice`` ends
+        its label with ``— enter``.
+        """
+        controls = "send again ⏎ · edit e" if record.can_send_again else "edit e"
+        return f"{record.sentence} — {controls}"
+
+    def action_resolve(self) -> None:
+        if self.record.can_send_again:
+            self.post_message(self.Requested(self, "send_again"))
+        else:
+            self.post_message(self.Requested(self, "edit"))
+
+    def action_edit(self) -> None:
+        self.post_message(self.Requested(self, "edit"))
+
+    def action_default(self) -> None:
+        self.action_resolve()
 
 
 @dataclass
