@@ -347,7 +347,11 @@ class Team(BaseModel):
 
 
 def escalation_preamble(reports_to: str) -> str:
-    """The chain-of-command line stamped on every launch below depth 1 (BEN-7-D4).
+    """The chain-of-command line for a team launch or a launch below depth 1.
+
+    Stamped on every ``team:`` launch at ANY depth — a depth-1 lead reports to
+    the top session and needs the rule as much as a depth-3 worker — and on
+    every plain launch at depth >= 2 inside a team lineage (BEN-7-D4).
 
     One source of truth for the no-push / no-secret / escalate rule. It is a
     prompt-level rule, not enforcement: session-wide auto-approve reaches

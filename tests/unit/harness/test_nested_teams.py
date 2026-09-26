@@ -11,6 +11,8 @@ BEN-7 decisions D1-D4 and D7, scored against BEN-1 S3 gates N0-N3:
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -241,6 +243,41 @@ async def test_the_recorded_role_is_team_prefixed(tmp_path, teams):
     assert job is not None and job.agent_role == "team:pod"
     node = root.subagent_comms.node(job_id)
     assert node is not None and node.agent_role == "team:pod"
+
+
+@pytest.mark.asyncio
+async def test_a_team_launch_stamps_the_team_prefixed_agent_on_job_and_origin(tmp_path, teams):
+    """The field the S3 N3 scorer keys on, pinned at both write sites.
+
+    ``run_subagent`` rewrites the launch agent to ``team:<name>`` exactly once
+    (subagent.py's target resolution), and that ONE value feeds both the job
+    row and ``mark_session_origin``'s ``agent=`` (the ``origin.json`` the bench
+    reads). Pinning both stops a future edit from stamping the bare role on
+    disk while the row says the team — the silent-fallback shape N3 exists to
+    catch — and stops the row drifting from the file the scorer reads.
+    """
+    root = make_root(tmp_path, teams)
+    job_id = subagent_mod.run_subagent(
+        label="lead", prompt="go", parent_session=root, jobs_manager=root.jobs, agent="pod"
+    )
+    job = root.jobs.get(job_id)
+    assert job is not None and job.agent_role == "team:pod"
+
+    comms = root.subagent_comms
+    deadline = asyncio.get_running_loop().time() + 10.0
+    origin_path = None
+    while asyncio.get_running_loop().time() < deadline:
+        session_dir = comms.session_dir_of(job_id)
+        if session_dir is not None and (session_dir / "origin.json").exists():
+            origin_path = session_dir / "origin.json"
+            break
+        await asyncio.sleep(0.01)
+    assert origin_path is not None, "the child never stamped origin.json"
+    origin = json.loads(origin_path.read_text())
+    assert origin["origin"] == "subagent"
+    assert origin["agent"] == "team:pod"
+    assert origin["label"] == "lead"
+    await root.dispose()
 
 
 @pytest.mark.parametrize(
