@@ -16,6 +16,10 @@ edit can break silently:
   directory, leaving exactly ``.execution-lease`` + ``.session.pid`` (measured),
   so ``create`` must tolerate that directory; materialisation is read off
   ``desktop.json``, which only ``create`` writes.
+* **the sidecar hand-off across the ordering** — a session warmed BEFORE its
+  ``create`` still receives the target's ``attachment.json`` on its first turn
+  (the regression the pre-engage pair introduced; the session-layer pin lives
+  beside it in ``tests/unit/session/test_attachment_persistence.py``).
 
 Route tests use a minimal app over the test's own root (``draft_app``, the same
 shape as ``test_desktop_sessions.py``'s ``draft_api``/``move_api``); pool tests
@@ -475,6 +479,94 @@ async def test_create_tolerates_the_warm_residue_directory(draft_app) -> None:
     assert (residue / "desktop.json").is_file()
     # The runtime's own bookkeeping survives untouched: those files are its.
     assert (residue / ".execution-lease").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_session_warmed_before_create_still_receives_the_team(tmp_path) -> None:
+    """The warm-then-create ordering must brief the first turn anyway.
+
+    The WARM constructs the Session on the first keystroke — that is what
+    warming is — while ``create`` writes ``attachment.json`` only on send. A
+    session built BEFORE its create must therefore adopt the sidecar at its
+    first turn, or a new chat launched with a team answers the operator bare
+    (the regression the draft pre-engage pair introduced). The composite is
+    the point: the REAL pool writes the sidecar into the warmed directory, and
+    the REAL session across the turn boundary reads it — neither half's own
+    unit pin can see the ordering by itself.
+    """
+    from datetime import datetime, timezone
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.harness.types import StreamEndEvent
+    from local_operator.prompts_api import build_system_blocks
+    from local_operator.session.goal import GoalState
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+    from local_operator.teams import Team, TeamRegistry
+    from tests.e2e.harness import TEST_MODEL, ScriptedStream
+
+    root = tmp_path.resolve()
+    teams = TeamRegistry(root)
+    teams.save_team(
+        Team(
+            id="t-lopdev",
+            name="lopdev",
+            created_date=datetime.now(timezone.utc),
+            manager="manager",
+            instructions="Ship reviewed work.",
+            project="local-operator",
+        )
+    )
+    pool = DesktopSessions(root)
+    draft_id = await pool.mint_draft(str(root), target={"kind": "team", "name": "lopdev"})
+    goal_state = GoalState()
+
+    def provider() -> list[str]:
+        return build_system_blocks(
+            [],
+            "<skills/>",
+            "test environment",
+            "2026-09-26",
+            team_brief=goal_state.team_brief,
+            agent_brief=goal_state.agent_brief,
+        )
+
+    setattr(provider, "append_only_state", True)
+    session = Session(
+        model=TEST_MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=Transcript(root / "sessions" / draft_id),
+        system_blocks_provider=provider,
+        goal_state=goal_state,
+        agent_registry=AgentRegistry(root),
+        team_registry=teams,
+    )
+    try:
+        # The warm: the session exists, the sidecar does not.
+        assert not (root / "sessions" / draft_id / "attachment.json").exists()
+        # On send, create writes the sidecar INTO the warmed directory.
+        created = await pool.create(
+            str(root), draft_id=draft_id, target={"kind": "team", "name": "lopdev"}
+        )
+        assert created == draft_id
+        assert (root / "sessions" / draft_id / "attachment.json").is_file()
+        # The first turn runs on the already-warm session and adopts it.
+        await session.prompt("kick the team off")
+        assert session.active_team_name == "lopdev"
+        assert "Ship reviewed work." in goal_state.team_brief
+        snapshots = [
+            entry
+            for entry in session._transcript.entries()
+            if entry.payload.get("custom_type") == "system_prefix"
+        ]
+        assert len(snapshots) == 1, "the first turn froze more than one prefix"
+        tail = snapshots[0].payload["details"]["blocks"][-1]
+        assert "<team>" in tail
+        assert "[team: lopdev]" in tail
+    finally:
+        await session.dispose()
+        await pool.close()
 
 
 @pytest.mark.asyncio
