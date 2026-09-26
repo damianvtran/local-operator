@@ -708,6 +708,36 @@ guard notices"; it is an occurrence assertion **with stamped rows**, added to th
 file, which is the only thing that makes any of the numbers above a guard rather
 than a measurement someone has to remember.
 
+**A third shape, and the first whose frame cost is ZERO (2026-07-26, measured at the
+mechanism level rather than through a frame).** Both falsified routes shared one
+assumption — that the numbers must live in a PYDANTIC FIELD to travel from the seam
+to the frame, which is what put them in the serialised schema and so on every row
+that shares that schema. They do not have to. A ``Usage`` accepts an UNDECLARED
+private attribute (``usage._decode_window = (us, tokens)``) and pydantic keeps it
+out of ``model_dump`` entirely: measured on this tree, the assignment succeeds and
+a dump of the same object carries **no key for it at all**. So the seam can hand the
+window forward through the relay for **0 wire bytes**, and the only public field
+pair in the design is the one the status band reads.
+
+Put together, the shape is: the seam stamps a PRIVATE pair early, where the usage
+event is handled rather than in the stream's ``finally`` (the ordering finding —
+``on_usage`` fires while the seam is suspended at ``yield``); the session copies
+that private pair onto ``FrontendUsage`` — the wire subclass — when it builds the
+frame's usage; and the pair is declared ONLY there, because ``jobs[i].usage`` and
+``descendant_usage[j]`` are declared ``Usage`` and therefore drop a
+``FrontendUsage``-only field (review round 1 verified that drop directly). Net
+frame cost: two integers on ``last_usage``, one occurrence, ~48 B against the 168 B
+of slack — and **nothing at all** on the 200 roster rows, which is the multiplier
+that made the first two routes cost 9,648 B and 7,800 B.
+
+That is a hypothesis with a measured mechanism, not a measured frame, and the
+difference is exactly what has been wrong three times in this section. So the first
+thing the next attempt does is still the SAME test: an occurrence assertion with
+stamped rows in ``tests/unit/session/test_attach_frame_size.py`` — a file that
+builds its 200 rows from an unstamped ``Usage`` and therefore stayed green through
+every wrong implementation above. Only after that assertion exists and counts
+one is this shape worth building on.
+
 **The re-priced form, which fits.** Put the two scalars on
 **`FrontendSessionState`** rather than on the per-receipt type: one occurrence per
 frame, ~48 B against 168 B of slack. That is also the HONEST shape rather than a
