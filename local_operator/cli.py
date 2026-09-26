@@ -51,7 +51,11 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
 from local_operator import procname
-from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
+from local_operator.agent_profiles import (
+    SEED_ORIGIN_PREFIX,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
+)
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config, resolve_radient_api_base_url
@@ -422,6 +426,28 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         required=True,
         help="ID of the agent to pull from Radient",
+    )
+    # Sync command
+    sync_parser = agents_subparsers.add_parser(
+        "sync",
+        help="Update installed starters and hub-pulled agents to their latest text",
+        parents=[parent_parser],
+    )
+    sync_group = sync_parser.add_mutually_exclusive_group()
+    sync_group.add_argument(
+        "--name",
+        type=str,
+        help="Sync only the installed profile with this name",
+    )
+    sync_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Sync every installed starter and hub-pulled agent (default when --name is absent)",
+    )
+    sync_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Also replace copies that were edited locally after their install/pull",
     )
 
     # Teams command
@@ -7372,12 +7398,21 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
         print(f"\033[1;32m{left_bar}   • Model: {agent.model or 'default'}\033[0m")
         if agent.description:
             print(f"\033[1;32m{left_bar}   • Description: {agent.description}\033[0m")
-        # The `seed:` provenance marker is bookkeeping this listing's reader
-        # cannot act on: it records that a role was installed from a packaged
-        # starter so `agent op='reset'` knows it may restore it. Hiding it
-        # keeps a machine-only tag out of a human-facing inventory.
+        # Provenance markers are bookkeeping this listing's reader cannot act
+        # on: `seed:` records the starter a role was installed from (so
+        # `op='reset'` knows it may restore it), and `seed_version:` /
+        # `seed_sha256:` are the sync baseline (`lop agents sync`). Hiding them
+        # keeps machine-only tags out of a human-facing inventory; the tags a
+        # person wrote still show. A row's `hub:` marker stays VISIBLE — it
+        # names the marketplace listing the row came from, which is something
+        # a reader can act on (`agents pull --id`).
         shown_tags = [
-            tag for tag in agent.tags if not str(tag).strip().lower().startswith(SEED_ORIGIN_PREFIX)
+            tag
+            for tag in agent.tags
+            if not str(tag)
+            .strip()
+            .lower()
+            .startswith((SEED_ORIGIN_PREFIX, SEED_VERSION_PREFIX, SEED_SHA256_PREFIX))
         ]
         if shown_tags:
             print(f"\033[1;32m{left_bar}   • Tags: {', '.join(shown_tags)}\033[0m")
@@ -7392,6 +7427,37 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     if page < total_pages:
         print(f"\033[1;32m│ Use --page {page + 1} to see next page\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+    return 0
+
+
+def agents_sync_command(
+    args: argparse.Namespace, agent_registry: "AgentRegistry", base_dir: Path
+) -> int:
+    """Update installed starters and hub-pulled agents; print the shared report.
+
+    A named function rather than inline dispatch so the command is reachable
+    the way its siblings are (``agents_delete_command`` et al.) — the parser
+    test and the handler test then cover the same callable the CLI runs, and
+    the rendering comes from ``agent_sync`` so this surface cannot grow a
+    second opinion about what a verdict means.
+    """
+
+    # Lazy: the sync coordinator pulls the agent registry module (dill, yaml)
+    # and the Radient client, none of which belong on the startup path.
+    from local_operator.agent_sync import resolve_hub_client_sync, sync_agent_profiles
+
+    names = [args.name] if getattr(args, "name", None) else None
+    radient_client = resolve_hub_client_sync(
+        agent_registry.config_dir,
+        base_url=_radient_hub_base_url(ConfigManager(base_dir)),
+    )
+    report = sync_agent_profiles(
+        agent_registry,
+        radient_client=radient_client,
+        names=names,
+        force=bool(getattr(args, "force", False)),
+    )
+    print("\n" + report.render())
     return 0
 
 
@@ -9423,6 +9489,13 @@ def main() -> int:
                 except Exception as e:
                     print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
                     return 1
+            elif args.agents_command == "sync":
+                # Update installed starters (and hub-pulled agents). The seed
+                # arm needs no credential and always runs; the hub arm resolves
+                # one in ``agents_sync_command`` and degrades per row (never
+                # fails the run) when it cannot — that policy lives in the
+                # shared sync functions, not in this branch.
+                return agents_sync_command(args, agent_registry, base_dir)
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "teams":
