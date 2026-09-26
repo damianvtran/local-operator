@@ -285,10 +285,14 @@ DEFAULT_CONFIG = Config(
             # directions, and the translation is where "off" ends up meaning
             # "prompting is off" in one place and "auto is off" in another.
             #
-            # Read by the TUI only. The headless paths keep ``--yolo`` as their
-            # one control: a saved file must not be able to disarm the gate of a
-            # ``local-operator exec`` running in CI, where nobody is watching the
-            # tools it approves.
+            # Read at mount by the TUI, at boot by phone-started sessions
+            # (``spawn_owned_session``), and — since this key seeds it — at boot
+            # by a ``lop exec --control`` run (``exec_control.start_exec_control``),
+            # whose value then keeps following the file. The plain headless path
+            # keeps ``--yolo`` as its one control: without ``--control`` there
+            # are no runtime gates to seed, so a saved file still cannot disarm
+            # the gate of a ``lop exec`` running in CI, where nobody is watching
+            # the tools it approves.
             "tool_approval_mode": "ask",
             # Direct OpenAI GPT-5 calls use the public Responses API by default.
             # Set `providers.openai.api` to `chat_completions` for an explicit

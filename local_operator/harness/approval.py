@@ -141,6 +141,50 @@ async def ask_approval(
     return bool(await narrow(tool_name, description))
 
 
+#: The sentence every surface renders when a gate could NOT ask anyone and
+#: refused for that reason. ``{tool}`` and ``{reason}`` are filled by
+#: :class:`ApprovalUnavailableError`.
+#:
+#: It lives here, beside the gate concept, for the same reason
+#: :data:`GATE_TIMEOUT_CUSTOM_TYPE` does: several layers render it and none of
+#: them may import the others — the harness loop's tier gate
+#: (``harness/loop.py``), the builtin self-gate's ``read``/``grep``/``lsp``
+#: callers (``tools/builtin.py``, ``tools/lsp.py``) — and a second copy is a
+#: second chance for one surface to describe the refusal differently. What it
+#: replaces is the worse failure: those surfaces previously wrote "User denied
+#: approval for 'bash'." for a call no user had ever seen, because a headless
+#: denial and a user's refusal were the same ``False``.
+APPROVAL_UNAVAILABLE_NOTICE = (
+    "Approval unavailable for '{tool}': nobody can answer on this run "
+    "({reason}), so the call was not run. Run with --yolo to auto-approve "
+    "every tier, name the tool in --tools to pre-approve it (and limit the "
+    "run's reach to the tools you name), or use --control so a supervisor "
+    "can answer."
+)
+
+
+class ApprovalUnavailableError(RuntimeError):
+    """A gate could not ask anyone — raised instead of returning a loose ``False``.
+
+    Raised ONLY by a host that KNOWS no person can answer (the headless CLI's
+    non-tty gate, ``session_factory._make_request_approval``). A host that CAN
+    ask keeps returning ``False``, where every call site's "User denied" copy
+    is correct; returning ``False`` from a host that cannot ask is what put
+    "User denied approval for 'bash'." into the transcript of a headless run
+    whose bash call nobody had been consulted about.
+
+    Call sites catch this type and render ``str(exc)`` — a
+    :data:`APPROVAL_UNAVAILABLE_NOTICE` naming the real cause and the
+    remedies — in place of their declined copy: the loop's tier gate and the
+    builtin ``_check_approval`` callers (``read``/``grep``/``lsp``).
+    """
+
+    def __init__(self, tool_name: str, reason: str) -> None:
+        self.tool_name = tool_name
+        self.reason = reason
+        super().__init__(APPROVAL_UNAVAILABLE_NOTICE.format(tool=tool_name, reason=reason))
+
+
 def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
     """Whether a write may LOOSEN a live approval gate (``ask`` -> ``auto``).
 
@@ -1285,9 +1329,11 @@ def report_operator_authority() -> str:
 
 
 __all__ = [
+    "APPROVAL_UNAVAILABLE_NOTICE",
     "APPROVALS_LOOSENING_WORDS",
     "AUTHORITY_OPS",
     "ApprovalGate",
+    "ApprovalUnavailableError",
     "Authority",
     "admit_increasing",
     "LOOSENING_KEPT_BY_ASK_NOTICE",
