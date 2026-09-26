@@ -369,6 +369,33 @@ def session_dir(root: "Path", session_id: str) -> "Path":
 HEARTBEAT_INTERVAL_S = 15.0
 HEARTBEAT_TIMEOUT_S = 45.0
 
+#: How long a VIEWER may treat an owner's last ANSWERED ROUND TRIP as evidence
+#: that the owner is still there (the design doc's §6 rule 1, "not stale").
+#:
+#: WHY A SECOND BUDGET BESIDE ``HEARTBEAT_TIMEOUT_S``, and why it is shorter.
+#: The heartbeat above is a RECORD on disk, bounded at 45 s so a reader can tell
+#: "the owner has not reported" without calling a working session dead — its own
+#: comment states the limit: a runtime whose loop is starved or deep in a turn
+#: stalls that write while the process is demonstrably working, measured at
+#: 105.8 s and 205.8 s gaps. That makes it the wrong instrument for "is this
+#: owner answering NOW": 45 s of lag in a STATUS field is precisely the staleness
+#: a viewer must not be shown, while 15 s of lag is generous for a viewer that
+#: can say ``attaching`` instead.
+#:
+#: THE TWO ARE DELIBERATELY NOT EQUAL, and this is the pair §6.2 rule 1 makes
+#: load-bearing: the record decides "has the owner reported", and THIS decides
+#: "may a frame still call the owner current". A reader applies its own clock to
+#: a ``verified_at`` stamp; nothing on the writer side asserts freshness by
+#: clearing anything, so a killed writer stops advancing the stamp rather than
+#: producing a fresh false "current".
+#:
+#: EQUAL TO THE BEAT INTERVAL, the tightest value that cannot expire a healthy
+#: owner between two beats. An idle runtime publishes no frontend frames, so
+#: what refreshes a viewer's stamp on an idle session is its OWN probe
+#: (``AttachedSession.verify_live``), not this interval — but a viewer probing on
+#: its own cadence must still not find a stamp expired that a timely beat set.
+LIVE_FRESHNESS_BUDGET_S = HEARTBEAT_INTERVAL_S
+
 #: How long a session runtime with WORK IN FLIGHT may defer its own disposal
 #: after a termination signal, before it disposes anyway (the drain in
 #: :func:`~local_operator.session.runtime.process._drain_for_signal`).
