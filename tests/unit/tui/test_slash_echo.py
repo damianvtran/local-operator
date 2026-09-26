@@ -149,6 +149,11 @@ ECHO_POLICY = {
     # word above them would only restate the row underneath it — and the word
     # `read` is an ACTION, not something the model is ever told.
     "notifications": False,
+    # The same rule as `/team` and `/usage`: the listing or the receipt IS the
+    # answer, and nothing here is words the model is told — the project TOOL is
+    # how the model writes project rows, while `/project` is the operator's own
+    # surface over the same store.
+    "project": False,
 }
 
 
@@ -240,6 +245,10 @@ PROMPT_POLICY = {
     "archive": False,
     "unarchive": False,
     "delete": False,
+    # Its argument is a subcommand word plus a project NAME — selectors, never
+    # free text a model is given (`/project show payments-migration`). The
+    # store, not the model, is what those words act on.
+    "project": False,
 }
 
 
