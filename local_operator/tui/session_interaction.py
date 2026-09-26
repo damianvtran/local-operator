@@ -20,6 +20,25 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class PendingSend:
+    """The painted rows of ONE in-flight send, swappable in place.
+
+    WHY A BOX RATHER THAN THE TUPLE ITSELF. The interaction has one
+    ``submitted_blocks`` slot, and two separate facts use it: the submit writes
+    the newest send's rows there, and a view rebuild re-authors them (a
+    cache-miss replay replaces the tuple with fresh blocks from the new view).
+    A worker that captured the tuple at dispatch would lose both properties —
+    a later submit would not confuse it, but a rebuild of ITS OWN send would
+    strand it on rows that are no longer on screen. So the dispatch captures
+    THIS object instead, and the rebuild path mutates ``blocks`` in place: the
+    capture follows its send through a re-seed, while a second submit simply
+    points the slot at a different box, leaving the first capture intact.
+    """
+
+    blocks: "tuple[Any, list[Any]] | None" = None
+
+
+@dataclass
 class TurnInteraction:
     provider_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     epoch: int = 0
@@ -35,13 +54,17 @@ class TurnInteraction:
     #:
     #: The echo is painted at SUBMIT, before the worker runs, because a prompt
     #: that appears the instant Enter is pressed is what makes the app feel
-    #: answerable. When the send is then REFUSED the row is a lie that outlives
-    #: the failure: styled exactly like a delivered message, and still there
-    #: after the user follows the refusal's advice and resends, so the
-    #: transcript shows the message twice and asserts an image was sent that
-    #: never left the machine (design round 1, D3). Holding the blocks is what
-    #: lets that echo be withdrawn; ``_withdraw_user_echo_for`` is the consumer.
-    submitted_blocks: tuple[Any, list[Any]] | None = None
+    #: answerable. When the send is then REFUSED the row is kept and resolved on
+    #: its failure record (the boundary rule): the record's ``blocks`` are what
+    #: ``_retire_failed_send_rows`` takes down when a resolution moves the
+    #: payload, and this slot is the in-flight send's handle on the same rows.
+    #:
+    #: A ``PendingSend`` box rather than the tuple, because BOTH the worker that
+    #: owns the send and the view-rebuild path address these rows: the worker
+    #: captures the box at dispatch (so a second submit cannot steal its
+    #: failure) and the rebuild mutates ``.blocks`` in place (so the capture
+    #: follows a re-seed). See ``PendingSend``.
+    submitted_blocks: PendingSend | None = None
     #: Prompts this surface has sent into a DRAINING runtime's spool, keyed by the
     #: message id the successor will announce them under — the one identity that
     #: survives the handover. This is what backs the row's queued marker (taken
@@ -101,8 +124,8 @@ class CompactionInteraction:
     held_typed: str = ""
     held_images: dict[int, Any] = field(default_factory=dict)
     #: The transcript rows painted for a prompt HELD through a compaction —
-    #: the same ``(UserBlock, [ImageBlock, ...])`` tuple ``turn.submitted_blocks``
-    #: carries, parked here for the minutes a pass can take.
+    #: the same rows ``turn.submitted_blocks`` names for a direct send, parked
+    #: here for the minutes a pass can take.
     #:
     #: A held prompt is dispatched long after the submit that painted it, and
     #: it can be refused exactly like a direct one. Without this the echo was

@@ -90,9 +90,9 @@ async def test_bare_stop_ends_the_session_and_keeps_the_transcript() -> None:
         row = _notices(app)[-1]
         assert row == (
             "this session was stopped — your message was not sent; /resume sess reopens it"
-            " — edit e"
+            " — edit\u00a0e"
         ), row
-        assert "send again" not in row, row
+        assert "send again" not in " ".join(row.split()), row
         assert "again?" in [
             b.text() for b in app.query_one(TranscriptView).blocks() if isinstance(b, UserBlock)
         ], "the row for the message was withdrawn"
