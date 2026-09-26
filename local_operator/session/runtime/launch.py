@@ -951,14 +951,15 @@ async def engage_runtime(
                 spawned = True
                 spawns += 1
                 # The standby this spawn may just have consumed is replaced
-                # BEHIND it: on a daemon thread, after the candidate exists, so
-                # the warm's fork never sits ahead of the user's own engage. A
-                # no-op outside a host that enabled warming (see
-                # ``standby.enable_warming``), and one ``flock`` probe when a
-                # standby is already waiting.
+                # BEHIND it: the spare supervisor is nudged after the candidate
+                # exists, so its fork never sits ahead of the user's own engage.
+                # The supervisor owns every fork and every retry (invariant P in
+                # ``standby``'s module docstring), so this call is a wake-up and
+                # never blocks. A no-op outside a host that enabled warming (see
+                # ``standby.enable_warming``).
                 from local_operator.session.runtime import standby
 
-                standby.warm_in_background(Path(config_dir), _spawn_interpreter())
+                standby.notify_engage()
             elif candidate is not None and candidate.poll() is not None:
                 # THE CANDIDATE WE SPAWNED IS GONE. It exited while no record
                 # exists and nobody holds the lease — a winner dying DURING

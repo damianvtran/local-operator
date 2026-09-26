@@ -19,8 +19,13 @@ the tests below pin, against REAL standby processes with only the warm stubbed:
 * the guards: a moved ``config.yml``, a moved loaded module, a differing
   interpreter or a differing warm-sensitive environment each refuse, and stale
   ones exit rather than waiting;
-* the lifecycle: one standby per process, exit on idle, exit when the console
-  goes away, and no directory or socket left anywhere;
+* the lifecycle: at most a role's depth of spares per process, exit on idle
+  where the slot reaps, exit when the console goes away, and no directory or
+  socket left anywhere; and the SUPERVISOR: every clear of a spare schedules a
+  bounded refill (invariant P), a young death is retried rather than dropped,
+  a wedged warm is retired by exact pid, a thrice-declined spare is replaced,
+  and an adopted spare leaves the pool before anything else runs — the defect
+  where the next engage SIGTERMed the first chat's live runtime;
 * the loud failure: an adopted runtime whose construction raises exits NON-ZERO
   with the reason in the capture file, exactly as a forked child does.
 
@@ -37,9 +42,10 @@ import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 import pytest
 
@@ -129,7 +135,7 @@ def test_warming_is_off_unless_a_host_enables_it(
     spawned: list[Any] = []
     monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
     monkeypatch.setattr(standby, "_WARMING", [False])
-    monkeypatch.setattr(standby, "_spawn_standby", lambda *a: spawned.append(a))
+    monkeypatch.setattr(standby, "_spawn_standby", lambda *a, **k: spawned.append(a))
     # The warm is for THIS console's own root, so the probe engine is told the
     # console's root is the temporary one.
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: tmp_path)
@@ -155,15 +161,15 @@ def test_a_root_that_is_not_a_real_path_is_never_warmed(monkeypatch: pytest.Monk
 
     monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
     monkeypatch.setattr(standby, "_WARMING", [False])
-    spawned: list[Any] = []
-    monkeypatch.setattr(standby, "warm_in_background", lambda *a: spawned.append(a))
+    started: list[Any] = []
+    monkeypatch.setattr(standby, "_start_supervisor", lambda: started.append(1))
     standby.enable_warming(MagicMock())
     standby.enable_warming(Path("relative/root"))
-    assert spawned == [] and standby._WARMING == [False]
+    assert started == [] and standby._WARMING == [False]
 
 
 def test_one_standby_per_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A second warm while one is alive is refused: this process holds at most one."""
+    """A pool that is at its role's depth is not filled further (a TUI holds one)."""
     monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
     monkeypatch.setattr(standby, "_WARMING", [True])
 
@@ -186,9 +192,9 @@ def test_one_standby_per_process(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     standby.reset_for_tests()
     try:
         first = standby._spawn_standby(tmp_path, sys.executable)
-        monkeypatch.setattr(standby, "_WARM", [first])
+        monkeypatch.setattr(standby, "_POOL", [first])
         spawned: list[Any] = []
-        monkeypatch.setattr(standby, "_spawn_standby", lambda *a: spawned.append(a))
+        monkeypatch.setattr(standby, "_spawn_standby", lambda *a, **k: spawned.append(a))
         standby.ensure_warm(tmp_path, sys.executable)
         assert spawned == []
     finally:
@@ -603,12 +609,13 @@ _CONSOLE_DRIVER = textwrap.dedent("""
     if won:
         deadline = time.monotonic() + budget
         while time.monotonic() < deadline:
-            warm = standby._WARM[0]
+            pool = standby._POOL
+            warm = pool[0] if pool else None
             warmed = bool(warm is not None and warm.alive() and standby.adoption_possible())
             if warmed:
                 break
             time.sleep(0.2)
-    spare = standby._WARM[0]
+    spare = standby._POOL[0] if standby._POOL else None
     out.write_text(json.dumps({
         "pid": os.getpid(),
         "slot": slot,
@@ -717,9 +724,10 @@ def _clear_module_state() -> None:
     """
     from local_operator.session.runtime import standby
 
-    standby._WARM[0] = None
+    standby._POOL.clear()
     standby._WARMING[0] = False
-    standby._LAST_REWARM[0] = 0.0
+    standby._ATTEMPTS[0] = 0
+    standby._NEXT_AT[0] = 0.0
     standby._release_slots()
 
 
@@ -770,7 +778,7 @@ def test_an_unwritable_run_directory_denies_the_slot(
         # ...and the console therefore warms nothing: this is the failure the
         # reviewer measured as "2 spares on ONE root, both reporting slot_held=False".
         spawned: list[Any] = []
-        monkeypatch.setattr(standby, "_spawn_standby", lambda *a: spawned.append(a))
+        monkeypatch.setattr(standby, "_spawn_standby", lambda *a, **k: spawned.append(a))
         monkeypatch.setattr(standby, "_WARMING", [True])
         standby.ensure_warm(root, sys.executable)
         assert spawned == [], "a console that could not take the slot warmed anyway"
@@ -826,6 +834,54 @@ def test_a_failed_spawn_gives_the_slot_back(
     # no child and no tracked standby for the next cell in this worker to trip on.
     assert standby._take_slot(root, standby.SLOT_TUI) is True
     assert (str(root), standby.SLOT_TUI) in standby._SLOTS
+
+
+def test_a_failed_second_spawn_keeps_the_slot_while_a_spare_lives(
+    supervisor_harness: Any,
+) -> None:
+    """M2 (agent review round 1): release the slot only when the pool is EMPTY.
+
+    The m3-2 rationale — "a slot held by a console with no spare is a win nobody
+    gets" — is exactly the empty case. At depth 2 with a live spare in hand the
+    slot is doing its job; releasing it lets another console win the cap and warm
+    beside a holder that already has a spare.
+    """
+    from local_operator.session.runtime import standby
+
+    def explode(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("no fork for you")
+
+    # (a) empty pool: the m3-2 release still happens.
+    empty = supervisor_harness(role=standby.SLOT_DAEMON)
+    assert standby._take_slot(empty.root, standby.SLOT_DAEMON) is True
+    empty.monkeypatch.setattr(standby, "_spawn_standby", explode)
+    standby._spawn_one(empty.root, standby.SLOT_DAEMON)
+    assert (
+        str(empty.root),
+        standby.SLOT_DAEMON,
+    ) not in standby._SLOTS, "a claim that produced no spare must go back"
+
+    # (b) a live spare in the pool: the second spawn fails, the slot STAYS, and
+    #     the failure is still scheduled as a retry.
+    held = supervisor_harness(role=standby.SLOT_DAEMON)
+    assert standby._take_slot(held.root, standby.SLOT_DAEMON) is True
+    calls: list[int] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("no fork for you")
+        return held.stub_spawn(*args, **kwargs)
+
+    held.monkeypatch.setattr(standby, "_spawn_standby", flaky)
+    standby._spawn_one(held.root, standby.SLOT_DAEMON)
+    assert len(standby._POOL) == 1, "the first spawn did not land"
+    standby._spawn_one(held.root, standby.SLOT_DAEMON)
+    assert (
+        str(held.root),
+        standby.SLOT_DAEMON,
+    ) in standby._SLOTS, "a failed second spawn released a slot that still has a live spare"
+    assert standby._NEXT_AT[0] > held.clock, "the failed spawn did not schedule a retry"
 
 
 def test_one_spare_per_root_per_slot_however_many_consoles(
@@ -1364,7 +1420,7 @@ def test_a_declined_request_does_not_retire_the_consoles_spare(
     item.ready()
     warm = standby._Standby(item.proc, item.sock, root)
     warm.ready = True
-    monkeypatch.setattr(standby, "_WARM", [warm])
+    monkeypatch.setattr(standby, "_POOL", [warm])
     retired: list[Any] = []
     monkeypatch.setattr(standby, "_retire", lambda candidate: retired.append(candidate))
     (root / "capture.log").touch()
@@ -1379,8 +1435,8 @@ def test_a_declined_request_does_not_retire_the_consoles_spare(
     )
     assert adopted is None
     assert retired == [], "a decline must not retire the spare"
-    assert not warm.consumed, "a declined spare is still this console's spare"
-    assert standby._WARM[0] is warm
+    assert warm.declines == 1, "the decline is counted against this spare"
+    assert warm in standby._POOL, "a declined spare is still this console's spare"
     assert item.proc.poll() is None, "the child must still be alive and waiting"
 
 
@@ -1396,3 +1452,565 @@ def test_a_differing_requester_is_declined_and_the_standby_keeps_waiting(
     assert reply is not None and reply["ok"] is False, reply
     # Declined, not retired: it still serves a matching requester.
     assert item.proc.poll() is None
+
+
+# ---------------------------------------------------------------------------
+# The supervisor (design 4.1): invariant P, the dead-end classes S1-S6/S8, and
+# the post-adoption trio, driven on a FAKE CLOCK with a stubbed fork.
+#
+# WHY FAKE CHILDREN AND NOT EARLIER CELLS' REAL DRIVERS: each cell below is one
+# transition rule of the schedule, and the observable is the SCHEDULE (the pool
+# plus the next-attempt deadline), not a real child's timing. The real children
+# live in ``scripts/bench_standby_lifecycle.py``. A real clock here would also be
+# the flake this suite's "Timing, flakes" section forbids: the backoff spans
+# seconds BY DESIGN, so these cells must own time rather than race it.
+# ---------------------------------------------------------------------------
+
+
+class _FakeProc:
+    """The ``Popen`` surface ``_retire``/``alive`` use, with signals recorded.
+
+    ``signals`` is the assertion surface for the dangerous case: an adopted
+    spare must NEVER appear here (the revision this replaces SIGTERMed the
+    still-live adopted runtime on the next engage).
+    """
+
+    _next_pid = 10_000
+
+    def __init__(self) -> None:
+        _FakeProc._next_pid += 1
+        self.pid = _FakeProc._next_pid
+        self.returncode: int | None = None
+        self.signals: list[int] = []
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.signals.append(signal.SIGTERM)
+        self.returncode = -signal.SIGTERM
+
+    def kill(self) -> None:
+        self.signals.append(signal.SIGKILL)
+        self.returncode = -signal.SIGKILL
+
+    def wait(self, timeout: float | None = None) -> int:
+        return int(self.returncode or 0)
+
+
+class _FakeSock:
+    """The console's end of a standby channel: a scripted byte stream and sends."""
+
+    def __init__(self, handshake: bytes = b"") -> None:
+        self.buffer = bytearray(handshake)
+        self.sent: list[bytes] = []
+        self.closed = False
+
+    def feed(self, data: bytes) -> None:
+        self.buffer.extend(data)
+
+    def settimeout(self, value: float | None) -> None:
+        pass
+
+    def recv(self, size: int) -> bytes:
+        if not self.buffer:
+            raise BlockingIOError
+        chunk = bytes(self.buffer[:size])
+        del self.buffer[:size]
+        return chunk
+
+    def sendmsg(self, buffers: Any, ancdata: Any, flags: int = 0, address: Any = None) -> int:
+        payload = buffers[0] if isinstance(buffers, (list, tuple)) else buffers
+        data = bytes(payload)
+        self.sent.append(data)
+        return len(data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _framed(payload: dict[str, Any]) -> bytes:
+    """One length-prefixed reply, the shape ``_recv`` reads."""
+    body = json.dumps(payload).encode("utf-8")
+    return len(body).to_bytes(4, "big") + body
+
+
+class _SupervisorHarness:
+    """A warming console's console-side state, on a clock the test controls.
+
+    Points every module global the supervisor consults (pool, role, root,
+    clock, schedule, slots) at fresh objects and stubs the fork, so a cell only
+    has to say what a spare does; ``place`` puts a hand-made spare in the pool
+    and ``advance`` moves the clock the scheduling steps read.
+    """
+
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, root: Path, *, role: str = standby.SLOT_TUI
+    ) -> None:
+        self.monkeypatch = monkeypatch
+        self.root = root
+        self.clock = 1_000.0
+        self.spawns: list[dict[str, Any]] = []
+        self.spares: list[standby._Standby] = []
+        # The SUITE runs with standbys disabled (conftest, see
+        # ``test_the_suite_runs_with_standbys_disabled``); a cell about the
+        # supervisor is a cell about a console that HAS enabled warming.
+        monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
+        monkeypatch.setattr(standby, "_now", lambda: self.clock)
+        monkeypatch.setattr(standby, "_WARMING", [True])
+        monkeypatch.setattr(standby, "_ROLE", [role])
+        monkeypatch.setattr(standby, "_ROOT", [root])
+        monkeypatch.setattr(standby, "_POOL", [])
+        monkeypatch.setattr(standby, "_NEXT_AT", [0.0])
+        monkeypatch.setattr(standby, "_ATTEMPTS", [0])
+        monkeypatch.setattr(standby, "_SLOTS", {})
+        monkeypatch.setattr("local_operator.paths.config_dir", lambda: root)
+        monkeypatch.setattr(standby, "_spawn_standby", self.stub_spawn)
+
+    def stub_spawn(
+        self, root: Path, interpreter: str, slot: str = standby.SLOT_TUI, *, idle_s: Any = None
+    ) -> standby._Standby:
+        warm = standby._Standby(cast(Any, _FakeProc()), cast(Any, _FakeSock()), root, slot)
+        self.spares.append(warm)
+        self.spawns.append({"root": root, "slot": slot, "idle_s": idle_s, "warm": warm})
+        return warm
+
+    def place(self, handshake: bytes = b"") -> tuple[standby._Standby, _FakeProc, _FakeSock]:
+        """Put a hand-made spare in the pool, as if it had just been forked."""
+        proc, sock = _FakeProc(), _FakeSock(handshake)
+        warm = standby._Standby(cast(Any, proc), cast(Any, sock), self.root, standby._ROLE[0])
+        self.spares.append(warm)
+        standby._POOL.append(warm)
+        return warm, proc, sock
+
+    def advance(self, seconds: float) -> None:
+        self.clock += seconds
+
+    def supervise(self) -> None:
+        standby._supervise_once()
+
+    def forked(self) -> list[standby._Standby]:
+        return [entry["warm"] for entry in self.spawns]
+
+    def shutdown(self) -> None:
+        for warm in self.spares:
+            warm.close()
+
+
+@pytest.fixture
+def supervisor_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Any]:
+    """Build harnesses (``role=...``); every one is closed and its slot freed."""
+
+    built: list[_SupervisorHarness] = []
+
+    def build(*, role: str = standby.SLOT_TUI) -> _SupervisorHarness:
+        harness = _SupervisorHarness(monkeypatch, tmp_path, role=role)
+        built.append(harness)
+        return harness
+
+    try:
+        yield build
+    finally:
+        for harness in built:
+            harness.shutdown()
+        standby._release_slots()
+
+
+@pytest.mark.parametrize(
+    ("role", "depth"),
+    [
+        (standby.SLOT_DAEMON, standby.DAEMON_SPARE_DEPTH),
+        (standby.SLOT_TUI, standby.TUI_SPARE_DEPTH),
+    ],
+)
+def test_the_supervisor_fills_to_the_roles_depth_and_idle_policy(
+    supervisor_harness: Any, role: str, depth: int
+) -> None:
+    h = supervisor_harness(role=role)
+    h.supervise()
+    assert len(h.forked()) == depth
+    assert {entry["idle_s"] for entry in h.spawns} == {standby._idle_for(role)}
+
+
+def test_s2_a_young_death_schedules_the_replacement(supervisor_harness: Any) -> None:
+    """The dead-end regression: "exited at once; not re-warming" is retired."""
+    h = supervisor_harness()
+    warm, proc, _sock = h.place()
+    proc.returncode = 1
+    h.advance(0.2)
+    h.supervise()
+    assert standby._POOL == []
+    assert standby._NEXT_AT[0] == pytest.approx(h.clock + standby.RETRY_BASE_S)
+    h.advance(standby.RETRY_BASE_S)
+    h.supervise()
+    assert len(standby._POOL) == 1 and standby._POOL[0].proc.pid != proc.pid
+
+
+def test_s1_a_failed_warm_is_replaced(supervisor_harness: Any) -> None:
+    h = supervisor_harness()
+    warm, _proc, sock = h.place(handshake=standby._FAILED)
+    assert standby._ready(warm) is False
+    assert standby._POOL == [] and sock.closed
+    assert standby._NEXT_AT[0] == pytest.approx(h.clock + standby.RETRY_BASE_S)
+    h.advance(standby.RETRY_BASE_S)
+    h.supervise()
+    assert len(standby._POOL) == 1
+
+
+def test_s3_young_deaths_back_off_doubling_to_the_cap(supervisor_harness: Any) -> None:
+    """A run of young deaths is retried forever, at a capped cadence."""
+    h = supervisor_harness()
+    delays: list[float] = []
+    for _ in range(7):
+        h.supervise()  # the deadline has passed: fork a replacement
+        assert standby._POOL, "no spare to kill"
+        standby._POOL[0].proc.returncode = 1
+        h.advance(0.1)
+        h.supervise()  # pruned young: the retry is scheduled, not dropped
+        assert standby._POOL == []
+        delays.append(round(standby._NEXT_AT[0] - h.clock, 3))
+        h.advance(standby.RETRY_CEIL_S + 0.5)  # past any scheduled deadline
+    assert delays == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+
+
+def test_s4_a_thrice_declined_spare_is_retired_and_replaced(supervisor_harness: Any) -> None:
+    h = supervisor_harness()
+    warm, proc, _sock = h.place(handshake=standby._READY)
+    standby._note_decline(warm, "other-venv")
+    standby._note_decline(warm, "other-venv")
+    assert standby._POOL == [warm] and proc.signals == []
+    standby._note_decline(warm, "other-venv")
+    assert standby._POOL == [] and proc.signals == [signal.SIGTERM]
+    assert standby._NEXT_AT[0] == pytest.approx(h.clock + standby.RETRY_BASE_S)
+
+
+def test_s5_a_busy_slot_is_retried_not_dropped(supervisor_harness: Any) -> None:
+    h = supervisor_harness()
+    h.monkeypatch.setattr(standby, "_take_slot", lambda root, slot: False)
+    h.supervise()
+    assert h.forked() == []
+    assert standby._NEXT_AT[0] == pytest.approx(h.clock + standby.SLOT_RETRY_S)
+    h.monkeypatch.setattr(standby, "_take_slot", lambda root, slot: True)
+    h.advance(standby.SLOT_RETRY_S)
+    h.supervise()
+    assert len(h.forked()) == 1
+
+
+def test_s6_a_raising_spawn_releases_the_slot_and_retries(supervisor_harness: Any) -> None:
+    h = supervisor_harness()
+
+    def explode(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("no fork for you")
+
+    h.monkeypatch.setattr(standby, "_spawn_standby", explode)
+    h.supervise()
+    assert standby._SLOTS == {}, "a claim that produced no spare goes back"
+    assert standby._NEXT_AT[0] == pytest.approx(h.clock + standby.RETRY_BASE_S)
+    h.monkeypatch.setattr(standby, "_spawn_standby", h.stub_spawn)
+    h.advance(standby.RETRY_BASE_S)
+    h.supervise()
+    assert len(h.forked()) == 1
+
+
+def test_a_wedged_warm_is_retired_and_refilled(supervisor_harness: Any) -> None:
+    h = supervisor_harness()
+    _warm, proc, _sock = h.place()  # nothing ever arrives on its channel
+    h.advance(standby.WARM_DEADLINE_S + 1)
+    h.supervise()
+    assert proc.signals == [signal.SIGTERM]
+    assert standby._POOL == []
+    assert standby._NEXT_AT[0] == pytest.approx(h.clock + standby.RETRY_BASE_S)
+
+
+def test_a_gone_root_parks_instead_of_fork_storming(
+    supervisor_harness: Any, tmp_path: Path
+) -> None:
+    h = supervisor_harness()
+    h.monkeypatch.setattr(standby, "_ROOT", [tmp_path / "deleted"])
+    h.supervise()
+    assert h.forked() == []
+    assert standby._NEXT_AT[0] == pytest.approx(h.clock + standby.ROOT_PROBE_S)
+
+
+def test_post_adoption_trio(supervisor_harness: Any) -> None:
+    """D1: tracking cleared, replacement scheduled, adopted pid never signalled."""
+    h = supervisor_harness()
+    warm, proc, sock = h.place(handshake=standby._READY + _framed({"ok": True}))
+    adopted = standby.try_adopt(
+        h.root, sys.executable, {"SOME": "env"}, h.root / "capture.log", None
+    )
+    assert isinstance(adopted, standby.AdoptedRuntime)
+    assert adopted.pid == proc.pid
+    # (1) the tracking entry is gone the moment the spawn is handed over
+    assert standby._POOL == [] and sock.closed
+    # (2) the replacement is scheduled (due now) and actually forks WITHOUT
+    #     another engage nudging it
+    assert standby._NEXT_AT[0] <= h.clock
+    h.supervise()
+    assert len(standby._POOL) == 1
+    replacement = standby._POOL[0]
+    assert replacement is not warm
+    # (3) and the adopted process can never be signalled: the next engage adopts
+    #     the REPLACEMENT, and supervisor passes far past the wedge deadline
+    #     still never touch the first chat's runtime.
+    cast(Any, replacement.sock).feed(standby._READY + _framed({"ok": True}))
+    second = standby.try_adopt(h.root, sys.executable, {}, h.root / "capture2.log", None)
+    assert isinstance(second, standby.AdoptedRuntime)
+    assert second.pid == replacement.proc.pid
+    h.advance(standby.WARM_DEADLINE_S * 2)
+    h.supervise()
+    assert proc.signals == [], "the first chat's runtime must never be signalled"
+    assert proc.poll() is None
+
+
+def test_concurrent_adoptions_never_signal_the_adopted_runtime(
+    root: Path, started: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: two concurrent ``try_adopt`` calls on ONE real spare — the loser must never
+    SIGTERM the winner's adopted runtime.
+
+    The harm needs a REAL child: the loser's channel dies because the child is a
+    runtime now, not because the standby failed, and the first revision answered a
+    dead channel with ``note_spare_gone(..., terminate=True)``. Construction: one
+    real standby (``_spawn_standby``); both attempts released by a barrier, so each
+    passes the pool-membership check before either finishes its handshake — the
+    window the reviewer reproduced 5/5.
+    """
+    warm = standby._spawn_standby(root, sys.executable, standby.SLOT_TUI)
+    started["made"].append(warm)
+    deadline = time.monotonic() + 90.0
+    while time.monotonic() < deadline:
+        assert warm.proc.poll() is None, "the spare exited before it warmed"
+        if standby._ready(warm):
+            break
+        time.sleep(0.05)
+    else:
+        raise AssertionError("the spare never warmed")
+    standby._POOL.append(warm)
+
+    retires: list[tuple[int, bool]] = []
+    real_retire = standby._retire
+
+    def spy(spare: Any) -> None:
+        retires.append((spare.proc.pid, spare.proc.poll() is None))
+        return real_retire(spare)
+
+    monkeypatch.setattr(standby, "_retire", spy)
+    barrier = threading.Barrier(2)
+    results: dict[str, Any] = {}
+
+    def attempt(tag: str) -> None:
+        barrier.wait(timeout=30)
+        try:
+            results[tag] = standby.try_adopt(
+                root, sys.executable, dict(os.environ), root / f"capture-{tag}.log", None
+            )
+        except BaseException as exc:  # noqa: BLE001 - try_adopt promises never to raise
+            results[tag] = exc
+
+    threads = [threading.Thread(target=attempt, args=(tag,)) for tag in ("A", "B")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert not any(
+        isinstance(result, BaseException) for result in results.values()
+    ), f"try_adopt raised: {results!r}"
+    winners = [r for r in results.values() if isinstance(r, standby.AdoptedRuntime)]
+    assert len(winners) == 1, f"expected exactly one adoption of one spare, got {results!r}"
+    adopted_pid = winners[0].pid
+    assert adopted_pid == warm.proc.pid
+    assert adopted_pid not in [pid for pid, _alive in retires], (
+        "B1: the loser retired the pid the winner had just adopted; the retire ledger "
+        f"is {retires!r}"
+    )
+    assert warm.adopted is True, "the winner must flag the spare the moment it adopts"
+
+
+def test_a_retire_decided_before_a_concurrent_adoption_never_signals_it(
+    supervisor_harness: Any,
+) -> None:
+    """R2.1 (agent review round 2): the flag read that decides a retire and the
+    ``terminate()`` are ONE critical section.
+
+    The window the reviewer widened and demonstrated: a retirer reads the adopted
+    flag (False), an adoption commits, and the signal lands on a pid that is a
+    runtime now. Here the gate is ``poll()`` — the fake blocks inside it until the
+    adopter has committed — so the gap is deterministic instead of µs-wide. On the
+    unfixed code the signal lands after the commit (cell fails); on the fixed code
+    the flag is re-read under ``_CHANNEL_LOCK`` and the signal is refused.
+    """
+    from local_operator.session.runtime import standby
+
+    h = supervisor_harness(role=standby.SLOT_DAEMON)
+    poll_entered = threading.Event()
+    committed = threading.Event()
+
+    class _GatedProc(_FakeProc):
+        def poll(self) -> int | None:
+            # The widened window: hold the decider here until the adoption has
+            # committed, exactly as the natural check→poll→signal gap allows.
+            if self.returncode is None and not poll_entered.is_set():
+                poll_entered.set()
+                assert committed.wait(timeout=10), "the adopter never committed"
+            return self.returncode
+
+    proc = _GatedProc()
+    warm = standby._Standby(cast(Any, proc), cast(Any, _FakeSock(b"")), h.root, standby.SLOT_DAEMON)
+    h.spares.append(warm)
+    standby._POOL.append(warm)
+
+    errors: list[BaseException] = []
+
+    def retire() -> None:
+        try:
+            standby.note_spare_gone(warm, "warm-wedged", terminate=True)
+        except BaseException as exc:  # noqa: BLE001 — surfaced by the asserts below
+            errors.append(exc)
+
+    def commit() -> None:
+        try:
+            assert poll_entered.wait(timeout=10), "the retire never reached its window"
+            # The adoption commit, exactly where try_adopt sets it: INSIDE the
+            # channel lock, at the instant the ok reply is parsed.
+            with standby._CHANNEL_LOCK:
+                warm.adopted = True
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            committed.set()
+
+    threads = [threading.Thread(target=retire), threading.Thread(target=commit)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert not errors, errors
+    assert warm.adopted is True
+    assert proc.signals == [], (
+        "R2.1: the retire signalled a spare whose adoption committed while the "
+        f"retire was deciding; signals are {proc.signals!r}"
+    )
+
+    # The other half of the ask: a genuinely dead spare still goes, and the 5 s
+    # SIGTERM wait stays OUTSIDE the channel — it is the WAIT that must not block
+    # the handshake, not the kill syscall (``_ready_locked``'s comment).
+    class _WaitWatchesLock(_FakeProc):
+        def wait(self, timeout: float | None = None) -> int:
+            assert (
+                not standby._CHANNEL_LOCK.locked()
+            ), "the SIGTERM wait must not hold the channel lock"
+            return super().wait(timeout)
+
+    dead = _WaitWatchesLock()
+    second = standby._Standby(
+        cast(Any, dead), cast(Any, _FakeSock(b"")), h.root, standby.SLOT_DAEMON
+    )
+    h.spares.append(second)
+    standby._POOL.append(second)
+    standby.note_spare_gone(second, "warm-wedged", terminate=True)
+    assert dead.signals == [signal.SIGTERM], "a genuinely dead spare still goes by exact pid"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "exited",
+        "warm-failed",
+        "warm-wedged",
+        "bad-handshake",
+        "adoption-failed",
+        "declined-thrice",
+        "retired (config-moved)",
+        "adopted",
+    ],
+)
+def test_invariant_p_every_clear_schedules_a_bounded_refill(
+    supervisor_harness: Any, reason: str
+) -> None:
+    """Invariant P: no clear leaves the console without a bounded refill."""
+    h = supervisor_harness()
+    warm, _proc, _sock = h.place(handshake=standby._READY)
+    standby.note_spare_gone(warm, reason)
+    assert standby._POOL == []
+    assert (
+        h.clock <= standby._NEXT_AT[0] <= h.clock + standby.RETRY_CEIL_S
+    ), "a clear must leave a refill DUE within the retry ceiling"
+    # The scheduled refill really happens, on time: advance exactly to the
+    # deadline and run the supervisor.
+    h.advance(max(0.0, standby._NEXT_AT[0] - h.clock) + 0.01)
+    h.supervise()
+    assert standby._POOL, "the scheduled refill never happened"
+
+
+def test_a_young_death_loop_refills_every_cycle(supervisor_harness: Any) -> None:
+    """The old dead-end, end to end: kill young, run the schedule, repeat."""
+    h = supervisor_harness()
+    for cycle in range(4):
+        h.supervise()
+        assert standby._POOL, f"cycle {cycle}: no spare to kill"
+        standby._POOL[0].proc.returncode = 1
+        h.advance(0.2)
+        h.supervise()
+        assert standby._POOL == [], f"cycle {cycle}: the dead spare stayed tracked"
+        h.advance(max(0.0, standby._NEXT_AT[0] - h.clock) + 0.01)
+        h.supervise()
+        assert standby._POOL, f"cycle {cycle}: no replacement appeared"
+
+
+def test_idle_window_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(standby.STANDBY_IDLE_ENV, "0")
+    assert standby._idle_reap_seconds() == 0.0, "0 is keep-warm, not a deadline"
+    monkeypatch.setenv(standby.STANDBY_IDLE_ENV, str(int(standby.IDLE_REAP_S)))
+    assert standby._idle_reap_seconds() == standby.IDLE_REAP_S
+    monkeypatch.setenv(standby.STANDBY_IDLE_ENV, "not a number")
+    assert standby._idle_reap_seconds() == standby.IDLE_REAP_S
+    monkeypatch.delenv(standby.STANDBY_IDLE_ENV)
+    assert standby._idle_reap_seconds() == standby.IDLE_REAP_S
+
+
+def test_the_spawned_child_carries_the_slots_idle_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: dict[str, Any] = {}
+
+    class _Child:
+        pid = 1
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            pass
+
+        def kill(self) -> None:
+            pass
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _popen(*_args: Any, **kwargs: Any) -> Any:
+        seen.clear()
+        seen.update(kwargs)
+        return _Child()
+
+    monkeypatch.setattr(standby.subprocess, "Popen", _popen)
+    daemon_spare = standby._spawn_standby(tmp_path, sys.executable, standby.SLOT_DAEMON)
+    assert seen["env"][standby.STANDBY_IDLE_ENV] == "0"
+    daemon_spare.close()
+    tui_spare = standby._spawn_standby(tmp_path, sys.executable, standby.SLOT_TUI)
+    assert seen["env"][standby.STANDBY_IDLE_ENV] == str(int(standby.IDLE_REAP_S))
+    tui_spare.close()
+
+
+def test_notify_engage_only_wakes_a_warming_console(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(standby.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(standby, "_NUDGE", threading.Event())
+    monkeypatch.setattr(standby, "_WARMING", [False])
+    standby.notify_engage()
+    assert not standby._NUDGE.is_set()
+    monkeypatch.setattr(standby, "_WARMING", [True])
+    standby.notify_engage()
+    assert standby._NUDGE.is_set()
