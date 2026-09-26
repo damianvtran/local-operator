@@ -58,6 +58,7 @@ from typing import Any
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
+from local_operator.session.runtime.reclaim import proc_environ_text  # noqa: E402
 from scripts import bench_tree  # noqa: E402
 
 #: The console process. Phase 1 warms and reports; phase 2 waits for the bench's
@@ -88,12 +89,12 @@ _CONSOLE = textwrap.dedent("""
     if won:
         deadline = time.monotonic() + float(budget)
         while time.monotonic() < deadline:
-            warm = standby._WARM[0]
+            warm = standby._POOL[0] if standby._POOL else None
             warmed = bool(warm is not None and warm.alive() and standby.adoption_possible())
             if warmed:
                 break
             time.sleep(0.2)
-    spare = standby._WARM[0]
+    spare = standby._POOL[0] if standby._POOL else None
 
     def _publish(path, payload):
         # ATOMIC (QA round 3, Q4-4): a plain write lets a reader observe a
@@ -173,6 +174,38 @@ def _process_table() -> dict[int, tuple[int, str]]:
     return table
 
 
+#: Read ONCE and patchable by name, as ``tools/group_reaper`` and ``secrets/peer``
+#: do, so the arm this host does not have can still be exercised from it.
+_IS_LINUX = sys.platform.startswith("linux")
+
+
+def _census_with_environment() -> str:
+    """``ps``'s whole table, with each process's environment, on EITHER platform.
+
+    ``-E`` IS A BSD/macOS OPTION AND PROCPS HAS NO ``-E`` (the whole story is in
+    ``reclaim.pid_environment``). On Linux ``ps -Eeww`` is an invalid option: non-zero,
+    and NOTHING on stdout — which both readers below would read as "no writers", the
+    comfortable zero ``_env_census_diagnostics`` exists to prevent, reached here by a
+    dead instrument instead of a thin one. So Linux appends ``/proc/<pid>/environ`` to
+    the same row (a file read, no fork), and the parsers below see the shape they
+    already parse. ``-eww`` selects the whole table on both families; only the
+    environment's source differs.
+    """
+    if not _IS_LINUX:
+        return subprocess.run(  # noqa: S603 — fixed argv, no shell
+            ["ps", "-Eeww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+        ).stdout
+    base = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        ["ps", "-eww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+    ).stdout
+    rows: list[str] = []
+    for line in base.splitlines():
+        pid_text, _, rest = line.strip().partition(" ")
+        env = proc_environ_text(int(pid_text)) if pid_text.isdigit() else ""
+        rows.append(f"{pid_text} {rest} {env}".strip())
+    return "\n".join(rows)
+
+
 def _root_census(root: Path, exclude: set[int]) -> dict[int, str]:
     """``pid -> command tail`` for every live process whose ENVIRONMENT names ``root``.
 
@@ -199,9 +232,7 @@ def _root_census(root: Path, exclude: set[int]) -> dict[int, str]:
     Cost: one ``ps`` over the whole table, measured at 59-75 ms for ~900 processes.
     """
     needle = f"LOCAL_OPERATOR_CONFIG_DIR={root}"
-    out = subprocess.run(
-        ["ps", "-Eeww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
-    ).stdout
+    out = _census_with_environment()
     found: dict[int, str] = {}
     for line in out.splitlines():
         fields = line.split(None, 1)
@@ -232,9 +263,7 @@ def _env_census_diagnostics() -> tuple[dict[str, int], list[int]]:
     the census cannot attribute, and the caller warns and fails on it rather than
     reporting a comfortable zero.
     """
-    out = subprocess.run(
-        ["ps", "-Eeww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
-    ).stdout
+    out = _census_with_environment()
     seen = 0
     with_environment = 0
     unreadable: list[int] = []

@@ -673,6 +673,33 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="if the target is idle, drive a turn now (mailbox mode only)",
     )
 
+    # `lop model`: switch ANOTHER live session's model (design D4). Its own
+    # subcommand rather than `lop send --model`, because a switch has no body and
+    # `send`'s positional/stdin binder would need a model-mode exception for every
+    # one of its rules. Same selector flags and the same resolver as `lop send`.
+    model_parser = subparsers.add_parser(
+        "model",
+        help="Switch another running lop session's model (like /model there)",
+        parents=[parent_parser],
+    )
+    model_parser.add_argument(
+        "target",
+        nargs="?",
+        help=(
+            "conversation-name / session-id / cwd substring (case-insensitive). "
+            "Omit when addressing with --pid/--session."
+        ),
+    )
+    model_parser.add_argument(
+        "selector",
+        nargs="?",
+        metavar="provider/model",
+        help="the model to switch to, e.g. deepseek/deepseek-flash",
+    )
+    model_selector = model_parser.add_mutually_exclusive_group()
+    model_selector.add_argument("--pid", type=int, help="target by exact pid")
+    model_selector.add_argument("--session", dest="session", help="target by exact session id")
+
     sessions_parser = subparsers.add_parser(
         "sessions",
         help=(
@@ -3026,6 +3053,48 @@ def _peer_red(message: str) -> None:
     print(f"\n\033[1;31m{message}\033[0m", file=sys.stderr)
 
 
+def _hold_sigint() -> None:
+    """Ignore further Ctrl-C while an interrupt notice is being printed.
+
+    A second Ctrl-C landing inside the ``except KeyboardInterrupt`` arm would
+    raise again mid-print and put back the traceback the arm exists to replace
+    (PR #1587 QA round 2, the double Ctrl-C cell). :func:`_die_of_sigint` then
+    restores the default before it re-delivers.
+    """
+    import signal
+
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (OSError, ValueError):  # not the main thread: nothing to hold
+        pass
+
+
+def _die_of_sigint() -> int:
+    """End the process BY SIGINT once a Ctrl-C notice has been printed.
+
+    Returning 130 is not the same thing to a shell. bash stops a script loop on
+    Ctrl-C only when the foreground child itself DIED of SIGINT ("wait and
+    cooperative exit"); a child that caught it and exited 130 reads as an
+    ordinary failure, so ``for i in 1 2 3; do lop send …; done`` sent the rest
+    of the batch after the user pressed Ctrl-C (PR #1587 review round 2,
+    MINOR-4). Restoring the default disposition and re-delivering the signal
+    gives the shell the status it expects, and ``$?`` still reads 130.
+
+    POSIX only: on Windows ``os.kill`` with SIGINT is a TerminateProcess, not a
+    console interrupt, so the 130 return stands there. Also the fallback if the
+    re-delivery is refused.
+    """
+    import signal
+
+    if os.name == "posix":
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGINT)
+        except (OSError, ValueError):
+            pass
+    return 130
+
+
 def _format_bytes(value: "int | None") -> str:
     """Human-readable memory size, or an em dash when the probe returned None.
 
@@ -3218,6 +3287,7 @@ def send_command(args: argparse.Namespace) -> int:
     from local_operator.mobile.peer_send import (
         candidate_lines,
         deliver_peer_message,
+        interrupted_send_detail,
         skipped_clause,
         validate_peer_body,
     )
@@ -3423,6 +3493,13 @@ def send_command(args: argparse.Namespace) -> int:
                 sender=sender,
             )
         )
+    except KeyboardInterrupt:
+        # Same wait, same rule as the timeout arm below: stopping it does not
+        # un-send an op that may already be written (PR #1587 UX round 1, U1).
+        # Then die OF the signal, so a shell loop around this stops too.
+        _hold_sigint()
+        _peer_red(interrupted_send_detail())
+        return _die_of_sigint()
     except TimeoutError as exc:
         # NOT "could not deliver": a read deadline expiring means no
         # ACKNOWLEDGED result, not an undelivered message — the mutation op is
@@ -3444,6 +3521,167 @@ def send_command(args: argparse.Namespace) -> int:
     else:
         print(f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}")
     return 0
+
+
+def model_command(args: argparse.Namespace) -> int:
+    """``lop model [<target>] <provider>/<model> [--pid N | --session ID]``.
+
+    Switches ANOTHER live, engaged session's model, with ``/model`` semantics:
+    the switch lands at that session's next provider call. The target validates
+    the pair against its own config and credentials and answers with its own
+    sentence, which is printed as-is; every refusal exits non-zero, like
+    ``lop send``.
+
+    One positional is the MODEL when a selector flag names the target, and the
+    TARGET-then-model pair otherwise — the same "a selector fully determines
+    the recipient" rule ``lop send``'s binder applies, without its body/stdin
+    grammar, because a switch has no body.
+    """
+    import asyncio
+
+    from local_operator.mobile.peer_send import (
+        PEER_MODEL_WAIT_NOTICE_S,
+        PeerModelUnconfirmed,
+        candidate_lines,
+        interrupted_switch_detail,
+        parse_model_selector,
+        resolve_switch_target,
+        switch_peer_model,
+        switch_receipt,
+        waiting_for_switch_detail,
+    )
+
+    if getattr(args, "model", None) or getattr(args, "hosting", None):
+        # The run-shaping `--model`/`--hosting` every subcommand inherits
+        # (`_propagate_global_flags`) mean "the model for THIS run", and a
+        # command named `model` makes `--model <p/m>` the natural guess. Parsed
+        # silently it left the selector empty and the error blamed the target
+        # (UX round 1, U4), so the mistake is named instead.
+        _peer_red(
+            "the model is a positional here, not a flag: "
+            "`lop model <name> <provider>/<model>` or `lop model --pid N <provider>/<model>`"
+        )
+        return 1
+
+    has_selector = args.pid is not None or args.session is not None
+    target, selector = args.target, args.selector
+    if has_selector:
+        if selector is not None:
+            # Two positionals AND a selector name two recipients; refuse rather
+            # than guess which one was meant (the `lop send` rule).
+            _peer_red(
+                "pass the target as a name OR as --pid/--session, not both "
+                "(e.g. `lop model --pid 48213 deepseek/deepseek-flash`)"
+            )
+            return 1
+        target, selector = None, target
+    elif target and not selector:
+        # One positional and no selector: argparse slotted it as the TARGET, but
+        # a lone word is almost always the model someone meant to apply. Say
+        # what is missing rather than printing bare usage.
+        _peer_red(
+            "name the session to switch as well: `lop model <name> <provider>/<model>` "
+            "or `lop model --pid N <provider>/<model>`"
+        )
+        return 1
+    if not selector:
+        _peer_red("usage: lop model [<target>] <provider>/<model> [--pid N | --session ID]")
+        return 1
+    parsed = parse_model_selector(selector)
+    if isinstance(parsed, str):
+        _peer_red(parsed)
+        return 1
+    provider, model_id = parsed
+
+    record, candidates, error = resolve_switch_target(
+        target=target,
+        pid=args.pid,
+        session=args.session,
+        pid_hint="--pid",
+        session_hint="--session",
+    )
+    if candidates:
+        print(
+            f"{len(candidates)} sessions match; replace the target with one of these:",
+            file=sys.stderr,
+        )
+        for line in candidate_lines(candidates, indent="  ", prefix="--pid"):
+            print(line, file=sys.stderr)
+        print(
+            f"  e.g. `lop model --pid {candidates[0].pid} {provider}/{model_id}`", file=sys.stderr
+        )
+        return 1
+    if record is None:
+        _peer_red(error or "no target resolved")
+        return 1
+    sender = _cli_switch_sender()
+    if record.pid == sender.get("pid"):
+        _peer_red("that target is this session; use /model in it")
+        return 1
+
+    async def switch() -> str:
+        # A stopped or wedged target is silent for the whole ack deadline, so
+        # after a short grace the wait is said out loud (UX round 3, U11). On
+        # stderr: stdout carries only the receipt, which callers may parse.
+        # Cancelled the moment an answer arrives, so a healthy switch prints
+        # nothing extra.
+        notice = asyncio.get_running_loop().call_later(
+            PEER_MODEL_WAIT_NOTICE_S,
+            lambda: print(waiting_for_switch_detail(record), file=sys.stderr, flush=True),
+        )
+        try:
+            return await switch_peer_model(
+                record, provider=provider, model_id=model_id, sender=sender
+            )
+        finally:
+            notice.cancel()
+
+    try:
+        detail = asyncio.run(switch())
+    except KeyboardInterrupt:
+        # Ctrl-C during the wait is the natural answer to the waiting line, and
+        # it stops only the WAIT: the op may already be in the target's buffer
+        # (PR #1587 UX round 1, U1). One honest notice, not a traceback that
+        # says nothing about the switch — then die OF the signal, so a shell
+        # loop around this stops too (review round 2, MINOR-4).
+        _hold_sigint()
+        _peer_red(switch_receipt(record, interrupted_switch_detail()))
+        return _die_of_sigint()
+    except (PeerModelUnconfirmed, RuntimeError) as exc:
+        _peer_red(switch_receipt(record, str(exc)))
+        return 1
+    print(switch_receipt(record, detail))
+    return 0
+
+
+def _cli_switch_sender() -> "dict[str, Any]":
+    """Who the target's audit card should name for a ``lop model`` run.
+
+    Inside a lop session (its `bash` tool, a shell under it) the ancestry walk
+    finds that session and the card names it. From a plain terminal it finds
+    nothing, and the bare pid it falls back to is this short-lived process —
+    gone before the owner reads the card, and a different number every run
+    (UX round 1, U2). That case is labelled as what it is.
+
+    SHORT, because the label is the card's header and the new model follows it
+    on the same clipped row (design round 2, D7; UX U9; QA Q5): the header says
+    ``terminal``, and WHERE rides in ``cwd``, which the card body appends after
+    the models and the expansion shows. The cwd is best effort: ``/`` has no
+    basename and a deleted working directory raises, and neither may cost the
+    switch its sender (review round 2, NIT-4).
+    """
+    from local_operator.mobile.peer_model import TERMINAL_SENDER
+
+    sender = _peer_sender_identity()
+    if str(sender.get("session_id") or "").strip():
+        return sender
+    sender["conversation_name"] = TERMINAL_SENDER
+    sender["via"] = TERMINAL_SENDER
+    try:
+        sender["cwd"] = os.getcwd()
+    except OSError:
+        sender.pop("cwd", None)
+    return sender
 
 
 def _non_negative_int(text: str) -> int:
@@ -8593,6 +8831,8 @@ def main() -> int:
             return browser_command(args)
         elif args.subcommand == "send":
             return send_command(args)
+        elif args.subcommand == "model":
+            return model_command(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":

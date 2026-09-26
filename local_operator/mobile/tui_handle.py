@@ -330,7 +330,11 @@ class TuiSessionHandle(SessionHandle):
         # LAST, once the identity above is in place: an idle ``/new`` or
         # ``/resume`` emits no session event, so without this nudge the
         # registrant's push tick (and with it the record `lop sessions` reads)
-        # waited for the 15 s heartbeat. ``_schedule_push`` is thread-safe.
+        # waited for the 15 s heartbeat. Called from the host (Textual) thread,
+        # exactly as the per-event handler in ``subscribe`` calls it: the
+        # ``SessionHandle.subscribe`` contract requires every projection
+        # callback to be thread-safe, i.e. to hop onto its own loop with
+        # ``call_soon_threadsafe`` rather than touch loop state here.
         if self._on_projection is not None:
             self._on_projection()
 
@@ -754,6 +758,151 @@ class TuiSessionHandle(SessionHandle):
         await self._on_app(apply)
         self._refresh_state()
         return f"model: {self._projection.model_label}"
+
+    async def receive_peer_model(
+        self,
+        provider: str,
+        model_id: str,
+        *,
+        sender: dict[str, Any] | None = None,
+    ) -> str:
+        """Another local session switching this TUI-hosted session's model.
+
+        The same four steps as ``ServingSessionHandle.receive_peer_model``
+        (design D1), with the TUI's own switch in the middle: ``/model`` run on
+        the Textual thread, so this owner's effort choice, fast mode, quota probe
+        and receipts all apply exactly as if its user had typed it.
+
+        THE ANSWER COMES FROM THE READ-BACK, NEVER FROM ``/model``. That command
+        reports refusals only as notices on this screen, so
+        :meth:`set_model_effort`'s ``model: <label>`` reads the same whether it
+        switched or not. The labels are read before and after the command IN THE
+        SAME HOP: for an owned session ``_run_slash_command`` reaches
+        ``_cmd_model`` → ``Session.set_model`` synchronously (a local ``Session``
+        has no ``route_shared_slash``, so nothing is scheduled), and reading in
+        that hop means no later command can land between the switch and the
+        answer. The one asynchronous path is a local-setup provider's capacity
+        probe, which the hop reports as ``accepted`` via
+        ``_model_activation_pending`` rather than guessing its outcome.
+        """
+        from local_operator.mobile import peer_model
+        from local_operator.model.configure import ModelSelectionRefused
+
+        provider, model_id = peer_model.normalise_pair(provider, model_id)
+        # Validated OFF both loops and before any hop: a refusal must cost the
+        # busy app nothing and mutate nothing.
+        try:
+            spec = await asyncio.to_thread(peer_model.validate_peer_selection, provider, model_id)
+        except ModelSelectionRefused as refused:
+            session = self._session()
+            raise ValueError(
+                peer_model.refusal_detail(
+                    refused.message,
+                    _effective_label(session),
+                    displaced=peer_model.displaced_selection(session),
+                )
+            ) from refused
+        new_label = f"{spec.provider}/{spec.model_id}"
+
+        def apply() -> dict[str, Any]:
+            session = self._session()
+            before = peer_model.selected_label(session)
+            state: dict[str, Any] = {
+                "before": before,
+                # Re-selecting the model a pinned fallback displaced (review
+                # round 2, N5): the selection will not move, the pin will go.
+                "dropped": (
+                    peer_model.pinned_fallback_label(session) if before == new_label else ""
+                ),
+                "busy": bool(getattr(session, "is_streaming", False)),
+                "calling": peer_model.provider_call_in_flight(session),
+                "already": peer_model.already_selected(session, new_label),
+                "pending": False,
+                "displaced": "",
+                "serving_fallback": "",
+                "children": 0,
+                "error": None,
+            }
+            if state["already"]:
+                state["after"] = _effective_label(session)
+                state["took"] = True
+                return state
+            try:
+                self._app._run_slash_command(f"/model {new_label}")
+            except Exception as error:  # noqa: BLE001 — the read-back decides (review N1)
+                state["error"] = error
+            finally:
+                # Read back in `finally`, in THIS hop: whatever `/model` managed
+                # before a raise is what is in force, and no later command can
+                # land between the switch and the answer.
+                state["pending"] = getattr(self._app, "_model_activation_pending", None) is not None
+                current = self._session()
+                # "Did it take" is the SELECTION test, never the effective label
+                # (review round 2, M2): a pinned fallback already serving the
+                # requested model makes the effective label equal it whether or
+                # not `/model` ran. The effective label is kept for "still on".
+                state["took"] = peer_model.already_selected(current, new_label)
+                state["after"] = _effective_label(current)
+                state["displaced"] = peer_model.displaced_selection(current)
+                # A pending switch has not applied: the pin, if any, is still
+                # what serves, and the card must name it (review r1, MINOR-1).
+                state["serving_fallback"] = peer_model.pinned_fallback_label(current)
+                state["children"] = peer_model.running_subagent_count(session)
+            return state
+
+        state = await self._on_app(apply)
+        self._refresh_state()
+        before, after, dropped = state["before"], state["after"], state["dropped"]
+        if state["already"]:
+            return peer_model.already_on_detail(new_label)
+        if not state["took"]:
+            if state["pending"] and state["error"] is None:
+                # The capacity probe runs after this hop, so the outcome is not
+                # known yet. The card still records WHO asked (QA round 1, Q2):
+                # without it the switch notice lands later with no trace of the
+                # sender. Worded as a request, because it can still fail.
+                await self._record_peer_model_card(
+                    peer_model.pending_audit_body(
+                        before, new_label, sender or {}, fallback=state["serving_fallback"]
+                    ),
+                    sender,
+                )
+                return peer_model.accepted_detail(new_label)
+            raise ValueError(
+                peer_model.refusal_detail(
+                    f"the switch to {new_label} did not take effect",
+                    after,
+                    displaced=state["displaced"],
+                )
+            ) from state["error"]
+        await self._record_peer_model_card(
+            peer_model.audit_body(before, new_label, sender or {}, dropped_fallback=dropped),
+            sender,
+        )
+        if state["error"] is not None:
+            return peer_model.partial_switch_detail(
+                before, new_label, state["error"], dropped_fallback=dropped
+            )
+        return peer_model.switched_detail(
+            before,
+            new_label,
+            busy=state["busy"],
+            calling=state["calling"],
+            running_subagents=state["children"],
+            dropped_fallback=dropped,
+        )
+
+    async def _record_peer_model_card(self, body: str, sender: dict[str, Any] | None) -> None:
+        """The audit card (design D6), record-only so it never opens a turn.
+
+        Best effort: the switch has already happened (or been accepted), and
+        reporting a failed card as a failed switch would invite a retry of a
+        switch that stuck.
+        """
+        try:
+            await self.receive_peer_message(body, mode="mailbox", wake=False, sender=sender)
+        except Exception:  # noqa: BLE001 — the switch stands whatever the card does
+            logger.warning("the remote model switch's audit card was not recorded", exc_info=True)
 
     async def set_effort(self, effort: str) -> str:
         def apply() -> None:

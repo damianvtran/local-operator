@@ -417,3 +417,252 @@ def test_provider_reported_usd_cost_survives_into_the_ledger(tmp_path):
     assert agg.cost_micro == 7500
     rec.close()
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# The decode window: measured AT THE SEAM, which is the only place it exists
+# ---------------------------------------------------------------------------
+#
+# These drive the real ``_record_stream`` and read the rate back out of the
+# store. They exist because every other decode test in the suite sets
+# ``CallSnapshot.decode_*`` BY HAND — so deleting the measurement from
+# ``configure.py`` entirely left the whole suite green (review round 1, MAJOR 1,
+# demonstrated by forcing ``_record_usage`` to receive zeros and observing an
+# identical pass count). A metric whose only test is a fixture asserting itself
+# has no regression guard at all.
+
+
+def _decode_of(store, session_id: str = "sess-1"):
+    """The recorded row's decode measures, read back through the report."""
+    report = store.session_report(session_id)
+    return report.aggregate, report.recent[0] if report.recent else None
+
+
+def _stream_with_deltas(deltas, *, output_tokens: int, stop_reason: str = "stop"):
+    usage = Usage(input_tokens=100, output_tokens=output_tokens, context_tokens=100)
+    return [
+        *deltas,
+        StreamUsageEvent(usage=usage),
+        StreamEndEvent(stop_reason=stop_reason, usage=usage),
+    ]
+
+
+def test_seam_measures_a_window_across_text_deltas(tmp_path):
+    """A text stream produces a window, one contributing call, and its tokens."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-1")
+    deltas = [StreamTextDelta(delta=f"chunk {i} ") for i in range(6)]
+    asyncio.run(_drain(fn, _request(), _stream_with_deltas(deltas, output_tokens=240)))
+    rec.flush_for_test()
+
+    agg, row = _decode_of(store)
+    assert agg.decode_calls == 1
+    assert agg.decode_us > 0
+    # Numerator and denominator cover the SAME calls: the contributing call's own
+    # output, not every call's.
+    assert agg.decode_tokens == 240
+    assert agg.decode_tps is not None and agg.decode_tps > 0
+    assert row is not None and row.output_tokens == 240
+    rec.close()
+    store.close()
+
+
+def test_seam_measures_a_reasoning_only_stream(tmp_path):
+    """Reasoning IS output: a thinking model's window must open on it.
+
+    ``ttft_ms`` stays -1 here because it is stamped only on text/tool-call
+    deltas — which is exactly why a window derived as ``duration - ttft`` was
+    unusable (design §8a), and why this test also pins the reasoning-only case
+    that derivation could never see.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-1")
+    deltas = [StreamReasoningDelta(delta=f"think {i} ") for i in range(5)]
+    asyncio.run(_drain(fn, _request(), _stream_with_deltas(deltas, output_tokens=180)))
+    rec.flush_for_test()
+
+    agg, row = _decode_of(store)
+    assert agg.decode_calls == 1 and agg.decode_us > 0 and agg.decode_tokens == 180
+    # ``None`` here, not ``-1``: the report's projection maps the column's "no
+    # sample" sentinel through ``NULLIF(..., -1)``, so unknown reaches a reader as
+    # NULL. Either spelling means the same thing — no text delta ever arrived —
+    # and that fact is what this test is about.
+    assert row is not None and row.ttft_ms is None
+    rec.close()
+    store.close()
+
+
+def test_seam_excludes_a_single_delta_call(tmp_path):
+    """One delta has no measurable window, so it is EXCLUDED and COUNTED.
+
+    This is the one-frame population the benchmark measured: its implied rate is
+    absurd because the whole answer lands in the trailing chunk. The exclusion is
+    the design's ``output_deltas >= 2`` guard, and it must show up as zero
+    contributions rather than as a very fast call.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-1")
+    asyncio.run(
+        _drain(
+            fn,
+            _request(),
+            _stream_with_deltas([StreamTextDelta(delta="the whole answer")], output_tokens=900),
+        )
+    )
+    rec.flush_for_test()
+
+    agg, _ = _decode_of(store)
+    assert agg.calls == 1 and agg.output_tokens == 900
+    assert agg.decode_calls == 0 and agg.decode_us == 0 and agg.decode_tokens == 0
+    assert agg.decode_tps is None  # unknown, never a very fast number
+    rec.close()
+    store.close()
+
+
+def test_seam_excludes_a_call_that_generated_nothing(tmp_path):
+    """No output tokens means no rate to report, however many deltas arrived."""
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-1")
+    deltas = [StreamTextDelta(delta="x") for _ in range(4)]
+    asyncio.run(_drain(fn, _request(), _stream_with_deltas(deltas, output_tokens=0)))
+    rec.flush_for_test()
+
+    agg, _ = _decode_of(store)
+    assert agg.decode_calls == 0 and agg.decode_tps is None
+    rec.close()
+    store.close()
+
+
+def test_seam_records_a_window_for_an_aborted_stream(tmp_path):
+    """A failure mid-stream still records what was measured, and does not re-raise.
+
+    ``ok`` is not part of the eligibility predicate on purpose (design risk 8):
+    dropping exactly the slow calls would bias every rate upward. The usage event
+    has to arrive BEFORE the failure for there to be a rate at all — a stream that
+    dies before reporting usage has output_tokens == 0, which the predicate
+    excludes for the honest reason that nothing generated is known.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-1")
+    usage = Usage(input_tokens=100, output_tokens=120, context_tokens=100)
+
+    async def stream():
+        yield StreamTextDelta(delta="one ")
+        yield StreamTextDelta(delta="two ")
+        yield StreamUsageEvent(usage=usage)
+        raise RuntimeError("provider died mid-stream")
+
+    events = []
+
+    async def drain():
+        async for event in fn._record_stream(_request(), stream()):
+            events.append(event)
+
+    raised = False
+    try:
+        asyncio.run(drain())
+    except RuntimeError:
+        raised = True
+    assert raised, "the wrapper must not swallow the provider's own failure"
+    assert len(events) == 3, "the events that DID arrive were forwarded"
+    rec.flush_for_test()
+
+    agg, row = _decode_of(store)
+    assert agg.calls == 1 and agg.ok_calls == 0
+    assert agg.decode_calls == 1 and agg.decode_us > 0 and agg.decode_tokens == 120
+    assert row is not None and row.ok is False
+    rec.close()
+    store.close()
+
+
+def test_a_broken_analytics_call_cannot_reach_the_stream(tmp_path, monkeypatch):
+    """The never-raise contract, at the seam rather than at the recorder."""
+    from local_operator.analytics import recorder as recorder_mod
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    reset_recorder_for_test(store)
+    fn = _fn("sess-1")
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("analytics is broken")
+
+    monkeypatch.setattr(recorder_mod, "record_call", explode)
+    events = asyncio.run(
+        _drain(fn, _request(), _stream_with_deltas([StreamTextDelta(delta="a")], output_tokens=5))
+    )
+    assert [type(e).__name__ for e in events] == [
+        "StreamTextDelta",
+        "StreamUsageEvent",
+        "StreamEndEvent",
+    ]
+    store.close()
+
+
+def test_the_seam_reads_the_clock_once_per_output_delta(tmp_path, monkeypatch):
+    """The hot-path bound, asserted STRUCTURALLY rather than by timing.
+
+    A timing assertion is a bet on machine load; this counts the calls instead,
+    and isolates the per-delta reads by draining two streams that differ ONLY in
+    how many output deltas they carry — so the wrapper's own housekeeping (the
+    ``started_at`` and ``duration_ms`` reads, one each per drain) cancels, and
+    what remains is the per-delta cost.
+
+    Counted through a PROXY on the wrapper's own module attribute rather than by
+    patching ``time.monotonic`` globally: the event loop itself reads the clock
+    to schedule (``loop.time()``), so a global patch counts asyncio's scheduling
+    reads too and the measurement flapped by a read or two between runs. The
+    proxy replaces only what ``configure`` sees, and delegates everything else.
+    That is the load-independent half of the design's §12.2.
+    """
+    import time as time_mod
+
+    from local_operator.model import configure as configure_mod
+
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    calls = {"n": 0}
+
+    class _CountingTime:
+        """The ``time`` module as ``configure`` sees it, with one read counted."""
+
+        def monotonic(self) -> float:
+            calls["n"] += 1
+            return time_mod.monotonic()
+
+        def __getattr__(self, name: str):
+            return getattr(time_mod, name)
+
+    monkeypatch.setattr(configure_mod, "time", _CountingTime())
+
+    def drain_with(deltas: int) -> int:
+        calls["n"] = 0
+        fn = _fn(f"sess-{deltas}")
+        events = _stream_with_deltas(
+            [StreamTextDelta(delta="x") for _ in range(deltas)], output_tokens=10 + deltas
+        )
+        asyncio.run(_drain(fn, _request(), events))
+        rec.flush_for_test()
+        return calls["n"]
+
+    without = drain_with(0)
+    with_one = drain_with(1)
+    with_500 = drain_with(500)
+    # One read per output delta, plus ONE more on the first delta: that one is
+    # the PRE-EXISTING ``ttft_ms`` stamp, which the base revision pays too, so it
+    # is not part of what this change adds. Both assertions are stated because
+    # they say different things — the first that the per-delta cost is exactly
+    # one read, the second that the wrapper's own housekeeping is constant.
+    assert with_500 - without == 501, (
+        "500 per-delta reads plus the first delta's pre-existing TTFT read; "
+        f"got {with_500 - without}"
+    )
+    assert (
+        with_500 - with_one == 499
+    ), f"499 further deltas must cost 499 reads; got {with_500 - with_one}"
+    rec.close()
+    store.close()

@@ -1,0 +1,372 @@
+"""``lop model`` — switch another live session's model from a terminal (design D4).
+
+Grammar cases go through the production parser (``build_cli_parser``), as
+``test_cli_send.py`` does, because the hazard is in how argparse SLOTS the
+positionals once a ``--pid``/``--session`` selector is present. Delivery cases
+dial a REAL in-process registrant, so each exit code and line is the one a
+user would read.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+from local_operator.cli import build_cli_parser, model_command
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.server import RuntimeServer
+from tests.unit.mobile.test_peer_model_wire import _ModelHandle, _OldRuntime
+from tests.unit.session.runtime.test_server import _wait_record
+
+
+def _run(argv: "list[str]") -> int:
+    return model_command(build_cli_parser().parse_args(["model", *argv]))
+
+
+def _alias(own: Any, **overrides: Any) -> registry.SessionRecord:
+    """A live, engaged record under a pid that is not this process's."""
+    fields: dict[str, Any] = {
+        "pid": os.getppid(),
+        "kind": "tui",
+        "session_id": "alias-session",
+        "conversation_name": "experiment one",
+        "cwd": "/tmp",
+        "model_label": "test/model",
+        "control_port": own.control_port,
+        "control_key": own.control_key,
+        "started": True,
+    }
+    fields.update(overrides)
+    record = registry.SessionRecord(**fields)
+    registry.publish(record)
+    return record
+
+
+@pytest.fixture
+def no_self(monkeypatch):
+    """The sender identity is this test process, never the alias pid."""
+    monkeypatch.setattr("local_operator.cli._peer_sender_identity", lambda: {"pid": os.getpid()})
+
+
+@pytest.mark.asyncio
+async def test_a_name_and_a_model_switch_the_peer(no_self, capsys) -> None:
+    handle = _ModelHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record())
+        import asyncio
+
+        rc = await asyncio.to_thread(_run, ["experiment", "deepseek/deepseek-flash"])
+        out = capsys.readouterr()
+        assert rc == 0, out.err
+        assert out.out.strip().splitlines() == [
+            "switched to deepseek/deepseek-flash (was test/model)",
+            "its next turn runs on it",
+            f"→ experiment one (pid {alias.pid})",
+        ]
+        # NIT-1: a healthy switch prints nothing extra — no waiting line.
+        assert out.err == ""
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_pid_with_one_positional_binds_it_as_the_model(no_self, capsys) -> None:
+    handle = _ModelHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record())
+        import asyncio
+
+        rc = await asyncio.to_thread(_run, ["--pid", str(alias.pid), "deepseek/deepseek-flash"])
+        assert rc == 0, capsys.readouterr().err
+        assert handle.calls[-1][0:2] == ("receive_peer_model", ("deepseek", "deepseek-flash"))
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_exits_non_zero_with_the_targets_sentence(no_self, capsys) -> None:
+    runtime = RuntimeServer(_ModelHandle(), kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record())
+        import asyncio
+
+        rc = await asyncio.to_thread(_run, ["--pid", str(alias.pid), "nosuchprov/x"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "refused: 'nosuchprov' is not a known provider; still on test/model" in err
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_an_older_peer_exits_non_zero_and_says_nothing_changed(no_self, capsys) -> None:
+    runtime = _OldRuntime(_ModelHandle(), kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record())
+        import asyncio
+
+        rc = await asyncio.to_thread(_run, ["--pid", str(alias.pid), "deepseek/deepseek-flash"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "older lop: it cannot switch models remotely; nothing changed" in err
+        assert err.count(str(alias.pid)) == 1
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize(
+    "argv,needle",
+    [
+        (["experiment", "deepseek/x", "--pid", "12"], "not both"),
+        (["deepseek/deepseek-flash"], "name the session to switch as well"),
+        ([], "usage: lop model"),
+        (["experiment", "deepseek"], "<provider>/<model-id>"),
+    ],
+)
+def test_a_malformed_command_dials_nothing(argv, needle, capsys) -> None:
+    with patch("local_operator.mobile.peer_client.send_control_op") as dial:
+        assert _run(argv) == 1
+    assert needle in capsys.readouterr().err
+    dial.assert_not_called()
+
+
+def test_pid_and_session_together_is_a_parser_error() -> None:
+    with pytest.raises(SystemExit):
+        build_cli_parser().parse_args(["model", "--pid", "1", "--session", "s", "a/b"])
+
+
+def test_a_stored_session_is_named_not_running(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "coldsess1").mkdir(parents=True)
+    assert _run(["--session", "coldsess1", "deepseek/deepseek-flash"]) == 1
+    assert "session 'coldsess1' is not running — open it and use /model" in (
+        capsys.readouterr().err
+    )
+
+
+def test_an_unknown_name_is_a_plain_miss(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert _run(["nobody-by-this-name", "deepseek/deepseek-flash"]) == 1
+    assert "no live session matches 'nobody-by-this-name'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--model", "--hosting"])
+def test_the_inherited_run_flags_are_named_as_the_mistake(flag, capsys) -> None:
+    """U4: `lop model x --model p/m` used to blame the target."""
+    with patch("local_operator.mobile.peer_client.send_control_op") as dial:
+        assert _run(["experiment", flag, "deepseek/deepseek-flash"]) == 1
+    err = capsys.readouterr().err
+    assert "the model is a positional here, not a flag" in err
+    dial.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_live_session_whose_name_only_the_store_knows_yet_is_switched(
+    no_self, capsys, monkeypatch, tmp_path
+) -> None:
+    """U1: a just-renamed session's record lags its name, so the name resolves on
+    disk first. The stored id is asked of the LIVE registry before the session is
+    called "not running"."""
+    import asyncio
+
+    import local_operator.mobile.peer_send as peer_send
+
+    handle = _ModelHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record(), conversation_name="old name")
+        monkeypatch.setattr(
+            peer_send,
+            "resolve_stored_target",
+            lambda needle, **_kw: (
+                (alias.session_id, [], "") if needle == "racepeer" else (None, [], "")
+            ),
+        )
+        rc = await asyncio.to_thread(_run, ["racepeer", "deepseek/deepseek-flash"])
+        out = capsys.readouterr()
+        assert rc == 0, out.err
+        assert "not running" not in out.err
+        assert handle.calls[-1][0:2] == ("receive_peer_model", ("deepseek", "deepseek-flash"))
+    finally:
+        runtime.close()
+
+
+def test_a_terminal_switch_is_attributed_to_the_terminal(monkeypatch, tmp_path) -> None:
+    """U2, then D7/U9/Q5: from a plain terminal the ancestry walk finds no
+    session. The header label is short (`terminal`) so the card's models survive
+    the clip; the directory rides in `cwd` for the body."""
+    import os as _os
+
+    from local_operator.cli import _cli_switch_sender
+
+    monkeypatch.setattr("local_operator.cli._peer_sender_identity", lambda: {"pid": 99999})
+    monkeypatch.chdir(tmp_path)
+    sender = _cli_switch_sender()
+    assert (sender["conversation_name"], sender["via"]) == ("terminal", "terminal")
+    assert sender["cwd"] == _os.getcwd()
+
+    # NIT-4: a deleted working directory must not cost the switch its sender.
+    def gone() -> str:
+        raise FileNotFoundError("cwd was removed")
+
+    monkeypatch.setattr("local_operator.cli.os.getcwd", gone)
+    sender = _cli_switch_sender()
+    assert sender["conversation_name"] == "terminal" and "cwd" not in sender
+    monkeypatch.setattr(
+        "local_operator.cli._peer_sender_identity",
+        lambda: {"pid": 7, "session_id": "s1", "conversation_name": "fleet boss"},
+    )
+    assert _cli_switch_sender()["conversation_name"] == "fleet boss"
+
+
+class _SilentHandle(_ModelHandle):
+    """A target that answers only once the CLI has said it is waiting (U11)."""
+
+    def __init__(self, noticed: "Any") -> None:
+        super().__init__()
+        self._noticed = noticed
+
+    async def receive_peer_model(self, provider, model_id, *, sender=None):  # noqa: ANN001, ANN201
+        import asyncio
+
+        # Event-driven, not a sleep: the answer is held until the notice fired.
+        assert await asyncio.to_thread(self._noticed.wait, 30), "the waiting notice never printed"
+        return await super().receive_peer_model(provider, model_id, sender=sender)
+
+
+@pytest.mark.asyncio
+async def test_a_slow_target_is_announced_on_stderr_while_it_is_waited_for(
+    no_self, monkeypatch, capsys
+) -> None:
+    """U11: a stopped target held `lop model` silent for the whole 15 s ack
+    deadline. After a short grace the CLI says who it is waiting for, on stderr
+    so stdout stays the receipt alone, and the receipt still follows."""
+    import asyncio
+    import threading
+
+    from local_operator.mobile import peer_send
+
+    noticed = threading.Event()
+    real = peer_send.waiting_for_switch_detail
+
+    def notice(record: Any) -> str:
+        noticed.set()
+        return real(record)
+
+    monkeypatch.setattr(peer_send, "PEER_MODEL_WAIT_NOTICE_S", 0.01)
+    monkeypatch.setattr(peer_send, "waiting_for_switch_detail", notice)
+    runtime = RuntimeServer(_SilentHandle(noticed), kind="tui")
+    runtime.start()
+    runtime.set_record_started(True)
+    try:
+        alias = _alias(await _wait_record())
+        rc = await asyncio.to_thread(_run, ["--pid", str(alias.pid), "deepseek/deepseek-flash"])
+        out = capsys.readouterr()
+        assert rc == 0, out.err
+        assert out.err.strip().splitlines() == [
+            f"no answer yet from experiment one (pid {alias.pid})…"
+        ]
+        assert "waiting" not in out.out
+        assert out.out.startswith("switched to deepseek/deepseek-flash")
+    finally:
+        runtime.close()
+
+
+def test_the_waiting_line_promises_no_total_and_fits_60_columns() -> None:
+    """MINOR-3: the ack deadline is an idle bound the target's pushes reset, so
+    the line quotes no total. D13: one row at 60 columns for a 25-char name."""
+    from types import SimpleNamespace
+
+    from local_operator.mobile.peer_send import waiting_for_switch_detail
+
+    record = SimpleNamespace(conversation_name="n" * 25, session_id="s", pid=4194304)
+    line = waiting_for_switch_detail(record)
+    assert "up to" not in line and "15" not in line, line
+    assert len(line) <= 60, (len(line), line)
+
+
+@pytest.mark.parametrize("command", ["model", "send"])
+def test_ctrl_c_while_waiting_is_one_honest_line_not_a_traceback(
+    command, no_self, monkeypatch, capsys
+) -> None:
+    """U1: Ctrl-C during the wait stops the WAIT, not an op that may already be
+    written. Exit 130 with one line saying it may still land."""
+    from local_operator.cli import send_command
+
+    record = registry.SessionRecord(
+        pid=os.getppid(),
+        kind="tui",
+        session_id="ctrlc-session",
+        conversation_name="experiment one",
+        cwd="/tmp",
+        model_label="test/model",
+        control_port=1,
+        control_key="k",
+        started=True,
+    )
+
+    def interrupted(coro):  # noqa: ANN001, ANN202
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("asyncio.run", interrupted)
+    # The real re-delivery would kill the test runner; what it must be called
+    # with is asserted below, and a real bash loop proves the effect (MINOR-4).
+    delivered: list[tuple[int, int]] = []
+    monkeypatch.setattr("local_operator.cli.os.kill", lambda pid, sig: delivered.append((pid, sig)))
+    monkeypatch.setattr("signal.signal", lambda *_a: None)
+    if command == "model":
+        monkeypatch.setattr(
+            "local_operator.mobile.peer_send.resolve_switch_target",
+            lambda **_k: (record, [], ""),
+        )
+        argv = ["model", "experiment", "deepseek/deepseek-flash"]
+        needle = "interrupted — the switch is unconfirmed and may still apply"
+    else:
+        monkeypatch.setattr(
+            "local_operator.cli._resolve_peer_target", lambda *_a, **_k: (record, [], "")
+        )
+        argv = ["send", "experiment", "hello"]
+        needle = "interrupted — delivery is UNCONFIRMED"
+    handler = model_command if command == "model" else send_command
+    try:
+        rc = handler(build_cli_parser().parse_args(argv))
+    except KeyboardInterrupt:
+        # Caught HERE so a regression fails this test instead of aborting the run.
+        pytest.fail("Ctrl-C escaped as a traceback")
+    err = capsys.readouterr().err
+    assert rc == 130
+    assert needle in err and "Traceback" not in err, err
+    # MINOR-4: exiting 130 is not enough for bash to stop a loop around the
+    # command; the process must die OF SIGINT, after the notice is printed.
+    assert delivered == [(os.getpid(), signal.SIGINT)]
+
+
+def test_the_unconfirmed_switch_lines_fit_60_columns_and_look_forward() -> None:
+    """U3: the op can still sit unread in a stalled target, so both receipts say
+    the switch may still apply — never "may or may not have landed", which a
+    `lop sessions` run straight away seemed to answer. Each row fits 60 columns."""
+    from local_operator.mobile.peer_send import (
+        interrupted_switch_detail,
+        unconfirmed_switch_detail,
+    )
+
+    for detail in (interrupted_switch_detail(), unconfirmed_switch_detail()):
+        assert "may still apply" in detail and "may or may not" not in detail, detail
+        assert max(len(line) for line in detail.splitlines()) <= 60, detail

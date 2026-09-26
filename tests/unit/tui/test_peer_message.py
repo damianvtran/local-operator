@@ -317,6 +317,19 @@ class TestPeerCard:
         assert '"lo-release-window"' in row
         assert row.index('"lo-release-window"') < row.index("I am claiming")
 
+    def test_a_terminal_sender_is_an_app_label_not_a_quoted_name(self) -> None:
+        """D12: `lop model` from a plain terminal is labelled `terminal` by the
+        app. Quoted, it read exactly like a session a user named "terminal";
+        the unquoted form is the one the app's other labels already use."""
+        terminal = {"pid": 91234, "conversation_name": "terminal", "via": "terminal"}
+        block = PeerMessageBlock("[remote model switch] now on a/x (was b/y)", terminal)
+        row = block._build_row(100).plain
+        assert "terminal · " in row and '"terminal"' not in row
+        assert block._header(100).startswith("terminal · pid 91234")
+        # A session a user really named "terminal" keeps the quotes.
+        named = PeerMessageBlock("hi", {"pid": 7, "conversation_name": "terminal"})
+        assert '"terminal"' in named._build_row(100).plain
+
     def test_the_snippet_sheds_before_the_sender_at_narrow_widths(self) -> None:
         """Monotonic degradation, in the order that keeps the row useful: the
         message preview gives way, the address does not."""

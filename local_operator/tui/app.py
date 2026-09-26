@@ -37666,22 +37666,106 @@ class OperatorApp(App[None]):
         # ``push_screen`` (not the awaiting variant): the screen dismisses
         # itself on Esc and returns nothing to reconcile, exactly like the
         # other read-only overlays.
-        self.push_screen(
-            AnalyticsScreen(
-                aggregate,
-                daily=daily,
-                monthly=monthly,
-                window_totals=window_totals,
-                # Search spend is not in this ledger (``web_search`` bills
-                # separately), so the two halves are handed to the screen rather
-                # than derived from the aggregate. Read HERE, on the same pass
-                # that read the store, so the screen holds one snapshot of each
-                # and a repaint cannot show a search total from a different
-                # moment than the model one.
-                search_spend=self._process_search_spend(),
-                session_search_spend=self._session_search_spend(),
-            )
+        from local_operator.tui.widgets.analytics_panel import MODEL_RATES_PENDING
+
+        screen = AnalyticsScreen(
+            aggregate,
+            daily=daily,
+            monthly=monthly,
+            window_totals=window_totals,
+            # Search spend is not in this ledger (``web_search`` bills
+            # separately), so the two halves are handed to the screen rather
+            # than derived from the aggregate. Read HERE, on the same pass
+            # that read the store, so the screen holds one snapshot of each
+            # and a repaint cannot show a search total from a different
+            # moment than the model one.
+            search_spend=self._process_search_spend(),
+            session_search_spend=self._session_search_spend(),
+            # The per-model table is the ONE section with its own read, and it
+            # is NOT read on this pass: ``model_rates()`` groups the raw ledger
+            # (seconds on the operator's 1.95 M rows), and folding it in here
+            # would make every open of this screen pay it — including the opens
+            # that never scroll to the table. So the section starts in its
+            # "reading" state and the worker below fills it in. The screen shows
+            # the same snapshot of everything else either way.
+            model_rates=MODEL_RATES_PENDING,
         )
+        self.push_screen(screen)
+        self.run_worker(
+            self._read_model_rates_worker(screen),
+            thread=False,
+            # ITS OWN GROUP, and that is load-bearing rather than tidy (review
+            # round 1, NIT 2, reproduced with a minimal Textual app):
+            # ``exclusive=True`` cancels the group's existing worker, and the
+            # worker that opened this screen — the coroutine that pushed it and is
+            # still awaiting — is in the ``analytics`` group. Sharing the group
+            # therefore had the child cancel its own PARENT, whose next await
+            # never resumed. A distinct group keeps the exclusivity (one rates
+            # read at a time) without cancelling the read that produced the
+            # report.
+            group="analytics-rates",
+            exclusive=True,
+            # The read is already isolated in a thread and cannot raise, but a
+            # screen a user opened to LOOK at their ledger must never be the
+            # thing that takes the session down (same rule as ``/info``).
+            exit_on_error=False,
+        )
+
+    async def _read_model_rates_worker(self, screen: Any) -> None:
+        """Fill in the per-model table's own read, after the screen is up.
+
+        Its own worker, and its own exception boundary: this read is slower than
+        everything else on the screen put together, so a failure here must cost
+        the table (and say so in that table) rather than the whole report.
+
+        **The scope is the same one the headline covers** — unbounded, i.e. all
+        time — because the Totals above this table come from an unbounded
+        ``aggregate()``. Reading 30 days here while the Totals read all time was a
+        review finding (round 1, MAJOR 2): the section invites the reader to hold
+        a model's output tokens against the headline's, and a narrower window
+        makes that comparison quietly wrong with nothing on screen saying so. The
+        meta line names the scope for the same reason.
+
+        The read is also no slower at that scope: measured on the operator's
+        1.95 M-row ledger, unbounded is 2 358.7 ms against 2 241.8 ms for 30 days.
+        """
+        from local_operator.analytics.store import AnalyticsStore
+        from local_operator.tui.widgets.analytics_panel import MODEL_RATES_LIMIT
+
+        def _read() -> list[Any]:
+            store = AnalyticsStore()
+            try:
+                # The SAME bound the section discloses when it hits it, so the
+                # notice cannot drift from the read that produced it.
+                return store.model_rates(limit=MODEL_RATES_LIMIT)
+            finally:
+                store.close()
+
+        try:
+            rows: Any = await asyncio.to_thread(_read)
+        except Exception:  # noqa: BLE001 — a slow side table never breaks the screen
+            logger.debug("analytics: model rates failed", exc_info=True)
+            from local_operator.tui.widgets.analytics_panel import MODEL_RATES_FAILED
+
+            rows = MODEL_RATES_FAILED
+        # NO MOUNT GUARD, and that is the fix rather than an omission (design
+        # round 1 D1 and review round 2's blocker, found independently in the
+        # real app by both). ``push_screen`` is not awaited — deliberately, since
+        # awaiting a ModalScreen waits for the user to CLOSE it — so the pump may
+        # not have mounted the screen yet when this write lands. Gating on
+        # ``is_mounted`` therefore DISCARDED the answer whenever the read beat the
+        # mount: a small or warm ledger renders "reading the ledger…" forever,
+        # with nothing left to retry. Measured by both reviewers at 3/3 and in
+        # three arms (as shipped the rows are dropped; with the guard removed they
+        # land; the guard is causal).
+        #
+        # Writing the state unconditionally is correct in both directions: before
+        # the mount it is simply the value the FIRST paint reads, and after a
+        # dismissal it is a write to a detached object that repaints nothing
+        # (``set_model_rates`` already wraps its repaint). The file documents this
+        # same trap twice already — ``is_mounted`` is not a liveness test for a
+        # screen that is still being pushed.
+        screen.set_model_rates(rows)
 
     def _cmd_session(self, arg: str, notice: NoticeFn) -> None:
         """Read only this session's ledger, or copy its ID; never treat text as a prompt."""
@@ -46376,7 +46460,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 129
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 130
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

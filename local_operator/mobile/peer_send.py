@@ -51,7 +51,21 @@ STORED_DISCOVERY_LIMIT = 200
 PEER_MESSAGE_MAX_BYTES = 256 * 1024
 
 
-def unengaged_refusal(label: str, *, count: int = 1, cold: bool = False) -> str:
+#: What an unengaged session cannot do, in :func:`unengaged_refusal`'s sentence.
+#: The peer-message form is the default; a model switch names its own verb
+#: (:data:`MODEL_SWITCH_CAPABILITY`) so a sender is not told a switch was
+#: refused because the target "cannot receive peer messages".
+PEER_MESSAGE_CAPABILITY = "cannot receive peer messages"
+MODEL_SWITCH_CAPABILITY = "cannot be switched remotely"
+
+
+def unengaged_refusal(
+    label: str,
+    *,
+    count: int = 1,
+    cold: bool = False,
+    capability: str = PEER_MESSAGE_CAPABILITY,
+) -> str:
     """The ONE sentence that refuses a peer message to a never-engaged session.
 
     A session that has not run a real turn yet (``SessionRecord.started`` is
@@ -109,7 +123,7 @@ def unengaged_refusal(label: str, *, count: int = 1, cold: bool = False) -> str:
         )
     return (
         f"{label} {'have' if plural else 'has'} not been engaged yet ({sent}), "
-        f"so {'they' if plural else 'it'} cannot receive peer messages — {remedy}"
+        f"so {'they' if plural else 'it'} {capability} — {remedy}"
     )
 
 
@@ -183,6 +197,7 @@ def resolve_peer_target(
     include_wedged: bool = False,
     require_started: bool = True,
     skipped: "list[Any] | None" = None,
+    capability: str = PEER_MESSAGE_CAPABILITY,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
@@ -246,6 +261,10 @@ def resolve_peer_target(
     claim to be the single source of truth and leave the ``send`` tool teaching
     a different rule from the command.
 
+    ``capability`` names what an unengaged target cannot do in its refusal;
+    the model switch passes :data:`MODEL_SWITCH_CAPABILITY` so its sender reads
+    about a switch, not about peer messages.
+
     Returns ``(record, candidates, error)``: exactly one of ``record`` or
     ``error`` is meaningful; ``candidates`` is populated on an ambiguous substring
     so the caller can list them for disambiguation. The shape is identical for the
@@ -300,7 +319,8 @@ def resolve_peer_target(
                         None,
                         [],
                         unengaged_refusal(
-                            unengaged_label(pid=requested_pid, session_id=rec.session_id)
+                            unengaged_label(pid=requested_pid, session_id=rec.session_id),
+                            capability=capability,
                         ),
                     )
                 return rec, [], ""
@@ -318,7 +338,13 @@ def resolve_peer_target(
                     # The label is the SESSION ID here, because that is the
                     # address this branch answers: an exact `--session` send
                     # named an id, not a pid.
-                    return None, [], unengaged_refusal(unengaged_label(session_id=session))
+                    return (
+                        None,
+                        [],
+                        unengaged_refusal(
+                            unengaged_label(session_id=session), capability=capability
+                        ),
+                    )
                 return rec, [], ""
         return None, [], f"no session found with session id {session!r}"
 
@@ -382,7 +408,11 @@ def resolve_peer_target(
                 label = f"the only live match for {needle_source!r} (pid {unengaged[0].pid})"
             else:
                 label = f"{len(unengaged)} live matches for {needle_source!r}"
-            return None, [], unengaged_refusal(label, count=len(unengaged))
+            return (
+                None,
+                [],
+                unengaged_refusal(label, count=len(unengaged), capability=capability),
+            )
         # Distinguish "matched but not live" from "no match at all" so the caller
         # knows whether to wait or to fix the name.
         wedged = [
@@ -1087,3 +1117,282 @@ def resolve_sender_identity(sender: "dict[str, Any] | None") -> "dict[str, Any]"
         # Broad on purpose (see above): a malformed record, an unexpected
         # attribute, or a scan fault must cost the label, never the message.
         return fallback
+
+
+# ---------------------------------------------------------------------------
+# Peer model switch — the send half of ``peer_set_model``
+# ---------------------------------------------------------------------------
+
+
+class PeerModelUnconfirmed(Exception):
+    """The switch was sent and no answer came back: it may or may not have landed.
+
+    A class of its own rather than a ``TimeoutError``/``OSError`` so neither
+    surface can fold it into "nothing changed". The receiver validates, applies
+    and only then acks, so a lost ack can hide an applied switch — the same
+    contract ``_dial_or_explain`` documents for a message.
+    """
+
+
+def parse_model_selector(selector: str) -> "tuple[str, str] | str":
+    """``provider/model_id`` split on the FIRST ``/``, or the refusal sentence.
+
+    Syntax only — the one check a sender can make without the target's config
+    (design D3). The split is on the first slash exactly as ``/model`` splits
+    it, so ``openrouter/deepseek/deepseek-chat`` keeps its own slash in the id.
+    The provider is lower-cased like ``/model`` does; the id keeps its case.
+    """
+    text = (selector or "").strip()
+    provider, sep, model_id = text.partition("/")
+    provider = provider.strip().lower()
+    model_id = model_id.strip()
+    if not sep or not provider or not model_id:
+        return f"model must be <provider>/<model-id> (e.g. deepseek/deepseek-flash), not {text!r}"
+    return provider, model_id
+
+
+def older_peer_detail() -> str:
+    """What an ``unknown op`` from an older build means to the sender (design D7).
+
+    No address in the sentence: every surface prints the address beside it, and
+    a sentence that named the pid again printed it twice (QA Q1, UX U6).
+    """
+    return (
+        "older lop: it cannot switch models remotely; nothing changed — "
+        "update it (lop update) or run /model in that session"
+    )
+
+
+#: The advice both unconfirmed-switch receipts end on.
+_CHECK_BEFORE_RETRYING = "check `lop sessions` before retrying"
+
+
+def unconfirmed_switch_detail() -> str:
+    """A lost ack AFTER the switch op was sent (design D7).
+
+    FORWARD-LOOKING, not "may or may not have landed" (PR #1587 UX round 2,
+    U3): the op can still be sitting unread in a stalled target's socket, so a
+    `lop sessions` run straight away shows the old model and the switch applies
+    afterwards. Two rows, each inside a 60-column terminal.
+    """
+    return f"no answer — the switch is unconfirmed and may still apply\n{_CHECK_BEFORE_RETRYING}"
+
+
+def interrupted_switch_detail() -> str:
+    """Ctrl-C while ``lop model`` waited (PR #1587 UX round 1, U1).
+
+    The same honesty as :func:`unconfirmed_switch_detail`: the op may already
+    sit in the target's socket buffer, and the target applies before it acks,
+    so stopping the wait is not stopping the switch.
+    """
+    return f"interrupted — the switch is unconfirmed and may still apply\n{_CHECK_BEFORE_RETRYING}"
+
+
+def interrupted_send_detail() -> str:
+    """Ctrl-C while ``lop send`` waited: :func:`_unanswered_dial_detail`'s rule.
+
+    Once the dial may have written the op, delivery is unconfirmed rather than
+    failed, and a re-send is the duplicate steer or wake that sentence warns of.
+    """
+    return (
+        "interrupted — delivery is UNCONFIRMED: it may still arrive, so do not "
+        "send it again unless you know it did not land"
+    )
+
+
+def unreachable_switch_detail(error: BaseException) -> str:
+    """The control socket never opened, so the op was never sent (review N3)."""
+    # Both facts the reader acts on lead; the socket detail trails (design
+    # round 2, D10).
+    return f"could not reach that session; nothing changed ({error})"
+
+
+#: How long the sender waits with NOTHING arriving from the target before it
+#: gives up on a switch. ABOVE the TUI host's own app-hop budget
+#: (``tui_handle._APP_HOP_TIMEOUT_S``, 10 s), because a target that is busy but
+#: succeeding must not read as "no answer" (review N2); the same figure as the
+#: attach client's ``ACK_TIMEOUT_S``.
+#:
+#: AN IDLE BOUND, NOT A TOTAL (PR #1587 review round 1, MINOR-3): it is applied
+#: to each socket read (``peer_client._FrameReader.next_line``), and a target
+#: that pushes projection frames on the connection resets it, so the whole wait
+#: can run longer. No user-facing sentence may quote it as "up to 15s".
+PEER_MODEL_ACK_TIMEOUT_S = 15.0
+
+#: How long ``lop model`` stays silent before saying it is still waiting (UX
+#: round 3, U11). A healthy target answers in well under a second, but a stopped
+#: or wedged one holds the command for at least :data:`PEER_MODEL_ACK_TIMEOUT_S`,
+#: and 15 s of nothing reads as a hang.
+PEER_MODEL_WAIT_NOTICE_S = 2.0
+
+
+def waiting_for_switch_detail(record: "Any") -> str:
+    """The one line ``lop model`` prints while the target has not answered yet.
+
+    Names the target in the receipt's own ``name (pid N)`` grammar. It promises
+    NO total: the ack deadline is an idle bound that the target's own pushes
+    reset (see :data:`PEER_MODEL_ACK_TIMEOUT_S`), and "up to 15s" was measured
+    running to 20 s (review round 1, MINOR-3). Short on purpose: one row at 60
+    columns for a name up to 25 characters (design round 1, D13).
+    """
+    name = record.conversation_name or record.session_id
+    return f"no answer yet from {name} (pid {record.pid})…"
+
+
+def not_running_detail(session: str) -> str:
+    """A stored/closed session: a cold switch has no owner to apply it (D1, D4)."""
+    return (
+        f"session {session!r} is not running — open it and use /model, or "
+        f"`lop --resume {session} --hosting <provider> --model <model-id>`"
+    )
+
+
+async def switch_peer_model(
+    record: "Any",
+    *,
+    provider: str,
+    model_id: str,
+    sender: "dict[str, Any]",
+) -> str:
+    """Ask ``record``'s LIVE session to switch model; return its receipt.
+
+    The receipt is the RECEIVER's own sentence (design §2): it validated the
+    pair against its own config and credentials, applied it through its own
+    switch, and read back what is actually in force. This side adds nothing but
+    the address.
+
+    Raises ``RuntimeError`` when the target answered no — a refusal (its
+    ``refused: …; still on …``), an unengaged or incapable handle, or an OLDER
+    build that does not know the op, which is translated here into
+    :func:`older_peer_detail` because its raw ``unknown op`` text says nothing
+    about what the sender should do, and when the socket could not be opened
+    (nothing was sent, so nothing changed). Raises :class:`PeerModelUnconfirmed`
+    only when the op was written and the target's socket then stayed silent for
+    :data:`PEER_MODEL_ACK_TIMEOUT_S` — an idle bound per read, not a total, so a
+    target that keeps pushing frames can hold the call longer.
+
+    Live, started records only: resolution already refused the rest, and this
+    re-checks ``started`` for a caller that bypassed it, exactly as
+    :func:`deliver_peer_message` does.
+    """
+    from local_operator.mobile.peer_client import ControlDialFailed, send_control_op
+
+    if not getattr(record, "started", True):
+        label = unengaged_label(pid=record.pid, session_id=record.session_id)
+        raise RuntimeError(unengaged_refusal(label, capability=MODEL_SWITCH_CAPABILITY))
+    try:
+        return await send_control_op(
+            record,
+            "peer_set_model",
+            {"provider": provider, "model_id": model_id, "sender": sender},
+            deadline_s=PEER_MODEL_ACK_TIMEOUT_S,
+            default_detail=f"switched to {provider}/{model_id}",
+            default_error="the switch was refused",
+        )
+    except ControlDialFailed as exc:
+        # Before the ConnectionError arm below, which it subclasses: nothing was
+        # sent, so this one CAN say nothing changed.
+        raise RuntimeError(unreachable_switch_detail(exc)) from exc
+    except RuntimeError as exc:
+        # D7: an older registrant's dispatch raises ``unknown op: 'peer_set_model'``.
+        # Matched on the prefix AND the op name, so an unrelated refusal that
+        # happens to quote a word is not rewritten.
+        if str(exc).startswith("unknown op") and "peer_set_model" in str(exc):
+            raise RuntimeError(older_peer_detail()) from exc
+        raise
+    except (ConnectionError, OSError) as exc:
+        # After the op frame was written (a dial failure is caught above).
+        # TimeoutError is an OSError subclass. Either way there is no
+        # acknowledged result — never "nothing changed", because the op may
+        # already sit in the target's socket buffer.
+        raise PeerModelUnconfirmed(unconfirmed_switch_detail()) from exc
+
+
+def resolve_switch_target(
+    *,
+    target: "str | None",
+    pid: "int | None",
+    session: "str | None",
+    pid_hint: str = "an exact pid",
+    session_hint: str = "a session id",
+) -> "tuple[Any | None, list[Any], str]":
+    """Resolve a model-switch address to ONE live, engaged record (design D4).
+
+    ``resolve_peer_target`` with the switch's own refusal wording, plus one
+    step for a name only the store answers to. A live record's name can lag a
+    rename by a heartbeat, so a just-renamed session's name resolves on disk
+    first (UX round 1, U1): the stored id is therefore asked of the LIVE
+    registry before it is called "not running". A live owner is switched
+    through its record; only a session no process owns gets the "open it and
+    use /model" sentence.
+
+    Returns ``resolve_peer_target``'s triple. Blocking (registry and directory
+    scans): callers run it off the loop.
+    """
+    record, candidates, error = resolve_peer_target(
+        target=target,
+        pid=pid,
+        session=session,
+        pid_hint=pid_hint,
+        session_hint=session_hint,
+        capability=MODEL_SWITCH_CAPABILITY,
+    )
+    if record is not None or candidates:
+        return record, candidates, error
+    if session and session_id_unowned(error):
+        stored = resolve_cold_session(session) or ""
+        return None, [], not_running_detail(stored) if stored else error
+    if (target or "").strip() and live_scan_found_nothing(error):
+        stored_id, stored_candidates, _withheld = resolve_stored_target(target or "")
+        if stored_candidates:
+            # Several stored namesakes: naming one would pick a recipient the
+            # call did not name, so the count is the answer.
+            return (
+                None,
+                [],
+                f"{len(stored_candidates)} stored sessions match {target!r} and none is "
+                "running — open the one you mean and use /model",
+            )
+        if stored_id:
+            live, _ignored, live_error = resolve_peer_target(
+                session=stored_id, session_hint=session_hint, capability=MODEL_SWITCH_CAPABILITY
+            )
+            if live is not None:
+                return live, [], ""
+            if not session_id_unowned(live_error):
+                # A live owner that refused (unengaged, wedged): its own answer.
+                return None, [], live_error
+            return None, [], not_running_detail(stored_id)
+    return None, [], error
+
+
+def switch_receipt(record: "Any", detail: str) -> str:
+    """How BOTH surfaces print a switch: the target's lines, then the address.
+
+    OUTCOME FIRST (design round 1, D1/D2): the sender's TUI card clips a line
+    from the right, and a leading ``pid N 'name':`` prefix spent the cells the
+    outcome needed while repeating what the card's own argument lines show. The
+    address therefore closes the receipt, in ``lop send``'s grammar
+    (``→ name (pid N)``, D4), so one terminal reads one vocabulary.
+    """
+    name = record.conversation_name or record.session_id
+    return f"{detail.rstrip()}\n→ {name} (pid {record.pid})"
+
+
+def switch_outcome(detail: str) -> str:
+    """The machine word for a switch receipt: the card's collapsed-row key (D6).
+
+    Read off the receipt's FIRST WORDS, which ``mobile/peer_model`` composes to
+    differ per outcome; a receipt from a target that phrases it differently
+    (a future build) maps to ``""`` and the card keeps its argument summary.
+    """
+    from local_operator.mobile.peer_model import PARTIAL_SWITCH_LEAD
+
+    first = detail.lstrip().split("\n", 1)[0]
+    if first.startswith("already on "):
+        return "unchanged"
+    if first.startswith("pending:"):
+        return "pending"
+    if first.startswith(("switched to ", "back on ")):
+        return "partial" if PARTIAL_SWITCH_LEAD in detail else "switched"
+    return ""

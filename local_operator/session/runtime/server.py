@@ -922,17 +922,22 @@ _UNCHAINED_OPS = frozenset({"ping"})
 #: * ``desktop_watch`` — REFUSED BY SHAPE: a registered ``kind == "attach"``
 #:   connection whose ``surface == "desktop"``, plus boolean ``visible`` /
 #:   ``can_notify``; anything else gets the error frame.
+#: * ``desktop_withdraw`` — REFUSED BY SHAPE: a registered ``kind == "attach"``
+#:   connection whose ``surface == "desktop"``; no fields are read. The
+#:   bridge's explicit "the pane left" signal (the one frame that clears the
+#:   session-scoped attach memory).
 #: * ``viewer_watch`` — REFUSED BY SHAPE: a registered ``kind == "attach"``
 #:   connection and a boolean ``displaying``.
 #: * ``event_mute`` / ``event_unmute`` — REFUSED BY SHAPE: attach-only, because
 #:   the relay they mute is never sent to a daemon at all.
 #:
-#: The dial path depends on the event mute, ``viewer_watch`` and ``desktop_watch``
-#: — three of the four refusal-by-shape members enumerated above — which
-#: ``session/attached.py`` re-asserts right after the welcome, exactly in the
-#: window where the canonical sync is still in flight. The ``watch`` and
-#: ``watch_job`` families are here for the daemon and child-page dials that send
-#: them, not for that reconnect.
+#: The dial path depends on the event mute, ``viewer_watch``,
+#: ``desktop_watch`` and ``desktop_withdraw`` — four of the five
+#: refusal-by-shape members enumerated above — which ``session/attached.py``
+#: re-asserts (or, for the withdrawal, replays) right after the welcome,
+#: exactly in the window where the canonical sync is still in flight. The
+#: ``watch`` and ``watch_job`` families are here for the daemon and child-page
+#: dials that send them, not for that reconnect.
 #:
 #: Their ``_dispatch`` push exemption is what makes them a MIRROR of an existing
 #: decision rather than a second one, and it covers ``watch``, ``unwatch``,
@@ -947,6 +952,7 @@ _SYNC_LOCAL_OPS = frozenset(
         "watch_job",
         "unwatch_job",
         "desktop_watch",
+        "desktop_withdraw",
         "viewer_watch",
         "event_mute",
         "event_unmute",
@@ -1368,6 +1374,12 @@ class SessionHandle(Protocol):
     #   Optional (getattr-probed in _dispatch) so reduced test handles and
     #   non-interactive exec hosts that never wired it keep working — a handle
     #   lacking it answers "this session cannot receive peer messages".
+    # receive_peer_model(provider, model_id, *, sender=None) -> str: another
+    #   local session switching this one's model (`send model=`, `lop model`).
+    #   Validates against THIS session's config, applies through the host's own
+    #   switch, reads back the model in force, and records a peer audit card.
+    #   Raises ValueError("refused: …; still on …") on refusal. Optional and
+    #   getattr-probed like receive_peer_message.
     # cancel_gracefully() -> str: stop the turn at the POST-TOOL boundary
     #   instead of cutting the running tool (Session.request_graceful_cancel).
     #   Serves the ``cancel`` op's default mode. Deliberately distinct from
@@ -1768,6 +1780,33 @@ class RuntimeServer:
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
         # the phone bridge and a follower terminal at once.
         self._clients: dict[int, _ClientConn] = {}
+        #: WHEN A DESKTOP ATTACHMENT WAS LAST HEARD FROM, across sockets.
+        #:
+        #: THE SESSION-SCOPED HALF OF THE ATTACH FACT (docs/design/
+        #: attached-interface-signal.md, "the transport-bound hole"). Every
+        #: other desktop fact on this class is per-CONNECTION, so a drop
+        #: erased it: the app was up, the pane was mounted, and between the
+        #: socket closing and the bridge's re-dial landing the model was told
+        #: "No interface is attached" — the exact lie this memory exists to
+        #: stop (live incident 2026-09-25: drops at 09:14:46 and storms at
+        #: 09:17:10-22 / 09:19:02-39, each coinciding with an injected
+        #: detached block).
+        #:
+        #: RENEWED by every accepted ``desktop_watch`` op and CLEARED only by
+        #: the explicit ``desktop_withdraw`` op; not cleared by a drop, not by
+        #: a session swap, not by anything else. It is read by
+        #: :meth:`attached_surfaces` ALONE — a stale memory must never keep a
+        #: runtime resident, so ``attach_clients`` (the reaper), Tier B
+        #: (``watching_surfaces``) and ``_desktop_visible`` do not read it.
+        #:
+        #: The window is the SAME ``DESKTOP_WATCH_LEASE_S`` the per-connection
+        #: lease uses (45 s, ``session/runtime/types.py``) — not a second
+        #: constant and not a wider window — so after the TTL with no
+        #: heartbeat the answer is honest again. ``0.0`` is "never heard
+        #: from", its own sentinel; every deliberate stop/retire path tears
+        #: this runtime down and takes the memory with it, so no in-place
+        #: clear exists beside the withdrawal op.
+        self._desktop_attach_seen: float = 0.0
         #: The attach connection that reserved an EXCLUSIVE move, or ``None``.
         #: Set on this loop in the same synchronous step that counts the other
         #: observers, so a viewer arriving after the count cannot be missed:
@@ -1806,6 +1845,11 @@ class RuntimeServer:
         #: the latch already set and never parks at all.
         self._close_event: asyncio.Event | None = None
         self._push_scheduled = False
+        #: A change landed while a push was already past its snapshot. That push
+        #: cannot carry it, and on an idle session (an idle `/new`/`/resume`) no
+        #: later event would schedule one, so the record waited for the 15 s
+        #: heartbeat. Set by ``_push_soon``; spent by ``_push_later``'s finally.
+        self._push_dirty = False
         # One warning per contiguous run of oversized frames, not one per
         # frame: a busy session repaints ~30x/s and a per-frame warning is the
         # log flood the cap exists to prevent. Reset when a frame fits again.
@@ -2559,7 +2603,40 @@ class RuntimeServer:
             )
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
-            self._publisher = RecordPublisher(self._record, self._config_root)
+            # INSTALL THE PUBLISHER BEFORE ITS RECORD CAN BE READ, and the
+            # ordering is the guarantee rather than housekeeping: ``_republish``
+            # no-ops while ``self._publisher`` is unset, so a record made
+            # readable before the assignment (which the constructor's own
+            # publish did) leaves a window where a write-through — a drain's
+            # ``note_leaving``, a turn's ``set_record_started`` — lands on the
+            # record object, no-ops against the attribute, and the readable
+            # file keeps its pre-write state until the next 15 s heartbeat.
+            # Thread preemption alone opens it, which is how the CI shards
+            # flaked reading ``leaving == ''`` (test_cold_join_against_drain)
+            # and ``started`` False (test_started_survives_the_republish);
+            # reversing the order gives a reader the invariant the tests
+            # assume — a readable record is one whose write-throughs land.
+            publisher = RecordPublisher(self._record, self._config_root, defer_publish=True)
+            self._publisher = publisher
+            try:
+                publisher.publish()
+            except Exception:
+                # A failed first publish must leave the boot exactly as the
+                # constructor-native failure did — no publisher, so
+                # ``wait_until_published`` still answers False — and no
+                # readable record either. The record half is why the close is
+                # here: a session thread's write-through can COMPLETE a
+                # heartbeat while this publish is in flight, and without the
+                # close that record outlives the rollback (nothing else
+                # unlinks it — ``_shutdown_impl`` unpublishes only behind a
+                # publisher, and thread mode swallows the raise). The close
+                # serialises with the writes (``RecordPublisher.close``), so
+                # it removes whatever raced it and refuses what comes after;
+                # it is best-effort, so it cannot mask the original failure.
+                # (agent review round 1, R1-1.)
+                self._publisher = None
+                publisher.close()
+                raise
             # BOTH BOOT REGISTRATIONS ARE PERFORMED ON THE SESSION'S LOOP. The
             # append itself is thread-tolerant, but the body of the same call is
             # not: ``subscribe`` folds the session's history, reconciles the
@@ -2624,14 +2701,15 @@ class RuntimeServer:
                 self._attention_task = asyncio.create_task(self._attention_loop())
         finally:
             # RELEASE THE DEFERRED MCP WIRING ON EVERY WAY OUT OF THIS PROLOGUE,
-            # not only the happy one. The record is written inside
-            # ``RecordPublisher.__init__``, so on the success path this is
-            # genuinely post-publication; a bind that raises reaches here too,
-            # and that case matters because ``_run`` (thread mode) swallows the
-            # exception and the process lives on — with no record and, without
-            # this, a latch shut for the session's life. MCP late beats MCP
-            # never, and the release cannot mask the failure: the exception
-            # still propagates.
+            # not only the happy one. The record is written by
+            # ``RecordPublisher.publish()`` — from the constructor by default,
+            # explicitly on this deferred boot path — so on the success path
+            # this is genuinely post-publication; a bind that raises reaches
+            # here too, and that case matters because ``_run`` (thread mode)
+            # swallows the exception and the process lives on — with no record
+            # and, without this, a latch shut for the session's life. MCP late
+            # beats MCP never, and the release cannot mask the failure: the
+            # exception still propagates.
             # See ``RuntimeServer._open_mcp_wiring_gate``.
             self._open_mcp_wiring_gate()
             # THE SERVING LATCH OPENS HERE, on every way out and in the same
@@ -2848,6 +2926,7 @@ class RuntimeServer:
         if self._push_task is task:
             self._push_task = None
         self._push_scheduled = False
+        self._push_dirty = False
 
     async def _attention_loop(self) -> None:
         """Reconcile read receipts without making a liveness heartbeat a read."""
@@ -3874,14 +3953,30 @@ class RuntimeServer:
             log = logger.info
         else:
             log = logger.warning
+        # AND, FOR A DESKTOP ATTACH, WHETHER THE SESSION-SCOPED MEMORY
+        # SURVIVED THE DROP (C5 — instrumentation only; the memory itself is
+        # not touched here). The runtime-side half of making the attach churn
+        # observable: a drop with ``live`` immediately after it is the shape
+        # the model-facing fix is about, and one with ``lapsed`` is an honest
+        # detachment. Appended only for ``surface=desktop`` so every other
+        # drop line, and the tests that pin its exact tail, are unchanged.
+        desktop_memory = ""
+        if conn.kind == "attach" and conn.surface == "desktop":
+            if self._desktop_attach_seen <= 0.0:
+                desktop_memory = " [desktop memory: never]"
+            elif self._desktop_attach_recent():
+                desktop_memory = " [desktop memory: live]"
+            else:
+                desktop_memory = " [desktop memory: lapsed]"
         log(
-            "session runtime: dropped %s client %s (events=%s frontend=%s surface=%s): %s",
+            "session runtime: dropped %s client %s (events=%s frontend=%s surface=%s): %s%s",
             conn.kind,
             peer,
             conn.wants_events,
             conn.wants_frontend,
             conn.surface,
             reason,
+            desktop_memory,
         )
         # The other half of the ``detached`` transition: the last terminal
         # leaving is precisely when the picker must start saying "nobody is
@@ -4218,6 +4313,11 @@ class RuntimeServer:
         failure costs a marker rather than a session. Called on every
         transition rather than left to the 15 s heartbeat because the value of
         these fields is that they are current when somebody looks.
+
+        The no-op below when the publisher is not installed yet cannot lose
+        anything a reader can see — ``_serve`` publishes the record only AFTER
+        installing the publisher, so a record that exists implies this call
+        finds one to write through.
         """
         publisher = getattr(self, "_publisher", None)
         if publisher is None:
@@ -4388,6 +4488,52 @@ class RuntimeServer:
         session_id = str(getattr(record, "session_id", "") or "")
         return presence.attended and presence.session_id == session_id
 
+    def _desktop_attach_recent(self) -> bool:
+        """Whether a desktop heartbeat was heard within the lease window (C1).
+
+        The session-scoped sibling of :meth:`_desktop_lease_live`: same 45 s
+        ``DESKTOP_WATCH_LEASE_S`` window, renewed by every accepted
+        ``desktop_watch``, cleared by ``desktop_withdraw`` — and deliberately
+        NOT cleared when the connection carrying it is dropped, which is the
+        whole point (a fully-closed app leaves it honest after the TTL;
+        a dropped-but-live pane does not).
+        """
+        seen = self._desktop_attach_seen
+        return seen > 0.0 and time.monotonic() - seen < DESKTOP_WATCH_LEASE_S
+
+    def _desktop_record_shows_this_session(self) -> bool:
+        """Whether the app's own record says it is SHOWING this conversation (C3).
+
+        The narrow reading, and both narrowings are decisions rather than
+        accidents:
+
+        * ``session_id`` must be NON-EMPTY and equal to THIS session's.
+          An empty name grants nothing — on this machine the record reads
+          ``session_id: ""`` while the operator IS watching (the UI withdraws
+          the name on every transient stream end), so granting on the empty
+          string would make every session on the machine claim an attached
+          interface. A name for ANOTHER conversation is not evidence for this
+          one either.
+        * ``has_window`` must hold: a windowless app is showing nothing, and
+          the record's own reader already enforces that when it builds
+          ``session_id`` — re-checked here so the two readers cannot drift.
+
+        Read only by :meth:`attached_surfaces`; ``_desktop_visible`` (Tier B)
+        keeps its own §2.3 fallback untouched.
+        """
+        try:
+            from local_operator.session.runtime.presence import desktop_presence
+
+            presence = desktop_presence(getattr(self, "_config_root", None) or config_dir())
+        except Exception:  # noqa: BLE001 — a presence read must never break an answer
+            logger.debug("could not read the desktop presence", exc_info=True)
+            return False
+        if not presence.present or not presence.has_window:
+            return False
+        record = getattr(self, "_record", None)
+        session_id = str(getattr(record, "session_id", "") or "")
+        return bool(session_id) and presence.session_id == session_id
+
     def notification_surfaces(self) -> frozenset[str]:
         """Delivery reachability is independent of a person viewing a session."""
         return (
@@ -4417,6 +4563,25 @@ class RuntimeServer:
         question the MODEL needs, because a question asked now is answered when
         they look, not when they are looking.
 
+        EXTENDED IN ROUND 3 (the transport-bound hole; see
+        ``docs/design/attached-interface-signal.md``). The lease above is a fact
+        about a SOCKET, and the socket is exactly what a bridge re-dial, a
+        renderer stream restart or a runtime swap takes away — so the model was
+        told "No interface is attached" while the app was open and the pane was
+        mounted. Two bounded, independent terms answer that, either of which can
+        grant:
+
+        * the SESSION-SCOPED memory (``_desktop_attach_seen``) — the last
+          accepted ``desktop_watch``, kept for the SAME 45 s window
+          (``DESKTOP_WATCH_LEASE_S``; not a second constant and not wider) and
+          not cleared by a drop. After the TTL with no heartbeat it is honest
+          again, and an explicit ``desktop_withdraw`` clears it at once;
+        * the app's own record, read narrowly — ``present ∧ has_window`` and a
+          non-empty ``session_id`` equal to this session's, for a successor
+          runtime booted under a still-open window before the re-dial lands
+          (see ``_desktop_record_shows_this_session`` for why an empty name
+          grants nothing).
+
         FOCUS IS DELIBERATELY ABSENT, and it must not be "tidied" into agreement
         with :meth:`_visible_attach_surfaces`. Focus flaps with window z-order,
         and this answer is rendered into the persisted system-prompt tail
@@ -4435,9 +4600,10 @@ class RuntimeServer:
         persisted block and writes a ``[session-state]`` row. The lease is what
         the question actually asked for: it is renewed by a heartbeat that names
         THIS session's subscription and is withdrawn when the pane leaves
-        (``desktop_watch``), so "lease live" IS "a pane holds this
-        conversation", with no window state and no notification capability in
-        it. ``can_notify`` belongs to reachability (:meth:`notification_surfaces`)
+        (``desktop_withdraw``; a transient stream end is NOT a withdrawal — the
+        memory above deliberately survives it), so "lease live" IS "a pane holds
+        this conversation", with no window state and no notification capability
+        in it. ``can_notify`` belongs to reachability (:meth:`notification_surfaces`)
         and ``visible`` to attention; neither is attachment.
 
         The reaper's own count (:meth:`attach_clients`) keeps the extra clause:
@@ -4462,6 +4628,34 @@ class RuntimeServer:
                     attached.add("desktop")
             else:
                 attached.add("attach")
+        # TWO ADDITIONAL, INDEPENDENT PATHS TO THE SAME ANSWER — either may
+        # grant, and both are bounded by their own clocks:
+        #
+        # * THE SESSION-SCOPED MEMORY (C1). The only desktop fact that does
+        #   not die with the socket that carried it, so a live pane's
+        #   attachment survives a drop, a re-dial before its re-assert lands,
+        #   and a runtime swap's blind window. It holds for the SAME 45 s
+        #   ``DESKTOP_WATCH_LEASE_S`` window as the per-connection lease and
+        #   is renewed by every accepted ``desktop_watch`` — after the TTL
+        #   with no heartbeat it is honest again. NEVER read by
+        #   ``attach_clients``/``watching_surfaces``/``_desktop_visible``:
+        #   this is a model-facing fact, not a residency or attention one.
+        #
+        # * THE APPARATUS IS SHOWING THIS SESSION (C3). The app's own
+        #   machine-wide record, read narrowly: ``present ∧ has_window`` and
+        #   a NON-EMPTY ``session_id`` equal to THIS session's — bounded by
+        #   that record's own TTL, which its reader already reaps. It covers
+        #   a successor runtime booted under a still-open window before the
+        #   bridge's re-dial lands. An EMPTY ``session_id`` grants NOTHING:
+        #   on the operator's machine the record reads ``""`` WHILE the
+        #   operator is watching (the UI withdraws it on transient stream
+        #   ends), so granting there would tell every session on the machine
+        #   "an interface is attached". A record naming ANOTHER conversation
+        #   is likewise not evidence for this one.
+        if "desktop" not in attached and self._desktop_attach_recent():
+            attached.add("desktop")
+        if "desktop" not in attached and self._desktop_record_shows_this_session():
+            attached.add("desktop")
         if self.watch_supported and self.phone_watchers > 0:
             # Reported as ``viewer`` rather than ``daemon``, for the reason given
             # on :meth:`watching_surfaces`: a relay being dialled is true of every
@@ -4989,11 +5183,50 @@ class RuntimeServer:
                 visible, can_notify = frame.get("visible"), frame.get("can_notify")
                 if type(visible) is not bool or type(can_notify) is not bool:
                     raise ValueError("desktop visibility fields must be booleans")
+                now = time.monotonic()
                 conn.desktop_visible = visible
                 conn.desktop_can_notify = can_notify
-                conn.desktop_seen = time.monotonic()
+                conn.desktop_seen = now
+                # EVERY ACCEPTED BEAT RENEWS THE SESSION-SCOPED MEMORY TOO,
+                # (False, False) INCLUDED, and that is load-bearing rather
+                # than sloppy: ``(False, False)`` is NOT the withdrawal.
+                # It is what a transient renderer stream end makes the bridge
+                # send (``desktop_sessions.py``'s post-pop refresh) and what
+                # a live pane on a host with no notification channel sends
+                # while hidden — in both cases the pane is still mounted, and
+                # clearing on this shape would re-open the incident during
+                # exactly the churn the memory exists to survive (and would
+                # flap the persisted block on a no-notify host, the round-2
+                # churn pin). The explicit withdrawal is its own op, below.
+                self._desktop_attach_seen = now
                 self._republish_detached()
                 detail = "desktop lease renewed"
+            elif op == "desktop_withdraw":
+                # THE EXPLICIT WITHDRAWAL (the bridge's "the pane left for
+                # real" signal). Its own op rather than a ``desktop_watch``
+                # shape because no pair of booleans can carry it: this frame
+                # clears the session-scoped memory AND this connection's
+                # lease, while ``(False, False)`` beats must keep renewing
+                # both (see the note above). CLOSING THE CONNECTION IS NOT
+                # THIS: a drop is the transport dying and the memory survives
+                # it on purpose; only this frame means the attachment ended.
+                if (
+                    conn.kind != "attach"
+                    or conn.surface != "desktop"
+                    or id(conn.writer) not in self._clients
+                ):
+                    raise ValueError("desktop withdrawal requires a live desktop attach connection")
+                conn.desktop_visible = False
+                conn.desktop_can_notify = False
+                # Both halves end together. ``desktop_seen = 0.0`` makes the
+                # per-connection lease dead NOW rather than 45 s from its
+                # last beat, so the model-facing answer drops promptly; the
+                # memory above is cleared so a successor dial cannot read the
+                # answer from it either.
+                conn.desktop_seen = 0.0
+                self._desktop_attach_seen = 0.0
+                self._republish_detached()
+                detail = "desktop lease withdrawn"
             elif op == "viewer_watch":
                 # A MULTIPLEXING TERMINAL SAYS WHETHER IT IS STILL SHOWING US.
                 #
@@ -5958,6 +6191,42 @@ class RuntimeServer:
                 wake=bool(frame.get("wake", False)),
                 sender=frame.get("sender") or {},
             )
+        if op == "peer_set_model":
+            # Another local session switching THIS one's model (design D1). The
+            # same two gates as ``peer_message`` directly above, for the same
+            # reasons: an unengaged session is refused here because a sender on
+            # an older build cannot be trusted to have refused it, and the
+            # capability is getattr-probed so a reduced or older handle answers
+            # a sentence instead of an AttributeError.
+            #
+            # A NEW op rather than ``set_model`` on purpose: every older runtime
+            # already knows ``set_model`` and would apply it unvalidated and
+            # unaudited, while an unknown op fails closed — the sender maps that
+            # to "runs an older lop … nothing changed" (D7). The handle owns the
+            # validation, the hop to the session's own loop/thread, the read-back
+            # and the audit card; nothing here touches the Session.
+            if not self._started:
+                from local_operator.mobile.peer_send import (
+                    MODEL_SWITCH_CAPABILITY,
+                    unengaged_label,
+                    unengaged_refusal,
+                )
+
+                raise ValueError(
+                    unengaged_refusal(
+                        unengaged_label(pid=self._record.pid, session_id=self._record.session_id),
+                        capability=MODEL_SWITCH_CAPABILITY,
+                    )
+                )
+            receive_model = getattr(h, "receive_peer_model", None)
+            if not callable(receive_model):
+                raise ValueError("this session cannot switch models remotely")
+            typed_receive_model = cast(Callable[..., Awaitable[str]], receive_model)
+            return await typed_receive_model(
+                str(frame["provider"]),
+                str(frame["model_id"]),
+                sender=frame.get("sender") or {},
+            )
         if op == "stop":
             # PR 3 (the kill switch): the graceful rung of the stop ladder
             # (session/runtime/control.py). The plan is deny parked gates →
@@ -6779,7 +7048,11 @@ class RuntimeServer:
     def _push_soon(self) -> None:
         # A callback may already be queued when close flips the cross-thread
         # event. Recheck here so shutdown cannot create new work behind itself.
-        if self._closed.is_set() or self._push_scheduled:
+        if self._closed.is_set():
+            return
+        if self._push_scheduled:
+            # Coalesced, never dropped: the in-flight push owes one more.
+            self._push_dirty = True
             return
         self._push_scheduled = True
         self._push_task = asyncio.create_task(self._push_later())
@@ -6788,10 +7061,19 @@ class RuntimeServer:
         try:
             # One short delay lets the current event batch fold before snapshot.
             await asyncio.sleep(0.05)
+            # Cleared at the SNAPSHOT, not at scheduling: a change marked during
+            # the delay above is read by the push below, so only one that lands
+            # after this point is owed a follow-up.
+            self._push_dirty = False
             if not self._closed.is_set():
                 await self._push()
         finally:
             self._push_scheduled = False
+            if self._push_dirty:
+                # ONE follow-up, however many marks arrived; ``_push_soon``
+                # re-checks ``_closed``, so shutdown cannot re-arm it.
+                self._push_dirty = False
+                self._push_soon()
 
     def _projection_recipients(self) -> list[_ClientConn]:
         """Who still wants projection *repaints*.

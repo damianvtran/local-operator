@@ -816,60 +816,23 @@ def _draft_model_spec(model: DraftModel) -> ModelSpec:
     a model the registry does not describe, resolves metadata (memoised, and
     disk-cached in the common case the picker just filled it).
     """
-    from local_operator.model.configure import build_model_spec
-    from local_operator.model.discovery import offered_model_ids
-    from local_operator.providers.registry import (
-        get_provider_definition,
-        is_decision_only,
+    from local_operator.model.configure import (
+        ModelSelectionRefused,
+        validate_model_selection,
     )
 
     provider = model.provider.strip()
     model_id = model.model_id.strip()
-    if get_provider_definition(provider) is None:
-        raise HTTPException(
-            422,
-            {
-                "code": "provider_unknown",
-                "message": f"'{provider}' is not a known provider.",
-            },
-        )
-    if is_decision_only(provider):
-        # A decision-only provider (TypeSafe's Jev) rejects ``chat/completions`` on
-        # every host we reach it through, so accepting this pick would store a
-        # session model that 400s on its first turn — the failure the model
-        # catalogue and the ranking already refuse to offer. It must be refused HERE,
-        # before the enumeration below, because that check CANNOT catch it:
-        # ``offered_model_ids`` answers ``None`` for a provider whose catalogue is not
-        # enumerable offline, and ``None`` means "we have not looked, accept the
-        # pair" — which is the right reading for an aggregator or a local endpoint
-        # and the wrong one for a provider whose catalogue is empty by construction.
-        raise HTTPException(
-            422,
-            {
-                "code": "provider_decision_only",
-                "message": (
-                    f"'{provider}' serves decision-model calls, not chat completions, "
-                    "so no session can run on it."
-                ),
-            },
-        )
-    served = offered_model_ids(provider)
-    if served is not None and model_id not in served:
-        raise HTTPException(
-            422,
-            {
-                "code": "model_unknown",
-                "message": f"'{model_id}' is not a model {provider} serves.",
-            },
-        )
-    effort = (model.reasoning_effort or "").strip().lower()
+    # The pair checks (known provider, not decision-only — which must precede the
+    # catalogue check because ``offered_model_ids`` answers ``None`` for such a
+    # provider — offered by the catalogue, buildable) live in the ONE validator
+    # the peer model switch shares. No ``usable`` probe: this route never
+    # refused on credentials, and its 422 bodies are a pinned wire contract.
     try:
-        spec = build_model_spec(provider, model_id)
-    except Exception as error:  # noqa: BLE001 — a spec we cannot build is a 422, not a 500
-        raise HTTPException(
-            422,
-            {"code": "model_unavailable", "message": f"'{model_id}' could not be resolved."},
-        ) from error
+        spec = validate_model_selection(provider, model_id)
+    except ModelSelectionRefused as refused:
+        raise HTTPException(422, {"code": refused.code, "message": refused.message}) from refused
+    effort = (model.reasoning_effort or "").strip().lower()
     if effort:
         if not spec.reasoning_efforts:
             raise HTTPException(
