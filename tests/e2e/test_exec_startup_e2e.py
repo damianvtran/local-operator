@@ -463,7 +463,14 @@ def test_exec_default_non_tty_denies_and_explicit_yolo_writes(exec_server, tmp_p
     denied = run("exec", "WRITE_FIXTURE", "--name", "Deny fixture", stdin="")
     assert denied.returncode == 0
     assert not (tmp_path / "written.txt").exists()
-    assert "denied" in json.dumps(requests).lower()
+    # The refusal must reach the model as an UNANSWERABLE gate — "nobody can
+    # answer on this run" — not as a decision a user made. The headless gate
+    # used to render "User denied approval ..." for a call nobody had been
+    # asked about; the model-visible half of that fix is pinned here (this
+    # assertion previously looked for the word "denied").
+    payload = json.dumps(requests).lower()
+    assert "approval unavailable" in payload
+    assert "user denied approval" not in payload
     allowed = run("exec", "WRITE_FIXTURE", "--yolo", "--name", "Allow fixture", stdin="")
     assert allowed.returncode == 0
     assert (tmp_path / "written.txt").read_text() == "side-effect"
