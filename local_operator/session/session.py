@@ -2042,6 +2042,10 @@ class Session:
         #: the ``team`` tool and behind ``/team``. ``None`` means the ``team``
         #: tool is not advertised.
         team_registry: Any | None = None,
+        #: The user's persistent project registry, when the host keeps one.
+        #: Behind the ``project``/``project_delete`` tools and behind
+        #: ``/project``. ``None`` means both tools are not advertised.
+        project_registry: Any | None = None,
         conversation_name: ConversationName | None = None,
         #: Where the BOOT model came from: ``"config"`` (the ``hosting`` /
         #: ``model_name`` keys), ``"agent"`` (a profile), ``"flag"``
@@ -2242,6 +2246,7 @@ class Session:
         self._subagent_comms = subagent_comms
         self.agent_registry = agent_registry
         self.team_registry = team_registry
+        self.project_registry = project_registry
         #: The team this session is running as manager of, when ``/team``
         #: launched it. Held here so every ``task`` child inherits the group's
         #: collaboration and project briefs without the manager restating them.
@@ -10578,6 +10583,7 @@ class Session:
             job_id=self._job_id,
             agent_registry=self.agent_registry,
             team_registry=self.team_registry,
+            project_registry=self.project_registry,
             delegated_tools={
                 tool.name: tool for tool in self._tools if tool.name.startswith("mcp__")
             },

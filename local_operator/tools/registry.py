@@ -20,6 +20,10 @@ from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
 from local_operator.tools.lsp import build_lsp_tool
+from local_operator.tools.project_tool import (
+    build_project_delete_tool,
+    build_project_tool,
+)
 from local_operator.tools.secret_tool import build_secret_tool
 from local_operator.tools.team_tool import build_team_delete_tool, build_team_tool
 from local_operator.web_fetch.tool import build_web_fetch_tool
@@ -73,6 +77,12 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # on "a relay is configured" would strip the tool from exactly the session
     # that has to create one (see build_network_tool).
     "network": lambda context: build_network_tool(context),
+    # createIf: projects need the store beside them; both tools are absent — not
+    # hidden — in a session without a registry (mirroring team/team_delete).
+    # Appended at the END of both tables on purpose: appending never shifts a
+    # provider-visible array prefix, which is what the prompt cache keys on.
+    "project": lambda context: build_project_tool(context),
+    "project_delete": lambda context: build_project_delete_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -108,6 +118,8 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "team",
     "team_delete",
     "network",
+    "project",
+    "project_delete",
 ]
 
 

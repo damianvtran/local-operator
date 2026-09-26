@@ -178,10 +178,15 @@ from local_operator.session.runtime.types import (
 from local_operator.slash_commands import (
     NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
+    PROJECT_SUBCOMMANDS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     network_subcommand_rows,
     primary_slash_name,
+    project_listing_text,
+    project_unavailable_text,
+    project_unimplemented_text,
+    project_unknown_word_text,
     slash_command_for,
     unknown_flag_refusal,
 )
@@ -17966,6 +17971,50 @@ class OperatorApp(App[None]):
         # payload is what the model is sent.
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
 
+    def _cmd_project(self, arg: str, notice: NoticeFn) -> None:
+        """``/project`` — the read-only listing; the view and the verbs are slice 3.
+
+        SLICE 1 STAND-IN, named as one: the full-page ``ProjectsView`` — the
+        ``new``/``delete``/``link``/``unlink`` actions, the delete confirm and
+        the argument rows — ships in slice 3 (``feat/projects-tui-view``), and
+        this branch exists because the registry refuses a registered command
+        with no TUI path (``test_every_registered_name_and_alias_actually_runs``).
+        It therefore answers the READ-ONLY LISTING from the store, and for every
+        other reserved verb it names the surfaces that act today: no word is
+        offered-but-broken, and nothing here mutates anything.
+
+        The words it recognises are the same reserved vocabulary the desktop
+        route validates and the picker will offer (``PROJECT_SUBCOMMANDS``), so
+        this refusal cannot contradict completions a later build adds.
+        """
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        registry = getattr(session, "project_registry", None)
+        if registry is None or not hasattr(registry, "list_projects"):
+            self._system_notice(project_unavailable_text(), "warning")
+            return
+        word = arg.split(maxsplit=1)[0].casefold() if arg.split() else ""
+        if word in {"", "list"}:
+            try:
+                projects = list(registry.list_projects())
+            except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+                self._system_notice(f"could not list projects: {exc}", "warning")
+                return
+            if not projects:
+                notice(
+                    "no projects yet. Ask the agent to create one with the project "
+                    "tool; it links this session automatically."
+                )
+                return
+            notice(project_listing_text(projects))
+            return
+        if word in PROJECT_SUBCOMMANDS:
+            self._system_notice(project_unimplemented_text(word), "warning")
+            return
+        notice(project_unknown_word_text(word), "warning")
+
     def _cmd_team(
         self,
         arg: str,
@@ -32845,6 +32894,12 @@ class OperatorApp(App[None]):
             self._cmd_team(arg, notice, attachments)
         elif command == "/agent":
             self._cmd_agent(arg, notice, attachments)
+        elif command == "/project":
+            # SLICE 1 STAND-IN: the listing answers from the store; every other
+            # reserved verb names the surface that acts today (slice 3 ships the
+            # full-page view). See `_cmd_project` — the branch exists because a
+            # registered command must have a TUI path.
+            self._cmd_project(arg, notice)
         else:
             # ``parts[0]``, not the lowered ``command``: with the echo gone this
             # line is the ONLY place the mistyped word appears, so it has to
@@ -47941,7 +47996,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 132
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 133
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

@@ -138,6 +138,11 @@ PREFIXES_TEXT_POLICY = {
     # never plans it as a command, which is exactly what keeps a mesh verb from
     # becoming paid chat.
     "network": False,
+    # FALSE, `/mcp`'s rule exactly: `/project delete x` IS a command the desktop
+    # forwards (the reserved vocabulary below), and it is not completable inline
+    # here only because the composer does not yet offer the subcommand rows or
+    # project names (the TUI argument rows are the projects-view slice).
+    "project": False,
     # FALSE, like `/usage` and `/stop`: the argument is a SELECTOR word (`read`)
     # rather than free text, and a sentence after the word must stay a message —
     # `/notifications seems broken` is prose a user is entitled to send, while
@@ -226,6 +231,12 @@ ARGUMENT_SHAPE_POLICY = {
     # in the design (§2.8.3) rather than left for a reader to discover, and is
     # harmless while no desktop surface queries this family.
     "network": ArgumentShape.SUBCOMMAND,
+    # `<subcommand> [name]` over this command's OWN vocabulary
+    # (`PROJECT_SUBCOMMANDS`), the same shape as `/network` and read through the
+    # same `command_argument_words`. At most two tokens, the second name-shaped, so
+    # `/project delete this thing` stays a message while `/project delete x` is
+    # the command on every surface that validates it.
+    "project": ArgumentShape.SUBCOMMAND,
     # ANY text: a handler or a form field takes it, so every whole-draft form is
     # the command. `/rename <title>`'s title is arbitrary text, and `/move <path>`
     # executes the path directly, spaces included.

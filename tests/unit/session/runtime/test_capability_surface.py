@@ -314,6 +314,7 @@ def test_no_advertised_command_tells_an_attached_user_to_reattach(command: str) 
             "_team_slash",
             "_agent_slash",
             "_mcp_slash",
+            "_project_slash",
         }:
             for inner in ast.walk(node):
                 if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
@@ -488,3 +489,42 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
     refused = handle._fast_slash(session, "on", SlashResult)
     assert "not available" in refused.text.lower()
     assert session.model.fast_mode is False
+
+
+def test_project_slash_lists_from_the_store_and_names_the_surfaces_that_act(
+    tmp_path: Path,
+) -> None:
+    """The slice-1 stand-in, exercised the way a routed command reaches it.
+
+    Two facts matter and both are the user's: the listing comes from the
+    session's own store (one bounded line), and every reserved verb with no
+    handler yet says which surfaces DO act today rather than answering nothing
+    — a command advertised as ``authoritative_session`` must never go silent
+    (the defect class the parity test above names), so the receipts are
+    asserted here, not just the branch's existence.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.projects import ProjectEdit, ProjectRegistry
+    from local_operator.session.frontend_state import SlashResult
+    from local_operator.session.runtime.serving import ServingSessionHandle
+
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"), sessions=["4e92693767fa"])
+    registry.create_project(ProjectEdit(name="beta"))
+    handle = ServingSessionHandle.__new__(ServingSessionHandle)
+    session = SimpleNamespace(project_registry=registry)
+
+    listing = handle._project_slash(session, "", SlashResult)
+    assert listing.kind == "notice"
+    assert listing.text == "2 projects: alpha [active], beta [active]"
+
+    unimplemented = handle._project_slash(session, "delete alpha", SlashResult)
+    assert "not in this build yet" in unimplemented.text
+    assert "/project list" in unimplemented.text
+
+    unknown = handle._project_slash(session, "frobnicate", SlashResult)
+    assert "unknown /project subcommand 'frobnicate'" in unknown.text
+
+    unavailable = handle._project_slash(SimpleNamespace(), "", SlashResult)
+    assert "unavailable" in unavailable.text

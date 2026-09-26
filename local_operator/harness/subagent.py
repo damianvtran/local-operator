@@ -2039,6 +2039,7 @@ async def _construct_child_session(
         # needs the same registry the parent used.
         agent_registry=getattr(parent_session, "agent_registry", None),
         team_registry=getattr(parent_session, "team_registry", None),
+        project_registry=getattr(parent_session, "project_registry", None),
         web_search_settings=ConfigManager(config_dir()).get_config_value("web_search", None),
         web_fetch_settings=ConfigManager(config_dir()).get_config_value("web_fetch", None),
     )
@@ -2262,6 +2263,7 @@ async def _construct_child_session(
         # rather than falling back to the packaged starters.
         agent_registry=getattr(parent_session, "agent_registry", None),
         team_registry=getattr(parent_session, "team_registry", None),
+        project_registry=getattr(parent_session, "project_registry", None),
         skill_resolver=resolve_internal_url,
         # How the transcript renders into LLM messages. Today every host uses
         # the default, so this changes nothing; it is plumbed because a host

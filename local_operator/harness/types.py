@@ -1196,6 +1196,12 @@ class ToolContext(BaseModel):
     # tool type. ``None`` means the host keeps no teams: the ``team`` tool
     # is then not advertised (createIf).
     team_registry: Any = None
+    # The user's project registry (``local_operator.projects``), behind the
+    # ``project``/``project_delete`` tools and behind ``/project``. Typed
+    # ``Any`` for the same import-graph reason as the two registries above.
+    # ``None`` means the host keeps no projects: both tools are then not
+    # advertised (createIf), exactly as ``team``/``team_delete`` behave.
+    project_registry: Any = None
     # The session's background job manager. Declared as a Protocol because
     # the concrete class lives in ``harness.jobs``, which imports this
     # module (import cycle). The ``wait``/``job`` tools read it; ``None``
