@@ -213,6 +213,15 @@ def _status_payload(audit: str = "steady") -> str:
     * ``unanswered`` — the relay is running and its control socket does not answer, so
       the payload carries ``relay: null`` and NO ``audit*`` key (the designer's
       ``SIGSTOP`` case): the panel must say so in a sentence, never go quiet.
+
+      AND IT CARRIES ``record.pid`` (QA round 4, Q-R4-2). ``relay`` is null here and
+      the pid the sentence needs is in the RECORD — ``status()`` emits ``"record":
+      record.to_json()``, and ``store.scan_own_relay`` reports ``live``/``wedged``
+      only for a record it actually found, so ``relay_running: true`` with both
+      blocks absent is a shape this product cannot emit. This fixture used to omit
+      it, which made the panel's OWN evidence script paint ``pid None`` — the exact
+      pre-fix symptom D45 fixed, on the tree that fixed it, for anyone who
+      regenerated D45's evidence from here.
     """
     relay: dict[str, Any] = {"pid": 4711}
     payload: dict[str, Any] = {
@@ -229,6 +238,10 @@ def _status_payload(audit: str = "steady") -> str:
         payload["relay_answering"] = False
         payload["relay_state"] = "wedged"
         payload["relay"] = None
+        # The pid the sentence names comes from the record, because the relay block is
+        # what is missing in this state (Q-R4-2). `wedged` is `scan_own_relay`'s word
+        # for a RUNNING process that is not reporting, so a record is what produced it.
+        payload["record"] = {"pid": 4711}
     elif audit == "steady":
         relay.update(
             audit_recorded_through=13,

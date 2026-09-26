@@ -147,6 +147,39 @@ class NetworkLocal:
     peers: list[PeerEntry] = field(default_factory=list)
 
 
+def _one_row_value(prefix: str, value: str, width: int) -> str:
+    """A ``label: value`` line that NEVER takes a second row, elided if it must be.
+
+    WHY THIS IS NOT ``_indented_value`` (review round 4 MAJOR 1, design round 5
+    D48). Wrapping is right for a row inside the scrolled body, where a second row
+    is a row the reader can scroll to. The audit news is not in the body: it is the
+    title block's third line, and that block is a FIXED three rows (``height: 3``),
+    so a wrapped second line does not lengthen the block — it overflows it, and
+    what lands outside is the tail the row was written to carry. Measured at 50x18
+    (a 39-cell box, a 40-cell rule, a floored 40-cell card): the rule wrapped onto
+    a row of its own and each sentence line spent two rows, so the block painted 8
+    rows of an 18-row screen and ``#network-scroll`` fell from 6 rows to 1.
+
+    THE CUT IS MARKED, with the ``…`` the footer already uses for the line it had
+    to shorten (``_hint_text``): a row that is silently short is the whole defect
+    here — the reader cannot tell a writer that published through 12 from one whose
+    sentence was cut mid-number.
+
+    THE CUT IS CELL-EXACT, not word-exact, deliberately. A word boundary can only
+    ever show LESS, it throws the partial word away, and it makes the visible length
+    depend on where the words happen to land — so one field would show a different
+    number of cells at every width with no rule a reader could learn. Eliding at the
+    cell the budget ends on shows the most cells that fit and always cuts in the
+    same place for the same width.
+    """
+    budget = max(1, width - len(prefix))
+    if len(value) <= budget:
+        return prefix + value
+    if budget == 1:
+        return "…"
+    return prefix + value[: budget - 1] + "…"
+
+
 def _indented_value(prefix: str, value: str, width: int) -> str:
     """A section's ``label: value`` line that keeps its indent when it wraps.
 
@@ -501,10 +534,26 @@ class NetworkScreen(ModalScreen[None]):
         a formula and a stylesheet drift, and a row built one cell too wide folds
         a value onto a second line — the "one record reads as two" fault these
         screens exist to remove.
+
+        AND THE MEASUREMENT IS A CEILING, not only a source (review round 4
+        MAJOR 1; design round 5, D48). The floor is there so a very narrow
+        terminal still lays its columns out in a sane number of cells, but a floor
+        that exceeds the box does not widen anything: it builds every row one cell
+        wider than the widget that paints it, and the wrap that follows paints a
+        second row somewhere the layout did not budget for one. Measured at 50x18
+        — the 40-cell floor against a 39-cell box — the rule wrapped onto a row of
+        its own beneath itself and each line of the three-line sentence spent two
+        rows, so the title block painted 8 rows of an 18-row screen while
+        ``#network-scroll`` collapsed from 6 rows to 1. The floor is therefore
+        clamped to the box: below 41 cells the row is laid out in the cells that
+        exist, which is also why the STEADY frame at those sizes does not move —
+        a 40-cell rule in a 39-cell box only ever PAINTED its first 39 cells, so
+        a 39-cell rule paints the same 39 cells and stops wrapping.
         """
         scroll = getattr(self, "_scroll", None)
         if scroll is not None and scroll.is_mounted and scroll.size.width:
-            return max(_MIN_CARD_WIDTH, scroll.size.width - 1)
+            box = scroll.size.width
+            return max(1, min(box, max(_MIN_CARD_WIDTH, box - 1)))
         try:
             return max(_MIN_CARD_WIDTH, min(140, int(self.app.size.width * 0.9)) - 7)
         except Exception:  # noqa: BLE001 — before mount there is no app size
@@ -524,8 +573,9 @@ class NetworkScreen(ModalScreen[None]):
         measured states (the real payload, and the fixture with two more peers) show
         it where the block's copy painted nowhere.
 
-        IT COSTS THE BODY NOTHING. The title's third row is the blank padding row that
-        box already held, and the row is only ever content in a state that has news:
+        IT COSTS THE BODY NOTHING, AND THE ROW IS BOUNDED TO ONE (review round 4
+        MAJOR 1; design round 5, D48). The title's third row is the blank padding row
+        that box already held, and the row is only ever content in a state that has news:
         ``_repaint`` adds the ``audit-news`` class that swaps that padding for the row
         (``#network-title.audit-news`` in ``local_operator.tcss``). A steady panel
         therefore paints exactly what it painted before this row existed — same content,
@@ -534,6 +584,23 @@ class NetworkScreen(ModalScreen[None]):
         the same three rows with the sentence in the third. The body is the same in
         every audit state, which is what makes "the row is visible" a fact about the
         panel rather than about how much table happens to be above it.
+
+        THE BOUND IS ONE ROW, and it is the block's own ``height: 3`` that makes it
+        observable rather than a matter of taste. ``height: auto`` was tried and
+        measured (round 4): the sentence wrapped to two, three and six rows on a
+        narrow terminal, the block grew 3 -> 4 -> 8, and the region it took the rows
+        from is ``1fr`` — so at 50x18 ``#network-scroll`` collapsed 6 rows -> 1 and the
+        news cost the body five rows where the claim it was justified on says it costs
+        none. The 67-cell sentence needs an 81-cell card to sit on one row, i.e. a
+        98-column window; the panel's default is 80, so BELOW 98 COLUMNS THE SENTENCE
+        IS ELIDED AND MARKED (``_one_row_value``) rather than wrapped, and what the
+        reader sees is the most cells that fit and a trailing ``…``. The alternative
+        the designer offered — drop the ``audit:`` label when the value cannot fit one
+        row — was measured too: it would show the whole sentence un-labelled from 70
+        to 97 columns, but it makes the row's SHAPE depend on the sentence's length, so
+        one field would read as a labelled row at 100 columns and an unlabelled one at
+        80 with nothing on screen to say the two are the same field. One row, one
+        shape, a marked cut.
         """
         width = max(1, self._card_width())
         text = Text(
@@ -553,8 +620,11 @@ class NetworkScreen(ModalScreen[None]):
             #
             # The label and its column are the block's own (cell 14), so a reader moving
             # between the panel and ``lop network status`` reads the same field twice.
+            # ``_one_row_value`` and not ``_indented_value``: this row is the block's
+            # fixed third row, so a wrapped second line overflows the block instead of
+            # lengthening it (the docstring above carries the measurement).
             text.append("\n")
-            text.append(_indented_value("  audit:      ", words, width), style="not bold")
+            text.append(_one_row_value("  audit:      ", words, width), style="not bold")
         return text
 
     #: The footer's keys, in order, as SEGMENTS rather than one string: every
@@ -1030,6 +1100,16 @@ class NetworkScreen(ModalScreen[None]):
             # of the frame every comparison in the round is made against. Set from the
             # same call that sets the content, so the two cannot come to disagree about
             # whether there is a row.
+            #
+            # THE SAME ROWS IN THE SAME BYTES IS ALSO WHY THE ROW IS BOUNDED TO ONE
+            # (review round 4 MAJOR 1; design round 5, D48). The class swaps a row that
+            # was already spent; it does not buy one. The class used to carry
+            # ``height: auto``, so a sentence too long for one row grew the block
+            # instead, and the rows came out of ``#network-scroll`` — measured at 50x18
+            # as a 6-row region collapsing to 1. With the row elided to the width it
+            # has (``_one_row_value``), the class only ever re-describes the third row,
+            # and the block, the region and the scrollbar are the same in every audit
+            # state at every size.
             title.set_class(bool(self._audit_words()), "audit-news")
         # THE FOOTER IS WIDTH-SENSITIVE, so it is re-derived here rather than only
         # built once in `compose`: `compose` runs before the first layout, when

@@ -1128,12 +1128,17 @@ def test_the_audit_row_is_painted_where_the_fold_cannot_reach_it() -> None:
     assert lagging[0] == "Mesh networks", lagging
     assert lagging[1] == steady[1], lagging[:2]
     news_lines = lagging[2:body_at]
+    assert len(news_lines) == 1, lagging[:6]
     assert news_lines[0].startswith("  audit:"), lagging[:5]
     assert lagging[2].index("13 recorded") == 14, lagging[2]
-    # The value keeps that indent when it wraps (``_indented_value``, UX round 3 U22):
-    # this block wraps at the panel's 40-cell floor, the capture size wraps nothing.
-    news = "".join(news_lines)
-    assert news.replace(" ", "") == "audit:13recorded,publishedthrough12(1notyetwritten)", news
+    # AND IT IS ONE ROW, ELIDED AND MARKED. This rig's title is built at the panel's
+    # 40-cell floor — the screen is never mounted, so ``_card_width`` falls back to
+    # ``_MIN_CARD_WIDTH`` — and the sentence is 53 cells of value against a 26-cell
+    # budget, so the row is cut and ends in the ``…`` that says so (``_one_row_value``).
+    # Round 4 wrapped here instead, which is what grew the title block 3 -> 8 rows on a
+    # real terminal at 50x18 and took the body's six rows down to one (review round 4
+    # MAJOR 1; design round 5, D48).
+    assert news_lines[0] == "  audit:      13 recorded, published th…", news_lines
 
     # THE BODY IS STATE-INDEPENDENT, and the separator is the section rhythm in every
     # state — the two halves of D47: the news no longer spends the blank, so `Relay` no
@@ -1150,74 +1155,250 @@ def _body_start(lines: list[str]) -> int:
     return next(n for n, line in enumerate(lines) if line == "This device")
 
 
+def _band(app: Any, screen: Any) -> dict[str, Any]:
+    """What the title band OWNS, read off the painted frame rather than the model.
+
+    The rows come from the compositor's own strips — the title's region is a rectangle
+    of the frame — because the property under test is that a row of the scrolled body
+    is still on screen, and no widget's own model can answer that: the block's BOX grew
+    while its content did not, which is a thing only the painted frame shows (review
+    round 4 MAJOR 1). ``content`` is the border box's content area, so it is the cells
+    a row can actually occupy — the number the card width has to stay inside.
+    """
+    title = screen.query_one("#network-title")
+    scroll = screen.query_one("#network-scroll")
+    rows = _painted(app).split("\n")
+    top, height = title.region.y, title.region.height
+    return {
+        "box": (title.region.width, title.region.height),
+        "content": (title.size.width, title.size.height),
+        "rows": rows[top : top + height],
+        "region": scroll.region.height,
+        "virtual": scroll.virtual_size.height,
+        "bar": bool(scroll.show_vertical_scrollbar),
+    }
+
+
+#: The sizes the band is pinned at — the six the review round measured (its own
+#: table, 100x30 down to the 50x18 floor where the region went 6 -> 1), the 80x24
+#: default-width case, the 84x16 region this file's other geometry tests cite, and
+#: the 40x20 floor where the rule itself was wider than the box. A single width is
+#: the defect this replaced: the claim held at 100x30 and at no other size, so a
+#: test pinned there passed while the panel grew 3 -> 8 rows on a real terminal
+#: (review round 4 MAJOR 1; design round 5, D48).
+_BAND_SIZES = ((100, 30), (98, 30), (96, 30), (84, 16), (80, 24), (56, 20), (50, 18), (40, 20))
+
+
 @pytest.mark.asyncio
 async def test_the_news_row_costs_the_scrolled_body_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """THE ROW IS OUTSIDE THE REGION, and the region does not shrink to pay for it.
 
-    The rig's numbers as a mounted invariant: the title block is three rows with news
-    and three rows without it — the ``audit-news`` class swaps its padding row for the
-    sentence, which is what keeps the steady frame's styles (and its bytes) exactly what
-    every geometry comparison in the round is made against — and ``#network-scroll`` is
-    the same box in both states. ``1fr`` makes that the second half of the claim: the
-    region is whatever the title and hint leave, so a row the title took would be a body
-    row lost, and the designer's "nothing that was on-page was pushed off it" is a
-    property here rather than a measurement (design round 4, D46/D47).
+    The claim is about the PAINTED frame — the row the reader loses is a row of the
+    scrolled body, and no model assertion can see it — so this is measured off the
+    compositor at every size in ``_BAND_SIZES``, in both states: the title block is a
+    three-row box with news and a three-row box without it, and ``#network-scroll``
+    is the same region with the same scrollbar in both. ``1fr`` makes that the second
+    half of the claim: the region is whatever the title and hint leave, so a row the
+    title took would be a body row lost, and the designer's "nothing that was on-page
+    was pushed off it" is a measurement here rather than a property (round 4, D46/D47).
+
+    THE BOX IS THE BOUND, and it is what round 4's ``height: auto`` broke: the block
+    grew to fit a wrapped sentence (3 -> 4 -> 8 rows over this list of sizes) and the
+    growth came out of a ``1fr`` region that went 16 -> 10 -> 1 at 50x18. The sentence
+    is elided to one row now, so the assertion is that the box is three rows at every
+    size rather than three rows at the one size where nothing wraps — and the rule is
+    checked for the same reason, because a card one cell wider than the box made the
+    rule wrap onto a row of its own below itself at the floor.
+    """
+    import json
+
+    import local_operator.tui.widgets.network_panel as panel_mod
+    from local_operator.network.relay import audit_status_words
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    def status_dict(published_through: int) -> dict[str, Any]:
+        return {
+            "installed": True,
+            "identity_present": True,
+            "relay_running": True,
+            "relay_answering": True,
+            "relay_state": "live",
+            "relay": {
+                "pid": 4711,
+                "audit_recorded_through": 13,
+                "audit_published_through": published_through,
+            },
+            "record": {"pid": 4711},
+            "log": "/tmp/iso/logs/network.log",
+        }
+
+    def stub(published_through: int) -> Any:
+        def run(args: list[str], **kwargs: Any) -> NetworkRun:
+            if not args or args[0] != "status":
+                return NetworkRun(tuple(args), 0, stdout="")
+            return NetworkRun(tuple(args), 0, stdout=json.dumps(status_dict(published_through)))
+
+        return run
+
+    # The relay's own words for this payload: the panel paints them, so the elision is
+    # checked against the sentence rather than against a copy of it written here.
+    words = audit_status_words(status_dict(12), omit_steady=True)
+    #: The label column the block's own rows use, and so the cells of value a row has.
+    label = "  audit:      "
+
+    bands: dict[bool, dict[tuple[int, int], dict[str, Any]]] = {False: {}, True: {}}
+    for news in (False, True):
+        for size in _BAND_SIZES:
+            monkeypatch.setattr(panel_mod, "run_network", stub(12 if news else 13))
+            app = _app_fixture()
+            async with app.run_test(size=size) as pilot:
+                screen = NetworkScreen(_panel_local())
+                app.push_screen(screen)
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                await pilot.pause()
+                band = _band(app, screen)
+                bands[news][size] = band
+
+                # THREE ROWS, and the box is exactly as tall as the content it was
+                # given: the steady title is a 3-row box holding 2 rows and a padding
+                # row, the news state a 3-row box holding all 3 rows.
+                assert band["box"] == (band["content"][0], 3), (size, news, band["box"])
+                assert band["content"][1] == (3 if news else 2), (size, news, band["content"])
+                # ONE rule row, never two: the rule is built at the card width, which
+                # may not exceed the box it is painted in, or it wraps below itself.
+                assert [n for n, row in enumerate(band["rows"]) if "─" in row] == [1], (
+                    size,
+                    news,
+                    band["rows"],
+                )
+                # The frame row carries the panel's own offset (a 90% card, centred,
+                # inside a padding box), so the block's rows are read from the label the
+                # block itself writes. ``label`` is the cell-14 column the block's rows
+                # use; from the frame, the label is what is left after the offset.
+                third = band["rows"][2].rstrip()
+                if news:
+                    # One row, and it is the relay's sentence elided to the cells it
+                    # has — the whole sentence where it fits, and the tail replaced by
+                    # the ``…`` that says it was cut (never a second row: a wrapped
+                    # line is what grew the block instead of marking the cut).
+                    row = third.lstrip()
+                    assert row.startswith(label.lstrip()), (size, third)
+                    value = row[len(label.lstrip()) :]
+                    if len(words) <= len(value):
+                        assert value == words, (size, third, words)
+                    else:
+                        assert value == words[: len(value) - 1] + "…", (size, third, words)
+                else:
+                    assert third.strip() == "", (size, band["rows"])
+
+    for size in _BAND_SIZES:
+        # THE REGION, as the reader experiences it: same rows, same thumb, same state.
+        assert bands[False][size]["region"] == bands[True][size]["region"], size
+        assert bands[False][size]["bar"] == bands[True][size]["bar"], size
+        assert bands[True][size]["box"][1] == 3, (size, bands[True][size])
+        # And the body's own EXTENT is the same number of rows in both states — the
+        # claim D46/D47 rests on, and the one a row moved out of the body has to keep:
+        # the sentence is painted in the band, not added to the region's content.
+        assert bands[False][size]["virtual"] == bands[True][size]["virtual"], (size, bands)
+
+
+@pytest.mark.asyncio
+async def test_a_re_layout_leaves_the_band_the_same_three_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A RESIZE THAT CHANGES NOTHING IN THE MODEL MUST LEAVE THE FRAME ALONE.
+
+    Q-R4-1, measured: in the news state any re-layout left the title holding four rows
+    for three rows of content — an empty row under the sentence — and the row did not
+    come back until the news cleared, so ``#network-scroll`` sat one row short (16 -> 15)
+    with a scrollbar it did not have. It was not the sentence wrapping at the
+    destination width: bouncing through 110x34, where nothing wrapped on this tree
+    either, returned the same 4/15. The empty row was the block's own padding row,
+    which ``height: auto`` re-added to a three-row content measurement on the way back.
+
+    So the assertion is the pair: a fresh frame at a size and the frame a resize
+    returns to that same size are THE SAME FRAME, and the news clearing gives the row
+    back to the padding it took it from. Driven through the pilot's own
+    ``resize_terminal``, which enters the same ``on_resize`` -> ``_repaint`` path a
+    terminal resize does.
     """
     import json
 
     import local_operator.tui.widgets.network_panel as panel_mod
     from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
 
-    def stub(published_through: int) -> Any:
-        def run(args: list[str], **kwargs: Any) -> NetworkRun:
-            if not args or args[0] != "status":
-                return NetworkRun(tuple(args), 0, stdout="")
-            return NetworkRun(
-                tuple(args),
-                0,
-                stdout=json.dumps(
-                    {
-                        "installed": True,
-                        "identity_present": True,
-                        "relay_running": True,
-                        "relay_answering": True,
-                        "relay_state": "live",
-                        "relay": {
-                            "pid": 4711,
-                            "audit_recorded_through": 13,
-                            "audit_published_through": published_through,
-                        },
-                        "record": {"pid": 4711},
-                        "log": "/tmp/iso/logs/network.log",
-                    }
-                ),
-            )
+    def payload(published_through: int) -> str:
+        return json.dumps(
+            {
+                "installed": True,
+                "identity_present": True,
+                "relay_running": True,
+                "relay_answering": True,
+                "relay_state": "live",
+                "relay": {
+                    "pid": 4711,
+                    "audit_recorded_through": 13,
+                    "audit_published_through": published_through,
+                },
+                "record": {"pid": 4711},
+                "log": "/tmp/iso/logs/network.log",
+            }
+        )
 
-        return run
+    def run(args: list[str], **kwargs: Any) -> NetworkRun:
+        if not args or args[0] != "status":
+            return NetworkRun(tuple(args), 0, stdout="")
+        return NetworkRun(tuple(args), 0, stdout=payload(12))
 
-    boxes: dict[bool, tuple[int, int, bool]] = {}
-    for news in (False, True):
-        monkeypatch.setattr(panel_mod, "run_network", stub(12 if news else 13))
-        app = _app_fixture()
-        async with app.run_test(size=(100, 30)) as pilot:
-            screen = NetworkScreen(_panel_local())
-            app.push_screen(screen)
-            await app.workers.wait_for_complete()
+    monkeypatch.setattr(panel_mod, "run_network", run)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = NetworkScreen(_panel_local())
+        app.push_screen(screen)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        await pilot.pause()
+        fresh = _band(app, screen)
+        assert fresh["rows"][2].strip().startswith("audit:"), fresh["rows"]
+
+        # Away and back through every size the round found a defect at: the wider
+        # 110x34 (nothing wraps at either end), the capture width's neighbours, and
+        # the 50x18 floor where the region collapsed to a single row.
+        for via in ((110, 34), (96, 30), (80, 24), (50, 18), (40, 20)):
+            await pilot.resize_terminal(*via)
             await pilot.pause()
-            title = screen.query_one("#network-title")
-            boxes[news] = (
-                # The BORDER box: Textual sizes border-box and `size` is the content box,
-                # so the steady title is a 3-row box holding 2 rows of content and a
-                # padding row, and the news state is a 3-row box holding 3 rows of
-                # content — the same row, spent differently.
-                title.region.height,
-                screen.query_one("#network-scroll").size.height,
-                title.has_class("audit-news"),
-            )
-    assert boxes[False] == (3, 16, False), boxes
-    assert boxes[True] == (3, 16, True), boxes
+            await pilot.pause()
+            at = _band(app, screen)
+            assert at["box"][1] == 3, (via, at)
+            assert [n for n, row in enumerate(at["rows"]) if "─" in row] == [1], (via, at["rows"])
+            assert at["rows"][2].strip().startswith("audit:"), (via, at["rows"])
+
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        await pilot.pause()
+        back = _band(app, screen)
+        assert back["box"] == fresh["box"], (fresh, back)
+        assert back["content"] == fresh["content"], (fresh, back)
+        assert back["region"] == fresh["region"], (fresh, back)
+        assert back["rows"] == fresh["rows"], (fresh["rows"], back["rows"])
+
+        # THE ROW COMES BACK when the news clears — the sentence and the class go
+        # together, through the panel's own "the worker answered" door. The two
+        # non-status runs are the ones the stubbed fill already published.
+        assert screen.relay is not None and screen.peers_run is not None, "the fill did not settle"
+        answered = NetworkRun(("status",), 0, stdout=payload(13))
+        screen.set_relay(screen.relay, screen.peers_run, answered)
+        await pilot.pause()
+        await pilot.pause()
+        cleared = _band(app, screen)
+        assert not screen.query_one("#network-title").has_class("audit-news"), cleared
+        assert cleared["rows"][2].rstrip() == "", cleared["rows"]
+        assert cleared["box"] == fresh["box"], (fresh, cleared)
+        assert cleared["content"] == (fresh["content"][0], 2), (fresh, cleared)
+        assert cleared["region"] == fresh["region"], (fresh, cleared)
 
 
 def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be() -> None:
@@ -1259,8 +1440,11 @@ def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be(
     assert "relay:      running, pid 35292 — NOT answering" in text, text
     assert "pid None" not in text, text
     assert "audit:" in text, text
-    # The sentence is present even at this cell's 40-cell panel width, wrapped by
-    # ``_indented_value`` — the panel at its capture size prints it on one row.
-    assert "audit.jsonlholdsthelaststate" in text.replace(" ", "").replace("\n", ""), text
+    # The sentence is present even at this cell's 40-cell panel width (a 26-cell value
+    # budget), as ONE elided row — the words it can carry, and the ``…`` that says it
+    # could not carry the rest. It used to wrap here, which cost the body a row per
+    # wrapped line on a real terminal (review round 4 MAJOR 1).
+    assert "  audit:      unavailable — relay not a…" in text, text
+    assert "audit.jsonlholds" not in text.replace(" ", ""), text
     # And the numbers are never invented for it: no counter survives a null relay.
     assert "recorded," not in text, text
