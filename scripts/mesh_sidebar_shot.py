@@ -13,7 +13,9 @@ exactly why it did not catch it.
 
 So this script builds the thing the frame claims to show: two config roots, two
 device identities, two REAL relays on loopback, one network with both devices
-admitted, a live link dialled A → B, and two sessions on B. Then it runs
+admitted, a live link dialled A → B, and two sessions on B that B is RUNNING
+(``_start_hosts`` states exactly what that does and does not claim). Then it
+runs
 ``sidebar_shot.py peers-focus`` with the mesh root handed to it, so the mesh tier
 in that frame comes from ``session.peer_rows.peer_session_rows`` — the
 production producer, reading A's own relay over its control socket and fanning
@@ -25,7 +27,10 @@ claim is load-bearing: the PAIRING here is written into both stores rather than
 negotiated through the SAS ceremony (``scripts`` has no pty and no second human),
 so this is not evidence about pairing. The transport is entirely real — the
 dial, the handshake, the control socket, the catalogue fan-out — and that is the
-path the frame is about.
+path the frame is about. The peer's runtime RESIDENCY is likewise arranged rather
+than run (a sandbox cannot start a model-backed runtime), which changes the
+ORDERING the frame shows and is therefore load-bearing rather than decorative;
+``_start_hosts`` states it in full.
 
 Everything runs in this process except the capture, which is a CHILD process
 given A's config root and left to dial A's relay the way the TUI does in
@@ -34,6 +39,7 @@ production. Both relays are stopped in ``finally``; no LaunchAgent is written.
 
 from __future__ import annotations
 
+import os
 import secrets as _secrets
 import shutil
 import subprocess
@@ -53,9 +59,17 @@ NETWORK_NAME = "devmesh"
 
 #: The two sessions B holds, as ``(session_id, title)``. Real-length titles, so
 #: the frame shows the title budget rather than a curated short name.
+#:
+#: ORDERED BY ID, which is the order the sidebar PAINTS a section's rows (``rank``
+#: breaks a tie on the id) — and it matters here through the CARET, not through the
+#: paint: ``sidebar_shot.py`` puts the cursor on the FIRST row the PRODUCER returns
+#: and B's rows come back in `registry.scan`'s order, which is its ``<pid>.json``
+#: filenames sorted, i.e. this tuple's own order for the hosts started from it. So
+#: starting them in id order lands the caret on the group's first row rather than
+#: on its second, which is the row a user reaches first.
 SESSIONS = (
-    ("9f3ac1e0b7d2", "Mesh transport identity design"),
     ("4c81ba77e310", "Federated catalogue fan-out"),
+    ("9f3ac1e0b7d2", "Mesh transport identity design"),
 )
 
 
@@ -153,6 +167,151 @@ def _seed_session(
     )
 
 
+#: The program a HOST process runs (see :func:`_start_hosts`). A string rather
+#: than a module so the whole mechanism stays readable in one place, and so that
+#: nothing under ``scripts/`` has to be importable by a bare interpreter.
+_HOST_PROGRAM = """
+import os
+import sys
+import time
+from pathlib import Path
+
+from local_operator.session.runtime import registry
+from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, SessionRecord
+
+root, session_id, title = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+record = SessionRecord(
+    pid=os.getpid(),
+    kind="daemon",
+    session_id=session_id,
+    conversation_name=title,
+    cwd="",
+    model_label="",
+    detached=True,
+    control_port=0,
+    control_key="",
+)
+registry.publish(record, root)
+# BEAT, because `registry.scan` calls a quiet owner `wedged` after
+# HEARTBEAT_TIMEOUT_S, and this frame's rows have to stay live for the whole
+# capture. SIGTERM, which is how the rig reaps us, ends the loop.
+while True:
+    time.sleep(HEARTBEAT_INTERVAL_S / 2)
+    registry.publish(record, root)
+"""
+
+
+def _start_hosts(
+    root: Path, sessions: tuple[tuple[str, str], ...]
+) -> list[subprocess.Popen[bytes]]:
+    """Start one HOST process per session B is running; return them to reap.
+
+    WHY THE ROWS HAVE TO BE LIVE AT ALL, because this is what puts the tier on
+    the page rather than merely what makes it read better (QA round 12,
+    Q-R12-1). ``_SECTION_PEER_RANK`` puts a peer's section AFTER ``Previous
+    Sessions``, and a peer's STORED rows rank with THIS device's cold rows — so
+    at 100x30, over ``sidebar_shot.py``'s own fixture, the whole tier AND the
+    caret ``peers-focus`` exists to put on a remote row opened ONE ENTRY BELOW the
+    drawn page: the frame showed this device's own four sections and no mesh
+    anywhere, which is the opposite of what it is for. No ordering tweak reaches
+    it either — two of that fixture's cold rows carry an armed and a dormant
+    wake, and a wake outranks a plain cold row whatever its clock says. A session
+    that is RUNNING ranks with the live rows instead, which is where a user sees
+    one.
+
+    ONE PROCESS PER RECORD, which is the product's own invariant and was measured
+    the hard way. A discovery record is keyed ``<pid>.json`` because a process
+    hosts one session at a time (``SessionRecord``'s own docstring), so publishing
+    BOTH records from THIS process had the second clobbered by the first and its
+    row come back cold — the first cut of this fix did exactly that, and
+    ``_require_rows`` reported it as one live row and one stored one. One host per
+    session is also what a device holding two runtimes really has.
+
+    THE RECORD IS REAL, AND THAT IS THE POINT. ``registry.publish`` writes the same
+    staged 0600 file a runtime writes, from a pid that is genuinely alive (the host
+    itself) with a beat it stamps fresh, so ``registry.scan`` classifies it ``live``
+    for the ORDINARY REASON rather than because this script said so — the
+    arrangement ``tests/unit/network/test_sync.py::_publish_live_record`` uses for
+    the same purpose, reused rather than re-derived. ``detached`` is True because
+    it is true of that row: nothing is watching that session, which is what a
+    runtime stamps at construction and clears only when a terminal attaches, so
+    the peer's row comes back ``idle`` — resident, unwatched
+    (``live_state_from_flags``) — and not ``attached``. ``daemon`` matches the kind
+    this device publishes for the same session's STORED half
+    (``RelayServer._stored_rows``); ``cwd`` and ``model_label`` are left empty
+    rather than invented, because nothing in the frame paints either.
+
+    WHAT IT DOES NOT CLAIM: that a runtime exists, that a turn ran, or that a model
+    was reachable. A sandbox cannot start a model-backed runtime, so what is
+    arranged is that a process PUBLISHES for the session; what this frame is
+    evidence for is how the sidebar RENDERS a peer row that is live, which is
+    decided entirely on the reading side from that record's own two flags.
+    """
+    return [
+        subprocess.Popen(
+            [sys.executable, "-c", _HOST_PROGRAM, str(root), session_id, title],
+            cwd=REPO,
+        )
+        for session_id, title in sessions
+    ]
+
+
+def _await_hosts(
+    root: Path, proc_list: list[subprocess.Popen[bytes]], deadline_s: float = 60.0
+) -> None:
+    """Wait until every host has PUBLISHED its record, or name the one that did not.
+
+    WAIT ON THE RECORD APPEARING, NOT ON THE CLOCK — and not on nothing at all.
+    ``Popen`` returns as soon as the process is spawned, while the host still has
+    an interpreter to start and the product to import before its first
+    ``publish``, which is seconds under this fleet's load. Reading B's catalogue
+    inside that window is a frame with no live row in it, which is not a degraded
+    frame but a different one (see ``_start_hosts``), and it was measured: one run
+    in four raced, both rows came back cold, and ``_require_rows`` refused it.
+
+    Bounded, because a host that never publishes is a defect to report rather than
+    something to wait out; and it fails fast on a host that EXITS, rather than
+    waiting the whole deadline out for a process that is already gone.
+    ``reap=False``: this is a reader, and the only sweeper on this path should be
+    the one that owns the directory.
+    """
+    from local_operator.session.runtime import registry
+
+    wanted = {proc.pid for proc in proc_list}
+    deadline = time.monotonic() + deadline_s
+    while True:
+        seen = {record.pid for record, _state in registry.scan(root, reap=False)}
+        if wanted <= seen:
+            return
+        dead = [(proc.pid, proc.returncode) for proc in proc_list if proc.poll() is not None]
+        if dead:
+            raise SystemExit(f"a session host exited before publishing its record: {dead}")
+        if time.monotonic() > deadline:
+            raise SystemExit(
+                f"no record for {sorted(wanted - seen)} after {deadline_s:.0f}s: the hosts "
+                "that did publish cannot make this frame, because a COLD peer row ranks "
+                "below the drawn page at this size"
+            )
+        time.sleep(0.05)
+
+
+def _stop_hosts(proc_list: list[subprocess.Popen[bytes]]) -> None:
+    """Reap every host by its own handle, so a capture never leaves one behind.
+
+    SIGTERM first, SIGKILL after a bounded wait, on the ``Popen`` objects THIS rig
+    started — never by program name, which on a host running other sessions reaches
+    processes that are not ours. Their records live in the sandbox and go with it.
+    """
+    for proc in proc_list:
+        proc.terminate()
+    for proc in proc_list:
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
 def _require_rows(root: Path, titles: tuple[str, ...]) -> None:
     """Refuse to write a frame unless the producer returns these NAMES.
 
@@ -161,6 +320,12 @@ def _require_rows(root: Path, titles: tuple[str, ...]) -> None:
     D14): the producer returned the right NUMBER of rows and the wrong STRING in
     them. So the assertion is on the names, and it fails on an id (the
     nameless-row fallback that shipped) as loudly as on a missing row.
+
+    THE STATE IS ASSERTED FOR THE SAME REASON (QA round 12). Every row has to read
+    ``idle`` — resident, unwatched — because that is what ranks the tier into the
+    drawn page (``_start_hosts``): a cold row here is not a slightly worse frame,
+    it is a frame with no mesh tier in it at all. A host that died before the
+    capture would otherwise ship that silently.
     """
     from local_operator.session.peer_rows import clear_cache, peer_session_rows
 
@@ -181,6 +346,44 @@ def _require_rows(root: Path, titles: tuple[str, ...]) -> None:
             "a user sees titles."
         )
     print(f"producer rows: {[(row.id, row.name, row.owner_device_name) for row in rows]}")
+    states = sorted(str(row.live_state) for row in rows)
+    if states != ["idle"] * len(titles):
+        raise SystemExit(
+            f"the producer returned rows whose live states are {states}, not one "
+            "``idle`` per seeded session: a host process is gone or never "
+            "published, and a COLD peer row ranks below the drawn page at this "
+            "size, so the frame would show no mesh tier at all. Re-run."
+        )
+
+
+def _require_caret_on_a_remote_row(path: Path) -> None:
+    """Refuse a frame in which the caret and the locality mark are not on ONE row.
+
+    THAT COMBINATION IS WHAT ``peers-focus`` EXISTS FOR (design round 1, D4), and
+    it is the one property a reader can check in the bytes the artifact actually
+    carries: the caret owns cell 0 and the locality mark cell 1, so a row holding
+    both is exactly "the cursor is on another device's session, and the row says
+    so". Read off the exported SVG the way ``_require_settled_chip`` reads the
+    model chip, and for the same reason — the failure it catches (the peer tier,
+    or the caret on it, falling below the drawn page) is invisible in the script's
+    own state and plain in the artifact.
+
+    Both glyphs are spelled here rather than imported: the widget paints them as
+    literals in ``SessionSidebar.render``, and the failure direction is the safe
+    one — a rename makes this guard REFUSE a frame rather than pass one it should
+    not.
+    """
+    caret = "›"
+    locality = "⇄"
+    svg = path.read_text(encoding="utf-8")
+    for runs in svg_text_runs_by_row(svg):
+        if any(caret in run for run in runs) and any(locality in run for run in runs):
+            return
+    raise SystemExit(
+        f"no row in {path.name} carries both the caret ({caret!r}) and the locality "
+        f"mark ({locality!r}): the peer tier, or the caret on it, is outside the "
+        "drawn page — which is this frame's whole subject. Re-capture."
+    )
 
 
 def _require_settled_chip(path: Path) -> None:
@@ -252,6 +455,9 @@ def main() -> int:
         identity=identity.load(root_b),
         audit=audit_mod.AuditLog(root_b),
     )
+    # Declared before the ``try`` so ``finally`` can reap whatever was started,
+    # including a run that failed between two hosts.
+    host_procs: list[subprocess.Popen[bytes]] = []
     try:
         host_a, port_a = server_a.bind()
         server_a.bind_control()
@@ -293,9 +499,15 @@ def main() -> int:
                 network_id=record_a.network_id,
                 home_device=server_b.identity.device_id,
             )
+        # ...and B is RUNNING them, one host process each. AFTER the
+        # directories, because a record is the live half of a session that has to
+        # exist already, and BEFORE the guard below, which is what refuses a frame
+        # whose rows are not these sessions IN A LIVE STATE.
+        host_procs.extend(_start_hosts(root_b, SESSIONS))
+        _await_hosts(root_b, host_procs)
         _require_rows(root_a, tuple(title for _session_id, title in SESSIONS))
 
-        env = {**__import__("os").environ, "LO_SIDEBAR_SHOT_MESH": str(root_a)}
+        env = {**os.environ, "LO_SIDEBAR_SHOT_MESH": str(root_a)}
         shot = subprocess.run(
             [
                 sys.executable,
@@ -311,9 +523,11 @@ def main() -> int:
         if shot.returncode != 0:
             return shot.returncode
         _require_settled_chip(out)
+        _require_caret_on_a_remote_row(out)
         print(f"wrote {out}")
         return 0
     finally:
+        _stop_hosts(host_procs)
         server_a.stop()
         server_b.stop()
         shutil.rmtree(sandbox, ignore_errors=True)
