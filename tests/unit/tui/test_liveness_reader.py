@@ -9,14 +9,17 @@ would spend the operator's latency to buy truthfulness he can have for free.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
-import pytest
 
 from local_operator.session.runtime.types import LIVE_FRESHNESS_BUDGET_S
 from local_operator.tui.liveness import (
+    LIVENESS_PROBE_BUDGET_S,
+    LIVENESS_PROBE_EVERY_S,
     LIVENESS_TEXT,
+    LivenessProbe,
     OwnerLiveness,
     liveness_text,
     owner_liveness,
@@ -160,6 +163,134 @@ def test_the_words_are_the_designers_to_choose_not_the_readers():
     assert not offenders, "liveness words spelled outside the copy table: " + ", ".join(offenders)
 
 
-@pytest.mark.parametrize("state", list(OwnerLiveness))
-def test_no_state_can_render_as_an_empty_string(state):
-    assert liveness_text(state).strip()
+def test_live_is_the_only_state_that_renders_as_an_empty_string():
+    """REPLACES an earlier test that asserted every state renders something.
+
+    That test was written against my provisional copy, where `LIVE` had the word
+    "live". The designer's decision makes `LIVE` render NOTHING -- a live claim is
+    up to a budget stale by construction, so painting one would re-introduce the
+    fresh confident-wrong statement this reader exists to remove. The assertion is
+    inverted here rather than deleted, so the reversal is visible in the diff.
+    """
+    empty = [state for state in OwnerLiveness if not liveness_text(state).strip()]
+    assert empty == [OwnerLiveness.LIVE], empty
+    for state in OwnerLiveness:
+        if state is not OwnerLiveness.LIVE:
+            assert liveness_text(state).strip(), state
+
+
+# --------------------------------------------------------------------------
+# The designer's copy, and the seam that carries it.
+# --------------------------------------------------------------------------
+
+
+def test_the_copy_is_the_designers_and_live_paints_nothing():
+    """The literal strings, pinned so a reword is a deliberate act."""
+    assert LIVENESS_TEXT[OwnerLiveness.LIVE] == "", "a live claim must paint no cell"
+    assert LIVENESS_TEXT[OwnerLiveness.COMING] == "Connecting…"
+    assert LIVENESS_TEXT[OwnerLiveness.STALE] == "Not answering"
+    assert LIVENESS_TEXT[OwnerLiveness.NEVER] == "No owner"
+
+
+def test_the_row_is_present_if_and_only_if_the_reader_is_not_live():
+    """The designer's checkable form, as a test.
+
+    A LIVE state paints the ordinary band byte-identically to today; every other
+    state takes the row. This is the property the ux round judges, so it is
+    pinned here rather than described.
+    """
+    for state in OwnerLiveness:
+        painted = bool(liveness_text(state, now=NOW, verified_at=NOW - 999))
+        assert painted is (state is not OwnerLiveness.LIVE), state
+
+
+def test_stale_carries_its_age_and_the_head_comes_first():
+    """`Not answering · 4m` -- head first, so the row's ellipsis eats the age."""
+    text = liveness_text(OwnerLiveness.STALE, now=NOW, verified_at=NOW - 240)
+    assert text.startswith("Not answering"), text
+    assert text == f"Not answering · {text.split(' · ')[1]}"
+    assert text.split(" · ")[1], "the age must not be empty"
+
+
+def test_the_stale_age_is_bounded_for_the_narrow_row():
+    """Head + age <= 22 cells (the designer's hard bound), at any age."""
+    for age in (1, 59, 60, 3_600, 86_400, 30 * 86_400):
+        text = liveness_text(OwnerLiveness.STALE, now=NOW, verified_at=NOW - age)
+        assert len(text) <= 22, (age, text, len(text))
+
+
+def test_stale_without_a_stamp_to_measure_from_degrades_to_its_head():
+    """No invented durations: a made-up age is the same class of lie."""
+    assert liveness_text(OwnerLiveness.STALE) == "Not answering"
+
+
+def test_only_stale_grows_an_age():
+    for state in OwnerLiveness:
+        if state is OwnerLiveness.STALE:
+            continue
+        assert liveness_text(state, now=NOW, verified_at=NOW - 240) == LIVENESS_TEXT[state], state
+
+
+# --------------------------------------------------------------------------
+# The precondition: someone must have asked for STALE to mean anything.
+# --------------------------------------------------------------------------
+
+
+def test_the_probe_cadence_is_inside_the_budget_it_feeds():
+    """A healthy owner must be re-verified before its stamp can expire.
+
+    At a 15 s budget a probe every 5 s leaves two missed rounds of slack; a
+    cadence at or above the budget would let a FINE session age into STALE,
+    which is the confident-wrong statement this reader exists to avoid.
+    """
+    assert LIVENESS_PROBE_EVERY_S < LIVE_FRESHNESS_BUDGET_S
+    assert LIVENESS_PROBE_EVERY_S * 3 <= LIVE_FRESHNESS_BUDGET_S + 1e-9
+    assert LIVENESS_PROBE_BUDGET_S <= 2.0, "the probe must not outlive a paint frame"
+
+
+def test_the_probe_is_due_on_a_cadence_and_immediately_when_never_run():
+    probe = LivenessProbe()
+    assert probe.due(None, now=NOW) is True
+    assert probe.due(NOW - 1.0, now=NOW) is False
+    assert probe.due(NOW - LIVENESS_PROBE_EVERY_S, now=NOW) is True
+
+
+def test_a_probe_that_cannot_answer_is_false_and_raises_nothing():
+    """`verify_live` absent, or raising, is a False -- never a crash on a tick."""
+
+    class NoProbe:
+        pass
+
+    class Exploding:
+        async def verify_live(self, timeout: float) -> bool:
+            raise TimeoutError("owner froze")
+
+    class Answering:
+        def __init__(self) -> None:
+            self.timeouts: list[float] = []
+
+        async def verify_live(self, timeout: float) -> bool:
+            self.timeouts.append(timeout)
+            return True
+
+    probe = LivenessProbe()
+    assert asyncio.run(probe.tick(NoProbe())) is False
+    assert asyncio.run(probe.tick(Exploding())) is False
+    owner = Answering()
+    assert asyncio.run(probe.tick(owner)) is True
+    assert owner.timeouts == [LIVENESS_PROBE_BUDGET_S], "the bound must be the constructor's"
+
+
+def test_a_probe_answer_makes_a_quiet_session_read_live_instead_of_stale():
+    """The precondition, end to end at the reader's level.
+
+    A session whose owner answered 4 minutes ago is STALE; the probe answering
+    moves the stamp and the same session becomes LIVE. Without the probe -- the
+    shipped state -- the first reading is what a HEALTHY quiet session would have
+    painted.
+    """
+    quiet = Owner(verified_at=NOW - 240)
+    assert owner_liveness(quiet, now=NOW) is OwnerLiveness.STALE
+    quiet.verified_at = NOW  # what verify_live's stamp does
+    assert owner_liveness(quiet, now=NOW) is OwnerLiveness.LIVE
+    assert liveness_text(OwnerLiveness.LIVE) == ""

@@ -36,9 +36,13 @@ import time
 from typing import Any
 
 from local_operator.session.runtime.types import LIVE_FRESHNESS_BUDGET_S
+from local_operator.tui.widgets.tool_card import format_duration
 
 __all__ = [
+    "LIVENESS_PROBE_BUDGET_S",
+    "LIVENESS_PROBE_EVERY_S",
     "LIVENESS_TEXT",
+    "LivenessProbe",
     "LIVE_FRESHNESS_BUDGET_S",
     "OwnerLiveness",
     "liveness_text",
@@ -76,16 +80,60 @@ class OwnerLiveness(enum.Enum):
 #: readings ("glyph must not imply a live reading, which is why the WORD beside
 #: it is the part …", ``widgets/status_line.py``).
 LIVENESS_TEXT: dict[OwnerLiveness, str] = {
-    OwnerLiveness.LIVE: "live",
-    OwnerLiveness.COMING: "attaching",
-    OwnerLiveness.STALE: "unresponsive since",
-    OwnerLiveness.NEVER: "no owner",
+    # LIVE renders NOTHING, and that is deliberate rather than an omission: the
+    # stamp is a clock, so a live claim is up to LIVE_FRESHNESS_BUDGET_S stale by
+    # construction, and painting one would re-introduce the fresh
+    # confident-wrong statement this whole phase exists to remove. Absence is
+    # already the app's live signal on the sidebar; the band agrees with it. The
+    # checkable form: the connection row is present IFF the state is not LIVE.
+    OwnerLiveness.LIVE: "",
+    OwnerLiveness.COMING: "Connecting\u2026",
+    # The AGE is composed by the caller (:func:`liveness_text`), because STALE is
+    # the only state that has one -- NEVER has no stamp to measure from, which is
+    # itself the fact separating them.
+    OwnerLiveness.STALE: "Not answering",
+    # "owner", not "runtime": the wire's own token for a pid holding the lease
+    # that did not answer is `owner-silent`, so this asserts non-SERVICE, not
+    # non-existence -- which is all the stamp can see.
+    OwnerLiveness.NEVER: "No owner",
 }
 
+#: Cadence and bound for the foreground probe (see :class:`LivenessProbe`).
+#:
+#: THIRD OF THE BUDGET, so a healthy owner is re-verified well inside the window
+#: the reader ages against: at 15 s a probe every 5 s leaves two missed rounds
+#: before a verdict could go stale. The BOUND is the repo's own "one socket round
+#: trip plus the leg's own work" envelope; a probe has to be cheap enough that a
+#: frozen owner does not hold the prober's slot open, and a healthy owner answers
+#: `ping` synchronously (the op is exempt from the runtime's op chain).
+LIVENESS_PROBE_EVERY_S = LIVE_FRESHNESS_BUDGET_S / 3
+LIVENESS_PROBE_BUDGET_S = 2.0
 
-def liveness_text(state: OwnerLiveness) -> str:
-    """The word for ``state``, from the single copy table above."""
-    return LIVENESS_TEXT[state]
+
+def liveness_text(
+    state: OwnerLiveness,
+    *,
+    now: float | None = None,
+    verified_at: float | None = None,
+) -> str:
+    """The row's text for ``state``, from the single copy table above.
+
+    STALE carries an AGE and it is composed here rather than in the table, so the
+    vocabulary stays one word per state and the one state with a measurement gets
+    it: ``Not answering · 4m``. The HEAD COMES FIRST deliberately -- the row's
+    existing right-side ellipsis then eats the age and never the word, which a
+    ``4m · Not answering`` spelling would truncate into nonsense.
+
+    An age is given only when both ``now`` and ``verified_at`` are known. Without
+    them STALE degrades to its bare head rather than inventing a number: a
+    made-up duration is the same class of confident-wrong statement as a made-up
+    liveness, and the head still reads on its own.
+    """
+    head = LIVENESS_TEXT[state]
+    if state is not OwnerLiveness.STALE or verified_at is None:
+        return head
+    clock = time.time() if now is None else now
+    return f"{head} \u00b7 {format_duration(max(0.0, clock - verified_at))}"
 
 
 def owner_liveness(
@@ -119,3 +167,68 @@ def owner_liveness(
     if getattr(session, "attaching", False):
         return OwnerLiveness.COMING
     return OwnerLiveness.NEVER
+
+
+class LivenessProbe:
+    """Re-verify the FOREGROUND session's stamp on a cadence, off the paint path.
+
+    THE PRECONDITION THAT MAKES `STALE` TRUE. `verified_at` is written only on a
+    wire answer -- a canonical ``FrontendSync``, a display refresh, or
+    :meth:`AttachedSession.verify_live` -- and every one of those is
+    EVENT-DRIVEN. On a healthy but QUIET session nothing asks and nothing
+    answers, so the stamp ages past the budget with nothing wrong, and the row
+    would paint ``Not answering · 4m`` on a session that is fine: the age would be
+    measuring the absence of QUESTIONS rather than of ANSWERS. That is the same
+    confident-wrong class the phase exists to remove, arriving through the fix.
+
+    So this asks. It is the instrument the design already anticipates ("what
+    refreshes a viewer's stamp on an idle session is its OWN probe",
+    ``session/runtime/types.py``) and the protocol already carries it: ``ping`` is
+    op-chain-exempt so a health probe is answered while mutations queue.
+
+    IT NEVER RUNS ON THE PAINT PATH. :meth:`tick` is awaited by a caller that owns
+    a cadence (the app's own interval), the paint reads only the resulting clock,
+    and the read path's 170.7-350.6 ms / warm receipt's 6.3-100.6 ms band is
+    therefore untouched. Nothing here raises: a probe that fails leaves the stamp
+    where it was, so a failure NARROWS the window rather than resetting it.
+    """
+
+    def __init__(
+        self,
+        *,
+        every: float = LIVENESS_PROBE_EVERY_S,
+        budget: float = LIVENESS_PROBE_BUDGET_S,
+    ) -> None:
+        self.every = every
+        self.budget = budget
+        self.probes = 0
+        self.answers = 0
+
+    def due(self, last: float | None, *, now: float | None = None) -> bool:
+        """Whether a probe is owed, given the last one's clock.
+
+        A pure clock comparison, so the caller's cadence can be coarse without
+        probing more often than the budget needs.
+        """
+        if last is None:
+            return True
+        return (time.time() if now is None else now) - last >= self.every
+
+    async def tick(self, session: Any) -> bool:
+        """One bounded probe. Returns whether the owner answered.
+
+        Guarded to an actual viewer: an owner-side ``Session`` has no
+        :meth:`verify_live` (it never dials), and calling one would be asking a
+        process about itself.
+        """
+        verify = getattr(session, "verify_live", None)
+        if not callable(verify):
+            return False
+        self.probes += 1
+        try:
+            answered = bool(await verify(self.budget))
+        except Exception:  # noqa: BLE001 -- an unanswered probe is a False, never a crash
+            return False
+        if answered:
+            self.answers += 1
+        return answered
