@@ -10,6 +10,18 @@ router = APIRouter(tags=["Capabilities"])
 
 @router.get("/v1/capabilities", response_model=CRUDResponse)
 async def capabilities():
+    # IMPORTED HERE, NOT AT MODULE SCOPE, and the two precedents are the ones
+    # `tests/unit/test_import_graph.py`'s server guard names in its own comment:
+    # `routes.desktop_profiles` imports `tools.agent_tool` per profile write and
+    # `routes.auth` imports `tunnels.report` per request, both for this reason.
+    # `references` reaches `tools.builtin` (~160 ms), and a module-scope import
+    # puts that back on EVERY `lop serve` startup, before the first request - the
+    # guard fails outright ("`local_operator.tools.builtin` is back on the startup
+    # path"), which is how this was found rather than reasoned about. Deferred,
+    # the cost is paid once per process, on the first `/v1/capabilities` request
+    # and never again; that route is the app's cold negotiation, not a hot path.
+    from local_operator.references import at_references_enabled
+
     return CRUDResponse(
         status=200,
         message="Backend capabilities retrieved.",
@@ -387,6 +399,72 @@ async def capabilities():
                 # an old renderer ignores the extra fields, and bumping would
                 # hide a working sign-in flow behind an update it does not need.
                 "tunnel": 1,
+                # ``@path`` in an ordinary submitted message, which
+                # :meth:`Session.prompt` expands into an
+                # ``<operator-references>`` block before the model sees the turn
+                # (`references.expand_references`; `prompt` is the single
+                # expansion site EVERY NON-ASIDE SURFACE reaches — the CLI,
+                # headless runs, the server, the scheduler, the mobile service and
+                # every subagent — and `references.py`'s docstring counts the
+                # other expanding caller, the TUI's aside worker, beside it).
+                #
+                # WHAT THIS KEY DOES NOT COVER, stated because a client that
+                # assumed otherwise would paint a chip over literal text: this
+                # server's send route takes ``mode: "prompt" | "steer"``, and a
+                # STEER bypasses `prompt` — :meth:`Session.steer` queues the
+                # message and expands nothing. `session/session.py` lists the
+                # three entry paths that predate the feature and leave an `@path`
+                # as inert prose: `steer`, a wake delivery, and an aside FORK —
+                # and that last one is true only of the adopted ROW, because the
+                # TUI's own aside worker expands the text it hands the model
+                # (`tui/app.py`'s `_expand_references` is that call, and
+                # `references.py` names it as one of the TWO expanding callers).
+                # So the key means "this backend expands a reference in a
+                # PROMPT", never "in any text a client sends", and a composer
+                # that can send either must withhold the affordance for the
+                # steer — which is what the shipped one does, `!busy` beside
+                # this gate.
+                #
+                # THIS IS THE WRITER THE RENDERER HAS BEEN WAITING FOR. The app
+                # ships the `@` picker, the inline chips and the composer tip,
+                # and withholds all three until a backend advertises this key —
+                # so on every backend older than this line the affordance is
+                # dark BY DESIGN, `@path` stays the plain text such a backend
+                # sends, and the composer says why. The key is the whole switch;
+                # nothing else about the app changed to light it up.
+                #
+                # CONDITIONAL, and it is the only key in this map whose PRESENCE
+                # is a runtime fact rather than a build fact.
+                # ``LOCAL_OPERATOR_AT_REFERENCES``
+                # (:data:`local_operator.references.AT_REFERENCES_ENV`) is a kill
+                # switch read per call, so a process told not to expand must not
+                # advertise a picker that paints chips for an expansion it will
+                # not perform: a client that believed the key would show the
+                # user a reference the model never receives, which is the one
+                # lie this gate exists to prevent. That variable has exactly ONE
+                # reader, :func:`~local_operator.references.at_references_enabled`,
+                # which is called here rather than re-read, so this payload and
+                # the expansion THIS PROCESS performs cannot disagree.
+                #
+                # AND THAT LAST CLAUSE IS SCOPED TO THIS PROCESS, which is a real
+                # boundary rather than a hedge: a turn is admitted over a socket
+                # to whichever process OWNS the session, and a runtime's
+                # environment is the snapshot it was spawned with. So a daemon
+                # whose switch is on can advertise the key while an owner engaged
+                # from a shell that exported the switch off sends the literal
+                # `@path`. No value read here can fix that, and it needs no new
+                # handling: the owner's behaviour is the same absent-key
+                # behaviour a client already implements, and the case that
+                # matters — every backend older than this line — is decided by
+                # presence alone.
+                #
+                # ITS OWN KEY rather than a bump, by the rule `session_search`
+                # states above: the composer renders perfectly well without it —
+                # an unexpanded `@path` is prose the model reads as prose — so
+                # gating that working composer on a newer version would take a
+                # surface away to advertise nothing. A client that does not see
+                # the key must send the draft as typed and offer no affordance.
+                **({"references": 1} if at_references_enabled() else {}),
             },
         },
     )

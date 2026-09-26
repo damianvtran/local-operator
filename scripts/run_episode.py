@@ -407,6 +407,7 @@ def build_config(
     max_steps: int,
     max_cycle_usd_micros: int | None,
     execution_overhead_seconds_per_action: float = 0.0,
+    completion_gate: bool = True,
 ) -> Any:
     """Roots under ONE durable directory; timeouts sized for a real worker.
 
@@ -440,6 +441,7 @@ def build_config(
         cleanup_timeout=120.0,
         handshake_timeout=60.0,
         max_cycle_cost_micros=max_cycle_usd_micros,
+        completion_gate=completion_gate,
     )
 
 
@@ -705,6 +707,15 @@ def build_parser() -> argparse.ArgumentParser:
         "and the model client is built without one (test/fake routes only)",
     )
     parser.add_argument(
+        "--no-completion-gate",
+        action="store_true",
+        help="do not challenge the first `finish status=done` with a re-check of "
+        "the end state: the episode ends on the first declaration, exactly as it "
+        "did before the gate existed. This is a campaign's CONTROL ARM, not a "
+        "preference -- it changes what the model is asked -- and the arm is "
+        "stamped on the manifest either way",
+    )
+    parser.add_argument(
         "--model-client",
         default="provider",
         choices=("provider", "scripted-finish"),
@@ -712,6 +723,24 @@ def build_parser() -> argparse.ArgumentParser:
         "(for proving the script against a fake adapter; never for a result)",
     )
     return parser
+
+
+def _can_challenge_completion(client: Any) -> bool:
+    """Whether this model client can re-present the end state for the gate.
+
+    A SEPARATE function rather than an inline ``isinstance``, for a naming
+    reason and a typing one. The naming reason: the driver refuses a run it
+    cannot gate, so the capability deserves a name that reads at the call site.
+    The typing reason: pyright NARROWS the variable an ``isinstance`` is given,
+    so a client that is both an ``EpisodeModelClient`` and a
+    ``CompletionChallenger`` -- which every shipped client is -- would be
+    narrowed to the latter and then rejected by the ``EpisodeRunner(model=...)``
+    call below it. Here the narrowing stays inside this function.
+    """
+
+    from local_operator.evaluation.runner.model import CompletionChallenger
+
+    return isinstance(client, CompletionChallenger)
 
 
 class _ScriptedFinish:
@@ -748,6 +777,29 @@ class _ScriptedFinish:
             strict=True,
         )
         return ModelDecision(action_batch=batch, route=self._route)
+
+    async def challenge_completion(
+        self, observation: Any, history: Sequence[Any], *, batch: Any, instruction: str
+    ) -> str:
+        """Answer a completion challenge the way a blind model can: with words.
+
+        The scripted client has no eyes and no provider, so it cannot re-examine
+        anything -- but it DOES have to implement the method. The runner refuses
+        to fire the gate for a client that cannot re-present the end state, and
+        the driver fails the run rather than seal a bundle whose manifest claims
+        the gate was on while nothing was challenged. Implementing it here keeps
+        the scripted episode the same SHAPE as a real one: challenge, then the
+        identical second declaration, which the runner always accepts.
+        """
+        from local_operator.evaluation.runner.completion import finish_claim
+        from local_operator.evaluation.runner.provider_client import (
+            build_completion_challenge,
+        )
+
+        del history
+        return build_completion_challenge(
+            claim=finish_claim(batch), instruction=instruction, observation=observation
+        )
 
 
 def _ensure_lease_outlasts_wall(
@@ -814,6 +866,7 @@ async def run(args: argparse.Namespace) -> int:
             execution_overhead_seconds_per_action=(
                 _ACTION_SETTLE_SECONDS if settle_policy == "paper" else 0.0
             ),
+            completion_gate=not args.no_completion_gate,
         )
     except VolatileRootError as error:
         print(str(error), file=sys.stderr)
@@ -856,6 +909,14 @@ async def run(args: argparse.Namespace) -> int:
             # runner's ``synthetic_model`` label are what keep it from being
             # read as a result.
             "model_client": args.model_client,
+            # Whether this episode challenged its first `done` declaration.
+            # The gate changes what the model is ASKED, so an arm that ran with
+            # it off is a different condition and not a comparable run: a score
+            # has to carry which arm produced it, the same way it carries the
+            # effort it was made at and any requested infra override. Stamped
+            # unconditionally, because a run that did NOT challenge would
+            # otherwise be indistinguishable from one whose stamp was lost.
+            "completion_gate": not args.no_completion_gate,
             # The effort the decisions were made at, beside the route they were
             # made on. A score is not comparable across effort levels, and the
             # published numbers this run is read against are at maximum effort,
@@ -915,6 +976,23 @@ async def run(args: argparse.Namespace) -> int:
             # is allocated, which is exactly what EXIT_PREFLIGHT means here.
             print(str(error), file=sys.stderr)
             return EXIT_PREFLIGHT
+
+    if config.completion_gate and not _can_challenge_completion(model_client):
+        # A DEAD INSTRUMENT MUST NOT RETURN A READING. The gate refuses to fire
+        # for a client that cannot re-present the end state, so carrying on
+        # would seal a bundle whose manifest says the gate was on while no
+        # challenge was ever made -- a run that cannot be told apart from a
+        # gate-off run by anything except reading its code. Fail with the
+        # remedy named instead; ``--no-completion-gate`` is how an operator says
+        # they meant it.
+        print(
+            f"--model-client {args.model_client} cannot re-present the end state "
+            "(no challenge_completion), so the completion gate cannot fire and "
+            "this bundle would claim a gate that never ran; pass "
+            "--no-completion-gate to run without it deliberately",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
 
     runner = EpisodeRunner(
         spec,

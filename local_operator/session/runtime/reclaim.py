@@ -6,8 +6,10 @@ store** (``~/.local-operator/run/mobile`` — what ``lop sessions``, ``lop send`
 attach and the desktop app all read), the oldest had been alive 11.3 h, and
 between them they held ~810 MB of RSS that no surface in the product could name.
 The second measurement is the one that changes what to do about them: asking each
-process for the config root it ACTUALLY uses (``ps -Eww``) found every one holding
-a heartbeat-fresh record in its OWN root — sibling QA stores under ``/tmp`` and
+process for the config root it ACTUALLY uses — its own environment, ``ps -Eww`` on
+macOS and ``/proc/<pid>/environ`` on Linux (:func:`pid_environment`) — found every
+one holding a heartbeat-fresh record in its OWN root — sibling QA stores under
+``/tmp`` and
 ``/private/tmp``, 32 of the 36 publishing ``busy: true``. So the population is not
 a set of corpses: it is runtimes of other stores that this store cannot see, and a
 sweep scoped to one store has no business ending any of them. Both facts are why
@@ -114,6 +116,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -317,20 +320,168 @@ REFUSAL_GONE = "gone"
 REFUSAL_NO_CENSUS = "no-census-row"
 
 
+#: Whether this host's ``ps`` is procps (Linux) or the BSD/macOS implementation.
+#: A NAMED CONSTANT rather than an inline ``sys.platform`` test for two reasons:
+#: :func:`pid_environment` is the single place the difference is resolved, and both
+#: arms are then drivable from either host by patching this name (the reason
+#: ``tools/group_reaper`` patches a name rather than ``sys.platform``), so the
+#: Linux spelling is exercised on the macOS developer machines too.
+_IS_LINUX = sys.platform.startswith("linux")
+
+#: Failure signatures (:func:`_report_failure`) already reported by this process.
+#: Keyed by (program, what went wrong) rather than by the whole argv, because the
+#: per-pid readers fork once per candidate and their argv carries the pid: a
+#: per-argv key would print one line per candidate for ONE broken instrument.
+_REPORTED_FAILURES: set[tuple[str, str]] = set()
+
+
+def _stderr_excerpt(stderr: str | None) -> str:
+    """The first thing a failed command said on stderr, trimmed, or ``""``."""
+    for line in (stderr or "").splitlines():
+        text = line.strip()
+        if text:
+            return text[:200]
+    return ""
+
+
+def _report_failure(command: Sequence[str], detail: str) -> None:
+    """Say ONCE, on the log, that a diagnostic command failed — and what it said.
+
+    WHY THIS EXISTS. :func:`_run_command` tolerates failure by design, but it used
+    to tolerate it SILENTLY: it never read ``returncode`` and never saw the tool's
+    own stderr, so "the instrument ran and found nothing" and "the instrument does
+    not exist on this platform" produced the same ``""``. That is how ``ps -Eww``
+    — an option procps does not have — kept every environment reader answering
+    nothing on Linux while every test stayed green. The failure has to be legible
+    somewhere, and this log line is the only place a diagnostic can put it without
+    raising through the supervisor's slice.
+
+    ONCE PER (program, failure kind) for the life of the process: a fleet-wide
+    breakage is one line, not one per pid. The first occurrence carries the argv
+    and the tool's own message; every repeat would be the same fact.
+    """
+    if not command:
+        return
+    key = (str(command[0]), detail)
+    if key in _REPORTED_FAILURES:
+        return
+    _REPORTED_FAILURES.add(key)
+    logger.warning(
+        "residency reader %s failed (%s) — reading it as 'no evidence'",
+        " ".join(str(part) for part in command),
+        detail,
+    )
+
+
 def _run_command(command: Sequence[str], timeout_s: float) -> str:
     """Run a read-only command and return its stdout, or ``""`` on any failure.
 
-    Never raises and never reports why: every caller here is a diagnostic whose
-    failure mode is "evidence unavailable", and a sweep that raised because ``ps``
-    was missing would take the supervisor's slice with it.
+    Never raises: every caller here is a diagnostic whose failure mode is
+    "evidence unavailable", and a sweep that raised because ``ps`` was missing
+    would take the supervisor's slice with it.
+
+    STILL NEVER RAISES, BUT NO LONGER SILENT. Two shapes are reported, once each,
+    through :func:`_report_failure`:
+
+    * a command that could not be run at all — ``OSError`` (no such binary, no
+      permission) or ``SubprocessError`` (the :data:`CENSUS_TIMEOUT_S` timeout, or
+      a signal);
+    * a non-zero exit **that came with a message on stderr**, which is the shape a
+      platform rejecting the argv takes (``ps -Eww`` on Linux: an invalid option,
+      non-zero, with the complaint on stderr).
+
+    A non-zero exit with NOTHING on stderr is deliberately NOT reported: that is
+    this module's normal, expected answer. ``ps -p <pid>`` on a pid that has gone
+    and ``lsof`` with an empty table both exit non-zero in silence, and a warning
+    printed on that ordinary "the target moved" path is one nobody reads by the
+    time a real one arrives.
+
+    The RETURN VALUE is unchanged on every path, including both reported ones: the
+    six call sites' contract ("stdout or ``""``, never a raise") is not this fix's
+    business, and widening it into a raiser — or into "failed means empty" — would
+    change behaviour on paths no test here drives.
     """
     try:
         done = subprocess.run(  # noqa: S603 — fixed argv, no shell
             list(command), capture_output=True, text=True, timeout=timeout_s
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _report_failure(command, f"{type(exc).__name__}: {exc}")
         return ""
+    if done.returncode != 0:
+        stderr = _stderr_excerpt(done.stderr)
+        if stderr:
+            _report_failure(command, f"exit {done.returncode}: {stderr}")
     return done.stdout or ""
+
+
+def proc_environ_text(pid: int) -> str:
+    """``/proc/<pid>/environ`` as whitespace-separated ``NAME=value`` text, or ``""``.
+
+    THE LINUX HALF of :func:`pid_environment`, and it needs no fork: the file is a
+    NUL-separated snapshot of the environment the process was STARTED with, which
+    is what ``ps -Eww`` reports on macOS (macOS ``ps(1)``: "This does not reflect
+    changes in the environment after process launch").
+
+    "Cannot read it" and "it says nothing" collapse into ``""`` here, the same way
+    they do on the macOS route: the caller's only question is which config root
+    this process names, and an empty answer is refused identically to a pid that is
+    gone. The two ways to get ``""`` are an exited pid and a process owned by
+    another user — the SAME limit ``ps -Eww`` has, because both read the same
+    kernel-side environment.
+    """
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return ""
+    return raw.decode("utf-8", "replace").replace("\0", " ").strip()
+
+
+def pid_environment(
+    pid: int,
+    *,
+    run: Callable[[Sequence[str], float], str] = _run_command,
+    timeout_s: float = CENSUS_TIMEOUT_S,
+) -> str:
+    """One pid's environment as text, from THIS platform's own source.
+
+    TWO SPELLINGS, AND IT IS NOT A FLAG DANCE — ``-E`` DOES NOT EXIST IN procps.
+    This module ran ``ps -Eww`` everywhere and called it "appends the process's
+    environment", which is true of BSD/macOS ``ps(1)`` (``-E``: "Display the
+    environment as well") and false of Linux's: procps-ng's manual lists no ``-E``
+    option at all, so ``ps -Eww`` there fails with an invalid-option complaint and
+    — before :func:`_report_failure` existed — every reader of a process's
+    environment answered "no evidence" instead. On Linux the source is the kernel's
+    own ``/proc/<pid>/environ`` (:func:`proc_environ_text`): NUL-separated, the same
+    snapshot ``ps`` itself would print, and free of a fork.
+
+    A SINGLE SPELLING WAS CONSIDERED AND NOT USED, AND THERE IS NONE TO USE.
+    procps documents the BSD-style modifier ``e`` ("Show the environment after the
+    command"), and ``ps eww -p PID -o command=`` is the one form that looks as if it
+    would serve both families. It does not. macOS ``ps(1)`` documents NO bare ``e``
+    modifier at all: its environment spelling is ``-E`` ("Display the environment as
+    well. This does not reflect changes in the environment after process launch"),
+    its DASHED ``-e`` is "Identical to -A" — a process-SELECTION option — and the
+    ``-e`` that measures the environment exists only under LEGACY DESCRIPTION,
+    beside a redefined ``-g``/``-l``/``-u``. So the
+    "portable" spelling is a documented modifier on one family and an undocumented
+    one on the other; and on the family that has it, using it means mixing BSD
+    syntax with the Unix-style ``-p``/``-o`` this module needs — that same manual:
+    "Options of different types may be freely mixed, but conflicts can appear", and
+    BSD options "must not be used with a dash". A spelling whose correctness rests
+    on undefined mixing rules is the same class of assumption that made ``-E`` look
+    portable in the first place, and (unlike ``/proc``) it cannot be exercised from
+    a macOS developer machine.
+
+    The NULs become single spaces so the text has the same SHAPE as the macOS
+    route's — whitespace-separated ``NAME=value`` — which is what the patterns in
+    :func:`config_root_of` and :func:`session_id_of` read. A value containing a
+    space is ambiguous in both spellings, equally, and nothing here reads anything
+    but those two names.
+    """
+    if _IS_LINUX:
+        return proc_environ_text(pid)
+    return run(["ps", "-Eww", "-p", str(pid), "-o", "command="], timeout_s)
 
 
 def etime_seconds(text: str) -> float:
@@ -415,8 +566,28 @@ def runtime_processes(
     ONE fork for the whole census, with no ``per-pid`` probe: at 57 runtimes a
     per-pid ``ps`` (3.9 ms each) would cost 220 ms of the supervisor's slice for
     data the process table already prints in a single call.
+
+    ``-ww`` IS MANDATORY AND IT IS NOT COSMETIC. ``command`` is this row's LAST
+    column, and ``ps(1)`` extends a last column to the edge of the display — so when
+    ps cannot determine the display width, as when its output is piped (every caller
+    here), the width on Linux "is undefined (it may be 80, unlimited, determined by
+    the TERM variable, and so on)". A truncated row severs the ``-m <module>`` pair
+    :func:`parse_process_row` matches, so the census reports FEWER runtimes than
+    exist — or none — as a NUMBER rather than as an error, and an empty census reads
+    downstream as "nothing to sweep". ``-ww`` is unlimited width.
+
+    ``-Eww`` would widen the row too, and it is still the wrong flag even though the
+    three sibling readers in this module use it. ``-E`` appends each process's own
+    environment to that same ``command`` column, which this reader does not need — the
+    environment is read per CANDIDATE by :func:`process_env`/:func:`process_envs`, and
+    the whole-fleet form measured 1.7 MB against 385 KB without it (see
+    :func:`process_env`) — and which it must not have, because ``parse_process_row``
+    word-splits that column and matches the spawn contract in it: environment words in
+    the field being matched are words an env var could put there, and admitting a
+    stranger as a runtime is the one misidentification this module's parser comment
+    exists to forbid.
     """
-    output = run(["ps", "-eo", "pid=,ppid=,etime=,time=,command="], timeout_s)
+    output = run(["ps", "-ww", "-eo", "pid=,ppid=,etime=,time=,command="], timeout_s)
     found: list[RuntimeProcess] = []
     for line in output.splitlines():
         row = parse_process_row(line)
@@ -433,24 +604,40 @@ def process_row(
 ) -> RuntimeProcess | None:
     """ONE pid's census row AND the environment it reports, in ONE ``ps`` fork.
 
-    THE SIGNAL-TIME RE-READ (see :func:`target_changed`). ``-Eww`` appends the
-    process's own environment to the ``command`` column, so the same fork that
-    says "this pid is still a runtime, this old, this much CPU" also carries the
-    config root the verdict attributed the candidate to — two of the four facts
-    the re-identification rests on, at the cost of the single per-candidate fork
-    the pass already pays for ``env_of``.
+    THE SIGNAL-TIME RE-READ (see :func:`target_changed`). The environment is
+    appended to the ``command`` column, so the same call that says "this pid is
+    still a runtime, this old, this much CPU" also carries the config root the
+    verdict attributed the candidate to — two of the four facts the
+    re-identification rests on, at the cost of the single per-candidate fork the
+    pass already pays for ``env_of``.
+
+    WHERE THAT ENVIRONMENT COMES FROM IS PER PLATFORM (:func:`pid_environment`):
+    on macOS ``-Eww`` appends it inside this very fork, and on Linux ``-E`` is not
+    an option at all, so the row comes from ``ps -ww`` and the environment is
+    appended from ``/proc/<pid>/environ`` — still ONE fork, because a ``/proc``
+    read forks nothing. ``-ww`` on the Linux argv is not cosmetic either: procps
+    leaves the ``command`` column's width UNDEFINED when its output is piped, and
+    the argv match in :func:`parse_process_row` is what says "still a runtime".
 
     ``None`` means the pid is not a live session runtime NOW: gone, or a
     different process wearing the pid. Both are refusals at signal time.
     """
+    # The one place the two spellings differ; the reason is in :func:`pid_environment`.
+    env_flag = "-ww" if _IS_LINUX else "-Eww"
     output = run(
-        ["ps", "-Eww", "-p", str(pid), "-o", "pid=,ppid=,etime=,time=,command="],
+        ["ps", env_flag, "-p", str(pid), "-o", "pid=,ppid=,etime=,time=,command="],
         timeout_s,
     )
     for line in output.splitlines():
         row = parse_process_row(line)
         if row is not None and row.pid == pid:
-            return row
+            if not _IS_LINUX:
+                return row
+            # ``ps`` cannot carry the environment here, so append it from /proc:
+            # same column, same shape for every reader of ``row.command``, and the
+            # same "" when it cannot be read (see :func:`proc_environ_text`).
+            env_text = pid_environment(pid, run=run, timeout_s=timeout_s)
+            return replace(row, command=f"{row.command} {env_text}".strip())
     return None
 
 
@@ -583,16 +770,20 @@ def socket_evidence(
 def process_env(pid: int, *, run: Callable[[Sequence[str], float], str] = _run_command) -> str:
     """One runtime's environment as text, or ``""`` when it cannot be read.
 
-    Read per CANDIDATE and never for the whole fleet: the census with ``-E``
-    measured 1.7 MB of output for 1140 processes against 385 KB without it, and
-    the only question this answers — which config root does this runtime use — is
-    asked of a handful of rows after the cheap filters have run.
+    Read per CANDIDATE and never for the whole fleet: one census with the
+    environment attached measured 1.7 MB of output for 1140 processes against
+    385 KB without it, and the only question this answers — which config root does
+    this runtime use — is asked of a handful of rows after the cheap filters have
+    run.
 
-    ``-ww`` is required, not cosmetic: ``ps`` truncates the environment to the
-    terminal width by default, which on a narrow or piped stdout silently drops
-    the tail of the very variable being looked for.
+    The platform's own source, and why it is no longer ``ps -Eww`` everywhere, is
+    in :func:`pid_environment`. The macOS route needs ``-ww``, not as cosmetics:
+    ``ps`` truncates the environment to the terminal width by default, which on a
+    narrow or piped stdout silently drops the tail of the very variable being
+    looked for. The Linux route needs no width flag at all — ``/proc`` is not a
+    terminal.
     """
-    return run(["ps", "-Eww", "-p", str(pid), "-o", "command="], CENSUS_TIMEOUT_S)
+    return pid_environment(pid, run=run, timeout_s=CENSUS_TIMEOUT_S)
 
 
 def process_envs(
@@ -608,11 +799,26 @@ def process_envs(
     call. The per-pid reader stays for the single-candidate path (a sweep looks at a
     handful) and for the fallback below; this one is for the fleet.
 
+    ONE ``ps`` fork on both platforms, and on Linux that is the whole extra cost:
+    the environment per row comes from ``/proc/<pid>/environ``
+    (:func:`proc_environ_text`), which is a file read and not a fork, so the
+    fleet-wide shape and its measured budget are unchanged. ``-Eww`` there would be
+    the macOS spelling only — ``-E`` is not a procps option, see
+    :func:`pid_environment` — and every value would then be the command line alone,
+    i.e. a config root nobody could read. ``-ww`` IS passed on both, because procps
+    leaves the ``command`` column's width undefined whenever its output is piped,
+    and the command prefix is half of what a caller is handed.
+
     A pid ``ps`` does not print is ABSENT rather than empty, so a caller can tell "no
     environment readable" from "an environment with nothing in it" — the first is
     what a candidate must be refused for, and the second does not exist.
     """
-    output = run(["ps", "-Eww", "-eo", "pid=,command="], timeout_s)
+    argv = (
+        ["ps", "-ww", "-eo", "pid=,command="]
+        if _IS_LINUX
+        else ["ps", "-Eww", "-eo", "pid=,command="]
+    )
+    output = run(argv, timeout_s)
     envs: dict[int, str] = {}
     for line in output.splitlines():
         text = line.strip()
@@ -623,7 +829,13 @@ def process_envs(
             pid = int(pid_text)
         except ValueError:
             continue
-        envs[pid] = command.strip()
+        if _IS_LINUX:
+            # The command prefix is KEPT so a caller sees the shape it sees on
+            # macOS, and the environment is appended from /proc: it is the part
+            # any caller reads (:func:`config_root_of`, :func:`session_id_of`).
+            envs[pid] = f"{command.strip()} {proc_environ_text(pid)}".strip()
+        else:
+            envs[pid] = command.strip()
     return envs
 
 

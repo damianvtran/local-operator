@@ -350,6 +350,22 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         sender = frame.get("sender", {})
         if not isinstance(sender, dict):
             raise ValueError("sender must be an object")
+    elif op == "peer_set_model":
+        # Another local lop session switching THIS one's model (`send model=` /
+        # `lop model`). SHAPE only: whether the pair is servable is the
+        # receiving handle's question (`validate_model_selection` against this
+        # session's own config and credentials), because a sender that may run
+        # under a different config dir cannot answer it. A new op rather than
+        # `set_model` so an OLD registrant fails closed with `unknown op` instead
+        # of applying an unvalidated, unaudited switch. Additive; no
+        # PROTOCOL_VERSION bump, for the reason `peer_message` gives above.
+        for name in ("provider", "model_id"):
+            value = frame.get(name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        sender = frame.get("sender", {})
+        if not isinstance(sender, dict):
+            raise ValueError("sender must be an object")
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +416,11 @@ ControlOp = Literal[
     # from ANOTHER local lop session hands a message to this one. Additive; no
     # PROTOCOL_VERSION bump (see validate_control_frame + the version note).
     "peer_message",  # {text, mode: mailbox|steer, wake?, sender?}
+    # A peer switching this session's model: validated, applied through the
+    # host's own switch, read back, and audited with a peer card on the target.
+    # Additive like peer_message; an old runtime answers unknown-op and the
+    # sender reports that nothing changed.
+    "peer_set_model",  # {provider, model_id, sender?}
     # The graceful rung of the kill switch (`lop stop` / `/stop`): deny parked
     # gates, abort the turn, dispose the session, release the lease, unpublish
     # the record, exit. Additive like peer_message — an old runtime answers

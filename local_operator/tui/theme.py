@@ -365,6 +365,16 @@ def register_theme(spec: ThemeSpec) -> None:
     _THEMES[spec.name] = spec
 
 
+def unregister_theme(name: str) -> None:
+    """Drop ``name`` if registered, so a runtime-derived theme can be re-derived.
+
+    The brand ramps are not removable: every fallback path lands on them.
+    """
+    if name in (DEFAULT_THEME, "light"):
+        raise ValueError(f"theme {name!r} is a brand ramp and cannot be unregistered")
+    _THEMES.pop(name, None)
+
+
 def theme_spec(name: str | None = None) -> ThemeSpec:
     """The :class:`ThemeSpec` for ``name`` (default: the active theme)."""
     registry = _registry()

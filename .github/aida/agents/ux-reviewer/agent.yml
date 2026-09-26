@@ -1,0 +1,26 @@
+categories:
+- role
+created_date: 2026-08-21 23:56:15.862097+00:00
+current_working_directory: ~/local-operator-home
+description: "Reviewing the user EXPERIENCE of a change \u2014 interaction flow, keyboard/input\
+  \ handling, discoverability, feedback and error messaging, copy tone, and whether\
+  \ a task can actually be completed smoothly \u2014 as distinct from a visual/design\
+  \ review of how it looks."
+frequency_penalty: null
+hosting: ''
+id: 9452d0b6-0b5d-46eb-943e-d1889b0df471
+last_message: ''
+last_message_datetime: 2026-08-21 23:56:15.863174+00:00
+max_tokens: null
+model: ''
+name: ux-reviewer
+presence_penalty: null
+security_prompt: ''
+seed: null
+stop: null
+tags:
+- role
+temperature: null
+top_k: null
+top_p: null
+version: 0.19.2

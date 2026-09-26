@@ -1224,6 +1224,16 @@ it landed.
    `## Fixes` as applicable, then `## Install` and the full-changelog compare
    link). A window's notes are written from the collected impact lines, not
    from commit subjects.
+
+   **A macOS job is on the critical path for every platform now.** `pypi-publish`
+   declares `keyagent-macos` as a hard dependency: the Developer-ID-signed helper and its
+   embedded profile are injected into the macOS wheel, and publishing the pure wheel alone
+   would be the silent downgrade the design forbids. The consequence for this checklist is
+   that an expired Developer ID identity or a revoked App ID stops the Linux and Windows
+   release too — and the remedy is a re-issued p12/profile refilled into
+   `secrets.MACOS_SIGNING_P12_BASE64` / `secrets.MACOS_SIGNING_PROFILE_BASE64`, not a
+   skipped job. `keyagent-macos` runs on the pinned `macos-15` runner deliberately, so do
+   not bump that pin during a release window.
 5. **Post the refs** (tag, release URL, installed `.lop-source` revision) as a
    comment on every PR in the window, and `send` them to each contributor
    still running.
@@ -1791,9 +1801,18 @@ would make the reply non-deterministic and need network and credit.
 one extra approval GitHub's *Additional approval for unattributed Copilot pull
 requests* adds when a pull request is not attributed to a person (on by default:
 it raises the configured count, so an unattributed PR needs two approvals), and
-carries a configured **bypass for the admin repository role** (`bypass_actors`:
-`RepositoryRole` 5, `bypass_mode: always` — diff this sentence against
-`gh api repos/<owner>/<repo>/rulesets/<id>` rather than trusting it). It no
+carries **five configured bypass actors, and they are two different controls**
+(as of 2026-09-24): the admin repository role (`RepositoryRole` 5,
+`bypass_mode: always`), plus four `User` actors — four of the five collaborators
+named under Tier 2 below, the `write`-role ones — each with `bypass_mode:
+pull_request`. Keep the two modes apart, because recording the list
+as one admin bypass is how this paragraph had it wrong: `always` bypasses for a
+direct push to `main` as well as for a merge, while `pull_request` "can only
+bypass rules on pull requests" — so those four can complete a pull request the
+rules would otherwise refuse, but none of them can move `main` without one. Diff
+this against `gh api repos/<owner>/<repo>/rulesets/<id>` rather than trusting it,
+and read an absent `bypass_actors` as *not visible to you* (the API returns it
+only to a caller with write access to the ruleset), never as "no bypass". It no
 longer sets `require_code_owner_review`, and `.github/CODEOWNERS` no longer
 declares an owner for anything: the two were removed together on 2026-09-16,
 because the owner list was what created a review request on every PR the moment
@@ -1825,7 +1844,14 @@ an outsider could land on `main` with nobody having looked at it.
 **How the forge records tier 1.** GitHub prohibits approving your own pull
 request (`422 Review Can not approve your own pull request`), and every agent
 here pushes as the owner's account, so an agent-authored PR the owner created
-can never be *clicked* approved by the account that opened it. The ruleset
+can never be *clicked* approved by the account that opened it. **And the agent
+round does not move that counter either**: the round is posted as a pull request
+*comment*, while the ruleset's `required_approving_review_count` counts submitted
+*reviews*, so a PR can carry a complete, clean, fresh round and still read
+`reviewDecision: REVIEW_REQUIRED` with an empty `reviews` list — the state #1455
+here was merged in on 2026-09-23, through this bypass. The round satisfies *this
+file's* gate; the forge's counter is unmoved by it, and that gap is what the
+`--admin` disclosure below exists to keep visible. The ruleset
 anticipates exactly this: the admin-role bypass is the **sanctioned** way the
 owner's reviewed PR completes, not a hole. So, concretely, for an agent acting
 for the owner with a clean independent round and green CI (the `changes`

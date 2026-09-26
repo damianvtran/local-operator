@@ -122,6 +122,11 @@ class _FakeOwner:
         self.port = 0
         self.conns = 0
         self.watch_calls = 0
+        #: How many ``desktop_withdraw`` frames this owner received (round 3).
+        #: A dial replays the recorded withdrawal instead of a lease when the
+        #: pane left; counting them apart from ``watch_calls`` is what lets a
+        #: test say WHICH arm of the replay ran.
+        self.withdraw_calls = 0
         self._server: asyncio.AbstractServer | None = None
         self._writers: list[asyncio.StreamWriter] = []
         self._connections: set[asyncio.Task[None]] = set()
@@ -170,6 +175,14 @@ class _FakeOwner:
                     continue
                 if frame.get("op") == "desktop_watch":
                     self.watch_calls += 1
+                    if self.answer_watch:
+                        await self._write(
+                            writer, {"op": "ack", "req": frame.get("req"), "data": {}}
+                        )
+                elif frame.get("op") == "desktop_withdraw":
+                    # Answered under the same flag: both ops are presence hints
+                    # with the same best-effort envelope on the dial.
+                    self.withdraw_calls += 1
                     if self.answer_watch:
                         await self._write(
                             writer, {"op": "ack", "req": frame.get("req"), "data": {}}
@@ -543,6 +556,11 @@ async def test_a_lost_presence_re_assert_does_not_fail_the_bind(
     await owner.start()
     _publish_live(tmp_path, owner)
     viewer = await _cold_viewer(tmp_path)
+    # A recorded, still-fresh presence pair — what a viewer that was watching
+    # moments before the drop carries into the redial. (A viewer with NO
+    # recorded state takes the withdrawal arm of the replay instead; see
+    # ``test_a_recorded_withdrawal_replays_as_a_withdrawal_not_a_lease``.)
+    await viewer.update_desktop_watch(visible=True, can_notify=True)
 
     started = time.monotonic()
     await viewer.attach_existing()
@@ -551,6 +569,41 @@ async def test_a_lost_presence_re_assert_does_not_fail_the_bind(
     assert viewer.is_cold is False, "a lost presence hint refused a healthy bind"
     assert owner.watch_calls == 1, "the re-assert was never attempted"
     assert elapsed < remote_module._DESKTOP_WATCH_ACK_BOUND_S + 2.0
+    await viewer.dispose()
+    await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_withdrawal_replays_as_a_withdrawal_not_a_lease(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """THE SUCCESSOR'S HALF OF THE WITHDRAWAL (round 3, C2's pin).
+
+    A runtime engaged AFTER the pane left must start and STAY detached, and
+    the dial is where that is decided: ``withdraw_desktop_watch`` records the
+    withdrawal as the desired state, and the next dial replays the WITHDRAWAL
+    OP rather than re-asserting a lease — a lease re-assert here would make a
+    fresh successor claim an attached interface nobody holds for its own
+    45 s. The mirror (a fresh recorded pair) is pinned by
+    ``test_a_lost_presence_re_assert_does_not_fail_the_bind``, which asserts
+    ``watch_calls == 1`` on exactly the same wire.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    await _seed(tmp_path)
+    owner = _FakeOwner(SESSION_ID, tmp_path, answer_watch=True, sync_on_connect=True)
+    await owner.start()
+    _publish_live(tmp_path, owner)
+    viewer = await _cold_viewer(tmp_path)
+
+    # Record the withdrawal while cold: the bridge's last-lease seam does
+    # exactly this, and the RECORDING is the part that must survive to the
+    # next dial.
+    await viewer.withdraw_desktop_watch()
+
+    await viewer.attach_existing()
+
+    assert owner.withdraw_calls == 1, "the recorded withdrawal was not replayed"
+    assert owner.watch_calls == 0, "the dial re-asserted a lease after a withdrawal"
     await viewer.dispose()
     await owner.stop()
 

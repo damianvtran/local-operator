@@ -29,6 +29,7 @@ can be spammed and misread, only a human can answer it.
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,15 +87,21 @@ def effect_copy(*, purpose: str, session_id: str, request_id: str = "") -> str:
     return f"Authorise the operator key to LOOSEN the approval gate of {target}"
 
 
-def sign_message(signer: Signer, message: bytes) -> Signature:
+def sign_message(signer: Signer, message: bytes, *, timeout: float | None = None) -> Signature:
     """Sign one message and return the wire form.
 
     Split from :func:`sign_challenge` so the message construction is not
     duplicated by a caller that already has the bytes — and so a test can sign a
     message the runtime did not mint, which is how the replay tests build their
     forged frames.
+
+    ``timeout`` bounds the wait for the human gesture on a presence-gated key. It is
+    the CALLER's bound and not the backend's: the key agent blocks in the OS call for as
+    long as the sheet is up, so the only thing that can end the wait is the process that
+    started it (``--timeout`` on ``lop operator sign``; the default lives in
+    ``keyagent.SIGN_TIMEOUT_SECONDS``).
     """
-    signature = signer.sign(message)
+    signature = signer.sign(message, timeout=timeout)
     return Signature(sig=signature.hex(), key_id=signer.handle.key_id)
 
 
@@ -141,6 +148,7 @@ def sign_challenge(
     session_id: str = "",
     request_id: str = "",
     backend_name: str | None = None,
+    timeout: float | None = None,
 ) -> Signature:
     """Sign the runtime's challenge for one action. This call prompts.
 
@@ -148,6 +156,10 @@ def sign_challenge(
     refuses the gesture — never a silent ``None``, because the surfaces that call
     it must be able to tell "the operator said no" from "there is no key here",
     and only the second one has a remedy the copy can name.
+
+    ``timeout`` is how long the human gesture may take; on expiry the key agent is killed
+    and the failure says nothing was signed, which is a different outcome from a
+    dismissed sheet and is reported as such.
     """
     if purpose not in ACTIONS:
         raise KeyBackendError(f"unknown signing purpose {purpose!r}")
@@ -166,7 +178,7 @@ def sign_challenge(
         challenge=challenge,
     )
     try:
-        return sign_message(signer, message)
+        return sign_message(signer, message, timeout=timeout)
     finally:
         signer.close()
 
@@ -231,15 +243,56 @@ def issue_device_cert(
 
 
 def describe_level(handle: KeyHandle) -> str:
-    """One line, for ``lop operator init``'s output, that does not overclaim."""
+    """One line, for ``lop operator init``'s output, that does not overclaim.
+
+    The presence branch names the protection class the ladder ACHIEVED (agent review
+    round 1, R1-5). The ladder never settles for a weaker class, so which one it got is
+    the difference between a key the OS will only use when the device has a passcode and
+    one it will use whenever it is unlocked — a fact an operator deserves, and the one
+    field of the helper's ``create`` reply that had no reader.
+    """
     if handle.presence:
-        return f"{handle.backend}: every signature requires a human gesture " "(the strong level)"
+        achieved = f" [{handle.rung}]" if handle.rung else ""
+        return (
+            f"{handle.backend}: every signature requires a human gesture "
+            f"(the strong level){achieved}"
+        )
     if handle.backend == FILE_ONLY:
+        # WHERE THIS COPY USED TO MISDIRECT (design round 1, D2). "this host has no
+        # presence store" and "use a host with a presence store" are false on the ONE
+        # platform that prints them — macOS, whose presence store this PR exists to
+        # reach. What is missing there is not the host's capability but THIS INSTALL's
+        # ability to reach it, and the remedy is the reinstall the sibling copy already
+        # names. "Pair a phone (stage D)" also leaked internal roadmap vocabulary into
+        # user-facing output; "stage D" is how the design document numbers a milestone,
+        # not something an operator can act on.
+        #
+        # AND WHERE THE REPLACEMENT MISDIRECTED EVERYWHERE ELSE (design round 2, D1).
+        # "Run `lop operator init` after reinstalling for a presence-gated key" is true
+        # on macOS and FALSE on the platform that prints this line most often: Linux has
+        # no OS-mediated per-signature presence store and the Windows CNG tier is
+        # unimplemented (§10), so there a reinstall installs the same file-only wheel and
+        # `lop operator init` is the idempotent report that replaces nothing — the reader
+        # is sent around a loop that cannot end. This is the failure class round 1 rated
+        # MAJOR in D2 and D3 (copy that misstates what the HOST can do, and a named
+        # remedy that cannot work); the platform split is what makes one line honest on
+        # both, rather than trading one platform's falsehood for the other's.
+        #
+        # The cost sentence above is platform-independent and stays as it is. The remedy
+        # is not: the reinstall route is named only where a presence store exists to
+        # reach, and everywhere else the reader gets the one lever that works from a
+        # file-only host — a paired phone authorises a session from another device, which
+        # is the authority this readable file does not confer.
+        remedy = (
+            "Run `lop operator init` after reinstalling for a presence-gated key, "
+            "or pair a phone."
+            if sys.platform == "darwin"
+            else "Pair a phone to authorise a session from another device."
+        )
         return (
             "file-only: the key is a 0600 file under your config dir, so ANY "
             "process running as you can sign for you. This is NOT a boundary — "
-            "it is reported as a lower level rather than counted as protection. "
-            "Pair a phone (stage D) or use a host with a presence store."
+            "it is reported as a lower level rather than counted as protection. " + remedy
         )
     return f"{handle.backend}: reported as-is; this build makes no claim about it"
 

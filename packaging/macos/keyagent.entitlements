@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- ONE ENTITLEMENT, and the choice is measured rather than minimal-by-taste.
+
+       `com.apple.application-identifier` = <TeamID>.<bundle id>. It is the claim
+       that gives the helper its own keychain access group, and the value MUST
+       equal the profile's own `com.apple.application-identifier`
+       (`SHA2U6KT7V.com.local-operator.lopkeyagent`); the assembly script asserts
+       that equality and fails the build otherwise.
+
+       WHY NOT `keychain-access-groups` AS WELL. It is not needed — measured
+       shapes (f) and (T) PASS with the application identifier alone — and it is
+       actively worse to carry: with a keychain-access-group entitlement and a
+       MISSING or stale profile the bundle is SIGKILLed by the kernel (measured
+       shape Q, exit 137), whereas the same missing profile with the application
+       identifier alone degrades to the fully diagnosable errSecMissingEntitlement
+       (-34018, shape Q2). A smaller claim and a failure mode a user can read.
+
+       WHY THIS FILE IS IN THE REPOSITORY WHILE THE PROFILE IS NOT. The
+       entitlement has to name a real app id for codesign to accept it, and an app
+       id is public: it appears in the signature of every wheel we publish, and
+       `codesign -d` prints it from any installed helper. Two hyphens in a row are
+       illegal inside an XML comment, which is why this sentence does not name
+       codesign's flag verbatim. The
+       PROFILE is different — it carries the Developer ID certificate, is bound to
+       this team, and must be refreshable when it or the certificate is rotated, so
+       it travels as the `MACOS_SIGNING_PROFILE_BASE64` secret and is written into
+       Contents/embedded.provisionprofile by the build. Committing it would put one
+       team's identity into every fork's build; committing this string only means a
+       fork edits it (and Info.plist, and its profile) together. -->
+  <key>com.apple.application-identifier</key>
+  <string>SHA2U6KT7V.com.local-operator.lopkeyagent</string>
+</dict>
+</plist>

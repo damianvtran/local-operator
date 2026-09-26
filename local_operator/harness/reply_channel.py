@@ -165,8 +165,13 @@ def reply_channel_tools(
     return [build_reply_channel_tool(schema, description=description, name=name)]
 
 
-def envelope_from_tool_call(calls: Iterable["ToolCall"], *, name: str) -> str | None:
-    """The raw argument JSON of the first reply-channel call, or ``None``.
+def envelope_from_tool_call(
+    calls: Iterable["ToolCall"],
+    *,
+    name: str,
+    offered_names: Iterable[str] | None = None,
+) -> str | None:
+    """The raw argument JSON of the reply-channel call, or ``None``.
 
     Returns TEXT, not a parsed object, so the caller feeds it to the very
     decoder that validates a prose reply. That is the whole point: one
@@ -184,14 +189,71 @@ def envelope_from_tool_call(calls: Iterable["ToolCall"], *, name: str) -> str | 
     rather than ``None`` — a distinction the caller needs, because "the model
     used the channel and sent garbage" is a rejection to report, while "the
     model did not use the channel" means read the prose instead.
+
+    ``offered_names`` is the tool names the REQUEST put on the wire, and
+    passing it is what makes the channel survive the model naming the call
+    something else. When the reply channel is the SOLE name offered, every call
+    the stream carried is the channel's, whatever it was named: the request
+    advertised no capability, so there is nothing else a call could be, and the
+    name is a label the model invented for the one function it was given.
+
+    That distinction is measured, not theoretical, and it is why the default is
+    the strict name test rather than the tolerant one. The measurement is the
+    arm's OSWorld bundles (``~/worktrees/osworld/runs``, all ``openrouter`` /
+    ``deepseek-v4.1-flash``), counted 2026-09-25 when the corpus stood at 56
+    episodes in 29 runs: of its 204 ``leading-delimiter`` refusal artifacts, 178
+    published NO reply text at all — ``content_deltas=0`` with a streamed call
+    (``tool_call_deltas`` 3-1124, ``stop=toolUse``), i.e. the decision arrived as
+    a tool call and the harness read only the empty prose, then refused the turn
+    for not beginning with ``{``. Both figures move with the corpus, so they
+    carry the moment they were taken; the ``tool_call_deltas`` RANGE did not move
+    across three recounts, and the mechanism is what the class is.
+
+    The corroboration half of that argument is not something the bundles can
+    produce: a reply that was READ leaves no stream record, so "other replies at
+    the same shape were read and published" is not a figure the artifacts can
+    support, and an earlier revision of this docstring quoted one anyway. The
+    journal carries it instead — across the same corpus, 2085 ``model_response``
+    events (counted the same day) stopped ``toolUse`` with a call and a non-empty
+    published reply, i.e. the correctly-named channel being read at scale.
+
+    Omitted (or naming any other set): only a call named ``name`` is the
+    channel, which is the correct reading for a request that ALSO offered real
+    tools — there a foreign name is a real capability being invoked, not a
+    reply, and reading its arguments as one would execute a label the harness
+    never advertised. This coercion is bounded by the PROSE as well as by
+    everything downstream of this function, and the bound is applied by the
+    CALLER: it passes ``offered_names`` only when the prose stated no decision of
+    its own, because widening is a RECOVERY of a decision that would otherwise
+    be lost and must not supersede one the model wrote
+    (``provider_client._stream``, gated on ``public_reply._states_a_decision``).
+
+    The widening is bounded by everything downstream of this function, which is
+    unchanged: the bytes go to the same decoder, so a foreign-named call
+    carrying two batches, a duplicate key, a non-object, or an object that
+    fails validation is refused by exactly the rules a prose reply is refused
+    by. No shape that was refused on the channel before is accepted now.
     """
-    matched = [call for call in calls if call.name == name]
+    calls = list(calls)
+    if offered_names is not None and list(offered_names) == [name]:
+        matched = calls
+    else:
+        matched = [call for call in calls if call.name == name]
     if not matched:
         return None
 
     # Two calls naming the channel is the SAME ambiguity the prose decoder
     # refuses -- "which one did the model mean?" -- and taking the first would
-    # execute a decision the model may have superseded.
+    # execute a decision the model may have superseded. That holds for two
+    # FOREIGN-named calls too, which is the case the sole-offer rule above now
+    # admits: two calls carrying two batches are refused here rather than
+    # resolved by order, so widening WHICH calls are read cannot widen how many
+    # of them may be executed. MEASURED, and narrower than the sentence above
+    # reads: the refusal fires on two batches bound to the SAME observation,
+    # while two batches naming DIFFERENT observations are accepted on both
+    # channels by the decoder's older-observation rule (see below). What the
+    # channel guarantees is that at most one batch EXECUTES, which is the
+    # property this comment needs.
     #
     # Rather than inventing a second rejection, hand the decoder every envelope
     # the model sent, concatenated, and let its own rules judge them. The
@@ -199,13 +261,25 @@ def envelope_from_tool_call(calls: Iterable["ToolCall"], *, name: str) -> str | 
     # concatenated text fails identically whether it arrives as prose or as
     # calls, so the channel cannot accept a shape prose refuses.
     #
-    # Which rule fires depends on the reply version. The v1 envelope decoder
-    # requires exactly one object with no trailing text, so it refuses two
-    # envelopes on framing before observation ids are ever compared -- two
-    # batches for DIFFERENT observations are refused there too, and that is
-    # the pre-existing v1 contract rather than anything this channel adds.
-    # The legacy actions-only decoder keeps its own competing-batch rule keyed
-    # on ``observation_id``. Either way the channel inherits the verdict.
+    # Which rule fires is MEASURED rather than assumed (probe over head and
+    # base, 2026-09-25). The framing account this comment used to give was wrong
+    # in three ways: trailing text after a complete JSON value is TOLERATED on
+    # both bindings — the decoder logs it and accepts the batch, and
+    # ``MAX_TOLERATED_TRAILING_CHARS`` bounds only the quoting in that warning —
+    # so nothing here is refused "on framing"; two batches for DIFFERENT
+    # observations are ACCEPTED on both bindings, under the older-observation
+    # quotation rule; and the competing-batch refusal is DECODER-LEVEL and
+    # BINDING-FREE (``_competing_batch_offset``, called from
+    # ``_decode_leading_json``, never sees a binding) — what gates it is whether
+    # the batches name an observation id PER ACTION, because
+    # ``_batch_observation_ids`` deliberately reads the actions and not a
+    # top-level id. Compact traffic binds once at the TOP level, so a
+    # compact-shaped payload names no per-action ids and even two envelopes both
+    # bound to the current observation are accepted. The arm's own path is legacy
+    # (``scripts/run_episode.py --action-binding`` defaults to ``legacy``), so
+    # the same-observation bound this comment needs does hold where the widening
+    # is used. Either way the channel inherits the decoder's verdict: this
+    # function adds no rule of its own beyond which calls carry text.
     #
     # Only calls that actually CARRY an envelope are joined. Joining empty ones
     # would produce a string of separators -- truthy, so the caller would

@@ -737,13 +737,45 @@ def _send_summary(args: dict[str, object]) -> str:
         peer_send_target_label,
     )
 
-    mode = peer_send_mode_label(args)
     # `who` may be a raw conversation substring, i.e. model-controlled text; it
     # goes through the same scalar flattening every other summary field does.
     who = _scalar_text(peer_send_target_label(args)) or "?"
+    model = _scalar_text(args.get("model"))
+    if model:
+        # A model switch carries no delivery mode — `wake` would claim a turn
+        # was started — so the leading marker names the act instead. Once the
+        # call settles the marker becomes the OUTCOME (`_switch_outcome_summary`).
+        return " · ".join(("model", who, f"→ {model}"))
+    mode = peer_send_mode_label(args)
     message = _scalar_text(args.get("message"))
     parts = [part for part in (mode, who, message) if part]
     return " · ".join(parts)
+
+
+#: The collapsed-row word for each settled model-switch outcome (design round 1,
+#: D6). Without it `switched`, `already on` and an `accepted` switch that can
+#: still fail all painted the same `✓` row, and only the expansion told them
+#: apart. Keyed by the tool result's ``details["outcome"]``.
+SWITCH_OUTCOME_WORDS: dict[str, str] = {
+    "switched": "switched",
+    "unchanged": "no change",
+    "pending": "pending",
+    "partial": "switched (error)",
+}
+
+
+def _switch_outcome_summary(summary: str, details: object) -> str:
+    """The settled switch row: the outcome word replaces the ``model`` marker.
+
+    Same position, same reason the marker leads: the row sheds from the right,
+    so the discriminator must be the first thing painted. An unknown or absent
+    outcome keeps the argument summary unchanged.
+    """
+    outcome = details.get("outcome") if isinstance(details, Mapping) else None
+    word = SWITCH_OUTCOME_WORDS.get(outcome) if isinstance(outcome, str) else None
+    if not word or not summary.startswith("model · "):
+        return summary
+    return f"{word} · {summary[len('model · '):]}"
 
 
 def _summary_from_args(tool_name: str, args: dict[str, object]) -> str:
@@ -2314,6 +2346,12 @@ class ToolCard(ExpandableActionBlock):
         cleaned result text.
         """
         self._added, self._removed = _diff_counts(details)
+        if self.tool_name.lower() == "send":
+            # Re-derived from the arguments every time, so a card that settles
+            # twice (a replay over a live row) never stacks outcome words.
+            self._summary = _switch_outcome_summary(
+                _strip_control_sequences(_summary_from_args("send", self._args)), details
+            )
         # Reset per result, with the fetch flags below and for the same reason: a
         # card is written once, but a rebuilt card must never inherit the previous
         # body's partial state.
@@ -2891,6 +2929,13 @@ class ToolCard(ExpandableActionBlock):
         if collapsed != reason and not reason.startswith(f"{collapsed} "):
             return ""
         return head
+
+    def _switch_row_names_its_outcome(self) -> bool:
+        """Whether this is a settled model-switch row whose summary leads with
+        its own outcome word (``_switch_outcome_summary``)."""
+        return self.tool_name.lower() == "send" and self._summary.startswith(
+            tuple(f"{word} · " for word in SWITCH_OUTCOME_WORDS.values())
+        )
 
     def _partial_reason(self) -> str:
         """The body's LEADING line when the collapsed row must carry it too.
@@ -3847,6 +3892,12 @@ class ToolCard(ExpandableActionBlock):
             # able to state that even where there is no disclosure sentence to
             # promote (design review round 2, D2-3).
             reason = self._partial_reason() or _PARTIAL_LABEL
+            if self._switch_row_names_its_outcome():
+                # A model switch that took but raised afterwards: the row already
+                # leads with `switched (error)`, and "Partial" would misname it —
+                # the switch is whole, the error came after (design round 2, D9).
+                # The glyph and tint carry the warning.
+                reason = ""
             tint = bindings.style("tool.status.partial_glyph")
             abbreviates = True
         elif self._state == "interrupted":

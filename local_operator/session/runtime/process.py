@@ -4421,10 +4421,12 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # measured race, not tidiness.
     #
     # ``runtime.start()`` hands ``_serve`` to a thread, and the first thing
-    # ``_serve`` does once it holds a bound socket is publish the record
-    # (``RecordPublisher.__init__``). The record is what every sender reads to
-    # find this process: ``launch.py``'s wait-for-record loop, the wake
-    # supervisor, and the stop ladder's rungs all address a target through it.
+    # ``_serve`` does once it holds a bound socket is publish the record —
+    # ``RecordPublisher.publish()``, from the constructor by default and
+    # explicitly on this deferred boot path. The record is what every sender
+    # reads to find this process: ``launch.py``'s wait-for-record loop, the
+    # wake supervisor, and the stop ladder's rungs all address a target
+    # through it.
     # With the handlers installed after the wait for that publication — where
     # they used to sit — a runtime was ADDRESSABLE WHILE A SIGTERM STILL KILLED
     # IT with the default disposition. Measured on CI, twice, on two platforms
