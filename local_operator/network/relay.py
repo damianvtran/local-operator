@@ -7205,12 +7205,25 @@ class RelayServer:
                     capabilities=sorted(_invite_capabilities(record, invite_id)),
                     added_by=record.self_device_id,
                     added_via="invite",
-                    # What the JOINER declared about itself in its hello, falling back
-                    # to the observed source address only when it declared nothing.
-                    # The observed address is an ephemeral port, so it is a last
-                    # resort: it is why every paired peer used to be unreachable the
-                    # moment the pairing link closed (QA round 1, F-2).
-                    endpoints=list(handshake.peer_endpoints) or [peer_addr],
+                    # What the JOINER declared about itself in its hello, and NOTHING
+                    # when it declared nothing. A fallback to the OBSERVED source
+                    # address (`peer_addr`) used to stand here, and it was the third
+                    # way to get a wrong address onto a row that is read as a dial
+                    # target: the port is the peer's ephemeral port on THIS connection,
+                    # gone the moment the pairing link drops, so on a loopback rig the
+                    # row read `127.0.0.1:52315` — a loopback address AND a port
+                    # nothing listened on — and on a real pair it is whatever the NAT
+                    # mapped for that one socket. The information is not lost; it is
+                    # just not published as an address: the pairing audit records
+                    # `their_addr`, where it is labelled an observation. The honest
+                    # answer for a silent member is already spelled out everywhere it
+                    # is read — `endpoints: []`, reported as `no_endpoint` ("no address
+                    # published for it") and `reachable: false`, with the member kept.
+                    # A DECLARED loopback endpoint is a different thing and stays:
+                    # `--listen-address 127.0.0.1` is the documented dial-only mode
+                    # saying "you cannot reach me", and `test_relay_e2e`'s F-2 case
+                    # pins it.
+                    endpoints=list(handshake.peer_endpoints),
                     root=self.root,
                 )
                 consume(record, invite_id, outcome="admitted")

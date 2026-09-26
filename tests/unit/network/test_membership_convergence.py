@@ -968,3 +968,56 @@ def test_the_announced_rotation_carries_its_statement_on_the_row(
     # Verified from the OTHER device's copy of the old key: what makes the row
     # admissible to a peer that never saw the frame.
     identity.verify_rotation_statement(proof, old_row.public_key)
+
+
+# ---------------------------------------------------------------------------
+# The third way to get a wrong address onto a row
+# ---------------------------------------------------------------------------
+
+
+def test_a_member_that_declares_nothing_gets_no_endpoint_not_the_observed_one(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row's ``endpoints`` is what ``_ensure_link`` DIALS, so a value that cannot be
+    dialled is worse than no value — it is read as an address.
+
+    The pair ceremony used to fall back to the OBSERVED source address of the pairing
+    connection when the joiner declared nothing: ``peer_addr``, the peer's ephemeral
+    port on this one socket, gone the moment the pairing link drops. On a loopback rig
+    that is ``127.0.0.1:<ephemeral>`` — a loopback address AND a port nothing listens
+    on (``127.0.0.1:52315`` in the audit that reported it) — and on a real pair it is
+    whatever the NAT mapped for that connection. Both are confidently wrong, where the
+    honest answer already has vocabulary everywhere it is read: ``endpoints: []``,
+    reported as ``no_endpoint`` ("no address published for it") and ``reachable:
+    false``, with the member kept.
+
+    The silent device is silent BY CONSTRUCTION — the ``devices`` fixture's ``SILENT``
+    mode answers nothing on every path that publishes an endpoint — so this cannot pass
+    because some host happened to advertise, and the precondition is asserted rather
+    than assumed. What this does NOT claim is that a DECLARED loopback endpoint is
+    wrong: `--listen-address 127.0.0.1` is the documented dial-only mode saying "you
+    cannot reach me", and ``test_relay_e2e``'s F-2 case pins that it stays.
+    """
+    hub = _make(devices, "hub")
+    silent = _make(devices, "silent-joiner", mode=SILENT)
+    _init_network(hub.server)
+    # THE PRECONDITION: nothing declared, so the row has an OBSERVATION and no
+    # declaration to be built from. Without this, a rig that advertised would satisfy
+    # the assertion below for entirely the wrong reason.
+    assert relay.advertise_endpoints(silent.server.settings) == []
+
+    _join(silent, inviter=hub, monkeypatch=monkeypatch)
+
+    record = store.load(store.list_networks(hub.root)[0].network_id, hub.root)
+    row = record.member(silent.identity.device_id)
+    assert row is not None and row.active, _members(hub)
+    assert row.endpoints == [], row.endpoints
+
+    # AND THE HONEST SENTENCE. "Nothing to dial" must read as nothing declared rather
+    # than as a failed dial: the dial's refusal is a claim about the peer, and the peer
+    # here has said nothing about itself at all.
+    link, reason = hub.server._ensure_link_with_reason(  # noqa: SLF001 — the surface's reader
+        silent.identity.device_id
+    )
+    assert link is None
+    assert reason == "no_endpoint", reason
