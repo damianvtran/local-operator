@@ -233,9 +233,10 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
 #: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
 #: (the fixture's frame lands at 1,048,408 of 1,048,576 — the GOAL-LESS shape;
-#: the live member arm leaves under ~110 B, so treat 168 B as a bound on a shape
-#: this decoder no longer sees rather than as headroom to spend. Re-derive it by
-#: capturing the member arm at the head under review, never by quoting this line.
+#: the live MEMBER arm leaves 73 B — measured on the guard's own ``_line_bytes``,
+#: with the four judged-goal keys present — so treat 168 B as headroom on a shape
+#: no goal-carrying turn sends. Re-derive it by capturing the member arm at the
+#: head under review, never by quoting this line.
 #: the catalogue grown from its 50-row floor to 54). The number that matters is
 #: the one the overshoot was about — whether the FLOOR fits: with the catalogue
 #: held at its floor the frame now has 1,384 B of line where it had 416 B too
