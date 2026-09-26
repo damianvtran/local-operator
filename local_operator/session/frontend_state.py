@@ -66,7 +66,7 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     TurnEndEvent,
     Usage,
-    _omit_unset_usage_stamp,
+    _omit_unset_usage_fields,
 )
 from local_operator.mcp.grants import GRANT_SUBCOMMANDS as _GRANT_SUBCOMMANDS
 from local_operator.model.costs import cost_summary, job_cost, turn_cost
@@ -2584,7 +2584,7 @@ class _FrozenUsage(Usage):
         # rather than composing with it, so the unset ``at_ms`` would come back as
         # a null on every frozen usage — which is the shape the attach frame's
         # worst case is made of.
-        return _omit_unset_usage_stamp(handler(_thaw_model(self)))
+        return _omit_unset_usage_fields(handler(_thaw_model(self)))
 
 
 class _FrozenFrontendUsage(FrontendUsage):
@@ -2595,7 +2595,7 @@ class _FrozenFrontendUsage(FrontendUsage):
     @model_serializer(mode="wrap")
     def _serialize_frozen_values(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         # Same reason as ``_FrozenUsage`` above.
-        return _omit_unset_usage_stamp(handler(_thaw_model(self)))
+        return _omit_unset_usage_fields(handler(_thaw_model(self)))
 
 
 def _thaw_model(value: BaseModel) -> BaseModel:
