@@ -358,7 +358,7 @@ class _DraftStream:
         self.close()
 
 
-def _declared_servers(client: Any, session_id: str) -> list[str] | None:
+def _declared_servers(client: Any, session_id: str, *, settle_s: float = 0.0) -> list[str] | None:
     """The MCP servers the RUNNING session sees declared, asked of the session.
 
     A benchmark whose "declared" arm declares nothing is measuring its own
@@ -374,16 +374,27 @@ def _declared_servers(client: Any, session_id: str) -> list[str] | None:
     cannot distinguish absent configuration from wiring that is merely pending.
     Require the cold marker as well: verification must not warm the measured path.
     An unreadable response is unknown, never a successful empty control.
+
+    ``settle_s`` is for the DRAFT arms, whose create has just happened while the
+    warm's runtime may still be mid-boot: the read envelope can then answer a
+    refusal-to-reconcile (the owner is ATTACHING) rather than a cold page, and
+    the same config read seconds later is the same fact. The budget only delays
+    the verdict — an unreadable response after it is still ``None`` — and the
+    unit tests keep the default single-shot read.
     """
-    try:
-        listed = client.get(f"/v1/desktop/sessions/{session_id}/mcp")
-        listed.raise_for_status()
-        data = listed.json()["result"]["data"]
-        if data.get("cold") is not True:
-            return None
-        return sorted(str(server["name"]) for server in data["servers"])
-    except Exception:  # noqa: BLE001 — a record we could not read is not a result
-        return None
+    deadline = time.monotonic() + settle_s
+    while True:
+        try:
+            listed = client.get(f"/v1/desktop/sessions/{session_id}/mcp")
+            listed.raise_for_status()
+            data = listed.json()["result"]["data"]
+            if data.get("cold") is not True:
+                return None
+            return sorted(str(server["name"]) for server in data["servers"])
+        except Exception:  # noqa: BLE001 — a record we could not read is not a result
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.5)
 
 
 def _one_run(
@@ -469,7 +480,9 @@ def _one_run(
         created_body = created.json()
         session_id = created_body["result"]["session_id"]
 
-        declared = _declared_servers(client, session_id)
+        declared = _declared_servers(
+            client, session_id, settle_s=0.0 if pre_engage == "off" else 30.0
+        )
         census_before = _runtime_children(daemon_pid)
         started = time.perf_counter()
         sent = client.post(
