@@ -4507,6 +4507,53 @@ def _close_partial_masks(text: str) -> str:
     return text
 
 
+def _mask_with_recorded_hit(shape: Shape, match: Match[str], hits: list[ShapeHit]) -> str:
+    """Record one match's hit and render its mask — the two halves ONE scan drives.
+
+    **Why one pass and not two.** ``_run_shapes`` used to run ``finditer`` to collect a
+    rule's hits and then ``sub`` to apply the same rule: two full scans of the text per
+    unguarded rule, so an anchored line paid 30 rules x 2 passes + the guarded rules'
+    own scans. Measured on an anchored line, the ``sub`` half that survives here is
+    52.1% of the pair's regex work (27.52 us of 52.85 us), and the removed half found
+    exactly the matches the surviving one finds.
+
+    **Hit ORDER is load-bearing, and this is why the merge is not a rewrite.** The
+    recorded order decides WHICH credentials are contained, not merely how they are
+    listed: ``VariableStore._register_shape_hits`` walks ``hits`` in order and stops
+    registering distinct values at ``MAX_DETECTED_REGISTRATIONS``, so a reordered hit
+    list registers a different set of secrets for the rest of the session. It also
+    fixes the label order of the containment notice (``shape_report`` keeps first
+    appearance) and the value order the survival index grades. ``re.sub`` invokes a
+    callback left to right over the non-overlapping matches of ONE scan of the
+    original string, which is the order ``finditer`` yields over that same string — so
+    the two are the same sequence by construction, and the string the matches describe
+    is the same one, immutably, because the substitution has not been applied yet.
+    ``tests/unit/secrets/test_shape_scan_equivalence.py`` asserts the text AND every
+    hit's bytes and order against the two-pass implementation.
+
+    The mask itself is rendered exactly as ``sub`` rendered it before: a template goes
+    through ``match.expand`` (the same expansion ``sub`` applies to a string
+    replacement), and the five rules whose replacement is a CALLABLE keep calling it.
+    """
+    value = _hit_value(shape, match)
+    if value:
+        hits.append(_make_hit(shape, match, value))
+    # A hit is recorded for every mask, whatever the value's length: the FLOOR
+    # decides what is worth registering, not what is worth REPORTING. Gating the
+    # record on it silenced the notice for a short-but-real credential (a
+    # 5-character DSN password, a 7-character `-pass` value): masked in the text,
+    # no hit, no row, no containment — the silent half of this whole PR.
+    replacement = shape.replacement
+    if callable(replacement):
+        return replacement(match)
+    # ``replacement`` is ``Callable | str``; the type checker cannot carry the
+    # ``callable`` narrowing through to here, so the assertion states what the
+    # branch above already established — the same shape ``_run_shapes`` uses for
+    # ``shape.replacement is not None``.
+    assert isinstance(replacement, str)
+    return match.expand(replacement)
+
+
 def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> str:
     """Apply one group of rules, in table order."""
     for shape in shapes:
@@ -4516,20 +4563,27 @@ def _run_shapes(shapes: tuple[Shape, ...], text: str, hits: list[ShapeHit]) -> s
         # ``__post_init__`` guarantees one of the two is present; the checker
         # cannot see through that, so the assertion states it here as well.
         assert shape.replacement is not None
-        matches = list(shape.pattern.finditer(text))
-        if matches:
-            for match in matches:
-                value = _hit_value(shape, match)
-                # A hit is recorded for every mask, whatever the value's length:
-                # the FLOOR decides what is worth registering, not what is worth
-                # REPORTING. Gating the record on it silenced the notice for a
-                # short-but-real credential (a 5-character DSN password, a
-                # 7-character `-pass` value): masked in the text, no hit, no row,
-                # no containment — the silent half of this whole PR.
-                if value:
-                    hits.append(_make_hit(shape, match, value))
-        text = shape.pattern.sub(shape.replacement, text)
+        # The callback is bound to this rule and this hit list for the length of one
+        # ``sub``, which is synchronous — so the loop variable cannot be rebound
+        # under it, and the default argument is belt and braces for a later edit that
+        # defers the call. One closure per rule per TEXT, not per line: `_run_shapes`
+        # runs once per anchored line of a tool result.
+        text = shape.pattern.sub(_recorder(shape, hits), text)
     return _close_partial_masks(text)
+
+
+def _recorder(shape: Shape, hits: list[ShapeHit]) -> Callable[[Match[str]], str]:
+    """The ``re.sub`` callback for one rule: record the hit, return the mask.
+
+    A factory rather than a nested ``def`` in the loop above so that the closure is
+    built in one place and the rule/``hits`` binding is explicit rather than captured
+    from a loop variable.
+    """
+
+    def record(match: Match[str]) -> str:
+        return _mask_with_recorded_hit(shape, match, hits)
+
+    return record
 
 
 #: Cheap necessary conditions for the whole table, as lowercase substrings.
@@ -4600,11 +4654,25 @@ _SHAPE_ANCHORS: tuple[str, ...] = (
 #: alternation of 61 literals costs one attempt per alternative AT EVERY
 #: POSITION — measured at 1.7 s for 730 KB of ordinary log text, i.e. worse than
 #: the table it was meant to skip. ``str.__contains__`` is the C-level search the
-#: engine does not do for us: 61 of them cost ~25 ms for the same text, and the
-#: first miss short-circuits nothing but nothing needs it to.
+#: engine does not do for us: 61 of them cost ~25 ms for the same text — the
+#: count the alternation was measured against, and the tuple has since grown to
+#: 74, which scales both sides of that comparison together and does not reopen
+#: the choice. A MISS reaches the end of the table, which is the case worth
+#: shaping the loop around; see the note under the signature for its cost.
 def has_shape_anchor(text: str) -> bool:
     lowered = text.lower()
-    return any(anchor in lowered for anchor in _SHAPE_ANCHORS)
+    # An explicit loop, not the equivalent ``any(anchor in lowered for anchor in
+    # _SHAPE_ANCHORS)``: the generator spends a Python frame per anchor, and a CLEAN
+    # line — every line of a build log, a directory listing, a JSON payload — tests
+    # all 74 of them, so the frame is paid 74 times per line for a scan that finds
+    # nothing. Measured over 20,000 clean log lines: 85.33 ms as a generator against
+    # 49.19 ms here (1.73x), which is ~26 ms per MB of tool result on a pass that runs
+    # on every one of them. The semantics are the ones `any` already had — stop at the
+    # first anchor present, answer True — so the saving is the frames, not the order.
+    for anchor in _SHAPE_ANCHORS:
+        if anchor in lowered:
+            return True
+    return False
 
 
 #: Rules whose shape can only be complete on one line, and the ones that can span

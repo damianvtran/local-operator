@@ -15,7 +15,7 @@ import requests
 import yaml
 from pydantic import ValidationError
 
-from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry, agents_store_present
 from local_operator.clients.tavily import TavilyResponse, TavilyResult
 from local_operator.harness.types import ChatRequest, Message, ModelSpec
 from local_operator.types import (
@@ -2885,3 +2885,24 @@ def test_a_legacy_stored_zero_max_tokens_loads_and_reads_as_no_ask(temp_agents_d
         _new_agent_fields(max_tokens=0)
     with pytest.raises(ValidationError):
         _new_agent_fields(max_tokens=-1)
+
+
+def test_agents_store_present_counts_both_store_shapes(tmp_path: Path) -> None:
+    """The launch-path predicate must see every store shape a registry reads.
+
+    ``AgentRegistry.__init__`` creates ``<root>/agents`` (then runs its
+    migrations), so launch-path callers that must not write decide from what
+    is already on disk. A legacy ``agents.json``-only root keeps resolving
+    its roles — the registry reads and migrates that file — so the predicate
+    counts it too, and only a truly fresh root reads as absent (review round
+    1, finding 3).
+    """
+    root = tmp_path / "config"
+    assert agents_store_present(root) is False
+
+    (root / "agents").mkdir(parents=True)
+    assert agents_store_present(root) is True
+
+    shutil.rmtree(root / "agents")
+    (root / "agents.json").write_text("[]\n", encoding="utf-8")
+    assert agents_store_present(root) is True

@@ -2285,6 +2285,11 @@ async def probe_oauth_capability(
     authenticable: a server that advertises no authorization server is now
     refused with the same message a stdio server gets, instead of being sent
     into a grant that cannot complete.
+
+    The discovery here is FORCED past the process cache. This is the human's
+    explicit "ask the network" action, so an answer some connect attempt
+    recorded seconds earlier must not be substituted for it — and the cost is
+    the same single round trip this gate has always paid.
     """
     if server_is_oauth_capable(cfg, store):
         return True
@@ -2294,7 +2299,7 @@ async def probe_oauth_capability(
     if not url:
         return False
     try:
-        discovered = await discover_oauth_endpoints(url) is not None
+        discovered = await discover_oauth_endpoints(url, force=True) is not None
     except Exception:  # noqa: BLE001 — a probe failure must not crash the command
         logger.debug("OAuth capability probe failed for %s", url, exc_info=True)
         return False
@@ -3259,7 +3264,54 @@ class DiscoveredOAuthEndpoints:
     auth_server_url: str | None = None
 
 
-async def discover_oauth_endpoints(server_url: str) -> DiscoveredOAuthEndpoints | None:
+@dataclass(frozen=True)
+class _OAuthProbe:
+    """What ONE uncached PRM/ASM probe learned, with its verdict kept apart.
+
+    The distinction this type exists for: ``endpoints is None`` has two very
+    different meanings, and only one of them may be remembered.
+
+    * ``answered_negative=True`` — the server SPOKE and its answer is "there is
+      no authorization-server metadata here": every RFC 8414 discovery URL it
+      was asked about replied 4xx. That is a stable fact about the deployment
+      for a short while, so it is cached and the next reconnect costs nothing.
+    * ``endpoints is None`` and ``answered_negative=False`` — the probe FAILED
+      (DNS, connect, TLS, timeout, a 5xx, a body that will not validate).
+      Nothing was learned about the server, so nothing is cached and the next
+      connect retries, exactly as every version before this cache did.
+    """
+
+    endpoints: DiscoveredOAuthEndpoints | None = None
+    answered_negative: bool = False
+
+
+#: How long an ANSWERED "no OAuth metadata here" is trusted, in seconds.
+#:
+#: A TTL rather than invalidation-on-config-change, deliberately. The
+#: reconfiguration that actually matters — a server edited to a different URL —
+#: already invalidates itself, because the URL is the cache key. What a config
+#: edit cannot tell us is the other direction: the SAME url starting to publish
+#: metadata (a deploy, a WAF rule lifted, a proxy fixed), which is not a config
+#: change at all and has no hook to hang invalidation on. So the entry expires
+#: on its own instead. 300 s is chosen against the cost of being wrong: a stale
+#: negative only postpones a proactive refresh (which then degrades to the
+#: SDK's pre-fix default for one connect) and one explicit login gate answers
+#: from the cache — while the win is per-connect, and a cold prompt reaches
+#: this once per connect attempt, so any TTL above a few seconds removes the
+#: storm. Nothing about metadata publication moves faster than minutes.
+OAUTH_DISCOVERY_NEGATIVE_TTL_S = 300.0
+
+#: Hard cap on EACH discovery cache, in entries; the oldest insertion is evicted
+#: when a new key arrives at the cap. Both caches are keyed by a server URL from
+#: config, so the real population is the configured server count (the operator's
+#: is 8) — but the key is a string a caller supplies, and a long-lived daemon
+#: outlives many configs, so the bound is stated rather than assumed.
+OAUTH_DISCOVERY_CACHE_MAX_ENTRIES = 64
+
+
+async def discover_oauth_endpoints(
+    server_url: str, *, force: bool = False
+) -> DiscoveredOAuthEndpoints | None:
     """Resolve a server's OAuth metadata via SEP-985 PRM then RFC 8414 ASM.
 
     Returns ``None`` when authorization-server metadata cannot be discovered;
@@ -3267,27 +3319,156 @@ async def discover_oauth_endpoints(server_url: str) -> DiscoveredOAuthEndpoints 
     rather than failing the connect. Discovery is two unauthenticated GETs and
     only runs for OAuth servers, which are already the slow, deferred connects.
 
-    Successful results are cached per process: reconnects rebuild the provider
-    and would otherwise re-fetch stable metadata on every backoff rung. Only
-    SUCCESSES are cached, so a transient discovery failure retries next time.
+    Caching, and why a negative needed its own entry. Successful results were
+    already cached per process. The ANSWERED NEGATIVE is now cached too, and
+    that is the substantive half: ``_ensure_oauth_fresh`` reaches this once per
+    CONNECT, and the connect path retries (backoff rungs, call-site retries,
+    every session build in a fleet of children), so a server whose metadata
+    discovery answers "I publish none" was re-probed on every attempt forever.
+    Measured on the operator's real 8-server ``mcp.json``: 70 discovery calls
+    during one cold prompt against 3 warm, ~184 ms cumulative CPU — for a
+    question whose answer cannot change between two attempts milliseconds
+    apart. The operator's own servers are mostly this case.
+
+    A FAILED probe is still never cached. That is the distinction the cache
+    turns on, and it is why :class:`_OAuthProbe` carries the verdict instead of
+    both cases collapsing into ``None`` as they did: a transient failure must
+    retry on the next connect, as it always has.
+
+    ``force`` skips BOTH caches for one call. It exists for the explicit
+    ``/mcp login`` gate (:func:`probe_oauth_capability`), where a human is
+    deliberately asking the network a question: an answer a connect attempt
+    recorded seconds earlier must not be silently substituted for it, and the
+    cost is one round trip per deliberate login.
+
+    Scope and bounds. Both caches are per PROCESS, keyed by server URL and
+    capped at :data:`OAUTH_DISCOVERY_CACHE_MAX_ENTRIES` entries; the negative
+    one additionally expires after :data:`OAUTH_DISCOVERY_NEGATIVE_TTL_S`
+    (positives are stable metadata and stay for the process, as before). What
+    that means per process shape: a long-lived ``lop serve`` pays one probe per
+    non-OAuth server per TTL window for its whole life, however many sessions,
+    reconnects and resumes run through it; a runtime child (each ``lop exec``,
+    each subagent build) starts empty and pays ONE probe per server — the floor
+    a process-local cache cannot go below. Sharing it across processes is
+    deliberately not done: it would need a new on-disk artifact with its own
+    staleness and isolation questions (see AGENTS.md on cache roots) to save
+    the daemon's own children a round trip each.
     """
-    cached = _DISCOVERED_ENDPOINTS_CACHE.get(server_url)
-    if cached is not None:
-        return cached
-    result = await _discover_oauth_endpoints_uncached(server_url)
-    if result is not None:
-        _DISCOVERED_ENDPOINTS_CACHE[server_url] = result
-    return result
+    if not force:
+        cached = _DISCOVERED_ENDPOINTS_CACHE.get(server_url)
+        if cached is not None:
+            return cached
+        if _oauth_discovery_negative_is_fresh(server_url):
+            return None
+    probe = await _discover_oauth_endpoints_uncached(server_url)
+    if probe.endpoints is not None:
+        _remember_discovered_endpoints(server_url, probe.endpoints)
+    elif probe.answered_negative:
+        _remember_answered_negative(server_url)
+    return probe.endpoints
 
 
 #: Per-process cache of successful endpoint discoveries, keyed by server URL.
 _DISCOVERED_ENDPOINTS_CACHE: dict[str, DiscoveredOAuthEndpoints] = {}
 
+#: Per-process "this URL answered: no OAuth metadata here", mapping server URL
+#: to the monotonic instant at which the answer stops being trusted.
+_DISCOVERED_ENDPOINTS_NEGATIVE_CACHE: dict[str, float] = {}
 
-async def _discover_oauth_endpoints_uncached(
-    server_url: str,
-) -> DiscoveredOAuthEndpoints | None:
-    """The actual PRM/ASM fetch; :func:`discover_oauth_endpoints` caches it."""
+
+def _oauth_discovery_now() -> float:
+    """The clock the negative cache reads.
+
+    Monotonic (a wall-clock step must not extend or collapse a TTL), and a named
+    seam so a test can move time instead of sleeping — the TTL test drives this
+    directly, which is the only way to assert an expiry deterministically on a
+    host this loaded.
+    """
+    return time.monotonic()
+
+
+def _evict_oldest_at_cap(cache: dict[Any, Any]) -> None:
+    """Make room for one new key by dropping the oldest insertion.
+
+    ``dict`` iteration is insertion-ordered, so ``next(iter(cache))`` is the
+    entry that has been there longest. Re-inserting an EXISTING key keeps its
+    position, so a hot URL is not pushed out by churn around it.
+    """
+    while len(cache) >= OAUTH_DISCOVERY_CACHE_MAX_ENTRIES:
+        cache.pop(next(iter(cache)), None)
+
+
+def _remember_discovered_endpoints(server_url: str, endpoints: DiscoveredOAuthEndpoints) -> None:
+    if server_url not in _DISCOVERED_ENDPOINTS_CACHE:
+        _evict_oldest_at_cap(_DISCOVERED_ENDPOINTS_CACHE)
+    _DISCOVERED_ENDPOINTS_CACHE[server_url] = endpoints
+
+
+def _remember_answered_negative(server_url: str) -> None:
+    if server_url not in _DISCOVERED_ENDPOINTS_NEGATIVE_CACHE:
+        _evict_oldest_at_cap(_DISCOVERED_ENDPOINTS_NEGATIVE_CACHE)
+    _DISCOVERED_ENDPOINTS_NEGATIVE_CACHE[server_url] = (
+        _oauth_discovery_now() + OAUTH_DISCOVERY_NEGATIVE_TTL_S
+    )
+
+
+def _oauth_discovery_negative_is_fresh(server_url: str) -> bool:
+    """Whether a cached "no metadata" answer is still within its TTL."""
+    deadline = _DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.get(server_url)
+    if deadline is None:
+        return False
+    if _oauth_discovery_now() >= deadline:
+        # Expired: evict on read so a URL nobody asks about again does not keep
+        # a slot, and so the next call re-probes (which is the whole point).
+        _DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.pop(server_url, None)
+        return False
+    return True
+
+
+#: Statuses that mean "ask again", NOT "the answer is no". A 429 is the server
+#: rate-limiting us and a 408 is its own timeout; both say nothing about whether
+#: this deployment publishes metadata, so neither may be folded into the
+#: "refused" count that a definitive negative is built from. Without this, a
+#: PRM-429 followed by an honest ASM-404 cached an answered negative for the full
+#: TTL — the same false-negative class as review R1-1, reached through a status
+#: code rather than the transport. Reported as review R2-2.
+#: ``425`` is in the set by the same argument and was added by review R3-2: RFC
+#: 8470 defines it as "the server is unwilling to risk processing a replayed
+#: request — try again later", which is a transient refusal to ANSWER rather than
+#: an answer of "no".
+_RETRYABLE_DISCOVERY_STATUSES = frozenset({408, 425, 429})
+
+
+def _refuses_metadata(status_code: int) -> bool:
+    """Does ``status_code`` say "no metadata HERE", as opposed to "ask again"?
+
+    A 4xx means "not at this URL". That is this module's OWN rule, and it is NOT
+    a mirror of the SDK — an earlier revision of this docstring claimed one, and
+    review R3-3 showed the claim is false in a way that matters: the SDK's ASM
+    bucket is ``300 <= status < 500`` and its PRM handler raises on anything
+    other than 200 or 404, so following that "mirror" would move 3xx into
+    ``refused`` and WEAKEN R1-1's fix. The rule stands on its own reasoning: only
+    a status that says "there is no metadata at this URL" may count, and a 3xx we
+    did not follow says nothing (it is handled as unusable above).
+
+    The RETRYABLE members are carved out because they refuse to ANSWER rather
+    than answering "no", and folding them into a definitive negative is what
+    R2-2 found.
+    """
+    return 400 <= status_code < 500 and status_code not in _RETRYABLE_DISCOVERY_STATUSES
+
+
+async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
+    """The actual PRM/ASM fetch; :func:`discover_oauth_endpoints` caches it.
+
+    Returns a :class:`_OAuthProbe`, not ``None``: a 4xx from every
+    authorization-server-metadata candidate is the peer ANSWERING "nothing
+    here" (cacheable), while a transport failure — and any status that is not a
+    4xx, including a 5xx and a 200 whose body will not validate — is a FAILURE
+    (never cached, retried next connect). Keeping the two apart is the point of
+    this function's return type; collapsing them is what made one answered "no"
+    cost a probe per reconnect.
+    """
     import httpx
     from mcp.client.auth.utils import (
         build_oauth_authorization_server_metadata_discovery_urls,
@@ -3297,6 +3478,26 @@ async def _discover_oauth_endpoints_uncached(
 
     prm: ProtectedResourceMetadata | None = None
     auth_server_url: str | None = None
+    #: A transport error while fetching PRM leaves the ASM candidate list
+    #: possibly INCOMPLETE — the PRM document is what names a non-same-origin
+    #: authorization server — so no ASM answer may then be called definitive.
+    prm_unreachable = False
+    #: The PRM leg ASKED its question and did not get an answer: a non-4xx,
+    #: non-200 status (a 5xx, a 3xx we did not follow), or a 200 whose body will
+    #: not validate. Distinct from ``prm_unreachable`` — that is "we could not
+    #: ask", this is "the server declined to answer" — and tracked separately
+    #: because it has to veto a definitive negative the same way ``asm_unusable``
+    #: does. Without it, a 503 on PRM followed by an honest 404 on ASM read as
+    #: "this deployment publishes no OAuth metadata" and was cached as an
+    #: ANSWERED NEGATIVE for the whole TTL — the exact case the rule above calls
+    #: a FAILURE ("a 5xx … is a FAILURE (never cached, retried next connect)").
+    #: Reported as review R1-1.
+    prm_unusable = False
+    #: ASM candidates that answered 4xx ("not here") and ones that did not
+    #: answer usably. A definitive negative needs at least one of the first and
+    #: none of the second.
+    asm_refused = 0
+    asm_unusable = False
     timeout = httpx.Timeout(REFRESH_HTTP_TIMEOUT_S)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -3304,12 +3505,26 @@ async def _discover_oauth_endpoints_uncached(
                 try:
                     response = await client.get(url)
                 except httpx.HTTPError:
+                    prm_unreachable = True
+                    continue
+                # Mirror the ASM leg's split, for the same reason. A 4xx means
+                # "not at this URL, try the next"; anything else non-200 means
+                # the server declined to answer the metadata question, so the
+                # probe is not definitive however the ASM leg goes on to answer.
+                if _refuses_metadata(response.status_code):
                     continue
                 if response.status_code != 200:
+                    # Includes the RETRYABLE statuses: a 429 or 408 is the server
+                    # declining to answer right now, so the probe is not
+                    # definitive and the next connect must ask again.
+                    prm_unusable = True
                     continue
                 try:
                     prm = ProtectedResourceMetadata.model_validate_json(response.content)
                 except Exception:  # noqa: BLE001 — malformed metadata: try the next URL
+                    # A 200 this content type cannot be read out of is the same
+                    # state as a 5xx: the question went unanswered.
+                    prm_unusable = True
                     continue
                 if prm.authorization_servers:
                     auth_server_url = str(prm.authorization_servers[0])
@@ -3322,28 +3537,47 @@ async def _discover_oauth_endpoints_uncached(
                 try:
                     response = await client.get(url)
                 except httpx.HTTPError:
+                    asm_unusable = True
                     continue
                 # Mirror the SDK's fallback semantics: a 4xx means "try the next
                 # discovery URL"; anything else non-200 means "stop looking".
-                if 400 <= response.status_code < 500:
+                if _refuses_metadata(response.status_code):
+                    asm_refused += 1
                     continue
                 if response.status_code != 200:
+                    # "Stop looking" is not "there is nothing here": a 5xx (or a
+                    # 3xx we did not follow) is the server declining to answer
+                    # the metadata question, so this stays retryable.
+                    asm_unusable = True
                     break
                 try:
                     asm = OAuthMetadata.model_validate_json(response.content)
-                except Exception:  # noqa: BLE001 — treat as not-found here
+                except Exception:  # noqa: BLE001 — a body we cannot use is not an answer
                     asm = None
+                    asm_unusable = True
                 break
             if asm is None:
-                return None
-            return DiscoveredOAuthEndpoints(
-                oauth_metadata=asm,
-                protected_resource_metadata=prm,
-                auth_server_url=auth_server_url,
+                return _OAuthProbe(
+                    endpoints=None,
+                    # Both halves are required: an answer from the ASM phase,
+                    # and no unanswered question anywhere in the probe.
+                    answered_negative=(
+                        asm_refused > 0
+                        and not asm_unusable
+                        and not prm_unreachable
+                        and not prm_unusable
+                    ),
+                )
+            return _OAuthProbe(
+                endpoints=DiscoveredOAuthEndpoints(
+                    oauth_metadata=asm,
+                    protected_resource_metadata=prm,
+                    auth_server_url=auth_server_url,
+                )
             )
     except Exception:  # noqa: BLE001 — discovery is best-effort; degrade, don't fail
         logger.debug("OAuth metadata discovery failed for %s", server_url, exc_info=True)
-        return None
+        return _OAuthProbe()
 
 
 def _try_lock_exclusive(fd: int) -> bool:

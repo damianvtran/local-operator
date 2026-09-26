@@ -133,6 +133,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     Returns:
         argparse.ArgumentParser: The CLI argument parser
     """
+    from local_operator.update import installed_version
+
     # Create parent parser with common arguments
     parent_parser = argparse.ArgumentParser(add_help=False)
     parent_parser.add_argument(
@@ -181,13 +183,25 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # first, so it must not be the one place that still answers from the stale
     # channel. See :func:`local_operator.update.installed_version`.
     #
-    # Imported inside the function because ``local_operator.update`` pulls
-    # ``ssl``/``urllib.request`` (measured ~28 ms cumulative against an ~84 ms
-    # `import local_operator.cli` baseline). This parser is built once per
-    # invocation, so the cost lands only on runs that build it, and the
-    # startup-path guards in tests/unit/test_import_graph.py stay satisfied.
-    from local_operator.update import installed_version
-
+    # RESOLVED EAGERLY, and that is a cost this parser accepts deliberately. The
+    # call above runs while the parser is BUILT, so every `lop sessions`,
+    # `lop status` and `lop config` pays ``local_operator.update``'s import —
+    # measured at 47.5 ms of CPU for the module — to build a string it never
+    # prints. ``local_operator.update`` imports ``ssl``/``urllib.request``/
+    # ``http.client`` on the way.
+    #
+    # A lazy action was written, measured and WITHDRAWN — CI's shard 4 caught it
+    # (commit c5731698d); review R2-3 is what asked for THIS comment to stop
+    # describing the retired class. Leaving ``action.version`` as None until the
+    # flag was parsed broke
+    # `tests/unit/test_update.py::test_cli_version_flag_reports_the_running_build`,
+    # which reads that attribute off the PARSER to pin that the value comes
+    # through ``installed_version()`` rather than a raw metadata call — and a raw
+    # call cannot see a running checkout's version. A property resolving on read
+    # satisfies the test but narrows a plain ``str`` attribute the type gate
+    # rejects. So the ~20 ms stays on the table, recorded rather than re-tried:
+    # the shape that would work is a resolver the flag's own action calls, and it
+    # needs a test that reads the attribute the way that cell does.
     parser.add_argument(
         "--version",
         action="version",
@@ -1114,10 +1128,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "when",
         help='when to fire: a duration ("in 2m", "45s") or a clock time ("at 09:30")',
     )
-    # Lazy, like every other harness import in this module (see the module
-    # docstring): the flag's help names the SHARED cap rather than a second
-    # number that could drift from it.
-    from local_operator.harness.wake import MAX_WAKE_MESSAGE_CHARS
+    # From ``harness.wake_types``, NOT ``harness.wake``. The help names the SHARED
+    # cap rather than a second number that could drift from it — but the parser is
+    # built on EVERY command, so importing it from the scheduler module pulled
+    # ``harness.wake`` and the pydantic model construction beneath it onto
+    # ``lop --version``, which builds this option group and never uses it.
+    # Measured with a profile of that command: ``harness/wake.py:1(<module>)`` at
+    # **1.214 s cumulative**, the single largest term in ``build_cli_parser``.
+    # The constant is data with no dependencies; it belongs with the DTOs.
+    from local_operator.harness.wake_types import MAX_WAKE_MESSAGE_CHARS
 
     wake_create.add_argument(
         "message",
@@ -1335,7 +1354,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # later converted meant the help text stated a default that was not the
     # default, and quoted a Python symbol an operator cannot act on (design
     # review D5).
-    from local_operator.update import DEFAULT_KEEP_GENERATIONS
+    #
+    # Read from ``install_defaults`` rather than from ``local_operator.update``,
+    # which is where this constant used to come from. ``update`` imports
+    # ``ssl``/``urllib.request``/``http.client`` (~47.5 ms of CPU here) and this
+    # line is the parser's only remaining reason to import it — so spelling it
+    # `from local_operator.update import ...` would have kept the whole stack on
+    # every ``lop`` start, for the sake of one integer rendered into a help
+    # string. ``update`` still re-exports the same value for its own callers.
+    from local_operator.install_defaults import DEFAULT_KEEP_GENERATIONS
 
     def _generation_count(value: str) -> int:
         """``--keep``'s value: a non-negative count, or a clean argparse refusal.

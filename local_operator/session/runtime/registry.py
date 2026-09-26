@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple, TypeVar
@@ -836,9 +837,21 @@ class RecordPublisher:
         record: DiscoveryRecord,
         root: Path | None = None,
         dirname: str = RUN_DIRNAME,
+        *,
+        defer_publish: bool = False,
     ) -> None:
         self.record = record
         self._dirname = dirname
+        # WRITES AND ``close`` SHARE ONE LOCK, and the pair is what lets a
+        # failed boot promise "no publisher, no readable record": the rollback
+        # in ``_serve`` runs ``close`` while a session thread can still be
+        # inside a heartbeat that read ``_publisher`` before the attribute was
+        # nulled. Unserialised, that write lands AFTER the unpublish and
+        # re-creates the record with no publisher behind it (agent review
+        # round 1, R1-1). Serialised, a writer either completes before the
+        # unlink or finds ``_closed`` and skips — never both late.
+        self._lock = threading.Lock()
+        self._closed = False
         # RESOLVE THE DIRECTORY ONCE, HERE, and use that resolution for the
         # rest of this publisher's life. ``root=None`` means "whatever
         # ``config_dir()`` says now", and ``config_dir()`` deliberately reads
@@ -857,15 +870,77 @@ class RecordPublisher:
         # Pin the CONFIG dir rather than the run dir so ``root`` keeps meaning
         # what every caller already passes.
         self._root = root if root is not None else config_dir()
-        self.path = publish(record, self._root, self._dirname)
+        # The path is named whether or not the write happens here, so a
+        # deferred publisher still hands callers that print or dial it
+        # (``RuntimeServer.record_path``) the file it will own.
+        self.path = record_path(record.pid, self._root, self._dirname)
+        # ``defer_publish`` is for the caller that must INSTALL this instance
+        # before the record may become readable; publishing from here would
+        # put a readable file on disk ahead of that installation. See
+        # :meth:`publish` for the window that ordering closes.
+        if not defer_publish:
+            publish(record, self._root, self._dirname)
+
+    def publish(self) -> None:
+        """Write this publisher's record NOW — first time or again.
+
+        The deferred half of the constructor, for the caller that must not let
+        the record become READABLE before it can install this instance. The
+        session runtime writes through its publisher from other threads
+        (``note_leaving``, ``set_record_started`` — via ``RuntimeServer.
+        _republish``), and a write-through that lands while ``_republish``
+        still sees no publisher is applied to the record object and then lost
+        to every reader: the file on disk keeps its earlier state until the
+        next 15 s heartbeat. The constructor's own publish made that window
+        real — the file was readable BEFORE the installer's assignment — so
+        the record could be read (and a write-through silently no-op behind
+        it) with a pre-write file in hand; that is the intermittent CI failure
+        this deferral removes — the cold-join arm
+        (``test_a_draining_session_hands_a_cold_facade_its_canonical_sync``)
+        read ``leaving == ''``, and ``test_started_survives_the_republish``
+        read ``started`` False.
+
+        With the write owned by the caller, the invariant is total: a readable
+        record implies the publisher is installed, so a write-through can
+        never no-op against a record that has already been read.
+
+        A CLOSED publisher writes nothing (see :meth:`close`): an unpublish
+        that raced a write must win, or the record the unpublish removed
+        would reappear behind a publisher the process no longer holds.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            publish(self.record, self._root, self._dirname)
 
     def heartbeat(self, **updates: object) -> None:
         """Rewrite the record with fresh liveness plus any changed fields
-        (model switch, conversation rename, new session id after /resume)."""
-        for key, value in updates.items():
-            if hasattr(self.record, key):
-                setattr(self.record, key, value)
-        publish(self.record, self._root, self._dirname)
+        (model switch, conversation rename, new session id after /resume).
+
+        Skips entirely once :meth:`close` has run — the skip and the lock
+        together are what ``RuntimeServer``'s failed-boot rollback relies on
+        while a session thread can still be inside a write it read the
+        publisher for.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            for key, value in updates.items():
+                if hasattr(self.record, key):
+                    setattr(self.record, key, value)
+            publish(self.record, self._root, self._dirname)
 
     def close(self) -> None:
-        unpublish(self.record.pid, self._root, self._dirname)
+        """Unpublish this publisher's record and refuse further writes.
+
+        Idempotent, and best-effort like the unpublish itself (a missing file
+        is fine). Takes the write lock so a heartbeat already in flight either
+        completes before the unlink or — not yet started — sees ``_closed``
+        and skips: no write lands after this returns, which is what keeps "no
+        publisher, no readable record" true for the failed-boot rollback that
+        runs while a session thread may still hold this instance (agent review
+        round 1, R1-1).
+        """
+        with self._lock:
+            self._closed = True
+            unpublish(self.record.pid, self._root, self._dirname)

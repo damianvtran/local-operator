@@ -1845,18 +1845,31 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
     """The newest stored token and account scope, or ``("", False, None)``.
 
     Best-effort by construction: an unreadable store, a missing table or a row
-    without a token all mean "no listing", never an exception. Opened and closed
-    per call because this is reached only when the registry could not describe a
-    model, which is once per model id per TTL bucket per process.
+    without a token all mean "no listing", never an exception.
+
+    Reached only when the registry could not describe a model, which is once per
+    model id per TTL bucket per process — and that is measured as THREE
+    constructions per boot on this tree, each opening its own connection to the
+    same ``auth.db`` to run one SELECT. So it reads through the process-level
+    store instead. The previous per-call open/close was justified by how rarely
+    this runs; rarity is a reason the reopen looked cheap, not a reason the
+    connection had to be private, and ``list_credentials`` below is a bare read
+    with no routing decision attached. ``shared_auth_store`` owns the teardown,
+    so this must not close it — which is also why the ``try/finally`` that used
+    to wrap ``store.close()`` is gone rather than re-pointed: a ``finally`` that
+    called it would close the shared connection under every other reader.
+
+    Failures still degrade to ``("", False, None)``: the accessor can raise (a
+    ``config_dir()`` that cannot be resolved, an unwritable parent for a missing
+    ``auth.db``), and the ``except`` below keeps that on the "no listing" path
+    exactly as the per-call store did.
     """
-    store = None
     try:
-        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.auth_store import shared_auth_store
         from local_operator.providers.registry import credential_provider_id
 
         storage = credential_provider_id(provider)
-        store = AuthStore()
-        rows = store.list_credentials(provider=storage)
+        rows = shared_auth_store().list_credentials(provider=storage)
         for row in reversed(rows):
             token = str(row.data.get("access") or "")
             if token:
@@ -1868,12 +1881,6 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
                 )
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
-    finally:
-        if store is not None:
-            try:
-                store.close()
-            except Exception:  # noqa: BLE001 - closing a broken handle is not fatal
-                pass
     return "", False, None
 
 
@@ -3187,6 +3194,18 @@ class _ChildModelRequestCounter:
     def count(self) -> int:
         with self._lock:
             return self._count
+
+
+#: The delta event types that carry generated output, matched against the
+#: event's own ``type`` string the way ``ttft_ms`` already matches its two: this
+#: wrapper is written against the provider stream contract rather than against
+#: the wire classes, so a provider added tomorrow is measured the moment it
+#: streams. ``reasoning_delta`` is here because reasoning IS output (it is billed
+#: as output tokens and it opens the decode window on a thinking model), but its
+#: branch in the loop runs first because it carries its own first-reasoning
+#: stamp; a text or tool-call delta keeps the pre-existing TTFT meaning
+#: untouched.
+_OUTPUT_DELTA_TYPES = frozenset({"text_delta", "tool_call_delta", "reasoning_delta"})
 
 
 class SessionStreamFn:
@@ -5786,6 +5805,26 @@ class SessionStreamFn:
         # to the operator. Same clock and same origin as ``ttft_ms``, so the two
         # are directly comparable and the reasoning gap is a subtraction.
         first_reasoning_at: float | None = None
+        # The DECODE WINDOW: the first and last output delta of any kind, and
+        # how many there were. Opened at the first delta and closed at the
+        # LAST, deliberately not at the stream end: ``duration_ms`` runs to the
+        # end of the loop, which carries the finish frame, the usage frame and
+        # any consumer backpressure, so a window derived from it measures a
+        # request rather than a generation. The trade that makes is stated
+        # rather than hidden: this window is narrower than DeepSeek Harness's
+        # step-end boundary by the gap between the final delta and the step-end
+        # frame, which is not decodable output, so the rate is a slight
+        # over-estimate against DSH's and the two are not bit-identical
+        # definitions.
+        #
+        # These are four scalars and one int: no list, no dict, no lock. The
+        # loop reads the clock at most once per output delta (the first text
+        # delta's pre-existing ``ttft_ms`` read is the only second one, and the
+        # first-delta branch reuses ``last_output_at`` for ``first_output_at``
+        # rather than taking another).
+        output_deltas = 0
+        first_output_at: float | None = None
+        last_output_at: float | None = None
         outcome = "incomplete"
         # Snapshot char lengths BEFORE streaming: cheap (string length reads,
         # sub-millisecond even on a very large context) and safe to hand a
@@ -5807,18 +5846,47 @@ class SessionStreamFn:
             self._descendant_request_counter.begin()
         try:
             async for event in stream:
-                if first_token_at is None and getattr(event, "type", "") in (
-                    "text_delta",
-                    "tool_call_delta",
-                ):
-                    first_token_at = time.monotonic()
-                if first_reasoning_at is None and getattr(event, "type", "") == "reasoning_delta":
+                # ONE ``getattr`` for the event type, and it is an ADDITION to
+                # this loop rather than a saving — measured, not assumed
+                # (``scripts/bench_tps_overhead.py``, interleaved A/B below).
+                # The two stamps this dispatch replaces were
+                # ``first_token_at is None and getattr(...)``, so they
+                # SHORT-CIRCUITED to zero lookups per event once their stamp was
+                # set; the decode window cannot do that, because knowing which
+                # events are output deltas is the whole measurement. So per
+                # event this adds one pydantic field read plus one frozenset
+                # membership test, and per OUTPUT delta it adds exactly one
+                # ``time.monotonic()`` on top (counted: 1.0006 clock reads per
+                # delta, against 0.0008 before). Measured cost: +215 ns/event
+                # (best-of-600 slope, 500 -> 5 000 deltas), which is ~1 ms on a
+                # 5 000-delta turn against a generation measured in seconds. No
+                # allocation, no lock, no I/O in the delta branch.
+                event_type = getattr(event, "type", "")
+                if event_type == "reasoning_delta":
                     # Matched on the event's own type string, exactly as
-                    # ``ttft_ms`` matches its two above: this wrapper is written
+                    # ``ttft_ms`` matches its two below: this wrapper is written
                     # against the provider stream contract, and importing the
                     # wire classes here to isinstance them is what the existing
                     # line deliberately avoids.
-                    first_reasoning_at = time.monotonic()
+                    #
+                    # The clock is read ONLY when this is the first reasoning
+                    # fragment; the decode window's own read below then reuses
+                    # it, so a reasoning delta costs exactly one
+                    # ``time.monotonic()``.
+                    now = time.monotonic() if first_reasoning_at is None else None
+                    if now is not None:
+                        first_reasoning_at = now
+                    output_deltas += 1
+                    last_output_at = now or time.monotonic()
+                    if first_output_at is None:
+                        first_output_at = last_output_at
+                elif event_type in _OUTPUT_DELTA_TYPES:
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                    output_deltas += 1
+                    last_output_at = time.monotonic()
+                    if first_output_at is None:
+                        first_output_at = last_output_at
                 usage = getattr(event, "usage", None)
                 if usage is not None:
                     final_usage = usage
@@ -5907,6 +5975,16 @@ class SessionStreamFn:
                 ),
                 outcome=outcome,
                 usage_reported=final_usage is not None,
+                # The decode window, closed here rather than inside the loop:
+                # ``first_output_at is None`` means the stream produced no
+                # output deltas at all, which is "no window" (0 microseconds),
+                # not a zero-length one.
+                decode_us=(
+                    max(0, int((last_output_at - first_output_at) * 1_000_000))
+                    if first_output_at is not None and last_output_at is not None
+                    else 0
+                ),
+                output_deltas=output_deltas,
             )
 
     def _record_usage(
@@ -5922,12 +6000,41 @@ class SessionStreamFn:
         first_reasoning_ms: float = -1,
         outcome: str = "unknown",
         usage_reported: bool = True,
+        decode_us: int = 0,
+        output_deltas: int = 0,
     ) -> None:
         """Enqueue one call sample. Off the hot path; never raises."""
         try:
             import time as _time
 
             from local_operator.analytics import CallSnapshot, record_call
+
+            # THE ELIGIBILITY PREDICATE, decided once here and deliberately not
+            # in the stream loop: ``output_tokens`` is only known from
+            # ``final_usage``, which arrives at the end.
+            #
+            #   * ``decode_us > 0`` — a window must have been measured. A
+            #     one-delta call's window is ~0 and its implied rate is absurd
+            #     (the whole answer lands in the trailing chunk), which is how a
+            #     naive ``output/duration`` headline reaches four figures.
+            #   * ``output_deltas >= 2`` — the same exclusion stated as the
+            #     property that makes a window meaningful, and the reason a
+            #     non-streaming provider's one-frame answer is counted as
+            #     EXCLUDED rather than averaged in.
+            #   * ``output_tokens > 0`` — nothing was generated, so there is no
+            #     rate to report.
+            #
+            # ``ok`` is NOT tested, and that is load-bearing rather than an
+            # oversight (Risk 8): an aborted or failed call's measured
+            # generation is a real measurement, and dropping exactly the slow
+            # calls would bias every rate upward.
+            #
+            # Numerator and denominator cover the SAME calls: ``decode_tokens``
+            # is the eligible calls' output, never ``SUM(output_tokens)`` over
+            # all of them — dividing one population by the other inflates the
+            # rate. ``decode_calls`` counts the contributing calls so a report
+            # can state its coverage instead of implying it.
+            eligible = decode_us > 0 and output_deltas >= 2 and int(usage.output_tokens) > 0
 
             # Cost is NOT priced here (review C1). The snapshot carries the
             # provider, model id, and every token count, which is everything
@@ -5994,6 +6101,12 @@ class SessionStreamFn:
                     # known zero-dollar call. Keep it visible without pricing
                     # invented token counts on the background writer.
                     priced=not usage_reported,
+                    # Ineligible writes 0 to all three, so "no window" is one
+                    # value on every surface and the coverage count is what
+                    # disambiguates it from a measured zero-length window.
+                    decode_us=decode_us if eligible else 0,
+                    decode_tokens=int(usage.output_tokens) if eligible else 0,
+                    decode_calls=1 if eligible else 0,
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort
