@@ -40517,6 +40517,18 @@ class OperatorApp(App[None]):
         as an empty skill vocabulary does: "this directory has nothing to offer"
         is a real answer, and the row says so instead of showing an empty box.
 
+        PROJECT ROWS ARE PREPENDED (slice 2, §6.3), and they are ordinary rows
+        of this same list rather than a second list. Each row's ``name`` is the
+        TOKEN the completion must write (``project:<name>``) and its ``display``
+        is the bare project name — the ``/new`` device picker's split, for the
+        same reason: a value that repeats a keyword on every row must not be
+        what the name column paints. Carrying the namespaced token as the NAME
+        is what lets the existing FILE completion, its ghost and its
+        "already in the buffer" rule write ``@project:<name>`` with no second
+        code path, and the picker's own prefix filter is what shows these rows
+        while the query is a prefix of the project token — a bare ``@``, the
+        typed route to ``project:``, or a fragment of a project's own name.
+
         It also passes on how many entries the scan's own cap kept OUT
         (``unlisted``), because the picker's overflow row is where the user finds
         out how much of the directory is not on screen and the picker has no way
@@ -40527,6 +40539,7 @@ class OperatorApp(App[None]):
         from local_operator.references import scan_directory_report
 
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
+        choices = [*self._project_picker_choices(), *choices]
         if not choices:
             picker.set_choices([])
             where = message.directory or "this directory"
@@ -40534,6 +40547,42 @@ class OperatorApp(App[None]):
             return
         picker.set_notice("")
         picker.set_choices(choices, unlisted=unlisted)
+
+    def _project_picker_choices(self) -> list[ArgumentChoice]:
+        """Project rows to PREPEND to the ``@`` list, or ``[]``.
+
+        Sorted by the store's own listing rule (name, case-insensitive) and
+        CAPPED: this is a shortcut into the namespace, not a browse of the
+        store — ``/project list`` and the projects view are the browse
+        surfaces — so a store with hundreds of rows can never push the
+        directory listing out of the picker. The cap applies AFTER the sort,
+        so the rows offered are stable across opens.
+
+        Never raises and never blocks on anything but the store read: a session
+        with no registry (an older runtime, a store that failed to open) or an
+        unreadable store reads as "no projects", and the directory list stands
+        alone — the degrade-one-feature rule every store read on a keystroke
+        path follows.
+        """
+        from local_operator.references import PROJECT_REFERENCE_PREFIX
+
+        session = self._session
+        registry = getattr(session, "project_registry", None) if session is not None else None
+        if registry is None or not hasattr(registry, "list_projects"):
+            return []
+        try:
+            projects = list(registry.list_projects())
+        except Exception:  # noqa: BLE001 — a picker never fails on the store
+            return []
+        # ≤8: see the docstring. The rows keep the store's name order.
+        return [
+            ArgumentChoice(
+                name=f"{PROJECT_REFERENCE_PREFIX}{project.name}",
+                display=project.name,
+                description=project.description,
+            )
+            for project in projects[:8]
+        ]
 
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         """The buffer just entered ``/<command> …`` — fill that command's list.
