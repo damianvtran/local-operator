@@ -41,7 +41,10 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from local_operator.network.credentials.messages import render_broker_error
+from local_operator.network.credentials.messages import (
+    has_catalogue_sentence,
+    render_broker_error,
+)
 from local_operator.network.credentials.placement import (
     PlacementDocument,
     merge_from_peer,
@@ -784,15 +787,33 @@ class MeshCredentialClient:
         )
 
     def _render(self, error: BrokerError, key: str, label: str) -> BrokerError:
-        """Fill in the person-facing sentence. The one place messages.py is reached."""
-        if not error.message:
-            error.message = render_broker_error(
-                error,
-                key=key,
-                provider=label,
-                owner_name=self.owner_label(key),
-                last_seen_s=self.owner_last_seen_s(error.owner_device or self.owner_of(key)),
-            )
+        """Fill in the person-facing sentence. The one place messages.py is reached.
+
+        THE CATALOGUE WINS OVER THE OWNER'S WORDS for every code it has a sentence
+        for. ``owner._refuse`` puts a DIAGNOSTIC on the wire (it names the requesting
+        device by id and carries no remedy) and says as much in its own comment — "the
+        SENTENCE the operator reads is rendered where the operator is" — but this
+        method used to fill in a sentence only when the message was EMPTY, so the
+        diagnostic was what the operator read. Measured on the two-device rig (audit
+        round 2): after ``credential revoke`` the borrower showed
+        "damians-MacBook-Pro does not share 'zai' with d_1d2a4f5aae0d880affc36653e3659260"
+        where the design's §4.6 sentence (owner named by name, the share remedy, no
+        device id) was the contract.
+
+        The owner's words are still kept where they are the best text available: a
+        code THIS build cannot classify means a newer owner, and ``messages._generic``
+        interpolates the diagnostic so the operator learns something. That is the same
+        rule :meth:`_detail_from_owner` already applies to a transport refusal.
+        """
+        if error.message and not has_catalogue_sentence(error.code):
+            return error
+        error.message = render_broker_error(
+            error,
+            key=key,
+            provider=label,
+            owner_name=self.owner_label(key),
+            last_seen_s=self.owner_last_seen_s(error.owner_device or self.owner_of(key)),
+        )
         return error
 
     def _from_reply(self, reply: Any, key: str, label: str, session_id: str) -> Grant | BrokerError:

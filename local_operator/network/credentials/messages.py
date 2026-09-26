@@ -25,6 +25,56 @@ from __future__ import annotations
 
 from local_operator.network.credentials.types import BrokerError
 
+#: Every code this module writes a sentence of its own for. It exists so the
+#: REQUESTER can tell "the catalogue has a sentence for this" from "this is a code
+#: this build cannot classify" — the second case is the only one that may keep the
+#: owner's own words (``_generic`` interpolates them).
+#:
+#: THE RULE THIS SET ENFORCES, measured on the two-device rig (audit round 2): an
+#: owner that puts its own sentence on the wire used to have that sentence shown to
+#: the operator IN PREFERENCE to the catalogue's, because ``client._render`` filled
+#: in a sentence only when the message was empty. After a ``credential revoke`` the
+#: operator therefore read the owner's internal shorthand —
+#: "damians-MacBook-Pro does not share 'zai' with d_1d2a4f5aae0d880affc36653e3659260"
+#: — instead of §4.6's sentence, which names no device id and carries the remedy.
+#: The design is explicit ("Sentences come from one place") and ``owner._refuse``'s
+#: own comment agrees ("the SENTENCE the operator reads is rendered where the
+#: operator is"); the wire message is a DIAGNOSTIC, and this set is what stops it
+#: from becoming user-facing copy again.
+#:
+#: It must stay in step with the chain in :func:`render_broker_error`; the test that
+#: pins it (``tests/unit/network/test_credentials_refusal_copy.py``) renders every
+#: member and fails if any of them falls through to :func:`_generic`.
+SENTENCED_CODES: frozenset[str] = frozenset(
+    {
+        "owner_offline",
+        "not_a_holder",
+        "not_owner",
+        "revoked",
+        "grant_invalid",
+        "device_bound",
+        "quota_blocked",
+        "interactive_required",
+        "epoch_stale",
+        "refresh_failed",
+        "rate_limited",
+        "not_authorised",
+        "identity_mismatch",
+        "unsupported",
+        "no_local_credential",
+        "not_implemented",
+    }
+)
+
+
+def has_catalogue_sentence(code: str) -> bool:
+    """Whether :func:`render_broker_error` writes a sentence for ``code``.
+
+    ``False`` means the code is unknown to THIS build — an owner that is newer than
+    the requester — and the owner's own words are then the best text available.
+    """
+    return code in SENTENCED_CODES
+
 
 def _owner_name(error: BrokerError, fallback: str) -> str:
     return error.owner_device_name or error.owner_device or fallback

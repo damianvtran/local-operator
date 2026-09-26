@@ -993,11 +993,26 @@ def _cmd_member_caps(args: argparse.Namespace) -> int:
     caps = [str(item) for item in args.capabilities]
     record = _resolve(args.network)
     from local_operator.network.relay import capability_change_lines
+    from local_operator.network.types import MeshRefusal
+
+    # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME. `credential
+    # share --with` resolves a name or an id here, and `lop network show`/`peers`
+    # print names — so an operator who copied the name they were just shown got
+    # "device-b is not an active member of credlab" from this verb while it IS one
+    # (measured on the two-device rig, audit round 2). One resolver, one spelling,
+    # and the refusal names the member list rather than denying the device exists.
+    resolved_device = _resolve_device(record, args.device)
+    if resolved_device is None:
+        raise MeshRefusal(
+            "unknown_member",
+            f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
+            "for the member list (a name, a device id, or an unambiguous tail of one)",
+        )
 
     if verb == "grant":
-        change, applied = _apply_capability_change(record, args.device, grant=caps)
+        change, applied = _apply_capability_change(record, resolved_device, grant=caps)
     else:
-        change, applied = _apply_capability_change(record, args.device, revoke=caps)
+        change, applied = _apply_capability_change(record, resolved_device, revoke=caps)
     payload = {
         "ok": True,
         "network_id": record.network_id,
