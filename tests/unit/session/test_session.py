@@ -4739,6 +4739,51 @@ async def test_a_turn_ending_mid_write_does_not_strand_the_result(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_a_lost_settle_write_is_held_with_the_marker(tmp_path, monkeypatch):
+    """A settle-time write that FAILED must still get the held shape (D-1).
+
+    The combination the first cut missed: the early journal write raises (the
+    best-effort path logs it and keeps going), so no row exists when the
+    departure latch arms -- and the flush then holds the batch. Reusing the
+    batch's unmarked object wrote a row every surface reads as delivered and
+    none paints (the TUI replay paints only a marked row; the phone loses the
+    notice sentence), silently losing the operator's only notice of a result
+    no turn ever answered. The hold now picks the shape per row: already
+    durable -> delivered, otherwise -> held.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    attempts = {"n": 0}
+    real_append = session._transcript.append_message
+
+    async def flaky_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE and attempts["n"] == 0:
+            attempts["n"] += 1
+            raise OSError("disk full (simulated)")
+        return await real_append(message, **kwargs)
+
+    monkeypatch.setattr(session._transcript, "append_message", flaky_append)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    assert not _job_result_rows(session), "precondition: the settle-time write was lost"
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+
+    session.retire_job_deliveries_to_transcript()
+    session._is_streaming = False
+    await session._deliver_deferred_job_results()
+
+    from local_operator.harness.rows import held_delivery_notice
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1"]
+    assert (
+        held_delivery_notice(rows[0].payload.get("details")) is not None
+    ), "a row no screen saw and no turn will answer must carry the held marker"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_delivery_turn_does_not_journal_its_row_twice(tmp_path):
     """The incoming-journal loop must skip a row that is already durable.
 
