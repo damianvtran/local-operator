@@ -1028,6 +1028,31 @@ class ToolContext(BaseModel):
     #: the class of bug ``tests/unit/session/test_tool_context_parity.py``
     #: exists to catch.
     scratchpad_dir: str | None = None
+    #: This session's own DIRECTORY on disk (``.../sessions/<id>``), absolute,
+    #: or ``None`` wherever ``scratchpad_dir`` is ``None`` (agent directories
+    #: are exported wholesale and stay free of runtime files). Its one consumer
+    #: is the ``eval`` tool's cross-process kernel marker
+    #: (``<session_dir>/eval-kernel.json``): a runtime that RESTARTS loses the
+    #: in-memory receipt that announced a kernel reset, and this directory is
+    #: where the restart is recorded so the first cell after it can say the
+    #: namespace is fresh rather than silently answering from an empty one.
+    #: Declared and derived like ``scratchpad_dir`` (same transcript gate).
+    session_dir: str | None = None
+    #: Whether this context's ``eval`` kernel is OWNED by a session runtime,
+    #: whose life the kernel's life must match. ``True`` from a ``Session``,
+    #: which already registers a dispose hook that closes the kernel when the
+    #: runtime ends — so with this set, the eval side must NOT reap on its own
+    #: kernel-only idle clock: a session can sit beyond the eval-side window
+    #: between cells while its runtime is busy (turns, subagents, tool calls),
+    #: which is not idle by the only clock that matters, the runtime's own
+    #: continuously evaluated predicate. ``False`` everywhere else, where the
+    #: on-access timer stays (no lifetime to anchor to).
+    #:
+    #: A declared fact rather than a liveness probe on purpose: at eval time
+    #: THIS call is turn work, so every "is the session active?" probe answers
+    #: true for a busy session and a dormant one alike — a probe would either
+    #: never fire or invent a second idle definition beside the runtime's.
+    kernel_managed_by_session: bool = False
     # Session-owned transport and duplicate-read coordinator. Kept off wire
     # payloads; its lifecycle belongs to the session that constructs tools.
     web_io: Any | None = Field(default=None, exclude=True)
