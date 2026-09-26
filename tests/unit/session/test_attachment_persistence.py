@@ -35,9 +35,15 @@ from typing import Any
 import pytest
 
 from local_operator.agents import AgentEditFields, AgentRegistry
-from local_operator.resume import ATTACHMENT_SIDECAR_NAME, read_session_attachment
+from local_operator.harness.types import Message, StreamEndEvent
+from local_operator.resume import (
+    ATTACHMENT_SIDECAR_NAME,
+    read_session_attachment,
+    write_session_attachment,
+)
+from local_operator.session.goal import GoalState
 from local_operator.session.session import Session
-from local_operator.session.transcript import Transcript
+from local_operator.session.transcript import Transcript, TranscriptEntry
 from local_operator.teams import Team, TeamRegistry
 
 from .test_session import MODEL, ScriptedStream
@@ -483,3 +489,138 @@ class TestTheSidecarIsRobust:
 
         session.set_goal("do not touch my mtime")
         assert session_dir.stat().st_mtime == 1_000_000
+
+
+def _late_adoption_session(
+    tmp_path: Path,
+    registries: tuple[AgentRegistry, TeamRegistry],
+) -> Session:
+    """A session over ``tmp_path/sess`` constructed with NOTHING on disk yet.
+
+    The warm-then-create ordering in miniature: construction runs while no
+    sidecar exists (what the desktop's first-keystroke warm does), and the
+    sidecar is written only afterwards (what ``create`` does on send). The
+    provider reads the session's own ``GoalState`` at call time and renders
+    through the REAL ``build_system_blocks``, so a tail asserted on it is the
+    tail the model would receive.
+    """
+    agents, teams = registries
+    goal_state = GoalState()
+
+    def provider() -> list[str]:
+        from local_operator.prompts_api import build_system_blocks
+
+        return build_system_blocks(
+            [],
+            "<skills/>",
+            "test environment",
+            "2026-09-26",
+            team_brief=goal_state.team_brief,
+            agent_brief=goal_state.agent_brief,
+        )
+
+    setattr(provider, "append_only_state", True)
+    return Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=provider,
+        goal_state=goal_state,
+        agent_registry=agents,
+        team_registry=teams,
+    )
+
+
+def _system_prefix_snapshots(session: Session) -> list[TranscriptEntry]:
+    """Every frozen ``system_prefix`` row on the session's own journal."""
+    return [
+        entry
+        for entry in session._transcript.entries()
+        if entry.payload.get("custom_type") == "system_prefix"
+    ]
+
+
+class TestLateAdoptionBeforeTheFirstTurn:
+    """The desktop's warm-then-create ordering must still brief the first turn.
+
+    Since the draft pre-engage pair (runtime #1607 / app #531) the new-chat
+    flow is warm-then-create: the runtime — and so the Session — is constructed
+    on the first keystroke, while ``attachment.json`` is written by ``create``
+    only when the user sends. ``__init__`` was the sidecar's only reader, so the
+    warm runtime read nothing and the first message ran bare on a session the
+    user had launched with a team. The fix re-attempts the restore at the last
+    safe moment — the top of the first ``_prepare_system_blocks``, before the
+    first ``system_prefix`` snapshot is frozen — and these tests pin it, plus
+    the guard that keeps it from ever firing on an answered conversation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_sidecar_written_after_construction_is_adopted_on_the_first_turn(
+        self, tmp_path, registries
+    ):
+        """THE regression pin: warm construction + sidecar-on-send = briefed turn."""
+        session = _late_adoption_session(tmp_path, registries)
+        # The warm: constructed while NOTHING was on disk...
+        assert not (tmp_path / "sess" / ATTACHMENT_SIDECAR_NAME).exists()
+        # ...and the sidecar lands only now, the way ``create`` writes it.
+        write_session_attachment(tmp_path / "sess", team="lopdev", agent="", goal="")
+
+        await session.prompt("open the team")
+        try:
+            assert session.active_team_name == "lopdev"
+            assert "Ship reviewed work." in session._goal_state.team_brief
+            snapshots = _system_prefix_snapshots(session)
+            assert len(snapshots) == 1, "the first turn froze more than one prefix"
+            tail = snapshots[0].payload["details"]["blocks"][-1]
+            # The brief itself reaches the FIRST snapshot's tail, and the
+            # manager marker rides it the way ``manager_preamble`` stamps it.
+            assert "<team>" in tail
+            assert "[team: lopdev]" in tail
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_agent_target_is_adopted_by_the_same_hook(self, tmp_path, registries):
+        """The agent slot rides the same late sidecar and the same hook."""
+        agents, _ = registries
+        row = agents.get_agent_by_name("auditor")
+        assert row is not None
+        agents.set_agent_system_prompt(row.id, "Audit the work carefully.")
+        session = _late_adoption_session(tmp_path, registries)
+        write_session_attachment(tmp_path / "sess", team="", agent="auditor", goal="")
+
+        await session.prompt("audit this")
+        try:
+            assert session.active_agent == "auditor"
+            assert "[role: auditor]" in session._goal_state.agent_brief
+            snapshots = _system_prefix_snapshots(session)
+            assert len(snapshots) == 1
+            tail = snapshots[0].payload["details"]["blocks"][-1]
+            assert "<agent>" in tail
+            assert "[role: auditor]" in tail
+        finally:
+            await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_an_answered_conversation_never_adopts_late(self, tmp_path, registries):
+        """The guard: never retro-attach mid-life, however late the sidecar lands.
+
+        The assistant row is written STRAIGHT to the journal — no turn runs
+        first — so that the one-shot adoption attempt has NOT yet been consumed
+        when the sidecar appears: what rejects the adoption here is the
+        assistant-history guard itself, not the attempt having already run.
+        """
+        session = _late_adoption_session(tmp_path, registries)
+        await session._transcript.append_message(Message.assistant("already answered"))
+        write_session_attachment(tmp_path / "sess", team="lopdev", agent="", goal="")
+        # The sidecar IS on disk and resolvable: the negative below is the
+        # guard's doing, not a missing attachment.
+        assert read_session_attachment(tmp_path / "sess") is not None
+
+        await session.prompt("carry on")
+        try:
+            assert session.active_team_name == ""
+            assert session._goal_state.team_brief == ""
+        finally:
+            await session.dispose()
