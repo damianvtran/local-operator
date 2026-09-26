@@ -271,13 +271,15 @@ async def test_a_correct_episode_counts_toward_the_rate(tmp_path: Path) -> None:
 async def test_a_manufactured_pass_leaves_both_sides_of_the_rate(tmp_path: Path) -> None:
     """THE REGRESSION: the same defect manufactures PASSES, and they must not count.
 
-    An earlier revision read every episode through ``binary == 0``, so the two
-    task_017 passes in the measured corpus were never even asked the question:
-    the matching zero left the denominator while the manufactured pass stayed in
-    the numerator, which inflates the arm exactly as much as the facility
+    An earlier revision read every episode through ``binary == 0``, so a
+    manufactured PASS would never even have been asked the question: it would
+    have stayed in the numerator even as the same rule excluded the manufactured
+    zero from the denominator, inflating the arm exactly as much as the facility
     corrects it. Sealing a PASS whose diagnostics carry the signature is the
     smallest bundle that can catch that, and it only passes if the binary is not
-    consulted at all.
+    consulted at all. (The measured corpus contains no manufactured pass: its
+    one apparatus-attributable episode is a zero, and the honest rate is
+    6/63 = 9.5% -- so this sealed bundle is that case's only instance.)
     """
 
     bundle, _ = await _seal_bundle(
@@ -309,9 +311,10 @@ async def test_a_recovered_right_tab_fallback_is_not_attributed(
     REAL (for the two passes, the expected eight-stop route; for the other zero, a
     1/7 partial against the route it did produce). Nothing in the log says the
     fallback landed on a different page -- its chosen URL is in fact byte-identical
-    to the evaluator's own target -- so a classifier keyed on the pair alone would
-    strip a genuine pass out of the numerator. Both binaries are driven because the
-    rule must not consult the score either way.
+    to the evaluator's own target, which is a selection echo (the evaluator picks
+    the page it prints BY that URL) rather than corroboration -- so a classifier
+    keyed on the pair alone would strip a genuine pass out of the numerator. Both
+    binaries are driven because the rule must not consult the score either way.
     """
 
     right_tab = MEASURED_DIAGNOSTICS.replace(
