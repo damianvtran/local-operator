@@ -1629,6 +1629,25 @@ class TestOAuthEndpointDiscovery:
 
     URL = "https://mcp.example.com/v1/mcp"
 
+    def setup_method(self) -> None:
+        """Clear BOTH discovery caches before every cell in this class.
+
+        The negative cache is the one that matters and the one that bit: every
+        cell here reuses the same ``URL``, so a cell that answers "this server
+        publishes no metadata" (``test_discovery_returns_none_when_asm_missing``)
+        left a 300 s negative entry keyed on that URL, and the NEXT cell's
+        discovery returned from it without ever reaching its own mocked
+        transport — so ``test_discovery_caches_successes`` saw zero HTTP calls
+        and read as a product defect. Individual cells still clear the positive
+        cache where they always did; this is the class-wide reset the second
+        cache needs, because a per-cell clear is what a new cache silently
+        escapes.
+        """
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        auth_mod._DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.clear()
+
     @pytest.mark.asyncio
     async def test_discovery_resolves_token_endpoint_from_prm_and_asm(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1672,6 +1691,103 @@ class TestOAuthEndpointDiscovery:
             str(endpoints.oauth_metadata.token_endpoint) == "https://auth.example.com/oauth/token"
         )
         assert endpoints.protected_resource_metadata is not None
+
+    @pytest.mark.asyncio
+    async def test_a_prm_5xx_is_never_cached_as_an_answered_negative(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Review R1-1. A 5xx on the PRM leg means the question went UNANSWERED.
+
+        The PRM loop used to record only a transport exception as "could not
+        ask", so a 503 fell through the non-200 branch unmarked; if the ASM leg
+        then answered an honest 404, ``answered_negative`` was true and the
+        probe was cached for ``OAUTH_DISCOVERY_NEGATIVE_TTL_S``. Every connect in
+        that window returned ``None`` without probing at all, where the base
+        retried every time — and the function's own docstring calls a 5xx a
+        FAILURE that is never cached.
+
+        Asserted as a CALL COUNT, not a timing: the second probe must still
+        reach the network.
+        """
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        auth_mod._DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.clear()
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            requests.append(url)
+            # PRM: the server declines to answer. ASM: an honest "not here".
+            if "oauth-protected-resource" in url or "resource-metadata" in url:
+                return httpx.Response(503)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched_client)
+        first = await auth_mod.discover_oauth_endpoints(self.URL)
+        before = len(requests)
+        second = await auth_mod.discover_oauth_endpoints(self.URL)
+        assert first is None and second is None
+        assert (
+            len(requests) > before
+        ), "the second probe made no request: a PRM 5xx was cached as an answered negative"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [408, 425, 429])
+    async def test_a_retryable_status_is_never_cached_as_an_answered_negative(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        """Review R2-2. 429 and 408 mean "ask again", not "the answer is no".
+
+        A 429 is the server rate-limiting us and a 408 is its own timeout; neither
+        says anything about whether this deployment publishes metadata. Folding
+        them into the "refused" count built a definitive negative out of a
+        transient condition, so PRM-429 + ASM-404 was cached for the whole TTL and
+        every connect in that window skipped the probe.
+
+        Asserted as a CALL COUNT: the second probe must still reach the network.
+        """
+        import httpx
+
+        from local_operator.mcp import auth as auth_mod
+
+        auth_mod._DISCOVERED_ENDPOINTS_CACHE.clear()
+        auth_mod._DISCOVERED_ENDPOINTS_NEGATIVE_CACHE.clear()
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            requests.append(url)
+            # PRM: transient. ASM: an honest "not here", which is what made the
+            # old rule call the whole probe definitive.
+            if "oauth-protected-resource" in url or "resource-metadata" in url:
+                return httpx.Response(status)
+            return httpx.Response(404)
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.AsyncClient
+
+        def patched_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_client(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", patched_client)
+        assert await auth_mod.discover_oauth_endpoints(self.URL) is None
+        before = len(requests)
+        assert await auth_mod.discover_oauth_endpoints(self.URL) is None
+        assert len(requests) > before, (
+            f"a PRM {status} was cached as an answered negative: the second probe "
+            "made no request"
+        )
 
     @pytest.mark.asyncio
     async def test_discovery_returns_none_when_asm_missing(
@@ -3579,10 +3695,19 @@ class TestProbeOauthCapability:
     async def test_a_public_server_is_refused_and_costs_one_probe(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Pre-fix this returned True for any remote config."""
+        """Pre-fix this returned True for any remote config.
+
+        The stub spells ``force`` because the login gate passes it: this is the
+        human's explicit "ask the network" action, so ``probe_oauth_capability``
+        calls ``discover_oauth_endpoints(url, force=True)`` to bypass the
+        process cache a connect attempt may have just written. A stub that
+        accepts only ``url`` raises ``TypeError`` inside the gate's
+        ``except Exception`` and reads as "refused" — which is why this test
+        asserts on the CALL rather than only on the False return.
+        """
         calls: list[str] = []
 
-        async def fake_discover(url: str) -> None:
+        async def fake_discover(url: str, *, force: bool = False) -> None:
             calls.append(url)
             return None  # no authorization server advertised
 
@@ -3596,9 +3721,14 @@ class TestProbeOauthCapability:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The first login on a fresh import must still work — and the result
-        is recorded so the next connect authenticates without re-probing."""
+        is recorded so the next connect authenticates without re-probing.
 
-        async def fake_discover(url: str) -> object:
+        Same ``force`` contract as the refusal cell above: a stub without it
+        raises into the gate's broad ``except``, so the gate answers False and
+        this test reads as a product failure rather than as a stale stub.
+        """
+
+        async def fake_discover(url: str, *, force: bool = False) -> object:
             return object()
 
         monkeypatch.setattr(auth_mod, "discover_oauth_endpoints", fake_discover)

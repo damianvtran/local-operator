@@ -115,6 +115,53 @@ def test_cli_import_does_not_load_local_operator_types(cli_modules: set[str]) ->
     )
 
 
+def test_cli_import_does_not_load_pydantic(cli_modules: set[str]) -> None:
+    """The headline of the startup work, guarded by a count rather than a timing.
+
+    ``import local_operator.cli`` used to load **43** pydantic modules — 40 of
+    them pulled in by ``config.py`` importing two ``DEFAULT_*_CONFIG`` constants
+    from their pydantic settings modules. Those constants now live in
+    ``web_defaults.py`` / ``install_defaults.py`` and the model modules import
+    from there, so the CLI path loads **zero** and the import measured 154.4 ->
+    82.9 ms of CPU (interleaved A/B, min-of-n).
+
+    Asserted as a SET rather than a timing on purpose: AGENTS.md asks for a
+    structural invariant wherever one expresses the property, and "which modules
+    loaded" is identical on an idle laptop and a wedged runner where a
+    millisecond ceiling is a bet on machine load. It fails the moment anyone
+    re-adds a module-level pydantic import to a file the CLI touches, which is
+    the way this cost came back twice already.
+    """
+    offenders = sorted(
+        name
+        for name in cli_modules
+        if name == "pydantic" or name.startswith(("pydantic.", "pydantic_core"))
+    )
+    assert not offenders, (
+        "importing local_operator.cli now loads pydantic: "
+        f"{offenders[:6]}{' …' if len(offenders) > 6 else ''} "
+        f"({len(offenders)} modules). That is the 40-module stack the startup work "
+        "removed from every invocation — check for a module-level import of a "
+        "pydantic model module in something the CLI reaches."
+    )
+
+    # The two DEFAULTS modules must stay pydantic-free — that is their entire
+    # purpose: they exist so the pydantic settings modules are not on the CLI
+    # path. `harness.wake_types` is deliberately NOT in this list even though the
+    # startup work created it too: its DTOs ARE pydantic models, so it imports
+    # pydantic by design, and what it must avoid is importing the SCHEDULER (that
+    # is `test_wake_types_split.py`'s subject).
+    for leaf in (
+        "local_operator.web_defaults",
+        "local_operator.install_defaults",
+    ):
+        loaded = _imported_modules(leaf)
+        assert not any(n == "pydantic" or n.startswith("pydantic") for n in loaded), (
+            f"{leaf} must stay import-cheap: it exists so the pydantic settings "
+            "modules are not on the CLI path"
+        )
+
+
 def test_cli_import_does_not_load_tokenizer(cli_modules: set[str]) -> None:
     # tiktoken itself is only 7.8 ms, but the cl100k_base encoding it exists to
     # provide costs 84 ms and +43.6 MB RSS. compaction/tokens.py loads it on

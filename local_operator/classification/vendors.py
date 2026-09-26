@@ -445,21 +445,26 @@ async def auth_store_api_key(config_dir: "Path | None", provider: str) -> str | 
     a corrupt or half-migrated ``auth.db``, or a network failure while refreshing
     an expired grant, must land on "this tier said nothing" so the static tiers
     below still get their turn. This layer is advisory; it may not fail a turn.
-    """
-    from local_operator.providers.auth_store import AuthStore
 
-    store: AuthStore | None = None
+    The PROCESS-level store, and NOT closed here. This is the classification
+    cascade's own store probe and it is reached once per vendor leg per
+    classification — three constructions per boot on this tree, each opening a
+    fresh connection to the same ``auth.db``. The connection's lifetime is the
+    process's (``shared_auth_store`` owns the teardown), so this function no
+    longer closes what it did not open. It still degrades identically on
+    failure: a dead store raises inside the call and lands on the ``None``
+    below, exactly as a dead per-call store did.
+    """
+    from local_operator.providers.auth_store import shared_auth_store
+
     try:
-        store = AuthStore(
+        store = shared_auth_store(
             (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
         )
         return await store.get_api_key(storage_provider_id(provider), read_only=True)
     except Exception:  # noqa: BLE001 — a leg that cannot resolve is not this leg
         logger.warning("classification: %s auth store unavailable", provider, exc_info=True)
         return None
-    finally:
-        if store is not None:
-            store.close()
 
 
 class _HttpDecisionVendor:

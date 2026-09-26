@@ -69,7 +69,17 @@ from typing_extensions import TypeVar
 # buy the approval-gate and wake-scheduler contracts on ``ToolContext`` real
 # types instead of ``Any``.
 from local_operator.harness.approval import ApprovalGate
-from local_operator.harness.wake import WakeSchedule
+
+# ``wake_types``, NOT ``wake``. The scheduler module defines nothing this file
+# needs, so importing it here bought the whole live layer — asyncio timers, the
+# recurrence math and its pydantic model classes — for one annotation. Measured
+# at 203.3 ms cumulative on this host, and because ``harness.types`` is on the
+# boot path of essentially everything, it landed on every entry point: a
+# ``lop --version`` profile showed ``harness/wake.py`` at 0.402 s inside
+# ``build_cli_parser``, for a command that schedules nothing. The two DTOs now
+# live in a leaf module that costs only pydantic; ``harness.wake`` re-exports
+# them, so both import paths give back the same class object.
+from local_operator.harness.wake_types import WakeSchedule
 
 # ---------------------------------------------------------------------------
 # Errors
