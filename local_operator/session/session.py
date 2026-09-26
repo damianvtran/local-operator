@@ -11429,21 +11429,30 @@ class Session:
             # unreachable; the branch that could write a held row as DELIVERED
             # is the one that must not exist, so the held build lives here and
             # the latch is tested once.
-            held = (
-                messages
-                if messages is not None
-                else [
+            #
+            # PER ROW, because the two rows need different shapes (design round
+            # 1, D-1): a row journaled at settle time was SEEN -- it keeps its
+            # delivered shape and the hold skips it, because the marker's first
+            # clause ("held when it arrived") would be false on it. A row whose
+            # settle-time write did NOT happen has been on no screen, and the
+            # latch forbids the turn that would have answered it, so it is
+            # exactly the report the marker exists for -- reusing the unmarked
+            # object for it (the first cut did) wrote a row every surface reads
+            # as delivered and none paints, losing the notice silently.
+            if messages is not None:
+                held = [
+                    (
+                        message
+                        if self._transcript.has_entry(message.id)
+                        else self._job_result_message(job_id, text, job, held=True)
+                    )
+                    for (job_id, text, job), message in zip(results, messages)
+                ]
+            else:
+                held = [
                     self._job_result_message(job_id, text, job, held=True)
                     for job_id, text, job in results
                 ]
-            )
-            # A message that was journaled at settle time (before the latch)
-            # keeps its delivered shape: the hold skips a row that is already
-            # durable and never rewrites one (the transcript is append-only).
-            # The marker exists to tell a report the operator NEVER SAW arrive
-            # from one whose turn answered it; a row they watched land already
-            # carries that signal itself, and the marker's first clause ("held
-            # when it arrived") would be false on it.
             await self._hold_job_results_for_next_turn(results, held)
             return
         if messages is None:
