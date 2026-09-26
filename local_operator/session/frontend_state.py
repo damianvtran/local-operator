@@ -5673,6 +5673,20 @@ class FrontendStateStore:
             # a bound placed only at the snapshot boundary holds for the first
             # frame and leaks on every one after it.
             _bound_launch_prompts_across_jobs(summaries)
+            # ...and the per-job RECEIPT fold, which lived only in
+            # ``sync_wire_payload`` and the durable checkpoint for exactly the
+            # reason above: a delta re-serializes job rows by its own route, so
+            # the fold has to run on this route too. Measured on the operator's
+            # machine (2026-09-26, session d81d04d3): 98 child sessions' ~18.5k
+            # provider calls ride each row's ``usage.cost_components``, and with
+            # a 224-row roster the UNFOLDED delta serialized ``changes.jobs`` at
+            # 4.3 MB -- every frame over the socket line, so the runtime
+            # degraded each one and the viewer re-synced from the snapshot in a
+            # loop, holding no live state at all. Folding is lossless for cost
+            # (see ``_folded_components``): receipts merge by serving identity,
+            # so the price and the token sums survive byte for byte.
+            for summary in summaries:
+                _fold_job_usage_in_place(summary)
             # ...and the same is true of the per-ROW text bound, which lived only
             # in ``sync_wire_payload``: a child whose ``result_text`` (or prompt,
             # or error) was a whole transcript page rode out unbounded on every

@@ -99,7 +99,11 @@ from local_operator.session.goal_loop import (
 )
 from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
+from local_operator.session.runtime.server import (
+    _MAX_LINE_BYTES,
+    RuntimeServer,
+    fit_frame_for_wire,
+)
 from local_operator.tui.costs import job_cost
 from tests.unit.session.runtime.test_server import FakeHandle
 
@@ -5686,6 +5690,133 @@ def test_the_live_delta_bounds_a_job_rows_free_text() -> None:
     assert len(row["result_text"]) <= JOB_RESULT_WIRE_CHARS + 1
     assert len(row["prompt"]) <= JOB_PROMPT_WIRE_CHARS + 1
     assert row["result_text"].endswith("…"), "a clipped preview must read as clipped"
+
+
+def _receipt_laden_jobs(count: int) -> list[JobState]:
+    """The attach guard's worst-case row, rebuilt for the DELTA route.
+
+    Mirrors the row surgery ``test_the_attach_frame_fits_for_a_session_that_ran_all_year``
+    applies to ``_jobs(200, 500)`` -- 400 receipts, huge free text, a
+    non-derivable launch id and twelve collapsed attempts -- with the
+    trajectory left empty because the delta's trajectory half is
+    ``job_trajectory_appends``, bounded on its own route by
+    ``filter_update_trajectories``. Kept local rather than shared so each
+    guard's fixture stays visible and independently tunable; the two must
+    agree on the SHAPE they exercise, not on a mutable common object.
+    """
+    return [
+        job.model_copy(
+            update={
+                "usage": Usage(
+                    input_tokens=1_000,
+                    cost_components=[_receipt(index) for index in range(400)],
+                ),
+                "result_text": "r" * 40_000,
+                "prompt": "p" * 40_000,
+                "error_text": "e" * 40_000,
+                "launch_message_id": f"subagent-launch:resumed-{index:04d}",
+                "launch_prompts": {
+                    f"subagent-launch:attempt-{index:04d}-{attempt}": "L" * 4_000
+                    for attempt in range(12)
+                },
+            }
+        )
+        for index, job in enumerate(_jobs(count, 0))
+    ]
+
+
+def test_the_live_delta_folds_a_job_rows_receipts() -> None:
+    """A fold applied only at the snapshot boundary leaks on every later delta.
+
+    ``sync_wire_payload`` folds each row's ``cost_components`` and
+    ``descendant_usage``, and the durable checkpoint folds them too;
+    ``FrontendStateStore.mutate``'s jobs path re-serializes the same rows by its
+    own route and did not. Measured live (session d81d04d3, 2026-09-26): 98
+    child sessions' ~18.5k provider calls rode the UNFOLDED delta, and with a
+    224-row roster ``changes.jobs`` serialized at 4.3 MB -- every frame over
+    the 1 MiB socket line, so the runtime degraded each one and the viewer
+    re-synced from the snapshot in a loop, holding no live state at all.
+    """
+    receipts = [_receipt(index) for index in range(400)]
+    descendants = [
+        FrontendUsage.model_validate(_receipt(index).model_dump(mode="json")) for index in range(40)
+    ]
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    update = store.mutate(
+        jobs=[
+            JobState(
+                id="j1",
+                type="task",
+                status="completed",
+                label="child",
+                usage=Usage(input_tokens=1_000, cost_components=receipts),
+                descendant_usage=descendants,
+            )
+        ]
+    )
+
+    assert update is not None
+    row = update.changes["jobs"][0]
+    components = row["usage"]["cost_components"]
+    assert len(components) == 1, (
+        "the delta must fold the row's receipts exactly as the snapshot does; "
+        f"got {len(components)} components"
+    )
+    # Folding is lossless for tokens and money (``_folded_components``): the one
+    # surviving receipt carries the summed counters.
+    assert components[0]["input_tokens"] == sum(receipt.input_tokens for receipt in receipts)
+    assert len(row["descendant_usage"]) == 1
+    assert row["descendant_usage"][0]["input_tokens"] == sum(
+        component.input_tokens for component in descendants
+    )
+
+
+def test_the_live_delta_fits_for_a_session_that_ran_all_year(monkeypatch: Any) -> None:
+    """The DELTA twin of the attach class guard, over the production pipeline.
+
+    The attach guard measures ``frontend_sync``; the live route re-serializes
+    the same rows through ``mutate``, and that is the frame the operator's
+    session actually degraded (4.3 MB of receipts per delta, one degradation
+    per second at the peak). This walks the production order -- store update,
+    the server's per-connection trajectory filter, the fit pass, then the
+    guard -- and FALSIFIES itself in the same cell: with the receipts fold
+    neutralized the same update must overflow the line, so the cell cannot
+    pass for a state the fold never touched.
+    """
+    import local_operator.session.frontend_state as frontend_state_module
+
+    store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    update = store.mutate(jobs=_receipt_laden_jobs(200))
+    assert update is not None
+    data = filter_update_trajectories(
+        update.model_dump(mode="json"),
+        lambda _job_id: False,
+        line_limit_bytes=_MAX_LINE_BYTES,
+    )
+    fitted = fit_frame_for_wire({"op": "frontend_update", "data": data}, _MAX_LINE_BYTES)
+    size = _line_bytes(fitted)
+    # ``FrontendUpdate`` always carries the ``degraded`` marker, so the honest
+    # read is its VALUE: False (the frame fit) vs True (the stand-in the relay
+    # substitutes).
+    assert not fitted.get("data", {}).get("degraded"), (
+        f"the live delta degraded at {size:,} bytes; "
+        f"{oversized_frame_report(fitted, _MAX_LINE_BYTES)}"
+    )
+    assert size <= _MAX_LINE_BYTES
+
+    # THE FALSIFIER: the same roster, the fold neutralized. The unfolded frame
+    # overflowed the operator's line in production; if this stops overflowing,
+    # the fixture no longer reproduces the condition and the cell above is
+    # certifying nothing.
+    monkeypatch.setattr(frontend_state_module, "_fold_job_usage_in_place", lambda _job: None)
+    store2 = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1"))
+    update2 = store2.mutate(jobs=_receipt_laden_jobs(200))
+    assert update2 is not None
+    raw = {"op": "frontend_update", "data": update2.model_dump(mode="json")}
+    assert _line_bytes(raw) > _MAX_LINE_BYTES, (
+        "the falsifier needs the unfolded frame to overflow; it no longer does, "
+        "so the fixture stopped reproducing the operator's condition"
+    )
 
 
 def test_an_oversized_text_tool_end_is_bounded_without_losing_the_event(caplog: Any) -> None:

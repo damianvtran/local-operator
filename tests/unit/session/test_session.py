@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import sys
 import textwrap
@@ -4620,22 +4621,319 @@ async def test_a_batch_the_disposal_got_to_first_is_still_made_durable(tmp_path)
 
 @pytest.mark.asyncio
 async def test_a_disposal_off_the_latch_still_delivers_nothing(tmp_path):
-    """The other half of MAJOR-1's guard: it keys on the LATCH, not on disposal.
+    """The other half of MAJOR-1's guard: the FLUSH keys on the LATCH, not on disposal.
 
     A session disposed with no departure armed has no arm that can write, and
     widening the guard to "any disposed session writes" would change a path
-    nothing asked to change.
+    nothing asked to change -- so the flush must add nothing here. What DOES
+    stand is the row the settle itself journaled (the streaming early write):
+    it is not the flush's doing, it landed while the turn was still up, and it
+    is the operator's copy of a completion they watched arrive.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    spent_before = len(stream.requests)
+    session._is_streaming = True
+    await session._on_job_completed("qa-r2", "one", _settled_job("qa-r2"))
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == [
+        "qa-r2"
+    ], "the settle-time row lands with or without a latch"
+    session._disposed = True
+
+    entries_before = list(session._transcript.entries())
+    await session._deliver_deferred_job_results()
+
+    assert session._transcript.entries() == entries_before, "off the latch, the flush adds nothing"
+    assert len(stream.requests) == spent_before, "and it buys no turn"
+    assert not session._deferred_job_results
+
+
+@pytest.mark.asyncio
+async def test_a_settled_result_is_readable_as_it_lands_not_at_turn_end(tmp_path):
+    """The 2026-09-26 incident: rows must not wait for a marathon turn to end.
+
+    One real turn ran 23.5 h (opened 09-25 09:29, ended 09-26 09:06:51), and
+    every completion inside it -- five results, settled 11:37 through 19:31 --
+    was deferred in ``_deferred_job_results`` and flushed together the next
+    morning at 09:06:52. The operator read that as an aggregation of
+    job-completed notices bunched at the end of the conversation.
+
+    The fix keeps the model's batched hand-over exactly as it was and makes
+    only the ROW early: durable at settle, and the batch reuses that message,
+    so the conversation holds one row.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True  # the marathon turn
+    prompts: list[list[Any]] = []
+
+    async def fake_prompt(messages: list[Any]) -> None:
+        prompts.append(list(messages))
+
+    session._prompt_messages = fake_prompt  # type: ignore[method-assign]
+    await session._on_job_completed("j1", "the result", _settled_job("j1"))
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == [
+        "j1"
+    ], "the row must be durable as the job settles, not at the turn's end"
+    early_id = rows[0].id
+    assert session._deferred_job_results, "precondition: the model's hand-over is still deferred"
+    assert prompts == [], "the human's copy must not buy a turn while the turn is streaming"
+
+    session._is_streaming = False
+    await session._deliver_deferred_job_results()
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while not prompts and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert len(prompts) == 1, "the model's hand-over is still ONE batched turn"
+    assert [message.id for message in prompts[0]] == [early_id], (
+        "the batch must hand over the row already written, not a twin -- a twin "
+        "would be a second transcript row, since dedup is by message id"
+    )
+    assert [row.id for row in _job_result_rows(session)] == [early_id], "exactly one row"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_ending_mid_write_does_not_strand_the_result(tmp_path, monkeypatch):
+    """The early write awaits, so the turn can end inside it.
+
+    Parking the entry after that would strand it: the finally-flush has
+    already run, seen an empty dict, and nothing would pick the entry up until
+    the NEXT turn's finally. The post-await re-check delivers it as the idle
+    arrival it has become instead.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    transcript = session._transcript
+    real_append = transcript.append_message
+
+    async def ending_append(message, **kwargs):
+        session._is_streaming = False  # the turn's finally lands mid-write
+        return await real_append(message, **kwargs)
+
+    monkeypatch.setattr(transcript, "append_message", ending_append)
+    prompts: list[list[Any]] = []
+
+    async def fake_prompt(messages: list[Any]) -> None:
+        prompts.append(list(messages))
+
+    session._prompt_messages = fake_prompt  # type: ignore[method-assign]
+    session._is_streaming = True
+    await session._on_job_completed("j1", "the result", _settled_job("j1"))
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while not prompts and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert session._deferred_job_results == {}, "the entry must not park after the flush ran"
+    assert len(prompts) == 1, "it must be delivered as the idle arrival it became"
+    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == [
+        "j1"
+    ], "and the idle delivery must not duplicate the early row"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_lost_settle_write_is_held_with_the_marker(tmp_path, monkeypatch):
+    """A settle-time write that FAILED must still get the held shape (D-1).
+
+    The combination the first cut missed: the early journal write raises (the
+    best-effort path logs it and keeps going), so no row exists when the
+    departure latch arms -- and the flush then holds the batch. Reusing the
+    batch's unmarked object wrote a row every surface reads as delivered and
+    none paints (the TUI replay paints only a marked row; the phone loses the
+    notice sentence), silently losing the operator's only notice of a result
+    no turn ever answered. The hold now picks the shape per row: already
+    durable -> delivered, otherwise -> held.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    attempts = {"n": 0}
+    real_append = session._transcript.append_message
+
+    async def flaky_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE and attempts["n"] == 0:
+            attempts["n"] += 1
+            raise OSError("disk full (simulated)")
+        return await real_append(message, **kwargs)
+
+    monkeypatch.setattr(session._transcript, "append_message", flaky_append)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    assert not _job_result_rows(session), "precondition: the settle-time write was lost"
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+
+    session.retire_job_deliveries_to_transcript()
+    session._is_streaming = False
+    await session._deliver_deferred_job_results()
+
+    from local_operator.harness.rows import held_delivery_notice
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1"]
+    assert (
+        held_delivery_notice(rows[0].payload.get("details")) is not None
+    ), "a row no screen saw and no turn will answer must carry the held marker"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_turn_does_not_journal_its_row_twice(tmp_path):
+    """The incoming-journal loop must skip a row that is already durable.
+
+    The QA probe on the delivery fix (PR #1619) found the gap every other cell
+    missed: the batch hands the row written at settle time back as the turn's
+    INITIAL, and ``_run_turn_pipeline`` journaled every initial unconditionally
+    -- two settled jobs became FOUR transcript rows under the same two ids, and
+    a successor's first provider request carried each result twice. The cells
+    that observe the hand-over replace ``_prompt_messages`` with a fake, which
+    is exactly why none of them could see the real loop run; this cell drives
+    the REAL pipeline and reads the transcript afterwards.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True  # the marathon turn
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    await session._on_job_completed("j2", "two", _settled_job("j2"))
+    session._is_streaming = False
+
+    await session._deliver_deferred_job_results()
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while len(stream.requests) < 2 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert len(stream.requests) >= 2, "the delivery turn never reached the provider"
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1", "j2"], (
+        "exactly one row per settled job -- a twin under the same id is the "
+        f"regression the probe caught: {[row.id for row in rows]}"
+    )
+    assert len({row.id for row in rows}) == 2, "the two rows must be distinct entries"
+    body = json.dumps(stream.requests[1].model_dump(mode="json"))
+    assert body.count("background job 'j1' completed") == 1, "the result rides once"
+    assert body.count("background job 'j2' completed") == 1
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_delivery_turn_does_not_journal_its_row_twice(tmp_path):
+    """The pre-abort drop path journals the initials, guarded the same way.
+
+    Sir Knight review round 1, finding 1: a delivery turn whose batch is
+    stopped-work residue enters ``_run_turn`` with ``_abort_requested`` still
+    set (``_STOPPED_WORK_RESIDUE_TYPES`` includes ``job_result``), so the drop
+    gate fires and ``_drop_pre_aborted_turn`` -- a second, sibling journal loop
+    -- wrote each settle-time row AGAIN under the same id (reproduced before
+    the guard: rows = 2, distinct ids = 1). The earlier cells all run the
+    un-aborted path, so none covered this arm.
     """
     stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
     session = make_session(tmp_path, stream)
     await session.prompt("start a job")
     session._is_streaming = True
-    await session._on_job_completed("qa-r2", "one", _settled_job("qa-r2"))
-    session._disposed = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    session._is_streaming = False
+    session._abort_requested = True  # the abort the residue arrived under
 
     await session._deliver_deferred_job_results()
 
-    assert _job_result_rows(session) == [], "off the latch, a disposal still delivers nothing"
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while session._pre_aborted_drops < 1 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert session._pre_aborted_drops >= 1, "the drop gate never fired"
+    assert len(stream.requests) == 1, "a dropped turn must not call the provider"
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1"]
+    assert len({row.id for row in rows}) == 1, "the dropped turn re-journaled the row"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_turn_marks_a_lost_settle_write_as_held(tmp_path, monkeypatch):
+    """The combination Sir Knight round 2 (finding 1) found: abort pending AND
+    the settle-time write failed.
+
+    The drop arm wrote the unmarked object durably -- a row no screen saw and
+    no turn answered, which the TUI replay skips entirely and the phone loses
+    its "held when it arrived" sentence for. The shape is now decided at the
+    drop itself: a not-yet-durable ``job_result`` row is marked held before it
+    is written, while a row already durable keeps its delivered shape.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    attempts = {"n": 0}
+    real_append = session._transcript.append_message
+
+    async def flaky_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE and attempts["n"] == 0:
+            attempts["n"] += 1
+            raise OSError("disk full (simulated)")
+        return await real_append(message, **kwargs)
+
+    monkeypatch.setattr(session._transcript, "append_message", flaky_append)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    assert not _job_result_rows(session), "precondition: the settle-time write was lost"
+    session._is_streaming = False
+    session._abort_requested = True  # the abort the residue arrives under
+
+    await session._deliver_deferred_job_results()
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    # Wait for the ROW, not the counter: ``_pre_aborted_drops`` increments at
+    # the top of ``_drop_pre_aborted_turn``, before its append has landed.
+    while not _job_result_rows(session) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert session._pre_aborted_drops >= 1, "the drop gate never fired"
+    assert len(stream.requests) == 1, "a dropped turn must not call the provider"
+
+    from local_operator.harness.rows import held_delivery_notice
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1"]
+    assert len({row.id for row in rows}) == 1
+    assert (
+        held_delivery_notice(rows[0].payload.get("details")) is not None
+    ), "the dropped turn's lost-write row must carry the held marker"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mismatched_message_batch_is_rebuilt_not_truncated(tmp_path):
+    """A caller's pairing error must not silently drop a result (review R1-5).
+
+    ``messages`` is paired with ``results`` positionally; a mismatch used to
+    rely on ``zip``, which TRUNCATES. The guard rebuilds the rows instead, so
+    every result still reaches the turn.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    await session._deliver_job_results(
+        [("j1", "one", _settled_job("j1")), ("j2", "two", _settled_job("j2"))],
+        messages=[session._job_result_message("j1", "one", _settled_job("j1"))],
+    )
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while len(stream.requests) < 2 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert len(stream.requests) >= 2, "the delivery turn never reached the provider"
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == [
+        "j1",
+        "j2",
+    ], "a truncated pairing would deliver only j1"
+    await session.dispose()
 
 
 @pytest.mark.asyncio
@@ -4717,7 +5015,15 @@ async def test_a_job_result_settling_after_the_latch_is_not_left_in_memory(tmp_p
 
     assert session._deferred_job_results == {}, "nothing may be parked in dying memory"
     assert len(stream.requests) == spent_before
-    assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == ["j1"]
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1"]
+    # A row HELD AT ARRIVAL carries the marker the surfaces read (UX round 1,
+    # U6): the operator never saw this one land, so it must not read as an
+    # already-acknowledged delivery. A row the settle itself journaled while a
+    # turn was up does NOT carry it -- there the operator watched it arrive,
+    # and the marker's own first clause ("held when it arrived") would be
+    # false on it (see ``_hold_job_results_for_next_turn``).
+    assert rows[0].payload["details"].get("held") is True
     await session.dispose()
 
 

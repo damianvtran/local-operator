@@ -215,6 +215,13 @@ async def _work_turn_with_deferred_children(
         # therefore before the flush that follows it.
         assert handle.begin_drain("runtime-retired", "(0.62.31 → 0.62.32)") is True
         assert session._leaving_deliveries is True, "the latch has to reach the session"
+        # A result that lands AFTER the latch: held AT ARRIVAL, so its row is
+        # written by the holding arm WITH the marker (U6). The two settles
+        # above journaled their rows at settle time -- before the latch
+        # existed -- and keep the delivered shape; that contrast is the point
+        # of the extra arrival, and it is what keeps the marker's end-to-end
+        # coverage after the early write moved the marker's line.
+        await session._on_job_completed("late-r7", "the late report", _settled("late-r7"))
 
     stream.release.set()
     await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
@@ -240,7 +247,14 @@ async def test_a_settled_batch_survives_an_exit_that_already_committed(
             config, directory, latch=True
         )
         assert len(stream.requests) == 1, "the held batch must not have bought a turn"
-        assert [row.get("job_id") for row in _job_result_rows(directory)] == ["qa-r2", "rev-r6"]
+        assert [row.get("job_id") for row in _job_result_rows(directory)] == [
+            "qa-r2",
+            "rev-r6",
+            "late-r7",
+        ], (
+            "every result is durable: the two mid-turn settles journal at settle "
+            "time, and the post-latch arrival is written by the holding arm"
+        )
         # ...and the exit runs, over the real disposal rung the drain leads to.
         await session.dispose()
 
@@ -256,7 +270,8 @@ async def test_a_settled_batch_survives_an_exit_that_already_committed(
     assert [row.get("job_id") for row in held] == [
         "qa-r2",
         "rev-r6",
-    ], f"both results must be durable, in settle order, after the exit: {held!r}"
+        "late-r7",
+    ], f"all three results must be durable, in settle order, after the exit: {held!r}"
 
     # THE SUCCESSOR: a real boot over the same directory, running a real turn.
     # This is the half that makes "durable" mean "the model sees it".
@@ -271,6 +286,7 @@ async def test_a_settled_batch_survives_an_exit_that_already_committed(
         )
         assert "the QA round finished" in sent, sent[-2000:]
         assert "the review round finished" in sent, sent[-2000:]
+        assert "the late report" in sent, sent[-2000:]
         assert (
             "[session incident]" not in sent
         ), "a successor that re-verifies finished work is the wasted turn this fixes"
@@ -279,19 +295,31 @@ async def test_a_settled_batch_survives_an_exit_that_already_committed(
     # U7, ON THE REAL FLOW (review round 2): the held marker is written once and
     # cleared nowhere, so the notice is painted on every later replay — and the
     # first wording claimed "no turn has read it yet", which after THIS turn is a
-    # lie. The successor has now read and answered both reports; the notice is
+    # lie. The successor has now read and answered the reports; the notice is
     # recomposed here from the DURABLE rows by the production decision, and it must
     # still be a fact about the arrival rather than a claim about now.
+    #
+    # TWO ROW SHAPES, and this scenario produces both on purpose: ``late-r7``
+    # was held at arrival and carries the marker; ``qa-r2``/``rev-r6``
+    # journaled their rows at settle time, before the latch existed, and keep
+    # the delivered shape -- the operator watched those arrive, so the marker's
+    # first clause ("held when it arrived") would be false on them. The
+    # recomposition contract below is asserted on the marked row.
     from local_operator.harness.rows import HELD_DELIVERY_NOTICE, held_delivery_notice
 
-    for row in _job_result_rows(directory):
-        decided = held_delivery_notice(row)
-        assert decided is not None, "the row is still marked held, which is now harmless"
-        text, _severity = decided
-        assert "no turn ran for it at that point" in text
+    by_id = {row.get("job_id"): row for row in _job_result_rows(directory)}
+    for job_id in ("qa-r2", "rev-r6"):
         assert (
-            "has read it yet" not in text
-        ), "after the answering turn, the notice must not still claim nobody read it"
+            held_delivery_notice(by_id[job_id]) is None
+        ), f"{job_id} arrived while the turn was up and keeps its delivered shape"
+    assert by_id["late-r7"].get("held") is True, "held at arrival, the marker must ride it"
+    decided = held_delivery_notice(by_id["late-r7"])
+    assert decided is not None, "the row is still marked held, which is now harmless"
+    text, _severity = decided
+    assert "no turn ran for it at that point" in text
+    assert (
+        "has read it yet" not in text
+    ), "after the answering turn, the notice must not still claim nobody read it"
     assert "no turn has read it yet" not in HELD_DELIVERY_NOTICE
 
 
@@ -330,3 +358,15 @@ async def test_a_settled_batch_still_opens_one_turn_without_the_latch(
         "the QA round finished" in delivered and "the review round finished" in delivered
     ), f"both results ride the same turn: {delivered[-2000:]}"
     assert len(_run_rows(directory)) == 2, "the delivery turn opened its own run"
+    # ONE ROW PER RESULT, re-asserted AFTER the delivery turn ran. The rows
+    # above are written at settle time; the delivery turn then hands those same
+    # messages back as its initials, and the pipeline's incoming-journal loop
+    # must not journal them a second time (the QA probe on this PR measured two
+    # rows becoming FOUR, same ids, until the loop learned to skip a durable
+    # row). The latch cell cannot see this -- its batch is held, not delivered
+    # -- so this is the only cell that runs the loop over pre-durable initials.
+    rows = _job_result_rows(directory)
+    assert [row.get("job_id") for row in rows] == ["qa-r2", "rev-r6"], (
+        "one row per result after the delivery turn: the loop must skip rows "
+        f"already made durable at settle time (found {[r.get('job_id') for r in rows]})"
+    )

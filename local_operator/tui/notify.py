@@ -1165,10 +1165,11 @@ class Notifier:
         stopped talking, but the WORK the user asked for is not done, and a
         toast then is a false finish. Staying quiet costs nothing, because
         settled jobs re-enter the conversation as a fresh turn whose own
-        completion is notifiable (``Session._on_job_completed``; jobs that
-        settle while a turn is streaming are held and arrive TOGETHER as one
-        turn once it ends, ``Session._deliver_deferred_job_results``) — so the
-        user is told once, when the last child has landed.
+        completion is notifiable (``Session._on_job_completed``). Results that
+        settle while a turn is streaming are journaled as they land and their
+        MODEL hand-over still arrives TOGETHER as one turn once that turn ends
+        (``Session._deliver_deferred_job_results``) — so the user is told once,
+        when the last child has landed.
 
         Deliberately counts children rather than asking whether any single
         child finished: a child's own completion is never notifiable on its
