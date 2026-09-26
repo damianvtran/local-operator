@@ -8720,7 +8720,7 @@ class OperatorApp(App[None]):
             if not source.display_only:
                 self._submit_boot_prompt(session)
             session.resume_viewer_gates()
-            self._session_sidebar.current_id = session_id
+            self._session_sidebar.set_current(session_id)
             self._session_sidebar.refresh()
             if refreshing and focused_before_refresh is not None:
                 if focused_before_refresh is old_view:
@@ -9733,7 +9733,7 @@ class OperatorApp(App[None]):
             return
         # Closed list: adopt the fresh read so the drawer, when it next opens,
         # shows the order the switch just traversed rather than the stale one.
-        self._session_sidebar.current_id = str(getattr(self._session, "session_id", ""))
+        self._session_sidebar.set_current(str(getattr(self._session, "session_id", "")))
         self._session_sidebar.set_entries(entries)
         self._switch_session_from(self._session_sidebar.entries, delta)
 
@@ -9943,7 +9943,7 @@ class OperatorApp(App[None]):
                 ):
                     return
                 session = self._session
-                self._session_sidebar.current_id = str(getattr(session, "session_id", ""))
+                self._session_sidebar.set_current(str(getattr(session, "session_id", "")))
                 self._session_sidebar.set_entries(entries)
                 self._session_sidebar.set_pins(pins)
                 self._session_sidebar.set_silent_peers(silent)
@@ -10463,6 +10463,17 @@ class OperatorApp(App[None]):
         # a runaway nobody can halt (see `_cmd_stop`, QA Q-2). Recorded on
         # adoption because that is the one edge where the identity is known.
         self._adopted_session_id = getattr(session, "session_id", "") or ""
+        # AND THE LIST SHOWS IT, from here rather than from each caller, because
+        # THIS is the one edge every arrival goes through — boot, `/new`,
+        # `/resume`, `/new remote <peer>`, a notification click, a remote takeover
+        # are all `_adopt_session` calls, which is the same reason the line above
+        # lives here. `/new remote` is the case that made the omission visible
+        # (re-shot sidebar evidence, mesh lane): the session is minted on the peer
+        # and stood in inside one keystroke, and the sidebar was never told, so on
+        # a populated store the row the pane said the user was in sat below the
+        # fold. The sidebar owns the reveal itself (`set_current` -> `_reveal`,
+        # the list's own scroll rule); all this edge owes it is the fact.
+        self._session_sidebar.set_current(self._adopted_session_id)
         # The latch belongs to the BINDING, not to the app: a swapped-in
         # session is cold again and owes its own engage. Its declaration has
         # always said a swap resets it, but nothing did — harmless while the

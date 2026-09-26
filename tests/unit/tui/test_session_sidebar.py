@@ -9,6 +9,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -3892,3 +3893,245 @@ async def test_the_hover_text_names_who_opened_an_agent_opened_row():
     assert described[1][2:] == ["agent-opened", "ws0000000002"]
     assert len(described[2]) == 3 and described[2][2] == "own000000001"
     assert not any("opened" in line for line in described[2])
+
+
+# ---------------------------------------------------------------------------
+# ARRIVING at a session shows its row
+# ---------------------------------------------------------------------------
+
+
+#: The session the peer mints in the cell below. It is the id the CLI's own
+#: receipt names (``lop network sessions --peer … --create`` prints
+#: ``session: <id>``), so it is the session the surface OPENS rather than one the
+#: test invents for the arrival.
+MINTED_PEER_SESSION = "9f2ac1e0b7d2"
+
+
+class _PeerViewer(FakeSession):
+    """What ``open_remote_viewer`` returns: a viewer whose owner is ANOTHER device.
+
+    Subclassed rather than patched onto ``FakeSession.session_id``, because the
+    id is the entire subject of the cell below — the list has to scroll to the row
+    for THIS session — and a property patched after the arrival would make the
+    assertion about a different fact from the one the reveal acted on.
+    """
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__()
+        self._peer_session_id = session_id
+
+    @property
+    def session_id(self) -> str:
+        return self._peer_session_id
+
+
+def _cold_rows(count: int = 40) -> list[CatalogEntry]:
+    """A cold list long enough to page, newest first, so the input IS the order.
+
+    ``created_at`` is given explicitly, and that is load-bearing rather than
+    decorative: it is the ranking's third term, and its default of ``0.0`` makes
+    every row in this file a TIE, which the id then breaks — a tie is how the
+    arriving row ended up ranked FIRST here (``9`` sorts before ``a``) and the
+    cell passed on an unrevealed list until the premise below caught it.
+    """
+    now = time.time()
+    return [
+        CatalogEntry(
+            SessionRow(
+                f"a{index:02d}", now - index, f"Session a{index:02d}", created_at=now - index
+            )
+        )
+        for index in range(count)
+    ]
+
+
+#: How old the peer's session is, in the fixture below. A cold list is ordered by
+#: birth (``CatalogEntry.rank``'s third term), so the arriving row must be OLDER
+#: than every local row or the list would file it first — where it is on the page
+#: before anything reveals it, and the cell below would be green on both trees.
+_PEER_ROW_AGE_S = 10_000.0
+
+
+def _peer_row(session_id: str) -> SessionRow:
+    """A peer's session as this device's catalogue lists it: remote and reachable."""
+    born = time.time() - _PEER_ROW_AGE_S
+    return SessionRow(
+        session_id,
+        born,
+        f"Session {session_id}",
+        created_at=born,
+        locality="remote",
+        owner_device="d_peer",
+        owner_device_name="pixel-8",
+        reachable=True,
+    )
+
+
+def _caret_line(sidebar: Any, needle: str) -> str:
+    """The painted line carrying ``needle`` — read off the RENDERED frame.
+
+    The page arithmetic below (`visible_entries`, `_offset`) says where the window
+    is; this says the frame agrees, which is what "the caret is drawn on it"
+    means. `render()` wants the widget's own width, hence the widget argument.
+    """
+    for line in sidebar.render().plain.splitlines():
+        if needle in line:
+            return line
+    raise AssertionError(f"{needle!r} is not on the frame at all")
+
+
+@pytest.mark.asyncio
+async def test_creating_a_remote_session_reveals_the_row_it_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/new remote <peer>`` attaches to the session it created AND shows it.
+
+    THE GAP THIS PINS (found by the lane that re-shot the sidebar evidence, on
+    branch ``feat/mesh-network``): ``_reveal`` ran only from the sidebar's own
+    navigation actions, so every OTHER way of arriving at a session left the list
+    where it was — and `/new remote`, the headline flow, is the one that mints a
+    session and stands in it inside a single keystroke. On a populated store the
+    row the pane says the user is in sat below the fold, which is the defect by
+    any reading: the app attached them to a session and did not show it.
+
+    WHAT IS DRIVEN, and what is stubbed, named rather than implied: the gesture is
+    `/new remote damian-mbp` through its real handler, and the arrival is the real
+    one — `_open_session_or_refuse` → `_open_remote_session` →
+    `_adopt_built_viewer` → `_adopt_session`. Only the three network boundaries are
+    stubbed: the CLI subprocess (`run_network`), the relay's row read
+    (`remote_row_for`) and the viewer construction (`open_remote_viewer`), which
+    are exactly the seams the mesh tests already stub because they need a live
+    relay. The list's rows are seeded through ``_sidebar_with`` — the same fixture
+    every other geometry cell in this file uses — because a unit test's store is
+    empty and the point here is the ARRIVAL, not the producer.
+    """
+    from local_operator.network.peers import KnownPeer
+    from local_operator.session import remote_open
+    from local_operator.tui import app as app_mod
+    from local_operator.tui.network_cli import NetworkRun
+
+    monkeypatch.setattr(
+        "local_operator.network.peers.resolve_peer",
+        lambda target, root=None: (
+            [KnownPeer(device_id="d_aaaa", name="damian-mbp", role="admin")]
+            if target in ("damian-mbp", "d_aaaa")
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        app_mod,
+        "run_network",
+        lambda args, **kwargs: NetworkRun(
+            tuple(args),
+            0,
+            stdout=f"session: {MINTED_PEER_SESSION}\ncreated on damian-mbp\nprompt admitted\n",
+        ),
+    )
+    monkeypatch.setattr(remote_open, "remote_row_for", lambda sid, root: _peer_row(sid))
+
+    async def open_viewer(session_id: str, **kwargs: Any) -> Any:
+        return _PeerViewer(session_id)
+
+    monkeypatch.setattr(remote_open, "open_remote_viewer", open_viewer)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [*_cold_rows(), CatalogEntry(_peer_row(MINTED_PEER_SESSION))]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        sidebar.focus()
+        await pilot.pause()
+        assert sidebar.has_focus, "premise: the caret is only painted on a focused list"
+
+        target = next(entry for entry in sidebar.entries if entry.id == MINTED_PEER_SESSION)
+        index = sidebar.entries.index(target)
+        # PREMISE, asserted rather than assumed: without it a list that fits its
+        # whole order on one page would pass on an unrevealed row, and the cell
+        # would be green on both trees.
+        assert index >= sidebar.page_size, (
+            f"premise: the arriving row must start below the fold "
+            f"(index={index} page_size={sidebar.page_size} entries={len(sidebar.entries)})"
+        )
+        assert target.id not in {
+            entry.id for entry in sidebar.visible_entries
+        }, "premise: the arriving row must not already be on the drawn page"
+        assert sidebar.cursor_id != MINTED_PEER_SESSION, "premise: the caret starts elsewhere"
+
+        app._run_slash_command("/new remote damian-mbp")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert (
+            app._adopted_session_id == MINTED_PEER_SESSION
+        ), "premise: the create must have attached this terminal to the peer's session"
+        context = (
+            f"offset={sidebar._offset} page_size={sidebar.page_size} "
+            f"index={index} entries={len(sidebar.entries)}"
+        )
+        page = {entry.id for entry in sidebar.visible_entries}
+        assert (
+            MINTED_PEER_SESSION in page
+        ), f"the session the app attached to is not on the drawn page ({context})"
+        assert (
+            sidebar.cursor_id == MINTED_PEER_SESSION
+        ), f"the caret is not on the session the app attached to ({context})"
+        line = _caret_line(sidebar, f"Session {MINTED_PEER_SESSION}")
+        assert line.startswith("›"), f"the caret is not painted on that row: {line!r}"
+
+
+@pytest.mark.asyncio
+async def test_an_arrival_the_list_cannot_carry_yet_is_revealed_when_the_row_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An arrival before its row exists lands on the poll that delivers it.
+
+    ``/new remote`` mints the session on the peer INSIDE the keystroke, so the
+    list's snapshot — a 2 s poll, not a live view — cannot contain the row the app
+    has just adopted. A reveal that only fires when the row is already in
+    ``entries`` is therefore correct on a warm list and silently does nothing at
+    the exact moment it matters; this is the arm that closes that, mirroring
+    ``ctrl+o``'s (``_land_pending_jump``), which the sidebar already had for the
+    same reason.
+
+    The deadline is asserted too: past it the intent is dropped, so a row that
+    appears long after the user has moved on cannot yank the caret. That bound is
+    the arm's whole reason for existing, and it is asserted by shifting it rather
+    than by sleeping on it.
+    """
+    from local_operator.tui.widgets import session_sidebar as sidebar_mod
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = app._session_sidebar
+        sidebar.set_open(True)
+        if app._sidebar_timer is not None:
+            app._sidebar_timer.pause()
+        app._sidebar_refresh_generation += 1
+        sidebar.set_entries(_cold_rows())
+        await pilot.pause()
+        before = sidebar.cursor_id
+
+        # The arrival, the way the app makes it, with the row not yet in the list.
+        sidebar.set_current(MINTED_PEER_SESSION)
+        assert sidebar.cursor_id == before, "the caret cannot move to a row the list lacks"
+
+        # The poll that carries the row: `_refresh_sidebar.refresh`'s own call.
+        sidebar.set_entries([*_cold_rows(), CatalogEntry(_peer_row(MINTED_PEER_SESSION))])
+        assert sidebar.cursor_id == MINTED_PEER_SESSION, "the arriving row was never revealed"
+        page = {entry.id for entry in sidebar.visible_entries}
+        assert MINTED_PEER_SESSION in page, (
+            f"the row landed off the page (offset={sidebar._offset} "
+            f"page_size={sidebar.page_size} entries={len(sidebar.entries)})"
+        )
+
+        # …and the same arm, past its deadline, does nothing.
+        sidebar.set_entries(_cold_rows())
+        sidebar.set_current("b-not-in-the-list")
+        monkeypatch.setattr(sidebar_mod, "PENDING_ARRIVAL_REVEAL_S", 0.0)
+        sidebar.set_current("")
+        sidebar.set_current(MINTED_PEER_SESSION)
+        sidebar.set_entries([*_cold_rows(), CatalogEntry(_peer_row(MINTED_PEER_SESSION))])
+        assert (
+            sidebar.cursor_id != MINTED_PEER_SESSION
+        ), "an expired arm still revealed a row that arrived after it"
