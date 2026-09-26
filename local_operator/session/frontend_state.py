@@ -6564,7 +6564,7 @@ class FrontendStateStore:
                 # frontend to the provider reading from before the rewrite.
                 settled_context = event.context_tokens or aggregate.context_tokens
                 changes.update(
-                    last_usage=aggregate.model_dump(mode="json"),
+                    last_usage=_usage_with_decode_window(aggregate),
                     context_tokens=settled_context,
                     context_is_estimate=(
                         True
@@ -6585,7 +6585,7 @@ class FrontendStateStore:
             # which is what the remainder below is computed against.
             call_cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
             changes.update(
-                last_usage=usage.model_dump(mode="json"),
+                last_usage=_usage_with_decode_window(usage),
                 context_tokens=usage.context_tokens or usage.input_tokens or state.context_tokens,
                 context_is_estimate=False,
             )

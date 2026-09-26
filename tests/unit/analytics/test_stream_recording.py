@@ -27,6 +27,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolResult,
     Usage,
+    decode_window_of,
 )
 from local_operator.model.configure import SessionStreamFn
 
@@ -664,5 +665,41 @@ def test_the_seam_reads_the_clock_once_per_output_delta(tmp_path, monkeypatch):
     assert (
         with_500 - with_one == 499
     ), f"499 further deltas must cost 499 reads; got {with_500 - with_one}"
+    rec.close()
+    store.close()
+
+
+def test_the_relayed_window_agrees_with_the_ledger_when_usage_arrives_early(tmp_path):
+    """The one invariant §9.3 states: the band and the ledger agree about a call.
+
+    A provider may send its usage frame BEFORE its final deltas — ``text → usage →
+    tool_call_delta…`` is ordinary, because tool-call argument deltas count as
+    output — so a stamp applied only at the usage event closes the window too early
+    and would have the band contradict the ledger (measured at 3.6x on this shape).
+    The seam re-stamps in its ``finally`` with the complete window; this is the
+    assertion that keeps it.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = reset_recorder_for_test(store)
+    fn = _fn("sess-1")
+    relayed = Usage(input_tokens=100, output_tokens=240, context_tokens=100)
+    events = [
+        StreamTextDelta(delta="first "),
+        StreamUsageEvent(usage=relayed),  # usage BEFORE the last delta
+        StreamTextDelta(delta="second "),
+        StreamTextDelta(delta="third "),
+        StreamEndEvent(stop_reason="stop", usage=relayed),
+    ]
+    asyncio.run(_drain(fn, _request(), events))
+    rec.flush_for_test()
+
+    agg, _row = _decode_of(store)
+    window = decode_window_of(relayed)
+    assert agg.decode_calls == 1
+    assert window is not None, "the final deltas arrived; the window must be complete"
+    assert window == (agg.decode_us, agg.decode_tokens), (
+        f"the relay carries {window} while the ledger recorded "
+        f"{(agg.decode_us, agg.decode_tokens)} — the band would contradict the ledger"
+    )
     rec.close()
     store.close()
