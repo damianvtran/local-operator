@@ -88,7 +88,16 @@ async def _armed_warm(bridge: Any) -> asyncio.Task[None]:
 
 
 @pytest.mark.asyncio
-async def test_replay_receipts_precede_snapshot_even_when_snapshot_is_newer(tmp_path):
+async def test_replay_receipts_precede_snapshot_even_when_snapshot_is_newer(tmp_path, monkeypatch):
+    # THE ONE EXISTING TEST THE DWELL NEEDS `RECONNECT_DWELL_S = 0` FOR (design
+    # §8.4), and it needs it because of what it asserts at its end: that the last
+    # release detached. With the dwell armed, a stream subscription that loses its
+    # transport holds the bridge for the window instead -- which is the whole
+    # point of D2 -- so "the last viewer leaving detaches" is a claim about the
+    # ZERO case, and the zero case is CONTRACT rather than a test hook. The
+    # dwell's own file carries the other side of it
+    # (`test_a_reconnect_inside_the_dwell_keeps_the_epoch_and_replays_the_outage`).
+    monkeypatch.setattr(module, "RECONNECT_DWELL_S", 0)
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     async with pool.session(sid) as bridge:
@@ -255,9 +264,7 @@ async def test_the_pre_open_drop_is_exactly_the_watermark(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_nothing_awaits_between_the_snapshot_state_and_its_watermark(
-    tmp_path, monkeypatch
-):
+async def test_nothing_awaits_between_the_snapshot_state_and_its_watermark(tmp_path, monkeypatch):
     """The guard for the ordering the pre-open drain depends on.
 
     ``snapshot()`` captures its state and its sequence with NOTHING awaiting
