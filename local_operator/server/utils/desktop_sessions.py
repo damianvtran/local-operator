@@ -160,6 +160,30 @@ BRIDGE_COUNT = 64
 #: flag exactly as before.
 REMOTE_READ_FIRST_FRAME_GRACE_S = READ_ATTACH_BUDGET_S
 
+#: How long ``POST /warm`` will wait for the owner to ANSWER before it declines
+#: to call the session warm (``DesktopSessionBridge.warm``).
+#:
+#: WHY THIS EXISTS AT ALL. The receipt used to be ``if not remote.is_cold: return
+#: "warm"``, and ``is_cold`` is a purely LOCAL predicate
+#: (``session/attached.py``): a viewer whose socket is still open reads live even
+#: when the owner is frozen, because a SIGSTOPped process sends no FIN and
+#: nothing the viewer can read locally changes. Measured on the in-tree rig with
+#: the owner SIGSTOPped, 4/4 rows answered ``200 {"state": "warm"}`` while the
+#: truth took a ``POST /messages`` and 15.0-15.6 s to surface. A fast wrong answer
+#: is worse than a slow honest one, because the slowness at least signals that
+#: something is wrong.
+#:
+#: ONE SECOND, not the 15 s an ack would otherwise allow. A healthy owner answers
+#: ``ping`` synchronously — the op is exempt from the runtime's op chain
+#: precisely so a health probe is not queued behind mutations
+#: (``session/runtime/server.py`` ``_UNCHAINED_OPS``) — so the honest case costs
+#: a round trip on loopback and the dishonest case is bounded well inside the two
+#: seconds the not-stale contract requires a viewer to learn the truth in. A
+#: budget near ``ACK_TIMEOUT_S`` would turn every stopped-owner warm into a
+#: 15 s hang on the first keystroke, which is the failure mode this route's
+#: "first keystroke must feel instant" design is built to avoid.
+WARM_VERIFY_BUDGET_S = 1.0
+
 #: How many recent one-shot announcements a bridge remembers by correlation id
 #: (see ``DesktopSessionBridge.publish_once``). Sized like the other bounded
 #: memories on this path rather than derived from a measurement: the window only
@@ -1316,10 +1340,40 @@ class DesktopSessionBridge:
         # (``_read_attach_settled``) carries the verdict. Reporting ``False``
         # there would say "nothing is coming" over an attach that is.
         in_flight = self.read_attach_task is not None and not self.read_attach_task.done()
+        verified_at = remote.verified_at
+        if remote.is_cold or verified_at is None:
+            # NOTHING REPORTS LIVE WITHOUT AN ANSWERED ROUND TRIP (§6 rule 1).
+            # ``is_cold`` alone cannot carry that claim: it is three local
+            # disjuncts with no round trip in it, so a facade whose owner has
+            # been SIGSTOPped reads live for as long as its socket stays open —
+            # the measured false-live this rule exists to remove.
+            #
+            # ``owner-silent`` is the closed-vocabulary token for exactly this
+            # state and the docstring above already defines it: "a pid DOES hold
+            # the lease ... and did not deliver canonical state inside the
+            # read's budget". ``remote.cold_reason`` returns ``None`` on a
+            # non-cold facade (it is derived from ``is_cold``), so this branch
+            # supplies the token rather than publishing a null reason with a
+            # cold verdict.
+            #
+            # ``attaching`` is True here even when ``is_cold`` is False — a dial
+            # exists and its state is not verified — which keeps §6 rule 4
+            # (``cold: false`` and ``attaching: true`` mutually exclusive) true
+            # by construction rather than by inspection.
+            return {
+                "cold": True,
+                "cold_reason": remote.cold_reason or "owner-silent",
+                "attaching": remote.attaching or in_flight or not remote.is_cold,
+            }
         return {
-            "cold": remote.is_cold,
-            "cold_reason": remote.cold_reason,
-            "attaching": remote.attaching or (in_flight and remote.is_cold),
+            "cold": False,
+            "cold_reason": None,
+            "attaching": False,
+            # Published ONLY with the live half, so "a cold facade never carries
+            # ``verified_at``" is a property of the frame rather than a hope, and
+            # a reader that needs "now" has the stamp it must age itself (§6
+            # rule 2: age is the reader's, never the writer's).
+            "verified_at": verified_at,
         }
 
     async def acquire(self, *, read: bool = False) -> AttachedSession:
@@ -3541,7 +3595,28 @@ class DesktopSessionBridge:
         remote = self.remote
         assert remote is not None
         if not remote.is_cold:
-            return "warm"
+            # A RESIDENT FACADE IS NOT EVIDENCE, and this is the receipt the
+            # operator's complaint turns on: with the owner SIGSTOPped a viewer's
+            # socket stays open, ``is_cold`` stays False, and this route answered
+            # ``200 {"state": "warm"}`` on 4/4 rows. A frozen process answers
+            # nothing, so the probe is what separates "warm" from "was warm when
+            # we last spoke" — and it is the SAME op the runtime already serves
+            # for liveness, not a second mechanism beside it.
+            #
+            # ``warming`` rather than a refusal on an unanswered probe: the
+            # session does have an owner and the engage is genuinely owed, so the
+            # honest answer is the one the cold arm already gives. What changes is
+            # that the receipt no longer claims the owner is CURRENT.
+            if await remote.verify_live(WARM_VERIFY_BUDGET_S):
+                return "warm"
+            # ``warming`` WITHOUT scheduling an engage, and the omission is the
+            # point: this facade already HAS an owner (that is what ``is_cold``
+            # False means) which merely did not answer. ``_schedule_warm`` would
+            # start a second engage for a session that already has a runtime —
+            # trading a false "warm" for a duplicated runtime, which is worse.
+            # What the receipt gives up is the CLAIM, not the dialect: the route
+            # still reports a state a renderer can act on.
+            return "warming"
         self._schedule_warm()
         return "warming"
 
