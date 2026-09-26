@@ -2506,21 +2506,30 @@ async def test_a_standing_failure_survives_the_idle_window_and_releases_once_res
         )
         assert await _pump(pilot, lambda: not source_a.active_workers)
 
-        def sweep() -> list:
+        def sweep() -> list[Any]:
             """Run one sweep tick with its release hand-off captured.
 
             The sweep schedules release work through `run_worker`; capturing
             the coroutine (and closing it) is how this suite observes the
             RELEASE decision without disposing the source underneath the
             assertions — the same shape `test_sidebar_idle_reap.py` uses.
+            Patched through `monkeypatch.setattr` because this suite's typed
+            `app` refuses a direct method assignment (pyright's
+            `reportAttributeAccessIssue`), and restored the same way so the
+            patch cannot leak into a later tick of this app.
             """
-            released: list = []
+            released: list[Any] = []
+
+            def capture(coro: Any, **kw: Any) -> Any:
+                released.append(coro)
+                return coro.close()
+
             original = app.run_worker
-            app.run_worker = lambda coro, **kw: released.append(coro) or coro.close()
+            monkeypatch.setattr(app, "run_worker", capture)
             try:
                 app._sweep_idle_sidebar_sources()
             finally:
-                app.run_worker = original
+                monkeypatch.setattr(app, "run_worker", original)
             return released
 
         await _to_sidebar(app, pilot, _sidebar_remote("side-b"))
