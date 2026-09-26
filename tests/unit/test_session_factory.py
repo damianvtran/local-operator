@@ -6247,3 +6247,38 @@ async def test_a_tool_removed_mid_turn_stays_in_the_array_until_the_next_turn(
     assert seeded is True
     assert dropped == [False], "a mid-turn removal must not republish the array"
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_projects_registry_reaches_the_session_and_its_tools(
+    tmp_config_dir: Path,
+) -> None:
+    """The projects primitive is wired at the COMPOSITION ROOT, not per surface.
+
+    Three things must be true of a factory-built session, and each has its own
+    failure mode if the wiring is dropped: the session carries a
+    ``ProjectRegistry`` rooted at the operator's config dir (the store the
+    desktop routes and the slash command also read), the per-turn
+    ``ToolContext`` carries THE SAME instance (so the tool cannot write a store
+    nobody reads), and both tools are advertised in the inventory the model is
+    given. The registry is built beside ``TeamRegistry`` under
+    degrade-one-feature handling, so a host whose ``projects/`` is unreadable
+    still boots — this asserts the happy path, not that a failure is fatal.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.projects import ProjectRegistry
+
+    session = await create_session(
+        _args(hosting="test", model="test"),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        registry = session.project_registry
+        assert isinstance(registry, ProjectRegistry)
+        assert registry.config_dir == tmp_config_dir
+        assert session._build_tool_context().project_registry is registry
+        assert {"project", "project_delete"} <= {tool.name for tool in session._tools}
+    finally:
+        await session.dispose()
