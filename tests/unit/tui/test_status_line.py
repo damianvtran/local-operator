@@ -43,6 +43,7 @@ from local_operator.tui.widgets.status_line import (
     ICON_CWD,
     ICON_DURATION,
     ICON_JOBS,
+    ICON_LAST_RATE,
     ICON_MCP,
     ICON_MODEL,
     ICON_TEAM,
@@ -2291,4 +2292,7 @@ def test_the_last_rate_segment_is_labelled_and_sheds_before_cost() -> None:
     empty = StatusLine(_dock(200), clock=FakeClock())
     empty.update(model_label="test/model", cwd="/tmp")
     rendered = empty.render_text(200).plain
-    assert "last" not in rendered and "—" not in rendered
+    # The GLYPH, not the substring: a model label or a conversation title may
+    # contain the word `last`, which would make a substring check pass for the
+    # wrong reason (review round 1).
+    assert ICON_LAST_RATE not in rendered and "—" not in rendered
