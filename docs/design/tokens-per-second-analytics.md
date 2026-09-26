@@ -692,7 +692,7 @@ measured, and it costs the frame **once per roster row**. Two reasons compound:
 the field is in the SCHEMA of every usage on the wire, so nothing drops it from
 `jobs[i].usage` the way a `FrontendUsage`-only field was dropped; and the relay
 assigns the stamped object to the assistant message AFTER the stream loop
-(`loop.py:2641` → `:2835` → `subagent.py:1464` → `:1536`), so the window lands on
+(`loop.py:2641` → `:2835` → `subagent.py:1459` → `:1537`), so the window lands on
 the very object `_accumulate_usage` copies into each job row. Measured through
 `sync_wire_payload`: 1 row +39 B (2 occurrences), 20 rows +780 B (21), **200 rows
 +7,800 B (201 occurrences)** — ~46x over the 168 B of slack, i.e. the recorded
