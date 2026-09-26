@@ -13,15 +13,18 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_operator.projects import (
+    MILESTONES_MAX,
     PROJECT_PROGRESS_STALE_S,
     PROJECT_SCHEMA,
     MilestoneEdit,
     Project,
     ProjectEdit,
+    ProjectMilestone,
     ProjectNameConflictError,
     ProjectRegistry,
     ProjectRegistryLockTimeout,
@@ -91,7 +94,8 @@ def test_an_inverted_range_is_refused_only_when_both_dates_are_set(
     assert project is not None
     # Clearing one side is how "TBD" is expressed; the update path must allow it.
     store.update_project(project.id, ProjectEdit(target_date=""))
-    assert store.get_project_by_name("ok").target_date is None
+    cleared = store.get_project_by_name("ok")
+    assert cleared is not None and cleared.target_date is None
 
 
 def test_milestones_are_capped_and_case_insensitively_unique(store: ProjectRegistry) -> None:
@@ -99,20 +103,23 @@ def test_milestones_are_capped_and_case_insensitively_unique(store: ProjectRegis
     with pytest.raises(ValueError):
         store.update_project(
             project.id,
-            ProjectEdit(milestones=[{"name": f"m{i}", "target_date": None} for i in range(21)]),
+            ProjectEdit(
+                milestones=[ProjectMilestone(name=f"m{i}") for i in range(MILESTONES_MAX + 1)]
+            ),
         )
-    store.update_project(project.id, ProjectEdit(milestones=[{"name": "Beta cut"}]))
+    store.update_project(project.id, ProjectEdit(milestones=[ProjectMilestone(name="Beta cut")]))
     with pytest.raises(ValueError):
         store.update_project(
-            project.id, ProjectEdit(milestones=[{"name": "Beta cut"}, {"name": "beta CUT"}])
+            project.id,
+            ProjectEdit(
+                milestones=[ProjectMilestone(name="Beta cut"), ProjectMilestone(name="beta CUT")]
+            ),
         )
     with pytest.raises(ValueError):
-        store.update_project(project.id, ProjectEdit(milestones=[{"name": "x" * 81}]))
+        store.update_project(project.id, ProjectEdit(milestones=[ProjectMilestone(name="x" * 81)]))
 
 
 def test_milestone_status_is_derived_from_dates_never_stored() -> None:
-    from local_operator.projects import ProjectMilestone
-
     assert milestone_status(ProjectMilestone(name="m", completed_at="2026-09-01")) == "completed"
     assert milestone_status(ProjectMilestone(name="m", target_date="2000-01-01")) == "overdue"
     assert milestone_status(ProjectMilestone(name="m", target_date="2999-01-01")) == "upcoming"
@@ -288,7 +295,8 @@ def test_status_done_stamps_completion_only_on_the_transition(store: ProjectRegi
 
     # Staying done does not move the date.
     store.update_project(project.id, ProjectEdit(status="done"))
-    assert store.get_project(project.id).completed_at == stamped
+    stamped_row = store.get_project(project.id)
+    assert stamped_row is not None and stamped_row.completed_at == stamped
 
     # Moving away leaves it; coming back stamps afresh.
     paused = store.update_project(project.id, ProjectEdit(status="paused"))
@@ -298,10 +306,9 @@ def test_status_done_stamps_completion_only_on_the_transition(store: ProjectRegi
 
     # An explicit clear is honoured even on the transition.
     create(store, name="second", status="done", completed_at="")
-    assert store.get_project_by_name("second").completed_at is None
-    explicit = store.update_project(
-        store.get_project_by_name("second").id, ProjectEdit(status="done", completed_at="")
-    )
+    second = store.get_project_by_name("second")
+    assert second is not None and second.completed_at is None
+    explicit = store.update_project(second.id, ProjectEdit(status="done", completed_at=""))
     assert explicit.project.completed_at is None
 
 
@@ -394,7 +401,9 @@ def test_the_surgical_milestone_op_adds_updates_completes_and_removes(
 # -- the composed view -------------------------------------------------------
 
 
-def _seed_session(root: Path, session_id: str, *, title: str | None, jobs: list[dict]) -> Path:
+def _seed_session(
+    root: Path, session_id: str, *, title: str | None, jobs: list[dict[str, Any]]
+) -> Path:
     session_dir = root / "sessions" / session_id
     session_dir.mkdir(parents=True)
     (session_dir / "created_at.json").write_text("1700000000.0")

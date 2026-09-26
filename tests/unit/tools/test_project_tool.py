@@ -87,7 +87,8 @@ async def test_create_without_a_session_identity_makes_an_unlinked_project(
     bare = ToolContext(cwd=".", project_registry=registry)
     body = await call(bare, op="create", name="loose-ends")
     assert "no session link" in body
-    assert registry.get_project_by_name("loose-ends").sessions == []
+    created = registry.get_project_by_name("loose-ends")
+    assert created is not None and created.sessions == []
 
 
 @pytest.mark.asyncio

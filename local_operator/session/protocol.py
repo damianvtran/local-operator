@@ -1633,9 +1633,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """The MCP startup outcome (discovery failures), or ``None``."""
         ...
 
-    # The registries behind ``/agent`` and ``/team``. Each is the registry of
-    # the machine the VIEWER runs on, which is why a viewer is a real
-    # implementation and not a passthrough.
+    # The registries behind ``/agent``, ``/team`` and ``/project``. Each is the
+    # registry of the machine the VIEWER runs on, which is why a viewer is a
+    # real implementation and not a passthrough.
 
     @property
     def agent_registry(self) -> Any | None:
@@ -1645,6 +1645,16 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     @property
     def team_registry(self) -> Any | None:
         """The user's team registry, or ``None`` when none is wired."""
+        ...
+
+    @property
+    def project_registry(self) -> Any | None:
+        """The user's project registry, or ``None`` when none is wired.
+
+        Under the same rule as its two neighbours: ``/project`` names projects
+        on the machine the VIEWER runs on, so a viewer implements it lazily
+        off its own config dir rather than proxying the owner's.
+        """
         ...
 
     # Per-frame reads with a narrow accessor, so a frame does not pay the
