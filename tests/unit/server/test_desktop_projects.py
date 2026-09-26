@@ -249,6 +249,9 @@ async def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation(api) ->
     payload = json.loads(path.read_text())
     payload["schema"] = 2
     payload["future_field"] = True
+    # A linked session, so the unlink route reaches the mutation (and therefore
+    # the guard) rather than stopping at its membership check.
+    payload["sessions"] = [SESSION_A]
     path.write_text(json.dumps(payload))
 
     read = await client.get(f"/v1/desktop/projects/{project_id}")
@@ -258,6 +261,28 @@ async def test_a_row_from_a_newer_build_is_readable_but_refuses_mutation(api) ->
     assert write.status_code == 409
     assert write.json()["detail"]["code"] == "project_schema_newer"
     assert "update this build" in write.json()["detail"]["message"]
+
+    # EVERY mutating route answers the same way. These three used to fall
+    # through to `errors()`'s generic RuntimeError arm — the guard subclasses
+    # RuntimeError — and told the client `503 runtime_unreachable`, a reconnect
+    # remedy that can never work (QA round 1, Q1; agent review M1).
+    for response in (
+        await client.post(
+            f"/v1/desktop/projects/{project_id}/links", json={"session_id": "abcdef012345"}
+        ),
+        await client.delete(f"/v1/desktop/projects/{project_id}/links/{SESSION_A}"),
+        await client.request(
+            "DELETE", f"/v1/desktop/projects/{project_id}", json={"confirm": "alpha"}
+        ),
+    ):
+        assert response.status_code == 409, response.text
+        detail = response.json()["detail"]
+        assert detail["code"] == "project_schema_newer", detail
+        assert "update this build" in detail["message"]
+
+    # ... and none of them wrote: the row still exists, still schema 2.
+    still_there = json.loads(path.read_text())
+    assert still_there["schema"] == 2 and still_there["sessions"] == [SESSION_A]
 
 
 async def test_lock_contention_answers_503(api, monkeypatch) -> None:

@@ -47,7 +47,7 @@ Two consequences worth knowing: the block is a **snapshot**, so it is as fresh a
 
 ## Views and the record
 
-Two things read the same row: the terminal's `/project` surface and the desktop **Projects** tab (list / board / timeline, plus a detail page with milestones and linked sessions). Both render from one composition of "what is each linked session doing" — runtime state, subagent counts, todo counts.
+Today the row is read through the `project` tool and the terminal's `/project` listing; the desktop **Projects** tab (list / board / timeline, plus a detail page with milestones and linked sessions) lands in a later UI slice. All of them render from one composition of "what is each linked session doing" — runtime state, subagent counts, todo counts.
 
 What is **stored** versus **derived** matters when you report:
 
@@ -71,5 +71,6 @@ It fires at most once per turn, only after a worked turn, only for stale records
 ## Surfaces
 
 - Agents write through the `project` tool; its `list`/`show` results are the reading surface.
-- The operator reads and acts via `/project` (terminal and desktop) and the desktop **Projects** tab; the desktop gates on the `projects` capability.
-- A slash form that survives on every surface is the reserved vocabulary `list | show | new | delete | link | unlink` — milestone editing is tool/API/UI work, not a slash verb.
+- The operator's `/project` lists today; the other reserved verbs (`new`/`delete`/`link`/`unlink`) answer "not in this build yet — use /project list, the agent's project tool, or the desktop Projects tab", and the desktop **Projects** tab itself lands in a later slice.
+- Milestone editing is tool/API/UI work, not a slash verb: the reserved vocabulary stays `list | show | new | delete | link | unlink`, and `/v1/desktop/projects` is the API a renderer grows into.
+- The desktop gates on the `projects` capability (`"projects": 1`), so an older backend hides the tab once it ships.

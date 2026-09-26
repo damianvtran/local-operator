@@ -10,6 +10,7 @@ the view payload.
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 from pathlib import Path
@@ -100,7 +101,9 @@ def test_an_inverted_range_is_refused_only_when_both_dates_are_set(
 
 def test_milestones_are_capped_and_case_insensitively_unique(store: ProjectRegistry) -> None:
     project = create(store)
-    with pytest.raises(ValueError):
+    # The cap refusal NAMES its remedy, one shape with the link cap's "unlink
+    # one first" (agent review round 1, m1 — the guide promises both name it).
+    with pytest.raises(ValueError, match="remove one"):
         store.update_project(
             project.id,
             ProjectEdit(
@@ -124,6 +127,25 @@ def test_milestone_status_is_derived_from_dates_never_stored() -> None:
     assert milestone_status(ProjectMilestone(name="m", target_date="2000-01-01")) == "overdue"
     assert milestone_status(ProjectMilestone(name="m", target_date="2999-01-01")) == "upcoming"
     assert milestone_status(ProjectMilestone(name="m")) == "upcoming"
+
+
+def test_the_default_date_basis_is_the_utc_today_the_stamp_comes_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One "today" or the badge contradicts the stamp (agent review round 1, n1).
+
+    Pinned by DISCRIMINATION, not by reading the source: the patched moment
+    (2000-01-01) is BEFORE the target (2000-06-01), which is before any real
+    run's local today. A helper-basis run calls that "upcoming"; a fallback to
+    ``date.today()`` calls it "overdue", so the test fails if the two bases
+    ever drift apart again.
+    """
+
+    from local_operator import projects
+
+    monkeypatch.setattr(projects, "_utc_today", lambda: datetime.date(2000, 1, 1))
+    assert milestone_status(ProjectMilestone(name="m", target_date="2000-06-01")) == "upcoming"
+    assert projects._today_iso() == "2000-01-01"
 
 
 # -- storage -----------------------------------------------------------------

@@ -341,7 +341,13 @@ async def remove(key: str, body: ProjectDelete, request: Request) -> CRUDRespons
                 )
             try:
                 registry.delete_project(found.id)
-            except ProjectRegistryLockTimeout as exc:
+            except (ProjectSchemaGuardError, ProjectRegistryLockTimeout) as exc:
+                # The write guard subclasses RuntimeError, and ``errors()``'s
+                # generic RuntimeError arm answers 503 runtime_unreachable —
+                # a reconnect remedy that can never work while the true
+                # remedy ("update this build") is lost. Caught HERE so the
+                # refusal matrix holds on every mutating route (QA round 1,
+                # Q1: delete/link/unlink were the three that missed it).
                 raise _refusal(exc, key) from exc
             return ProjectDeleted()
 
@@ -359,7 +365,15 @@ async def link(key: str, body: LinkMutation, request: Request) -> CRUDResponse[A
                 raise _not_found(registry, key)
             try:
                 project, _added = registry.link_session(found.id, body.session_id)
-            except (ValueError, ValidationError, ProjectRegistryLockTimeout) as exc:
+            except (
+                ValueError,
+                ValidationError,
+                ProjectSchemaGuardError,
+                ProjectRegistryLockTimeout,
+            ) as exc:
+                # ``ProjectSchemaGuardError`` last-but-named for the reason the
+                # delete route states: it subclasses RuntimeError, so an
+                # uncaught guard reaches ``errors()``'s 503 arm.
                 raise _refusal(exc, key) from exc
             live = _live_counts(registry, [project])
             return project_summary(project, live_sessions=live.get(project.id, 0))
@@ -378,7 +392,12 @@ async def unlink(key: str, session_id: str, request: Request) -> CRUDResponse[An
                 raise _not_found(registry, key)
             try:
                 project, _removed = registry.unlink_session(found.id, session_id)
-            except (ValueError, ValidationError, ProjectRegistryLockTimeout) as exc:
+            except (
+                ValueError,
+                ValidationError,
+                ProjectSchemaGuardError,
+                ProjectRegistryLockTimeout,
+            ) as exc:
                 raise _refusal(exc, key) from exc
             live = _live_counts(registry, [project])
             return project_summary(project, live_sessions=live.get(project.id, 0))
