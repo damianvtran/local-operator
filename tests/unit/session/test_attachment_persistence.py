@@ -624,3 +624,51 @@ class TestLateAdoptionBeforeTheFirstTurn:
             assert session._goal_state.team_brief == ""
         finally:
             await session.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_live_pre_turn_attach_is_not_reverted_by_a_stale_sidecar(
+        self, tmp_path, registries, monkeypatch
+    ):
+        """F1 (review round 1): the attach the operator JUST made wins over a stale file.
+
+        The sidecar write is best-effort (``write_session_attachment``
+        swallows failures by contract), so a live ``/team`` / ``/agent`` /
+        ``/goal`` made before the first turn can sit beside a file still
+        holding the PREVIOUS life's values. The late adoption must not revert
+        those live slots: per slot, a stored value that DIFFERS from a
+        non-empty live one is skipped, and the live value stays.
+        """
+        from local_operator import resume as resume_module
+
+        agents, teams = registries
+        # The stale sidecar's values RESOLVE, so a guard-less adoption would
+        # actually re-attach them and clobber the live ones — the failure F1
+        # names. A stale value that merely fails to resolve would not.
+        teams.save_team(_team("architects"))
+        agents.create_agent(_role_fields(name="scribe", description="Writes", tags=["role"]))
+        session = _late_adoption_session(tmp_path, registries)
+
+        # The previous life left its values on disk...
+        resume_module.write_session_attachment(
+            tmp_path / "sess", team="architects", agent="scribe", goal="the stale goal"
+        )
+        # ...and the live attaches below run with the journal write failing
+        # SILENTLY (a no-op writer is the observable end state of the real
+        # best-effort contract), so the file keeps those old values.
+        monkeypatch.setattr(resume_module, "write_session_attachment", lambda *a, **k: None)
+        session.attach_team(teams.get_team_by_name("lopdev"))
+        session.attach_agent_profile("auditor")
+        session.set_goal("the live goal")
+
+        await session.prompt("first")
+        try:
+            # Per slot: the live value survives.
+            assert session.active_team_name == "lopdev"
+            assert session.active_agent == "auditor"
+            assert session.goal == "the live goal"
+            # The stale values never engaged at all — no carries, no notice.
+            assert session._unresolved_team == ""
+            assert session._unresolved_agent == ""
+            assert session.attachment_restore_notice == ""
+        finally:
+            await session.dispose()
