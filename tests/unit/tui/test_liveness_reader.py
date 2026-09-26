@@ -10,11 +10,11 @@ would spend the operator's latency to buy truthfulness he can have for free.
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.session.runtime.types import LIVE_FRESHNESS_BUDGET_S
 from local_operator.tui.liveness import (
@@ -488,13 +488,29 @@ async def test_a_live_fork_outranks_the_liveness_term(tmp_path, monkeypatch):
         # constant that passes whether or not the band renders it -- which is
         # precisely why CI had to catch the original `assert 'forking · esc' in
         # 'No owner'`.
-        row = app._status.render_text(100).plain
-        assert FORK_PENDING_TEXT in row, f"the fork lost its only cancellable segment: {row!r}"
-        assert "Not answering" in row, f"the term that explains the dead end is gone: {row!r}"
-        assert row.index("Not answering") < row.index("\u00b7", row.index("Not answering")) + 1
-        # AGE LAST: the ellipsis must eat the age and never a word.
-        tail = row.split("Not answering", 1)[1]
-        assert re.match(r" \u00b7 \S", tail), f"the age is not in final position: {row!r}"
+        assert app._status is not None  # narrows the Optional for the checker AND the runtime
+        # THE EXACT COMPOSITION, not a membership test. A `" · " in row` style
+        # assertion is anchored after the word and passes with the age DELETED --
+        # the reviewer's finding, and the same class as the tautology it replaced.
+        composed = getattr(app._status, "_connection", "")
+        assert composed == f"{FORK_PENDING_TEXT} \u00b7 Not answering \u00b7 10m", composed
+        # Age LAST, asserted by POSITION in the string that is actually painted.
+        assert composed.endswith("10m") and composed.index("forking") < composed.index(
+            "Not answering"
+        )
+
+        # AND THE ROW AT A TRUNCATING WIDTH, because that is where "the ellipsis
+        # eats the age and never a word" is a property at all: at 100 cells the
+        # row is 34 and nothing is clipped, so the test could not exercise it.
+        # Measured by the reviewer at 77->62->57->35: the NAME truncates first,
+        # then the age; neither head is ever eaten.
+        for width in (62, 57, 35):
+            narrow = app._status.render_text(width).plain
+            assert cell_len(narrow) <= width, (width, narrow)
+            assert "forking" in narrow, (width, narrow)
+            assert "Not answering" in narrow, (width, narrow)
+            assert narrow.index("forking") < narrow.index("Not answering"), (width, narrow)
+
         # And the app's own reader still classifies the owner as unanswerable --
         # this is a DISPLAY decision, not a mis-classification.
         assert app._liveness_row_text(session).startswith("Not answering")
