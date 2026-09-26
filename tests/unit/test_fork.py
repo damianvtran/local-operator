@@ -1474,6 +1474,11 @@ def _band():
     band._jobs = 0
     band._streaming = False
     band._cost = ""
+    # The band's LAST-RATE cell: `_render` reads it, so this stand-in carries it
+    # like every other field `_render` reads (the docstring above is the contract —
+    # adding a field to the painter means adding it here, which is exactly how this
+    # list caught the omission on CI rather than in a frame).
+    band._last_rate = ""
     band._conversation_name = ""
     band._forked = False
     band._fork_pending = False
