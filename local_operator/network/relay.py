@@ -2145,12 +2145,17 @@ def audit_status_words(payload: Mapping[str, Any], *, omit_steady: bool = False)
             return ""
         return f"{int(recorded)} recorded, published through {int(recorded)}"
     if payload.get("relay_running"):
-        # 67 CELLS, MEASURED, and that is why the wording is this tight: the panel's
-        # value budget is 68 (an 84-cell region, a 14-cell label, and the card's own
-        # padding), so a longer sentence WRAPS — and a wrapped second line is below the
-        # fold, which puts the end of the sentence exactly where the silence this line
-        # exists to break used to be. The CLI and the digest have room; the row has to
-        # be one row on all three, or the panel is the surface where it fails.
+        # 67 CELLS, MEASURED, and that is why the wording is this tight: the panel's own
+        # row is the title block's third line, whose card is 83 cells at the canonical
+        # 100-column capture, so the value budget is 69 (83 minus the 14-cell label) and
+        # a longer sentence costs the reader cells rather than rows. The panel ELIDES it
+        # to the budget and marks the cut with ``…`` (``_one_row_value``), so a row that
+        # cannot hold the whole sentence says so instead of wrapping — a wrapped second
+        # line lands outside the block's fixed three rows, which round 4 measured as the
+        # block growing 3 -> 8 rows and the scrolled region collapsing 6 -> 1 at 50x18.
+        # The CLI and the digest have room; the row has to be one row on all three, or
+        # the panel is the surface where it fails, and 67 cells is what fits that one
+        # row everywhere the panel is captured.
         return "unavailable — relay not answering; audit.jsonl holds the last state"
     return ""
 

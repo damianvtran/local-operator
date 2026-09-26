@@ -2317,10 +2317,19 @@ InfoScreen .analytics-panel, NetworkScreen .analytics-panel {
      * asked — as the title's third line, because the Relay block it used to sit in
      * is the last thing in a scrolled region and the fold takes it first (design
      * round 4, D46/D47). With the class, that padding row becomes the sentence's
-     * row: same three rows, so the news costs the body nothing; without it, the
-     * steady panel keeps the styles — and the bytes — it always had. A wrapped
-     * sentence grows the block (`auto`) instead of being cropped. */
-    height: auto;
+     * row: the SAME three rows the base rule above pins, so the news costs the body
+     * nothing at any width; without it, the steady panel keeps the styles — and the
+     * bytes — it always had.
+     *
+     * AND THE THREE ROWS ARE NOT NEGOTIABLE (review round 4 MAJOR 1; design round 5,
+     * D48). This rule used to carry `height: auto`, and a sentence too long for one
+     * row grew the block instead of being cut: measured 3 -> 4 -> 8 rows from the
+     * canonical 100x30 down to 50x18, out of a `1fr` region that went 16 -> 10 -> 1,
+     * plus the 1-cell rule overflow wrapping onto a row of its own at the floor.
+     * The row is now elided to the cells it has (`_one_row_value` in
+     * `widgets/network_panel.py`, which carries the budget and the `…` that marks
+     * the cut) and the height stays the base rule's, so this state differs from the
+     * steady one in ONE ROW'S CONTENT and in nothing else. */
     padding-bottom: 0;
 }
 
