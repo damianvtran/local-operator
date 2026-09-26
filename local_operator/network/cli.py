@@ -2757,9 +2757,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
     # while the human block said nothing about them, which made a lagging writer and a
     # healthy one the same picture to the reader the numbers are for (design round 3,
     # D40). It sits ABOVE ``log:`` because it is news about the relay's own state while
-    # the log path is a location — and because the TUI's Relay block shares this order,
-    # so a reader moving between the two surfaces reads the same block twice (the panel
-    # pays for the row out of its own layout; see ``network_panel._report_text``).
+    # the log path is a location. The TUI prints the row in the same words at the same
+    # cell, but NOT in this block: its Relay block is the last thing in a scrolled region
+    # that grows with the table above it, so round 4 hoisted the row into the panel's
+    # title, where the fold cannot reach it (design round 4, D46; the panel's block is
+    # ``network_panel._title_text``). This command has no fold — its block prints whole.
     audit_words = relay_mod.audit_status_words(payload)
     if audit_words:
         lines.append(f"audit:      {audit_words}")

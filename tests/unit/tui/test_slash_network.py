@@ -1074,19 +1074,23 @@ def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_relay_block_pays_for_the_audit_row_only_when_it_has_news() -> None:
-    """THE FOLD IS THE CONSTRAINT, so the row is conditional and it sits above ``log:``.
+def test_the_audit_row_is_painted_where_the_fold_cannot_reach_it() -> None:
+    """THE FOLD IS THE CONSTRAINT, so the row left the scrolled region entirely.
 
-    The Relay block paints into an 84x16 region holding a 17-row body: the scrollbar is
-    already up and ``log:`` is already below the fold
-    (``static/tui-mesh-network.geometry.json``). A steady-state row would therefore buy
-    nothing and cost a ROW, so the steady state paints exactly what it painted before
-    this change — the row that carries news is the one a reader opens the panel for
-    (a lag, a degraded writer, or a relay that cannot be asked).
+    Round 3 painted the audit news in the Relay block and paid for it out of the
+    block's separator blank. That held only while the content above held still: the
+    block is the LAST thing in ``#network-scroll``, whose height grows with every
+    network and peer row, so two more peers pushed the block — and the row with it —
+    under the fold, and the distinction vanished again in exactly the state the row
+    exists for (design round 4, D46, measured on the real wedged payload and on the
+    fixture with two more peers: ``virtual_size`` 18 and 20 in an 84x16 region).
 
-    And it is rendered in the row the separator blank used to hold, BEFORE ``log:``
-    rather than appended: the last body row is the invisible one, so a news row at the
-    end would land under the fold — a silence, which is the failure D40 is about.
+    The row is the title block's third line now, outside ``#network-scroll`` and out
+    of its budget, in the row the title's own blank padding used to hold — so what this
+    pins is a model fact rather than a pixel: **the body is the same in every audit
+    state**, and the news is a property of the panel. A steady panel paints the third
+    line empty, which is the frame every geometry comparison in the round (and the
+    committed README figure) is made against.
     """
     import json
 
@@ -1108,27 +1112,112 @@ def test_the_relay_block_pays_for_the_audit_row_only_when_it_has_news() -> None:
         return screen.render_lines_for_test()
 
     steady = block({"pid": 4711, "audit_recorded_through": 13, "audit_published_through": 13})
-    assert not [line for line in steady if line.startswith("  audit:")], steady
-
     lagging = block({"pid": 4711, "audit_recorded_through": 13, "audit_published_through": 12})
-    audit_at = next(n for n, line in enumerate(lagging) if line.startswith("  audit:"))
-    log_at = next(n for n, line in enumerate(lagging) if line.startswith("  log:"))
-    assert audit_at < log_at, lagging
-    # Values at cell 14, the column the four rows around it already use, and the value
-    # keeps that indent when it wraps (``_indented_value``, UX round 3 U22) — this block
-    # wraps at the panel's 40-cell floor, the capture size wraps nothing.
-    assert lagging[audit_at].index("13 recorded") == 14, lagging[audit_at]
-    assert "".join(lagging[audit_at:log_at]).replace(" ", "") == (
-        "audit:13recorded,publishedthrough12(1notyetwritten)"
-    ), lagging[audit_at:log_at]
-    # THE SEPARATOR IS WHAT PAYS FOR IT, and that is the width-independent fact: the
-    # steady body keeps its blank line before ``Relay``, the news body has the row
-    # instead. (The body's LINE COUNT is not comparable here — this panel is rendered at
-    # its 40-cell floor, where the audit value itself wraps; at the capture size the
-    # geometry JSON carries the stronger number, ``virtual_size`` 17 in every state.)
-    relay_at = next(n for n, line in enumerate(steady) if line == "Relay")
-    assert steady[relay_at - 1] == "", steady[relay_at - 2 : relay_at + 1]
-    assert lagging[relay_at - 1] != "", lagging[relay_at - 2 : relay_at + 1]
+
+    # The steady panel carries no news anywhere, and the title block contributes no
+    # third line: that row is the title's own padding, which is what keeps the steady
+    # frame's styles — and its bytes — exactly as they were.
+    assert not [line for line in steady if line.startswith("  audit:")], steady
+    assert steady[0] == "Mesh networks", steady
+    assert steady[_body_start(steady)] == "This device", steady[:5]
+
+    # The news is on the TITLE: after the rule and before the body, in the same words
+    # at the same cell 14 the block's rows use — so a reader moving between the panel
+    # and `lop network status` reads the same field twice.
+    body_at = _body_start(lagging)
+    assert lagging[0] == "Mesh networks", lagging
+    assert lagging[1] == steady[1], lagging[:2]
+    news_lines = lagging[2:body_at]
+    assert news_lines[0].startswith("  audit:"), lagging[:5]
+    assert lagging[2].index("13 recorded") == 14, lagging[2]
+    # The value keeps that indent when it wraps (``_indented_value``, UX round 3 U22):
+    # this block wraps at the panel's 40-cell floor, the capture size wraps nothing.
+    news = "".join(news_lines)
+    assert news.replace(" ", "") == "audit:13recorded,publishedthrough12(1notyetwritten)", news
+
+    # THE BODY IS STATE-INDEPENDENT, and the separator is the section rhythm in every
+    # state — the two halves of D47: the news no longer spends the blank, so `Relay` no
+    # longer abuts the peers list in the states that carry news.
+    steady_at = _body_start(steady)
+    assert lagging[body_at:] == steady[steady_at:]
+    relay_at = next(n for n, line in enumerate(steady) if line == "Relay") - steady_at
+    assert steady[steady_at + relay_at - 1] == "", steady[steady_at + relay_at - 2 :]
+    assert lagging[body_at + relay_at - 1] == "", lagging[body_at + relay_at - 2 :]
+
+
+def _body_start(lines: list[str]) -> int:
+    """Where the scrolled body begins — the first row after the title block."""
+    return next(n for n, line in enumerate(lines) if line == "This device")
+
+
+@pytest.mark.asyncio
+async def test_the_news_row_costs_the_scrolled_body_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE ROW IS OUTSIDE THE REGION, and the region does not shrink to pay for it.
+
+    The rig's numbers as a mounted invariant: the title block is three rows with news
+    and three rows without it — the ``audit-news`` class swaps its padding row for the
+    sentence, which is what keeps the steady frame's styles (and its bytes) exactly what
+    every geometry comparison in the round is made against — and ``#network-scroll`` is
+    the same box in both states. ``1fr`` makes that the second half of the claim: the
+    region is whatever the title and hint leave, so a row the title took would be a body
+    row lost, and the designer's "nothing that was on-page was pushed off it" is a
+    property here rather than a measurement (design round 4, D46/D47).
+    """
+    import json
+
+    import local_operator.tui.widgets.network_panel as panel_mod
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    def stub(published_through: int) -> Any:
+        def run(args: list[str], **kwargs: Any) -> NetworkRun:
+            if not args or args[0] != "status":
+                return NetworkRun(tuple(args), 0, stdout="")
+            return NetworkRun(
+                tuple(args),
+                0,
+                stdout=json.dumps(
+                    {
+                        "installed": True,
+                        "identity_present": True,
+                        "relay_running": True,
+                        "relay_answering": True,
+                        "relay_state": "live",
+                        "relay": {
+                            "pid": 4711,
+                            "audit_recorded_through": 13,
+                            "audit_published_through": published_through,
+                        },
+                        "record": {"pid": 4711},
+                        "log": "/tmp/iso/logs/network.log",
+                    }
+                ),
+            )
+
+        return run
+
+    boxes: dict[bool, tuple[int, int, bool]] = {}
+    for news in (False, True):
+        monkeypatch.setattr(panel_mod, "run_network", stub(12 if news else 13))
+        app = _app_fixture()
+        async with app.run_test(size=(100, 30)) as pilot:
+            screen = NetworkScreen(_panel_local())
+            app.push_screen(screen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            title = screen.query_one("#network-title")
+            boxes[news] = (
+                # The BORDER box: Textual sizes border-box and `size` is the content box,
+                # so the steady title is a 3-row box holding 2 rows of content and a
+                # padding row, and the news state is a 3-row box holding 3 rows of
+                # content — the same row, spent differently.
+                title.region.height,
+                screen.query_one("#network-scroll").size.height,
+                title.has_class("audit-news"),
+            )
+    assert boxes[False] == (3, 16, False), boxes
+    assert boxes[True] == (3, 16, True), boxes
 
 
 def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be() -> None:
@@ -1138,6 +1227,12 @@ def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be(
     in a state where the relay may not answer — so the panel must not go quiet here,
     because its silence is indistinguishable from a healthy writer's. This is the one
     surface case D40 said it would not accept as a follow-up.
+
+    AND IT NAMES THE PROCESS IT IS TALKING ABOUT (design round 4, D45). The wedged
+    payload is the one where ``relay`` is null, which is exactly why the pid cannot be
+    read from that block alone: it printed the literal ``None`` above a sentence saying
+    the process is up. The record on disk carries the pid, and the panel reads the pair
+    in the order the CLI and the agent digest already do.
     """
     import json
 
@@ -1155,12 +1250,14 @@ def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be(
                 "relay_answering": False,
                 "relay_state": "wedged",
                 "relay": None,
+                "record": {"pid": 35292},
                 "log": "/tmp/iso/logs/network.log",
             }
         ),
     )
     text = "\n".join(screen.render_lines_for_test())
-    assert "relay:      running, pid None — NOT answering" in text, text
+    assert "relay:      running, pid 35292 — NOT answering" in text, text
+    assert "pid None" not in text, text
     assert "audit:" in text, text
     # The sentence is present even at this cell's 40-cell panel width, wrapped by
     # ``_indented_value`` — the panel at its capture size prints it on one row.

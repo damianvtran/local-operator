@@ -2311,6 +2311,19 @@ InfoScreen .analytics-panel, NetworkScreen .analytics-panel {
     padding-bottom: 1;
 }
 
+#network-title.audit-news {
+    /* The title block's third row is PADDING in every state but one: `/network`
+     * paints the audit news — a degraded writer, a lag, or a relay that cannot be
+     * asked — as the title's third line, because the Relay block it used to sit in
+     * is the last thing in a scrolled region and the fold takes it first (design
+     * round 4, D46/D47). With the class, that padding row becomes the sentence's
+     * row: same three rows, so the news costs the body nothing; without it, the
+     * steady panel keeps the styles — and the bytes — it always had. A wrapped
+     * sentence grows the block (`auto`) instead of being cropped. */
+    height: auto;
+    padding-bottom: 0;
+}
+
 #analytics-scroll, #session-report-scroll, #info-scroll, #network-scroll {
     width: 100%;
     height: 1fr;

@@ -2108,15 +2108,15 @@ def audit_status_words(payload: Mapping[str, Any], *, omit_steady: bool = False)
       printed (``0 recorded`` would call every row buffered on a reader that
       believed it);
     * NO relay process at all — nothing is printed either, and that is a rule rather
-      than an oversight: with no writer there is no lag that could be hidden, the
-      ``relay:`` line directly above says ``not running`` on every one of these
-      surfaces, and the TUI's Relay block is already one row past its own fold.
+      than an oversight: with no writer there is no lag that could be hidden, and the
+      ``relay:`` line says ``not running`` on every one of these surfaces.
 
-    ``omit_steady`` drops the steady-state line and NOTHING ELSE. The TUI sets it: its
-    Relay block paints into an 84x16 region that already holds a 17-row body (the
-    scrollbar in ``static/tui-mesh-network.geometry.json`` is the measurement), so a
-    row that says "nothing is wrong" would cost the row that would say something
-    (design round 3, D40). Every state that carries news is still rendered there.
+    ``omit_steady`` drops the steady-state line and NOTHING ELSE. The TUI sets it: the
+    panel paints the row as its title block's third line (round 4 moved it out of the
+    Relay block, which the fold clipped — D46), so a steady line would cost a row on the
+    one frame every geometry comparison and the committed figure are made against, for a
+    sentence that says nothing is wrong. Every state that carries news is still rendered
+    there.
     """
     relay = payload.get("relay") or {}
     if payload.get("relay_answering"):

@@ -407,7 +407,7 @@ form of key escrow.
 | `lop network invite [--expires 10m] [--role read\|drive\|admin] [--device <device>]` | Mint a single-use invite token for this network. `--device` binds redemption to one device id, so a token that reaches any other device is refused and burned (`mesh-transport-identity.md` §5.1); it is the form to use after any compromise |
 | `lop network join <token>` | Join a network from an invite; shows the SAS for confirmation |
 | `lop network ls` | Networks this device is in, with role, epoch, member count, reachability |
-| `lop network show <network>` | Members, roles, endpoints, capability grants, audit tail |
+| `lop network show <network>` | Members, roles, endpoints, capability grants |
 | `lop network rename <network> <name>` / `rm <network>` | Modify / forget a network locally |
 | `lop network member rm <network> <device>` | Revoke a member (rotates the secret, bumps the epoch) |
 | `lop network peers` | Reachable peers right now, latency, session counts |
