@@ -6127,7 +6127,7 @@ class OperatorApp(App[None]):
         # BEFORE the turn paints, so the queue's own row is gone by the time
         # the prompt's echo appears under it — the notice narrates the hold,
         # and the hold ends here (design round 3, D15). Same current-view
-        # guard as `_withdraw_user_echo_for`: a background source's notice
+        # guard the retired-echo removal used: a background source's notice
         # lives in a view this app can no longer reach, and its teardown is
         # the view's own business.
         if notice is not None and self._is_current(source):
@@ -6140,8 +6140,11 @@ class OperatorApp(App[None]):
             # line would run, and an echo the worker cannot see is one it cannot
             # resolve. The worker's `finally` clears it on every path (review
             # round 2, MAJOR-3). Boxed like the direct path (see
-            # ``PendingSend``), so the dispatch capture follows a view rebuild.
-            source.turn.submitted_blocks = PendingSend(blocks)
+            # ``PendingSend``), so the dispatch capture follows a view rebuild;
+            # a hold that somehow lost its rows hands the slot nothing rather
+            # than an empty box — its failure then resolves by text, exactly as
+            # before the record existed.
+            source.turn.submitted_blocks = PendingSend(blocks) if blocks is not None else None
             self._start_turn_for(
                 source,
                 held,
