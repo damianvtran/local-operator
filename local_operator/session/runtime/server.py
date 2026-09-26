@@ -2590,10 +2590,19 @@ class RuntimeServer:
             except Exception:
                 # A failed first publish must leave the boot exactly as the
                 # constructor-native failure did — no publisher, so
-                # ``wait_until_published`` still answers False — rather than
-                # an installed publisher standing over a record that does not
-                # exist.
+                # ``wait_until_published`` still answers False — and no
+                # readable record either. The record half is why the close is
+                # here: a session thread's write-through can COMPLETE a
+                # heartbeat while this publish is in flight, and without the
+                # close that record outlives the rollback (nothing else
+                # unlinks it — ``_shutdown_impl`` unpublishes only behind a
+                # publisher, and thread mode swallows the raise). The close
+                # serialises with the writes (``RecordPublisher.close``), so
+                # it removes whatever raced it and refuses what comes after;
+                # it is best-effort, so it cannot mask the original failure.
+                # (agent review round 1, R1-1.)
                 self._publisher = None
+                publisher.close()
                 raise
             # BOTH BOOT REGISTRATIONS ARE PERFORMED ON THE SESSION'S LOOP. The
             # append itself is thread-tolerant, but the body of the same call is
@@ -2659,14 +2668,15 @@ class RuntimeServer:
                 self._attention_task = asyncio.create_task(self._attention_loop())
         finally:
             # RELEASE THE DEFERRED MCP WIRING ON EVERY WAY OUT OF THIS PROLOGUE,
-            # not only the happy one. The record is written inside
-            # ``RecordPublisher.__init__``, so on the success path this is
-            # genuinely post-publication; a bind that raises reaches here too,
-            # and that case matters because ``_run`` (thread mode) swallows the
-            # exception and the process lives on — with no record and, without
-            # this, a latch shut for the session's life. MCP late beats MCP
-            # never, and the release cannot mask the failure: the exception
-            # still propagates.
+            # not only the happy one. The record is written by
+            # ``RecordPublisher.publish()`` — from the constructor by default,
+            # explicitly on this deferred boot path — so on the success path
+            # this is genuinely post-publication; a bind that raises reaches
+            # here too, and that case matters because ``_run`` (thread mode)
+            # swallows the exception and the process lives on — with no record
+            # and, without this, a latch shut for the session's life. MCP late
+            # beats MCP never, and the release cannot mask the failure: the
+            # exception still propagates.
             # See ``RuntimeServer._open_mcp_wiring_gate``.
             self._open_mcp_wiring_gate()
             # THE SERVING LATCH OPENS HERE, on every way out and in the same
