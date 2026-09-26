@@ -560,6 +560,63 @@ def test_config_edit_rejects_an_out_of_range_value(
     assert cli.config_edit_command(argparse.Namespace(key="retry.maxRetries", value="9999")) == 1
 
 
+def test_config_edit_can_set_a_list_valued_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A comma-separated list used to be stored as a STRING and then refused by the
+    one message that had just asked for a list.
+
+    ``config edit``'s guessing ladder knows int/float/bool/null, so a LIST value fell
+    through it as text and ``validate`` answered "expected a comma-separated list" — to
+    a user who had typed exactly that. Every list-valued key was unreachable from this
+    command because of it (``providers.openrouter.order``, ``providers.openrouter.only``,
+    ``web_search.providers``), while the /settings page could set them, because the page
+    calls ``coerce`` — the parse this branch was skipping. The mesh is where it bit
+    hardest: ``network.advertise_hosts`` IS a list, so the documented way to declare a
+    tunnel or public address did nothing here.
+
+    Asserted through the READER, not the file alone: the point is not that a list
+    reached YAML but that ``NetworkSettings`` reads the addresses a peer will dial.
+    """
+    import yaml
+
+    from local_operator.network import relay
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    args = argparse.Namespace(
+        key="network.advertise_hosts", value="tunnel.example.com:4100, 203.0.113.7:4097"
+    )
+    assert cli.config_edit_command(args) == 0
+
+    values = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert values["network"]["advertise_hosts"] == [
+        "tunnel.example.com:4100",
+        "203.0.113.7:4097",
+    ]
+    assert relay.NetworkSettings.from_config(tmp_path).advertise_hosts == (
+        "tunnel.example.com:4100",
+        "203.0.113.7:4097",
+    )
+
+
+def test_config_edit_keeps_a_closed_list_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same route must not become a way PAST the vocabulary a closed list owns.
+
+    ``web_search.providers`` is a closed allow-list, and the refusal is the point: a
+    provider name no implementation answers to is a search that silently stops working.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert (
+        cli.config_edit_command(argparse.Namespace(key="web_search.providers", value="nope")) == 1
+    )
+
+    captured = capsys.readouterr()
+    assert "unknown: nope" in captured.err + captured.out
+
+
 def test_config_create_command(tmp_home: Path) -> None:
     manager = MagicMock()
     with patch("local_operator.cli.ConfigManager", return_value=manager):

@@ -2114,7 +2114,18 @@ advertised endpoint, and the link is then bidirectional. Concretely:
      port through it and put that hostname in `network.advertise_hosts`. This is
      the sanctioned WAN path: the tunnel gives reachability, and the peer link's
      own authentication gives access control, so a public endpoint grants an
-     attacker nothing but a handshake attempt.
+     attacker nothing but a handshake attempt. **Where that key actually lives,
+     because spelling it in dots is how an operator ends up beside it:** the
+     nested path is `values.network.advertise_hosts` in `config.yml`, and the key
+     has a row in `/settings` (section *Mesh network*, *Advertised endpoints*).
+     `lop config edit network.advertise_hosts "tunnel.example.com:4100"` writes it
+     too — a LIST value, so it takes a comma-separated list and refuses anything
+     the key cannot carry. For a device that is JOINING, `lop network join
+     --advertise-host host:port` declares the same list for that pairing, so a
+     joiner behind a tunnel does not have to edit `config.yml` at all. A
+     top-level `network:` block is not this key and never was: the store reads
+     `values` only, and it now says so — naming the key and its `values.` home —
+     instead of leaving the edit to be discovered as erased.
   2. One member with a public address (an EC2 peer, the spine's §10 topology).
   3. A future hub/forwarding capability (§14) — **not built here**.
 - **Never** UPnP/NAT-PMP (silently changes the operator's router configuration),
