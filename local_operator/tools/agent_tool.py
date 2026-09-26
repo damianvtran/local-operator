@@ -122,11 +122,9 @@ class AgentParams(BaseModel):
             "search: find a role by meaning; list/show: what exists and what it "
             "says (show also prints the packaged text when an installed role "
             "has diverged from it); install: add a packaged starter; reset: "
-            "restore the packaged starter over an edited role, reporting what "
-            "it replaced; sync: pull the latest packaged starter / hub listing "
-            "for installed roles (unedited copies update in place; edited ones "
-            "refuse unless force is set); create/update: author or fix a role "
-            "or a specialist profile."
+            "restore it over an edited role, reporting what it replaced; sync: "
+            "pull the latest for installed roles (force overrides edits); "
+            "create/update: author or fix a role or a specialist profile."
         )
     )
     # The no-spaces guidance is a modularity contract, not registry law: the
@@ -212,8 +210,8 @@ class AgentParams(BaseModel):
     delegate: bool | None = Field(
         default=None,
         description=(
-            "create/update: may this profile launch its own subagents? Default "
-            "no — only coordinating roles should."
+            "create/update: may this profile launch subagents? Default no; "
+            "only coordinating roles should."
         ),
     )
     kind: Literal["role", "specialist"] | None = Field(
@@ -221,20 +219,18 @@ class AgentParams(BaseModel):
         description=(
             "create: 'role' (default) is a reusable delegation target tagged "
             "for task(agent=...). 'specialist' is a durable named agent with "
-            "its own instruction set — a User Dashboard Agent, a support "
-            "triager — that can sit on a team roster without being a role. "
-            "Ignored on update: a profile cannot change kind."
+            "its own instruction set, and can sit on a team roster without "
+            "being a role. Ignored on update: a profile cannot change kind."
         ),
     )
-    # Last on purpose: the schema is billed on every turn, and appending a
-    # field keeps the provider-visible prefix byte-identical for callers that
-    # never touch it (the ``tools/registry.py`` array note, applied per field).
-    force: bool | None = Field(
-        default=None,
-        description=(
-            "sync: apply an update even where the installed copy was edited "
-            "locally. Without it those rows are reported and left alone."
-        ),
+    # A plain bool, not ``bool | None``: the tri-state costs ~55 characters of
+    # JSON on EVERY session's tools array (the anyOf branch), and "unset" has
+    # no meaning for a force flag — the budget gate in
+    # ``scripts/bench_context_budget.py`` is the reason to care which shape a
+    # schema field takes, not a style preference.
+    force: bool = Field(
+        default=False,
+        description="sync: apply over local edits.",
     )
 
 
@@ -1379,10 +1375,10 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         description=(
             "Reusable agent profiles: delegation roles (reviewer, coder, "
             "architect, manager, designer, scout) and specialists with their "
-            "own instruction sets. Find, install, sync to the latest, author, "
-            "or reset one to its packaged version; launch a role with "
-            "task(agent='<name>'). A specialist is the reusable base a team "
-            "layers collaboration and project briefs on top of."
+            "own instruction sets. Find, install, author, or reset one to its "
+            "packaged version; launch a role with task(agent='<name>'). A "
+            "specialist is the reusable base a team layers collaboration and "
+            "project briefs on top of."
         ),
         parameters=parameters,
         # Writes land in the user's own configuration directory, never in the
