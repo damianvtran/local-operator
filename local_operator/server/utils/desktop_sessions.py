@@ -2660,11 +2660,30 @@ class DesktopSessionBridge:
         is exactly what a dwell would then be holding shut.
         """
         now = time.monotonic()
-        return [
-            s
-            for s in self.subscribers.values()
-            if not s.overflow and (s.expires > now or (include_dwelling and s.dwelling))
-        ]
+        live: list[DesktopSubscription] = []
+        for sub in self.subscribers.values():
+            if sub.overflow:
+                continue
+            if sub.dwelling:
+                # A VIEWER THAT HAS LOST ITS TRANSPORT IS NOT A LIVE LEASE,
+                # whatever its lease clock still says. This is why the flag is a
+                # parameter rather than a filter on `expires`: a dwelling
+                # subscription keeps the lease it was given while the relay was
+                # up, so excluding it only once `expires` had passed would let a
+                # dwell pin a build update for the REST OF THE LEASE -- up to
+                # WATCH_TTL, more than twice the dwell itself.
+                #
+                # `tests/unit/server/test_serve_retire.py` is the end-to-end form
+                # of that, and it is what caught this: a route-held relay's own
+                # lease made the drain unemptiable, which is the circular valve
+                # that file exists to prevent ("the record could not say let go
+                # until the client had let go").
+                if include_dwelling:
+                    live.append(sub)
+                continue
+            if sub.expires > now:
+                live.append(sub)
+        return live
 
     async def refresh_watch(self) -> None:
         """Recompute the aggregate watch lease, and warm for a VISIBLE one.
@@ -3380,7 +3399,12 @@ class DesktopSessionBridge:
             # policy switches to backpressure at the same moment the subscriber
             # stops being able to lose anything by eviction.
             disconnected = False
-            pending: list[dict[str, Any]] = []
+            # NOT `pending`: `events`'s `finally` uses that name for the
+            # exception still propagating through it (main's C5 diagnostic), and
+            # two different values under one name in one function is the kind of
+            # trap a reader pays for later. The rename is this branch's, so
+            # main's block stays byte-identical.
+            pending_frames: list[dict[str, Any]] = []
             while True:
                 try:
                     item = sub.queue.get_nowait()
@@ -3392,7 +3416,7 @@ class DesktopSessionBridge:
                 frame, size = item
                 sub.queued_bytes -= size
                 if frame["seq"] > snapshot["seq"]:
-                    pending.append(frame)
+                    pending_frames.append(frame)
             sub.opened = True
             yield {
                 "session_id": self.session_id,
@@ -3411,7 +3435,7 @@ class DesktopSessionBridge:
             for frame in replay:
                 yield frame
             yield snapshot
-            for frame in pending:
+            for frame in pending_frames:
                 yield frame
             if disconnected:
                 yield {"type": "gap", "session_id": self.session_id}
