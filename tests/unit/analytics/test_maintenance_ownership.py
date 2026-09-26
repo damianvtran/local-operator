@@ -56,7 +56,7 @@ from local_operator.analytics.store import _WAL_SIZE_LIMIT_BYTES, AnalyticsStore
 #: asks a backstop to be and becomes a second, quieter speed assertion. Raised
 #: to 120 s for that reason, and deliberately WITHOUT touching anything these
 #: tests assert: no ceiling on the suite, no retry loop, no sleep.
-_BACKSTOP_S = 120.0
+_BACKSTOP_S = 240.0
 
 #: Ceiling on a store that parks the writer on purpose, so a broken test cannot
 #: leave a thread blocked inside the sweep forever.
@@ -276,8 +276,20 @@ def test_the_sweep_runs_on_the_writer_thread_and_never_on_the_caller(tmp_path):
     handle, store = _fake(entered=entered)
     rec = AnalyticsRecorder(store=handle, maintenance_root=tmp_path / "iso")
     try:
-        # The public path a session uses: one sample, and the writer thread's
-        # first idle tick performs the hourly attempt.
+        # THE WRITER PATH IS THE SUBJECT, so it cannot be driven directly: an
+        # earlier revision called `_run_owned_maintenance()` from the test thread
+        # and the store recorded `MainThread` — which is the *caller* case this
+        # cell exists to forbid, not evidence about the writer.
+        #
+        # What it waits on is therefore the writer's idle tick (`queue.Empty`
+        # after `_FLUSH_INTERVAL_S`), which is real production behaviour but is a
+        # CADENCE rather than a contract. That is why `_BACKSTOP_S` is minutes and
+        # not seconds: on a CI runner sharing cores with four sibling shards a
+        # 0.5 s tick can take a long time to arrive, and the cell reports "the
+        # writer thread never reached the sweep" rather than a wrong thread
+        # identity when it does not. The assertion it makes once the tick lands is
+        # the one that cannot flake.
+        _hour_turns(rec)
         rec.record(_snap())
         assert entered.wait(_BACKSTOP_S), "the writer thread never reached the sweep"
         rec.flush_for_test()
@@ -303,6 +315,10 @@ def test_a_second_recorder_does_not_wait_for_a_sweep_already_in_flight(tmp_path)
 
     returned, outcome = threading.Event(), []
 
+    def winner() -> None:
+        # The holder: it takes the lock and parks in `prune` until released.
+        a._run_owned_maintenance()
+
     def loser() -> None:
         # The result is carried out to the test thread rather than asserted in
         # here: an exception raised on a worker thread would be swallowed by the
@@ -313,7 +329,13 @@ def test_a_second_recorder_does_not_wait_for_a_sweep_already_in_flight(tmp_path)
             returned.set()
 
     try:
-        a.record(_snap())
+        # The holder stands ON the writer path, so the lock is held by the real
+        # mechanism rather than by a test thread imitating it. Same cadence
+        # caveat as the sibling cell above: the wait is on the writer's idle tick,
+        # with a minutes-long backstop for a loaded runner.
+        _hour_turns(a, b)
+        rec_starter = threading.Thread(target=lambda: a.record(_snap()), daemon=True)
+        rec_starter.start()
         assert entered.wait(_BACKSTOP_S), "the first sweep never started"
         thread = threading.Thread(target=loser, daemon=True)
         thread.start()
