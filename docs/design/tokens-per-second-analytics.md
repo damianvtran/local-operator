@@ -730,8 +730,34 @@ frame cost: two integers on ``last_usage``, one occurrence, ~48 B against the 16
 of slack — and **nothing at all** on the 200 roster rows, which is the multiplier
 that made the first two routes cost 9,648 B and 7,800 B.
 
-That is a hypothesis with a measured mechanism, not a measured frame, and the
-difference is exactly what has been wrong three times in this section. So the first
+Two spelling traps, both measured (review round 2), because the natural first
+attempt at each fails:
+
+* the wrap cannot be ``FrontendUsage.model_validate(usage)`` — that raises
+  ``ValidationError``. ``last_usage`` is built by ``_usage_wire``
+  (``frontend_state.py:2804-2806``), which DUMPS the live ``Usage``, so the pair has
+  to be injected into the dumped dict after reading the private attribute off the
+  object;
+* and it must be materialised on the ``last_usage`` VALUE alone, never on an object
+  also fed to ``usage_components``. That list is ``list[FrontendUsage]`` — 200
+  ``FrontendUsage`` slots, NOT ``Usage``-typed ones — so a pair set on a receipt
+  WOULD serialise; the receipts are safe only because they are dumped from the live
+  ``Usage``. ``accrue_usage`` builds ``last_usage`` and ``usage_components`` in one
+  call (``:6216-6247``), which is what makes this a one-line mistake.
+
+Measured on the guard's own roster shape through the real ``sync_wire_payload``
+(review round 2): 200 rows plain with a plain last_usage is 186,657 B and **0**
+occurrences; putting the private pair on ALL 201 objects is still 186,657 B —
+**+0 B exactly** — and declaring the pair on the ``last_usage`` value alone is
+186,696 B, **1 occurrence**, +39 B at a two-digit window and 48 B at the 7-digit
+worst case. Stamping EARLY also closes the ordering finding the reverted attempt
+left open: with the pair set before ``on_usage`` fires, the consumer's dump and
+``accrue_usage``'s injection can both read it, so the band's source is populated on
+the live path rather than only on refresh.
+
+That is still a hypothesis with a measured mechanism rather than a measured frame in
+the SHAPE the band would ship, and the difference is exactly what has been wrong
+three times in this section. So the first
 thing the next attempt does is still the SAME test: an occurrence assertion with
 stamped rows in ``tests/unit/session/test_attach_frame_size.py`` — a file that
 builds its 200 rows from an unstamped ``Usage`` and therefore stayed green through
