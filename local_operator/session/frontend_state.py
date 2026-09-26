@@ -232,7 +232,10 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: distinction the 13-byte precedent above did not make. Measure the guard, not
 #: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
 #: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
-#: (the fixture's frame lands at 1,048,408 of 1,048,576, i.e. 168 B under, with
+#: (the fixture's frame lands at 1,048,408 of 1,048,576 — the GOAL-LESS shape;
+#: the live member arm leaves under ~110 B, so treat 168 B as a bound on a shape
+#: this decoder no longer sees rather than as headroom to spend. Re-derive it by
+#: capturing the member arm at the head under review, never by quoting this line.
 #: the catalogue grown from its 50-row floor to 54). The number that matters is
 #: the one the overshoot was about — whether the FLOOR fits: with the catalogue
 #: held at its floor the frame now has 1,384 B of line where it had 416 B too
@@ -426,7 +429,8 @@ _SHAREABLE_STATE_FIELDS = frozenset(
 #: ``model_catalogue``, the frame's slack absorber, reclaims 1,208 B of what the
 #: text cut releases: it sits on its 50-row floor at the larger text share
 #: (15,080 B) and grows to 54 rows at the smaller one (16,288 B). Paid here
-#: instead the same fixture measures 1,048,408 B, 168 B under the line — and 8 of
+#: instead the same fixture measures 1,048,408 B on the goal-less shape (under
+#: ~110 B of real slack at this head) — and 8 of
 #: those bytes are not the stamp's: the fixture's own 8-entry
 #: ``live_tool_started_at`` map now carries the real epoch's width too, and that
 #: map exists on the released build. Measured, the frame is 1,048,400 B — the
@@ -5962,8 +5966,19 @@ class FrontendStateStore:
             effective_model=(
                 effective.model_dump(mode="json") if isinstance(effective, ModelSpec) else effective
             ),
+            # THROUGH THE HELPER, and this site is the one that made the whole
+            # channel look broken (review round 2): ``refresh_from_session`` runs
+            # from ``observe_event`` at the END of both the message and the turn,
+            # i.e. AFTER the two branches that set the window, so a plain dump here
+            # OVERWRITES the materialised pair with a payload that cannot carry a
+            # private attribute — measured: after MessageEndEvent and after
+            # AgentEndEvent, ``last_usage.decode_us`` was absent while the ledger
+            # held the call's window. The no-op rule keeps it safe for an unstamped
+            # usage (``decode_window_of`` answers None).
             last_usage=(
-                last_usage.model_dump(mode="json") if isinstance(last_usage, Usage) else last_usage
+                _usage_with_decode_window(last_usage)
+                if isinstance(last_usage, Usage)
+                else last_usage
             ),
             context_tokens=(current.context_tokens if preserve_settled_context else receipt_context)
             or current.context_tokens,
