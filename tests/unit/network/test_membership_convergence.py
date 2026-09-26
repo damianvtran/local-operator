@@ -55,6 +55,7 @@ from local_operator.network.handshake import (
     refusal_from_pairing,
     sas_matches,
 )
+from tests.unit.network import conftest as net_fixtures
 
 NETWORK_NAME = "mesh-r4"
 
@@ -320,6 +321,23 @@ def _members(device: Device) -> set[str]:
 
 def _events(device: Device) -> list[str]:
     return [str(row.get("event")) for row in device.server.audit.tail(limit=500)]
+
+
+def _recorded(device: Device, word: str, *, timeout_s: float = 15.0) -> bool:
+    """Wait until ``device``'s own trail carries ``word``; report whether it arrived.
+
+    THE TRAIL IS WRITTEN BY WHICHEVER THREAD DID THE ACT, AND AFTER THE ACT. The
+    listener that refuses a pairing seals and sends its abort frame BEFORE it records
+    ``pairing_refused`` (relay.py, the refusal branch) — so the joiner's exception,
+    which is the effect the test already holds, arrives strictly first. A single-shot
+    read of the trail right after it therefore assumes a scheduling gap of ZERO; a
+    shard runner failed this cell on 1 ms of one (CI, head 3d19009e6: the events list
+    ended at ``trust_changed`` and no ``pairing_refused`` ever appeared), and 1 ms is
+    well inside the 525-668 ms starvation gaps this fleet measures. The bound is the
+    backstop for a row that genuinely never arrives — which then fails the assertion
+    below with the whole trail in the message.
+    """
+    return net_fixtures.wait_for(lambda: word in _events(device), timeout_s=timeout_s)
 
 
 def _link_peers(device: Device) -> set[str]:
@@ -690,6 +708,11 @@ def test_a_pairing_refusal_carries_the_sentence_and_the_remedy(
     # confirmation was parked in this test — the admitted pairing above — so a burned
     # joiner reaching the human step (which is what the round-4 review caught, via its
     # expiry) shows up here as a second one.
+    #
+    # THE REFUSAL'S OWN ROW IS AWAITED, NOT ASSUMED: see `_recorded`. The frame that
+    # carried this refusal reached the joiner above, and the inviter records the row
+    # after sending it, so the read races the write by design.
+    assert _recorded(a, "pairing_refused"), _events(a)
     events = _events(a)
     assert events.count("pairing_awaiting_confirmation") == 1, events
     assert "pairing_refused" in events, events
