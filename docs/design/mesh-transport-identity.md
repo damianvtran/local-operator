@@ -938,7 +938,12 @@ so a relay restart mid-pairing cannot be used to replay an invite.
   `{"invite_id", "path", "expires_at", "role", "hosts", "expires_in_s"}` — never
   the token.
 - `lop network join` accepts a token inline, `@<path>`, or no argument (it reads
-  the newest file in the outbox directory).
+  the newest file in the outbox directory). `--host host:port` overrides where it
+  DIALS; `--advertise-host host:port` (repeatable) declares where peers should
+  reach *this* device, and leads the list the inviter copies onto its member row
+  — the joiner's half of §10.4's "declared hosts, then detected ones", for the
+  device that most often has no dialable address of its own. `--name` sets the
+  name that row carries.
 
 **No flag anywhere accepts the SAS.** §5.3 is why.
 
