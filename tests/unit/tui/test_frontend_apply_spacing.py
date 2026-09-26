@@ -407,7 +407,9 @@ async def test_the_band_shows_the_last_calls_measured_rate() -> None:
         )
         app._paint_frontend_session(viewer)
         await pilot.pause()
-        assert "last 19.4k tok/s" in app._status.render_text(200).plain
+        status = app._status
+        assert status is not None
+        assert "last 19.4k tok/s" in status.render_text(200).plain
 
         # The negative: a call that measured no window leaves the segment OFF. It
         # is asserted on the GLYPH rather than on the substring `last`, because a
@@ -420,4 +422,6 @@ async def test_the_band_shows_the_last_calls_measured_rate() -> None:
         )
         app._paint_frontend_session(viewer)
         await pilot.pause()
-        assert status_line_module.ICON_LAST_RATE not in app._status.render_text(200).plain
+        status = app._status
+        assert status is not None
+        assert status_line_module.ICON_LAST_RATE not in status.render_text(200).plain
