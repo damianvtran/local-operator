@@ -657,6 +657,31 @@ than as the session. That is a strictly smaller change than a live counter and
 it is the one to price first; it still needs a frame-budget decision, which is
 why it is a follow-up rather than part of this change.
 
+**That frame-budget decision, priced (2026-09-26, the follow-up's first step).**
+The two fields ride `FrontendUsage` — a `Usage` subclass — and `FrontendUsage`
+appears in the frame exactly ONCE, as `FrontendState.last_usage`
+(`frontend_state.py:2678`). That is the whole reason this is affordable where
+`roster_released` was not: that regression cost 25 B **× 200 rows** and took the
+calibrated worst case from 1,048,408 to 1,052,200 bytes, i.e. over the 1 MiB
+line. Two integer keys on a single object are not multiplied by anything. Their
+worst-case wire cost is `"decode_us"` + `:` + 7 digits and `"decode_tokens"` + `:`
++ 7 digits — **~46 B**, against the 168 B of slack the calibrated frame leaves
+(`1,048,408 of 1,048,576`; `tests/unit/session/test_attach_frame_size.py`, re-run
+green at 123 passed on this date). Realistic values are single-digit-token counts
+and six-digit microsecond windows, so the ordinary cost is nearer 30 B.
+
+So the shape of the follow-up is now bounded, and it is four small edits rather
+than a subsystem: the two fields on `FrontendUsage`, the seam stamping them onto
+the usage it already relays (`_record_usage` has both numbers in hand), one
+`StatusLine` segment plus its drop-ladder rung — a figure that is NOT re-derivable
+from the transcript belongs near `cost`, which the ladder's own comment calls "the
+one figure that is not a live reading of this turn" — and the two tests those
+changes need (the frame delta, pinned as an assertion rather than a comment, and
+the band's rendering plus its shed order). The remaining open question is the
+labelling, not the cost: a bare `N tok/s` beside a live context reading invites
+exactly the misreading §9.3 exists to prevent, so the segment has to say it is the
+last call, and that wording is a design-round question.
+
 ### 9.4 Desktop endpoint
 
 **One new op, and no change to the cost of the existing one.**
