@@ -78,6 +78,11 @@ def test_http_declaration_requires_valid_cold_response(status, data, expected):
         (200, {"cold": True, "servers": []}, True, []),
         (409, {}, True, None),
         (200, {"operations": []}, True, None),
+        # R2-2 (round-2 review): a page that does not PARSE is unreadable —
+        # a verdict, not a traceback. These shapes all raised before the fix.
+        (200, ["not", "a", "page"], True, None),
+        (200, {"cold": True, "servers": ["not-a-mapping"]}, False, None),
+        (200, {"cold": True, "servers": [{"no": "name"}]}, False, None),
     ],
 )
 def test_the_declaration_reader_takes_the_cold_and_draft_live_pages(
