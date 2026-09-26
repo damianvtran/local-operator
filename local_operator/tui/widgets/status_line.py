@@ -326,7 +326,11 @@ _MIN_GROUP_GAP = 4
 #:   is still the widest thing left, and a title predicts no action. The terminal
 #:   tab still carries it, which is where it earns its keep anyway. Dropping it
 #:   RE-WALKS the ladder from the top — see :meth:`StatusLine._fit`.
-#: * ``cost``, then ``cwd``, then ``context``, then ``mcp``: context usage is the
+#: * ``last-rate``, then ``cost``, then ``cwd``, then ``context``, then ``mcp``:
+#:   the two figures that are not live readings of THIS turn come first, and the
+#:   rate leads the pair because it is the more re-derivable of them (one scalar
+#:   about a call that has ended, also on ``/analytics`` and ``/session``, against
+#:   cumulative money that exists only here). Context usage is the
 #:   one an operator acts on, and the MCP indicator outlives even that WHEN IT IS
 #:   AN ALARM — a healthy count is only a courtesy, so it sheds like one; see
 #:   :func:`drop_ladder`.

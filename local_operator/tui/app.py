@@ -10843,9 +10843,12 @@ class OperatorApp(App[None]):
         # (empty string) when the last call measured no window, which is the band's
         # convention for an inapplicable reading; a ``—`` in a numeric slot would
         # read as a broken figure rather than as an unknown.
-        # Local, like this module's other analytics_panel imports: the panel
-        # imports the theme helpers, and a module-level import here would put that
-        # cycle on the boot path for one formatter.
+        # Local, like this module's other analytics_panel imports, and the reason
+        # is BOOT COST rather than a cycle: measured (review round 1), importing
+        # the panel in a fresh interpreter does NOT pull `tui.app` in, so there is
+        # no cycle to avoid — but `import local_operator.tui.app` is 772 modules and
+        # the panel adds 6 more for one formatter. The panel is deliberately off the
+        # boot path; hoisting this would put it back.
         from local_operator.tui.widgets.analytics_panel import format_tps
 
         window_us = int(getattr(usage, "decode_us", 0) or 0) if usage is not None else 0

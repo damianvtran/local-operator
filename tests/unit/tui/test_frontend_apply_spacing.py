@@ -25,9 +25,11 @@ from local_operator.session.frontend_state import (
     FrontendSessionState,
     FrontendStateStore,
     FrontendUpdate,
+    FrontendUsage,
 )
 from local_operator.tui import app as app_module
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets import status_line as status_line_module
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -373,3 +375,49 @@ def test_the_spacing_is_bounded_by_its_floor_and_ceiling() -> None:
     assert delay(0.001) == app_module._FRONTEND_APPLY_FLOOR_S
     assert delay(0.040) == pytest.approx(0.040 / app_module._FRONTEND_APPLY_MAX_SHARE - 0.040)
     assert delay(10.0) == app_module._FRONTEND_APPLY_CEILING_S
+
+
+@pytest.mark.asyncio
+async def test_the_band_shows_the_last_calls_measured_rate() -> None:
+    """The frame→band read, which is the one line of the band feature no test drove.
+
+    Review round 1 on the segment: the widget's parameter, label and ladder rung are
+    covered, but the COMPUTATION that fills them was not — and its failure mode is
+    silent, because an empty string is both "no window was measured" and "the read
+    broke". So this drives the real ``_apply_frontend_state`` with a last_usage
+    carrying a materialised pair (exactly what ``_usage_with_decode_window`` puts on
+    the wire) and asserts the rendered band, plus the negative.
+    """
+    viewer = _Viewer()
+    app = await _booted(viewer)
+    async with app.run_test(size=(120, 28)) as pilot:
+        await pilot.pause()
+        # 240 tokens over 12,345 us = 19,441 tok/s, which the shared formatter
+        # spells `19.4k` — the same spelling `/analytics` and `/session` use.
+        viewer.push(
+            last_usage=FrontendUsage.model_validate(
+                {
+                    "input_tokens": 100,
+                    "output_tokens": 240,
+                    "context_tokens": 100,
+                    "decode_us": 12_345,
+                    "decode_tokens": 240,
+                }
+            )
+        )
+        app._paint_frontend_session(viewer)
+        await pilot.pause()
+        assert "last 19.4k tok/s" in app._status.render_text(200).plain
+
+        # The negative: a call that measured no window leaves the segment OFF. It
+        # is asserted on the GLYPH rather than on the substring `last`, because a
+        # model label or a conversation title may contain that word and would make
+        # a substring check pass for the wrong reason.
+        viewer.push(
+            last_usage=FrontendUsage.model_validate(
+                {"input_tokens": 100, "output_tokens": 240, "context_tokens": 100}
+            )
+        )
+        app._paint_frontend_session(viewer)
+        await pilot.pause()
+        assert status_line_module.ICON_LAST_RATE not in app._status.render_text(200).plain
