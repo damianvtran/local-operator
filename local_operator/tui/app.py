@@ -15310,152 +15310,6 @@ class OperatorApp(App[None]):
 
         self.call_from_thread(_relaunch_after_upgrade)
 
-    async def _open_resume_picker(self, notice: NoticeFn) -> None:
-        """The bare ``/resume`` picker, with its store-wide reads off the loop.
-
-        Scheduled by :meth:`_cmd_resume` through ``run_worker`` rather than
-        awaited from it: the command dispatcher is a synchronous ``elif`` chain
-        shared by every ``/`` command, so an ``async def _cmd_resume`` would make
-        this one handler's shape differ from its thirty neighbours and from the
-        two other callers that invoke it directly (the ``action_keymap_resume``
-        hotkey). The work that must not block the loop is exactly the three
-        calls below, and ``to_thread`` is the spelling the neighbouring sidebar
-        poll already uses for the same kind of read
-        (``_refresh_sidebar``'s ``collect``).
-        """
-        from local_operator.paths import config_dir
-        from local_operator.resume import recent_session_rows
-        from local_operator.session.search_index import build_index
-
-        # UNCAPPED, deliberately. Every finite cap reproduces the bug it was
-        # meant to bound: the picker's filter only ever sees the rows it was
-        # handed (``session_picker.filter_rows`` scans ``_all``), so a
-        # session past the cap is not merely off-screen, it is unfindable
-        # and indistinguishable from one that was deleted. The previous
-        # limit of 200 was justified by a retention sweep that no longer
-        # exists (``retention`` never deletes a transcript since 4173ec73),
-        # and the store had already grown past it, hiding 30 of the
-        # reporting machine's 230 sessions. Affordable because the scan is
-        # limit-independent (see ``resume.recent_sessions``) and the counter
-        # below becomes truthful as a consequence: ``_all`` is now the
-        # store's real total rather than a number that never says it is one.
-        #
-        # ``limit=None`` is passed EXPLICITLY rather than left to the
-        # default. Relying on the default is what shipped this surface with
-        # a cap of ten: the signature defaulted to ``10``, this line said
-        # nothing, and "uncapped" was true only in the comment above. The
-        # argument is now visible at the call site, so the claim and the
-        # code can be checked against each other in one place.
-        # ``include_archived=True``: the PICKER is the one surface with a
-        # reveal toggle, so it needs the archived rows in hand and the
-        # ``archived`` flag on each one to know which rows the toggle is
-        # revealing. They are hidden until it is used — the picker's own
-        # ``_pool`` drops them while it is off — so the default list a user
-        # sees here is the same list every other surface offers.
-        # OFF THE EVENT LOOP, and that is the whole of this method's reason to
-        # exist. `recent_session_rows` walks the store's session namespace and
-        # `build_index` digests every id in it; on the reporting store that is
-        # the difference between a picker that opens and a composer that stops
-        # echoing keystrokes until both finish. `limit=None` is deliberate and
-        # unchanged -- the fix is WHICH THREAD reads, never how much: a cap
-        # makes a session past it unfindable rather than merely off-screen.
-        try:
-            rows = await asyncio.to_thread(
-                recent_session_rows, config_dir(), limit=None, include_archived=True
-            )
-        except Exception:
-            # Best-effort, like the index below: the picker is a convenience and a
-            # store read that failed must leave the session on screen rather than
-            # take the app down. Before this moved off the loop the raise unwound
-            # into the command dispatcher; ``exit_on_error=False`` plus this arm
-            # is how the worker keeps that outcome.
-            logger.debug("resume picker row read failed", exc_info=True)
-            return
-        # NOT enriched with creation dates here, and that is a measured
-        # decision rather than an omission. ``recent_session_rows`` leaves
-        # ``created_at`` at 0.0 because it is on the CLI startup path and
-        # also feeds the CLI recovery listing and ``mobile/peer_send.py``,
-        # none of which render a preview. The picker's preview header DOES
-        # need the second clock — but only for the ONE row under the
-        # cursor, so it resolves it lazily and caches it there
-        # (``session/preview.py``, ``SessionPreviews.created_at``).
-        #
-        # An eager loop over every row here was the first cut, following
-        # ``mobile/daemon.py:278``'s pattern. Measured on this machine's
-        # real store it cost 3.6 ms over 151 rows — 24.6% of a 14.8 ms
-        # open, against a 15% ceiling — because 85 of those rows miss the
-        # ``created_at.json`` sidecar and take the more expensive
-        # ``st_birthtime`` path. Paying it per drawn row instead makes the
-        # cost proportional to what is actually shown.
-        if not rows:
-            # Says whose sessions, not that the disk is empty. Delegated
-            # subagent runs live in the same directory and are deliberately
-            # not listed, so on a machine whose only surviving sessions are
-            # children (retention evicts the older parent first) the flat
-            # "none exist" was simply false — and a dead end for a user who
-            # knows work is there.
-            self._system_notice(RESUME_EMPTY_NOTICE, "warning")
-            return
-
-        # Live state is overlaid HERE rather than inside
-        # ``recent_session_rows``, and that placement is load-bearing:
-        # ``resume.py`` is stdlib-only and sits on the CLI startup path, so
-        # `lop --resume` must not pay for a registry walk. The picker is
-        # the one caller that wants it, and it pays for it once at open:
-        # ONE ``registry.scan()`` and ONE ``wakes.store.read_index()`` for
-        # the whole list, never a probe per row.
-        # ``decorate_rows`` is one registry walk plus one wakes-index read for
-        # the WHOLE list, not one probe per row -- but it is still file I/O, so
-        # it belongs on the same side of the boundary as the two reads around it.
-        rows = await asyncio.to_thread(self._overlay_live_state, rows)
-
-        # AFTER the empty check, so a store with nothing to offer does no
-        # scanning, and BEFORE the screen is pushed, so the first keystroke
-        # filters against a complete index rather than a half-built one.
-        # Incremental (only transcripts that changed since the last open are
-        # re-read) and best-effort: a store whose cache cannot be written
-        # still gets the name-and-id filter the picker had before.
-        try:
-            # ARCHIVED IDS ARE NOT HANDED TO THE INDEX, which is what makes
-            # "an archived conversation is not found by the standard search"
-            # true without an index change: the index is built from exactly
-            # the ids it is given, and a row the toggle has not revealed
-            # must not be reachable through a body match. When the toggle IS
-            # on, those rows are matched by name and id like any other row
-            # (``_digests`` simply has no entry for them), which is the
-            # documented shape of searching a revealed archive.
-            digests = await asyncio.to_thread(
-                build_index,
-                config_dir(),
-                [row.id for row in rows if not row.archived],
-            )
-        except Exception:
-            digests = {}
-
-        def _resume_choice(session_id: str | None) -> None:
-            # Dismissed with Esc (or on an empty filter) — the session on
-            # screen is left exactly as it was, with nothing said: a
-            # cancelled picker is not an event worth a transcript line.
-            if session_id:
-                self._resume_session(session_id, notice)
-
-        self.push_screen(
-            SessionPickerScreen(
-                rows,
-                time.time(),
-                digests,
-                # The picker re-reads liveness on its own animation tick
-                # (D1+D3): a spinner that moves while reporting state from
-                # when the picker opened is a stronger claim than a frozen
-                # one and less true. The same overlay used to build the
-                # rows does the refresh, so there is one definition of what
-                # each marker means.
-                refresh_live_state=self._overlay_live_state,
-            ),
-            _resume_choice,
-        )
-        return
-
     def _cmd_resume(self, arg: str, notice: NoticeFn) -> None:
         """``/resume`` — pick a conversation; ``/resume <id>`` — resume one.
 
@@ -15473,7 +15327,9 @@ class OperatorApp(App[None]):
         is unavailable and the command says so instead of opening a picker
         whose every choice would fail.
         """
-        from local_operator.resume import RESUME_LATEST
+        from local_operator.paths import config_dir
+        from local_operator.resume import RESUME_LATEST, recent_session_rows
+        from local_operator.session.search_index import build_index
 
         # Rejections go through ``_system_notice`` (see `_cmd_usage`): nothing
         # ran, so the boot composition must survive them.
@@ -15482,13 +15338,107 @@ class OperatorApp(App[None]):
             return
 
         if not arg:
-            # ``exit_on_error=False``: the reads below touch the filesystem, and a
-            # store that cannot be walked must not QUIT the app, which is what a
-            # worker's unhandled exception does by default. Before this moved off
-            # the loop a raise propagated into the command dispatcher, which keeps
-            # the session on screen; the worker must keep that behaviour.
-            self.run_worker(
-                self._open_resume_picker(notice), group="resume-picker", exit_on_error=False
+            # UNCAPPED, deliberately. Every finite cap reproduces the bug it was
+            # meant to bound: the picker's filter only ever sees the rows it was
+            # handed (``session_picker.filter_rows`` scans ``_all``), so a
+            # session past the cap is not merely off-screen, it is unfindable
+            # and indistinguishable from one that was deleted. The previous
+            # limit of 200 was justified by a retention sweep that no longer
+            # exists (``retention`` never deletes a transcript since 4173ec73),
+            # and the store had already grown past it, hiding 30 of the
+            # reporting machine's 230 sessions. Affordable because the scan is
+            # limit-independent (see ``resume.recent_sessions``) and the counter
+            # below becomes truthful as a consequence: ``_all`` is now the
+            # store's real total rather than a number that never says it is one.
+            #
+            # ``limit=None`` is passed EXPLICITLY rather than left to the
+            # default. Relying on the default is what shipped this surface with
+            # a cap of ten: the signature defaulted to ``10``, this line said
+            # nothing, and "uncapped" was true only in the comment above. The
+            # argument is now visible at the call site, so the claim and the
+            # code can be checked against each other in one place.
+            # ``include_archived=True``: the PICKER is the one surface with a
+            # reveal toggle, so it needs the archived rows in hand and the
+            # ``archived`` flag on each one to know which rows the toggle is
+            # revealing. They are hidden until it is used — the picker's own
+            # ``_pool`` drops them while it is off — so the default list a user
+            # sees here is the same list every other surface offers.
+            rows = recent_session_rows(config_dir(), limit=None, include_archived=True)
+            # NOT enriched with creation dates here, and that is a measured
+            # decision rather than an omission. ``recent_session_rows`` leaves
+            # ``created_at`` at 0.0 because it is on the CLI startup path and
+            # also feeds the CLI recovery listing and ``mobile/peer_send.py``,
+            # none of which render a preview. The picker's preview header DOES
+            # need the second clock — but only for the ONE row under the
+            # cursor, so it resolves it lazily and caches it there
+            # (``session/preview.py``, ``SessionPreviews.created_at``).
+            #
+            # An eager loop over every row here was the first cut, following
+            # ``mobile/daemon.py:278``'s pattern. Measured on this machine's
+            # real store it cost 3.6 ms over 151 rows — 24.6% of a 14.8 ms
+            # open, against a 15% ceiling — because 85 of those rows miss the
+            # ``created_at.json`` sidecar and take the more expensive
+            # ``st_birthtime`` path. Paying it per drawn row instead makes the
+            # cost proportional to what is actually shown.
+            if not rows:
+                # Says whose sessions, not that the disk is empty. Delegated
+                # subagent runs live in the same directory and are deliberately
+                # not listed, so on a machine whose only surviving sessions are
+                # children (retention evicts the older parent first) the flat
+                # "none exist" was simply false — and a dead end for a user who
+                # knows work is there.
+                self._system_notice(RESUME_EMPTY_NOTICE, "warning")
+                return
+
+            # Live state is overlaid HERE rather than inside
+            # ``recent_session_rows``, and that placement is load-bearing:
+            # ``resume.py`` is stdlib-only and sits on the CLI startup path, so
+            # `lop --resume` must not pay for a registry walk. The picker is
+            # the one caller that wants it, and it pays for it once at open:
+            # ONE ``registry.scan()`` and ONE ``wakes.store.read_index()`` for
+            # the whole list, never a probe per row.
+            rows = self._overlay_live_state(rows)
+
+            # AFTER the empty check, so a store with nothing to offer does no
+            # scanning, and BEFORE the screen is pushed, so the first keystroke
+            # filters against a complete index rather than a half-built one.
+            # Incremental (only transcripts that changed since the last open are
+            # re-read) and best-effort: a store whose cache cannot be written
+            # still gets the name-and-id filter the picker had before.
+            try:
+                # ARCHIVED IDS ARE NOT HANDED TO THE INDEX, which is what makes
+                # "an archived conversation is not found by the standard search"
+                # true without an index change: the index is built from exactly
+                # the ids it is given, and a row the toggle has not revealed
+                # must not be reachable through a body match. When the toggle IS
+                # on, those rows are matched by name and id like any other row
+                # (``_digests`` simply has no entry for them), which is the
+                # documented shape of searching a revealed archive.
+                digests = build_index(config_dir(), [row.id for row in rows if not row.archived])
+            except Exception:
+                digests = {}
+
+            def _resume_choice(session_id: str | None) -> None:
+                # Dismissed with Esc (or on an empty filter) — the session on
+                # screen is left exactly as it was, with nothing said: a
+                # cancelled picker is not an event worth a transcript line.
+                if session_id:
+                    self._resume_session(session_id, notice)
+
+            self.push_screen(
+                SessionPickerScreen(
+                    rows,
+                    time.time(),
+                    digests,
+                    # The picker re-reads liveness on its own animation tick
+                    # (D1+D3): a spinner that moves while reporting state from
+                    # when the picker opened is a stronger claim than a frozen
+                    # one and less true. The same overlay used to build the
+                    # rows does the refresh, so there is one definition of what
+                    # each marker means.
+                    refresh_live_state=self._overlay_live_state,
+                ),
+                _resume_choice,
             )
             return
 
