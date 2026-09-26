@@ -376,9 +376,7 @@ async def test_a_visible_watch_beat_arms_the_drafts_warm(draft_app, monkeypatch)
         )
         assert response.status_code == 200, response.text
         assert pool.bridges[draft_id] is bridge
-        await _until(
-            lambda: engaged, why="a visible lease did not arm the draft bridge's warm"
-        )
+        await _until(lambda: engaged, why="a visible lease did not arm the draft bridge's warm")
         assert engaged[0] == ("engage", False), "the lease warm must be a BACKGROUND bind"
         assert bridge.warm_task is not None
 
@@ -406,9 +404,7 @@ async def test_the_warm_route_engages_a_draft(draft_app, monkeypatch) -> None:
     # cancellation rather than the engage.
     async with pool.session(draft_id, read=True, allow_draft=True) as holder:
         assert holder.remote is not None
-        response = await client.post(
-            f"/v1/desktop/sessions/{draft_id}/warm", json={}
-        )
+        response = await client.post(f"/v1/desktop/sessions/{draft_id}/warm", json={})
         assert response.status_code == 200, response.text
         assert response.json()["result"]["state"] == "warming"
         await _until(lambda: engaged, why="the warm never reached the engage seam")
