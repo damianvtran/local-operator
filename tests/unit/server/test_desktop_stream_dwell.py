@@ -16,6 +16,7 @@ is measured in milliseconds.
 """
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -425,3 +426,104 @@ async def test_a_read_release_still_detaches_on_the_spot(tmp_path):
     assert bridge.dwelling is False, "no stream lost a transport here"
     assert bridge.remote is None, "so the read's release detached, on the spot"
     assert not bridge._dwell_tasks
+
+
+async def _pool_at_the_cap(tmp_path: Path) -> tuple[DesktopSessions, list[str]]:
+    """A pool with `BRIDGE_COUNT` RESIDENT, idle bridges, and their ids.
+
+    Resident, not merely created: a bridge exists once a session is acquired, and
+    `_evict_one` chooses among bridges.
+    """
+    pool = DesktopSessions(tmp_path)
+    ids: list[str] = []
+    for _ in range(BRIDGE_COUNT):
+        sid = await pool.create(str(tmp_path))
+        async with pool.session(sid):
+            pass
+        ids.append(sid)
+    assert len(pool.bridges) == BRIDGE_COUNT, "the pool is at its cap"
+    return pool, ids
+
+
+def _spy_on_closes(pool: DesktopSessions) -> list[tuple[str, bool]]:
+    """Record every bridge `close()` and whether the POOL LOCK was held for it.
+
+    The lock question is the whole point: `close()` awaits the bridge's own lock
+    and the owner connection's teardown, so a close that runs while the pool lock
+    is held is the multi-second open the ordering exists to prevent.
+    """
+    seen: list[tuple[str, bool]] = []
+    for bridge in pool.bridges.values():
+        original = bridge.close
+        session_id = bridge.session_id
+
+        async def spy(original: Any = original, session_id: str = session_id) -> None:
+            seen.append((session_id, pool.lock.locked()))
+            await original()
+
+        bridge.close = spy  # type: ignore[method-assign]
+    return seen
+
+
+async def test_the_open_that_evicts_closes_the_victim_after_the_pool_lock(tmp_path):
+    """The PRODUCTION composition, which the two cases above do not drive.
+
+    `test_eviction_closes_what_it_drops` and
+    `test_the_dwelling_bridge_is_the_last_resort` both call `_evict_one()` and
+    then close the victim THEMSELVES -- so neither can fail when the close in
+    `session()` is deleted, moved inside the pool lock, or skipped on a failure
+    path. This case opens one more session on a full pool, which is the only way
+    to reach the composition a real caller uses, and asserts:
+
+    * exactly one victim was closed, and
+    * it was closed with the pool lock RELEASED.
+
+    Both halves are falsifiable and both were falsified: with the close removed
+    the first assertion fails, and with it moved inside the lock the second does.
+    """
+    pool, _ = await _pool_at_the_cap(tmp_path)
+    seen = _spy_on_closes(pool)
+
+    fresh = await pool.create(str(tmp_path))
+    async with pool.session(fresh):
+        assert fresh in pool.bridges, "the new session has a working bridge"
+        assert len(pool.bridges) == BRIDGE_COUNT, "and the pool is still at its cap"
+
+    assert len(seen) == 1, (
+        "the open that forced the eviction must be the thing that closes the "
+        "victim; a count of 0 means the close is not on the production path at all"
+    )
+    assert seen[0][1] is False, (
+        "the close must run with the pool lock RELEASED; True here is the "
+        "multi-second open that holding it across `close()` would buy"
+    )
+
+
+async def test_a_failed_open_still_closes_the_victim_it_evicted(tmp_path, monkeypatch):
+    """The failure path, which is why the close is in a `finally`.
+
+    A raise from `acquire` -- a failed bind, a refused handshake -- unwinds past
+    anything sitting after the `try`, and the victim evicted for room is then left
+    resident with nothing holding it: out of the pool, so a later open builds a
+    SECOND bridge while the first still holds a facade and a runtime. Inert for an
+    idle tier-1 victim; not inert for a tier-2 DWELLING one, whose facade, runtime
+    and presence assertion would be unreachable until its dwell expired.
+    """
+    pool, _ = await _pool_at_the_cap(tmp_path)
+    seen = _spy_on_closes(pool)
+
+    fresh = await pool.create(str(tmp_path))
+    original = module.DesktopSessionBridge.acquire
+
+    async def failing_acquire(self: Any, *, read: bool = False) -> Any:
+        if self.session_id == fresh:
+            raise RuntimeError("the bind failed")
+        return await original(self, read=read)
+
+    monkeypatch.setattr(module.DesktopSessionBridge, "acquire", failing_acquire)
+    with pytest.raises(RuntimeError, match="the bind failed"):
+        async with pool.session(fresh):
+            pass  # pragma: no cover - the open never yields
+
+    assert len(seen) == 1, "the victim was closed even though the open failed"
+    assert seen[0][1] is False, "and still after the pool lock, not inside it"

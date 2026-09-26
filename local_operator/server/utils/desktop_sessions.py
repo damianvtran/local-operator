@@ -5385,18 +5385,30 @@ class DesktopSessions:
             # acquire/release maintain) is what says whether anyone is using it.
             if taken:
                 self._end_handout(session_id)
-        if evicted is not None:
-            # AFTER THE POOL LOCK, AND NOT ONE LINE EARLIER. ``close()`` awaits
-            # the bridge's own lock and the owner connection's teardown, and
-            # holding the pool lock across either is the multi-second open
-            # ``forget``'s own docstring exists to prevent. Closing is also what
-            # the bare ``del`` never did: without it the dropped bridge keeps its
-            # facade, its runtime, its subscribers and its presence, and a later
-            # open of that session builds a SECOND bridge with its own epoch
-            # while the first is still attached. For a DWELLING victim this is
-            # also what ends the dwell -- see ``_evict_one``.
-            with contextlib.suppress(ConnectionError, RuntimeError):
-                await evicted.close()
+            if evicted is not None:
+                # AFTER THE POOL LOCK, AND NOT ONE LINE EARLIER. ``close()``
+                # awaits the bridge's own lock and the owner connection's
+                # teardown, and holding the pool lock across either is the
+                # multi-second open ``forget``'s own docstring exists to prevent.
+                # The ``async with self.lock`` above has already exited by the
+                # time this runs, which is what makes that true.
+                #
+                # IT CLOSES ON THE FAILURE PATH TOO, AND THAT IS WHY IT IS IN A
+                # ``finally`` AT ALL (agent review round 1, MAJOR 3). Sitting
+                # after the ``try`` meant a raise from ``acquire`` -- a failed
+                # bind, a refused handshake -- unwound straight past it, so a
+                # victim evicted for room was left resident with nothing holding
+                # it: the pool no longer knew it, and a later open of that session
+                # built a SECOND bridge while the first still held a facade and a
+                # runtime. Nearly inert for an idle tier-1 victim, and not inert
+                # at all for a tier-2 DWELLING one, whose facade, runtime and
+                # presence assertion would then be unreachable until its dwell
+                # expired.
+                #
+                # Closing is also what the bare ``del`` never did, on either path.
+                # For a dwelling victim it is what ends the dwell (``_evict_one``).
+                with contextlib.suppress(ConnectionError, RuntimeError):
+                    await evicted.close()
         try:
             yield bridge
         finally:
