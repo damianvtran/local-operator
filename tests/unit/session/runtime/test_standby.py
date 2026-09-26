@@ -1828,6 +1828,92 @@ def test_concurrent_adoptions_never_signal_the_adopted_runtime(
     assert warm.adopted is True, "the winner must flag the spare the moment it adopts"
 
 
+def test_a_retire_decided_before_a_concurrent_adoption_never_signals_it(
+    supervisor_harness: Any,
+) -> None:
+    """R2.1 (agent review round 2): the flag read that decides a retire and the
+    ``terminate()`` are ONE critical section.
+
+    The window the reviewer widened and demonstrated: a retirer reads the adopted
+    flag (False), an adoption commits, and the signal lands on a pid that is a
+    runtime now. Here the gate is ``poll()`` — the fake blocks inside it until the
+    adopter has committed — so the gap is deterministic instead of µs-wide. On the
+    unfixed code the signal lands after the commit (cell fails); on the fixed code
+    the flag is re-read under ``_CHANNEL_LOCK`` and the signal is refused.
+    """
+    from local_operator.session.runtime import standby
+
+    h = supervisor_harness(role=standby.SLOT_DAEMON)
+    poll_entered = threading.Event()
+    committed = threading.Event()
+
+    class _GatedProc(_FakeProc):
+        def poll(self) -> int | None:
+            # The widened window: hold the decider here until the adoption has
+            # committed, exactly as the natural check→poll→signal gap allows.
+            if self.returncode is None and not poll_entered.is_set():
+                poll_entered.set()
+                assert committed.wait(timeout=10), "the adopter never committed"
+            return self.returncode
+
+    proc = _GatedProc()
+    warm = standby._Standby(cast(Any, proc), cast(Any, _FakeSock(b"")), h.root, standby.SLOT_DAEMON)
+    h.spares.append(warm)
+    standby._POOL.append(warm)
+
+    errors: list[BaseException] = []
+
+    def retire() -> None:
+        try:
+            standby.note_spare_gone(warm, "warm-wedged", terminate=True)
+        except BaseException as exc:  # noqa: BLE001 — surfaced by the asserts below
+            errors.append(exc)
+
+    def commit() -> None:
+        try:
+            assert poll_entered.wait(timeout=10), "the retire never reached its window"
+            # The adoption commit, exactly where try_adopt sets it: INSIDE the
+            # channel lock, at the instant the ok reply is parsed.
+            with standby._CHANNEL_LOCK:
+                warm.adopted = True
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            committed.set()
+
+    threads = [threading.Thread(target=retire), threading.Thread(target=commit)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert not errors, errors
+    assert warm.adopted is True
+    assert proc.signals == [], (
+        "R2.1: the retire signalled a spare whose adoption committed while the "
+        f"retire was deciding; signals are {proc.signals!r}"
+    )
+
+    # The other half of the ask: a genuinely dead spare still goes, and the 5 s
+    # SIGTERM wait stays OUTSIDE the channel — it is the WAIT that must not block
+    # the handshake, not the kill syscall (``_ready_locked``'s comment).
+    class _WaitWatchesLock(_FakeProc):
+        def wait(self, timeout: float | None = None) -> int:
+            assert (
+                not standby._CHANNEL_LOCK.locked()
+            ), "the SIGTERM wait must not hold the channel lock"
+            return super().wait(timeout)
+
+    dead = _WaitWatchesLock()
+    second = standby._Standby(
+        cast(Any, dead), cast(Any, _FakeSock(b"")), h.root, standby.SLOT_DAEMON
+    )
+    h.spares.append(second)
+    standby._POOL.append(second)
+    standby.note_spare_gone(second, "warm-wedged", terminate=True)
+    assert dead.signals == [signal.SIGTERM], "a genuinely dead spare still goes by exact pid"
+
+
 @pytest.mark.parametrize(
     "reason",
     [

@@ -199,10 +199,11 @@ spare reaches READY or a refill lives a normal life) instead of being dropped; a
 warm that never finishes inside ``WARM_DEADLINE_S`` is retired by exact pid; a
 spare declined ``DECLINE_RETIRE_N`` times is retired and refilled (a standing
 mismatch means it can never serve its own console); a slot claim is retried at
-``SLOT_RETRY_S``; and an adopted spare LEAVES the pool immediately — it carries
-a FLAG set from inside the adoption lock, so a concurrent attempt racing for the
-same spare finds the flag and moves to the next candidate — so no path can
-signal a process that is now a session's runtime. The daemon keeps
+``SLOT_RETRY_S``; an adopted spare LEAVES the pool immediately — it carries a
+FLAG set from inside the adoption lock, a concurrent attempt racing for the same
+spare finds the flag and moves to the next candidate, and the terminate gate
+re-reads that flag under the same lock directly before signalling — so no path
+can signal a process that is now a session's runtime. The daemon keeps
 ``DAEMON_SPARE_DEPTH`` spares and never idle-reaps them; every other console
 keeps one and keeps ``IDLE_REAP_S``. The idle policy travels to the child as
 ``STANDBY_IDLE_ENV`` (additive; a child from an older build keeps its 900 s).
@@ -837,11 +838,11 @@ def note_spare_gone(spare: "_Standby", reason: str, *, terminate: bool = False) 
     signalling it is the very defect this choke point exists to prevent.
     """
     if terminate and spare.adopted:
-        # HARD RULE (B1): a spare that has been adopted IS a session's runtime —
-        # its pid is not a spare's any more, whatever reason a caller passes.
-        # The flag is checked HERE, at the one function that can reach
-        # ``_retire``, and again inside ``_retire`` itself, because this is the
-        # promise the module exists to keep.
+        # Fast-path belt (B1): skip even scheduling the retire when the flag is
+        # already visible. The AUTHORITATIVE check is inside ``_retire``, under
+        # ``_CHANNEL_LOCK`` (R2.1, agent review round 2) — this read is advisory
+        # and may race by design: a commit landing a µs later is caught by the
+        # locked re-read there, instead of being signalled.
         logger.debug("not retiring an adopted spare (%s)", reason)
         terminate = False
     if terminate:
@@ -1425,19 +1426,31 @@ def _retire(warm: _Standby) -> None:
     tree once. SIGTERM first because that is what a standby expects; SIGKILL only
     if it ignores one, and only for the pid this process forked.
 
-    A flagged spare is refused (B1): whatever path got here — a direct call from
-    a clear, a test teardown, a future caller — this pid is a session's runtime
-    now, and signalling it is the exact harm this module exists to remove.
+    THE DECISION AND THE SIGNAL ARE ONE CRITICAL SECTION (B1, made airtight in
+    agent review round 2, R2.1): the adopted flag is SET under
+    ``_CHANNEL_LOCK`` at the instant an adoption commits, so the last read of
+    that flag and the ``terminate()`` happen under the SAME lock. A commit
+    landing between a check and a signal is therefore impossible, and the
+    module's claim — no path can signal a process that is now a session's runtime
+    — holds for EVERY caller: the supervisor's wedged-warm path, the decline
+    retirement, ``reset_for_tests``, not only a racing ``try_adopt``.
+
+    ``poll()`` may run outside the lock (an alive verdict is re-judged under it),
+    and the 5 s SIGTERM wait and the SIGKILL escalation stay OUTSIDE: it is the
+    WAIT that must not block the channel, not the kill syscall (see
+    ``_ready_locked``'s note on the same rule).
     """
-    if getattr(warm, "adopted", False):
-        return
     try:
-        if warm.proc.poll() is None:
+        if warm.proc.poll() is not None:
+            return
+        with _CHANNEL_LOCK:
+            if getattr(warm, "adopted", False):
+                return
             warm.proc.terminate()
-            try:
-                warm.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                warm.proc.kill()
+        try:
+            warm.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            warm.proc.kill()
     except Exception:  # noqa: BLE001 - a retire is best-effort BY CONTRACT
         # Not just OSError, and not fatal: this runs on the engage path (a
         # refused or timed-out adoption) and on the console's way out. A standby
