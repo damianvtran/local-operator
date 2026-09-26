@@ -543,3 +543,47 @@ def test_the_agent_digest_of_a_doctor_run_reads_in_words() -> None:
     # The row's own address is kept once, in its own column; the sentence that
     # repeated it does not.
     assert body.count("127.0.0.1:64994") == 1, body
+
+
+def test_the_agent_digest_carries_the_audit_state_at_its_own_column() -> None:
+    """D40 on the surface a "why is my session stuck" question actually arrives on.
+
+    The digest is the model's only view: the audit fields ride in ``details``, which
+    never reaches a provider, so a digest that omitted them left an agent unable to
+    distinguish a row that is recorded-but-unpublished from one that does not exist —
+    the same blindness the CLI and the panel had. Same words as those two, through the
+    one renderer (``relay.audit_status_words``), at this register's own column: every
+    value here starts at cell 11 (``installed: ``, ``relay:     ``, ``log:       ``).
+
+    The payload is staged because the transport is not the subject — the numbers are
+    the relay's own in production, and the CLI cells drive a real writer's.
+    """
+    payload = {
+        "installed": True,
+        "supported": True,
+        "identity_present": True,
+        "relay_running": True,
+        "relay_answering": True,
+        "relay": {
+            "pid": 4711,
+            "audit_recorded_through": 13,
+            "audit_published_through": 12,
+            "audit_degraded": False,
+            "audit_degraded_reason": "",
+        },
+        "log": "/tmp/network.log",
+        "networks": [],
+    }
+    lines = net_tool._render("status", payload)  # noqa: SLF001 — the renderer under test
+    audit_line = next(line for line in lines if line.startswith("audit:"))
+    assert audit_line == ("audit:     13 recorded, published through 12 (1 not yet written)"), lines
+
+    # A WEDGED RELAY SPEAKS: never an omission, because the omission is the bug. And a
+    # stale relay with no counters says nothing at all rather than zero (absent, not 0).
+    wedged = dict(payload, relay=None, relay_answering=False, relay_state="wedged")
+    spoken = net_tool._render("status", wedged)  # noqa: SLF001
+    assert any(
+        line.startswith("audit:") and "audit.jsonl holds the last state" in line for line in spoken
+    ), spoken
+    stale = dict(payload, relay={"pid": 4711})
+    assert not [line for line in net_tool._render("status", stale) if line.startswith("audit:")]

@@ -2067,6 +2067,94 @@ def membership_marker(row: dict[str, Any]) -> str:
     return f"  [members NOT verified: no peer answered{': ' + states if states else ''}]"
 
 
+def audit_status_words(payload: Mapping[str, Any], *, omit_steady: bool = False) -> str:
+    """The audit trail's state in the reader's words, or ``""`` when there is none.
+
+    WHY THIS EXISTS AS ONE FUNCTION. The two counters in :func:`status`'s payload
+    answer the one question a reader staring at ``audit.jsonl`` during an incident
+    has — "is the row I am looking for recorded but not yet written, or does it not
+    exist?" — and for two releases they were reachable only through ``--json``: the
+    CLI's human block, the TUI's Relay block and the agent's own digest printed
+    nothing about the audit, so the silence of a lagging writer and the silence of a
+    healthy one were the same picture on every surface a person actually looks at
+    (design round 3, D40). ONE renderer, so the three cannot describe one fact in
+    three vocabularies — the shape :func:`membership_lines` and
+    :func:`membership_marker` are already in this module for.
+
+    THE WORDS ARE THE READER'S, NOT THE API'S (D42). ``publication_of`` answers
+    ``file`` / ``buffered`` / ``unknown``, and none of those three is printed here:
+    ``file`` names the substrate rather than the question, and the pair
+    *recorded* / *published* is the payload's own vocabulary and the operator's.
+
+    WHAT THE NUMBERS CLAIM, AND WHAT THEY DO NOT. ``published_through`` is a HIGH-WATER
+    MARK of what this writer put in the file, not a claim that every row at or below it
+    is still there: retention rotates generations and prunes them, and a row that was
+    published and later pruned keeps its number below the mark (:meth:`AuditLog.publication_of`
+    carries the same caveat beside the answer it gives). So the line says
+    *published through N* — a boundary — rather than "N rows are on disk".
+
+    THE CASES, and the two omissions:
+
+    * a failed write (a LOSS signal) — ``DEGRADED`` first, because it is the one the
+      reader must not miss, with the same reason string the relay printed to stderr;
+    * a lag — the count that is coming, worded as the normal batching rather than as
+      a loss;
+    * a relay that is running but not answering — a SENTENCE, never an omission: the
+      pair is unreadable exactly when the reader is most likely to be asking, and a
+      surface that went quiet here would reproduce the ambiguity this whole change
+      exists to remove (the designer's ``SIGSTOP`` case);
+    * an ANSWERING relay that carries no counters — an older build answers ``status``
+      during an update, and the numbers are ABSENT rather than zero, so nothing is
+      printed (``0 recorded`` would call every row buffered on a reader that
+      believed it);
+    * NO relay process at all — nothing is printed either, and that is a rule rather
+      than an oversight: with no writer there is no lag that could be hidden, the
+      ``relay:`` line directly above says ``not running`` on every one of these
+      surfaces, and the TUI's Relay block is already one row past its own fold.
+
+    ``omit_steady`` drops the steady-state line and NOTHING ELSE. The TUI sets it: its
+    Relay block paints into an 84x16 region that already holds a 17-row body (the
+    scrollbar in ``static/tui-mesh-network.geometry.json`` is the measurement), so a
+    row that says "nothing is wrong" would cost the row that would say something
+    (design round 3, D40). Every state that carries news is still rendered there.
+    """
+    relay = payload.get("relay") or {}
+    if payload.get("relay_answering"):
+        if relay.get("audit_degraded"):
+            reason = str(relay.get("audit_degraded_reason") or "").strip()
+            # THE REASON IS THE LINE'S REASON TO EXIST (D40's own example), and it is
+            # the SAME string the relay already printed to stderr — an errno is what an
+            # operator acts on, and a longer gloss in front of it is what pushes the
+            # errno itself past the panel's one-row budget.
+            return f"DEGRADED — {reason}" if reason else "DEGRADED"
+        published = relay.get("audit_published_through")
+        recorded = relay.get("audit_recorded_through")
+        if published is None or recorded is None:
+            return ""
+        lag = int(recorded) - int(published)
+        if lag > 0:
+            # (1 not yet written) is the STATE, not an error: a row buffered behind
+            # the tick is the middle answer publication_of exists to give, and a
+            # reader told "1 not yet written" knows to look again rather than to
+            # conclude the record was lost.
+            return (
+                f"{int(recorded)} recorded, published through {int(published)} "
+                f"({lag} not yet written)"
+            )
+        if omit_steady:
+            return ""
+        return f"{int(recorded)} recorded, published through {int(recorded)}"
+    if payload.get("relay_running"):
+        # 67 CELLS, MEASURED, and that is why the wording is this tight: the panel's
+        # value budget is 68 (an 84-cell region, a 14-cell label, and the card's own
+        # padding), so a longer sentence WRAPS — and a wrapped second line is below the
+        # fold, which puts the end of the sentence exactly where the silence this line
+        # exists to break used to be. The CLI and the digest have room; the row has to
+        # be one row on all three, or the panel is the surface where it fails.
+        return "unavailable — relay not answering; audit.jsonl holds the last state"
+    return ""
+
+
 def membership_lines(row: dict[str, Any]) -> list[str]:
     """The lines a surface prints when THIS device's own standing is not `active`.
 

@@ -330,14 +330,43 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
     silently the whole command output.
     """
     if action == "status":
+        from local_operator.network.relay import audit_status_words
+
         relay = payload.get("relay") or {}
+        # THE SAME THREE CASES THE CLI'S BLOCK HAS, from the same fields (Q-R3-4):
+        # ``relay_running`` is a process, ``relay_answering`` is this probe being
+        # answered, and only the pair together can describe a relay that is up and
+        # silent. Reading the pid alone said "not running" about a running process —
+        # and now that the audit line below says "the relay is not answering", the
+        # block would have contradicted itself in two adjacent lines.
+        if payload.get("relay_running"):
+            pid = relay.get("pid") or (payload.get("record") or {}).get("pid")
+            relay_line = (
+                f"running, pid {pid}"
+                if payload.get("relay_answering")
+                else (
+                    f"running (pid {pid}), NOT answering its control socket "
+                    f"(state: {payload.get('relay_state')})"
+                )
+            )
+        else:
+            relay_line = "not running"
         lines = [
             f"installed: {'yes' if payload.get('installed') else 'no'}"
             + ("" if payload.get("supported") else "  (no launchd on this platform)"),
             f"identity:  {'present' if payload.get('identity_present') else 'missing'}",
-            f"relay:     {'running, pid ' + str(relay.get('pid')) if relay else 'not running'}",
-            f"log:       {payload.get('log')}",
+            f"relay:     {relay_line}",
         ]
+        # THE SAME WORDS THE CLI AND THE PANEL PRINT, through the one renderer (design
+        # round 3, D40), at this register's own column: every value here starts at cell
+        # 11 (`installed: `, `identity:  `, `log:       `). It matters more here than on
+        # either: this digest is where "why is my session stuck" actually arrives, and
+        # the payload's audit fields ride in ``details``, which never reaches a provider
+        # — so without this line the model cannot know the distinction exists.
+        audit_words = audit_status_words(payload)
+        if audit_words:
+            lines.append(f"audit:     {audit_words}")
+        lines.append(f"log:       {payload.get('log')}")
         return lines + ["  " + line for line in _networks_block(payload)]
     if action == "ls":
         return _networks_block(payload)

@@ -2029,7 +2029,9 @@ def test_the_owner_s_close_row_reaches_the_file_it_writes(
     reach the file — one full 15 s tick, because the close lands just after a flush and
     an otherwise idle relay has nothing else to drain — so the 20 s bound this cell
     carried was 1.24x the product's own publication latency, and a relay whose
-    publication had doubled would have passed it (agent review round 2, NIT 2). On the
+    publication had doubled would have passed it (the lane's own test-robustness round,
+    where this bound was cut to 5 s — not an agent-review round; agent review round 3,
+    NIT 2, corrected the citation). On the
     fixed head the same trace reads **0.0006 / 0.0015 / 0.0004 s**: the flush is the
     close's own act now (``audit.STREAM_LIFECYCLE_EVENTS``).
 
@@ -2037,7 +2039,8 @@ def test_the_owner_s_close_row_reaches_the_file_it_writes(
     backstop that turns a hang into a failure, and it is deliberately BELOW one
     heartbeat, so a regression that puts the row back on the tick cadence fails here
     instead of passing 1.24x. Five seconds is a catastrophe ceiling, not precision: the
-    work being waited on is one ``write(2)`` on a thread in this process (measured
+    work being waited on is one flush (an append-open and one ``.write()`` carrying the
+    batch) on a thread in this process (measured
     above at 1.5 ms), and the largest starvation gap recorded for this fleet is 525-668
     ms (AGENTS.md, "If you must measure"), so the bound sits ~7x above the worst gap this
     host has produced and ~1/3 of the latency it must reject.

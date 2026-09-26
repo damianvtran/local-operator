@@ -1067,3 +1067,103 @@ def test_the_gloss_never_hands_a_bare_wire_code_back_to_a_person() -> None:
     for reason in sorted(refused):
         assert resume.peer_reason_words(reason) == resume._BARE_CODE_WORDS, reason  # noqa: SLF001
     assert resume.peer_reason_words("not_a_member") == resume.PEER_REASON_WORDS["not_a_member"]
+
+
+# ---------------------------------------------------------------------------
+# Design round 3 D40 — the audit row, and the row it is allowed to cost
+# ---------------------------------------------------------------------------
+
+
+def test_the_relay_block_pays_for_the_audit_row_only_when_it_has_news() -> None:
+    """THE FOLD IS THE CONSTRAINT, so the row is conditional and it sits above ``log:``.
+
+    The Relay block paints into an 84x16 region holding a 17-row body: the scrollbar is
+    already up and ``log:`` is already below the fold
+    (``static/tui-mesh-network.geometry.json``). A steady-state row would therefore buy
+    nothing and cost a ROW, so the steady state paints exactly what it painted before
+    this change — the row that carries news is the one a reader opens the panel for
+    (a lag, a degraded writer, or a relay that cannot be asked).
+
+    And it is rendered in the row the separator blank used to hold, BEFORE ``log:``
+    rather than appended: the last body row is the invisible one, so a news row at the
+    end would land under the fold — a silence, which is the failure D40 is about.
+    """
+    import json
+
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    def block(relay: Any, **over: Any) -> list[str]:
+        screen = NetworkScreen(_panel_local())
+        payload = {
+            "installed": True,
+            "identity_present": True,
+            "relay_running": True,
+            "relay_answering": True,
+            "relay_state": "live",
+            "relay": relay,
+            "log": "/tmp/iso/logs/network.log",
+        }
+        payload.update(over)
+        screen.status_run = NetworkRun(("status",), 0, stdout=json.dumps(payload))
+        return screen.render_lines_for_test()
+
+    steady = block({"pid": 4711, "audit_recorded_through": 13, "audit_published_through": 13})
+    assert not [line for line in steady if line.startswith("  audit:")], steady
+
+    lagging = block({"pid": 4711, "audit_recorded_through": 13, "audit_published_through": 12})
+    audit_at = next(n for n, line in enumerate(lagging) if line.startswith("  audit:"))
+    log_at = next(n for n, line in enumerate(lagging) if line.startswith("  log:"))
+    assert audit_at < log_at, lagging
+    # Values at cell 14, the column the four rows around it already use, and the value
+    # keeps that indent when it wraps (``_indented_value``, UX round 3 U22) — this block
+    # wraps at the panel's 40-cell floor, the capture size wraps nothing.
+    assert lagging[audit_at].index("13 recorded") == 14, lagging[audit_at]
+    assert "".join(lagging[audit_at:log_at]).replace(" ", "") == (
+        "audit:13recorded,publishedthrough12(1notyetwritten)"
+    ), lagging[audit_at:log_at]
+    # THE SEPARATOR IS WHAT PAYS FOR IT, and that is the width-independent fact: the
+    # steady body keeps its blank line before ``Relay``, the news body has the row
+    # instead. (The body's LINE COUNT is not comparable here — this panel is rendered at
+    # its 40-cell floor, where the audit value itself wraps; at the capture size the
+    # geometry JSON carries the stronger number, ``virtual_size`` 17 in every state.)
+    relay_at = next(n for n, line in enumerate(steady) if line == "Relay")
+    assert steady[relay_at - 1] == "", steady[relay_at - 2 : relay_at + 1]
+    assert lagging[relay_at - 1] != "", lagging[relay_at - 2 : relay_at + 1]
+
+
+def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be() -> None:
+    """The SIGSTOP case: ``relay: null`` and no ``audit*`` key at all.
+
+    A reader who has just found a row missing from ``audit.jsonl`` is, by construction,
+    in a state where the relay may not answer — so the panel must not go quiet here,
+    because its silence is indistinguishable from a healthy writer's. This is the one
+    surface case D40 said it would not accept as a follow-up.
+    """
+    import json
+
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    screen = NetworkScreen(_panel_local())
+    screen.status_run = NetworkRun(
+        ("status",),
+        0,
+        stdout=json.dumps(
+            {
+                "installed": True,
+                "identity_present": True,
+                "relay_running": True,
+                "relay_answering": False,
+                "relay_state": "wedged",
+                "relay": None,
+                "log": "/tmp/iso/logs/network.log",
+            }
+        ),
+    )
+    text = "\n".join(screen.render_lines_for_test())
+    assert "relay:      running, pid None — NOT answering" in text, text
+    assert "audit:" in text, text
+    # The sentence is present even at this cell's 40-cell panel width, wrapped by
+    # ``_indented_value`` — the panel at its capture size prints it on one row.
+    assert "audit.jsonlholdsthelaststate" in text.replace(" ", "").replace("\n", ""), text
+    # And the numbers are never invented for it: no counter survives a null relay.
+    assert "recorded," not in text, text

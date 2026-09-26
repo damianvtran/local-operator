@@ -57,7 +57,13 @@ that just ended, and 15 s of a row that exists being indistinguishable from a ro
 that does not is long enough to conclude a stream was never closed. And a writer
 answers :meth:`AuditLog.publication_of` for any sequence number, so a reader that
 finds nothing in the file can tell "recorded, not published yet" from "no such row"
-instead of inferring one from the other.
+instead of inferring one from the other. AN ANSWER NOBODY RENDERS IS NOT AN ANSWER,
+so the same fact reaches the three surfaces a person actually looks at —
+``lop network status``'s block, the TUI's ``/network`` panel and the agent's own
+digest (``relay.audit_status_words``, one renderer for all three) — including the
+case where the relay is running but not answering, where the surfaces say so in a
+sentence rather than going quiet, because that is the state in which the reader is
+most likely to be asking.
 
 RETENTION IS BY SIZE AND BY AGE with a fixed number of compressed generations, so
 the steady-state footprint is bounded by construction rather than by tuning. The
@@ -412,11 +418,16 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
 #: because the close lands just after a flush and nothing else on an otherwise idle
 #: relay drains the buffer. The bound the cell used to carry was 20 s, which is 1.24x
 #: the product's own publication latency — a cell that cannot tell a working relay from
-#: one whose publication had doubled (agent review round 2, NIT 2).
+#: one whose publication had doubled (the lane's own test-robustness round, where this
+#: cell's bound was cut to 5 s: the round that found it, not an agent-review round).
 #:
-#: PUBLISHED, NOT SYNCED, AND NOT PER ROW. This is a ``flush`` — one ``write(2)`` of the
-#: batch — and never an ``fsync``: nothing here claims to survive a power cut, which is
-#: the whole of what :data:`DURABLE_EVENTS` is for. The cost is bounded by the STREAM
+#: PUBLISHED, NOT SYNCED, AND NOT PER ROW. This is a ``flush`` — ONE append-open and one
+#: ``.write()`` carrying the whole batch — and never an ``fsync``: nothing here claims to
+#: survive a power cut, which is the whole of what :data:`DURABLE_EVENTS` is for. The
+#: count is of CALLS and not of syscalls (agent review round 3, NIT 1: a batch past the
+#: text layer's 8 KiB buffer decomposes into more than one ``write(2)`` while
+#: ``write_calls`` moves by one, so nothing here is a syscall count, and the rate claim
+#: does not need one). The cost is bounded by the STREAM
 #: COUNT and by nothing else: a stream opens and closes when a viewer attaches and
 #: leaves, both human-scale events, so an idle relay writes nothing at all (no timer
 #: fires when nothing happened) and a busy one pays at most two extra writes per stream
@@ -540,9 +551,12 @@ class AuditLog:
         self._published_seq = self._seq
         self._last_flush = time.monotonic()
         #: Two MEASURED counters, because §4.8's bounds are asserted against them
-        #: rather than estimated: ``write_calls`` counts the ``write(2)``s this writer
-        #: made (its whole point is that they are bounded by the 1 Hz tick plus the
-        #: buffer filling plus durable events, NOT by the frame rate), and ``syncs``
+        #: rather than estimated: ``write_calls`` counts the flush calls that actually
+        #: opened the file and wrote (one append-open plus one ``.write()`` carrying the
+        #: batch — CALLS, not ``write(2)`` syscalls, which a batch over the text layer's
+        #: buffer can split; see :data:`STREAM_LIFECYCLE_EVENTS`). Its whole point is
+        #: that those calls are bounded by the 1 Hz tick plus the buffer filling plus
+        #: durable events, NOT by the frame rate, and ``syncs``
         #: counts ``os.fsync`` calls, which happen for ``DURABLE_EVENTS`` and on
         #: rotation and for nothing else. ``scripts/mesh_audit_probe.py`` reads both; a
         #: bound with no instrument behind it is a claim nobody can check.
@@ -601,9 +615,17 @@ class AuditLog:
         """Where the record numbered ``seq`` is: ``file``, ``buffered`` or ``unknown``.
 
         THE MIDDLE ANSWER IS THE ONE THIS EXISTS FOR, and it is the difference between
-        a reader and a guess. ``file`` means it is in ``audit.jsonl`` and a reader's
-        answer is final (unless ``degraded``). ``buffered`` means this writer has
-        RECORDED it and has not published it, so a reader that reads the file and finds
+        a reader and a guess. ``file`` means PUBLISHED BY THIS WRITER — written to the
+        live file, or to a generation that retention still holds — and it is a
+        HIGH-WATER MARK rather than a claim of presence: everything at or below
+        ``_published_seq`` went through this log's own ``flush``, but a row a rotation
+        or the retention cap has since PRUNED keeps this answer for good, so ``file``
+        must not be read as "a record with this number is on disk somewhere" (agent
+        review round 3, MINOR 1: measured with seq 1 absent from every generation and
+        ``publication_of(1)`` still ``file``). ``lop network log --export`` is what
+        reads the compressed generations back; ``§4.5`` of the incident playbook is the
+        retention rule. ``buffered`` means this writer has RECORDED it and has not
+        published it, so a reader that reads the file and finds
         nothing is seeing the LAG rather than an absence — which is the state an
         operator reading ``audit.jsonl`` during an incident cannot otherwise
         distinguish from a row that never existed, and it is why stream lifecycle rows
@@ -615,12 +637,18 @@ class AuditLog:
         case: a reader in ANOTHER process holds its own ``AuditLog`` and must take the
         numbers from the one that owns the file — ``lop network status`` carries them
         (``relay``'s ``audit_published_through`` / ``audit_recorded_through``) for
-        exactly that reader. THE ANSWER IS ABOUT THIS WRITER'S OWN COUNTER, so it is
-        sound while the relay is the file's only writer, which the module docstring
-        states as the contract; a second process appending to the same file would
-        render sequence numbers of its own from the same seed (``_last_sequence`` is
-        read once, at open), and the ``seq`` a reader is asking about would no longer
-        identify one row.
+        exactly that reader, and the human surfaces print them in the reader's own
+        words (``relay.audit_status_words``). THE ANSWER IS ABOUT THIS WRITER'S OWN
+        COUNTER, so it is sound while the relay is the file's only writer, which the
+        module docstring states as the contract; a second process appending to the same
+        file would render sequence numbers of its own from the same seed
+        (``_last_sequence`` is read once, at open), and the ``seq`` a reader is asking
+        about would no longer identify one row — the middle answer then names the
+        WRONG ROW (measured, agent review round 3, MINOR 2: ``publication_of(1)``
+        answered ``buffered`` while the file already held a different row numbered 1).
+        That is pre-existing, disclosed here rather than repaired, and out of this
+        slice: the fix is a re-read of the tail before rendering, which is a cost on
+        the reader's path that this writer cannot pay for it.
         """
         with self._write_lock:
             if seq <= self._published_seq:
@@ -655,7 +683,7 @@ class AuditLog:
                 # record whose loss to a power cut is unrecoverable must be on the
                 # platter before the act it describes can be reported as done. The
                 # reasoning the design gives is the one this code had drifted from —
-                # it flushed (a ``write(2)`` into the page cache) and never synced, so
+                # it flushed (a buffered write into the page cache) and never synced, so
                 # "the latch is written and fsynced before the broadcast" was true of
                 # the buffer and false of the disk. Only these events pay it: a
                 # per-record fsync on ordinary traffic is exactly the disk I/O the

@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from local_operator import resume
+from local_operator.network import audit as audit_mod
 from local_operator.network import cli as net_cli
 from local_operator.network import relay, store, types, wire
 from tests.unit.network import conftest as net_fixtures
@@ -870,3 +871,148 @@ def _record_in(root: Path) -> types.NetworkRecord:
         self_role="admin",
         self_capabilities=sorted(types.capabilities_for_role("admin")),
     )
+
+
+# ---------------------------------------------------------------------------
+# Design round 3 D40 — the audit trail's state, on the block a person reads
+# ---------------------------------------------------------------------------
+
+
+def _audit_status(root: Path, log: Any, **over: Any) -> dict[str, Any]:
+    """``relay.status()``'s shape, with the audit block read off a REAL writer.
+
+    The transport is stubbed; nothing else is. ``published_through`` /
+    ``recorded_through`` / ``degraded`` are the writer's own properties, so these cells
+    cannot keep passing after the writer's meaning of them moves — the thing a
+    hand-typed fixture would let happen (the counters are the whole subject here).
+    """
+    payload: dict[str, Any] = {
+        "installed": True,
+        "supported": True,
+        "identity_present": True,
+        "relay_running": True,
+        "relay_answering": True,
+        "relay_state": "live",
+        "relay": {
+            "pid": 4711,
+            "audit_published_through": log.published_through,
+            "audit_recorded_through": log.recorded_through,
+            "audit_degraded": log.degraded,
+            "audit_degraded_reason": log.degraded_reason,
+            "audit_path": str(audit_mod.audit_path(root)),
+        },
+        "record": {"pid": 4711},
+        "port": 4711,
+        "log": str(root / "network.log"),
+        "networks": [],
+    }
+    payload.update(over)
+    return payload
+
+
+def test_the_status_block_prints_the_audit_lag_in_the_readers_words(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D40: a reader has to be able to tell "not yet written" from "no such row".
+
+    The distinction existed for two releases and was reachable only through ``--json``,
+    so on this block — the one an operator runs first during an incident — a lagging
+    writer and a healthy one were the same picture: nothing. The pair is printed here in
+    the payload's own vocabulary (D42: ``file``/``buffered``/``unknown`` stay in the
+    Python API), and the lag is worded as the batching it is rather than as a loss.
+
+    The two states come from ONE real writer, one record apart, which is what the
+    middle state is: a row that is recorded and still buffered behind the tick.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    log = audit_mod.AuditLog(root)
+    log.record(audit_mod.AuditEvent(event="link_opened"))
+    log.record(audit_mod.AuditEvent(event="link_closed"))
+    log.flush()
+
+    monkeypatch.setattr(relay, "status", lambda *a, **k: _audit_status(root, log))
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    steady = capsys.readouterr().out
+    assert "audit:      2 recorded, published through 2" in steady, steady
+    # The same register as the three lines above it: every value starts at cell 12.
+    audit_line = next(line for line in steady.splitlines() if line.startswith("audit:"))
+    assert audit_line.index("2 recorded") == 12, audit_line
+
+    # One more record, no flush: the writer holds it, and the block says so.
+    log.record(audit_mod.AuditEvent(event="link_opened"))
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    lagging = capsys.readouterr().out
+    assert "audit:      3 recorded, published through 2 (1 not yet written)" in lagging, lagging
+
+
+def test_an_older_relays_answer_prints_no_audit_line_rather_than_zero(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Absence is not zero, on the human path as well as in the payload.
+
+    A relay of an adjacent build answers ``status`` during an update and carries no
+    counters. A reader that defaulted them to ``0`` would render every row as "not yet
+    written" — the one answer that is wrong in a way the reader cannot detect — so the
+    line is omitted instead, which is honest about having nothing to say.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    log = audit_mod.AuditLog(root)
+    payload = _audit_status(root, log)
+    payload["relay"] = {"pid": 4711}  # an answering relay with no counters
+    monkeypatch.setattr(relay, "status", lambda *a, **k: payload)
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert "audit:" not in out, out
+    assert "relay:      running, pid 4711" in out, out
+
+
+def test_a_wedged_relay_gets_a_sentence_where_the_audit_numbers_would_be(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE CASE THE FINDING WAS MEASURED ON (D40, a ``SIGSTOP``ped relay).
+
+    With the relay running but not answering, the payload carries ``relay: null`` and no
+    ``audit*`` key at all — so a reader who has just found a row missing from
+    ``audit.jsonl`` is in exactly the state where the numbers vanish, and vanishing is
+    indistinguishable from health unless the surface says why. This cell pins the
+    sentence, and pins it directly under the relay line that says the same thing about
+    the same process.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    log = audit_mod.AuditLog(root)
+    payload = _audit_status(root, log, relay=None, relay_answering=False, relay_state="wedged")
+    monkeypatch.setattr(relay, "status", lambda *a, **k: payload)
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    relay_at = next(n for n, line in enumerate(lines) if line.startswith("relay:"))
+    audit_at = next(n for n, line in enumerate(lines) if line.startswith("audit:"))
+    assert audit_at == relay_at + 1, out
+    assert lines[relay_at].endswith("NOT answering its control socket (state: wedged)"), out
+    assert "not answering; audit.jsonl holds the last state" in lines[audit_at], out
+
+
+def test_a_failed_audit_write_reads_degraded_before_anything_else_on_the_block(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The LOSS signal, on the surface an operator opens first.
+
+    ``AuditLog.record``'s contract is that a failed write is "a degraded flag plus a line
+    on stderr" — and the stderr of a background relay is not where anyone looks. The
+    failure here is real (the writer's own path is occupied by a directory), so both the
+    flag and the reason are the writer's, and the reason printed is the writer's own
+    string: an operator acts on errno, not on a summary of it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    audit_mod.audit_path(root).parent.mkdir(parents=True, exist_ok=True)
+    audit_mod.audit_path(root).mkdir()
+    log = audit_mod.AuditLog(root)
+    log.record(audit_mod.AuditEvent(event="link_opened"))
+    log.flush()
+    assert log.degraded is True, "the rig did not make the writer fail; the cell proves nothing"
+
+    monkeypatch.setattr(relay, "status", lambda *a, **k: _audit_status(root, log))
+    assert net_cli._cmd_status(Namespace(json=False)) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert "audit:      DEGRADED" in out, out
+    assert log.degraded_reason in out, (log.degraded_reason, out)
