@@ -819,11 +819,17 @@ def _destination_move(
     owner_device: str,
     owner_name: str,
     asked: bool = False,
+    target_id: str = "",
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
     Returns ``(result, refusal, new_id)``. ``asked`` distinguishes the offload
     (the owner invited us, so no status/prepare handshake is owed) from a recall.
+
+    ``target_id`` is the id a ``keep`` copy must be adopted under, for the one caller
+    that has to name it BEFORE this function runs: an invite acks the id the pull will
+    use, so the inviter's receipt names a session that will exist (QA delta, Q-D2).
+    Empty means "mint one here", which is what every uninvited caller does.
 
     The phases are reported as they happen, and the caller's contract only requires
     that a SUCCESS reports an openable phase — so a move that stopped at
@@ -926,9 +932,23 @@ def _destination_move(
         note("prepared")
         break
 
+    invited_id = target_id
     target_id = session_id
     if keep:
-        target_id = fork_mod.new_session_id()
+        # ONE MINT, AND IT IS THIS DEVICE'S (QA delta, Q-D2). A ``--keep`` copy is
+        # created HERE, so the directory that appears is the one this id names — an
+        # inviter that minted its own would publish a receipt naming a session no
+        # device holds, and the follow-up move the user is told to run would answer
+        # "no device in this network holds …". The invited path therefore hands its
+        # own mint down (``_destination_invite``), because its ack has to carry the id
+        # before this thread has run at all.
+        #
+        # ``invited_id`` IS READ OFF THE PARAMETER FIRST because ``target_id`` is this
+        # name's SECOND meaning from the line above — the id the session is adopted
+        # under — and an ``or`` against the parameter would silently be an ``or``
+        # against ``session_id`` (measured: the receipt named the source id and the copy
+        # was minted under another).
+        target_id = invited_id or fork_mod.new_session_id()
     staging = sync_mod.staging_dir(server.root, target_id)
     try:
         sync_mod.sync_from(
@@ -1888,6 +1908,9 @@ def _destination_invite(
                 owner_device=owner_device,
                 owner_name=owner_name,
                 asked=True,
+                # THE ID THE ACK ALREADY CARRIED, so the copy is adopted under the id
+                # the inviter was told about rather than a second, unreachable one.
+                target_id=new_id,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -2595,6 +2618,41 @@ class _NullTransport:
         )
 
 
+def _peer_may_not_take(link: "PeerLink", session_id: str, label: str) -> SessionMoveRefusal | None:
+    """A refusal for a peer this device does not admit to move, or ``None``.
+
+    WHY THE INVITER LOOKS BEFORE IT INVITES (QA delta, Q-D3). Every frame a pull
+    sends lands on THIS device and is authorised here against the invited peer's own
+    member row (``authorizer.Authorizer.check``), so a peer holding only ``drive``
+    has all of them refused here. Before this check that refusal was produced where
+    nothing was waiting for it: the invite went out, the peer's first ask was refused
+    at t+0.4 s, and the user was told 31.77 s later that the move "did not finish in
+    time" with the advice to ask again — advice no retry can satisfy, because a
+    capability is a decision and asking again gets the same answer. Measured on two
+    real devices, the peer admitted ``drive``.
+
+    ``link.role_capabilities()`` is the SAME row the authoriser decides on, resolved
+    from the current member record rather than captured at admission (see
+    ``PeerLink.role_capabilities``), so this cannot refuse a move the authoriser would
+    have admitted. It is a pre-check and not a second guard: what it removes is the
+    WAIT, never the decision, which stays in the authoriser.
+
+    The remedy is named because a refusal's job is to say what would change the
+    answer — the grant that widens this peer's authority is the operator's, not the
+    retrying user's. The verb and its argument order are ``lop network member
+    grant|revoke <network> <device> <capability>``'s own.
+    """
+    if "move" in link.role_capabilities():
+        return None
+    return _move_refusal(
+        session_id,
+        "not_authorised",
+        f"{label} may not take sessions from this device (it does not hold the 'move' "
+        f"capability here), so {session_id} was not offered to it. Grant it with "
+        f"`lop network member grant <network> {label} move` if that was the intent.",
+    )
+
+
 def _offload(
     server: "RelayServer", session_id: str, *, to: str, keep: bool, wait_s: float
 ) -> SessionMoveResult | SessionMoveRefusal:
@@ -2638,6 +2696,9 @@ def _offload(
         link = _link_for_move(server, target_device, target_name)
     except Moved as refusal:
         return _move_refusal(session_id, "unreachable", refusal.message)
+    blocked = _peer_may_not_take(link, session_id, target_name or target_device)
+    if blocked is not None:
+        return blocked
     progress = progress_for(server)
     progress.forget(session_id)
     transport = LinkTransport(server, link, session_id)

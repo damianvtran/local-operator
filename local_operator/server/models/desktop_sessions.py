@@ -72,16 +72,24 @@ class SessionRow(BaseModel):
     #:
     #: ``locality`` and ``peer`` are the transport's two, and ONLY ``locality`` is a
     #: field every row carries an answer in: ``"local"`` for a row on this device,
-    #: ``"remote"`` for one another device holds. ``peer`` is ``null`` on BOTH — the
-    #: nested block is deliberately not published by the federated listing, because a
-    #: client that grouped by ``peer.name`` filed every remote row under one heading
-    #: in the first review, and the flat locality fields below are what a renderer
-    #: groups and labels from instead (Addendum 2 B). So a reader must take
-    #: ``peer: null`` as "this row carries no nested block" and never as "this row is
-    #: local": ``locality`` is the only field that answers which it is, and it is
-    #: always present. This comment said the opposite of both — that ``remote`` came
-    #: with the block — while ``remote_session_rows`` was omitting it on purpose, and
-    #: a renderer mirrors this shape by hand (QA round 1 integration, Q-INT-5).
+    #: ``"remote"`` for one another device holds. ``peer`` is ``null`` on the rows THIS
+    #: model describes, both halves: ``remote_session_rows`` mints each remote row from
+    #: the flat fields and never sets the nested block, because a client that grouped by
+    #: ``peer.name`` filed every remote row under one heading in the first review
+    #: (Addendum 2 B), and this device's own catalogue publishes ``"peer": None`` beside
+    #: its flat fields. So a reader must take ``peer: null`` as "this row carries no
+    #: nested block" and never as "this row is local": ``locality`` is the only field
+    #: that answers which it is, and it is always present.
+    #:
+    #: AND IT IS NOT A CLAIM ABOUT EVERY SURFACE (QA delta, Q-D5). The transport's own
+    #: federated row REQUIRES the block and carries it on every remote row
+    #: (``network/projection.py::to_row_json``) — that is the shape ``lop network
+    #: sessions --peer/--all-peers --json`` prints, and the shape ``cli.sessions_command``
+    #: reads ``peer.name`` from for its PEER column. Two shapes on purpose: this model and
+    #: the renderer that mirrors it group from the FLAT fields, the federated row carries
+    #: the block, and an earlier revision of this comment generalised this surface's rule
+    #: to "the federated listing" in both directions (first wrong about remote rows,
+    #: Q-INT-5; then wrong about the listing, Q-D5).
     locality: Literal["local", "remote"] = "local"
     peer: dict[str, Any] | None = None
     #: -- THE FLAT LOCALITY FIELDS (mesh build plan, Addendum 2 B). The renderer
