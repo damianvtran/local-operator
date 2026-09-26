@@ -461,7 +461,7 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     plus the registry's agent-id lookup, raising ``ValueError`` with the
     legacy message shapes when unconfigured.
     """
-    from local_operator.agents import AgentRegistry
+    from local_operator.agents import AgentRegistry, agents_store_present
     from local_operator.config import ConfigManager
     from local_operator.paths import config_dir
     from local_operator.session_factory import resolve_agent, resolve_hosting_model
@@ -474,14 +474,34 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     # agents and config and then spawned a worker that used the override's.
     base_dir = config_dir()
     config_manager = ConfigManager(base_dir)
-    agent_registry = AgentRegistry(base_dir)
+    # GUARDED (review round 2, finding 1): build the registry only when it has
+    # something to answer — an agent selector, or a store already on disk.
+    # ``resolve_agent`` returns ``None`` for a selector-less call WITHOUT
+    # reading the registry, so on a truly fresh root the old unconditional
+    # construction wrote ``config/agents/`` for an answer nothing consumed,
+    # and it did so on BOTH launch arms before the deny-trap advisory could
+    # reach its fresh-root branch (foreground: the ``cli.py`` preflight then
+    # ``run_exec``; background: ``_spawn_background``). A selector keeps the
+    # construction exactly as it was — ``--agent`` creates on a miss, so the
+    # registry is load-bearing there — and a store that EXISTS is still
+    # constructed (migrations included) even without one, preserving prior
+    # behaviour byte for byte.
     selector_args = argparse.Namespace(
         hosting=exec_args.hosting,
         model=exec_args.model,
         agent_name=exec_args.agent_name,
         agent_id=exec_args.agent_id,
     )
-    agent = resolve_agent(selector_args, agent_registry)
+    agent_registry: AgentRegistry | None = (
+        AgentRegistry(base_dir)
+        if (exec_args.agent_name or exec_args.agent_id) or agents_store_present(base_dir)
+        else None
+    )
+    # ``agent_registry`` is None only when no selector is present (the guard
+    # above) — which is exactly the case ``resolve_agent`` answers with
+    # ``None`` before it reads the registry, so this branch is that same
+    # answer without the construction's write.
+    agent = resolve_agent(selector_args, agent_registry) if agent_registry is not None else None
     return resolve_hosting_model(agent, selector_args, config_manager)
 
 

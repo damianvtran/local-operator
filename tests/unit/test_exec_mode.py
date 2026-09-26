@@ -977,13 +977,20 @@ def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
     it tells a run that will work that it will be denied.
     """
     _redirect_logs_dir(monkeypatch, tmp_path)
-    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    # The dry preflight runs for REAL here — only the model-resolution LEAF is
+    # stubbed, so the ordering this asserts is the production one
+    # (``run_exec → resolve_startup → preflight → advisory``). Stubbing the
+    # whole preflight is what let the launch path's first writer hide from
+    # this test (review round 2, finding 1).
+    resolved = MagicMock(return_value=("test", "m"))
+    monkeypatch.setattr("local_operator.session_factory.resolve_hosting_model", resolved)
     popen_mock = MagicMock()
     popen_mock.return_value.pid = 4321
     monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
     monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
 
     assert exec_mode.run_exec("task", ExecArgs(background=True, profile="reviewer")) == 0
+    assert resolved.called, "the real dry preflight must have run"
     assert "cannot ask for approval" not in capsys.readouterr().err
     # The probe's fresh-root branch is only reachable because the FIRST writer
     # on this path — resolve_startup's name check — no longer builds a
@@ -991,7 +998,6 @@ def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
     # store once the whole launch-to-advisory ordering has run.
     root = tmp_path / "config"
     assert not (root / "agents").exists()
-    assert not (root / "agents.json").exists()
 
 
 def test_the_profile_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1011,6 +1017,44 @@ def test_the_profile_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_p
 
     assert advisory is None, "the reviewer seed declares tools: the run is answerable"
     assert not (root / "agents").exists()
+
+
+def test_the_preflight_creates_no_agents_store_on_a_fresh_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The hosting/model preflight was the launch path's FIRST writer (R2-1).
+
+    ``resolve_hosting_model_dry`` built ``AgentRegistry`` unconditionally on
+    every call — the foreground ``cli.py`` preflight and the background
+    ``_spawn_background`` preflight alike — so a fresh root held
+    ``config/agents/`` before the deny-trap advisory could ever reach its
+    fresh-root branch. Without a selector the registry's answer was ``None``
+    and unused; the construction is skipped and the run still fails exactly
+    like an empty registry would.
+    """
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    with pytest.raises(ValueError):
+        exec_mode.resolve_hosting_model_dry(ExecArgs())
+
+    assert not (root / "agents").exists()
+
+
+def test_the_preflight_keeps_agent_selector_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With a selector the registry stays constructed and answers as before.
+
+    ``--agent`` creates the agent on a miss and ``--agent-id`` must fail with
+    the legacy message, so the guard never withholds the registry from
+    either (review round 2, finding 1's preserve-exactly requirement).
+    """
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    with pytest.raises(ValueError, match="No agent found with ID: missing"):
+        exec_mode.resolve_hosting_model_dry(ExecArgs(agent_id="missing"))
 
 
 def test_resolve_startup_creates_no_agents_store_for_a_profile(
@@ -1035,7 +1079,6 @@ def test_resolve_startup_creates_no_agents_store_for_a_profile(
     assert resolve_startup(ExecArgs(profile="reviewer")) is None
 
     assert not (root / "agents").exists()
-    assert not (root / "agents.json").exists()
     assert not root.exists(), "a name check must not create the config root"
 
 
