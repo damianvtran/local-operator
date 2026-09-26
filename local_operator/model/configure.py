@@ -3201,26 +3201,6 @@ class _ChildModelRequestCounter:
 _OUTPUT_DELTA_TYPES = frozenset({"text_delta", "tool_call_delta", "reasoning_delta"})
 
 
-def _decode_measure(
-    *, decode_us: int, output_deltas: int, output_tokens: int
-) -> tuple[int, int, int]:
-    """The ``(decode_us, decode_tokens, decode_calls)`` a call earns, or zeros.
-
-    TWO consumers now read this rule — the ledger snapshot and the ``Usage``
-    object the seam relays to the TUI — and a rule stated twice is a rule that
-    can be stated two ways: an eligibility change that moved one and not the
-    other would put a rate on the band for calls the ledger counts as
-    unmeasured, which is the disagreement every honesty test in this feature
-    exists to prevent. So it lives here and both call sites ask it.
-
-    ``output_deltas >= 2`` is the same exclusion the ledger documents: a single
-    delta has no window to measure, so a rate computed from one is a division by
-    a duration the provider never spent generating.
-    """
-    eligible = decode_us > 0 and output_deltas >= 2 and output_tokens > 0
-    return (decode_us, output_tokens, 1) if eligible else (0, 0, 0)
-
-
 class SessionStreamFn:
     """One conversation's stateful router over a shareable client pool.
 
@@ -5971,39 +5951,6 @@ class SessionStreamFn:
                 self._descendant_request_counter.end()
             # In a ``finally`` so an aborted/failed stream (which still cost
             # input tokens) is recorded too — best-effort and never raising.
-            # The decode window, closed here rather than inside the loop:
-            # ``first_output_at is None`` means the stream produced no OUTPUT
-            # deltas at all, which is "no window" (0 microseconds), not a
-            # zero-length one. Computed once because two consumers now read it:
-            # the ledger snapshot below, and the ``Usage`` object the caller
-            # receives (stamped just after this).
-            window_us = (
-                max(0, int((last_output_at - first_output_at) * 1_000_000))
-                if first_output_at is not None and last_output_at is not None
-                else 0
-            )
-            if final_usage is not None:
-                # STAMP THE OBJECT THE CALLER ALREADY GETS. ``final_usage`` is the
-                # provider's own ``Usage`` instance, carried on the event stream
-                # that the session turns into ``restored_usage`` and the frontend
-                # frame turns into ``last_usage`` — so writing the window here is
-                # what lets the status band read the last completed call's rate
-                # with no second channel, no extra frame field and no database
-                # read on a repaint. Mutating it is safe: it is the same object
-                # those consumers would have seen, and pydantic's ``Usage`` is not
-                # frozen.
-                #
-                # Left at 0 (and so DROPPED by the serializer) for an ineligible
-                # call, which is what keeps the pair off the 200-cap
-                # ``usage_components`` list — see ``_omit_unset_usage_fields``.
-                measured_us, measured_tokens, _ = _decode_measure(
-                    decode_us=window_us,
-                    output_deltas=output_deltas,
-                    output_tokens=int(getattr(final_usage, "output_tokens", 0) or 0),
-                )
-                if measured_us:
-                    final_usage.decode_us = measured_us
-                    final_usage.decode_tokens = measured_tokens
             self._record_usage(
                 request,
                 component_chars,
@@ -6021,7 +5968,15 @@ class SessionStreamFn:
                 ),
                 outcome=outcome,
                 usage_reported=final_usage is not None,
-                decode_us=window_us,
+                # The decode window, closed here rather than inside the loop:
+                # ``first_output_at is None`` means the stream produced no
+                # output deltas at all, which is "no window" (0 microseconds),
+                # not a zero-length one.
+                decode_us=(
+                    max(0, int((last_output_at - first_output_at) * 1_000_000))
+                    if first_output_at is not None and last_output_at is not None
+                    else 0
+                ),
                 output_deltas=output_deltas,
             )
 
@@ -6072,11 +6027,7 @@ class SessionStreamFn:
             # all of them — dividing one population by the other inflates the
             # rate. ``decode_calls`` counts the contributing calls so a report
             # can state its coverage instead of implying it.
-            measured_us, measured_tokens, measured_calls = _decode_measure(
-                decode_us=decode_us,
-                output_deltas=output_deltas,
-                output_tokens=int(usage.output_tokens),
-            )
+            eligible = decode_us > 0 and output_deltas >= 2 and int(usage.output_tokens) > 0
 
             # Cost is NOT priced here (review C1). The snapshot carries the
             # provider, model id, and every token count, which is everything
@@ -6146,9 +6097,9 @@ class SessionStreamFn:
                     # Ineligible writes 0 to all three, so "no window" is one
                     # value on every surface and the coverage count is what
                     # disambiguates it from a measured zero-length window.
-                    decode_us=measured_us,
-                    decode_tokens=measured_tokens,
-                    decode_calls=measured_calls,
+                    decode_us=decode_us if eligible else 0,
+                    decode_tokens=int(usage.output_tokens) if eligible else 0,
+                    decode_calls=1 if eligible else 0,
                 )
             )
         except Exception:  # noqa: BLE001 — recording is best-effort

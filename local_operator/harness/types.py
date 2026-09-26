@@ -421,24 +421,8 @@ class Message(BaseModel):
         return message
 
 
-def _omit_unset_usage_fields(data: dict[str, Any]) -> dict[str, Any]:
-    """Drop the usage fields that were never MEASURED, so they cost no wire bytes.
-
-    Three fields so far, and the reason they are dropped rather than zeroed is the
-    same for all three: an integer that is always serialised is an integer that is
-    always PAID FOR, and one of the two slots a ``Usage`` reaches the wire through
-    is a 200-cap list (``FrontendState.usage_components``,
-    ``USAGE_COMPONENT_CAP``), so an always-present key on this type costs
-    48 B x 201 objects -- the shape that took the attach frame over its 1 MiB
-    socket line once already (``roster_released``, 25 B x 200 rows). Dropping the
-    unset ones keeps that multiplier at ONE object, the call that actually
-    measured a window, and the frame-budget test asserts the occurrence count
-    rather than trusting this paragraph.
-
-    ``at_ms`` is a stamp that was never set; ``decode_us``/``decode_tokens`` are a
-    window that was never measured. Both are the same question -- "is this number
-    real?" -- which is why one function answers it for the whole type rather than
-    three serializers each deciding alone.
+def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop ``at_ms`` from a serialized usage while it was never set.
 
     Every ``Usage`` subclass's own ``@model_serializer`` must route its result
     through here (see ``session/frontend_state``'s frozen wrappers), because a
@@ -453,15 +437,6 @@ def _omit_unset_usage_fields(data: dict[str, Any]) -> dict[str, Any]:
     """
     if data.get("at_ms") is None:
         data.pop("at_ms", None)
-    # 0 is the type's own "not measured" for both, matching the store's columns,
-    # so the drop is unconditional on the value and cannot drift from it. A
-    # genuinely measured zero-length window is not representable here on purpose:
-    # the seam only stamps an ELIGIBLE call, and eligibility requires a positive
-    # window.
-    if not data.get("decode_us"):
-        data.pop("decode_us", None)
-    if not data.get("decode_tokens"):
-        data.pop("decode_tokens", None)
     return data
 
 
@@ -473,7 +448,7 @@ class Usage(BaseModel):
         self, handler: SerializerFunctionWrapHandler
     ) -> dict[str, Any]:
         """Serialize normally, then drop a stamp that was never set."""
-        return _omit_unset_usage_fields(handler(self))
+        return _omit_unset_usage_stamp(handler(self))
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -492,21 +467,6 @@ class Usage(BaseModel):
     cache_write_5m_tokens: int = 0
     cache_write_1h_tokens: int = 0
     context_tokens: int | None = None  # provider-reported full context size if given
-    # The decode window of the call that produced the counts above: the
-    # microseconds between the FIRST and the LAST output delta, and the output
-    # tokens generated inside it. Stamped by the model seam
-    # (``model/configure.py``) on the ``Usage`` object it already relays, so the
-    # status band can read the last completed call's rate without a second
-    # channel and without a database read; the store records the same two numbers
-    # for the same call, from one shared eligibility rule.
-    #
-    # 0 on BOTH means "no measured window" -- a call that streamed once, a
-    # non-streaming provider, or a call that failed before any output. That is
-    # the same 0 the ledger's columns use, and the serializer DROPS the pair when
-    # it is 0, so an unmeasured call costs the attach frame nothing (see
-    # :func:`_omit_unset_usage_fields` for why that matters at 201 objects).
-    decode_us: int = 0
-    decode_tokens: int = 0
     # The reasoning/thinking slice of ``output_tokens`` when the provider
     # breaks it out (OpenAI ``output_tokens_details.reasoning_tokens``). Kept
     # as a SUBSET of ``output_tokens`` — never added on top — so callers that
@@ -541,7 +501,7 @@ class Usage(BaseModel):
     # to 80,000 usages in its worst-case roster — so a literal ``"at_ms": null``
     # on each one cost 8 KB of a frame that had 3 KB of headroom and pushed it past
     # the 1 MiB socket line limit (``tests/unit/session/test_attach_frame_size``).
-    # Unset fields are dropped by :func:`_omit_unset_usage_fields` instead. That is
+    # Unset stamps are dropped by :func:`_omit_unset_usage_stamp` instead. That is
     # also the honest wire shape — "absent" and "None" mean the same thing to
     # every reader (``tariff.moment_for`` reads the stamp duck-typed off an object
     # OR a mapping) — it is still serialized wherever it IS set, so it travels the
