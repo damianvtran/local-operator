@@ -22,6 +22,13 @@ from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from local_operator.agent_profiles import (
+    SEED_ORIGIN_PREFIX,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
+    is_sha256_hex,
+    marker_value,
+)
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.optional import missing_extra_error
 from local_operator.paths import default_agent_cwd
@@ -483,10 +490,43 @@ HUB_SHA256_PREFIX = "hub_sha256:"
 #: the value is echoed into a URL path by ``download_agent_from_marketplace``.
 _HUB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
-#: A recorded pull fingerprint is exactly a sha256 hex digest or it is not
-#: usable; the shape check keeps a truncated/hand-edited tag from being
-#: compared as if it proved anything.
-_HUB_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+#: Every tag prefix that records where a row came FROM rather than what it
+#: SAYS: the seed markers (installed from a packaged starter) and the hub
+#: markers (pulled from a marketplace listing). ONE list, shared by the import
+#: choke point that strips them and the publish filter that must not ship them
+#: — a second spelling is how one surface would keep a leak the other closed.
+PROVENANCE_TAG_PREFIXES: tuple[str, ...] = (
+    SEED_ORIGIN_PREFIX,
+    SEED_VERSION_PREFIX,
+    SEED_SHA256_PREFIX,
+    HUB_ORIGIN_PREFIX,
+    HUB_SHA256_PREFIX,
+)
+
+
+def strip_provenance_tags(tags: Any) -> Any:
+    """``tags`` with every provenance marker removed; anything else untouched.
+
+    THE import gate (agent review round 1, B1). An archive is untrusted input,
+    and these markers are the trust anchors ``sync``/``reset`` key on: ``hub:``
+    decides which listing a re-fetch reads, and ``*_sha256:`` is taken as proof
+    that the copy is unedited — so persisting an archive's copy of either let a
+    published file plant a baseline and have the next no-force sync overwrite
+    the row with text of its author's choosing. Provenance is EARNED at install
+    or pull, never imported: the trusted writers re-stamp their own markers
+    after import (``install_seed``, :meth:`AgentRegistry._stamp_hub_provenance`).
+
+    A non-list value is passed through to ``AgentData``'s own validation rather
+    than coerced here: a malformed ``tags:`` should be refused, not silently
+    emptied.
+    """
+
+    if not isinstance(tags, list):
+        return tags
+    return [
+        str(tag) for tag in tags if not str(tag).strip().lower().startswith(PROVENANCE_TAG_PREFIXES)
+    ]
+
 
 #: The one sentence every credential-less hub verdict carries. The sync run
 #: never fails for absence of a Radient credential — it reports this per row
@@ -502,22 +542,20 @@ def hub_origin(agent: "AgentData") -> str | None:
     The FIRST tag carrying the prefix decides, like :func:`agent_profiles.seed_origin`:
     a malformed marker is reported (the row still shows up as "not recorded",
     which is the safe answer) rather than skipped so that a later tag could
-    claim the row.
+    claim the row. Marker resolution itself is shared with the seed side
+    (:func:`agent_profiles.marker_value`; review round 1, n2).
     """
 
-    for tag in agent.tags or []:
-        text = str(tag).strip()
-        if not text.lower().startswith(HUB_ORIGIN_PREFIX):
-            continue
-        hub_id = text[len(HUB_ORIGIN_PREFIX) :].strip()
-        if _HUB_ID_RE.match(hub_id):
-            return hub_id
-        logging.warning(
-            "ignoring hub provenance tag %r on agent %r: not a marketplace id",
-            text,
-            getattr(agent, "name", None),
-        )
+    hub_id = marker_value(agent, HUB_ORIGIN_PREFIX)
+    if hub_id is None:
         return None
+    if _HUB_ID_RE.match(hub_id):
+        return hub_id
+    logging.warning(
+        "ignoring hub provenance tag %r on agent %r: not a marketplace id",
+        f"{HUB_ORIGIN_PREFIX}{hub_id}",
+        getattr(agent, "name", None),
+    )
     return None
 
 
@@ -2116,6 +2154,15 @@ class AgentRegistry:
                 if not isinstance(agent_data, dict):
                     raise ValueError("Invalid agent metadata in agent.yml")
 
+                # Provenance is EARNED, never imported (see
+                # ``strip_provenance_tags``): dropped before validation, so no
+                # marker the archive controlled can reach the stored row. The
+                # pull path re-stamps its own afterwards. Only touched when the
+                # archive HAS tags — writing None here would turn an absent key
+                # into a validation error the archive did not deserve.
+                if agent_data.get("tags") is not None:
+                    agent_data["tags"] = strip_provenance_tags(agent_data["tags"])
+
                 # An archive describes a profile, not a destination on this host.
                 # Ignore its identity even when it looks like a valid local UUID:
                 # preserving one would allow a normal import to destroy an agent.
@@ -2780,27 +2827,11 @@ class HubSyncVerdict:
     detail: str = ""
 
 
-def _hub_marker(agent: "AgentData", prefix: str) -> str | None:
-    """The value of the FIRST tag carrying ``prefix`` (case-insensitive), or None.
-
-    Markers are provenance, not authority: an absent or malformed value reads as
-    "not recorded" and never as something to repair.
-    """
-
-    for tag in agent.tags or []:
-        text = str(tag).strip()
-        if not text.lower().startswith(prefix):
-            continue
-        value = text[len(prefix) :].strip()
-        return value or None
-    return None
-
-
 def _hub_installed_fingerprint(agent: "AgentData") -> str | None:
     """The recorded pull fingerprint, or None when missing/malformed."""
 
-    value = _hub_marker(agent, HUB_SHA256_PREFIX)
-    if value is None or not _HUB_SHA_RE.match(value.lower()):
+    value = marker_value(agent, HUB_SHA256_PREFIX)
+    if value is None or not is_sha256_hex(value):
         return None
     return value.lower()
 

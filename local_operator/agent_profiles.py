@@ -648,6 +648,18 @@ def install_seed(
     existing = None
     try:
         existing = registry.get_agent_by_name(seed.name)
+        if existing is None:
+            # Fall back to the SAME fold every other resolver uses
+            # (``resolve_profile``, the desktop routes, sync's own row scan).
+            # The exact-case lookup misses a row the operator renamed to a
+            # different spelling (``Reviewer`` over the packaged ``reviewer``),
+            # and missing it here is how a second row with the packaged
+            # spelling got minted beside the renamed one — including on sync's
+            # apply path, which reported an update while the duplicate appeared
+            # (agent review round 1, M2).
+            folded = _role_named(registry, seed.name.strip().lower())
+            if folded is not None:
+                existing = folded
     except Exception:  # noqa: BLE001
         existing = None
     if existing is not None and not is_role(existing) and not overwrite:
@@ -972,19 +984,31 @@ def _field_text(value: Any) -> str:
     return str(value)
 
 
-#: A recorded install fingerprint: exactly a sha256 hex digest, or it is not
-#: usable as "what was installed" and the row is treated as unprovable rather
-#: than matched against garbage. Same shape check the marker writer produces.
-_SEED_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+#: A recorded fingerprint is exactly a sha256 hex digest, or it is not usable
+#: as "what was installed" and the row is treated as unprovable rather than
+#: matched against garbage. Shared by the seed and hub readers (agent review
+#: round 1, n2 — the two regexes were twins).
+_SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _marker_value(agent: "AgentData", prefix: str) -> str | None:
+def is_sha256_hex(value: str) -> bool:
+    """Whether ``value`` is exactly a sha256 hex digest (any case)."""
+
+    return bool(_SHA256_HEX_RE.match(value.strip().lower()))
+
+
+def marker_value(agent: "AgentData", prefix: str) -> str | None:
     """The value of the FIRST tag carrying ``prefix`` (case-insensitive), or None.
 
     Markers are provenance, not authority: the tags array is writable through
     the desktop routes, agent import and the tool itself, so every reader of a
     marker treats an absent or malformed value as "not recorded" rather than
     repairing it into something trusted.
+
+    Shared with the hub-provenance readers in :mod:`local_operator.agents`:
+    ``seed:`` and ``hub:`` markers resolve the same way, and two
+    implementations is how one of them would later stop treating a malformed
+    marker as "not recorded" (agent review round 1, n2).
     """
 
     for tag in agent.tags or []:
@@ -999,8 +1023,8 @@ def _marker_value(agent: "AgentData", prefix: str) -> str | None:
 def _installed_fingerprint(agent: "AgentData") -> str | None:
     """The recorded install fingerprint, or None when missing/malformed."""
 
-    value = _marker_value(agent, SEED_SHA256_PREFIX)
-    if value is None or not _SEED_SHA_RE.match(value.lower()):
+    value = marker_value(agent, SEED_SHA256_PREFIX)
+    if value is None or not is_sha256_hex(value):
         return None
     return value.lower()
 
@@ -1130,7 +1154,7 @@ def _sync_one_seed(
         )
 
     profile = profile_from_agent(registry, agent)
-    installed_version = _marker_value(agent, SEED_VERSION_PREFIX)
+    installed_version = marker_value(agent, SEED_VERSION_PREFIX)
     packaged_version = load_seed_version(key)
     diverged = seed_divergence(profile, seed)
     baseline = _installed_fingerprint(agent)
@@ -1159,17 +1183,56 @@ def _sync_one_seed(
             (field, _field_text(values.get(field))) for field in diverged if field != "instructions"
         )
 
+    def _apply() -> bool:
+        """Overwrite the classified row with the packaged starter.
+
+        Targets ``agent.name`` — the row THIS verdict is about — not the folded
+        ``key``. Install now falls back to the same fold, but naming the row
+        exactly keeps the write on the row the report describes, and it is the
+        direct fix for the case-renamed row folded discovery finds while the
+        exact apply lookup used to miss it (there minting a duplicate
+        ``reviewer`` beside ``Reviewer``; agent review round 1, M2).
+        """
+
+        return install_seed(agent.name, registry=registry, overwrite=True) is not None
+
     if not diverged:
         return _verdict(
             verdict="up-to-date",
             detail=f"matches the packaged starter ({packaged_version or 'unversioned'})",
         )
 
-    if installed_version is not None and installed_version == packaged_version:
-        # The packaged starter has not moved since this row was installed, so
-        # the difference is a local edit and there is nothing to PULL. Sync
-        # reports the row as current rather than nagging: applying would mean
-        # silently reverting someone's work, which is `reset`'s explicit job.
+    if baseline is None:
+        # No install record, so "did the starter move?" is unanswerable: the
+        # row differs from the packaged text, and whether that is because
+        # someone edited it or because the package changed cannot be told from
+        # what was recorded (nothing was). The refusal is the safe direction,
+        # and the wording says exactly what is known instead of announcing an
+        # update or a local edit it cannot prove (agent review round 1, M1).
+        applied = _apply() if force else False
+        return _verdict(
+            verdict="outdated-diverged",
+            applied=applied,
+            replaced_instructions=(profile.instructions or "") if applied else None,
+            replaced_fields=_replaced_fields() if applied else (),
+            detail=(
+                "forced over this copy's text"
+                if applied
+                else (
+                    "no install record — cannot tell whether the starter moved or this "
+                    "copy was edited; re-run with force to take the packaged text"
+                )
+            ),
+        )
+
+    if seed_fingerprint(seed) == baseline:
+        # The packaged starter still holds what this row was installed from, so
+        # the difference is a local edit and there is nothing to PULL — applying
+        # would mean silently reverting someone's work, which is ``reset``'s
+        # explicit job. Decided by the FINGERPRINT, not the version string: a
+        # body change shipped without a version bump is a real package move,
+        # and comparing versions first is how it was mis-reported as "local
+        # edits" and became un-updateable even with force (review round 1, M1).
         return _verdict(
             verdict="up-to-date",
             detail=(
@@ -1178,35 +1241,40 @@ def _sync_one_seed(
             ),
         )
 
-    if baseline is not None and seed_fingerprint(profile) == baseline:
-        # Provably untouched since install, and the package moved: apply. This
-        # is the ordinary "user updates local-operator, runs sync" path, and it
-        # is safe precisely because the fingerprint proves no local edit can be
-        # lost — the echo of the replaced text is kept anyway, matching reset.
-        applied = install_seed(key, registry=registry, overwrite=True)
+    # The packaged starter moved. Direction is deliberately not gated on version
+    # ORDER: sync means "make this copy match the starter THIS build ships", so
+    # a downgrade (``lop`` downgraded, channel switched, a starter reverted) is
+    # the same update in the other direction — both versions and the replaced
+    # text ride in the receipt, so it is never silent (QA round 1, Q-1, recorded
+    # in the remediation as the intended call).
+    if seed_fingerprint(profile) == baseline:
+        # Provably untouched since install: apply. This is the ordinary "user
+        # updates local-operator, runs sync" path, and it is safe precisely
+        # because the fingerprint proves no local edit can be lost — the echo of
+        # the replaced text is kept anyway, matching reset.
+        applied = _apply()
         return _verdict(
             verdict="outdated-clean",
-            applied=applied is not None,
+            applied=applied,
             replaced_instructions=profile.instructions or "",
-            replaced_fields=_replaced_fields() if applied is not None else (),
+            replaced_fields=_replaced_fields() if applied else (),
             detail="the packaged starter changed; this copy was unedited",
         )
 
-    # Not provably clean: the row differs from what was installed (or predates
-    # the fingerprint), and the packaged starter has moved. Never overwrite a
-    # possibly-edited prompt without an explicit force — the same refusal
-    # `reset` makes for rows it cannot prove the harness wrote.
-    applied = install_seed(key, registry=registry, overwrite=True) if force else None
+    # Moved and not provably clean: never overwrite a possibly-edited prompt
+    # without an explicit force — the same refusal `reset` makes for rows it
+    # cannot prove the harness wrote.
+    applied = _apply() if force else False
     return _verdict(
         verdict="outdated-diverged",
-        applied=applied is not None,
-        replaced_instructions=(profile.instructions or "") if applied is not None else None,
-        replaced_fields=_replaced_fields() if applied is not None else (),
+        applied=applied,
+        replaced_instructions=(profile.instructions or "") if applied else None,
+        replaced_fields=_replaced_fields() if applied else (),
         detail=(
             "forced over local edits"
-            if applied is not None
+            if applied
             else "re-run with force to replace it"
-            + (f" (installed {installed_version})" if installed_version else " (no install record)")
+            + (f" (installed {installed_version})" if installed_version else "")
         ),
     )
 

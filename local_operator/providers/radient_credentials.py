@@ -9,12 +9,36 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
 from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.registry import get_provider_definition
+
+if TYPE_CHECKING:
+    from local_operator.config import ConfigManager
+
+
+def configured_radient_base_url(config_manager: "ConfigManager") -> str:
+    """The hub API root a ``ConfigManager``'s configuration resolves to.
+
+    THE one read of ``config.yml``'s ``radient_base_url`` for hub consumers:
+    the NESTED ``values.radient_base_url`` the config store actually holds wins
+    when set (a flat document-root key is dropped by the migration and would be
+    silently ignored), and :func:`resolve_radient_api_base_url` supplies the
+    ``RADIENT_API_BASE_URL``/canonical default otherwise, version segment
+    included. The CLI's ``_radient_hub_base_url`` and the sync coordinator's
+    ``agent_sync.hub_base_url`` both delegate here rather than each spelling
+    the rule — one configuration resolving two destinations is the bug the
+    single-place rule exists to prevent (agent review round 1, n2; the shape is
+    asserted in ``tests/unit/test_radient_hub_base_resolution.py``).
+    """
+
+    from local_operator.env import resolve_radient_api_base_url
+
+    return resolve_radient_api_base_url(config_manager.get_config_value("radient_base_url", None))
 
 
 def _radient_api_key(config_dir: Path | None) -> SecretStr:
