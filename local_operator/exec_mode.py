@@ -461,7 +461,7 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     plus the registry's agent-id lookup, raising ``ValueError`` with the
     legacy message shapes when unconfigured.
     """
-    from local_operator.agents import AgentRegistry
+    from local_operator.agents import AgentRegistry, agents_store_present
     from local_operator.config import ConfigManager
     from local_operator.paths import config_dir
     from local_operator.session_factory import resolve_agent, resolve_hosting_model
@@ -474,14 +474,34 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     # agents and config and then spawned a worker that used the override's.
     base_dir = config_dir()
     config_manager = ConfigManager(base_dir)
-    agent_registry = AgentRegistry(base_dir)
+    # GUARDED (review round 2, finding 1): build the registry only when it has
+    # something to answer — an agent selector, or a store already on disk.
+    # ``resolve_agent`` returns ``None`` for a selector-less call WITHOUT
+    # reading the registry, so on a truly fresh root the old unconditional
+    # construction wrote ``config/agents/`` for an answer nothing consumed,
+    # and it did so on BOTH launch arms before the deny-trap advisory could
+    # reach its fresh-root branch (foreground: the ``cli.py`` preflight then
+    # ``run_exec``; background: ``_spawn_background``). A selector keeps the
+    # construction exactly as it was — ``--agent`` creates on a miss, so the
+    # registry is load-bearing there — and a store that EXISTS is still
+    # constructed (migrations included) even without one, preserving prior
+    # behaviour byte for byte.
     selector_args = argparse.Namespace(
         hosting=exec_args.hosting,
         model=exec_args.model,
         agent_name=exec_args.agent_name,
         agent_id=exec_args.agent_id,
     )
-    agent = resolve_agent(selector_args, agent_registry)
+    agent_registry: AgentRegistry | None = (
+        AgentRegistry(base_dir)
+        if (exec_args.agent_name or exec_args.agent_id) or agents_store_present(base_dir)
+        else None
+    )
+    # ``agent_registry`` is None only when no selector is present (the guard
+    # above) — which is exactly the case ``resolve_agent`` answers with
+    # ``None`` before it reads the registry, so this branch is that same
+    # answer without the construction's write.
+    agent = resolve_agent(selector_args, agent_registry) if agent_registry is not None else None
     return resolve_hosting_model(agent, selector_args, config_manager)
 
 
@@ -755,17 +775,48 @@ def _declared_by_profile(name: str | None) -> bool:
     identity: an unresolvable name resolves to "no declaration" and leaves
     the advisory on — ``resolve_startup`` refuses such runs before this is
     reached anyway.
+
+    DOCUMENTED LIMITS (post-merge review of #1597). This is a launch-time
+    oracle, and it is narrower than the session's own resolution in two known
+    ways. ``--resume`` restores a stored role attachment INSIDE the session,
+    with no ``--profile`` on this command line, so a resumed run whose role
+    declares tools still prints the advisory — the copy stays true (calls that
+    need approval will be denied; the role's own members do not need it), but
+    the suppression is narrower than the session's. Conversely, a role's
+    allow-list approves only its members, so a call outside it still denies
+    with no advisory: the declaration bounds reach rather than approving the
+    run. Sharing one predicate with ``exec_startup.declared_tool_inventory``
+    would close both gaps, but that function needs the live session and runs
+    after this point; it is a recorded follow-up, not a claim of equivalence.
     """
     if not name:
         return False
     try:
         from local_operator.agent_profiles import resolve_profile_or_specialist
-        from local_operator.agents import AgentRegistry
+        from local_operator.agents import AgentRegistry, agents_store_present
         from local_operator.paths import config_dir
 
-        _kind, profile, _prompt, _display = resolve_profile_or_specialist(
-            name, registry=AgentRegistry(config_dir())
-        )
+        config_root = config_dir()
+        # GUARDED so a best-effort probe cannot WRITE: ``AgentRegistry``'s
+        # constructor creates ``config_dir`` and ``config_dir/agents`` when
+        # missing (then runs its migrations), and a launch-path check has no
+        # business creating directories (post-merge review of #1597; round 1,
+        # finding 2). ``agents_store_present`` counts BOTH shapes — the
+        # per-agent tree and a legacy ``agents.json`` — so a legacy root still
+        # resolves its registered roles here rather than being reported as
+        # "no declaration" (round 1, finding 3); a truly fresh root constructs
+        # nothing and the packaged seeds resolve without a registry. The same
+        # predicate guards the sibling writer in
+        # ``exec_startup.resolve_startup``, which fires before this probe.
+        #
+        # Flagged for review, not settled here: on a legacy ``agents.json``
+        # root the construction this predicate permits still runs the
+        # registry's migrations — a write triggered by a name check. That
+        # migration is what the session side runs too, so name resolution
+        # stays identical; whether a launch-time CHECK should be what triggers
+        # a migration is a question for the store's design, not this probe.
+        registry = AgentRegistry(config_root) if agents_store_present(config_root) else None
+        _kind, profile, _prompt, _display = resolve_profile_or_specialist(name, registry=registry)
     except Exception:  # noqa: BLE001 — an odd registry means "no declaration"
         return False
     return profile is not None and bool(profile.tools)
