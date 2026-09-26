@@ -2382,7 +2382,11 @@ def test_agents_list_hides_the_seed_provenance_marker(capsys) -> None:
 
 def test_agents_list_shows_a_hub_marker(capsys) -> None:
     """A hub marker names the marketplace listing the row came from, which is
-    a thing a reader can act on (`agents pull --id`), so it stays visible."""
+    a thing a reader can act on (`agents pull --id`), so it stays visible.
+    The hub BASELINE (`hub_sha256:`) is sync bookkeeping, so it is hidden with
+    the seed trio — same class of tag, same treatment (agent review round 1,
+    m1).
+    """
     registry = MagicMock()
     agent = MagicMock()
     agent.name = "hunter"
@@ -2392,13 +2396,15 @@ def test_agents_list_shows_a_hub_marker(capsys) -> None:
     agent.hosting = ""
     agent.model = ""
     agent.description = ""
-    agent.tags = ["role", "hub:abc-123"]
+    agent.tags = ["role", "hub:abc-123", f"hub_sha256:{'e' * 64}"]
     agent.categories = ["role"]
     registry.list_agents.return_value = [agent]
 
     assert agents_list_command(argparse.Namespace(page=1, perpage=10), registry) == 0
 
-    assert "hub:abc-123" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "hub:abc-123" in out
+    assert "hub_sha256:" not in out
 
 
 # --- qwencloud-ticket: the two-store surface (PR 2, slice B) -----------------

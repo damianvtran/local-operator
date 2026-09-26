@@ -116,11 +116,16 @@ def _render_entry(entry: SyncEntry) -> str:
         elif entry.verdict == "up-to-date":
             line = f"{entry.name}: up-to-date — {entry.detail}"
         elif entry.verdict == "outdated-clean":
-            transition = (
-                f" ({entry.installed_version} -> {entry.packaged_version})"
-                if entry.installed_version and entry.packaged_version
-                else ""
-            )
+            if entry.installed_version and entry.packaged_version:
+                if entry.installed_version == entry.packaged_version:
+                    # An unbumped body move is a real update (agent review
+                    # round 1, M1). "1.0.0 -> 1.0.0" would read as a no-op, so
+                    # the receipt says what actually moved instead.
+                    transition = f" ({entry.packaged_version}, text moved)"
+                else:
+                    transition = f" ({entry.installed_version} -> {entry.packaged_version})"
+            else:
+                transition = ""
             line = f"{entry.name}: updated to the packaged starter{transition}"
         else:
             fields = ", ".join(entry.diverged_fields) or "unknown fields"
@@ -221,18 +226,18 @@ def sync_payload(report: SyncReport) -> dict[str, Any]:
 def hub_base_url(config_dir: Path) -> str:
     """The Radient Agent Hub API root for a config root, config.yml included.
 
-    The same resolution the CLI's ``_radient_hub_base_url`` performs — the
-    nested ``values.radient_base_url`` wins when set, canonical default
-    otherwise, version segment included — for surfaces that do not hold a
-    ``ConfigManager`` already (the ``agent`` tool; the CLI keeps its own
-    helper so existing commands are untouched).
+    For surfaces that do not hold a ``ConfigManager`` already (the ``agent``
+    tool). The RULE is not repeated here: it lives in
+    ``providers.radient_credentials.configured_radient_base_url``, which the
+    CLI's ``_radient_hub_base_url`` delegates to as well — one configuration
+    resolving two destinations is the bug the single-place rule exists to
+    prevent (agent review round 1, n2).
     """
 
     from local_operator.config import ConfigManager
-    from local_operator.env import resolve_radient_api_base_url
+    from local_operator.providers.radient_credentials import configured_radient_base_url
 
-    manager = ConfigManager(config_dir)
-    return resolve_radient_api_base_url(manager.get_config_value("radient_base_url", None))
+    return configured_radient_base_url(ConfigManager(config_dir))
 
 
 async def resolve_hub_client(

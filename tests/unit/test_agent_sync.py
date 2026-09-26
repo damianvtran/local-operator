@@ -17,8 +17,12 @@ from typing import Any
 
 import yaml
 
-from local_operator.agent_profiles import install_seed
-from local_operator.agent_sync import sync_agent_profiles, sync_payload
+from local_operator.agent_profiles import (
+    SEED_ORIGIN_PREFIX,
+    SeedSyncVerdict,
+    install_seed,
+)
+from local_operator.agent_sync import SyncReport, sync_agent_profiles, sync_payload
 from local_operator.agents import (
     HUB_ORIGIN_PREFIX,
     HUB_SHA256_PREFIX,
@@ -154,6 +158,77 @@ def test_a_pull_replaces_a_hub_marker_carried_by_the_archive(tmp_path) -> None:
 
     assert hub_origin(row) == "real-id"
     assert [tag for tag in row.tags if tag.startswith(HUB_ORIGIN_PREFIX)] == ["hub:real-id"]
+
+
+def test_import_strips_provenance_tags_carried_by_an_archive(tmp_path) -> None:
+    """The import choke point refuses ALL provenance, not just the hub pair.
+
+    ``test_a_pull_replaces_a_hub_marker_carried_by_the_archive`` covers the
+    pull path, which re-stamps afterwards. This is the plain ``import_agent``
+    path (the desktop import route and archive imports), where nothing
+    re-stamps: an archive could otherwise plant a ``hub_sha256:`` baseline and
+    a ``hub:`` listing for the next no-force sync to act on, or have its row
+    adopted by the seed arm (agent review round 1, B1).
+    """
+
+    registry = AgentRegistry(tmp_path)
+    zip_path = tmp_path / "archive.zip"
+    _archive(
+        zip_path,
+        name="hunter",
+        description="Tracks things",
+        text="PROMPT v1",
+        tags=[
+            "role",
+            "osint",
+            f"{HUB_ORIGIN_PREFIX}evil-listing-1",
+            f"{HUB_SHA256_PREFIX}{'a' * 64}",
+            "seed:coder",
+            "seed_version:9.9.9",
+            f"seed_sha256:{'b' * 64}",
+        ],
+    )
+
+    imported, _renamed = registry.import_agent(zip_path)
+    row = registry.get_agent_by_name(imported.name)
+    assert row is not None
+
+    assert list(row.tags) == ["role", "osint"], "only what the author wrote survives import"
+    assert hub_origin(row) is None
+    assert _tag(row, HUB_SHA256_PREFIX) is None
+    assert not any(tag.startswith(SEED_ORIGIN_PREFIX) for tag in row.tags)
+
+
+def test_a_planted_hub_marker_cannot_make_sync_overwrite_the_row(tmp_path) -> None:
+    """The B1 repro: with the strip, the archive's listing is never fetched.
+
+    Before the strip: an archive tagged ``hub:evil``/``hub_sha256:<its own
+    text>`` imported as "provably unedited since pull", and the next no-force
+    sync fetched the archive-named listing and wrote its text over the row
+    (``applied: True``, no force, reproduced by the reviewer). Provenance is
+    earned at pull, so the imported row carries no marker and the hub arm has
+    nothing to walk.
+    """
+
+    registry = AgentRegistry(tmp_path)
+    zip_path = tmp_path / "archive.zip"
+    _archive(
+        zip_path,
+        name="hunter",
+        description="Tracks things",
+        text="ORIGINAL TEXT",
+        tags=["role", f"{HUB_ORIGIN_PREFIX}evil-listing-1"],
+    )
+    imported, _renamed = registry.import_agent(zip_path)
+    row = registry.get_agent_by_name(imported.name)
+    assert row is not None
+
+    stub = _StubHub({"evil-listing-1": {"name": "hunter", "description": "d", "text": "PWNED"}})
+    verdicts = sync_hub_agents(registry, radient_client=stub, force=False)
+
+    assert stub.requested == [], "a planted marker must not name a listing to fetch"
+    assert list(verdicts) == []
+    assert registry.get_agent_system_prompt(row.id) == "ORIGINAL TEXT"
 
 
 def test_a_pull_with_a_nonconforming_id_records_no_marker(tmp_path) -> None:
@@ -299,6 +374,34 @@ def test_the_coordinator_runs_the_seed_arm_while_the_hub_degrades(tmp_path) -> N
     rendered = report.render()
     assert "reviewer: up-to-date" in rendered
     assert "hunter: hub unavailable" in rendered
+
+
+def test_an_unbumped_update_does_not_render_as_a_no_op() -> None:
+    """``1.0.0 -> 1.0.0`` reads as nothing happened (agent review round 1, M1).
+
+    An unbumped body move is a real update; the receipt says what moved
+    instead of showing an empty version transition. The verdict itself comes
+    from the real classifier in the profiles suite — this pins only the line a
+    reader diffs, which is why the verdict is constructed by hand.
+    """
+
+    report = SyncReport(
+        entries=(
+            SeedSyncVerdict(
+                name="reviewer",
+                verdict="outdated-clean",
+                applied=True,
+                detail="the packaged starter changed; this copy was unedited",
+                installed_version="1.0.0",
+                packaged_version="1.0.0",
+                replaced_instructions="OLD TEXT",
+            ),
+        )
+    )
+
+    rendered = report.render()
+    assert "reviewer: updated to the packaged starter (1.0.0, text moved)" in rendered
+    assert "1.0.0 -> 1.0.0" not in rendered
 
 
 def test_the_payload_carries_every_verdict_field_and_a_kind(tmp_path) -> None:

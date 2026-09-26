@@ -29,12 +29,13 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from local_operator.agent_profiles import (
-    SEED_ORIGIN_PREFIX,
-    is_specialist,
-    profile_from_agent,
+from local_operator.agent_profiles import is_specialist, profile_from_agent
+from local_operator.agents import (
+    PROVENANCE_TAG_PREFIXES,
+    AgentData,
+    AgentEditFields,
+    AgentRegistry,
 )
-from local_operator.agents import AgentData, AgentEditFields, AgentRegistry
 from local_operator.clients._http import APIError, scrub_details
 from local_operator.clients.radient import (
     InstructionSetError,
@@ -860,7 +861,7 @@ def _instruction_set_fields(
             str(tag)
             for tag in (agent.tags or [])
             if str(tag).partition(":")[0].strip().lower() not in PROFILE_ENCODING_TAG_KEYS
-            and not str(tag).startswith(SEED_ORIGIN_PREFIX)
+            and not str(tag).strip().lower().startswith(PROVENANCE_TAG_PREFIXES)
         ],
     }
     # `when_to_use` and `categories` are NOT derived. Locally a role stores its

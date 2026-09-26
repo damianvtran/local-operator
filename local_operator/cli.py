@@ -58,7 +58,7 @@ from local_operator.agent_profiles import (
 )
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
-from local_operator.env import get_env_config, resolve_radient_api_base_url
+from local_operator.env import get_env_config
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
@@ -7384,6 +7384,11 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
 
     # Get agents for current page
     page_agents = agents[start_idx:end_idx]
+    # The agents module is already imported whenever a registry exists — this
+    # is the handler that receives one — so quoting its baseline prefix costs
+    # nothing, and this must not become a second spelling of "hub_sha256:".
+    from local_operator.agents import HUB_SHA256_PREFIX
+
     print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
     for i, agent in enumerate(page_agents):
         is_last = i == len(page_agents) - 1
@@ -7401,18 +7406,20 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
         # Provenance markers are bookkeeping this listing's reader cannot act
         # on: `seed:` records the starter a role was installed from (so
         # `op='reset'` knows it may restore it), and `seed_version:` /
-        # `seed_sha256:` are the sync baseline (`lop agents sync`). Hiding them
-        # keeps machine-only tags out of a human-facing inventory; the tags a
-        # person wrote still show. A row's `hub:` marker stays VISIBLE — it
-        # names the marketplace listing the row came from, which is something
-        # a reader can act on (`agents pull --id`).
+        # `seed_sha256:` / `hub_sha256:` are the sync baselines (`lop agents
+        # sync`). Hiding them keeps machine-only tags out of a human-facing
+        # inventory; the tags a person wrote still show. A row's `hub:` marker
+        # stays VISIBLE — it names the marketplace listing the row came from,
+        # which is something a reader can act on (`agents pull --id`).
         shown_tags = [
             tag
             for tag in agent.tags
             if not str(tag)
             .strip()
             .lower()
-            .startswith((SEED_ORIGIN_PREFIX, SEED_VERSION_PREFIX, SEED_SHA256_PREFIX))
+            .startswith(
+                (SEED_ORIGIN_PREFIX, SEED_VERSION_PREFIX, SEED_SHA256_PREFIX, HUB_SHA256_PREFIX)
+            )
         ]
         if shown_tags:
             print(f"\033[1;32m{left_bar}   • Tags: {', '.join(shown_tags)}\033[0m")
@@ -7446,7 +7453,13 @@ def agents_sync_command(
     # and the Radient client, none of which belong on the startup path.
     from local_operator.agent_sync import resolve_hub_client_sync, sync_agent_profiles
 
-    names = [args.name] if getattr(args, "name", None) else None
+    # ``--all`` is READ, not decorative: it names "every installed row" — the
+    # same set the absence of --name selects — so the flag does what it says
+    # instead of parsing into nothing (agent review round 1, n1).
+    if getattr(args, "all", False):
+        names = None
+    else:
+        names = [args.name] if getattr(args, "name", None) else None
     radient_client = resolve_hub_client_sync(
         agent_registry.config_dir,
         base_url=_radient_hub_base_url(ConfigManager(base_dir)),
@@ -7614,7 +7627,7 @@ def teams_delete_command(name: str, team_registry: Any) -> int:
 
 
 def _radient_hub_base_url(config_manager: ConfigManager) -> str:
-    """The ONE place the CLI resolves the Radient Agent Hub API root.
+    """The CLI's name for the hub API root resolution.
 
     ``config.yml``'s ``values.radient_base_url`` — the NESTED key the config
     store actually holds; a flat document-root ``radient_base_url`` is dropped by
@@ -7625,8 +7638,17 @@ def _radient_hub_base_url(config_manager: ConfigManager) -> str:
     push`` and ``agents pull`` each carried their own literal, two of the three
     naming a route or a host that does not exist, so one configuration resolved
     three different destinations and two of them could never work.
+
+    The RULE lives in ``providers.radient_credentials.configured_radient_base_url``
+    (agent review round 1, n2): the sync coordinator needs the same resolution,
+    and a second copy beside the first is how the two drift. This helper stays
+    so the CLI's call sites keep naming their own surface rather than each
+    importing the provider module.
     """
-    return resolve_radient_api_base_url(config_manager.get_config_value("radient_base_url", None))
+
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    return configured_radient_base_url(config_manager)
 
 
 def agents_delete_command(

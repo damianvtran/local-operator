@@ -89,6 +89,29 @@ def test_the_command_syncs_only_the_named_profile(isolated_config_dir: Path, cap
     assert "reviewer" not in out
 
 
+def test_the_all_flag_names_every_installed_profile(isolated_config_dir: Path, capsys) -> None:
+    """``--all`` is read by the handler, not just parsed (agent review round 1, n1).
+
+    The flag is the explicit spelling of the set the absence of ``--name``
+    selects — the two inputs are INTENTIONALLY equivalent, which is exactly why
+    the handler must consult ``args.all`` rather than ignore it: an unread flag
+    is a lie in ``--help``. This pins the advertised meaning end to end; the
+    mutual-exclusivity contract stays covered above.
+    """
+
+    registry = AgentRegistry(isolated_config_dir)
+    assert install_seed("reviewer", registry=registry) is not None
+    assert install_seed("coder", registry=registry) is not None
+
+    args = build_cli_parser().parse_args(["agents", "sync", "--all"])
+    rc = agents_sync_command(args, registry, isolated_config_dir)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "reviewer: up-to-date" in out
+    assert "coder: up-to-date" in out
+
+
 def test_the_command_answers_a_name_that_is_not_installed(
     isolated_config_dir: Path, capsys
 ) -> None:
