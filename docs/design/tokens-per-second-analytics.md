@@ -638,8 +638,18 @@ render term and a layout test — that part is ordinary. The blocker is the
 3. **Both routes to a real live rate are expensive.** Either new per-frame
    fields cross the attach boundary, or the TUI process measures deltas itself.
    The frame budget is documented as *elastic and already over-subscribed*: the
-   worst-case frame measured **1,048,408 of 1,048,576 bytes — 168 bytes under
-   the 1 MiB socket line limit** — and `JOB_TEXT_FRAME_BUDGET_CHARS` was cut
+   worst-case frame measured **1,048,408 of 1,048,576 bytes — and the slack is
+   NOT the 168 B that implies**. Measured on the guard's own ``_line_bytes`` at the
+   head under review: the MEMBER arm with the goal record present lands at
+   **1,048,503 B, so 73 B of slack**; remove the four judged-goal keys
+   (``goal_status``, ``goal_history_truncated``, ``goal_judge``, ``goal_history``)
+   and the same payload is **1,048,408 B** — exactly the recorded figure, i.e. what
+   this section had been quoting was the GOAL-LESS shape, which no turn with a goal
+   actually sends. The judged-goal record costs 95 B and the released arm pays it
+   outright (1,050,721 = 1,048,576 + its recorded 2,145 B pre-existing excess).
+   Three measurements disagreed here before this one — 168 B quoted forward, 106 B,
+   and 73 B — which is why the number is stated with the instrument that produced
+   it rather than as headroom anyone may spend — and `JOB_TEXT_FRAME_BUDGET_CHARS` was cut
    120,000 → 119,872 → 119,360 to *pay* for two per-frame fields, with the
    comment stating "the next per-frame field is paid for out of here too"
    (`frontend_state.py:205-236`). Teaching the TUI to observe deltas is a far
@@ -672,7 +682,7 @@ the calibrated fixture itself fills it with 5,000 receipts, which the wire caps 
 `FrontendUsage`, using the guard's own `_receipt` shape: 1 receipt 2,061 → 2,157 B
 (+96); 200 receipts 70,318 → 79,966 B (**+9,648**); 5,000 receipts (wire-caps to
 200) 70,518 → 80,166 B (**+9,648**). That is 48 B x 201 objects against 168 B of
-slack — **57x over**, taking the calibrated worst case from 1,048,408 to about
+slack — **132x over** on the 73 B the live frame actually leaves, taking the calibrated worst case from 1,048,408 to about
 **1,058,056 B, some 9.5 KB past the 1 MiB line**. The payload carries 201
 `"decode_us"` occurrences.
 

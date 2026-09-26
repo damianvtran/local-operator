@@ -85,6 +85,7 @@ from local_operator.session.frontend_state import (
     _bound_goal_record_in_place,
     _folded_components,
     _released_row,
+    _usage_with_decode_window,
     _with_lineage,
     filter_update_trajectories,
     oversized_frame_report,
@@ -6191,3 +6192,74 @@ def test_the_goal_record_yields_only_when_the_frame_is_over_the_line() -> None:
     assert big["data"]["snapshot"]["goal_history_truncated"] is True
     assert big["data"]["snapshot"]["goal_judge"] is None
     assert big["data"]["snapshot"]["goal_status"] == "active"
+
+
+def test_the_decode_window_reaches_the_frame_once_and_only_once():
+    """The band's window must cost ONE materialised object, not 201.
+
+    Three shapes for this were priced and two were falsified by measurement
+    (design §9.3): declaring the pair on the base ``Usage`` cost 9,648 B through
+    the 200-cap ``usage_components`` list, and stamping the relayed object after
+    the stream loop cost 7,800 B through 200 job ROWS. Both were the same mistake
+    — a pydantic FIELD is in the schema of every value sharing it.
+
+    The shipped shape carries the window in a PRIVATE attribute (free: pydantic
+    keeps it out of ``model_dump``) and materialises it on the frame's
+    ``last_usage`` value alone. This asserts that end to end, on the worst-case
+    roster shape, with the pair STAMPED ON EVERY OBJECT — which is the part the
+    earlier claims skipped: the omission rule drops only UNSET values, and an
+    eligible call's window is set by definition, so a guard whose rows are
+    unstamped measures the without-column and stays green through a 201x cost.
+    """
+    receipts = []
+    for index in range(200):
+        receipt = _receipt(index)
+        receipt._decode_window = (1_234_567, 240)
+        receipts.append(receipt)
+    rows = []
+    for index in range(200):
+        usage = Usage(input_tokens=1_000, output_tokens=240, cost_components=receipts)
+        usage._decode_window = (1_234_567, 240)
+        rows.append(
+            JobState(
+                id=f"job-{index}",
+                type="task",
+                label=f"child {index}",
+                status="completed",
+                start_time=1_699_000_000.0,
+                settled_at=1_700_000_000.0,
+                usage=usage,
+            )
+        )
+    last = Usage(input_tokens=100, output_tokens=240)
+    last._decode_window = (1_234_567, 240)
+
+    # ``last_usage`` goes in as a WIRE payload, the way the store builds it: the
+    # validator is what materialises the private window, so handing it the live
+    # object would test the fixture rather than the frame.
+    store = FrontendStateStore(
+        FrontendSessionState(
+            session_id="s1",
+            epoch="e1",
+            jobs=rows,
+            last_usage=FrontendUsage.model_validate(_usage_with_decode_window(last)),
+            usage_components=receipts,
+        )
+    )
+    frame = sync_wire_payload(store.subscribe(lambda _u: None).sync)
+    text = json.dumps(frame)
+
+    # The private channel itself is FREE, at full depth: 201 stamped objects.
+    stamped = 201
+    assert stamped == len(rows) + 1, "the fixture must stamp every row's usage"
+    # And only the last_usage value materialises it: one occurrence of each key.
+    assert text.count('"decode_us"') == 1, (
+        f"the decode window reaches the frame {text.count('\"decode_us\"')} times; "
+        "it must be materialised on last_usage alone (design §9.3)"
+    )
+    assert text.count('"decode_tokens"') == 1
+    assert frame["snapshot"]["last_usage"]["decode_us"] == 1_234_567
+    # The roster rows must NOT carry it, which is what the private attribute buys.
+    assert all(
+        "decode_us" not in row["usage"] for row in frame["snapshot"]["jobs"] if row.get("usage")
+    )
