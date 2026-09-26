@@ -21,15 +21,19 @@ Maps tabs -- across three arms:
 
 Reading all four properly is what produced the rule below, and it refutes an
 earlier version of this docstring. In EVERY one of the four the fallback's chosen
-URL is byte-identical to the URL the evaluator itself printed as its target page,
-and in three of the four the parse then returned REAL content that went on to be
-scored: the two passes matched the expected eight-stop walking route, and
-``ep-9a6876e889e1`` scored a 1/7 partial against the route it did produce. Those
-three are readings of the state the episode produced. Only ``ep-94b968963d3e``
-is a mis-grade, and what makes it one is visible and checkable: the element the
-task is judged on was not on the graded page, the selector the evaluator waited
-for timed out, and the read it scored came back empty (``{'aria-label': []}``)
-where the check expected content.
+URL is byte-identical to the URL the evaluator itself printed as its target page
+-- a selection echo, not agreement: ``chrome.py`` selects the page it prints BY
+the fallback's own URL, so the two lines cannot disagree -- and in three of the
+four the parse then returned REAL content that went on to be scored: the two
+passes matched the expected eight-stop walking route, and ``ep-9a6876e889e1``
+scored a 1/7 partial against the route it did produce. Those three are readings
+of the state the episode produced -- the discriminating evidence is the read that
+followed, not the URL echo. Only ``ep-94b968963d3e`` is a mis-grade: the element
+the task is judged on was not on the graded page, the selector the evaluator
+waited for timed out, and the read it scored came back empty
+(``{'aria-label': []}``) where the check expected content. The classifier keys on
+that shape's three log markers -- a proxy for the read, not a check of it, with
+its residuals stated at ``_WAIT_TIMEOUT_RE`` below.
 
 So the classifier requires ALL THREE markers -- getter failure, open-tab
 fallback, and a timed-out selector -- and the third is load-bearing, not
@@ -106,16 +110,33 @@ UNREADABLE = "unreadable"
 # false, and the sealed corpus shows it: the getter-failure and the fallback are
 # emitted by the same code path whatever tab the fallback lands on. In all four
 # measured task_017 episodes the fallback's chosen URL is byte-identical to the
-# URL the evaluator itself printed as its target page, and in three of the four
-# the parse then produced REAL content that went on to be scored (two passes on
-# the expected route, one 1/7 partial). Those three are readings, so classifying
-# them would remove genuine passes from the numerator -- the exact error this
-# module exists to avoid, aimed the other way.
+# URL the evaluator itself printed as its target page -- a selection echo, not
+# agreement: ``chrome.py`` selects the page it prints BY the fallback's own URL,
+# so the two lines cannot disagree -- and in three of the four the parse then
+# produced REAL content that went on to be scored (two passes on the expected
+# route, one 1/7 partial). Those three are readings, so classifying them would
+# remove genuine passes from the numerator -- the exact error this module exists
+# to avoid, aimed the other way.
 #
 # What separates the fourth (a genuine mis-grade) is that the element the check
-# asked for was NOT on the graded page, so the read came back empty:
-# ``{'aria-label': []}`` against an evaluator that expected content. That is
-# ``_WAIT_TIMEOUT_RE``, and it is why the corroborator is now a REQUIREMENT.
+# asked for was NOT on the graded page, so its read came back empty
+# (``{'aria-label': []}`` against an evaluator that expected content). That
+# emptiness is what ``_WAIT_TIMEOUT_RE`` stands in for, and it is why the
+# corroborator is now a REQUIREMENT.
+#
+# AND THE THIRD MARKER IS A PROXY FOR THAT EMPTY READ, NOT A CHECK OF IT: the
+# classifier keys on the log and never opens the graded content. Two residuals
+# are stated here rather than closed, and neither has an instance in the
+# 96-bundle corpus (so nothing moves today -- they are named so no reader takes
+# the markers as an exact reconstruction of the read). A run whose read was REAL
+# can still carry all three markers -- a wait timeout for one selector while the
+# graded read another path produces stays non-empty, a wait/read race or a
+# multi-selector config -- and classifies identically, the reason saying "came
+# back empty" however the read turned out. And a genuine capability failure with
+# the same geometry (the element truly absent, the fallback on a route-less Maps
+# tab, the timeout fired, the read empty) emits an identical marker set, which
+# only the campaign's finish-frame evidence could separate from
+# ``ep-94b968963d3e``'s shape.
 _ACTIVE_URL_NONE_RE = re.compile(r"get_active_url_from_accessTree[^\n]*\breturned:\s*None")
 _OPEN_TAB_FALLBACK_RE = re.compile(r"Falling back to an open[^\n]*\btab\b")
 # Required, not corroborative: the graded page did not carry the element the task
@@ -335,9 +356,12 @@ def read_bundle(bundle: Path) -> EpisodeTriage:
         # Nothing was captured to attribute the score to, so there is nothing to
         # classify and the score stands as the capability reading it is. The
         # binary is deliberately NOT consulted: the same evaluator defect
-        # manufactures passes as well as zeros (module docstring), and a rule of
-        # "only a zero is triaged" is exactly what left two manufactured passes
-        # in this corpus's numerator.
+        # manufactures passes as well as zeros (module docstring), and the binary
+        # cannot say whether a pass is a reading -- a rule of "only a zero is
+        # triaged" could never see a mis-grade that came out as a pass, and a
+        # manufactured pass would leave both sides of the rate. (This corpus's
+        # one apparatus-attributable episode is a zero; the honest rate is
+        # 6/63 = 9.5%.)
         return EpisodeTriage(
             episode_id=episode_id,
             bundle=bundle,
