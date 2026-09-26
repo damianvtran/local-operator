@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import json
 import logging
 import sys
 import textwrap
@@ -4734,6 +4735,46 @@ async def test_a_turn_ending_mid_write_does_not_strand_the_result(tmp_path, monk
     assert [row.payload["details"]["job_id"] for row in _job_result_rows(session)] == [
         "j1"
     ], "and the idle delivery must not duplicate the early row"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_turn_does_not_journal_its_row_twice(tmp_path):
+    """The incoming-journal loop must skip a row that is already durable.
+
+    The QA probe on the delivery fix (PR #1619) found the gap every other cell
+    missed: the batch hands the row written at settle time back as the turn's
+    INITIAL, and ``_run_turn_pipeline`` journaled every initial unconditionally
+    -- two settled jobs became FOUR transcript rows under the same two ids, and
+    a successor's first provider request carried each result twice. The cells
+    that observe the hand-over replace ``_prompt_messages`` with a fake, which
+    is exactly why none of them could see the real loop run; this cell drives
+    the REAL pipeline and reads the transcript afterwards.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    session._is_streaming = True  # the marathon turn
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    await session._on_job_completed("j2", "two", _settled_job("j2"))
+    session._is_streaming = False
+
+    await session._deliver_deferred_job_results()
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    while len(stream.requests) < 2 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert len(stream.requests) >= 2, "the delivery turn never reached the provider"
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1", "j2"], (
+        "exactly one row per settled job -- a twin under the same id is the "
+        f"regression the probe caught: {[row.id for row in rows]}"
+    )
+    assert len({row.id for row in rows}) == 2, "the two rows must be distinct entries"
+    body = json.dumps(stream.requests[1].model_dump(mode="json"))
+    assert body.count("background job 'j1' completed") == 1, "the result rides once"
+    assert body.count("background job 'j2' completed") == 1
     await session.dispose()
 
 

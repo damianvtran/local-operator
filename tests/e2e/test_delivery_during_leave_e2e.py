@@ -358,3 +358,15 @@ async def test_a_settled_batch_still_opens_one_turn_without_the_latch(
         "the QA round finished" in delivered and "the review round finished" in delivered
     ), f"both results ride the same turn: {delivered[-2000:]}"
     assert len(_run_rows(directory)) == 2, "the delivery turn opened its own run"
+    # ONE ROW PER RESULT, re-asserted AFTER the delivery turn ran. The rows
+    # above are written at settle time; the delivery turn then hands those same
+    # messages back as its initials, and the pipeline's incoming-journal loop
+    # must not journal them a second time (the QA probe on this PR measured two
+    # rows becoming FOUR, same ids, until the loop learned to skip a durable
+    # row). The latch cell cannot see this -- its batch is held, not delivered
+    # -- so this is the only cell that runs the loop over pre-durable initials.
+    rows = _job_result_rows(directory)
+    assert [row.get("job_id") for row in rows] == ["qa-r2", "rev-r6"], (
+        "one row per result after the delivery turn: the loop must skip rows "
+        f"already made durable at settle time (found {[r.get('job_id') for r in rows]})"
+    )

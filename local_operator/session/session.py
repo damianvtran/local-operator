@@ -9752,12 +9752,22 @@ class Session:
             from local_operator.harness.rows import is_harness_chrome
 
             for message in initial:
-                await self._transcript.append_message(
-                    message,
-                    producer_command_id=(
-                        producer_command_id if message.id == admitted_id else None
-                    ),
-                )
+                # ALREADY-DURABLE initials are not journaled a second time. The
+                # delivery path (``_on_job_completed`` -> ``_deliver_job_results``)
+                # makes each settled result's row durable the moment the job
+                # settles, and hands the SAME message back as its turn's initial
+                # -- so an unconditional append here wrote a twin entry under the
+                # same id: PR #1619's probe measured two settled jobs producing
+                # FOUR rows in memory and on disk, and a successor's first
+                # provider request carrying each result twice. Normal prompts are
+                # unaffected: their message is new by construction.
+                if not self._transcript.has_entry(message.id):
+                    await self._transcript.append_message(
+                        message,
+                        producer_command_id=(
+                            producer_command_id if message.id == admitted_id else None
+                        ),
+                    )
                 if admitted is not None and message.id == admitted_id and not admitted.done():
                     # The append completed under Transcript's fsync boundary;
                     # only now may a producer discard its retained command.
