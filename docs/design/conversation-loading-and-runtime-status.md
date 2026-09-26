@@ -8,6 +8,13 @@ output is quoted; every number carries the load average it was taken at, because
 on this host a wall time without a load figure is weather, not evidence.
 
 **Revision log.**
+* **Revision 2** — R2 is refuted on the mechanism (the boot loop's products are
+  correctness state: the admission set, the revision generation, and the complete
+  entry list) and its replacement — a sidecar index — is ruled out **with
+  measurements** (§9 R11). The cold boot is therefore documented as unshortenable
+  without weakening admission or lineage, and the ranked list now opens with R7
+  (the precondition) and R3 (warmth). First paint on the 207 MB shape is confirmed
+  at **p50 ~790 ms**.
 * **Revision 1** — answers the round-1 review on PR #1620 (reviewer, task-4:
   RR1-1 … RR1-5 plus ten citation findings). It withdraws this document's central
   recommendation: R1's rank-1 latency billing is refuted (the read path already
@@ -591,8 +598,17 @@ with.
    sessions the LRU keeps — bounded by a memory envelope that cannot cover his
    working set (§4.3), which is why it is a partial and not the answer.
 
-It does not make the *first prompt* on a cold session instant: a turn needs LLM
-history, which needs the parse. That is R2's job.
+**Revision 2 closes the cold half honestly: nothing sound shortens a cold boot.**
+R2 is refuted (the parse's products are correctness state — the admission set, the
+revision generation and the complete entry list; §9 R2), and the sidecar index that
+would have carried two of them is ruled out with measurements (§9 R11): the two
+facts cost **≤57.5 ms of a 577.7 ms parse** on the real 207 MB journal, and the
+cache cannot be verified without the parse it exists to avoid. The measured cold
+shape is first paint **p50 ~790 ms** (which never waited for the parse), pid
+**~1 420 ms**, addressable **~1 347 ms** after the pid, attach **~3 803 ms**. So:
+**the 300 ms target is met on a warm runtime (20.3-78.6 ms) and a cold boot costs
+what correctness costs** — which makes warmth (R3) the only remaining latency
+lever, and truthful liveness (R7) the thing that must ship first.
 
 ### The verdict this document carries (reviewer, task-4)
 
@@ -1055,7 +1071,38 @@ a large surface, for a withdrawn effect.
 300 ms of the `watch` POST once the pid exists" — is the measurement that refuted
 it: the addressable time is 254.9-460.2 ms (tiny) / 5 283.4 ms (xl).
 
-### R2 — Take the whole-journal parse off the boot's critical path
+### R2 — Take the whole-journal parse off the boot's critical path — **REFUTED, DO NOT IMPLEMENT**
+
+> **REVISION 2 — WITHDRAWN ON THE MECHANISM** (coder, task-8; measured, file:line).
+> `Transcript.__init__` (`session/transcript.py:1141-1170`) is **one loop over every
+> journal line**, and per row it builds the replay data **and the correctness
+> state**. Three products cannot come from a suffix window, two of them
+> correctness:
+> * **`_admitted_command_ids`** — the idempotency admission set, read by
+>   `has_admitted_command` (`:1611-1613`) and answered on the wire as
+>   `duplicate: true`. A suffix window **misses a re-delivered command from before
+>   the window and admits it again — silent duplicate execution.**
+> * **`_history_generation`** — a count of `ENTRY_COMPACTION`/`ENTRY_PRUNE` rows
+>   over the *whole* journal (`:1590-1592`); a suffix gives wrong revision lineage
+>   and wrong `_display_window_cache` invalidation.
+> * **`_entries`** as the rebuild's source — `_write_entries` writes
+>   `for row in (*self._entries, *entries)` (`:1552-1568`); a partial `_entries`
+>   makes a rebuild write a **truncated journal**.
+>
+> So the window that is sound for **paint** is not sound for **state**, the same
+> loop builds both, and splitting them costs a second full pass. **R2's premise —
+> that the boot's replay can lag its parse — is false: the parse's products are
+> correctness state.** The section is kept for the record; the successor question
+> (a sidecar index) is ruled out in its own right at §9 R11.
+>
+> **Measured context that also resolves an old contradiction in this document**
+> (coder, task-8, xl = 206.99 MB / 18 301 rows, n=6, load 45.6-51.3): first paint
+> **p50 ~790 ms** — so this document's 789.0 ms reproduces and the review's
+> 1 768.9 ms was the n=1 outlier — pid exists **~1 420 ms**, the record is
+> published **0.3-1.7 ms after the bind**, **pid → addressable p50 ~1 347 ms**, and
+> the attach lands **~3 803 ms**. **First paint happens *before* the pid exists, so
+> it never waited for the parse** — R2 could not have moved the row it was ranked
+> on.
 
 **What.** The deferred (D) of `docs/design/session-load-central-cache.md` §3(D),
 whose follow-up shape that doc already names: **not** lazy `Transcript._entries`,
@@ -1293,13 +1340,106 @@ The tiny row is the other end and needs nothing: the same frame lands in
 **Measurement.** The existing `--scenario open` table, with the page-cache
 `cached_page_hit` / rows-decoded counters beside it, at a stated load.
 
+### R11 — A sidecar index for the admission set and the generation: **RULED OUT, measured**
+
+*(This is the documented answer to the last cold-latency item. Method: I timed the
+boot loop on the real 207 MB fixture in three passes — iterate the lines only,
+then `TranscriptEntry.from_json` each row, then the full loop including
+`_index_entry` and `_admitted_command_id` — via `$SCRATCH/probe_sidecar.py` under
+`scripts/run_bounded.py`-style isolation. Best-of-2, one process, load ~50.)*
+
+The proposal was a cheap sidecar carrying `_admitted_command_ids` and
+`_history_generation`, written at append time, so the boot reads a small file
+instead of decoding 207 MB. **It cannot save what it was meant to save, and the
+measurement says so:**
+
+```
+file              206.99 MB / 18 301 rows
+iterate lines      289.3 ms   (50.1%)  <- the read + UTF-8 decode, unavoidable
++ from_json        520.2 ms   (+231.0 ms, 44.4%)
++ index + admit    577.7 ms   (+57.5 ms, 10.0%)
+   admitted ids 0, compaction/prune rows 50
+```
+
+The 57.5 ms is the **entire** index step — `_entry_ids`, `_latest_by_type`,
+`_latest_custom_entries`, `_latest_user`, the generation count **and** the
+admission set. The two facts a sidecar would carry are a strict subset of it:
+one `entry.type` test per row, one `payload.get`, and a set insert for the marked
+rows (0 on this fixture; one per user prompt on a real one). **So the recoverable
+slice is a few tens of milliseconds of a 577.7 ms parse — before paying for the
+sidecar's own read, verification and write-path cost.**
+
+**And the read and the decode stay regardless**, because `_entries` must be the
+complete row list: `_write_entries`' rebuild branch writes `(*self._entries,
+*entries)` (`transcript.py:1552-1568`), and 104 non-test call sites read
+`.entries`. A sidecar carrying two derived facts removes neither the 289.3 ms
+read nor the 231.0 ms decode.
+
+**The four questions, answered — and the third is what makes it a `no` rather than
+a `not worth it`:**
+
+1. **Recovery — missing / truncated / partially written → fall back to the full
+   parse.** Those three are detectable with a tail marker (row count + last entry
+   id + a version field) and the fallback is sound and cheap *to detect*. **Stale
+   (behind the journal) is detectable** the same way: the sidecar's last covered
+   journal position is behind the file's. **Written by an older version is NOT
+   detectable by any cheap check**, and it is the one that matters:
+   `_admitted_command_id`'s own docstring records that producer provenance "was
+   introduced with an explicit kind marker" — **the extraction rule has already
+   changed once**, so an older sidecar can be well-formed, correctly positioned,
+   version-stamped, and carry a *different rule's* answer. A wrong admission set
+   re-admits a command and silently double-executes it. A wrong generation gives
+   wrong lineage. Silently, at boot, with no symptom until the duplicate lands.
+2. **Is it a second source of truth? Yes, and that is the whole problem.** The
+   journal is the durable artifact; the sidecar would be a *derived cache of a
+   correctness predicate*. For it to be trusted it must be verified, and the only
+   complete verification is the parse whose cost it exists to avoid — so the
+   honest reading is that **it can never be trusted at boot; it can only be
+   trusted when the parse happens anyway, at which point it saves the derive step
+   it was supposed to replace.** That is circular, and the circle does not close
+   with a cheaper key.
+3. **Write-path cost and atomicity.** The admission set changes per admitted
+   command, so this is the hot path that today performs exactly one durable append
+   with `fsync`. A sidecar adds a second write that must be atomic with respect to
+   the first (or carry a torn-write marker), on the path where a torn write is
+   *silent* — the re-admission failure above. **Paying a hot-path durability risk
+   and a new silent-failure mode for a few tens of milliseconds is a bad trade in
+   the wrong direction:** the failure class is duplicate execution, which is worse
+   than slow.
+4. **So: not worth it, and the honest answer is no.** Not "not worth it yet" — the
+   design cannot be made sound by a better key, because the thing it caches *is*
+   the correctness predicate and the only verifier is the thing it replaces.
+
+**What this closes, stated for the operator's question.** On the 207 MB shape the
+cold attach is ~3 803 ms: first paint **p50 ~790 ms** (which never waited for the
+parse), pid at **~1 420 ms**, addressable **p50 ~1 347 ms** after the pid, then the
+materialisation. **No sound change removes the parse for a cold boot**, because its
+products are the admission set, the revision generation and the complete entry
+list — correctness state, not replay. The remaining sound levers are **warmth**
+(R3: do not pay a cold boot for the working set) and **truthfulness** (R7), and the
+honest sentence is: *the target is met on a warm runtime (20.3-78.6 ms), and a cold
+boot costs what correctness costs.*
+
+**The one sound path forward, recorded and NOT proposed for this round.** The
+reason `_entries` must be eager is the rebuild branch; decouple it — **copy the
+file's bytes and append, instead of re-serialising `(*self._entries, *entries)`** —
+and the only *correctness* reason for eager `_entries` disappears. After that, a
+windowed `entries` with an explicit `materialise()` boundary becomes sound to
+evaluate. That is §3(D)'s laziness with its hazard actually removed rather than
+worked around, and it is a multi-PR programme: the byte-copy rebuild, the 104
+`.entries` readers, the `hasattr` duck-type sites (`session_factory.py:904-906,
+969-972,1022`), the `threading.Lock`-guarded load reachable from a loop thread
+(the #401 freeze shape), and an equivalence oracle against the whole-file replay.
+**Do not start it on the strength of this document.**
+
 ### Ranked summary
 
 | rank | change | effect on 300 ms | risk | independent |
 |---|---|---|---|---|
-| **1** | **R2** windowed boot replay — take the parse off the boot | −248 ms / 107 MB; **−2 286 ms / 261 MB**; the only item that reaches xl | high | yes |
-| **2** | **§6 rule 1 + R7** verified liveness — a **PRECONDITION** of anything publishing liveness on the read path | none by itself; it is what stops a fast answer being the *lying* one (status is already <300 ms while wrong) | medium | yes — ships alone, and first |
-| 3 | R3 warmth 4 → 6 | one cold attach → 20-80 ms per extra slot | low | yes |
+| **1** | **§6 rule 1 + R7** verified liveness — a **PRECONDITION** of anything publishing liveness on the read path | none by itself; it is what stops a fast answer being the *lying* one (status is already <300 ms while wrong) | medium | yes — ships alone, and first |
+| **2** | **R3** warmth 4 → 6 | one cold attach → 20-80 ms per extra slot; now the only latency lever left | low | yes |
+| — | ~~R2 windowed boot replay~~ | **REFUTED** — the parse's products are correctness state (admission set, lineage, complete `_entries`) | — | — |
+| — | ~~R11 sidecar index~~ | **RULED OUT, measured** — the two facts cost ≤57.5 ms of a 577.7 ms parse, and the cache cannot be verified without the parse | — | — |
 | 4 | R5 prewarm off the loop | removes 93 ms loop stalls, twice per 2 s refresh | medium | yes |
 | 5 | R4 TUI cache: the streaming arm | 31.91 ms prepare → 0.21 ms hit | medium | yes |
 | 6 | R8 first-paint headroom (incl. the xl cold facade: 1 768.9 ms) | closes the over-budget samples | low-medium | yes |
@@ -1307,13 +1447,15 @@ The tiny row is the other end and needs nothing: the same frame lands in
 | — | ~~R1 early frame~~ | **withdrawn** — the frame already ships at the read path (26.6-174.4 ms tiny) | n/a | no |
 | — | ~~R9 store census~~ | **negative result** — ~3% of a core, no sound cheaper key | n/a | no |
 
-**Ordering rationale (revision 1).** **R2 is first because the parse sits between
-the pid and the socket** — nothing else can move the operator's 261 MB case (§5).
-**R7/§6 rule 1 is second and is a PRECONDITION, not a follow-on:** the review's
+**Ordering rationale (revision 2).** **R2 is out** (refuted on the mechanism, §9
+R2) and **R11 is out with it** (measured, §9 R11), so the list now opens with the
+precondition and the only latency lever that survives: **R7/§6 rule 1 is first and
+is a PRECONDITION, not a follow-on:** the review's
 sharpest line is that *status is already inside 300 ms while wrong* (reads
 170.7-350.6 ms, `/warm` 6.3-100.6 ms, owner frozen), so a design that optimises
-only milliseconds makes the operator's position worse, not better. R3 is third
-because it is one constant on the primary interface. R8 absorbs the xl cold-facade
+only milliseconds makes the operator's position worse, not better. **R3 is second because with the parse
+unshortenable it is the only remaining way to avoid paying a cold boot** — it is one
+constant on the primary interface. R8 absorbs the xl cold-facade
 cost that R1 used to claim. **R9 is a recorded negative result** (§9 R9), and
 **R1 is withdrawn** — its frame already ships and its two surviving halves are R7
 (veracity) and R8/R2 (cost). R6 is last on effect and ranked for completeness;
