@@ -132,6 +132,18 @@ ICON_AGENTS = "◍"
 #: so the band's width arithmetic stays correct while the glyph is invisible.
 ICON_JOBS = "▣"
 ICON_CONTEXT = "▦"
+#: Throughput of the LAST COMPLETED call, and the glyph is deliberately
+#: content-free: the band's doctrine is that an icon is a CATEGORY mark and the
+#: value carries the meaning (``▴ high``, ``◉ auditor``), and every richer candidate
+#: collides with a neighbour it would sit beside — ``▤`` is a third content square
+#: next to ``▦``, ``◊`` a second diamond next to ``◈``, ``◌`` is what the in-flight
+#: spinner already reads as, and the gauge-like ``▬``/``▭`` would claim a scale this
+#: reading does not have. ``▢`` is unused, cell-width 1 and inside the tofu-safe
+#: U+25xx block. DESIGN ROUND, not decoration: the segment is retrospective and the
+#: glyph must not imply a live reading, which is why the WORD beside it is the part
+#: that carries the meaning (see :data:`ICON_COST`'s neighbour, the ``last`` word).
+ICON_LAST_RATE = "▢"
+
 ICON_COST = "◈"
 ICON_DURATION = "◷"
 #: MCP servers. ``⊙`` (U+2299) is the reference's glyph and measures ONE cell
@@ -405,6 +417,13 @@ _DROP_LADDER: tuple[str, ...] = (
     # Its place in the order is unchanged: below it are only figures an operator
     # acts on, which is where a title stops competing.
     "name",
+    # The second figure that is not a live reading of this turn, and it sheds
+    # BEFORE ``cost`` because it is strictly more re-derivable: one scalar about a
+    # call that has already ENDED, and the same number is on a screen the operator
+    # can open (``/analytics``, ``/session``), where cost is cumulative money that
+    # only exists here. It must never cost ``context`` a cell — the rung below is
+    # what predicts the operator's next action.
+    "last-rate",
     # The one figure that is not a live reading of this turn.
     "cost",
     # The working directory goes before the context number. Its shorten step has
@@ -1126,6 +1145,7 @@ class StatusLine:
         self._jobs: int = 0
         self._streaming: bool = False
         self._cost: str = ""
+        self._last_rate: str = ""
         self._conversation_name: str = ""
         # True while this session is a FORK still wearing the title it inherited
         # from its parent. Only the terminal title reads it, and it is pushed by
@@ -1466,6 +1486,7 @@ class StatusLine:
         streaming: bool | None = None,
         failed: bool | None = None,
         cost: str | None = None,
+        last_rate: str | None = None,
         conversation_name: str | None = None,
         forked: bool | None = None,
         fork_pending: bool | None = None,
@@ -1517,6 +1538,10 @@ class StatusLine:
             self._approvals_always = approvals_always
         if cost is not None:
             self._cost = cost
+        if last_rate is not None:
+            # The FORMATTED value (``41 tok/s``), or the empty string for "the last
+            # call measured no window". Never ``—``: see the segment's rung.
+            self._last_rate = last_rate
         if conversation_name is not None:
             self._conversation_name = conversation_name
         if forked is not None:
@@ -2352,6 +2377,16 @@ class StatusLine:
                         ),
                     )
                 )
+        # LABELLED, always: an unlabelled rate beside a live context reading reads
+        # as this turn's speed, and this one is the last COMPLETED call's (design
+        # round: ``last`` is the 4-cell floor, and ``last call`` buys nothing). The
+        # word is the label's whole cost, which is why the glyph above is
+        # content-free. ABSENT rather than ``—`` when the last call measured no
+        # window: ``—`` is a table-column convention and in a numeric slot it reads
+        # as a broken reading, while absence is what this band already does for an
+        # unpriced ``cost``.
+        if self._last_rate and "last-rate" not in dropped:
+            parts.append((ICON_LAST_RATE, f"last {self._last_rate}", dim))
         cost = self._shown_cost()
         if cost and "cost" not in dropped:
             parts.append((ICON_COST, cost, Style(color=theme_mod.semantic_color("warning"))))
