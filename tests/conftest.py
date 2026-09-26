@@ -93,6 +93,13 @@ _AMBIENT_VARS = (
     # looking like it tested the feature. The standby's own tests clear it for the
     # children they explicitly want to warm.
     "LOP_RUNTIME_STANDBY_DISABLED",
+    # The standby's idle window (``standby.STANDBY_IDLE_ENV``, agent review
+    # round 1): it decides how long a spare waits before reaping itself, which
+    # is the memory bound the standby cells and the lifecycle bench measure.
+    # Inherited from the operator's shell it would move that bound under every
+    # cell and under the bench's console — a REAL-MACHINE-resource name, so it
+    # is scrubbed rather than explained.
+    "LOP_STANDBY_IDLE_S",
     # The marker the desktop app injects into a console surface's environment
     # (design ui-console-tab §6.5), read by ``local_operator/terminals.py``'s
     # ``is_local_operator_console`` and therefore by
