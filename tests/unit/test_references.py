@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.harness.approval import ApprovalUnavailableError
 from local_operator.references import (
     _BLOCK_PREAMBLE,
     BLOCK_LIMIT_CHARS,
@@ -58,6 +59,21 @@ class SpyGate:
     async def __call__(self, tool_name: str, description: str) -> bool:
         self.asks.append((tool_name, description))
         return self.reply
+
+
+class UnanswerableGate:
+    """A gate that cannot reach anyone — the headless non-tty gate's raise.
+
+    Same 2-argument shape as :class:`SpyGate`, so it rides the same arity path
+    through ``ask_approval``; what differs is that there is no answer to give.
+    """
+
+    def __init__(self) -> None:
+        self.asks: list[tuple[str, str]] = []
+
+    async def __call__(self, tool_name: str, description: str) -> bool:
+        self.asks.append((tool_name, description))
+        raise ApprovalUnavailableError(tool_name, "no terminal is attached")
 
 
 @pytest.mark.asyncio
@@ -246,6 +262,41 @@ async def test_a_declined_approval_leaves_the_token_verbatim(tmp_path):
     assert result.expanded is False
     assert result.sent is text
     assert result.notices == [f"@{outside / 'elsewhere.txt'} — not included; approval declined"]
+
+
+@pytest.mark.asyncio
+async def test_an_unanswerable_gate_declines_only_its_token(tmp_path):
+    """The typed refusal degrades PER TOKEN, never by aborting the message.
+
+    ``ApprovalUnavailableError`` from the headless gate used to reach
+    ``expand_references``'s never-raise catch-all, which degrades by aborting:
+    ``expanded=False``, the raw message sent, and one outside/sensitive
+    ``@ref`` silently dropped every other reference in the same message (the
+    post-merge regression from #1597). A refusal — and an unanswerable gate —
+    declines only the token it was asked about.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "elsewhere.txt").write_text("CONTENT_BEHIND_THE_GATE", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.md").write_text("NOTESBODY", encoding="utf-8")
+    text = f"review @{outside / 'elsewhere.txt'} and @notes.md"
+    gate = UnanswerableGate()
+
+    result = await expand_references(text, str(workspace), request_approval=gate)
+
+    # The in-workspace reference SURVIVES; only the refused token is declined,
+    # and the notice names the real cause rather than an abort.
+    assert result.expanded is True
+    assert "NOTESBODY" in result.sent
+    assert "CONTENT_BEHIND_THE_GATE" not in result.sent
+    typed = f"@{outside / 'elsewhere.txt'}"
+    assert result.notices == [
+        f"{typed} — not included; approval unavailable (no terminal is attached)"
+    ]
+    assert len(gate.asks) == 1
+    assert gate.asks[0][0] == "read"
 
 
 @pytest.mark.asyncio

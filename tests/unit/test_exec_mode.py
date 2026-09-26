@@ -987,6 +987,25 @@ def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
     assert "cannot ask for approval" not in capsys.readouterr().err
 
 
+def test_the_profile_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The advisory's role probe must not create directories.
+
+    ``_declared_by_profile`` used to construct ``AgentRegistry(config_dir())``
+    unconditionally, and that constructor mkdirs ``config_dir/agents`` — so a
+    best-effort launch-path check wrote to the operator's roots on every run
+    (post-merge review of #1597). A config root with no agents directory has
+    no registered roles to resolve; the packaged seeds — the case this probe
+    exists for — must still resolve without one.
+    """
+    root = tmp_path / "config"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(root))
+
+    advisory = exec_mode._deny_trapped_advisory(ExecArgs(background=True, profile="reviewer"))
+
+    assert advisory is None, "the reviewer seed declares tools: the run is answerable"
+    assert not (root / "agents").exists()
+
+
 @pytest.mark.parametrize(
     "flags",
     [

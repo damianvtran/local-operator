@@ -755,6 +755,19 @@ def _declared_by_profile(name: str | None) -> bool:
     identity: an unresolvable name resolves to "no declaration" and leaves
     the advisory on — ``resolve_startup`` refuses such runs before this is
     reached anyway.
+
+    DOCUMENTED LIMITS (post-merge review of #1597). This is a launch-time
+    oracle, and it is narrower than the session's own resolution in two known
+    ways. ``--resume`` restores a stored role attachment INSIDE the session,
+    with no ``--profile`` on this command line, so a resumed run whose role
+    declares tools still prints the advisory — the copy stays true (calls that
+    need approval will be denied; the role's own members do not need it), but
+    the suppression is narrower than the session's. Conversely, a role's
+    allow-list approves only its members, so a call outside it still denies
+    with no advisory: the declaration bounds reach rather than approving the
+    run. Sharing one predicate with ``exec_startup.declared_tool_inventory``
+    would close both gaps, but that function needs the live session and runs
+    after this point; it is a recorded follow-up, not a claim of equivalence.
     """
     if not name:
         return False
@@ -763,9 +776,15 @@ def _declared_by_profile(name: str | None) -> bool:
         from local_operator.agents import AgentRegistry
         from local_operator.paths import config_dir
 
-        _kind, profile, _prompt, _display = resolve_profile_or_specialist(
-            name, registry=AgentRegistry(config_dir())
-        )
+        config_root = config_dir()
+        # GUARDED so a best-effort probe cannot WRITE: ``AgentRegistry``'s
+        # constructor creates ``config_dir/agents`` when it is missing, and a
+        # launch-path check has no business creating directories (post-merge
+        # review of #1597). No agents directory means no registered roles for
+        # the registry to resolve, so the packaged seeds — the case this probe
+        # exists for — resolve the same without one.
+        registry = AgentRegistry(config_root) if (config_root / "agents").exists() else None
+        _kind, profile, _prompt, _display = resolve_profile_or_specialist(name, registry=registry)
     except Exception:  # noqa: BLE001 — an odd registry means "no declaration"
         return False
     return profile is not None and bool(profile.tools)
