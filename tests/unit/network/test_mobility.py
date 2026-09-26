@@ -301,7 +301,9 @@ def test_the_invite_ack_names_the_id_the_pull_is_handed(
     monkeypatch.setattr(mobility, "_destination_move", spy)
     # A link stub is enough: the handler reads the owner's device id off it and hands it to the
     # pull, which is the spy (``LinkTransport.__init__`` stores its arguments and asks nothing).
-    link = SimpleNamespace(device_id=server_a.identity.device_id)
+    # Annotated ``Any`` because the stub is deliberately not a ``PeerLink`` — building one needs a
+    # real server pair, which is the dial this test exists to avoid.
+    link: Any = SimpleNamespace(device_id=server_a.identity.device_id)
 
     ack = mobility._destination_invite(server_b, link, {"session_id": SESSION, "keep": True})
 
