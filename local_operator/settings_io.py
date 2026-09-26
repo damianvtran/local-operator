@@ -2321,6 +2321,21 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("keep names, trim the rest", "inherit the parent block as-is"),
     ),
     Setting(
+        key="subagents.max_team_depth",
+        path=("subagents", "max_team_depth"),
+        section="subagents",
+        label="Max nested-team depth",
+        kind=Kind.INT,
+        # Literal, like max_running's: the consumer default is
+        # ``harness.subagent.DEFAULT_MAX_TEAM_DEPTH``, and the consumer test
+        # keeps the two equal. The maximum is ``teams.MAX_ORG_DEPTH``; the
+        # reader clamps to it even when the file says more (BEN-7-D3).
+        default=3,
+        help="Deepest launch allowed in a tree that runs a team. 1 is the top's children.",
+        minimum=1,
+        maximum=8,
+    ),
+    Setting(
         key="subagents.model_choice",
         path=("subagents", "model_choice"),
         section="subagents",
@@ -2407,9 +2422,9 @@ SETTINGS: tuple[Setting, ...] = (
         #
         # The pointer names the row (by the key the page greppable from, which is
         # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, model_choice, lo, med, hi, so
-        # "above" would point med at lo and hi at med — and `hi` is the row this
-        # incident ran through.
+        # above": registry order is max_running, slim_child_knowledge,
+        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
+        # at lo and hi at med — and `hi` is the row this incident ran through.
         help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
@@ -2441,9 +2456,9 @@ SETTINGS: tuple[Setting, ...] = (
         #
         # The pointer names the row (by the key the page greppable from, which is
         # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, model_choice, lo, med, hi, so
-        # "above" would point med at lo and hi at med — and `hi` is the row this
-        # incident ran through.
+        # above": registry order is max_running, slim_child_knowledge,
+        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
+        # at lo and hi at med — and `hi` is the row this incident ran through.
         help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
@@ -2475,9 +2490,9 @@ SETTINGS: tuple[Setting, ...] = (
         #
         # The pointer names the row (by the key the page greppable from, which is
         # also the spelling `lop config edit` takes) instead of saying "row
-        # above": registry order is max_running, model_choice, lo, med, hi, so
-        # "above" would point med at lo and hi at med — and `hi` is the row this
-        # incident ran through.
+        # above": registry order is max_running, slim_child_knowledge,
+        # max_team_depth, model_choice, lo, med, hi, so "above" would point med
+        # at lo and hi at med — and `hi` is the row this incident ran through.
         help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
