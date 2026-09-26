@@ -9,46 +9,58 @@ attempts, the fallback then selected a DIFFERENT open Google Maps tab (a place
 page, which has no directions inputs), and the selector it went on to wait for
 timed out.
 
-FOUR SCORED EPISODES CARRY THAT SIGNATURE, NOT ONE, AND IT MANUFACTURES PASSES
-AS WELL AS ZEROS. The audit of all 96 sealed bundles (2026-09-26) found it on
-four ``task_017`` episodes -- the Maps task, the one that opens several Maps
-tabs -- across three arms:
+FOUR SCORED EPISODES CARRY THE GETTER-AND-FALLBACK PAIR, AND THAT PAIR IS NOT
+BY ITSELF A MIS-GRADE. The audit of all 96 sealed bundles (2026-09-26) found the
+pair on four ``task_017`` episodes -- the Maps task, the one that opens several
+Maps tabs -- across three arms:
 
     ep-94b968963d3e  cohort7-20260925-002218           binary 0  partial 0
     ep-9a6876e889e1  gateOFF-task_017-20260925-184401  binary 0  partial 142857
     ep-b62377fe1ba5  gateON-t017-20260925-181934       binary 1  partial 1000000
     ep-3dcae8b48633  strong-task_017-20260926-043257   binary 1  partial 1000000
 
-(The two zeros are the pair an earlier revision of this module flagged; the two
-ones are the pair it could not see, because it triaged only ``binary == 0``.)
+Reading all four properly is what produced the rule below, and it refutes an
+earlier version of this docstring. In EVERY one of the four the fallback's chosen
+URL is byte-identical to the URL the evaluator itself printed as its target page,
+and in three of the four the parse then returned REAL content that went on to be
+scored: the two passes matched the expected eight-stop walking route, and
+``ep-9a6876e889e1`` scored a 1/7 partial against the route it did produce. Those
+three are readings of the state the episode produced. Only ``ep-94b968963d3e``
+is a mis-grade, and what makes it one is visible and checkable: the element the
+task is judged on was not on the graded page, the selector the evaluator waited
+for timed out, and the read it scored came back empty (``{'aria-label': []}``)
+where the check expected content.
 
-The fallback grades a tab the episode did not produce, so its score is not a
-reading in EITHER direction, and the correction has to move both sides of the
-rate. Flagging only the zeros -- what this module did -- removes two zeros from
-the denominator while leaving two manufactured PASSES in the numerator, which
-inflates the arm as much as it corrects it. Over this corpus the honest figure
-is 4/60 = 6.7% against an uncorrected binary rate of 6/62 = 9.7%; the honest
-capability reading is 4-6 correct of 60-62, the width being roster completeness
-(a signature a cohort does not carry cannot be corrected out of it) rather than
-arithmetic.
+So the classifier requires ALL THREE markers -- getter failure, open-tab
+fallback, and a timed-out selector -- and the third is load-bearing, not
+corroborative. On this corpus that flags one episode, and the honest figure is
+6/63 = 9.5% against the naive binary rate of 6/64 = 9.4%. The two are close
+because this corpus contains no manufactured PASS: had the fallback graded a page
+whose EMPTY read happened to satisfy an empty expectation, the mis-grade would
+have landed on a pass, which is the case a rule that consults ``binary`` at all
+could not see.
 
 SO THIS IS A READ-SIDE TRIAGE, NOT A HARNESS FIX. The pinned vendor tree's
-getter is deliberately left alone: patching it would make the arm
-non-comparable with the published benchmark (``INFRA.md``'s rule about upstream
-retry policy), and the next reader could not tell the two arms apart from a
-score. The adapter already seals the evaluator's diagnostics into the
-score-details artifact, so the classification is derivable from the sealed
-bundle and nothing about scoring changes.
+getter is deliberately left alone: ``docs/benchmarks/osworld_2/README.md``
+("Comparability") makes a number reportable only when its bundle verifies, its
+reportability is ``reportable`` and its comparability is ``comparable``, so
+changing the apparatus the pin names would move the arm out from under its own
+score rather than fix the score. (``~/worktrees/osworld/INFRA.md`` states the
+same rule for this campaign's runs; it is the campaign's own record and not in
+this repository, so the in-repo document is the citation to check.) The adapter
+already seals the evaluator's diagnostics into the score-details artifact, so the
+classification is derivable from the sealed bundle and nothing about scoring
+changes.
 
 WHAT IT DOES NOT DO. It does not decide that an episode "really" succeeded, and
 it never rewrites a score: an apparatus-attributable episode is EXCLUDED and
 NAMED from BOTH sides of the rate, so the figure is computed over the episodes
-whose score the apparatus could actually read. Unscored episodes are excluded
-and named for the same reason and by the same rule (``INFRA.md``: "Exclude them
-honestly and name why; do not count them as zeros"). A campaign reading this
-rate still has to exclude a non-reportable arm -- a scripted or fake-provider
-run -- by its own manifest ``reportability_label``; that is the driver's stamp
-and not something a score can be triaged into.
+whose score the apparatus could actually read. Unscored episodes are excluded and
+named for the same reason and by the same rule -- a score has to exist before it
+can be a reading of anything. A campaign reading this rate still has to exclude a
+non-reportable arm -- a scripted or fake-provider run -- by its own manifest
+``reportability_label``; that is the driver's stamp (see the comparability rule
+above) and not something a score can be triaged into.
 
 Run it over a run directory (``<run>/evidence/<episode>`` bundles) or over one
 bundle:
@@ -86,16 +98,30 @@ UNSCORED = "unscored"
 UNREADABLE = "unreadable"
 
 # The signature, as the pinned getter and its caller spell it in their own log
-# records. Both halves are required: the getter returning ``None`` is what the
-# evaluator tried to recover from, and the open-tab fallback is what it did
-# about it -- a fallback that picked the RIGHT tab would be invisible here (the
-# score would simply be right), so the pair is what makes the reading
-# attributable rather than merely suspicious.
+# records. It takes THREE markers, and the third is the one that does the work.
+#
+# THE FIRST TWO ALONE ARE NOT ATTRIBUTION, and an earlier revision of this module
+# assumed they were on the reasoning that "a fallback that picked the RIGHT tab
+# would be invisible here (the score would simply be right)". That reasoning is
+# false, and the sealed corpus shows it: the getter-failure and the fallback are
+# emitted by the same code path whatever tab the fallback lands on. In all four
+# measured task_017 episodes the fallback's chosen URL is byte-identical to the
+# URL the evaluator itself printed as its target page, and in three of the four
+# the parse then produced REAL content that went on to be scored (two passes on
+# the expected route, one 1/7 partial). Those three are readings, so classifying
+# them would remove genuine passes from the numerator -- the exact error this
+# module exists to avoid, aimed the other way.
+#
+# What separates the fourth (a genuine mis-grade) is that the element the check
+# asked for was NOT on the graded page, so the read came back empty:
+# ``{'aria-label': []}`` against an evaluator that expected content. That is
+# ``_WAIT_TIMEOUT_RE``, and it is why the corroborator is now a REQUIREMENT.
 _ACTIVE_URL_NONE_RE = re.compile(r"get_active_url_from_accessTree[^\n]*\breturned:\s*None")
 _OPEN_TAB_FALLBACK_RE = re.compile(r"Falling back to an open[^\n]*\btab\b")
-# Corroboration, not a requirement: the fallback lands on a page without the
-# element the task is judged on, which is why the read produced nothing. Named
-# in the reason when present, because it is what a reader checks next.
+# Required, not corroborative: the graded page did not carry the element the task
+# is judged on, which is the observable difference between "the fallback graded a
+# page the episode did not produce" and "the fallback recovered the target and the
+# read was real". Named in the reason because it is what a reader checks next.
 _WAIT_TIMEOUT_RE = re.compile(r"wait_for_selector timed out for '([^']*)'")
 
 #: The diagnostics key ``scoring`` wraps a captured block under.
@@ -105,31 +131,37 @@ _DIAGNOSTICS_KEY = "evaluator_diagnostics"
 def classify_apparatus_attribution(diagnostics_text: str) -> str | None:
     """Why this episode looks apparatus-attributable, or ``None`` if it does not.
 
-    Deliberately takes the diagnostics and NOT the score: the signature can land
-    on an episode that passed exactly as it can on one that failed (see the
-    roster in the module docstring), so a caller that only asked about zeros
-    would miss half of what the defect manufactures.
+    All three markers are required; see the comment above them for why the first
+    two are not enough and what the third buys.
+
+    Deliberately takes the diagnostics and NOT the score. The check is about what
+    the evaluator could READ, and a mis-grade can land on either verdict: a read
+    that came back empty manufactures a zero, and one compared against a
+    mis-selected page could as easily confirm a pass. A caller that only asked
+    about zeros could not see the second case at all.
 
     ``diagnostics_text`` is the evaluator's retained stdout and stderr, joined.
     A capture that was TRUNCATED can hide the signature (the ring drops the head
     of the stream), which costs a false negative -- an unclassified episode that
-    stays in the rate -- and never a false positive, because both markers have
-    to be present in the bytes that survived.
+    stays in the rate -- and never a false positive, because every marker has to
+    be present in the bytes that survived.
     """
 
-    active_url = _ACTIVE_URL_NONE_RE.search(diagnostics_text)
-    if active_url is None or _OPEN_TAB_FALLBACK_RE.search(diagnostics_text) is None:
+    if _ACTIVE_URL_NONE_RE.search(diagnostics_text) is None:
         return None
-    reason = (
-        "the evaluator could not read the active tab's URL "
-        "('get_active_url_from_accessTree ... returned: None') and its open-tab "
-        "fallback selected a different tab, so the state it graded was not the "
-        "state the episode produced"
-    )
+    if _OPEN_TAB_FALLBACK_RE.search(diagnostics_text) is None:
+        return None
     timeout = _WAIT_TIMEOUT_RE.search(diagnostics_text)
-    if timeout is not None:
-        reason += f"; the selector it then waited for ({timeout.group(1)!r}) timed out"
-    return reason
+    if timeout is None:
+        return None
+    return (
+        "the evaluator could not read the active tab's URL "
+        "('get_active_url_from_accessTree ... returned: None'), its open-tab "
+        "fallback graded a page that did not carry the element the task is judged "
+        f"on (the selector it waited for, {timeout.group(1)!r}, timed out), and the "
+        "read it scored came back empty -- so the state graded was not the state "
+        "the episode produced"
+    )
 
 
 def _diagnostics_text(details: Any) -> str:
