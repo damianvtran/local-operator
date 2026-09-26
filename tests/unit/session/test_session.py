@@ -4858,6 +4858,57 @@ async def test_a_dropped_delivery_turn_does_not_journal_its_row_twice(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_dropped_turn_marks_a_lost_settle_write_as_held(tmp_path, monkeypatch):
+    """The combination Sir Knight round 2 (finding 1) found: abort pending AND
+    the settle-time write failed.
+
+    The drop arm wrote the unmarked object durably -- a row no screen saw and
+    no turn answered, which the TUI replay skips entirely and the phone loses
+    its "held when it arrived" sentence for. The shape is now decided at the
+    drop itself: a not-yet-durable ``job_result`` row is marked held before it
+    is written, while a row already durable keeps its delivered shape.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")] for _ in range(4)])
+    session = make_session(tmp_path, stream)
+    await session.prompt("start a job")
+    attempts = {"n": 0}
+    real_append = session._transcript.append_message
+
+    async def flaky_append(message, **kwargs):
+        if getattr(message, "custom_type", None) == JOB_RESULT_MESSAGE_TYPE and attempts["n"] == 0:
+            attempts["n"] += 1
+            raise OSError("disk full (simulated)")
+        return await real_append(message, **kwargs)
+
+    monkeypatch.setattr(session._transcript, "append_message", flaky_append)
+    session._is_streaming = True
+    await session._on_job_completed("j1", "one", _settled_job("j1"))
+    assert not _job_result_rows(session), "precondition: the settle-time write was lost"
+    session._is_streaming = False
+    session._abort_requested = True  # the abort the residue arrives under
+
+    await session._deliver_deferred_job_results()
+
+    deadline = asyncio.get_running_loop().time() + 5.0
+    # Wait for the ROW, not the counter: ``_pre_aborted_drops`` increments at
+    # the top of ``_drop_pre_aborted_turn``, before its append has landed.
+    while not _job_result_rows(session) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert session._pre_aborted_drops >= 1, "the drop gate never fired"
+    assert len(stream.requests) == 1, "a dropped turn must not call the provider"
+
+    from local_operator.harness.rows import held_delivery_notice
+
+    rows = _job_result_rows(session)
+    assert [row.payload["details"]["job_id"] for row in rows] == ["j1"]
+    assert len({row.id for row in rows}) == 1
+    assert (
+        held_delivery_notice(rows[0].payload.get("details")) is not None
+    ), "the dropped turn's lost-write row must carry the held marker"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_mismatched_message_batch_is_rebuilt_not_truncated(tmp_path):
     """A caller's pairing error must not silently drop a result (review R1-5).
 
