@@ -23,8 +23,6 @@ import pytest
 from local_operator.server.utils import desktop_sessions as module
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 
-pytestmark = pytest.mark.asyncio
-
 ROUTE = (
     Path(__file__).resolve().parents[3]
     / "local_operator"
@@ -48,7 +46,13 @@ def test_the_route_acquires_before_any_response_exists() -> None:
     entry = source.index('@router.get("/v1/desktop/sessions/{session_id}/events")')
     body = source[entry : source.index("\n@router.", entry + 1)]
 
-    acquire = body.index("host(request).session(session_id, read=True)")
+    # THE ANCHOR IS A PREFIX, DELIBERATELY. This test is about an ORDERING, not
+    # about a call's arguments, and the arguments change for reasons that have
+    # nothing to do with the ordering: main added `allow_draft=True` here for the
+    # draft pre-engage path, and a test anchored on the full argument list went
+    # red for a change that preserved the property it exists to assert. Matching
+    # the receiver and the method keeps the assertion about what it names.
+    acquire = body.index("host(request).session(session_id")
     subscribe = body.index("bridge.subscribe(")
     assert acquire < subscribe, (
         "the bridge must be acquired before the subscription is taken; the "
@@ -77,6 +81,7 @@ async def _snapshot_that_bursts(bridge: Any, original: Any, count: int) -> Any:
     return snapshot_and_burst
 
 
+@pytest.mark.asyncio
 async def test_the_handshake_survives_a_burst_published_while_it_builds(
     tmp_path, monkeypatch
 ) -> None:
@@ -111,6 +116,7 @@ async def test_the_handshake_survives_a_burst_published_while_it_builds(
         await stream.aclose()
 
 
+@pytest.mark.asyncio
 async def test_the_same_burst_after_the_handshake_still_ends_in_a_gap(
     tmp_path, monkeypatch
 ) -> None:
