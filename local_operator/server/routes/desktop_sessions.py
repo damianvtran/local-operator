@@ -9,7 +9,7 @@ import logging
 import pathlib
 import sqlite3
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from typing import Annotated, Any, Callable, Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -3833,8 +3833,44 @@ async def events(
 
     async def stream():
         try:
-            async for frame in bridge.events(sub, epoch=epoch, after_seq=after_seq):
-                yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+            # THE GENERATOR IS CLOSED BEFORE THE RELEASE, AND THAT ORDER IS THE
+            # FIX (F-A). On a CANCELLED teardown -- which is what an SSE client's
+            # disconnect *is*: the relay drops, the ASGI scope is cancelled while
+            # this wrapper is suspended at its own ``yield`` -- the OUTER
+            # ``finally`` used to run before the inner generator's, so
+            # ``release_once()`` reached ``release()`` with ``users == 0`` and
+            # ``dwelling`` still False, detached, and cleared ``self.remote``.
+            # The dwell then armed LATE, on a bridge with no facade, so the next
+            # ``acquire()`` minted a fresh epoch and the client's perfectly good
+            # cursor could never match: measured 31 distinct epochs from 35 opens
+            # on the operator's daemon, corroborated by "Task was destroyed but it
+            # is pending!" (the async-generator finalizer being destroyed) and 24
+            # ``/watch`` 404s. On an ORDERLY end the inner ``finally`` ran first
+            # and the dwell worked, which is exactly why the earlier round's tests
+            # passed while the product still churned.
+            #
+            # ``aclosing`` rather than a bare ``async for``: it guarantees the
+            # generator's ``finally`` runs -- on this path, and on a ``return`` or
+            # a raise -- which also restores the per-stream REASON LOG and
+            # ``refresh_watch()`` on the cancellation path, both of which were
+            # silently skipped there. Closing it *inside* the ``try`` is the
+            # load-bearing part: the outer ``finally`` below has not run yet.
+            async with aclosing(bridge.events(sub, epoch=epoch, after_seq=after_seq)) as frames:
+                try:
+                    async for frame in frames:
+                        yield "data: " + json.dumps(frame, separators=(",", ":")) + "\n\n"
+                finally:
+                    # STAMPED BEFORE THE GENERATOR IS CLOSED, AND THE ORDER IS
+                    # LOAD-BEARING RATHER THAN TIDY (F-B). Closing it arms the
+                    # dwell, whose deadline is ``now + RECONNECT_DWELL_S``;
+                    # stamping the grace afterwards would put ITS deadline a few
+                    # microseconds LATER than the dwell's, so at the dwell's expiry
+                    # the grace would still be open and ``_end_dwell`` would refuse
+                    # the very detach it exists to perform -- leaving the bridge
+                    # attached at ``users == 0`` with nothing left to wake it.
+                    # Stamp first and the two deadlines agree in the only safe
+                    # direction.
+                    bridge.note_stream_ended(sub)
         finally:
             await release_once()
 

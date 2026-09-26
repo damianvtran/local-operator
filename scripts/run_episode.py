@@ -35,6 +35,9 @@ Inputs, all explicit:
 * Budget and step caps (``--max-steps``, ``--max-usd``, ``--max-wall-s``,
   ``--max-cycle-usd``), all explicit; the defaults are conservative because
   a paid episode with no cap is the one thing this script must not run.
+  ``--max-usd-at`` states the USD figure against another route's prices and
+  scales the enforced cap to this run's route (never downward), so a budget
+  sized on a cheap route does not truncate an expensive one.
 
 Output: the ``EpisodeOutcome`` as a JSON object on stdout, plus
 ``bundle_root``. Exit status is 0 only for ``completed``; ``failed``,
@@ -50,15 +53,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import hashlib
 import json
 import os
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Sequence, cast, get_args
+from typing import Any, NamedTuple, Sequence, cast, get_args
 
 from local_operator.evaluation.adapters.api import (
     AdapterSelector,
@@ -166,10 +171,10 @@ class _LayeredResolver:
         return tuple(resolved)
 
 
-def _parse_route(value: str) -> tuple[str, str]:
+def _parse_route(value: str, *, flag: str = "--route") -> tuple[str, str]:
     provider, sep, model = value.partition("/")
     if not sep or not provider or not model:
-        raise argparse.ArgumentTypeError("--route must be <provider>/<model-id>")
+        raise argparse.ArgumentTypeError(f"{flag} must be <provider>/<model-id>")
     return provider, model
 
 
@@ -316,6 +321,181 @@ def _budget(
                 )
             )
     return BudgetAuthorization(episode_id=episode_id, allowances=tuple(allowances))
+
+
+#: Providers whose own PUBLIC price listing the cap's basis may be read from.
+#:
+#: The basis arithmetic needs the prices the provider will bill, not a mirror's
+#: copy of them: measured 2026-09-26, the harness's ranked price chain (which
+#: prefers models.dev) served ``0.30/1.20`` USD-per-Mtok for a route the
+#: campaign runs, while the provider's OWN listing quoted ``0.035/0.29`` for
+#: the same id -- ~8.6x on input. One unverified source was enough to size a
+#: budget wrong, so the basis reads the provider's listing through the same
+#: discovery machinery the picker uses, keylessly and into an isolated cache
+#: (``_fresh_basis_prices``), and anything outside this set refuses at
+#: preflight rather than sizing from a number nobody checked.
+_PRICE_BASIS_PROVIDERS = frozenset({"openrouter"})
+
+#: Bound on the one price-listing GET a scaled cap may make at preflight.
+_PRICE_BASIS_FETCH_TIMEOUT_S = 60.0
+
+
+# NOTE, deliberately not a dataclass: this module is loaded by spec-loader
+# callers that exec it WITHOUT registering it in ``sys.modules`` (see
+# tests/unit/evaluation/adapters/osworld/test_run_episode_script.py), and with
+# ``from __future__ import annotations`` a dataclass resolves its field types
+# through ``sys.modules[cls.__module__]`` at class creation -- which raises
+# ``AttributeError: 'NoneType' object has no attribute '__dict__'`` under
+# exactly that loader (measured). A NamedTuple records the same typed fields
+# without that lookup.
+class _UsdCapScale(NamedTuple):
+    """The per-episode USD allowance and how it was derived.
+
+    ``configured_micros`` is the operator's ``--max-usd`` figure verbatim;
+    ``effective_micros`` is what the budget enforces. ``basis`` is the route
+    the figure was stated at (``--max-usd-at``), or ``None`` when the figure
+    is used as stated, and ``factor`` is ``effective / configured``. The two
+    indexes are the published-rate sums the factor was computed from (input +
+    output, USD per million tokens), recorded so a reader can re-derive the
+    arithmetic from the bundle alone.
+    """
+
+    configured_micros: int
+    effective_micros: int
+    factor: float
+    basis: str | None
+    route_price_usd_per_mtok: float | None = None
+    basis_price_usd_per_mtok: float | None = None
+
+
+def _fresh_basis_prices(ids: Sequence[str]) -> dict[str, float]:
+    """Input+output USD-per-Mtok for each id, from the provider's live listing.
+
+    ONE fetch through the picker's own discovery machinery (keyless, bounded),
+    into a TemporaryDirectory: deliberately NOT the shared catalogue cache,
+    whose capture may lag a provider price change and whose refresh would be a
+    side effect on state this process does not own. Rows the listing does not
+    price are simply absent from the result; the caller decides what that
+    means. Raises on a failed fetch so the caller can refuse at preflight.
+    """
+    from local_operator.model.prices import openrouter_rows
+
+    with tempfile.TemporaryDirectory(prefix="lop-usd-basis-") as scratch:
+        rows = openrouter_rows(
+            timeout=_PRICE_BASIS_FETCH_TIMEOUT_S, ttl_s=0.0, cache_dir=Path(scratch)
+        )
+    prices: dict[str, float] = {}
+    for row in rows:
+        if row.id in ids:
+            prices[row.id] = float(row.input_price) + float(row.output_price)
+    return prices
+
+
+def _scale_usd_cap(
+    configured_micros: int,
+    *,
+    route: tuple[str, str],
+    basis: tuple[str, str] | None,
+) -> _UsdCapScale:
+    """Scale the operator's USD figure from its stated price basis to the route.
+
+    WHY THIS EXISTS. The per-episode USD cap is set FOR A MODEL, but the same
+    figure was applied to every route: measured 2026-09-26, a $3.00 cap that a
+    cheap route never came near (its full runs cost ~$0.29) truncated a
+    ~24x-pricier route at 106 of its 500 protocol steps, and the sealed
+    partial score read as a capability result when it was a budget artifact.
+    A figure priced for one route class cannot bound an episode on another.
+
+    THE RULE. The figure is read as "an episode budget at the basis route's
+    prices" and rescaled by the routes' per-token price (input + output, USD
+    per million, summed): ``effective = configured * max(1, px(route) /
+    px(basis))``. The direction is one-way: the scaling can only RELAX the cap,
+    never tighten it. A scaling that could shrink a cap would manufacture
+    exactly the artifact this exists to remove (a cheap route inheriting a
+    pricier route's figure), while a relaxation can only buy the steps the
+    operator intended to fund; the configured figure remains the floor.
+
+    THE BASIS IS STATED, never inferred: most invocations pass no basis at all
+    and get the figure exactly as given (factor 1.0) -- no historical number
+    changes without a caller asking for the scaling. When a basis IS given,
+    both routes must price, from the provider's own live listing, or the run
+    refuses at preflight rather than guessing: a silently unscaled cap is the
+    original defect again. Every outcome lands in the manifest metadata
+    (``_usd_cap_metadata``), so a reader can tell which bound applied and
+    re-derive why.
+    """
+    if basis is None:
+        return _UsdCapScale(configured_micros, configured_micros, 1.0, None)
+    basis_label = f"{basis[0]}/{basis[1]}"
+    if tuple(basis) == tuple(route):
+        # Stated at the run's own route: nothing to rescale, but the basis is
+        # still recorded so the bundle says the pairing was checked.
+        return _UsdCapScale(configured_micros, configured_micros, 1.0, basis_label)
+    for label, entry in (("--route", route), ("--max-usd-at", basis)):
+        if entry[0] not in _PRICE_BASIS_PROVIDERS:
+            raise ValueError(
+                f"{label} provider {entry[0]!r} has no live public price listing wired "
+                "for --max-usd-at; drop --max-usd-at to use the figure as stated"
+            )
+    try:
+        prices = _fresh_basis_prices([route[1], basis[1]])
+    except Exception as error:  # noqa: BLE001 - any fetch failure is preflight-fatal
+        raise ValueError(
+            f"could not read the live price listing for the --max-usd basis: {error}"
+        ) from error
+    missing = [model for model in (route[1], basis[1]) if model not in prices]
+    if missing:
+        raise ValueError(
+            "the live price listing does not price "
+            + ", ".join(repr(model) for model in missing)
+            + "; drop --max-usd-at to use the figure as stated"
+        )
+    route_index = prices[route[1]]
+    basis_index = prices[basis[1]]
+    if route_index <= 0 or basis_index <= 0:
+        raise ValueError(
+            f"cannot scale --max-usd from unpriced rates ({route[1]}={route_index:g}, "
+            f"{basis[1]}={basis_index:g} USD per Mtok, input+output); "
+            "drop --max-usd-at to use the figure as stated"
+        )
+    factor = max(1.0, route_index / basis_index)
+    return _UsdCapScale(
+        configured_micros=configured_micros,
+        effective_micros=int(round(configured_micros * factor)),
+        factor=factor,
+        basis=basis_label,
+        route_price_usd_per_mtok=route_index,
+        basis_price_usd_per_mtok=basis_index,
+    )
+
+
+def _usd_cap_metadata(cap: _UsdCapScale) -> dict[str, Any]:
+    """The manifest fields that make a scaled cap legible from the bundle.
+
+    Stamped for every run, scaled or not, so any bundle answers "which bound
+    applied" without a reader having to know the defaults of the day: the
+    effective figure is what the budget enforced, the configured figure and
+    the basis are why, and the factor re-derives the arithmetic.
+
+    Integers, not floats: portable metadata admits str/bool/int/list/map, and
+    money-adjacent quantities are recorded as integers everywhere else here
+    (micro-USD), so the factor is millionths of itself and the prices are
+    micro-USD per million tokens.
+    """
+    metadata: dict[str, Any] = {
+        "usd_cap_configured_micros": cap.configured_micros,
+        "usd_cap_effective_micros": cap.effective_micros,
+        "usd_cap_price_factor_micros": int(round(cap.factor * 1_000_000)),
+        "usd_cap_at": cap.basis,
+    }
+    if cap.route_price_usd_per_mtok is not None:
+        metadata["usd_cap_route_price_micros_per_mtok"] = int(
+            round(cap.route_price_usd_per_mtok * 1_000_000)
+        )
+        metadata["usd_cap_basis_price_micros_per_mtok"] = int(
+            round((cap.basis_price_usd_per_mtok or 0.0) * 1_000_000)
+        )
+    return metadata
 
 
 def build_spec(
@@ -675,7 +855,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--infra-purpose", default="benchmark_compute")
     parser.add_argument("--config-dir", type=Path, default=None, help="lop config dir")
     parser.add_argument("--max-steps", type=int, default=25)
-    parser.add_argument("--max-usd", type=float, default=0.50, help="provider spend cap")
+    parser.add_argument(
+        "--max-usd",
+        type=float,
+        default=0.50,
+        help="provider spend cap (a safety net; see --max-usd-at for how the figure is scaled)",
+    )
+    parser.add_argument(
+        "--max-usd-at",
+        type=functools.partial(_parse_route, flag="--max-usd-at"),
+        default=None,
+        metavar="PROVIDER/MODEL",
+        help=(
+            "the route whose prices the --max-usd figure is stated at; the enforced cap "
+            "is scaled to the run route's prices, never down. Default: use the figure "
+            "as stated"
+        ),
+    )
     # OSWorld 2.0 bounds an episode by MODEL STEPS (500), not by time: the
     # upstream loop is `step_idx < max_steps` and no timeout decorator is
     # applied anywhere. A wall clock here is a runaway guard only, so it is
@@ -854,7 +1050,14 @@ async def run(args: argparse.Namespace) -> int:
     route = _route_identity(provider, model)
     episode_id = args.episode_id or f"ep-{uuid.uuid4().hex[:12]}"
     secret_refs = tuple(args.secret) if args.secret is not None else _DEFAULT_SECRET_REFS
-    max_usd_micros = int(round(args.max_usd * 1_000_000))
+    configured_usd_micros = int(round(args.max_usd * 1_000_000))
+    try:
+        usd_cap = _scale_usd_cap(
+            configured_usd_micros, route=(provider, model), basis=args.max_usd_at
+        )
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
     max_cycle = int(round(args.max_cycle_usd * 1_000_000)) if args.max_cycle_usd else None
 
     try:
@@ -893,7 +1096,10 @@ async def run(args: argparse.Namespace) -> int:
         benchmark_release=args.benchmark_release,
         secret_refs=secret_refs,
         infra_values=infra_values,
-        max_usd_micros=max_usd_micros,
+        # The ENFORCED figure: ``run()`` has already scaled the operator's
+        # ``--max-usd`` from its stated price basis; the derivation is stamped
+        # into the metadata below so the bundle explains the number.
+        max_usd_micros=usd_cap.effective_micros,
         max_wall_ms=args.max_wall_s * 1000,
         max_steps=args.max_steps,
         metadata={
@@ -930,6 +1136,11 @@ async def run(args: argparse.Namespace) -> int:
                 else {}
             ),
             "script": "scripts/run_episode.py",
+            # The USD cap's arithmetic: what the operator set, what the budget
+            # enforced, and the price factor between them. Stamped for every
+            # run, scaled or not, because a bundle must be able to say which
+            # bound applied without guessing the defaults of the day.
+            **_usd_cap_metadata(usd_cap),
             # Apparatus disclosure: the infra overrides REQUESTED for this run
             # (instance type, root volume size, system proxy policy). A score on
             # non-default apparatus is not comparable to one produced on the
