@@ -40,6 +40,28 @@ USAGE
     .venv/bin/python scripts/bench_cold_send_http.py --runs 3 --json out.json
     .venv/bin/python scripts/bench_cold_send_http.py --runs 3 --mcp-variant mcpx \\
         --measured-tree 2bf8cb890 --label "pre-fix arm"
+    .venv/bin/python scripts/bench_cold_send_http.py --runs 5 \\
+        --pre-engage keystroke --think 3 --label "draft-warm arm"
+
+PRE-ENGAGE ARMS, AND THE BRIDGE THEY MUST HOLD. ``--pre-engage keystroke``
+reproduces the O3 pane: mint a draft, open its ``/events`` stream, beat
+``/watch`` with the subscription id the stream published, fire ``/warm``, wait
+``--think`` seconds (the typing the warm overlaps), then ``create`` with the
+draft id and send. ``--pre-engage open`` is the O4 variant — the real pane
+fires the mint+warm at PANE OPEN, so ``--think`` there means the whole
+pane-open-to-send span; the rig's sequence is otherwise identical.
+
+THE RIG MUST HOLD THE STREAM OR IT MEASURES NOTHING. A warm whose only bridge
+user is its own request is cancelled when that request returns
+(``DesktopSessionBridge.warm``'s own docstring), so the draft arms keep the
+``/events`` stream open in a background thread for the WHOLE run — the same
+standing user the pane's subscription is — and fire ``/warm`` only after the
+stream published its ``subscription_id`` (the ``/watch`` beat needs a live
+subscription, exactly as the renderer's does). **Attribution per run**: the
+rig records a runtime-child census immediately BEFORE and AFTER the send; a
+draft run whose pre-send census shows NO runtime child timed a cancelled or
+never-fired warm, is labelled INVALID in the summary, and exits 4 rather than
+reporting it as a draft-warm number.
 
 MEASURED TREE. ``--measured-tree`` names the commit whose ``local_operator/`` this
 run measures and is VERIFIED against the subtree on disk (``bench_tree``), because
@@ -58,6 +80,7 @@ rather than reporting a treatment arm that measured the control (QA round 1, Q1)
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import secrets
@@ -67,6 +90,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -182,6 +206,36 @@ def _standby_children(daemon_pid: int) -> list[int]:
     return sorted(found)
 
 
+def _runtime_children(daemon_pid: int) -> list[int]:
+    """This daemon's live SESSION-runtime children, by exact pid.
+
+    The census the draft arms are attributable with: a draft warm that was
+    actually held must show its runtime child HERE, before the send. A run whose
+    pre-send census is empty timed a cancelled or never-fired warm and is
+    reported INVALID rather than slow.
+
+    ``-m RUNTIME_MODULE`` names a session runtime specifically; the standby
+    (``STANDBY_MODULE``) is DELIBERATELY not counted — it is not a draft's spawn,
+    and folding it in would make the attribution vacuous. Same ``-eww`` width
+    trap as ``_standby_children``: procps truncates ``command`` at the terminal
+    width, and a truncated line reads as a measurement of nothing.
+    """
+    from local_operator.session.runtime.types import RUNTIME_MODULE
+
+    out = subprocess.run(
+        ["ps", "-eww", "-o", "pid=,ppid=,command="], capture_output=True, text=True
+    )
+    found: list[int] = []
+    for line in out.stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 3:
+            continue
+        pid, ppid, command = fields
+        if int(ppid) == daemon_pid and f"-m {RUNTIME_MODULE}" in command:
+            found.append(int(pid))
+    return sorted(found)
+
+
 def _kill_runtime(config_dir: Path, session_id: str) -> None:
     """Kill the runtime this session spawned, so runs stay independent.
 
@@ -213,6 +267,97 @@ def _kill_runtime(config_dir: Path, session_id: str) -> None:
         pass
 
 
+class _DraftStream:
+    """One draft's ``/events`` subscription, held for the whole run.
+
+    WHY THE RIG MUST HOLD IT: a warm whose only bridge user is its own request
+    is cancelled when that request returns (``DesktopSessionBridge.warm``'s own
+    docstring), so without a standing subscription the draft arm would measure
+    the cancellation rather than the engage. The thread also reads the stream's
+    ``open`` frame, which is where the renderer gets the ``subscription_id`` its
+    ``/watch`` beat then carries — the rig cannot invent one: the beat answers
+    404 for a subscription the bridge never had.
+
+    A DAEMON THREAD WITH ITS OWN CLIENT: the sync httpx client cannot
+    interleave requests on a busy streaming response, and the run's own requests
+    must keep flowing. Lines are read and discarded after the id is learned;
+    ``close()`` unblocks the reader by closing the response, and the thread is a
+    daemon so a wedged read can never outlive the process.
+    """
+
+    def __init__(self, base: str, headers: dict[str, str], draft_id: str) -> None:
+        self.base, self.headers, self.draft_id = base, headers, draft_id
+        self.subscription_id: str | None = None
+        self.status: int | None = None
+        self.error: BaseException | None = None
+        self._opened = threading.Event()
+        self._stop = threading.Event()
+        self._response: Any = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_DraftStream":
+        self._thread = threading.Thread(target=self._read, name="draft-events", daemon=True)
+        self._thread.start()
+        if not self._opened.wait(20.0):
+            raise SystemExit(f"the draft events stream never opened ({self.error!r})")
+        if self.status != 200:
+            raise SystemExit(f"the draft events stream answered {self.status}")
+        return self
+
+    def _read(self) -> None:
+        import httpx
+
+        try:
+            timeout = httpx.Timeout(10.0, read=120.0)
+            with httpx.Client(base_url=self.base, headers=self.headers, timeout=timeout) as client:
+                with client.stream(
+                    "GET", f"/v1/desktop/sessions/{self.draft_id}/events"
+                ) as response:
+                    self.status = response.status_code
+                    self._response = response
+                    self._opened.set()
+                    for line in response.iter_lines():
+                        if self._stop.is_set():
+                            break
+                        if not line.startswith("data: "):
+                            continue
+                        frame = json.loads(line[len("data: ") :])
+                        # The id lives in the OPEN frame's PAYLOAD, not at the
+                        # top level: ``bridge.events`` yields
+                        # ``{"type": "open", "payload": {"subscription_id": ...}}``.
+                        payload = frame.get("payload") or {}
+                        announced = payload.get("subscription_id")
+                        if self.subscription_id is None and announced:
+                            self.subscription_id = str(announced)
+        except BaseException as exc:  # noqa: BLE001 — surfaced through `error`/`status`
+            self.error = exc
+            self._opened.set()
+
+    def wait_subscription(self, timeout: float = 20.0) -> str:
+        """The id the stream's ``open`` frame published (the watch beat's argument)."""
+        deadline = time.monotonic() + timeout
+        while self.subscription_id is None:
+            if self.error is not None:
+                raise SystemExit(f"the draft events stream failed: {self.error!r}")
+            if time.monotonic() > deadline:
+                raise SystemExit("the draft events stream never published its subscription id")
+            time.sleep(0.02)
+        return self.subscription_id
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._response is not None:
+            try:
+                self._response.close()
+            except Exception:  # noqa: BLE001 — closing a live stream may raise by design
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+
 def _declared_servers(client: Any, session_id: str) -> list[str] | None:
     """The MCP servers the RUNNING session sees declared, asked of the session.
 
@@ -242,48 +387,129 @@ def _declared_servers(client: Any, session_id: str) -> list[str] | None:
 
 
 def _one_run(
-    client: Any, base: str, workspace: Path, config_dir: Path, index: int, variant: str
+    client: Any,
+    base: str,
+    workspace: Path,
+    config_dir: Path,
+    index: int,
+    variant: str,
+    *,
+    pre_engage: str,
+    think: float,
+    daemon_pid: int,
+    headers: dict[str, str],
 ) -> dict[str, Any]:
     """One new conversation, one first send, both response bodies kept.
 
     The host load is sampled per run and travels WITH the row, because a first
     send measured at load 10 and one at load 200 are not the same measurement and
     the difference is invisible after the fact (review round 1, R5).
+
+    THE DRAFT ARMS RUN INSIDE A ``_DraftStream`` CONTEXT, from just after the
+    mint to just after the send: the stream is the standing bridge user that
+    keeps the warm alive (``warm()``'s own precondition), so the create and the
+    send must happen while it is open. The control arm takes no stream.
     """
     loadavg = os.getloadavg()[0] if hasattr(os, "getloadavg") else float("nan")
-    created = client.post(
-        "/v1/desktop/sessions",
-        json={"request_id": str(uuid.uuid4()), "cwd": str(workspace)},
-    )
-    created_body = created.json()
-    session_id = created_body["result"]["session_id"]
-
-    declared = _declared_servers(client, session_id)
-    started = time.perf_counter()
-    sent = client.post(
-        f"/v1/desktop/sessions/{session_id}/messages",
-        json={"request_id": str(uuid.uuid4()), "text": "bench: one word"},
-    )
-    first_send_ms = round((time.perf_counter() - started) * 1000.0, 1)
-
-    result = {
+    result: dict[str, Any] = {
         "run": index,
-        "session_id": session_id,
-        "first_send_ms": first_send_ms,
+        "pre_engage": pre_engage,
+        "think_s": think,
         "loadavg": round(loadavg, 1),
         "variant": variant,
-        "mcp_declared_servers": declared,
-        "mcp_declaration_correct": declared == (["bench-slow"] if variant == "mcpx" else []),
-        "create_status": created.status_code,
-        "create_body": created_body,
-        "send_status": sent.status_code,
-        "send_body": (
-            sent.json()
-            if sent.headers.get("content-type", "").startswith("application/json")
-            else sent.text
-        ),
+        "mint_ms": None,
+        "warm_ms": None,
+        "watch_ms": None,
     }
+    draft_id: str | None = None
+
+    with contextlib.ExitStack() as stack:
+        if pre_engage != "off":
+            started = time.perf_counter()
+            minted = client.post(
+                "/v1/desktop/sessions/draft",
+                json={"request_id": str(uuid.uuid4()), "cwd": str(workspace)},
+            )
+            result["mint_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
+            assert minted.status_code == 200, minted.text
+            draft_id = minted.json()["result"]["draft_id"]
+            result["draft_id"] = draft_id
+            stream = stack.enter_context(_DraftStream(base, headers, draft_id))
+            subscription_id = stream.wait_subscription()
+            started = time.perf_counter()
+            watched = client.post(
+                f"/v1/desktop/sessions/{draft_id}/watch",
+                json={
+                    "subscription_id": subscription_id,
+                    "visible": True,
+                    "can_notify": False,
+                },
+            )
+            result["watch_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
+            assert watched.status_code == 200, watched.text
+            # THE KEYSTROKE POINT: the warm fires once, and only now that the
+            # subscription holds the bridge — the same ordering the renderer
+            # enforces, and the reason the stream is held at all.
+            started = time.perf_counter()
+            warmed = client.post(f"/v1/desktop/sessions/{draft_id}/warm", json={})
+            result["warm_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
+            assert warmed.status_code == 200, warmed.text
+            if think > 0:
+                time.sleep(think)
+
+        started = time.perf_counter()
+        create_body: dict[str, Any] = {
+            "request_id": str(uuid.uuid4()),
+            "cwd": str(workspace),
+        }
+        if draft_id is not None:
+            create_body["draft_id"] = draft_id
+        created = client.post("/v1/desktop/sessions", json=create_body)
+        create_ms = round((time.perf_counter() - started) * 1000.0, 1)
+        created_body = created.json()
+        session_id = created_body["result"]["session_id"]
+
+        declared = _declared_servers(client, session_id)
+        census_before = _runtime_children(daemon_pid)
+        started = time.perf_counter()
+        sent = client.post(
+            f"/v1/desktop/sessions/{session_id}/messages",
+            json={"request_id": str(uuid.uuid4()), "text": "bench: one word"},
+        )
+        first_send_ms = round((time.perf_counter() - started) * 1000.0, 1)
+        census_after = _runtime_children(daemon_pid)
+
+    result.update(
+        {
+            "session_id": session_id,
+            "create_ms": create_ms,
+            "first_send_ms": first_send_ms,
+            "runtime_children_before_send": census_before,
+            "runtime_children_after_send": census_after,
+            # THE PER-RUN ATTRIBUTION (spec §3.1): a draft arm whose pre-send
+            # census shows no runtime child did not warm at all — the warm was
+            # cancelled (no standing bridge user) or never fired (a refused
+            # beat) — so its send number is not a draft-warm reading. ``None``
+            # on the control arm, which has no warm to attribute.
+            "warm_spawned_before_send": (bool(census_before) if pre_engage != "off" else None),
+            "mcp_declared_servers": declared,
+            "mcp_declaration_correct": declared == (["bench-slow"] if variant == "mcpx" else []),
+            "create_status": created.status_code,
+            "create_body": created_body,
+            "send_status": sent.status_code,
+            "send_body": (
+                sent.json()
+                if sent.headers.get("content-type", "").startswith("application/json")
+                else sent.text
+            ),
+        }
+    )
     _kill_runtime(config_dir, session_id)
+    if draft_id is not None and draft_id != session_id:
+        # The create minted FRESH (the draft was lost or expired) — reap the
+        # warm's runtime by its own id too, or the rig leaks one process per
+        # such run.
+        _kill_runtime(config_dir, draft_id)
     return result
 
 
@@ -293,11 +519,24 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         return {}
     declared = sorted({name for row in rows for name in (row.get("mcp_declared_servers") or [])})
     correct = [row.get("mcp_declaration_correct") for row in rows]
+    draft_rows = [row for row in rows if row.get("pre_engage", "off") != "off"]
     return {
         "median": round(statistics.median(values), 1),
         "min": round(min(values), 1),
         "max": round(max(values), 1),
         "n": len(values),
+        "pre_engage": rows[0].get("pre_engage", "off"),
+        "think_s": rows[0].get("think_s", 0.0),
+        #: Draft arms only: whether EVERY run's pre-send census showed a warm's
+        #: runtime (``all([])`` is True, so the None guard is explicit), and the
+        #: runs that did not — the rows that timed a cancelled or never-fired
+        #: warm and must not be quoted as draft-warm numbers.
+        "warm_spawn_before_send": (
+            all(row.get("warm_spawned_before_send") for row in draft_rows) if draft_rows else None
+        ),
+        "invalid_runs": [
+            row["run"] for row in draft_rows if not row.get("warm_spawned_before_send")
+        ],
         #: What the running sessions ACTUALLY had declared, and whether that
         #: matches the arm's own name for itself. A `mcpx` arm that declares
         #: nothing is the control arm wearing the treatment's label, which is the
@@ -311,6 +550,30 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=3, help="new conversations to time")
+    parser.add_argument(
+        "--pre-engage",
+        choices=("off", "keystroke", "open"),
+        default="off",
+        help=(
+            "off: today's flow (create -> send). keystroke/open: mint a draft, hold its "
+            "events stream, beat /watch with the id the stream published, fire /warm, "
+            "wait --think, then create with the draft id and send — the pre-engaged "
+            "pane. The rig HOLDS THE BRIDGE (the stream) for the whole run: a warm "
+            "whose only user is its own request is cancelled on return. open is the O4 "
+            "variant — the real pane warms at PANE OPEN, so --think there is the whole "
+            "pane-open-to-send span; the rig sequence is otherwise identical. A draft "
+            "run whose pre-send census shows no runtime child is INVALID and exits 4"
+        ),
+    )
+    parser.add_argument(
+        "--think",
+        type=float,
+        default=0.0,
+        help=(
+            "seconds between the draft's warm and its create+send (the typing time). "
+            "0 is the paste+send worst case; 3 is 'typed for three seconds'"
+        ),
+    )
     parser.add_argument(
         "--mcp-variant",
         type=str,
@@ -433,14 +696,32 @@ def main() -> int:
                     )
                     time.sleep(args.warm_wait)
                 for index in range(args.runs):
-                    row = _one_run(client, base, workspace, config_dir, index, args.mcp_variant)
+                    row = _one_run(
+                        client,
+                        base,
+                        workspace,
+                        config_dir,
+                        index,
+                        args.mcp_variant,
+                        pre_engage=args.pre_engage,
+                        think=args.think,
+                        daemon_pid=proc.pid,
+                        headers=headers,
+                    )
                     row["standby_children"] = _standby_children(proc.pid)
                     rows.append(row)
+                    detail = ""
+                    if row["pre_engage"] != "off":
+                        detail = (
+                            f", mint {row['mint_ms']}, warm {row['warm_ms']}, "
+                            f"create {row['create_ms']} ms, spawn-before-send: "
+                            f"{'yes' if row['warm_spawned_before_send'] else 'NO — INVALID'}"
+                        )
                     print(
                         f"  run {index + 1}/{args.runs}: first send = "
                         f"{row['first_send_ms']} ms  (create {row['create_status']}, "
                         f"send {row['send_status']}, load {row['loadavg']}, "
-                        f"mcp declared: {row['mcp_declared_servers'] or 'none'})",
+                        f"mcp declared: {row['mcp_declared_servers'] or 'none'}{detail})",
                         flush=True,
                     )
     finally:
@@ -480,6 +761,12 @@ def main() -> int:
     stats["standby"] = args.standby
     print("\n--- first POST /messages wall time (ms) ---")
     print(f"  mcp variant: {args.mcp_variant}  standby: {args.standby}")
+    if args.pre_engage != "off":
+        print(
+            f"  pre-engage: {args.pre_engage}  think: {args.think:.1f} s  "
+            f"warm-spawn-before-send: {stats.get('warm_spawn_before_send')}  "
+            f"invalid runs: {stats.get('invalid_runs') or 'none'}"
+        )
     if args.standby == "on":
         print(
             "  every run is reported: a send that arrives before the daemon's standby\n"
@@ -520,6 +807,20 @@ def main() -> int:
             flush=True,
         )
         return 3
+    if stats.get("invalid_runs"):
+        # Non-zero for the same reason the declaration exit above is: a draft
+        # warm that was not held (or never fired) leaves an empty pre-send
+        # census, and the row it produced timed NO warm — reporting it as a
+        # draft-warm number would be measuring a cancellation (spec §3.1).
+        print(
+            "\n  DRAFT RUNS INVALID: the pre-send census shows no runtime child for "
+            f"runs {stats['invalid_runs']}. A warm whose only bridge user is its own "
+            "request is cancelled when that request returns, so those rows timed no "
+            "warm at all; check the /events hold and the /watch beat before quoting "
+            "them.",
+            flush=True,
+        )
+        return 4
     return 0
 
 
