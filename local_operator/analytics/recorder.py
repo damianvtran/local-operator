@@ -34,6 +34,7 @@ cannot block the loop or a session.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import queue
@@ -156,6 +157,13 @@ _MAINTENANCE_LOCK_NAME = "analytics-maintenance.lock"
 #: a worse outcome than the redundant sweep this feature removes.
 _MAINTENANCE_ELECTION_SUPPORTED = os.name == "posix"
 
+#: ``_try_lock_maintenance``'s third outcome: the kernel or the filesystem does
+#: not implement the lock at all (see the errno split in that function). A
+#: sentinel rather than ``None`` because the caller must tell "somebody else owns
+#: this hour" — do nothing — apart from "nobody can own any hour here", which
+#: sweeps unowned exactly as the no-``flock`` platform path does.
+_LOCK_UNSUPPORTED = -1
+
 
 def maintenance_lock_path(root: Path) -> Path:
     """The election file for a resolved config root. Pure — creates nothing.
@@ -204,10 +212,33 @@ def _try_lock_maintenance(path: Path) -> int | None:
         return None
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        # Contended (or refused): another recorder owns this hour.
+    except OSError as exc:
         os.close(fd)
-        return None
+        # NOT EVERY `flock` FAILURE IS CONTENTION, and reading them all as
+        # "another recorder owns this hour" wedges retention FOREVER on a root
+        # that refuses the call: `ENOLCK` (lock table full), `EOPNOTSUPP`/
+        # `ENOTSUP` (the filesystem does not implement it — some network and FUSE
+        # mounts), `EINVAL`. Each of those leaves every process answering "not my
+        # hour" for every hour, which is the unbounded-ledger outcome
+        # `_MAINTENANCE_ELECTION_SUPPORTED` already refuses on Windows — reached
+        # here through the filesystem rather than the platform. Reported as review
+        # R1-3, with a probe showing 3 attempts and 0 prunes.
+        #
+        # `_LOCK_UNSUPPORTED` is therefore a THIRD outcome: sweep unowned, exactly
+        # as a platform without `flock` does. The bound that makes it safe is the
+        # one that shapes the whole election — `_maybe_prune` stamps
+        # `_last_prune` BEFORE the attempt, so an unowned sweep still happens at
+        # most once per process per hour. N processes on such a root fall back to
+        # the pre-election behaviour rather than to no maintenance at all, and the
+        # warning says so once per attempt rather than silently.
+        if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EACCES):
+            return None
+        logger.warning(
+            "analytics: flock is unusable on %s (errno %s); sweeping unowned",
+            path,
+            exc.errno,
+        )
+        return _LOCK_UNSUPPORTED
     return fd
 
 
@@ -602,7 +633,15 @@ class AnalyticsRecorder:
         path = self.maintenance_lock
         fd = _try_lock_maintenance(path)
         if fd is None:
+            # Somebody else owns this hour. Do nothing — no polling, no waiting.
             return False
+        if fd == _LOCK_UNSUPPORTED:
+            # Nobody CAN own an hour on this root (see ``_try_lock_maintenance``):
+            # sweep unowned rather than letting retention stop forever. The
+            # per-process hourly stamp still bounds this to one sweep per process
+            # per hour, which is the pre-election behaviour.
+            self._sweep()
+            return True
         try:
             now = time.time()
             claimed = _read_sweep_claim(fd)

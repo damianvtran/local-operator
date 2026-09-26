@@ -666,3 +666,66 @@ def test_bound_wal_leaves_a_pinned_wal_alone_and_still_reclaims_it_later(tmp_pat
 
     assert store.bound_wal() is True
     assert wal.stat().st_size == 0
+
+
+def test_a_root_that_refuses_flock_still_sweeps(tmp_path, monkeypatch):
+    """Review R1-3. ``flock`` refusing is not the same as somebody else owning it.
+
+    ``EAGAIN``/``EWOULDBLOCK`` really is contention and the loser must do nothing.
+    But ``ENOLCK`` (the lock table is full), ``EOPNOTSUPP``/``ENOTSUP`` (the
+    filesystem does not implement ``flock`` — some network and FUSE mounts) and
+    ``EINVAL`` mean NOBODY can own an hour on this root. Reading those as
+    contention leaves every process answering "not my hour" forever, which is the
+    unbounded ledger ``_MAINTENANCE_ELECTION_SUPPORTED`` already refuses on
+    Windows — reached through the filesystem instead of the platform.
+
+    The assertion is on the SWEEP, not on a log line: a store that is never swept
+    is the failure this exists to prevent, and it is invisible in the return value
+    of the old code, which was a plain ``False`` either way.
+    """
+    import errno
+    import fcntl
+
+    from local_operator.analytics import recorder as recorder_module
+
+    handle, store = _fake()
+    rec = AnalyticsRecorder(store=handle, maintenance_root=tmp_path / "iso")
+    try:
+        _hour_turns(rec)
+        monkeypatch.setattr(
+            fcntl, "flock", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.ENOLCK, "nope"))
+        )
+        # Patch the module's own view: it imports `fcntl` inside the function, so
+        # the sentinel path is what this drives.
+        assert recorder_module._try_lock_maintenance(rec.maintenance_lock) == (
+            recorder_module._LOCK_UNSUPPORTED
+        )
+        assert rec._run_owned_maintenance() is True, "an unusable lock must not stop retention"
+        assert "prune" in store.calls, store.calls
+    finally:
+        rec.close()
+
+
+def test_contention_is_still_a_refusal_not_a_sweep(tmp_path, monkeypatch):
+    """The other half of R1-3: ``EAGAIN`` must NOT be read as "unsupported".
+
+    Without this cell the fix could be "always sweep", which would undo the
+    election it exists to protect — 18-22 processes sweeping one ledger hourly.
+    """
+    import errno
+    import fcntl
+
+    from local_operator.analytics import recorder as recorder_module
+
+    handle, store = _fake()
+    rec = AnalyticsRecorder(store=handle, maintenance_root=tmp_path / "iso")
+    try:
+        _hour_turns(rec)
+        monkeypatch.setattr(
+            fcntl, "flock", lambda *a, **k: (_ for _ in ()).throw(OSError(errno.EAGAIN, "held"))
+        )
+        assert recorder_module._try_lock_maintenance(rec.maintenance_lock) is None
+        assert rec._run_owned_maintenance() is False, "contention must remain a refusal"
+        assert store.calls == [], store.calls
+    finally:
+        rec.close()
