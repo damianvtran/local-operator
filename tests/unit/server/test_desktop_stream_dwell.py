@@ -396,3 +396,22 @@ async def test_eviction_never_awaits_inside_the_pool_lock(tmp_path):
         "multi-second open the ordering exists to prevent"
     )
     assert sid  # the created session is untouched by this case
+
+
+async def test_a_read_release_still_detaches_on_the_spot(tmp_path):
+    """The dwell is scoped to STREAMS, and this is the other side of that scope.
+
+    A read route's `release()` detaches immediately. Applying the dwell to every
+    `session()` read would silently extend residency across the whole read
+    surface -- every `sessions.get`, every `/history`, every `/mcp` -- and change
+    what every test that asserts a read detaches is describing.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+
+    async with pool.session(sid) as bridge:
+        assert bridge.users == 1
+
+    assert bridge.dwelling is False, "no stream lost a transport here"
+    assert bridge.remote is None, "so the read's release detached, on the spot"
+    assert not bridge._dwell_tasks
