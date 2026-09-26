@@ -8,6 +8,17 @@ output is quoted; every number carries the load average it was taken at, because
 on this host a wall time without a load figure is weather, not evidence.
 
 **Revision log.**
+* **Revision 2** — **R7 HAS SHIPPED** while this revision was being written
+  (`feat(status): report live only from an answered round trip`, PR #1624, merged
+  the same day), in the shape §6.2 specifies and with §6's invariant quoted
+  verbatim in the source. See "R7 shipped — verified against §6.2" below. The
+  revision's own content is the cold half: R2 is refuted on the mechanism (the boot loop's products are
+  correctness state: the admission set, the revision generation, and the complete
+  entry list) and its replacement — a sidecar index — is ruled out **with
+  measurements** (§9 R11). The cold boot is therefore documented as unshortenable
+  without weakening admission or lineage, and the ranked list now opens with R7
+  (the precondition) and R3 (warmth). First paint on the 207 MB shape is confirmed
+  at **p50 ~790 ms**.
 * **Revision 1** — answers the round-1 review on PR #1620 (reviewer, task-4:
   RR1-1 … RR1-5 plus ten citation findings). It withdraws this document's central
   recommendation: R1's rank-1 latency billing is refuted (the read path already
@@ -488,8 +499,18 @@ My run and coder's agree on the shape and disagree in an instructive place —
 | p50 (~0.7 MB) | 237.5 ms (81.7-681.7) | 2/5 | 68.4 ms (35.0-502.6) | 200.8 ms |
 | p90 (~1.6 MB) | **490.0 ms** (71.2-671.6) | 4/5 | 187.7 ms (31.6-310.8) | 274.9 ms |
 | p99 (~6 MB) | 147.7 ms (78.5-516.3) | 1/5 | 100.9 ms (27.2-186.4) | 244.0 ms |
-| **xl (~200 MB)** | **789.0 ms** (738.3-933.5) | **5/5** | 75.3 ms (52.0-558.8) | **1 768.9 ms** (n=1, load 68.7) |
+| **xl (~200 MB)** | **789.0 ms** (738.3-933.5) | **5/5** | 75.3 ms (52.0-558.8) | **~790 ms** (n=6) |
 | m5000 (~12 MB) | — | — | — | 297.3 ms |
+
+**The xl row did not reproduce in one direction, and it now has — CLOSED.** The
+reviewer measured **1 768.9 ms** to the snapshot frame on xl (207 MB / 18 301
+rows, `t_headers` 1 654.7 ms) at **n=1, load 68.7** — 2.2x slower than this
+document's 789.0 ms p50 at a *higher* load — and RR1-8 was right to ask for xl at
+n≥5 before R8 was scoped, because a single sample is not a row. Coder has since
+taken it: **p50 ~790 ms at n=6, load 45.6-51.3.** The shipped figure reproduces,
+**the 1 768.9 ms is withdrawn as the n=1 outlier**, and R8 is scoped on ~790 ms.
+The withdrawn number is named here rather than quietly deleted, because the reason
+it was raised is the reason it is now retired.
 
 **Read the spread, not the medians.** Both runs were taken at load 74-98 and the
 same profile moved by an order of magnitude between samples (tiny: 29.5 ms to
@@ -499,6 +520,11 @@ warmed host, which is the honest limit of any wall-clock claim here: **the p50 i
 weather; the `over 300 ms` counts and the size ordering are the finding.** What
 both runs agree on: first paint is *at* the budget on small profiles, misses
 badly on the 200 MB shape, and is 3-9x cheaper on a warm reopen.
+
+One more fact from coder's n=6 run, because it changes what R8 can claim: **first
+paint happens before the pid exists**, so it never waited for the boot parse — the
+paint path and the parse path are independent, which is why no publish-ordering
+change (R1) and no parse change (R2/R11) moves this row.
 
 Two facts fix the shape of the fix: the `validate` leg
 (`GET /v1/desktop/sessions/{id}` → `snapshot()` at
@@ -543,7 +569,8 @@ n=6). Cold attach is TWO terms: a fixed spawn + boot of 1 275.3-1 481.3 ms (n=3,
 tiny), plus a size-dependent whole-journal parse that sits INSIDE the boot —
 between a pid existing (2 622.6 ms at xl, 207 MB / 18 301 rows) and the serving
 plane's first addressable instant (5 283.4 ms). The durable first paint waits for
-neither term (26.6-174.4 ms tiny, 1 768.9 ms xl). So the target is reached by
+neither term (26.6-174.4 ms tiny; xl's first paint reproduces at **p50 ~790 ms**,
+n=6, and the reviewer's 1 768.9 ms was the n=1 outlier — §4.7). So the target is reached by
 taking the parse off the boot — **R2** — not by publishing an earlier answer from
 the runtime.**
 
@@ -563,7 +590,8 @@ therefore billing work that already ships. R1's remaining content is re-scoped a
 
 1. the reviewer (task-4) measured it — the runtime is addressable at
    **254.9-460.2 ms** on tiny and **5 283.4 ms** on xl (pid at 2 622.6 ms, first
-   paint 1 768.9 ms), i.e. nothing is listening at pid time;
+   paint 1 768.9 ms — that last an **n=1** sample, superseded by §4.7), i.e.
+   nothing is listening at pid time;
 2. the coder (task-5) read the same code for the implementation and agreed:
    `spawn_owned_session` awaits `create_session` and constructs the
    `ServingSessionHandle` **from the built session**, and the record "precedes the
@@ -591,8 +619,48 @@ with.
    sessions the LRU keeps — bounded by a memory envelope that cannot cover his
    working set (§4.3), which is why it is a partial and not the answer.
 
-It does not make the *first prompt* on a cold session instant: a turn needs LLM
-history, which needs the parse. That is R2's job.
+**Revision 2 closes the cold half honestly: nothing sound shortens a cold boot.**
+R2 is refuted (the parse's products are correctness state — the admission set, the
+revision generation and the complete entry list; §9 R2), and the sidecar index that
+would have carried two of them is ruled out with measurements (§9 R11): the two
+facts cost **≤57.5 ms of a 577.7 ms parse** on the real 207 MB journal, and the
+cache cannot be verified without the parse it exists to avoid. The measured cold
+shape is first paint **p50 ~790 ms** (which never waited for the parse), pid
+**~1 420 ms**, addressable **~1 347 ms** after the pid, attach **~3 803 ms**. So:
+**the 300 ms target is met on a warm runtime (20.3-78.6 ms) and a cold boot costs
+what correctness costs** — which makes warmth (R3) the only remaining latency
+lever, and truthful liveness (R7) the thing that must ship first.
+
+### R7 shipped — verified against §6.2 (recorded so nobody rebuilds it)
+
+PR **#1624** merged `verified_at` into `main` before this revision landed. I
+checked the implementation against the contract this document specifies rather
+than assuming, because the contract is only worth having if the shipped shape
+matches it:
+
+* **The invariant is now a documented property, not a convention.**
+  `session/attached.py:1156-1164`: "``None`` IS LOAD-BEARING, not a default: a
+  cold facade — the ones ``saved_preview`` builds, and every facade before its
+  first sync — must carry NO stamp, so that **'a cold facade never reports a
+  verification' is an invariant a test can hold rather than a convention**." That
+  is §6.2 rule 1's test-holdable form, in the source, with
+  `tests/unit/session/test_verified_at.py` holding it.
+* **It is written in exactly one place and cleared in none** (`_note_wire_answer`,
+  `:2495-2524`), and the docstring enumerates **three** wire surfaces rather than
+  this document's single `_await_frontend` — a better answer to the locus question
+  than the one §6.2 originally gave, and the reason the source refuses to write a
+  count into the rule.
+* **The resync conflation is explicitly preserved** (`:2489-2491`): "no resync
+  path clears it", with the reasoning this document adopted from review RR1-5 —
+  clearing one on a resync "would turn a live, mid-refresh session cold (the
+  conflation ``owner_reachable`` exists to prevent)".
+* **`owner_reachable` is not replaced** (`:2487-2491`): the stamp "adds evidence
+  about the OWNER; it does not replace either predicate".
+
+**What this changes for the plan:** the precondition is met, so nothing remaining
+has to land "first". What was R7 is **shipped**, the ranked list opens with the
+latency lever instead, and the `ping` mechanism at §6.2 rule 1 turned out to be one
+of several sound refreshers rather than the needed definition.
 
 ### The verdict this document carries (reviewer, task-4)
 
@@ -935,8 +1003,9 @@ cold facade emits `cold` + `cold_reason` + `attaching` with no runtime
 * **(i) its veracity** — the frame must not report `cold: false` off a resident
   facade's memory. That is §6 rule 1 / **R7**, a correctness fix to a frame that
   ships today, and it is ranked as a *precondition* rather than as a later pass.
-* **(ii) its xl cost** (1 768.9 ms) — which is the boot's parse, i.e. **R2**, and
-  is tracked there.
+* **(ii) its xl cost** — **~790 ms p50 at n=6** (§4.7; the 1 768.9 ms n=1 sample is
+  withdrawn), which is *first paint*, i.e. **R8**, not the boot's parse — and first
+  paint happens before the pid exists, so no parse change moves it either.
 
 **Nothing in R1 remains as an independent change.** The section is kept, with the
 banner above, because the reasoning that killed the early-frame billing is worth
@@ -961,7 +1030,12 @@ record"; and `server.py:2657-2670` — `asyncio.start_server(...)` then
 | | pid exists | plane addressable | durable first paint |
 |---|---|---|---|
 | tiny | 127-248 ms | **254.9-460.2 ms** | **26.6-174.4 ms** |
-| xl (207 MB / 18 301 rows, load 68.7) | **2 622.6 ms** | **5 283.4 ms** | 1 768.9 ms |
+| xl (207 MB / 18 301 rows, load 68.7) | **2 622.6 ms** | **5 283.4 ms** | 1 768.9 ms (n=1) |
+
+*The xl column of this table is the reviewer's single sample. It is kept because
+the pid and addressable rows are the refutation and they stand; its first-paint
+cell is **superseded** — coder's n=6 run gives p50 ~790 ms (§4.7), so the 1 768.9 ms
+was an outlier rather than a second regime.*
 
 **The tiny row is the one that ends the argument: the durable first paint already
 arrives at 26.6-174.4 ms — *earlier* than the 127-248 ms this section proposed.**
@@ -1055,7 +1129,38 @@ a large surface, for a withdrawn effect.
 300 ms of the `watch` POST once the pid exists" — is the measurement that refuted
 it: the addressable time is 254.9-460.2 ms (tiny) / 5 283.4 ms (xl).
 
-### R2 — Take the whole-journal parse off the boot's critical path
+### R2 — Take the whole-journal parse off the boot's critical path — **REFUTED, DO NOT IMPLEMENT**
+
+> **REVISION 2 — WITHDRAWN ON THE MECHANISM** (coder, task-8; measured, file:line).
+> `Transcript.__init__` (`session/transcript.py:1141-1170`) is **one loop over every
+> journal line**, and per row it builds the replay data **and the correctness
+> state**. Three products cannot come from a suffix window, two of them
+> correctness:
+> * **`_admitted_command_ids`** — the idempotency admission set, read by
+>   `has_admitted_command` (`:1611-1613`) and answered on the wire as
+>   `duplicate: true`. A suffix window **misses a re-delivered command from before
+>   the window and admits it again — silent duplicate execution.**
+> * **`_history_generation`** — a count of `ENTRY_COMPACTION`/`ENTRY_PRUNE` rows
+>   over the *whole* journal (`:1590-1592`); a suffix gives wrong revision lineage
+>   and wrong `_display_window_cache` invalidation.
+> * **`_entries`** as the rebuild's source — `_write_entries` writes
+>   `for row in (*self._entries, *entries)` (`:1552-1568`); a partial `_entries`
+>   makes a rebuild write a **truncated journal**.
+>
+> So the window that is sound for **paint** is not sound for **state**, the same
+> loop builds both, and splitting them costs a second full pass. **R2's premise —
+> that the boot's replay can lag its parse — is false: the parse's products are
+> correctness state.** The section is kept for the record; the successor question
+> (a sidecar index) is ruled out in its own right at §9 R11.
+>
+> **Measured context that also resolves an old contradiction in this document**
+> (coder, task-8, xl = 206.99 MB / 18 301 rows, n=6, load 45.6-51.3): first paint
+> **p50 ~790 ms** — so this document's 789.0 ms reproduces and the review's
+> 1 768.9 ms was the n=1 outlier — pid exists **~1 420 ms**, the record is
+> published **0.3-1.7 ms after the bind**, **pid → addressable p50 ~1 347 ms**, and
+> the attach lands **~3 803 ms**. **First paint happens *before* the pid exists, so
+> it never waited for the parse** — R2 could not have moved the row it was ranked
+> on.
 
 **What.** The deferred (D) of `docs/design/session-load-central-cache.md` §3(D),
 whose follow-up shape that doc already names: **not** lazy `Transcript._entries`,
@@ -1275,13 +1380,13 @@ during a display refresh the session must NOT be reported cold.
 
 ### R8 — First-paint headroom in its own right
 
-**What.** First paint is at the budget (200-490 ms p50; the xl row measured
-789.0 ms here and 1 768.9 ms in the review's single sample — so **this item is not
-scoped until xl is re-run at n>=5**, §4.7) and `validate` is 84% of it. It is cold-spawn-coupled, so R3 moves it. The residual
+**What.** First paint is at the budget (200-490 ms p50 on the small profiles) and
+the xl row is **p50 ~790 ms at n=6** (coder, load 45.6-51.3), which is the
+reproduction §4.7 asked for — so this item is **scoped, and priced on ~790 ms**.
+`validate` is 84% of it. It is cold-spawn-coupled, so R3 moves it. The residual
 items are the 50 ms attention wait
 (`ATTENTION_SNAPSHOT_WAIT_S`), the duplicate tail read between snapshot and
-`/history`, and the xl row — **now including the cold-facade cost that R1 used to
-claim: 1 768.9 ms on xl (reviewer, n=1) / 738-934 ms (mine)**, which the page
+`/history`, and the xl row (**p50 ~790 ms, n=6; 738-934 ms in my n=5 run**), which the page
 cache does not help because the journal is cold by construction in every sample.
 The tiny row is the other end and needs nothing: the same frame lands in
 **26.6-174.4 ms** (reviewer, n=3).
@@ -1293,27 +1398,162 @@ The tiny row is the other end and needs nothing: the same frame lands in
 **Measurement.** The existing `--scenario open` table, with the page-cache
 `cached_page_hit` / rows-decoded counters beside it, at a stated load.
 
+### R11 — A sidecar index for the admission set and the generation: **RULED OUT, measured**
+
+*(This is the documented answer to the last cold-latency item. Method: three timed
+passes over the real 206.99 MB / 18 301-row xl fixture — iterate the lines only,
+then `TranscriptEntry.from_json` each row, then the full loop including
+`_index_entry` and `_admitted_command_id` — best-of-2 in one process at load ~50.
+The probe as it was run:)*
+
+```python
+# three passes over the same journal, each timed best-of-2
+def iter_only():                      # read + UTF-8 decode
+    with root.open(encoding="utf-8") as h:
+        return sum(1 for line in h if line.strip())
+def decode_only():                    # + TranscriptEntry.from_json per row
+    with root.open(encoding="utf-8") as h:
+        return [TranscriptEntry.from_json(l) for l in h if l.strip()]
+def full():                           # + _index_entry + _admitted_command_id
+    out = set()
+    with root.open(encoding="utf-8") as h:
+        for l in h:
+            e = TranscriptEntry.from_json(l)
+            if e is not None:
+                cid = _admitted_command_id(e)
+                if cid is not None:
+                    out.add(cid)
+    return out
+```
+
+*Saved output: `~/.dsh/scratch/d98d97c9-4eb6-496c-9f59-0645e8d38b45/probe_sidecar.py`
+(that scratch directory is session-scoped and may be gone; the block above is the
+part that matters, and the fixture is the in-tree builder's `xl` profile, so the
+measurement is re-derivable from the tree alone. Best-of-2 is enough here because
+the three passes differ by 2x, not by noise.)*
+
+The proposal was a cheap sidecar carrying `_admitted_command_ids` and
+`_history_generation`, written at append time, so the boot reads a small file
+instead of decoding 207 MB. **It cannot save what it was meant to save, and the
+measurement says so:**
+
+```
+file              206.99 MB / 18 301 rows
+iterate lines      289.3 ms   (50.1%)  <- the read + UTF-8 decode, unavoidable
++ from_json        520.2 ms   (+231.0 ms, 44.4%)
++ index + admit    577.7 ms   (+57.5 ms, 10.0%)
+   admitted ids 0, compaction/prune rows 50
+```
+
+The 57.5 ms is the **entire** index step — `_entry_ids`, `_latest_by_type`,
+`_latest_custom_entries`, `_latest_user`, the generation count **and** the
+admission set. The two facts a sidecar would carry are a strict subset of it:
+one `entry.type` test per row, one `payload.get`, and a set insert for the marked
+rows (0 on this fixture; one per user prompt on a real one). **So the recoverable
+slice is a few tens of milliseconds of a 577.7 ms parse — before paying for the
+sidecar's own read, verification and write-path cost.**
+
+**And the read and the decode stay regardless**, because `_entries` must be the
+complete row list: `_write_entries`' rebuild branch writes `(*self._entries,
+*entries)` (`transcript.py:1552-1568`), and `.entries` is read all over the tree.
+The count, with the command that produces it, so it is checkable rather than
+quoted:
+
+```sh
+grep -rn '\.entries\b' --include=*.py local_operator/ | grep -v tests | wc -l   # 105
+grep -rl '\.entries\b' --include=*.py local_operator/ | grep -v tests | wc -l   #  20 files
+```
+
+**105 text matches across 20 files** at the cited revision, 59 of them
+`self.entries`; it is a *text* count, it excludes `tests/`, and it includes the
+property's own definition, so a narrower AST form returns fewer. The claim it
+supports is the robust one: **`.entries` has readers in 20 modules**, so a
+partially-loaded entry list is a wide-surface hazard rather than a local one. A
+sidecar carrying two derived facts removes neither the 289.3 ms read nor the
+231.0 ms decode.
+
+**The four questions, answered — and the third is what makes it a `no` rather than
+a `not worth it`:**
+
+1. **Recovery — missing / truncated / partially written → fall back to the full
+   parse.** Those three are detectable with a tail marker (row count + last entry
+   id + a version field) and the fallback is sound and cheap *to detect*. **Stale
+   (behind the journal) is detectable** the same way: the sidecar's last covered
+   journal position is behind the file's. **Written by an older version is NOT
+   detectable by any cheap check**, and it is the one that matters:
+   `_admitted_command_id`'s own docstring records that producer provenance "was
+   introduced with an explicit kind marker" — **the extraction rule has already
+   changed once**, so an older sidecar can be well-formed, correctly positioned,
+   version-stamped, and carry a *different rule's* answer. A wrong admission set
+   re-admits a command and silently double-executes it. A wrong generation gives
+   wrong lineage. Silently, at boot, with no symptom until the duplicate lands.
+2. **Is it a second source of truth? Yes, and that is the whole problem.** The
+   journal is the durable artifact; the sidecar would be a *derived cache of a
+   correctness predicate*. For it to be trusted it must be verified, and the only
+   complete verification is the parse whose cost it exists to avoid — so the
+   honest reading is that **it can never be trusted at boot; it can only be
+   trusted when the parse happens anyway, at which point it saves the derive step
+   it was supposed to replace.** That is circular, and the circle does not close
+   with a cheaper key.
+3. **Write-path cost and atomicity.** The admission set changes per admitted
+   command, so this is the hot path that today performs exactly one durable append
+   with `fsync`. A sidecar adds a second write that must be atomic with respect to
+   the first (or carry a torn-write marker), on the path where a torn write is
+   *silent* — the re-admission failure above. **Paying a hot-path durability risk
+   and a new silent-failure mode for a few tens of milliseconds is a bad trade in
+   the wrong direction:** the failure class is duplicate execution, which is worse
+   than slow.
+4. **So: not worth it, and the honest answer is no.** Not "not worth it yet" — the
+   design cannot be made sound by a better key, because the thing it caches *is*
+   the correctness predicate and the only verifier is the thing it replaces.
+
+**What this closes, stated for the operator's question.** On the 207 MB shape the
+cold attach is ~3 803 ms: first paint **p50 ~790 ms** (which never waited for the
+parse), pid at **~1 420 ms**, addressable **p50 ~1 347 ms** after the pid, then the
+materialisation. **No sound change removes the parse for a cold boot**, because its
+products are the admission set, the revision generation and the complete entry
+list — correctness state, not replay. The remaining sound levers are **warmth**
+(R3: do not pay a cold boot for the working set) and **truthfulness** (R7), and the
+honest sentence is: *the target is met on a warm runtime (20.3-78.6 ms), and a cold
+boot costs what correctness costs.*
+
+**The one sound path forward, recorded and NOT proposed for this round.** The
+reason `_entries` must be eager is the rebuild branch; decouple it — **copy the
+file's bytes and append, instead of re-serialising `(*self._entries, *entries)`** —
+and the only *correctness* reason for eager `_entries` disappears. After that, a
+windowed `entries` with an explicit `materialise()` boundary becomes sound to
+evaluate. That is §3(D)'s laziness with its hazard actually removed rather than
+worked around, and it is a multi-PR programme: the byte-copy rebuild, the 104
+`.entries` readers, the `hasattr` duck-type sites (`session_factory.py:904-906,
+969-972,1022`), the `threading.Lock`-guarded load reachable from a loop thread
+(the #401 freeze shape), and an equivalence oracle against the whole-file replay.
+**Do not start it on the strength of this document.**
+
 ### Ranked summary
 
 | rank | change | effect on 300 ms | risk | independent |
 |---|---|---|---|---|
-| **1** | **R2** windowed boot replay — take the parse off the boot | −248 ms / 107 MB; **−2 286 ms / 261 MB**; the only item that reaches xl | high | yes |
-| **2** | **§6 rule 1 + R7** verified liveness — a **PRECONDITION** of anything publishing liveness on the read path | none by itself; it is what stops a fast answer being the *lying* one (status is already <300 ms while wrong) | medium | yes — ships alone, and first |
-| 3 | R3 warmth 4 → 6 | one cold attach → 20-80 ms per extra slot | low | yes |
+| ~~1~~ | ~~**§6 rule 1 + R7** verified liveness~~ | **SHIPPED** in PR #1624, verified against §6.2 above | — | — |
+| **1** | **R3** warmth 4 → 6 | one cold attach → 20-80 ms per extra slot; **the only latency lever left** | low | yes |
+| — | ~~R2 windowed boot replay~~ | **REFUTED** — the parse's products are correctness state (admission set, lineage, complete `_entries`) | — | — |
+| — | ~~R11 sidecar index~~ | **RULED OUT, measured** — the two facts cost ≤57.5 ms of a 577.7 ms parse, and the cache cannot be verified without the parse | — | — |
 | 4 | R5 prewarm off the loop | removes 93 ms loop stalls, twice per 2 s refresh | medium | yes |
 | 5 | R4 TUI cache: the streaming arm | 31.91 ms prepare → 0.21 ms hit | medium | yes |
-| 6 | R8 first-paint headroom (incl. the xl cold facade: 1 768.9 ms) | closes the over-budget samples | low-medium | yes |
+| 6 | R8 first-paint headroom | closes the over-budget samples — **priced on xl p50 ~790 ms (n=6)**, and the review's 1 768.9 ms is withdrawn as the n=1 outlier | low-medium | yes |
 | 7 | R6 TUI load path → page cache | bounded repeat parse → **0 rows decoded** | low | yes |
 | — | ~~R1 early frame~~ | **withdrawn** — the frame already ships at the read path (26.6-174.4 ms tiny) | n/a | no |
 | — | ~~R9 store census~~ | **negative result** — ~3% of a core, no sound cheaper key | n/a | no |
 
-**Ordering rationale (revision 1).** **R2 is first because the parse sits between
-the pid and the socket** — nothing else can move the operator's 261 MB case (§5).
-**R7/§6 rule 1 is second and is a PRECONDITION, not a follow-on:** the review's
+**Ordering rationale (revision 2).** **R7 has shipped** (#1624), **R2 is out**
+(refuted on the mechanism, §9 R2) and **R11 is out with it** (measured, §9 R11).
+So the list opens with the only latency lever that survives — and the review's
+argument for why truthfulness had to come first is now the record of what was
+done, not a plan: the review's
 sharpest line is that *status is already inside 300 ms while wrong* (reads
 170.7-350.6 ms, `/warm` 6.3-100.6 ms, owner frozen), so a design that optimises
-only milliseconds makes the operator's position worse, not better. R3 is third
-because it is one constant on the primary interface. R8 absorbs the xl cold-facade
+only milliseconds makes the operator's position worse, not better — and that work is merged. **R3 is first
+because with the parse unshortenable it is the only remaining way to avoid paying a
+cold boot** — it is one constant on the primary interface. R8 absorbs the xl cold-facade
 cost that R1 used to claim. **R9 is a recorded negative result** (§9 R9), and
 **R1 is withdrawn** — its frame already ships and its two surviving halves are R7
 (veracity) and R8/R2 (cost). R6 is last on effect and ranked for completeness;
