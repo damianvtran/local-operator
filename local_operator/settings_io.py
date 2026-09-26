@@ -604,9 +604,10 @@ SECTIONS: tuple[Section, ...] = (
         "network",
         "Mesh network",
         Scope.NEW_LAUNCH,
-        "Bounds for `lop network`: audit retention, how many unauthenticated "
-        "connections the relay will hold at once, session-copy cadence and how long "
-        "a borrowed login lives. All take effect when the relay restarts.",
+        "Where this device listens, what it tells peers to dial, and the bounds for "
+        "`lop network`: audit retention, how many unauthenticated connections the "
+        "relay will hold at once, session-copy cadence and how long a borrowed login "
+        "lives. All take effect when the relay restarts.",
     ),
     Section(
         "retired",
@@ -3091,6 +3092,72 @@ SETTINGS: tuple[Setting, ...] = (
         # every click into a terminal with nothing on screen or in the log
         # saying why. Rejecting it here keeps the user in front of the field.
         validate_value=_validate_desktop_launch_command,
+    ),
+    # -- network: where peers reach this device -------------------------------
+    # THE TRIO THE DESIGN'S OWN TABLE NAMES. mesh-transport-identity.md §10.4 lists
+    # `network.listen_address`, `network.port` and `network.advertise_hosts` among
+    # the keys every one of which "needs its Setting, its module-level default
+    # beside the reader, and its _consumer_defaults() entry". They were the three
+    # that never got one, and the cost was not cosmetic: with no row, no surface in
+    # the product could show or write them, so the only documented way to declare
+    # an address was to hand-edit `config.yml` — and that edit went nowhere. A
+    # top-level `network:` block (beside `values:`, which is how a dotted key reads)
+    # is invisible to `get_nested_value`, which walks `values`, AND is deleted by
+    # the next launch's cleanup migration, whose rewrite serialises only
+    # metadata/values/version. So the operator's spelling was silently ignored and
+    # then silently destroyed, while `init --advertise-host` looked like an
+    # alternative that only worked once, at creation. Registering them is what
+    # makes the canonical location `values.network.*` the one /settings shows and
+    # writes, i.e. the one `get_nested_value` reads back.
+    Setting(
+        key="network.listen_address",
+        path=("network", "listen_address"),
+        section="network",
+        label="Listen address",
+        kind=Kind.TEXT,
+        default="0.0.0.0",
+        help=(
+            "Where this relay accepts connections: 127.0.0.1 = dial-only (accept "
+            "nothing), 0.0.0.0 = every interface, or one interface's address."
+        ),
+    ),
+    # INT with the port range enforced, because the value is a socket bind and a
+    # typo stored here would surface later as a relay that will not start — the
+    # page and `lop config edit` both reach this, so the bound belongs on the row.
+    Setting(
+        key="network.port",
+        path=("network", "port"),
+        section="network",
+        label="Mesh port",
+        kind=Kind.INT,
+        default=4097,
+        minimum=1,
+        maximum=65535,
+        help=(
+            "The port peers dial, and the one an advertised endpoint names when it "
+            "does not carry a port of its own."
+        ),
+    ),
+    # LIST over an OPEN namespace — deliberately no `members`. The vocabulary is
+    # hostnames, addresses and ports, which are the operator's and not this repo's;
+    # a closed list would reject every address that matters. Empty means "no
+    # opinion" (publish whatever the interface table shows), so the row clears
+    # rather than failing, exactly as `NetworkSettings.from_config` reads an absent
+    # key.
+    Setting(
+        key="network.advertise_hosts",
+        path=("network", "advertise_hosts"),
+        section="network",
+        label="Advertised endpoints",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Where peers should TRY to reach this device, in this order. Empty = "
+            "the detected local addresses only; add a tunnel or public host:port "
+            "when peers cannot dial the detected one. Every entry needs its port."
+        ),
+        placeholder="tunnel.example.com:4100, 203.0.113.7:4097",
+        empty_unsets=True,
     ),
     # -- network (the mesh audit log) ---------------------------------------
     # Defaults mirror ``local_operator/network/audit.py``'s module constants, which

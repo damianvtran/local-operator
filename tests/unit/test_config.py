@@ -626,3 +626,170 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
         "local_operator/session_factory.py",
         "local_operator/config_migrations.py",
     }, mark_callers
+
+
+# ---------------------------------------------------------------------------
+# The key that was dropped on load and erased on save
+# ---------------------------------------------------------------------------
+
+
+def _write_config_with_extra(config_dir: Path, extra: dict[str, object]) -> Path:
+    """``config.yml`` with ``extra`` at the TOP LEVEL, beside ``values``.
+
+    This is the spelling a person writes for a setting the docs name in dots
+    (``network.advertise_hosts``), and it is the exact file the mesh bug was
+    reported with: an operator declaring their public address so a peer could dial
+    it.
+    """
+    path = config_dir / "config.yml"
+    document = {
+        "version": "0.1.0",
+        "metadata": {"created_at": "x", "last_modified": "x", "description": "d"},
+        "values": {"conversation_length": 100},
+        **extra,
+    }
+    path.write_text(yaml.safe_dump(document))
+    return path
+
+
+@pytest.fixture
+def warned_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The once-per-process warning memo, emptied so each test sees its own first load.
+
+    ``config._UNMODELLED_WARNED`` is process-global on purpose (see there), which
+    makes a test that asserts on the warning order-dependent unless it starts from
+    an empty memo.
+    """
+    from local_operator import config as config_mod
+
+    monkeypatch.setattr(config_mod, "_UNMODELLED_WARNED", set())
+
+
+def test_a_top_level_key_the_store_does_not_model_is_never_erased(tmp_path: Path) -> None:
+    """THE ERASE half. A write used to delete every top-level key but the three it models.
+
+    ``_write_config`` serialises ``vars(self.config)``, which holds only
+    ``version``/``metadata``/``values``, so a hand-written ``network:`` block was gone
+    after the next write — and writes happen on ordinary paths: this is what the
+    startup cleanup migration does (it leaves a ``.pre-cleanup-migration`` backup
+    beside the file for that reason), and ``/settings`` writes on every Enter. An
+    operator's declared address therefore vanished with no error, the failure the
+    mesh lane reported as "any ``lop`` run rewrites the file without it".
+    """
+    declared = {"network": {"advertise_hosts": ["203.0.113.7:4097"]}}
+    path = _write_config_with_extra(tmp_path, declared)
+    manager = ConfigManager(tmp_path)
+
+    # The write the migration and the settings page both perform.
+    manager._write_config(vars(manager.config))
+
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert document["network"] == declared["network"], document.keys()
+    # ...and the write still did its OWN job: the modelled keys are all there.
+    assert document["values"]["conversation_length"] == 100
+    assert document["metadata"]["last_modified"]
+
+
+def test_the_startup_migration_keeps_a_key_it_does_not_model(tmp_path: Path) -> None:
+    """The same erase, through the REAL writer: the migration that rewrites the file.
+
+    Run end to end rather than by calling ``_write_config`` directly, because the
+    migration is the path the operator actually hits — one ``lop`` verb on a fresh
+    install is enough to trigger it and it is what left the backup behind.
+    """
+    from local_operator.config_migrations import migrate_session_cleanup
+
+    declared = ["203.0.113.7:4097"]
+    path = _write_config_with_extra(tmp_path, {"network": {"advertise_hosts": declared}})
+
+    changes = migrate_session_cleanup(tmp_path)
+
+    assert changes, "the migration must have done its own work for this to prove anything"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert document["network"]["advertise_hosts"] == declared
+    # Its own job, on the same file: the retired reapers' opt-out is pinned.
+    assert document["values"]["session"]["reap_unused"] is False
+
+
+def test_a_top_level_key_is_reported_rather_than_silently_ignored(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """THE DROP half. It is still not READ — and now it is not quiet either.
+
+    Every setting is read from ``values``, so this key does nothing for as long as
+    it sits there. That is a defensible schema; being silent about it is not, because
+    the file gives the operator no sign and the docs spell the path in dots. The
+    warning has to name BOTH the key and where a setting lives, or it is just noise.
+    """
+    _write_config_with_extra(tmp_path, {"network": {"advertise_hosts": ["203.0.113.7:4097"]}})
+
+    with caplog.at_level(logging.WARNING):
+        manager = ConfigManager(tmp_path)
+
+    assert manager.get_nested_value(("network", "advertise_hosts"), "DEFAULT") == "DEFAULT"
+    messages = [record.getMessage() for record in caplog.records]
+    reported = [message for message in messages if "top-level" in message]
+    assert len(reported) == 1, messages
+    assert "network" in reported[0]
+    assert "values.network" in reported[0]
+
+
+def test_a_modelled_config_reports_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """The mirror, so the warning is not simply always on: a normal file is silent."""
+    _write_config(tmp_path, {"conversation_length": 7})
+
+    with caplog.at_level(logging.WARNING):
+        ConfigManager(tmp_path)
+
+    assert not [r for r in caplog.records if "top-level" in r.getMessage()]
+
+
+def test_the_registry_writes_the_key_where_the_mesh_reads_it(tmp_path: Path) -> None:
+    """THE SANCTIONED ROUTE, end to end: /settings → the file → ``advertise_endpoints``.
+
+    The bug was not only that the natural spelling did nothing; there was no working
+    route at all for the three keys ``NetworkSettings.from_config`` reads, so no
+    surface could show or write them and the mesh docs' own remediation ("put that
+    hostname in `network.advertise_hosts`") pointed at a key with no writer. This
+    pins the path the fix adds: the registry's tuple is the reader's tuple, the
+    value lands where ``get_nested_value`` walks, and the relay publishes it.
+    """
+    from local_operator import settings_io
+    from local_operator.network import relay
+
+    setting = settings_io.BY_KEY["network.advertise_hosts"]
+    assert setting.path == ("network", "advertise_hosts")
+
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, ["198.51.100.9:4100"])
+
+    reread = ConfigManager(tmp_path)
+    assert reread.get_nested_value(("network", "advertise_hosts")) == ["198.51.100.9:4100"]
+    settings = relay.NetworkSettings.from_config(tmp_path)
+    assert settings.advertise_hosts == ("198.51.100.9:4100",)
+    # And it is the FIRST candidate a peer is told to dial, before the detected
+    # addresses: only the operator knows about a tunnel or a public address.
+    assert relay.advertise_endpoints(settings)[0] == "198.51.100.9:4100"
+
+
+def test_the_port_and_listen_address_have_rows_too(tmp_path: Path) -> None:
+    """The other two keys ``from_config`` reads, which had no writer for the same reason.
+
+    An advertised ``host:port`` needs the port, and whether the relay accepts at all
+    is ``listen_address``: a page that offered the endpoints and hid these two would
+    be offering half of one setting's contract.
+    """
+    from local_operator import settings_io
+    from local_operator.network import relay
+
+    manager = ConfigManager(tmp_path)
+    for key, value in (("network.port", 4123), ("network.listen_address", "127.0.0.1")):
+        settings_io.write_setting(manager, settings_io.BY_KEY[key], value)
+
+    settings = relay.NetworkSettings.from_config(tmp_path)
+    assert settings.port == 4123
+    assert settings.listen_address == "127.0.0.1"
+    # The dial-only answer, which is what this pair of values means together.
+    assert relay.advertise_endpoints(settings) == ["127.0.0.1:4123"]
