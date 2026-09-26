@@ -10,6 +10,7 @@ would spend the operator's latency to buy truthfulness he can have for free.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -481,13 +482,19 @@ async def test_a_live_fork_outranks_the_liveness_term(tmp_path, monkeypatch):
         app._probe_foreground_liveness()
         await _drain(app, pilot)
 
+        # THE ASSERTION THE REGRESSION WOULD HAVE FAILED, on the RENDERED BAND:
+        # both facts are present, and the age is LAST. The previous version of
+        # this test ended on `assert FORK_PENDING_TEXT`, a tautology about a
+        # constant that passes whether or not the band renders it -- which is
+        # precisely why CI had to catch the original `assert 'forking · esc' in
+        # 'No owner'`.
         row = app._status.render_text(100).plain
-        assert "Not answering" not in row, (
-            f"the liveness term outranked an app-owned verdict: {row!r}"
-        )
-        assert getattr(app._status, "_connection", "") == "", row
-
-        # And the app's own probe still reads the session as unanswerable — the
-        # term is SUPPRESSED here, not mis-classified.
+        assert FORK_PENDING_TEXT in row, f"the fork lost its only cancellable segment: {row!r}"
+        assert "Not answering" in row, f"the term that explains the dead end is gone: {row!r}"
+        assert row.index("Not answering") < row.index("\u00b7", row.index("Not answering")) + 1
+        # AGE LAST: the ellipsis must eat the age and never a word.
+        tail = row.split("Not answering", 1)[1]
+        assert re.match(r" \u00b7 \S", tail), f"the age is not in final position: {row!r}"
+        # And the app's own reader still classifies the owner as unanswerable --
+        # this is a DISPLAY decision, not a mis-classification.
         assert app._liveness_row_text(session).startswith("Not answering")
-        assert FORK_PENDING_TEXT  # the segment this row must be free to carry

@@ -2364,3 +2364,39 @@ def test_a_stale_row_is_muted_without_a_spinner_and_coming_keeps_the_glyph(monke
     coming.set_connecting(True)
     coming._spinner_index = 2
     assert LIVENESS_TEXT[OwnerLiveness.COMING].rstrip("…") in coming.render_text(62).plain
+
+
+def test_the_composed_fork_and_liveness_row_fits_and_keeps_the_age_last(monkeypatch) -> None:
+    """The composition, at the sizes the reviewer measured.
+
+    `forking · esc` and `Not answering · 4m` are COMPLEMENTARY: one says what you
+    can still do, the other says why the window will not arrive. Composed they
+    measured 35 of the band's 62 cells, so this is a choice rather than a
+    constraint -- but composing must not move the AGE out of final position, or a
+    narrow terminal starts truncating a word instead of a duration.
+    """
+    from local_operator.tui.liveness import OwnerLiveness, liveness_text
+    from local_operator.tui.widgets.status_line import FORK_PENDING_TEXT
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_SHIMMER", "1")
+    name = "Fix sidebar reconnect on session switch"
+    composed = (
+        f"{FORK_PENDING_TEXT} · "
+        f"{liveness_text(OwnerLiveness.STALE, now=1_000_000.0, verified_at=1_000_000.0 - 240.0)}"
+    )
+    assert composed == "forking · esc · Not answering · 4m", composed
+
+    for width in (120, 77, 62, 40):
+        status = StatusLine(_dock(width))
+        status.update(connection=composed, connection_muted=True, conversation_name=name)
+        status.set_connecting(False)
+        row = status.render_text(width).plain
+
+        assert cell_len(row) <= width, (width, row)
+        # Both facts survive at every width, and in that order.
+        assert "forking" in row and "Not answering" in row, (width, row)
+        assert row.index("forking") < row.index("Not answering"), (width, row)
+        # THE AGE IS LAST: whatever the ellipsis eats, it is never the age while
+        # the head is intact.
+        if "Not answering" in row and "4m" not in row:
+            assert row.rstrip().endswith(("\u2026", "…", "reconnec…")), (width, row)

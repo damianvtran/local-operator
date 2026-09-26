@@ -373,6 +373,9 @@ from local_operator.tui.widgets.settings_view import (
     SettingsViewDismissed,
 )
 from local_operator.tui.widgets.status_line import (
+    FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
+)
+from local_operator.tui.widgets.status_line import (
     ICON_APPROVALS,
     ICON_MCP,
     McpStatus,
@@ -9029,25 +9032,36 @@ class OperatorApp(App[None]):
         # is NEVER — it has no stamp because it never dials — and `No owner`
         # painted about a process that IS the owner would be a new
         # confident-wrong statement rather than a fix for an old one.
-        # AND IT YIELDS TO A VERDICT THE APP ALREADY OWNS. The term enters the
-        # GAP, so anything the app can say for itself wins -- the connection row
-        # is a whole-row TAKEOVER, and a takeover over an app-owned indication
-        # hides it. CI caught exactly that: a conversation with a live forked
-        # child and an unanswerable owner rendered `No owner` where it must
-        # render `forking · esc`, costing the fork the only segment it can be
-        # cancelled from. The rule is general rather than a list of exceptions --
-        # anything the app already owns outranks a verdict ABOUT the app's owner
-        # -- so this reads the same probe `_sync_fork_pending` reads, and the
-        # guard is written on a session that may legitimately lack it.
+        # COMPETING VERDICTS SUPPRESS, COMPLEMENTARY VERDICTS COMPOSE.
+        #
+        # The connection row is a whole-row TAKEOVER, so whatever lands in it is
+        # all the band says. CI caught the first cut of this hiding `forking · esc`
+        # on a conversation with a live fork and a silent owner -- but suppressing
+        # there was wrong for a sharper reason than precedence: a pending fork is
+        # DRAINED BY THE OWNER'S OWN LOOP at a TURN BOUNDARY, so a stopped owner
+        # never reaches one and `/fork` never arrives *while the band promises it
+        # will*. `esc` still works (``cancel_fork`` is a local ``_fork_pending =
+        # None``), which is why the fork keeps its place; and the liveness term is
+        # the ONLY thing that explains why the window will not arrive. Dropping it
+        # leaves the operator to read a frozen owner as his own choice -- the
+        # failure mode he reported, on the fork path.
+        #
+        # So the app's own text wins only where it answers the SAME QUESTION ("is
+        # this session being served?"). `STOPPED_SESSION_NOTICE` and `Reconnect
+        # failed · Select again to retry` do, and they already own `status` above,
+        # so this branch never runs for them. A pending fork states a DIFFERENT
+        # fact -- what you can do -- so the two compose, and the AGE STAYS LAST so
+        # the row's ellipsis still eats the age rather than a word.
         fork_probe = getattr(source.session, "has_pending_fork", None)
-        app_owns_a_verdict = bool(fork_probe()) if callable(fork_probe) else False
-        if not status and not app_owns_a_verdict and _is_viewer(source.session):
+        fork_pending = bool(fork_probe()) if callable(fork_probe) else False
+        if not status and _is_viewer(source.session):
             verdict = owner_liveness(source.session)
             if verdict is not OwnerLiveness.LIVE:
-                status = liveness_text(
+                text = liveness_text(
                     verdict,
                     verified_at=getattr(source.session, "verified_at", None),
                 )
+                status = f"{_FORK_PENDING_TEXT} · {text}" if fork_pending else text
                 # STALE is PROVISIONAL — a long turn ends, a SIGCONT lands, a
                 # starved loop catches up — so it takes the muted register and NOT
                 # `danger`, which stays the latch's terminal verdict. The same
