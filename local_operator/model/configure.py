@@ -1845,18 +1845,31 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
     """The newest stored token and account scope, or ``("", False, None)``.
 
     Best-effort by construction: an unreadable store, a missing table or a row
-    without a token all mean "no listing", never an exception. Opened and closed
-    per call because this is reached only when the registry could not describe a
-    model, which is once per model id per TTL bucket per process.
+    without a token all mean "no listing", never an exception.
+
+    Reached only when the registry could not describe a model, which is once per
+    model id per TTL bucket per process — and that is measured as THREE
+    constructions per boot on this tree, each opening its own connection to the
+    same ``auth.db`` to run one SELECT. So it reads through the process-level
+    store instead. The previous per-call open/close was justified by how rarely
+    this runs; rarity is a reason the reopen looked cheap, not a reason the
+    connection had to be private, and ``list_credentials`` below is a bare read
+    with no routing decision attached. ``shared_auth_store`` owns the teardown,
+    so this must not close it — which is also why the ``try/finally`` that used
+    to wrap ``store.close()`` is gone rather than re-pointed: a ``finally`` that
+    called it would close the shared connection under every other reader.
+
+    Failures still degrade to ``("", False, None)``: the accessor can raise (a
+    ``config_dir()`` that cannot be resolved, an unwritable parent for a missing
+    ``auth.db``), and the ``except`` below keeps that on the "no listing" path
+    exactly as the per-call store did.
     """
-    store = None
     try:
-        from local_operator.providers.auth_store import AuthStore
+        from local_operator.providers.auth_store import shared_auth_store
         from local_operator.providers.registry import credential_provider_id
 
         storage = credential_provider_id(provider)
-        store = AuthStore()
-        rows = store.list_credentials(provider=storage)
+        rows = shared_auth_store().list_credentials(provider=storage)
         for row in reversed(rows):
             token = str(row.data.get("access") or "")
             if token:
@@ -1868,12 +1881,6 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
                 )
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not read a stored %s token for the listing: %s", provider, exc)
-    finally:
-        if store is not None:
-            try:
-                store.close()
-            except Exception:  # noqa: BLE001 - closing a broken handle is not fatal
-                pass
     return "", False, None
 
 

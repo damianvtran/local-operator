@@ -53,6 +53,17 @@ from urllib.request import url2pathname
 
 from local_operator import launchd
 from local_operator.helpers import retention_label
+
+# Re-exported, not defined here: the CLI parser needs this one int to render
+# ``--keep``'s ``%(default)s`` on EVERY invocation, and reading it from this
+# module dragged ``ssl``/``urllib.request``/``http.client`` onto every ``lop``
+# start. The value's documented home is now ``local_operator.install_defaults``,
+# a stdlib-only module; every existing consumer of the name here is unaffected.
+# The ``as`` spelling is what marks this as a deliberate re-export rather than
+# an unused import.
+from local_operator.install_defaults import (
+    DEFAULT_KEEP_GENERATIONS as DEFAULT_KEEP_GENERATIONS,
+)
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import PLATFORM_LABEL
 
@@ -1144,7 +1155,12 @@ _LOCAL_BIN = "~/.local/bin"
 #: flight but no record yet (an engage's first ~1.2 s) and for a terminal whose
 #: record has aged out. Two rather than one because the previous generation is
 #: exactly the one a just-flipped fleet is still reading from.
-DEFAULT_KEEP_GENERATIONS = 2
+#:
+#: Bound at the top of this module from :mod:`local_operator.install_defaults`,
+#: which is where the value and this rationale now live — the constant is here
+#: for the readers who expect it beside the other install-layout constants, and
+#: the cheap module exists so the CLI can have the int without this module's
+#: ``ssl``/``urllib.request`` stack.
 
 #: Age at which a generation with no ``.lop-source`` marker is crash debris
 #: rather than an install in flight. Nothing else can leave one: every failure
