@@ -1244,6 +1244,32 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
     return hosts[:MAX_DECLARED_ENDPOINTS]
 
 
+def _invite_hosts(
+    record: NetworkRecord, settings: NetworkSettings, declared: Sequence[str]
+) -> list[str]:
+    """Where a joiner should dial US, for an invite that does not name hosts itself.
+
+    THE LIVE LISTENER FIRST, THE RECORD SECOND, and the order is the fix for a
+    user-visible one: ``record.listen["advertised"]`` is written once, by ``init``, from
+    the config as it stood then, while the invite is the one place that value is acted
+    on blind — a joiner dials it. So a relay whose bound port differs from what the
+    record says (the operator changed ``network.port`` between the two, or started the
+    listener with a port of its own) minted invites naming a socket nothing held: the
+    invite read ``47774`` while ``lsof`` showed the listener on ``47778`` (QA round 1,
+    Q-1). THIS process knows where it is listening — :meth:`RelayServer.bind` records the
+    address it actually bound — which is strictly better information than a value
+    written by an earlier one.
+
+    ``declared`` is the operator's own ``network.advertise_hosts``: it leads the live
+    list, so the tunnel or public address they declared is still what a joiner tries
+    first. The record is the fallback FOR THE PATHS WHERE NOTHING IS BOUND (a dial-only
+    ``127.0.0.1`` listener contributes no detected address at all, which is the case
+    ``test_relay_e2e``'s F-2 pins), not a competitor to the live answer.
+    """
+    live = advertise_endpoints(settings, declared=declared)
+    return live or [str(host) for host in record.listen.get("advertised") or []]
+
+
 # ---------------------------------------------------------------------------
 # Membership: the ONLY writer of network records
 # ---------------------------------------------------------------------------
@@ -7920,6 +7946,10 @@ class RelayServer:
         # rotation all write, so the read is inside the lock: minting from a
         # snapshot would revert whatever they wrote in between.
         resolved = self._require_network(str(frame.get("network") or ""))
+        # The operator's declaration, read fresh: it is the "lead" half of the list
+        # `_invite_hosts` builds, and it is the one part of the answer this process
+        # cannot derive from its own socket.
+        declared = NetworkSettings.from_config(root=self.root).advertise_hosts
         with store.mutate(resolved.network_id, self.root) as record:
             state = store.require_secrets(record.network_id, self.root)
             minted: MintedInvite = mint_invite(
@@ -7927,7 +7957,8 @@ class RelayServer:
                 state.secret,
                 role=str(frame.get("role") or "read"),
                 ttl_s=float(frame.get("ttl_s") or 600.0),
-                hosts=[str(host) for host in frame.get("hosts") or []] or None,
+                hosts=[str(host) for host in frame.get("hosts") or []]
+                or _invite_hosts(record, self.settings, declared),
                 device_id=str(frame.get("device_id") or ""),
             )
             record.invites.append(minted.record)

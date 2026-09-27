@@ -2442,3 +2442,30 @@ class TestConfigEditStoresACascadeAsAMapping:
         chain = resolve_chain(selector, chains)
         assert chain is not None, "no chain resolved for the configured selector"
         assert expand_fallback_targets(selector, chain) == []
+
+
+def test_declared_endpoints_must_be_host_port_pairs() -> None:
+    """The row's help promises "every entry needs its port"; ``validate`` enforces it.
+
+    Through the SCHEMA rather than through one command, because this is the check every
+    writer shares — the page, ``lop config edit`` and ``PATCH /v1/settings`` all reach
+    ``validate`` before anything is stored. A declared entry is carried into every invite
+    this device mints, so an entry a peer cannot dial is a lie the device tells on the
+    operator's behalf (review round 1, M1).
+    """
+    setting = settings_io.BY_KEY["network.advertise_hosts"]
+
+    assert settings_io.validate(setting, ["tunnel.example.com:4100"], None) is None
+    assert (
+        settings_io.validate(setting, ["203.0.113.7:4097", "tunnel.example.com:4100"], None) is None
+    )
+
+    for bad in (
+        ["203.0.113.7"],
+        ["tunnel.example.com:70000"],
+        ["tunnel.example.com:"],
+        ["x:0"],
+        "not-a-list",
+    ):
+        problem = settings_io.validate(setting, bad, None)
+        assert problem and "host:port" in problem, (bad, problem)

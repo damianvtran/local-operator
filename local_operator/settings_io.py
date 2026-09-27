@@ -1042,6 +1042,30 @@ def _bash_shell_help(windows: bool) -> str:
 _BASH_SHELL_HELP = _bash_shell_help(_IS_WINDOWS)
 
 
+def _validate_advertise_hosts(value: object) -> object:
+    """Every entry is ``host:port`` — the shape this row's help already promises.
+
+    Enforced at the WRITE facade rather than at the relay because this is the only place
+    a person types an endpoint, and every writer funnels through :func:`validate` (the
+    page, `lop config edit`, the server's `PATCH /v1/settings`). An entry with no port
+    (``203.0.113.7``) or an impossible one (``tunnel.example.com:70000``) was accepted,
+    persisted into ``listen.advertised``, and then carried into every invite — where it
+    reads as an address a joiner can dial and is not, which is the class of lie the rest
+    of this change is about (review round 1, M1).
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Advertised endpoints must be a list of host:port entries.")
+    for entry in value:
+        text = str(entry).strip()
+        host, _, port = text.rpartition(":")
+        if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ValueError(
+                f"not a dialable host:port: {text} — every entry needs a port, "
+                "for example tunnel.example.com:4100"
+            )
+    return value
+
+
 SETTINGS: tuple[Setting, ...] = (
     # -- model --------------------------------------------------------------
     Setting(
@@ -3158,6 +3182,7 @@ SETTINGS: tuple[Setting, ...] = (
         ),
         placeholder="tunnel.example.com:4100, 203.0.113.7:4097",
         empty_unsets=True,
+        validate_value=_validate_advertise_hosts,
     ),
     # -- network (the mesh audit log) ---------------------------------------
     # Defaults mirror ``local_operator/network/audit.py``'s module constants, which
