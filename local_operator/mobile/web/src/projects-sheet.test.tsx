@@ -156,6 +156,18 @@ describe("browse", () => {
 		expect(await screen.findByText("payments-migration")).toBeTruthy();
 	});
 
+	it("renders an unreachable daemon as prose, not the browser's TypeError", async () => {
+		getProjects.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+		renderSheet();
+		// The browser's own "Failed to fetch" explains nothing (round-1 design, D3).
+		expect(await screen.findByText("could not reach the daemon")).toBeTruthy();
+		expect(screen.queryByText(/Failed to fetch/)).toBeNull();
+
+		getProjects.mockResolvedValueOnce({ projects: [] });
+		fireEvent.click(screen.getByRole("button", { name: "retry" }));
+		expect(await screen.findByText("no projects yet")).toBeTruthy();
+	});
+
 	it("re-reads the store on every open, so another surface's write is never missed", async () => {
 		getProjects.mockResolvedValue({ projects: [] });
 		const { rerender } = render(<ProjectsSheet open={false} onClose={() => {}} />);
@@ -187,8 +199,8 @@ describe("detail", () => {
 		fireEvent.click(await screen.findByText("payments-migration"));
 		await waitFor(() => expect(getProject).toHaveBeenCalledWith("p1"));
 		expect(await screen.findByText("cutover done")).toBeTruthy();
-		expect(screen.getByText(/reported 2h ago/)).toBeTruthy();
-		expect(screen.getByText(/by operator/)).toBeTruthy();
+		// Reporter before any stale marker (round-1 UX, U2).
+		expect(screen.getByText("reported 2h ago by operator")).toBeTruthy();
 		expect(screen.getByText("Payments cutover")).toBeTruthy();
 		expect(screen.getByText("live")).toBeTruthy();
 
@@ -254,6 +266,32 @@ describe("detail", () => {
 		expect(await screen.findByText(/update this build/)).toBeTruthy();
 	});
 
+	it("binds a stale report to the report, not the reporter, and states an empty one once", async () => {
+		const reported = Date.now() / 1000 - 5 * 86400;
+		getProjects.mockResolvedValue({ projects: [summary()] });
+		getProject.mockResolvedValue({
+			project: view({
+				progress: "flights booked",
+				progress_updated_at: reported,
+				progress_reported_by: "operator",
+				progress_stale: true,
+			}),
+			links: [],
+		});
+		renderSheet();
+		fireEvent.click(await screen.findByText("payments-migration"));
+		// "reported 5d ago by operator · stale" — never "stale by operator".
+		expect(await screen.findByText("reported 5d ago by operator · stale")).toBeTruthy();
+
+		getProject.mockResolvedValue({ project: view({ progress: "" }), links: [] });
+		fireEvent.click(screen.getByRole("button", { name: "projects" }));
+		fireEvent.click(await screen.findByText("payments-migration"));
+		expect(await screen.findByText("no progress reported yet")).toBeTruthy();
+		// The age line belongs to a REPORT — with none, it would only restate
+		// the line above in the negative (round-1 UX, U3).
+		expect(screen.queryByText("none recorded")).toBeNull();
+	});
+
 	it("shows the detail fetch's failure with a working retry", async () => {
 		getProjects.mockResolvedValue({ projects: [summary()] });
 		getProject.mockRejectedValueOnce(new HttpError(404, "no project with id or name 'p1'", "project_not_found"));
@@ -281,6 +319,18 @@ describe("create", () => {
 		expect(await screen.findByText("created alpha")).toBeTruthy();
 		// Back at the browse view, list re-read.
 		await waitFor(() => expect(getProjects).toHaveBeenCalledTimes(2));
+	});
+
+	it("starts a fresh form on every entry, so a cancelled draft does not come back", async () => {
+		getProjects.mockResolvedValue({ projects: [] });
+		renderSheet();
+		fireEvent.click(await screen.findByRole("button", { name: "new project" }));
+		const field = () => screen.getByPlaceholderText("e.g. payments-migration") as HTMLInputElement;
+		fireEvent.change(field(), { target: { value: "abandoned-draft" } });
+		fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+		fireEvent.click(screen.getByRole("button", { name: "new project" }));
+		// The reader did not type it this time (round-1 UX, U1).
+		expect(field().value).toBe("");
 	});
 
 	it("keeps the form and the daemon's sentence when the name is taken", async () => {
