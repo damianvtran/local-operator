@@ -35,7 +35,12 @@ rendering is not a contract.
    override the rest).
 3. Mint the invite on that device: `lop network invite --role drive --json`.
    Add `--network <name>` when the device is in more than one network, `--role
-   read` for a viewer, `--expires 30m` to change the ten-minute default. The
+   read` for a viewer, `--expires 30m` to change the ten-minute default. `drive`
+   is the right default for a device that will PROMPT from here and never hold
+   anything: it may list, view, prompt, steer, stop and slash, and it may not
+   take a session (`move`), delete one on a peer (`delete`) or borrow a login
+   (`broker_credential`). Grant those to a device you trust to carry work — see
+   "Moving a session between devices". The
    token is written to a **file** and the JSON gives you `path`, never the token;
    hand that file to the other machine out of band — AirDrop, a shared directory,
    or the user's own copy at a terminal they control. Never into a chat
@@ -324,6 +329,24 @@ lop sessions move <id> --to <peer> --keep   # copy it and leave the original run
 THE DIRECTION IS THE PROTOCOL: the device that will HOLD the conversation issues
 the move, so `--to <peer>` is this device asking the peer to pull and `--to local`
 is this device pulling. There is no push verb.
+
+RECEIVING A CONVERSATION IS ITS OWN CAPABILITY, AND `drive` DOES NOT HAVE IT. The
+peer must hold `move` ON THE DEVICE THAT HOLDS THE WORK, or the move is refused
+before anything is copied — `code: not_authorised`, naming the peer and the remedy.
+A `--role drive` device (what the setup above mints, and the right default for a
+laptop you only want to prompt from) may list, view, prompt, steer, stop and slash;
+taking ownership of a conversation, deleting one on a peer and borrowing a login
+are the three it may not. Grant one of them, on the device that owns the work:
+
+```bash
+lop network member grant <network> <device-id> move     # may take sessions from here
+lop network member grant <network> <device-id> delete   # may delete sessions here
+```
+
+or pair that device with `--role admin`. The device id is the one the refusal
+prints (a name will not resolve for this verb). Read the `code` before retrying:
+the identical move succeeds unchanged once the grant is in place, and re-pairing to
+"fix" it burns the device id instead.
 
 THE DEFAULT IS A MOVE, NOT A COPY. Without `--keep` the conversation keeps its id
 and the copy on the device it left is deleted once the handoff commits — which is
