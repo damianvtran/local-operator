@@ -53,9 +53,11 @@ import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
 
 /** The board's section order — the daemon's own rank, mirrored so a section
-    the client draws and the order the daemon sorted cannot disagree. An
-    unknown status (a row from a newer build) gets its own trailing section
-    rather than being dropped. */
+    the client draws and the order the daemon sorted cannot disagree. The one
+    Python source is `STATUS_RANK` in `local_operator/server/models/
+    desktop_projects.py`; a script cannot import it, so this copy carries the
+    pointer. An unknown status (a row from a newer build) gets its own trailing
+    section rather than being dropped. */
 const STATUS_ORDER = ["active", "paused", "done", "archived"];
 
 type View =
@@ -66,10 +68,14 @@ type View =
 
 /** The daemon's sentence for a refusal, or a plain line when it gave none.
 
-    A bare-status message is not a reason: `api.request` falls back to the
-    status when a failing response's body is not JSON, and "409" under a button
-    the reader just pressed explains nothing. */
+    Three failure classes meet here, and none of them may surface raw:
+    a bare-status message (`api.request` falls back to the status when a
+    failing response's body is not JSON — "409" under a button the reader just
+    pressed explains nothing), and a FETCH-level failure, which arrives as the
+    browser's own TypeError ("Failed to fetch") when the daemon is not
+    listening at all (round-1 design, D3). */
 function refusalReason(error: unknown): string {
+	if (error instanceof TypeError) return "could not reach the daemon";
 	const message = error instanceof Error ? error.message : String(error);
 	if (message === "" || /^\d{3}$/.test(message)) return "the daemon did not say why";
 	return message;
@@ -278,6 +284,17 @@ export function ProjectsSheet({
 		void loadDetail(view.key);
 	}, [view, loadDetail]);
 
+	/* Entering the create view starts a FRESH form. A draft the reader
+	   abandoned (cancel, sheet close) must not come back pre-filled on the
+	   next "new project" — the reader did not type it this time, and a
+	   distracted one can create the abandoned name (round-1 UX, U1). */
+	useEffect(() => {
+		if (view.name === "create") {
+			setName("");
+			setDescription("");
+		}
+	}, [view]);
+
 	const openDetail = (key: string) => {
 		setDetail(null);
 		setDetailError("");
@@ -372,30 +389,34 @@ export function ProjectsSheet({
 						<div className="flex items-center gap-2 px-3 pt-1 pb-2">
 							<div
 								className="flex overflow-hidden rounded-sm border border-control"
-								    role="group"
-								>
-									{/* Two readings of ONE array: the list keeps the daemon's
-										  order, the board groups it by status. Neither re-sorts. The
-										  selected segment takes the accent wash — a fill on `bg-elevated`
-										  that is actually visible (a same-ground `bg-elevated` segment
-										  measured identical to its track in the first capture round). */}
-										{(["list", "board"] as const).map((mode) => (
-											<button
-											key={mode}
-												type="button"
-												aria-pressed={board === (mode === "board")}
+								role="group"
+							>
+								{/* Two readings of ONE array: the list keeps the daemon's
+								    order, the board groups it by status. Neither re-sorts.
+								    The selected segment spends the ACCENT for its fill: the
+								    same-ground fills round 1 tried (bg-elevated, then the
+								    accent wash) both measured ~1:1 against the track — 1.009:1
+								    in the default theme, under 3:1 in all 31 — so the state
+								    leaned on a 1.88:1 label delta alone. accent-on-track is
+								    7.24:1 and clears 3:1 in every theme (on-accent label
+								    8.58:1). */}
+								{(["list", "board"] as const).map((mode) => (
+									<button
+										key={mode}
+										type="button"
+										aria-pressed={board === (mode === "board")}
 										onClick={() => setBoard(mode === "board")}
 										className={cn(
 											"min-h-11 min-w-14 px-2 text-mono-sm",
 											board === (mode === "board")
-												? "bg-accent-wash text-ink"
+												? "bg-accent text-on-accent"
 												: "text-ink-muted",
 										)}
 									>
 										{mode}
 									</button>
-									))}
-								</div>
+								))}
+							</div>
 							<Button
 								variant="outline"
 								className="ml-auto"
@@ -516,24 +537,29 @@ export function ProjectsSheet({
 								) : (
 									<p className="text-body-sm text-ink-dim">no progress reported yet</p>
 								)}
-								<p
-									className={cn(
-										"mt-1 text-meta",
-										detail.project.progress &&
+								{/* The age line belongs to a REPORT: with no snippet it could only
+									   restate the line above in the negative (round-1 UX, U3). The
+										  reporter comes before the stale marker, because "stale"
+										  modifies the report, not the person who filed it (U2). */}
+											{detail.project.progress ? (
+											<p
+											className={cn(
+											"mt-1 text-meta",
 											detail.project.progress_stale &&
-											detail.project.progress_updated_at !== null
-											? "text-warning"
-											: "text-ink-muted",
-									)}
-								>
-									{detail.project.progress_updated_at !== null
-										? `reported ${formatRelative(detail.project.progress_updated_at)}` +
-											(detail.project.progress_stale ? " · stale" : "")
-										: "none recorded"}
-									{detail.project.progress_reported_by
-										? ` by ${detail.project.progress_reported_by}`
-										: ""}
-								</p>
+												detail.project.progress_updated_at !== null
+												? "text-warning"
+												: "text-ink-muted",
+											)}
+										>
+										{detail.project.progress_updated_at !== null
+											? `reported ${formatRelative(detail.project.progress_updated_at)}` +
+												(detail.project.progress_reported_by
+													? ` by ${detail.project.progress_reported_by}`
+													: "") +
+												(detail.project.progress_stale ? " · stale" : "")
+											: "none recorded"}
+									</p>
+								) : null}
 							</Section>
 							<Section
 								title={
@@ -678,7 +704,7 @@ export function ProjectsSheet({
 							aria-busy={busy ? true : undefined}
 							onClick={() => void submitCreate()}
 						>
-							create
+							{busy ? "creating…" : "create"}
 						</Button>
 						<Button variant="quiet" disabled={busy} onClick={() => setView({ name: "browse" })}>
 							cancel
