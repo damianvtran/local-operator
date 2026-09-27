@@ -1351,6 +1351,16 @@ their authors and contributors for building in the open.
   [Mario Zechner (`mariozechner`)](https://github.com/mariozechner). Its
   approach to agent orchestration and harness ergonomics inspired aspects of our
   subagent and tooling implementation.
+- **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**
+  (`dsh`): an open-source agent harness by
+  [DeepSeek AI](https://deepseek.com), built on an everything-is-a-plugin
+  architecture over [Cordis](https://github.com/cordiverse/cordis). Its web
+  client's UI and interaction design informed parts of our desktop app: a single
+  sidebar carrying navigation alongside the agent, team, and session lists,
+  section-level view controls, progressive disclosure for long lists, and a
+  width-constrained conversation whose resize handles reveal themselves on
+  hover. We studied the design and built our own implementation; DeepSeek AI has
+  not reviewed, endorsed, or contributed to this project.
 
 Inspiration drawn from these projects informed our own independent
 implementation; any mistakes here are our own.
