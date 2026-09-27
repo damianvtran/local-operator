@@ -48,6 +48,23 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ProjectRegistry:
     return ProjectRegistry(root)
 
 
+@pytest.fixture(autouse=True)
+def _cold_project_caches():
+    """Both module caches start — and end — cold, per test.
+
+    The registry and names caches are process-wide by design (one store read
+    per keystroke budget), so a snapshot primed by one test must not answer the
+    next one's question (review round 1, F12's latent-bleed nit).
+    """
+    import local_operator.references as references
+
+    references._project_registry_cache = None
+    references._project_names_cache = None
+    yield
+    references._project_registry_cache = None
+    references._project_names_cache = None
+
+
 def create(store: ProjectRegistry, name: str = "payments-migration", **fields) -> None:
     """``test_projects_store``'s helper shape: one project, ``ProjectEdit`` fields."""
     store.create_project(ProjectEdit(name=name, **fields))
@@ -185,8 +202,18 @@ async def test_an_empty_name_falls_through_to_the_path_rule(store, tmp_path) -> 
 
 
 def test_reference_resolves_matches_the_expansion_order(store, tmp_path, monkeypatch) -> None:
-    """The ink gate asks the SAME four parts, so ink and expansion cannot drift."""
+    """The ink gate asks the SAME four parts, so ink and expansion cannot drift.
+
+    The project arm is answered from the names snapshot (review round 1, M-4),
+    so this test publishes it the way the app does — through the store read —
+    before asking. That ``reference_resolves`` itself stays a pure in-memory
+    question, and schedules a refresh instead of constructing, is pinned by
+    the predicate tests below.
+    """
+    import local_operator.references as references
+
     create(store, name="alpha")
+    references._read_project_rows()
 
     assert reference_resolves("project:alpha", str(tmp_path)) is True
     assert reference_resolves("project:ALPHA", str(tmp_path)) is True
@@ -199,6 +226,77 @@ def test_reference_resolves_matches_the_expansion_order(store, tmp_path, monkeyp
 
     monkeypatch.setenv("LOCAL_OPERATOR_AT_REFERENCES", "0")
     assert reference_resolves("project:alpha", str(tmp_path)) is False
+
+
+def test_the_ink_predicate_schedules_a_refresh_without_constructing(
+    store, tmp_path, monkeypatch
+) -> None:
+    """M-4 holds BOTH halves: cold answer is immediate, and the only thread
+    that ever constructs the store is the named read thread.
+
+    Construction is what a store read costs (measured ~0.5 s on a 500-row
+    store in review), and the ink runs on every text change — so a construction
+    on THIS thread would be the stall the finding names. The recorder makes the
+    thread identity an assertion instead of a hope; the post-settle check is
+    race-free because a synchronous construction would have been recorded
+    before the call returned.
+    """
+    import threading
+
+    import local_operator.references as references
+
+    create(store, name="alpha")
+    real = ProjectRegistry
+    constructed: list[str] = []
+
+    def _recording(*args, **kwargs):
+        constructed.append(threading.current_thread().name)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("local_operator.projects.ProjectRegistry", _recording)
+
+    assert reference_resolves("project:alpha", str(tmp_path)) is False  # cold: fail closed
+    # The claim is about the THREAD, not about a race: a synchronous read
+    # would have recorded this thread before the call returned, and the
+    # scheduled thread may or may not have landed by now — so assert that
+    # THIS thread never constructed, then wait the scheduled read out.
+    assert threading.current_thread().name not in constructed
+
+    deadline = time.monotonic() + 10
+    while references._project_names_cache is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert references._project_names_cache is not None
+    assert constructed == [
+        references._READ_THREAD_NAME
+    ], "the store must be constructed exactly once, on the read thread"
+    assert reference_resolves("project:alpha", str(tmp_path)) is True
+
+
+def test_the_ink_predicate_schedules_only_when_the_snapshot_is_cold_or_stale(
+    store, tmp_path, monkeypatch
+) -> None:
+    """The scheduler's whole contract, without a thread: fresh answers stay
+    silent; stale answers still serve AND schedule; cold fails closed and
+    schedules."""
+    import local_operator.references as references
+    from local_operator.paths import config_dir
+
+    calls: list[int] = []
+    monkeypatch.setattr(references, "_schedule_project_names_refresh", lambda: calls.append(1))
+    root = str(config_dir())
+
+    references._project_names_cache = (root, frozenset({"alpha"}), time.monotonic())
+    assert reference_resolves("project:alpha", str(tmp_path)) is True
+    assert reference_resolves("project:ghost", str(tmp_path)) is False
+    assert calls == []
+
+    references._project_names_cache = (root, frozenset({"alpha"}), time.monotonic() - 10)
+    assert reference_resolves("project:alpha", str(tmp_path)) is True
+    assert calls == [1]
+
+    references._project_names_cache = None
+    assert reference_resolves("project:alpha", str(tmp_path)) is False
+    assert calls == [1, 1]
 
 
 def test_the_colon_is_not_special_to_the_token_grammar() -> None:
@@ -337,7 +435,7 @@ async def test_a_project_element_over_the_block_budget_degrades_to_listed(store,
 
 @pytest.mark.asyncio
 async def test_the_liveness_line_counts_a_live_busy_record(store, tmp_path) -> None:
-    """End to end through the REAL runtime scan: ``1 live (busy), 1 stopped``.
+    """End to end through the REAL runtime scan: ``1 live, busy, 1 stopped``.
 
     The record shape mirrors ``test_projects_store``'s live-record test — a
     fresh heartbeat on the current pid — so this is the same classification
@@ -366,12 +464,18 @@ async def test_the_liveness_line_counts_a_live_busy_record(store, tmp_path) -> N
     result = await expand_references("@project:alpha", str(tmp_path))
 
     assert result.expanded is True
-    assert "sessions: 2 linked — 1 live (busy), 1 stopped" in result.sent
+    assert "sessions: 2 linked — 1 live, busy, 1 stopped" in result.sent
 
 
 def test_the_liveness_line_maps_runtime_states_to_a_fixed_vocabulary() -> None:
     """The category mapping and its order, at the unit level (the wedged and
-    idle-live arms are hard to stage through records alone)."""
+    idle-live arms are hard to stage through records alone).
+
+    The words are the OTHER surfaces' words (review round 1, F8):
+    ``project_tool._session_lines`` writes ``live, busy`` for the same record,
+    and ``stale`` is its own bucket — it used to read ``stopped`` here while
+    the view and the desktop said ``stale``.
+    """
     from types import SimpleNamespace
 
     from local_operator.references import _project_sessions_line
@@ -387,9 +491,84 @@ def test_the_liveness_line_maps_runtime_states_to_a_fixed_vocabulary() -> None:
 
     assert (
         _project_sessions_line(project, states)
-        == "sessions: 5 linked — 1 live (busy), 1 live, 1 wedged, 2 stopped"
+        == "sessions: 5 linked — 1 live, busy, 1 live, 1 wedged, 1 stale, 1 stopped"
     )
     assert _project_sessions_line(SimpleNamespace(sessions=[]), {}) == "sessions: none linked"
+
+
+def test_the_progress_attribution_names_who_reported_and_compact_ages() -> None:
+    """The attribution's arms and the age spellings (review round 1, F12's
+    coverage nits): ``operator`` is named as itself, a session is named as a
+    session, and seconds/minutes/hours/days each keep their unit."""
+    from types import SimpleNamespace
+
+    from local_operator.references import _compact_age, _project_progress_attribution
+
+    now = time.time()
+    by_operator = SimpleNamespace(progress_updated_at=now - 90, progress_reported_by="operator")
+    assert _project_progress_attribution(by_operator) == " (reported 1m ago by operator)"
+    by_session = SimpleNamespace(
+        progress_updated_at=now - 3 * 86400, progress_reported_by=SESSION_A
+    )
+    assert _project_progress_attribution(by_session) == (
+        f" (reported 3d ago by session {SESSION_A})"
+    )
+    unreported = SimpleNamespace(progress_updated_at=None, progress_reported_by="")
+    assert _project_progress_attribution(unreported) == ""
+    anonymous = SimpleNamespace(progress_updated_at=now, progress_reported_by="")
+    assert _project_progress_attribution(anonymous) == " (reported 0s ago)"
+
+    assert _compact_age(0) == "0s"
+    assert _compact_age(59) == "59s"
+    assert _compact_age(60) == "1m"
+    assert _compact_age(3599) == "59m"
+    assert _compact_age(3600) == "1h"
+    assert _compact_age(86400 - 1) == "23h"
+    assert _compact_age(86400) == "1d"
+    assert _compact_age(-5) == "0s"
+
+
+@pytest.mark.asyncio
+async def test_one_message_schedules_one_runtime_scan_for_two_projects(
+    store, tmp_path, monkeypatch
+) -> None:
+    """The ``states`` singleton: a second project element on the same message
+    reuses the first's scan instead of walking the runtime registry again
+    (review round 1, F12)."""
+    import local_operator.projects as projects_module
+
+    create(store, name="alpha")
+    create(store, name="beta")
+    calls: list[int] = []
+    real = projects_module.scan_runtime_states
+
+    def _counting(root):
+        calls.append(1)
+        return real(root)
+
+    monkeypatch.setattr(projects_module, "scan_runtime_states", _counting)
+
+    result = await expand_references("@project:alpha and @project:beta", str(tmp_path))
+
+    assert result.expanded is True
+    assert result.sent.count('<reference type="project"') == 2
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_project_free_message_never_scans_the_runtime(store, tmp_path, monkeypatch) -> None:
+    """No project element, no runtime scan — the singularity must not become a
+    per-message tax."""
+    import local_operator.projects as projects_module
+
+    calls: list[int] = []
+    monkeypatch.setattr(projects_module, "scan_runtime_states", lambda root: calls.append(1) or {})
+    (tmp_path / "note.txt").write_text("hello\n", encoding="utf-8")
+
+    result = await expand_references("read @note.txt", str(tmp_path))
+
+    assert result.expanded is True
+    assert calls == []
 
 
 @pytest.mark.asyncio
