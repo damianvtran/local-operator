@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Sequence
 
 if TYPE_CHECKING:
     from local_operator.resume import SessionRow
@@ -77,6 +77,7 @@ async def open_remote_viewer(
     takeover: Callable[[], Awaitable[Any]],
     row: "SessionRow | None" = None,
     surface: str = "terminal",
+    slash_consumers: Sequence[str] | None = None,
 ) -> "AttachedSession | None":
     """A COLD viewer whose owner is the peer, or ``None`` when the id is not remote.
 
@@ -87,9 +88,22 @@ async def open_remote_viewer(
     ``takeover`` is required by the facade and never reached: a remote owner sets
     ``_can_go_cold``, so owner loss leaves the viewer cold rather than making this
     device a second writer (INV-1).
+
+    ``slash_consumers`` is the viewer's own declaration of the action receipts it
+    renders and submits (``AttachedSession``'s constructor argument of the same
+    name). ``None`` means "whatever the facade does by default" — the full attached
+    vocabulary, which is right for every existing caller (this function has four
+    others: the TUI, the desktop server, ``lop --resume`` and the session factory,
+    and three of them render a receipt's request themselves). A ONE-SHOT caller
+    passes ``()`` instead, which declares nothing, so the owner runs the turn
+    itself rather than standing down for a viewer that will print the receipt and
+    exit (review round 1, MAJOR-2).
     """
     from local_operator.network.projection import PeerRow, remote_owner_for
-    from local_operator.session.attached import AttachedSession
+    from local_operator.session.attached import (
+        ATTACHED_SLASH_CONSUMERS,
+        AttachedSession,
+    )
 
     config_dir = Path(config_dir)
     if row is None:
@@ -116,4 +130,12 @@ async def open_remote_viewer(
         surface=surface,
         owner=owner,
         seed=owner.seed(),
+        # ``None`` is THIS function's default (every caller that does not care),
+        # so it resolves to the facade's own default rather than to "declare
+        # nothing": the four other callers must keep the behaviour they have, and
+        # three of them submit a receipt's request themselves — declaring nothing
+        # for them would run the command twice.
+        slash_consumers=(
+            ATTACHED_SLASH_CONSUMERS if slash_consumers is None else tuple(slash_consumers)
+        ),
     )

@@ -163,6 +163,44 @@ over a paired mesh. From a shell:
 | `lop network sessions --peer <id> --archive <session>` | hide it on the device that holds it |
 | `lop network sessions --peer <id> --unarchive <session>` | restore it there |
 | `lop network sessions --peer <id> --delete <session> [--yes]` | delete it where it lives — a dry run until `--yes` |
+| `lop network sessions --peer <id> --send <session> <text>` | deliver a TURN to a conversation that is already there, and wait for its outcome |
+| `lop network sessions --peer <id> --steer <session> <text>` | inject into the turn that session is running there |
+| `lop network sessions --peer <id> --slash <session> /<command> [args]` | run a slash command in that session, ON its device |
+
+THE THREE PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is the
+one that starts a new one). They open the same viewer the TUI's sidebar pick and `lop
+--resume <a peer's id>` open, so what they act on is the OWNER's runtime: a routed
+slash changes the peer's own record (a rename is visible in that device's listing),
+and `--send` waits for the owner's terminal turn outcome rather than returning on
+admission. The text is the positional — or stdin, for a body with newlines in it —
+and, like every verb here, the tail may also be typed as `/network sessions …` from
+inside a session. `--send` exits 0 only for a turn that REACHED its end; a turn that
+failed there, is still running, or was queued for a retiring runtime exits 1 with
+`outcome` naming which (`failed`, `running`, `queued`) so a script cannot read a
+delivery as a completion.
+
+THE TEXT IS WHAT FOLLOWS THE LAST FLAG THIS COMMAND READS, taken as-is to the end
+of the command line. A prompt that talks about flags is delivered whole —
+`--send <session> check the --name field` sends those five words — because nothing
+after the first plain word is re-read as a flag. The boundary is the parser's own
+and it is worth knowing exactly: **a token that IS one of this command's flags is
+still that flag**, so `--send <session> --json is the field` delivers `is the field`
+with JSON output on, and this command's own flags therefore go BEFORE the session
+id. `--` is the separator for text that starts with a dash, in either direction
+(`--send <session> -- --json is the field I mean`), and a flag that only describes a
+NEW session — `--model`, `--hosting`, `--run-in`, `--name`, `--cwd`, `--prompt`,
+`--profile`, `--team`, `--effort`, `--agent`, `--agent-name`, `--agent-id` — is
+**refused** when an act is present rather than accepted and dropped, which was the
+other way words went missing here (review round 2, MINOR-1).
+
+EVERY SUCCESS RECEIPT NAMES THE DEVICE THE ACT RAN ON, and `--peer` is not that
+name — the session id is what routes the act, so the receipt answers from the
+session's own row and costs no extra read. `peer` is therefore the device
+(`cloud-node-1`), not whatever `--peer` was typed; when the two disagree, the
+caller's own word is carried beside it as `peer_named` and the human run says so in
+a line of its own. A receipt you can trust to name the machine that did the work is
+the point: before this, `--peer no-such-device --send <id> hello` answered
+`peer: no-such-device` with exit 0 while the turn really ran elsewhere.
 
 EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
 acting on one (QA round 5, Q-R5-1):
@@ -179,10 +217,29 @@ acting on one (QA round 5, Q-R5-1):
 - `peer_unreachable` — the relay ANSWERED, and the DEVICE NAMED is the reason: it
   is not in the network, or it is in it and did not answer. An unreachable peer is a
   `doctor` question and not an error to retry (`lop network doctor --json`).
-- `stop_unreported` / `engage_unreported` / `create_unreported` — a receipt arrived
-  without the field it is a receipt for, so whether the peer acted is UNKNOWN:
-  restart the relay and ask again, and do not read the answer as a failure of the
-  act.
+- `stop_unreported` / `engage_unreported` / `create_unreported` / `slash_unreported`
+  — a receipt arrived without the field it is a receipt for, so whether the peer
+  acted is UNKNOWN: restart the relay and ask again, and do not read the answer as a
+  failure of the act. `slash_unreported` is the routed-slash case: the owner's
+  `SlashResult` is `kind`/`text`/`style`/`data`, and one whose `style` this build
+  does not know (including a receipt with no `style` at all, which used to read as
+  success) cannot be read as an outcome.
+- `turn_not_running` — a `--steer` reached a session that is not running a turn
+  there, so there was nothing for it to correct. The sentence names the two ways
+  forward (`--send` to start a turn, `--slash` to change the session); nothing was
+  written to the peer.
+- `session_unknown` — the named device ANSWERED and holds no such conversation (its
+  own listing is the sentence's second half). Distinct from `peer_unreachable` on
+  purpose: one means "ask again when it is back", the other means "that id is not
+  there".
+- `session_unreachable` — the peer accepted the act and then its runtime stopped
+  answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
+  (that runtime may be starting, or wedged), or the act as a whole running out of
+  `PILOT_ACT_TIMEOUT_S`. The peer's own sentence is carried verbatim, and nothing on
+  this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
+  `relay_unavailable` with no local relay) even when the rung that noticed was the
+  bind: the two codes answer "which side of the open died", not "which sentence did
+  I get", because a stopped device and a stopped runtime look identical from here.
 
 `--all-peers` merges the rows it could read and NAMES the peers it could not
 (`<device>: unreachable (<reason>)` on stderr), so a partial listing is never
