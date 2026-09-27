@@ -23,7 +23,6 @@ spilled through the same helper the other tools use.
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -51,6 +50,8 @@ from local_operator.projects import (
     milestone_status,
     progress_is_stale,
     readable_error,
+    reported_age,
+    truncate_row,
 )
 from local_operator.tools.builtin import (
     _error,
@@ -62,9 +63,6 @@ from local_operator.tools.builtin import (
 
 logger = logging.getLogger(__name__)
 
-#: One listing row stays scannable in a transcript; the same discipline as the
-#: team tool's row cap.
-_ROW_CAP = 160
 
 _STATUS_WORDS = ("active", "paused", "done", "archived")
 
@@ -158,21 +156,12 @@ def _calling_session_id(context: ToolContext | None) -> str | None:
 def _reported_age(project: Project, *, now: float | None = None) -> str | None:
     """``2h``-style age of the progress snippet, or ``None`` when none is stored.
 
-    The caller composes the sentence, so one implementation of the age arithmetic
-    serves the listing row, the ``show`` block and the update receipt without any
-    of them disagreeing about how old the snippet is.
+    Delegates to :func:`local_operator.projects.reported_age` — THE age
+    arithmetic, one copy — so the listing row, the ``show`` block, the update
+    receipt and the operator's own surfaces cannot disagree about how old a
+    snippet is (agent review round 1, F3).
     """
-    if not project.progress or project.progress_updated_at is None:
-        return None
-    moment = time.time() if now is None else now
-    age = max(0.0, moment - project.progress_updated_at)
-    if age < 90:
-        return f"{int(age)}s"
-    if age < 5400:
-        return f"{int(age // 60)}m"
-    if age < 172800:
-        return f"{int(age // 3600)}h"
-    return f"{age / 86400:.0f}d"
+    return reported_age(project.progress_updated_at if project.progress else None, now=now)
 
 
 def _milestone_counts(project: Project) -> str:
@@ -189,7 +178,7 @@ def _estimate_text(project: Project) -> str:
 
 
 def _row(project: Project, *, now: float | None = None) -> str:
-    """One scannable listing line, ``_ROW_CAP``-bounded."""
+    """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS)."""
     parts = [
         f"- {project.name} [{project.status}]",
         _estimate_text(project),
@@ -212,7 +201,7 @@ def _row(project: Project, *, now: float | None = None) -> str:
         # QUOTED: an unquoted tail read as if it were the progress text (the
         # first cut of this row shipped exactly that ambiguity).
         row += f' · "{summary}"'
-    return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
+    return truncate_row(row)
 
 
 def _field_lines(project: Project) -> list[str]:

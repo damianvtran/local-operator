@@ -315,3 +315,182 @@ async def test_reopening_retargets_without_duplicates(tmp_path: Path) -> None:
         assert len(app.query(ProjectsView)) == 1
         assert app._projects_view is not None
         assert app._projects_view.cursor == 1
+
+
+# -- remediation round 1: the open reveal, the bar's row, the caps, the keys --
+
+
+@pytest.mark.asyncio
+async def test_show_reveals_the_named_row_on_a_store_longer_than_the_viewport(
+    tmp_path: Path,
+) -> None:
+    """Q2: `/project show <name>` must land the reader ON the named row.
+
+    The builder used to set the cursor and repaint, never scrolling — on a
+    store longer than the viewport the page described a row that was 25 rows
+    below the window.
+    """
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, *[f"p{i:02d}" for i in range(40)])
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "p39")
+        assert view.cursor == 39
+        offset = view._body.scroll_offset.y
+        assert offset > 0
+        assert offset <= 39 < offset + view._usable_height()
+
+
+@pytest.mark.asyncio
+async def test_downward_reveal_clears_the_horizontal_scrollbar_row(tmp_path: Path) -> None:
+    """D1: with the h-bar up, the reveal must not park the cursor under it.
+
+    The bar paints over the content region's LAST row, so the reveal's height
+    has to be the same number ``max_scroll_y`` is computed from.
+    """
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    for index in range(1, 31):
+        registry.create_project(
+            ProjectEdit(
+                name=f"workstream-{index:02d}",
+                description="a description wide enough to overflow the body",
+            )
+        )
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "workstream-01")
+        assert view._body.scrollbar_size_horizontal == 1  # the bar is genuinely up
+        await pilot.press("end")
+        await pilot.pause()
+        assert view.cursor == 29
+        offset = view._body.scroll_offset.y
+        assert 0 <= 29 - offset < view._usable_height()
+        # And the physical check the widget's arithmetic exists to satisfy:
+        # the row's screen line is above the bar's first line.
+        bar = getattr(view._body, "_horizontal_scrollbar", None)
+        if bar is not None:
+            content_top = view._body.region.y + 1  # the body's top padding
+            assert content_top + (29 - offset) < bar.region.y
+
+
+@pytest.mark.asyncio
+async def test_cursor_clamps_to_the_painted_rows_past_the_cap(tmp_path: Path) -> None:
+    """D2: past ``PROJECTS_MAX`` the cursor may not rest on an unpainted row."""
+    from local_operator.tui.projects_render import PROJECTS_MAX
+
+    session = _ProjectSession()
+    session.project_registry = _registry(
+        tmp_path, *[f"queued-{index:03d}" for index in range(1, PROJECTS_MAX + 6)]
+    )
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "queued-001")
+        await pilot.press("end")
+        await pilot.pause()
+        assert view.cursor == PROJECTS_MAX - 1  # the last PAINTED row, not row 204
+        assert view._last is not None
+        assert "▸" in view._last.text.plain
+        assert "more not shown" in view._last.text.plain
+        # The footer names the row the canvas paints, not the unpainted tail.
+        assert "queued-200" in view.rendered_rows()[-1]
+
+
+@pytest.mark.asyncio
+async def test_zoom_survives_refresh_while_the_span_is_unchanged(tmp_path: Path) -> None:
+    """F2: ``r`` must not discard a manual timeline zoom (the comment's claim)."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await pilot.press("3")
+        await pilot.pause()
+        await pilot.press("minus")
+        await pilot.pause()
+        zoomed = view.tier
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.pause()
+        assert view.tier == zoomed  # the span did not change; the zoom stands
+        # A span CHANGE re-derives the auto tier (the stated rule).
+        session.project_registry.create_project(ProjectEdit(name="far", target_date="2031-01-01"))
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.pause()
+        assert view.tier != zoomed
+
+
+@pytest.mark.asyncio
+async def test_hint_ladder_sheds_scroll_before_the_view_keys(tmp_path: Path) -> None:
+    """U3: at 60 columns the newest view types stay advertised."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta", "gamma")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await pilot.pause()
+        assert view._timeline_hint.display is True
+        assert view._next_hint.display is True
+        assert view._scroll_hint.display is False
+        # Widening brings the scroll hint back into the ladder.
+        await pilot.resize_terminal(140, 40)
+        await pilot.pause()
+        assert view._scroll_hint.display is True
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_closes_the_projects_page_like_its_siblings(tmp_path: Path) -> None:
+    """Q1: the first ctrl+C dismisses the page (its warning then VISIBLE)."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        assert view.tracked == 1
+        assert not app._transcript_view().display
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        await pilot.pause()
+        assert app._projects_view is None
+        assert app._transcript_view().display
+        assert app.is_running
+        # The warning lands in a transcript that is visible again — the whole
+        # point of closing the page in the same rung as its three siblings.
+        assert app._exit_hint is not None
+        assert "ctrl+c again to exit" in str(getattr(app._exit_hint, "_text", ""))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (150, 40)])
+async def test_footer_shedding_keeps_the_page_geometry(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
+    """Design round-2 scope: the U1/U2 footer changes move no geometry."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(
+        ProjectEdit(
+            name="long-horizon-annotator-overhaul-with-many-many-words",
+            description="a description that forces the footer to shed clauses",
+        )
+    )
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=size) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "long-horizon-annotator-overhaul-with-many-many-words")
+        await pilot.pause()
+        assert view._detail.region.height == 2  # the reserved box, unchanged
+        width_scalar = view._canvas.styles.width
+        height_scalar = view._canvas.styles.height
+        assert width_scalar is not None and height_scalar is not None
+        assert view.canvas_size == (width_scalar.value, height_scalar.value)
+        assert app.screen.virtual_size == app.screen.size  # the screen never scrolls

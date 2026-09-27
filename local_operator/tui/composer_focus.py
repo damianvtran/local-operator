@@ -43,7 +43,7 @@ def focus_is_claimed(app: Any) -> bool:
     """Whether some surface has a claim on the keyboard the composer must not take.
 
     Delegates to :meth:`OperatorApp._focus_is_claimed`, which is the real
-    definition — approval, ask picker, aside, the three full-page modes, the
+    definition — approval, ask picker, aside, the four full-page modes, the
     login prompt, any pushed screen, and a read-only composer. This is a thin,
     defensive accessor for the widget layer, NOT a second copy of that logic: a
     second copy would drift from the first, and the drift would be silent.

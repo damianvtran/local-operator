@@ -185,6 +185,7 @@ from local_operator.slash_commands import (
     primary_slash_name,
     project_needs_name_text,
     project_show_refusal_text,
+    project_store_unreadable_text,
     project_subcommand_rows,
     project_unavailable_text,
     run_project_slash_op,
@@ -17981,7 +17982,7 @@ class OperatorApp(App[None]):
             projects = registry.list_projects()
         except Exception:  # noqa: BLE001 — a picker list never crashes the app
             return []
-        return [
+        rows = [
             ArgumentChoice(
                 f"{verb} {project.name}",
                 project.description or "(no description)",
@@ -17989,6 +17990,26 @@ class OperatorApp(App[None]):
             )
             for project in projects
         ]
+        if verb == "delete":
+            # The picker path to the confirmation (`/delete` offers its `yes`
+            # row; this verb's `yes` was otherwise typed blind — agent review
+            # round 1, finding 9). The rows are built ONCE PER OPENING
+            # (`ArgumentQueryOpened` fires on the transition), so the confirm
+            # variant is offered for every project up front and the typed name
+            # FILTERS it: after `delete alph`, the scorer keeps
+            # `delete alpha yes` and drops `delete beta yes`. Appended after
+            # the name rows so the empty-query default completion is still a
+            # plain name, never a destructive command.
+            rows.extend(
+                ArgumentChoice(
+                    f"delete {project.name} yes",
+                    "confirm deletion — removes the row and every session link",
+                    detail=project.status,
+                    alert=True,
+                )
+                for project in projects
+            )
+        return rows
 
     def _team_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/team <…>`` list: team NAMES first, then `chart`.
@@ -18230,10 +18251,18 @@ class OperatorApp(App[None]):
             if not name:
                 notice(project_needs_name_text("show"), "warning")
                 return
+            if getattr(registry, "load_error", None) is not None:
+                # The page reads the same store the receipt does: an unreadable
+                # one must refuse in the same words rather than resolve every
+                # name to "no project named" (QA round 1, Q4).
+                notice(project_store_unreadable_text(), "warning")
+                return
             try:
                 project = registry.get_project_by_name(name)
             except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
-                notice(f"could not read the projects store: {exc}", "warning")
+                from local_operator.projects import store_error_text
+
+                notice(f"could not read the projects store: {store_error_text(exc)}", "warning")
                 return
             if project is None:
                 notice(project_show_refusal_text(name), "warning")
@@ -22411,13 +22440,18 @@ class OperatorApp(App[None]):
                 return True
         except Exception:  # noqa: BLE001
             return True
-        # The three full-page modes and the login prompt: each hides the
+        # The four full-page modes and the login prompt: each hides the
         # transcript or is the only thing on the frame the user can answer.
         try:
             if (
                 self._subagent_view is not None
                 or self._org_chart_view is not None
                 or self._settings_view is not None
+                # The projects page is listed EXPLICITLY even though its
+                # read-only composer already claims the keyboard: the claim
+                # must not depend on that side effect, or a future focusable
+                # mode rebuilds the hole (agent review round 1, finding 11).
+                or self._projects_view is not None
                 or self._key_prompt is not None
             ):
                 return True
@@ -22987,6 +23021,13 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        # The projects page, beside its three siblings: it hides the transcript
+        # exactly as they do, so a ctrl+C that closed every other mode but this
+        # one left the page up — and the "ctrl+c again to exit" warning appended
+        # behind it, where the hidden transcript cannot show it — while a second
+        # press quit the app: a silent dead end (QA round 1, Q1 / review
+        # finding 1).
+        self._close_projects_view()
         # The aside goes with it, for the reason the hint below exists at all.
         # The card floats over the transcript at one elevation step, so a
         # notice appended behind it is drawn where it cannot be read — and this
@@ -33329,10 +33370,8 @@ class OperatorApp(App[None]):
         elif command == "/agent":
             self._cmd_agent(arg, notice, attachments)
         elif command == "/project":
-            # SLICE 1 STAND-IN: the listing answers from the store; every other
-            # reserved verb names the surface that acts today (slice 3 ships the
-            # full-page view). See `_cmd_project` — the branch exists because a
-            # registered command must have a TUI path.
+            # Every reserved verb runs (slice 3); `_cmd_project` owns the
+            # branch so a registered command always has a TUI path.
             self._cmd_project(arg, notice)
         else:
             # ``parts[0]``, not the lowered ``command``: with the echo gone this

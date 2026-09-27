@@ -26,7 +26,7 @@ from local_operator.slash_commands import (
     project_unavailable_text,
 )
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.widgets.command_picker import PickerMode
+from local_operator.tui.widgets.command_picker import ArgumentChoice, PickerMode
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -135,11 +135,21 @@ async def test_new_creates_and_links_this_session(tmp_path: Path) -> None:
         project = session.project_registry.get_project_by_name("payments-migration")
         assert project is not None and project.sessions == [SESSION_ID]
 
-        # The duplicate refusal names the way in rather than dying silently.
+        # The duplicate refusal names the way in rather than dying silently —
+        # and the embedded command RUNS verbatim (F6: the quoted form 404'd a
+        # second time when copied), so it is exercised as typed.
         app._run_slash_command("/project new payments-migration")
         await pilot.pause()
-        assert "already exists" in _notices(app)[-1]
-        assert "/project show 'payments-migration'" in _notices(app)[-1]
+        duplicate = _notices(app)[-1]
+        assert "already exists" in duplicate
+        assert "/project show payments-migration opens the existing row." in duplicate
+        embedded = duplicate.split("— ", 1)[1].split(" opens the existing row.", 1)[0]
+        assert embedded == "/project show payments-migration"
+        app._run_slash_command(embedded)
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view.tracked == 1
+        assert view.cursor == 0
 
 
 @pytest.mark.asyncio
@@ -404,3 +414,161 @@ async def test_new_slot_offers_no_rows(tmp_path: Path) -> None:
         await _type(pilot, "/project new ")
         picker = app.query_one(Editor).picker
         assert picker.mode is not PickerMode.ARGUMENT or not picker._choices
+
+
+# -- remediation round 1: the typed-`yes` edge, unreadable stores, receipts ---
+
+
+@pytest.mark.asyncio
+async def test_delete_yes_handles_a_project_named_yes(tmp_path: Path) -> None:
+    """F7: a lone ``yes`` is a NAME, and its rehearsal names the ``yes yes`` form.
+
+    The old parse stripped the trailing ``yes`` as the confirmation, leaving an
+    empty name, and answered ``name a project`` — which neither said the row
+    existed nor named its spelling.
+    """
+    session = _ProjectSession()
+    registry = _registry(tmp_path, "yes")
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project delete yes")
+        await pilot.pause()
+        rehearsal = _notices(app)[-1]
+        assert "Nothing was deleted" in rehearsal
+        assert "/project delete yes yes to confirm." in rehearsal
+        assert registry.get_project_by_name("yes") is not None  # nothing deleted
+
+        app._run_slash_command("/project delete yes yes")
+        await pilot.pause()
+        assert "deleted project 'yes'" in _notices(app)[-1]
+        assert registry.get_project_by_name("yes") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_yes_with_an_unresolvable_prefix_refuses_by_name(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project delete ghost yes")
+        await pilot.pause()
+        assert _notices(app)[-1] == (
+            "no project named 'ghost' — /project list shows every tracked project."
+        )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_store_refuses_without_leaking_a_path(tmp_path: Path) -> None:
+    """QA Q4: ``chmod 000`` must not read as an empty store, and no path leaks."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"))
+    import os
+
+    os.chmod(projects_dir, 0o000)
+    try:
+        session = _ProjectSession()
+        # A FRESH reader: the degraded state this test is about (an existing
+        # registry keeps its 5 s cache, which is the store's own documented
+        # behaviour, not the surfaces').
+        session.project_registry = ProjectRegistry(tmp_path)
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 32)) as pilot:
+            await _boot(pilot, app)
+            for command in ("/project list", "/project show alpha", "/project delete alpha"):
+                app._run_slash_command(command)
+                await pilot.pause()
+                answer = _notices(app)[-1]
+                assert "unreadable" in answer, command
+                assert "no projects yet" not in answer
+                assert "no project named" not in answer
+                assert str(tmp_path) not in answer
+            app._run_slash_command("/project new x")
+            await pilot.pause()
+            answer = _notices(app)[-1]
+            assert "could not create the project" in answer
+            assert "permission denied" in answer
+            assert str(tmp_path) not in answer
+    finally:
+        os.chmod(projects_dir, 0o755)
+    # Readable again: the store recovers without a restart.
+    recovered = ProjectRegistry(tmp_path)
+    assert recovered.load_error is None
+    assert recovered.get_project_by_name("alpha") is not None
+
+
+def test_show_receipt_states_tags_and_missing_links() -> None:
+    """F5 + the related note: ``missing`` for a gone directory, ``tags:`` always."""
+    from local_operator.slash_commands import project_show_receipt
+
+    view: dict[str, Any] = {
+        "project": {
+            "name": "alpha",
+            "status": "active",
+            "description": "",
+            "progress": "",
+            "progress_updated_at": None,
+            "tags": ["infra", "q3"],
+            "milestones": [
+                {"name": "beta", "target_date": "2025-01-01", "completed_at": None},
+                {"name": 17},  # malformed: the reader prints it without a status
+            ],
+            "estimate": None,
+            "estimate_unit": "points",
+        },
+        "progress_stale": False,
+        "sessions": [{"session_id": "deadbeef0000", "exists": False, "title": "", "runtime": None}],
+    }
+    receipt = project_show_receipt(view)
+    assert "tags: infra, q3" in receipt
+    assert "- deadbeef0000 [missing]" in receipt
+    assert "[stopped]" not in receipt
+    assert "  - beta [overdue] target 2025-01-01" in receipt
+    assert "  - 17 [unknown] target —" in receipt
+
+
+@pytest.mark.asyncio
+async def test_picker_offers_the_delete_confirmation_row(tmp_path: Path) -> None:
+    """Finding 9: the picker carries the way into `delete`'s confirmation.
+
+    Rows exist once per opening, so the confirm variant is offered up front and
+    the typed name FILTERS it — exactly the row the user needs after typing a
+    name, and never for any other name.
+    """
+    from local_operator.tui.widgets.command_picker import argument_suggestions
+
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app.query_one(Editor).focus()
+        await _type(pilot, "/project delete ")
+        rows = _rows(app)
+        assert [name for name, _d, _det, _a in rows] == [
+            "delete alpha",
+            "delete beta",
+            "delete alpha yes",
+            "delete beta yes",
+        ]
+        # The name rows come FIRST: the empty-query default is a name, never a
+        # destructive command.
+        assert rows[0][3] is False
+        assert [alert for name, _d, _det, alert in rows if name.endswith(" yes")] == [
+            True,
+            True,
+        ]
+        # Typing the name filters to its own confirm row, and no other's.
+        typed = [
+            (name, choice)
+            for name, choice in argument_suggestions(
+                "delete al", [ArgumentChoice(n, d, detail=det, alert=a) for n, d, det, a in rows]
+            )
+        ]
+        names = [name for name, _choice in typed]
+        assert "delete alpha yes" in names
+        assert "delete beta yes" not in names

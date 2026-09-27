@@ -5687,12 +5687,11 @@ class ServingSessionHandle(SessionHandle):
         if command == "agent":
             return self._agent_slash(session, args, SlashResult)
         if command == "project":
-            # SLICE 1 STAND-IN, the TUI twin's shape: the listing answers from
-            # the store, every other reserved verb names the surfaces that act
-            # today. A command advertised as `authoritative_session` MUST be
-            # dispatchable here (tests/unit/session/runtime
-            # /test_capability_surface.py routes by that rule), and the
-            # full-page view ships in a later slice.
+            # Every reserved verb runs (slice 3), through the same runner the
+            # TUI's own `_cmd_project` calls. A command advertised as
+            # `authoritative_session` MUST be dispatchable here
+            # (tests/unit/session/runtime/test_capability_surface.py routes by
+            # that rule).
             return self._project_slash(session, args, SlashResult)
         if command == "mcp":
             return await self._mcp_slash(session, args, SlashResult, locality)
@@ -6355,11 +6354,17 @@ class ServingSessionHandle(SessionHandle):
         parts = arg.split(maxsplit=1)
         word = parts[0] if parts else ""
         rest = parts[1].strip() if len(parts) > 1 else ""
+        # The registry's OWN config dir: the composition reads the store and
+        # the session directories from one root, and on an attach whose config
+        # dir differs from this process's, the process-global one would compose
+        # a view of the wrong machine's sessions (agent review round 1,
+        # finding 11).
+        registry_dir = getattr(registry, "config_dir", None) or config_dir()
         text, style = run_project_slash_op(
             word,
             rest,
             registry=registry,
-            config_dir=config_dir(),
+            config_dir=registry_dir,
             session_id=str(getattr(session, "session_id", "") or "") or None,
         )
         return SlashResult(kind="notice", text=text, style=style)
