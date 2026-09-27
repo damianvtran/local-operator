@@ -637,7 +637,14 @@ async def test_a_multi_line_notice_rewraps_and_repins_through_a_resize() -> None
         # Folded, not damaged: every authored line still begins a row, and the
         # indented ones still carry their indent.
         assert narrow[0].startswith("  ✗ cannot tell how this install was")
-        assert "      uv tool upgrade local-operator" in narrow
+        # At 100 cells the rewritten suggestion is one row; at 46 it folds, its
+        # continuation carrying the indent — so the full line is asserted where
+        # it fits, and the exact pair of rows where it does not.
+        assert "      uv tool install --force local-operator" in wide
+        assert narrow[narrow.index("      uv tool install --force") :][:2] == [
+            "      uv tool install --force",
+            "      local-operator",
+        ]
 
         # `restate` and `retheme` take the same three steps around `_build`.
         block.restate("first\n  second indented", "warning")
