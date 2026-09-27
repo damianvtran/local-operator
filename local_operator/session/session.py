@@ -10505,6 +10505,25 @@ class Session:
         root = scratchpad_root(bound if isinstance(bound, (str, Path)) else None)
         return None if root is None else str(root)
 
+    def _session_dir(self) -> str | None:
+        """This session's DIRECTORY as a path string, or ``None``.
+
+        Derived FROM :meth:`_scratchpad_dir` (its parent) rather than from the
+        transcript a second time: the two must gate IDENTICALLY — an agent
+        directory has neither, and a derivation cannot disagree with itself.
+        The consumer is the ``eval`` tool's cross-process kernel marker
+        (``<session dir>/eval-kernel.json``): a runtime that restarts loses the
+        in-memory receipt that announced a kernel reset, so the first cell
+        after the restart reads this directory instead.
+
+        The directory is NOT created here, for the same reason the scratchpad
+        root is not: it is the transcript's own directory and exists (or not)
+        on the transcript's terms — a speculative runtime must leave nothing
+        on disk (``Transcript(defer_materialise=True)``).
+        """
+        scratchpad = self._scratchpad_dir()
+        return None if scratchpad is None else str(Path(scratchpad).parent)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -10517,6 +10536,17 @@ class Session:
             cwd=self._cwd,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
+            # The session's OWN directory: where the eval tool records its
+            # cross-process kernel marker. None wherever the scratchpad is
+            # None — derived from it, so the two gates cannot drift.
+            session_dir=self._session_dir(),
+            # A Session's eval kernel lives exactly as long as this runtime:
+            # the dispose hook this Session registers closes it, and the
+            # eval-side reaper must not second-guess that with a kernel-only
+            # clock (a busy session with a long gap between cells was losing
+            # its namespace mid-task). See the module docstring of
+            # ``local_operator/tools/eval.py``.
+            kernel_managed_by_session=True,
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
