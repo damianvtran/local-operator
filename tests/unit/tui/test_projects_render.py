@@ -30,7 +30,9 @@ NOW = 1_760_000_000.0
 DAY = 86400.0
 
 
-def _view(name: str = "alpha", sessions: list[dict[str, Any]] | None = None, **over: Any) -> dict:
+def _view(
+    name: str = "alpha", sessions: list[dict[str, Any]] | None = None, **over: Any
+) -> dict[str, Any]:
     project = {
         "id": f"id-{name}",
         "name": name,
@@ -55,7 +57,9 @@ def _view(name: str = "alpha", sessions: list[dict[str, Any]] | None = None, **o
     return {"project": project, "progress_stale": False, "sessions": sessions or []}
 
 
-def _session(session_id: str = "ab12cd34ef56", state: str = "stopped", **over: Any) -> dict:
+def _session(
+    session_id: str = "ab12cd34ef56", state: str = "stopped", **over: Any
+) -> dict[str, Any]:
     row = {
         "session_id": session_id,
         "exists": True,

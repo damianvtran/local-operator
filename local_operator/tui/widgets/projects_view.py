@@ -343,26 +343,32 @@ class ProjectsView(Vertical):
             (self._zoom_hint, " zoom", True) if self._view == "timeline" else None
         )
 
-        def plan(*leads: tuple[HintButton, str, bool] | None) -> list[tuple[HintButton, str, bool]]:
+        def leads_of(
+            *leads: tuple[HintButton, str, bool] | None,
+        ) -> list[tuple[HintButton, str, bool]]:
             return [lead for lead in leads if lead is not None]
 
-        all_leads = plan(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, zoom)
+        all_leads = leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, zoom)
         rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = [
             rung(all_leads, "back to conversation", state=True),
             rung(all_leads, "back to conversation", state=False),
             rung(all_leads, "back", state=False),
-            rung(plan(scroll, list_hint, board_hint, timeline_hint, refresh), "back", state=False),
-            rung(plan(scroll, list_hint, board_hint, timeline_hint), "back", state=False),
-            rung(plan(scroll, list_hint, board_hint), "back", state=False),
-            rung(plan(scroll, list_hint), "back", state=False),
-            rung(plan(scroll), "back", state=False),
-            rung(plan(), "back", state=False),
+            rung(
+                leads_of(scroll, list_hint, board_hint, timeline_hint, refresh),
+                "back",
+                state=False,
+            ),
+            rung(leads_of(scroll, list_hint, board_hint, timeline_hint), "back", state=False),
+            rung(leads_of(scroll, list_hint, board_hint), "back", state=False),
+            rung(leads_of(scroll, list_hint), "back", state=False),
+            rung(leads_of(scroll), "back", state=False),
+            rung(leads_of(), "back", state=False),
         ]
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
-        for plan, esc_label in rungs:
-            if self._measure_hints(plan, esc_label) <= width:
-                chosen = (plan, esc_label)
+        for leads, esc_label in rungs:
+            if self._measure_hints(leads, esc_label) <= width:
+                chosen = (leads, esc_label)
                 break
         plan, esc_label = chosen
         visible = {hint for hint, _label, _lead in plan}
@@ -450,7 +456,15 @@ class ProjectsView(Vertical):
 
     def rendered_rows(self) -> list[str]:
         """The page as plain strings — title, rule, canvas rows. Assertable."""
-        rows = [self._title.render().plain, self._rule.render().plain]
+
+        def plain(widget: Static) -> str:
+            # ``Widget.render()``'s return type is a union (str | Visual | Rich
+            # renderable); the page only ever hands it ``Text``, so read the
+            # plain form off whatever came back.
+            renderable = widget.render()
+            return str(getattr(renderable, "plain", "") or renderable)
+
+        rows = [plain(self._title), plain(self._rule)]
         if self._last is not None:
             rows.extend(text.plain for text in self._last.text.split("\n"))
         return rows

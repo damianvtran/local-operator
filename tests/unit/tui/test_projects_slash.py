@@ -335,6 +335,7 @@ def test_the_tui_show_page_and_the_mirror_receipt_read_one_composition(
 
     registry = _registry(tmp_path, "alpha")
     project = registry.get_project_by_name("alpha")
+    assert project is not None
     view = build_project_view(project, config_dir=tmp_path)
     receipt = project_show_receipt(view)
     assert "alpha [active]" in receipt

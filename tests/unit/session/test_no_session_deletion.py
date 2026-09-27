@@ -1614,6 +1614,11 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "widget.remove()",
     ),
     (
+        "local_operator/tui/app.py::OperatorApp._close_projects_view",
+        "<path>.remove",
+        "widget.remove()",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._close_settings_view",
         "<path>.remove",
         "widget.remove()",
