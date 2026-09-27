@@ -45,6 +45,7 @@ from textual.widgets import Static
 
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.projects_render import (
+    PROJECTS_MAX,
     TIMELINE_TIERS,
     RenderResult,
     aggregate_footer,
@@ -53,6 +54,7 @@ from local_operator.tui.projects_render import (
     render_project_board,
     render_project_list,
     render_project_timeline,
+    timeline_span,
 )
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
 
@@ -94,6 +96,13 @@ def _style_resolver() -> Callable[[str], Style]:
     styles = {
         "name": Style(color=color("fg"), bold=True),
         "status": Style(color=color("accent")),
+        # D4: per-status chips — `active` keeps the accent, `paused` warns,
+        # `done`/`archived` recede. One mapping, read by the list rows, the
+        # footer chip and the board.
+        "status_active": Style(color=color("accent")),
+        "status_paused": Style(color=color("warning")),
+        "status_done": Style(color=color("muted")),
+        "status_archived": Style(color=color("dim")),
         "cursor": Style(color=color("accent"), bold=True),
         "dim": Style(color=color("dim")),
         # A live session is the accent-of-success: the one fact the page exists
@@ -171,6 +180,13 @@ class ProjectsView(Vertical):
         self._view: str = "list"
         self._cursor: int = 0
         self._tier: str = "month"
+        #: Whether the tier above was chosen by hand (``+``/``-``) and, if so,
+        #: the dated span it was chosen for. A manual zoom survives a
+        #: recomposition while that span is unchanged; a changed span
+        #: re-derives the auto tier (the rule the zoom comments state, now
+        #: actually implemented — agent review round 1, F2).
+        self._tier_manual: bool = False
+        self._manual_span: tuple[str, str] | None = None
         self._updated_at: float | None = None
         #: Last render, kept for the geometry probes and rendered_rows().
         self._last: RenderResult | None = None
@@ -223,13 +239,19 @@ class ProjectsView(Vertical):
                 # The cursor only exists on the list canvas; showing a project
                 # means being ABLE to see it, so a `show` lands on the list.
                 self._view = "list"
-        self._cursor = max(0, min(self._cursor, max(len(self._views) - 1, 0)))
+        self._cursor = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
         if self._view == "timeline":
             # A recomposition can change the dated span (a new target date),
-            # and the auto tier exists to fit it; an explicit zoom is only kept
-            # while the span it was chosen for still fits.
-            self._tier = auto_timeline_tier(self._views)
+            # and the auto tier exists to fit it; an explicit zoom is kept
+            # while the span it was chosen for still fits (see `_choose_tier`).
+            self._tier = self._choose_tier()
         self._repaint()
+        # Reveal the highlighted row, and again once the first layout lands:
+        # the app seeds the data before mount, so the body may be zero-sized
+        # here. Without this a `show` on a store longer than the viewport left
+        # the cursor off-screen while the footer named it (QA Q2 / design D1).
+        self._scroll_cursor_into_view()
+        self.call_after_refresh(self._scroll_cursor_into_view)
 
     def focus_project(self, project_id: str) -> None:
         """Move the list cursor to a project (an already-open page, re-shown)."""
@@ -237,9 +259,45 @@ class ProjectsView(Vertical):
             project = view.get("project") if isinstance(view, dict) else None
             if isinstance(project, dict) and str(project.get("id")) == str(project_id):
                 self._view = "list"
-                self._cursor = index
+                self._cursor = max(0, min(index, max(self._painted_count() - 1, 0)))
                 self._repaint()
+                self._scroll_cursor_into_view()
+                self.call_after_refresh(self._scroll_cursor_into_view)
                 return
+
+    def _painted_count(self) -> int:
+        """Rows the list canvas actually paints — its own ``PROJECTS_MAX`` cap in.
+
+        Past the cap the canvas stops painting rows and names the overflow in
+        ONE truncation row, so a cursor beyond it would rest on a row the
+        canvas never draws and the footer would name a project no reader can
+        see anywhere (design round 1, D2). The cap is the renderer's own
+        constant, imported rather than copied, so the clamp cannot drift from
+        what is painted.
+        """
+        return max(0, min(len(self._views), PROJECTS_MAX))
+
+    def _span_key(self) -> tuple[str, str] | None:
+        """The dated span the timeline axis covers, as an ISO pair (or ``None``)."""
+        span = timeline_span(self._views)
+        if span is None:
+            return None
+        return (span[0].isoformat(), span[1].isoformat())
+
+    def _choose_tier(self) -> str:
+        """The tier to paint: the manual zoom while its span survives, else auto.
+
+        `r` (and any recomposition) must not discard a zoom the reader chose
+        when nothing about the span changed — the contradiction agent review
+        round 1 (F2) measured: `-` to month, `r`, and the page was back on
+        week. A span change re-derives the auto tier, which is the rule the
+        zoom comment always claimed.
+        """
+        if self._tier_manual and self._manual_span == self._span_key():
+            return self._tier
+        self._tier_manual = False
+        self._manual_span = None
+        return auto_timeline_tier(self._views)
 
     @property
     def tracked(self) -> int:
@@ -276,6 +334,9 @@ class ProjectsView(Vertical):
         self._canvas.styles.width = result.width
         self._canvas.styles.height = result.height
         self._paint_chrome()
+        # The hint's actionability depends on geometry only the layout knows;
+        # one deferred pass keeps it honest after the first frame (finding 8).
+        self.call_after_refresh(self._sync_scroll_hint)
 
     def _paint_chrome(self) -> None:
         muted = Style(color=theme_mod.semantic_color("muted"))
@@ -300,8 +361,12 @@ class ProjectsView(Vertical):
         self._rule.update(Text("─" * width, style=dim))
 
         if self._view == "list" and self._views:
-            index = max(0, min(self._cursor, len(self._views) - 1))
-            self._detail.update(detail_footer(self._views[index], style_for=_style_resolver()))
+            index = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
+            # The width: the footer sheds whole clauses to fit it instead of
+            # hard-clipping mid-word (UX round 1, U1).
+            self._detail.update(
+                detail_footer(self._views[index], style_for=_style_resolver(), width=width)
+            )
         else:
             tier = self._tier if self._view == "timeline" else None
             self._detail.update(
@@ -312,9 +377,13 @@ class ProjectsView(Vertical):
     def _paint_hints(self) -> None:
         """Lay out the footer hints, shedding WHOLE hints until the row fits.
 
-        The org-chart ladder, same rule: the affordances a reader needs most
-        (scroll, views, esc) survive, and ``esc`` is never dropped because it
-        is the only way out. Each rung is measured before it is committed.
+        The org-chart ladder, same rule: each rung is measured before it is
+        committed and ``esc`` is never dropped because it is the only way out.
+        What sheds first is the order's own statement: ``+/-`` (timeline only)
+        and ``r`` go before the view triplet, and ``↔↕ scroll`` — a gesture a
+        reader finds by trying an arrow — goes before ``3 timeline``/``v next``,
+        so the newest view types stay advertised on a narrow terminal (UX
+        round 1, U3).
         """
 
         def rung(
@@ -354,15 +423,28 @@ class ProjectsView(Vertical):
             rung(all_leads, "back to conversation", state=False),
             rung(all_leads, "back", state=False),
             rung(
-                leads_of(scroll, list_hint, board_hint, timeline_hint, refresh),
+                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh),
                 "back",
                 state=False,
             ),
-            rung(leads_of(scroll, list_hint, board_hint, timeline_hint), "back", state=False),
-            rung(leads_of(scroll, list_hint, board_hint), "back", state=False),
-            rung(leads_of(scroll, list_hint), "back", state=False),
-            rung(leads_of(scroll), "back", state=False),
-            rung(leads_of(), "back", state=False),
+            rung(
+                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt),
+                "back",
+                state=False,
+            ),
+            # `↔↕ scroll` sheds HERE, before any view key: a view the reader
+            # cannot discover is worse than a gesture they will try anyway.
+            rung(leads_of(list_hint, board_hint, timeline_hint, nxt), "back", state=False),
+            # …and the esc LABEL sheds before a view key too (the key itself
+            # never drops): at 60 columns `1/2/3 · v · esc` all fit as bare
+            # keys, and the dock still spells the full sentence
+            # (`Read-only · esc back`), so nothing is lost that a reader needs
+            # to leave the page (UX round 1, U3).
+            rung(leads_of(list_hint, board_hint, timeline_hint, nxt), "", state=False),
+            rung(leads_of(list_hint, board_hint, timeline_hint), "", state=False),
+            rung(leads_of(list_hint, board_hint), "", state=False),
+            rung(leads_of(list_hint), "", state=False),
+            rung(leads_of(), "", state=False),
         ]
         width = max(self.size.width - 2, 1)
         chosen = rungs[-1]
@@ -386,6 +468,9 @@ class ProjectsView(Vertical):
             self._state_hint,
         ):
             hint.display = hint in visible
+        # Arm the scroll hint against the geometry just painted; the deferred
+        # pass in `_repaint` re-arms it once the layout has settled.
+        self._sync_scroll_hint()
 
     def _measure_hints(self, plan: list[tuple[HintButton, str, bool]], esc_label: str) -> int:
         """Cell width of a candidate hint row, measured before it is painted."""
@@ -429,6 +514,19 @@ class ProjectsView(Vertical):
         # layout knows, so both repaint on resize. The canvas is
         # width-independent (it scrolls), so only the chrome moves.
         self._paint_chrome()
+        self.call_after_refresh(self._sync_scroll_hint)
+
+    def _sync_scroll_hint(self) -> None:
+        """Arm ``↔↕ scroll`` only while the body has somewhere to scroll.
+
+        ``HintButton.set_actionable`` exists for exactly this (its docstring
+        calls the alternative "the reported 'nothing happens when I click' bug
+        one step earlier"), and the sibling subagent page drives it the same
+        way. Cheap and idempotent, so it rides the chrome paint plus one
+        deferred pass for the post-layout geometry (agent review round 1,
+        finding 8: the hint lit on hover on a canvas that could not scroll).
+        """
+        self._scroll_hint.set_actionable(self._body.max_scroll_x > 0 or self._body.max_scroll_y > 0)
 
     # -- geometry probes (for tests / visual validation) --------------------
     @property
@@ -455,18 +553,27 @@ class ProjectsView(Vertical):
         return self._cursor
 
     def rendered_rows(self) -> list[str]:
-        """The page as plain strings — title, rule, canvas rows. Assertable."""
+        """The page as plain strings — title, rule, canvas rows, footer. Assertable.
+
+        The FOOTER rides last: its fit (U1) and its ``missing`` badge (F5) are
+        read here by tests rather than guessed from a frame.
+        """
 
         def plain(widget: Static) -> str:
-            # ``Widget.render()``'s return type is a union (str | Visual | Rich
-            # renderable); the page only ever hands it ``Text``, so read the
-            # plain form off whatever came back.
-            renderable = widget.render()
-            return str(getattr(renderable, "plain", "") or renderable)
+            # ``Static.render()`` returns a Visual, NOT the renderable it was
+            # updated with; the original content lives on ``content``. Read the
+            # plain form from whichever candidate carries it, so this helper
+            # works however Textual wires the two.
+            for candidate in (getattr(widget, "content", None), widget.render()):
+                text = getattr(candidate, "plain", None)
+                if text is not None:
+                    return str(text)
+            return ""
 
         rows = [plain(self._title), plain(self._rule)]
         if self._last is not None:
             rows.extend(text.plain for text in self._last.text.split("\n"))
+        rows.append(plain(self._detail))
         return rows
 
     # -- view switching -----------------------------------------------------
@@ -476,8 +583,9 @@ class ProjectsView(Vertical):
         self._view = view
         if view == "timeline":
             # An auto tier per composition: the axis exists to fit the data it
-            # was opened on, and a manual zoom survives until the span changes.
-            self._tier = auto_timeline_tier(self._views)
+            # was opened on, and a manual zoom survives until the span changes
+            # (`_choose_tier`).
+            self._tier = self._choose_tier()
         # The canvas is a different shape now; start the reader at its origin
         # rather than at a scroll offset computed for the previous canvas.
         self._body.scroll_to(x=0, y=0, animate=False)
@@ -503,6 +611,11 @@ class ProjectsView(Vertical):
         if tier not in TIMELINE_TIERS or tier == self._tier:
             return
         self._tier = tier
+        # A hand-chosen tier, remembered with the span it was chosen for: it
+        # survives a recomposition that leaves the span alone, and yields to
+        # the auto tier when the span changes (agent review round 1, F2).
+        self._tier_manual = True
+        self._manual_span = self._span_key()
         if self._view == "timeline":
             self._body.scroll_to(x=0, y=0, animate=False)
             self._repaint()
@@ -547,22 +660,37 @@ class ProjectsView(Vertical):
         """Move the list cursor, CLAMPED, then reveal it (reveal-then-act)."""
         if not self._views:
             return
-        position = max(0, min(self._cursor + delta, len(self._views) - 1))
+        position = max(0, min(self._cursor + delta, max(self._painted_count() - 1, 0)))
         if position == self._cursor:
             return
         self._cursor = position
         self._repaint()
         self._scroll_cursor_into_view()
 
+    def _usable_height(self) -> int:
+        """Rows the body can actually show — the h-scrollbar's row excluded.
+
+        ``max_scroll_y`` is computed as ``virtual - (container - bar)``, so the
+        reveal has to use the SAME arithmetic: on a canvas wider than the
+        viewport the horizontal bar paints over the content region's last row,
+        and a reveal that counted it parked the selected row underneath the bar
+        — invisible to the keyboard (design round 1, D1).
+        """
+        return max(
+            0,
+            self._body.container_size.height - self._body.scrollbar_size_horizontal,
+        )
+
     def _scroll_cursor_into_view(self) -> None:
         """Keep the cursor row inside the scrolled viewport.
 
         The body is a ScrollableContainer around ONE painted Static, so there
         is no child widget to call ``scroll_visible`` on — the offset is
-        computed from the row index directly. Guarded because the container has
-        no size until it is laid out.
+        computed from the row index directly, against the rows the body can
+        actually show. Guarded because the container has no size until it is
+        laid out.
         """
-        height = self._body.size.height
+        height = self._usable_height()
         if height <= 0:
             return
         offset = self._body.scroll_offset.y
@@ -572,7 +700,8 @@ class ProjectsView(Vertical):
             target = self._cursor - height + 1
         else:
             return
-        self._body.scroll_to(x=self._body.scroll_offset.x, y=max(0, target), animate=False)
+        target = max(0, min(target, self._body.max_scroll_y))
+        self._body.scroll_to(x=self._body.scroll_offset.x, y=target, animate=False)
 
     def action_scroll_left(self) -> None:
         self._body.scroll_left()
@@ -582,13 +711,13 @@ class ProjectsView(Vertical):
 
     def action_page_up(self) -> None:
         if self._view == "list":
-            self._move(-max(1, self._body.size.height))
+            self._move(-max(1, self._usable_height()))
             return
         self._body.scroll_page_up()
 
     def action_page_down(self) -> None:
         if self._view == "list":
-            self._move(max(1, self._body.size.height))
+            self._move(max(1, self._usable_height()))
             return
         self._body.scroll_page_down()
 
@@ -608,7 +737,8 @@ class ProjectsView(Vertical):
 
     def action_scroll_end(self) -> None:
         if self._view == "list":
-            self._move(len(self._views) - 1 - self._cursor)
+            # The cursor stops at the last PAINTED row (see `_painted_count`).
+            self._move(max(0, self._painted_count() - 1 - self._cursor))
             return
         # Bottom-RIGHT, the org chart's explicit maxima: ``scroll_end`` reaches
         # the bottom-LEFT on this Textual, and the wide axis is the one a

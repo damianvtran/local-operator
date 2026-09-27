@@ -44,16 +44,20 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
+from local_operator.projects import PROJECT_ROW_CAP
+from local_operator.projects import milestone_state as derived_milestone_state
+from local_operator.projects import reported_age
+
 #: Cap on projects a single canvas renders. Past it the canvas names the
 #: overflow in one truncation row; the cap exists so one runaway store cannot
 #: make a keystroke path paint unbounded text (the settings list's discipline).
 PROJECTS_MAX = 200
 
-#: One list row stays scannable, the same 160-cell budget the project tool's
-#: own listing uses (``tools/project_tool.py::_ROW_CAP``). Duplicated as a
-#: value, not imported: this module is on the TUI's import path and the tool
-#: module drags the harness with it. The two move together.
-LIST_ROW_CAP = 160
+#: One list row stays scannable, the same budget the project tool's own listing
+#: uses — THE value lives in the store module (``projects.PROJECT_ROW_CAP``) and
+#: every surface imports it, so no two surfaces can truncate the same row at two
+#: widths (agent review round 1, F4).
+LIST_ROW_CAP = PROJECT_ROW_CAP
 
 #: Board columns in their fixed order; ``archived`` joins only when non-empty
 #: (the desktop board's rule, kept identical so the two boards agree).
@@ -117,26 +121,12 @@ def _row(view: dict[str, Any]) -> dict[str, Any]:
 def age_text(updated_at: float | None, *, now: float | None = None) -> str | None:
     """``3s``/``5m``/``2h``/``1d`` age of a timestamp, or ``None``.
 
-    The age arithmetic lives HERE (not per renderer) so the list, the board and
-    the detail footer cannot disagree about how old a progress line is. The
-    90 s / 90 min / 48 h cut points are the project tool's own (``_reported_age``
-    in ``tools/project_tool.py``) — when they move, they move together.
+    Thin alias for :func:`local_operator.projects.reported_age` — THE age
+    arithmetic, one copy (the 90 s / 90 min / 48 h cut points live there), so
+    the list, the board, the detail footer, the terminal listing and the
+    project tool cannot disagree about how old a progress line is.
     """
-    if updated_at is None:
-        return None
-    moment = now
-    if moment is None:
-        import time
-
-        moment = time.time()
-    age = max(0.0, moment - updated_at)
-    if age < 90:
-        return f"{int(age)}s"
-    if age < 5400:
-        return f"{int(age // 60)}m"
-    if age < 172800:
-        return f"{int(age // 3600)}h"
-    return f"{age / 86400:.0f}d"
+    return reported_age(updated_at, now=now)
 
 
 def progress_age_text(view: dict[str, Any], *, now: float | None = None) -> str | None:
@@ -179,6 +169,34 @@ def milestone_counts(project: dict[str, Any]) -> str:
     milestones = project.get("milestones") or []
     done = sum(1 for m in milestones if isinstance(m, dict) and m.get("completed_at"))
     return f"M {done}/{len(milestones)}"
+
+
+def _milestone_style(style_for: StyleFor, state: str) -> Style:
+    """Colour for a derived milestone state — ONE treatment, every surface.
+
+    ``overdue`` is the danger tone everywhere: the footer used to paint the
+    same late milestone warning-amber while the timeline painted it red, so
+    "red = late" did not transfer between two views of one page (design
+    round 1, D3) — both now read this mapping, and so does the board.
+    """
+    if state == "completed":
+        return style_for("milestone_done")
+    if state == "overdue":
+        return style_for("milestone_late")
+    # `milestone_due` (muted), the same token the timeline's `◇` uses — the
+    # footer and the timeline agree about every derived milestone state.
+    return style_for("milestone_due")
+
+
+def _status_style(style_for: StyleFor, status: str) -> Style:
+    """Colour for a project's status chip — ONE mapping (design round 1, D4).
+
+    ``active`` keeps the accent every other "running" chip on the page uses,
+    ``paused`` takes the warning tone, and ``done``/``archived`` recede — so
+    the colour channel carries the scan the page exists for instead of three
+    identical green badges.
+    """
+    return style_for(f"status_{status or 'active'}")
 
 
 def _sessions_text(view: dict[str, Any]) -> str:
@@ -287,7 +305,8 @@ def _list_row(
     row = Text(no_wrap=True)
     row.append("▸ " if selected else "  ", style=style_for("cursor") if selected else Style())
     row.append(str(project.get("name") or "(unnamed)"), style=style_for("name"))
-    row.append(f" [{project.get('status') or 'active'}]", style=style_for("status"))
+    status = str(project.get("status") or "active")
+    row.append(f" [{status}]", style=_status_style(style_for, status))
     extras: list[tuple[str, str]] = []
     estimate = estimate_text(project)
     if estimate:
@@ -311,9 +330,12 @@ def _list_row(
         row.append(" · ", style=style_for("dim"))
         tail = f'"{summary}"'
         if cell_len(row.plain) + cell_len(tail) > LIST_ROW_CAP:
-            # Same 160-cell row budget the tool's listing uses: the operator
-            # listing and the model listing truncate the same way so a reader
-            # comparing them sees the same row, not two spellings of it.
+            # The shared row budget (``projects.PROJECT_ROW_CAP``) in CELLS: the
+            # DERIVED rules — age, cap, milestone status — come from the store
+            # module so the operator's and the model's surfaces cannot disagree
+            # about them; the rows themselves legitimately differ by surface
+            # (this one adds the cursor marker and the live count, the tool
+            # words its session field differently).
             tail = tail[: max(1, LIST_ROW_CAP - cell_len(row.plain) - 1)].rstrip() + "…"
         row.append(tail, style=style_for("dim"))
     return row
@@ -526,11 +548,21 @@ def _timeline_row(
 def _timeline_axis(
     start: date, end: date, *, axis_cells: int, tier: str, today: date, style_for: StyleFor
 ) -> Text:
-    """The label row: a unit label at each unit start that is a month (or quarter)."""
+    """The label row: a unit label at each unit start that is a month (or quarter).
+
+    A label is placed only when the WHOLE label fits inside the canvas with a
+    blank cell between it and its neighbour — the guard used to allow a label
+    to start on the very next cell, so a full-year month axis read
+    ``JanAprJulOct`` and the last label was clipped to a single character at
+    the edge (agent review round 1 finding 10 / QA Q3). The first label of
+    each new year carries a two-digit year cue (design round 1, D6): an
+    18-month span otherwise reads ``Jan … Jan`` with nothing to tell them
+    apart.
+    """
     row = Text(no_wrap=True)
     row.append(" " * TIMELINE_NAME_WIDTH)
     row.append(" ", style=style_for("dim"))
-    labels: list[tuple[int, str]] = [(0, _timeline_unit_label(start, tier))]
+    labels: list[tuple[int, str, int]] = [(0, _timeline_unit_label(start, tier), start.year)]
     cursor = _timeline_unit_start(start, tier)
     while cursor <= end:
         if tier == "week":
@@ -543,7 +575,7 @@ def _timeline_axis(
             break
         if tier == "quarter":
             cell = _timeline_cell_index(cursor, start, tier)
-            labels.append((cell, _timeline_unit_label(cursor, tier)))
+            labels.append((cell, _timeline_unit_label(cursor, tier), cursor.year))
         elif tier == "week":
             # One label per month the axis crosses: a label per week would be
             # unreadable at one cell per week, and a month is the coarsest fact
@@ -551,22 +583,27 @@ def _timeline_axis(
             # exactly when the previous week sat in a different month.
             if cursor.month != (cursor - timedelta(days=7)).month:
                 cell = _timeline_cell_index(cursor.replace(day=1), start, tier)
-                labels.append((cell, cursor.strftime("%b")))
+                labels.append((cell, cursor.strftime("%b"), cursor.year))
         else:
             cell = _timeline_cell_index(cursor, start, tier)
-            labels.append((cell, cursor.strftime("%b")))
+            labels.append((cell, cursor.strftime("%b"), cursor.year))
     cells = [" "] * axis_cells
     placed = -1
+    emitted_year: int | None = None
     text = Text(no_wrap=True)
     text.append(" " * TIMELINE_NAME_WIDTH)
     text.append(" ", style=style_for("dim"))
-    for cell, label in labels:
-        if cell <= placed or cell >= axis_cells:
+    for cell, label, year in labels:
+        if emitted_year is not None and year != emitted_year:
+            label = f"{label} '{year % 100:02d}"
+        if cell + len(label) > axis_cells:
+            continue
+        if placed >= 0 and cell <= placed + 1:
             continue
         for offset, char in enumerate(label):
-            if cell + offset < axis_cells:
-                cells[cell + offset] = char
+            cells[cell + offset] = char
         placed = cell + len(label) - 1
+        emitted_year = year
     today_cell = _timeline_cell_index(today, start, tier)
     if 0 <= today_cell < axis_cells and cells[today_cell] == " ":
         # The marker runs through every DATA row; on the axis it yields to a
@@ -670,20 +707,23 @@ def today_iso(now: float | None = None) -> str:
 def milestone_state(milestone: dict[str, Any], *, today: str | None = None) -> str:
     """``completed | overdue | upcoming`` — the store's derived-status rule.
 
-    A derived value, never stored (``projects.milestone_status`` is the model
-    side of the same rule): completion wins; a past target is overdue; else
-    upcoming.
+    Delegates to :func:`local_operator.projects.milestone_state`, which the
+    model side (:func:`projects.milestone_status`) also calls: one rule for
+    both shapes, so a footer's colour and the tool's reported status cannot
+    disagree about one milestone. Tolerant of malformed dates for the reason
+    stated there — a canvas frame must not crash on a bad row.
     """
-    if milestone.get("completed_at"):
-        return "completed"
-    target = str(milestone.get("target_date") or "")
-    if target and target < (today or today_iso()):
-        return "overdue"
-    return "upcoming"
+    return derived_milestone_state(
+        milestone.get("completed_at"), milestone.get("target_date"), today=today
+    )
 
 
 def detail_footer(
-    view: dict[str, Any], *, now: float | None = None, style_for: StyleFor | None = None
+    view: dict[str, Any],
+    *,
+    now: float | None = None,
+    style_for: StyleFor | None = None,
+    width: int | None = None,
 ) -> Text:
     """``progress + milestones + session rollup`` for the highlighted project.
 
@@ -693,65 +733,139 @@ def detail_footer(
     linked session's runtime state beside what it is carrying (subagent and
     todo counts when the store knows them). ``null`` counts are OMITTED, never
     rendered as zeroes.
+
+    ``width`` fits the line to the space the page actually has: clauses are
+    shed WHOLE, tail-first among equals, in a fixed preference order, and the
+    row never clips mid-word — the Rich ``ellipsis`` this Text declares is
+    inert under the widget's default fold, so the fitting is done here
+    (UX round 1, U1). The order keeps the footer's stated purpose longest:
+    the identity always, the milestones and the session rollup before the
+    (long, and duplicated by the canvas row) progress body. When even the
+    identity does not fit it is ellipsized explicitly, never cut silently.
     """
     resolver = _styles(style_for)
     project = _row(view)
-    text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(str(project.get("name") or "(unnamed)"), style=resolver("name"))
-    text.append(f" [{project.get('status') or 'active'}]", style=resolver("status"))
+
+    def chip(status: str) -> Style:
+        # D4: one mapping, every surface. `active` keeps the accent every other
+        # "running" chip uses; `paused` takes the warning tone; `done` and
+        # `archived` recede — the colour channel then carries the scan the page
+        # exists for instead of three identical green badges.
+        return resolver(f"status_{status or 'active'}")
+
+    clauses: dict[str, Text] = {}
+    identity = Text(no_wrap=True)
+    status = str(project.get("status") or "active")
+    identity.append(str(project.get("name") or "(unnamed)"), style=resolver("name"))
+    identity.append(f" [{status}]", style=chip(status))
+    clauses["identity"] = identity
+
+    progress = Text(no_wrap=True)
     age = progress_age_text(view, now=now)
     if age is None:
-        text.append("  ·  progress: none recorded", style=resolver("dim"))
+        progress.append("progress: none recorded", style=resolver("dim"))
     else:
         stale = " · stale" if view.get("progress_stale") else ""
         by = str(project.get("progress_reported_by") or "")
         reporter = f" by {by}" if by else ""
-        text.append(f"  ·  progress reported {age} ago{reporter}{stale}: ", style=resolver("dim"))
-        text.append(str(project.get("progress") or ""))
+        progress.append(f"progress reported {age} ago{reporter}{stale}: ", style=resolver("dim"))
+        progress.append(str(project.get("progress") or ""))
+    clauses["progress"] = progress
+
+    milestones = Text(no_wrap=True)
     if project.get("milestones"):
-        text.append("  ·  ", style=resolver("dim"))
-        text.append(milestone_counts(project), style=resolver("dim"))
+        milestones.append(milestone_counts(project), style=resolver("dim"))
         today = today_iso(now)
         for milestone in project["milestones"][:3]:
             if not isinstance(milestone, dict):
                 continue
             state = milestone_state(milestone, today=today)
-            text.append(
+            milestones.append(
                 f" · {milestone.get('name')} [{state}]",
-                style=resolver("stale") if state == "overdue" else resolver("dim"),
+                style=_milestone_style(resolver, state),
             )
+    clauses["milestones"] = milestones
+
+    sessions = Text(no_wrap=True)
     rows_value = view.get("sessions")
     rows: list[Any] = rows_value if isinstance(rows_value, list) else []
-    text.append("  ·  ", style=resolver("dim"))
     if not rows:
-        text.append("no linked sessions", style=resolver("dim"))
+        sessions.append("no linked sessions", style=resolver("dim"))
     else:
-        text.append("sessions: ", style=resolver("dim"))
+        sessions.append("sessions: ", style=resolver("dim"))
         bits: list[str] = []
         for row in rows[:4]:
             if not isinstance(row, dict):
                 continue
             session_row: dict[str, Any] = row
+            session_id = session_row.get("session_id")
+            if session_row.get("exists") is False:
+                # The link is stale — say so rather than "stopped", which
+                # would be a wrong statement about a session that is gone
+                # (agent review round 1, F5; GUIDE.md's `missing` promise).
+                bits.append(f"{session_id} [missing]")
+                continue
             runtime_value = session_row.get("runtime")
             runtime: dict[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
             state = str(runtime.get("state") or "stopped")
             busy = ", busy" if runtime.get("busy") else ""
-            bit = f"{session_row.get('session_id')} [{state}{busy}]"
+            bit = f"{session_id} [{state}{busy}]"
             subagents_value = session_row.get("subagents")
             subagents: dict[str, Any] = subagents_value if isinstance(subagents_value, dict) else {}
-            if subagents:
-                running = int(subagents.get("running") or 0)
-                settled = int(subagents.get("settled") or 0)
+            if subagents.get("running") is not None and subagents.get("settled") is not None:
+                running = int(subagents["running"])
+                settled = int(subagents["settled"])
                 bit += f" {running} running/{settled} settled"
             todos_value = session_row.get("todos")
             todos: dict[str, Any] = todos_value if isinstance(todos_value, dict) else {}
-            if isinstance(todos, dict):
-                bit += f" · todos {todos.get('open')}/{todos.get('total')}"
+            # BOTH values must exist: a snapshot-less session carries the key
+            # with null counts, and `todos None/None` is user-visible junk
+            # (UX round 1, U2 — the receipt path omits it; so does this now).
+            if todos.get("open") is not None and todos.get("total") is not None:
+                bit += f" · todos {todos['open']}/{todos['total']}"
             bits.append(bit)
-        text.append(" · ".join(bits))
+        sessions.append(" · ".join(bits))
         if len(rows) > 4:
-            text.append(f" · +{len(rows) - 4} more", style=resolver("dim"))
-    return text
+            sessions.append(f" · +{len(rows) - 4} more", style=resolver("dim"))
+    clauses["sessions"] = sessions
+
+    order = ("identity", "progress", "milestones", "sessions")
+    # Preference ladder, longest first. Every rung keeps the identity; the
+    # FULL rung is preferred whenever it fits, and each rung below sheds the
+    # clause whose information survives elsewhere first (the progress age is
+    # also on the canvas row; the rollup counts are too), so a narrow terminal
+    # loses the least.
+    rungs = (
+        order,
+        order[:3],
+        ("identity", "milestones", "sessions"),
+        ("identity", "milestones"),
+        ("identity",),
+    )
+
+    def compose(keys: tuple[str, ...]) -> Text:
+        row_text = Text(no_wrap=True)
+        for index, key in enumerate(keys):
+            if index:
+                row_text.append("  ·  ", style=resolver("dim"))
+            row_text.append_text(clauses[key])
+        if len(keys) < len(order):
+            # Say that more exists; a footer that stopped at a clause boundary
+            # with no marker reads as if it were the whole story.
+            row_text.append(" …", style=resolver("dim"))
+        return row_text
+
+    if width is None:
+        return compose(order)
+    fitted = compose(order)
+    for keys in rungs:
+        candidate = compose(keys)
+        if cell_len(candidate.plain) <= width:
+            fitted = candidate
+            break
+    if cell_len(fitted.plain) > width:
+        fitted.truncate(width, overflow="ellipsis")
+    return fitted
 
 
 def aggregate_footer(

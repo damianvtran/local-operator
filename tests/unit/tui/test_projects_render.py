@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from rich.style import Style
+
 from local_operator.tui.projects_render import (
     BOARD_CARDS_MAX,
     BOARD_COLUMN_WIDTH,
@@ -367,3 +369,146 @@ def test_aggregate_footer_counts_projects_and_live_sessions() -> None:
     assert "1 active" in text and "1 paused" in text and "1 done" in text
     assert "1 live session" in text
     assert "zoom: month" in text
+
+
+# -- the axis, the footer and the shared rules (remediation round 1) ----------
+
+
+def test_axis_labels_never_touch_and_never_clip() -> None:
+    """QA Q3 / review finding 10: a label needs a blank cell and the whole label.
+
+    The guard used to allow a label to start on the very next cell after its
+    neighbour (``MayAugN``) and to clip the last label at the canvas edge.
+    """
+    views = [_view("alpha", start_date="2026-01-01", target_date="2026-12-31")]
+    result = render_project_timeline(views, tier="month")
+    axis = result.text.plain.split("\n")[0][TIMELINE_NAME_WIDTH + 1 :]
+    assert "Jan " in axis and "May " in axis and "Sep " in axis
+    # No label starts on the cell right after another's end (and none is
+    # truncated): every present label is followed by a blank cell.
+    assert "Apr" not in axis and "Aug" not in axis  # would have touched their neighbours
+
+
+def test_axis_marks_the_first_label_of_each_new_year() -> None:
+    """Design D6: an 18-month span otherwise reads ``Jan … Jan``."""
+    month_views = [_view("alpha", start_date="2026-05-01", target_date="2027-11-30")]
+    axis = render_project_timeline(month_views, tier="month").text.plain.split("\n")[0]
+    assert "'27" in axis
+    # Quarter labels are six cells wide once cued, so the span gives them room.
+    quarter_views = [_view("alpha", start_date="2026-01-01", target_date="2028-12-31")]
+    quarter = render_project_timeline(quarter_views, tier="quarter").text.plain.split("\n")[0]
+    assert "'27" in quarter
+
+
+def _long_footer_view() -> dict[str, Any]:
+    return _view(
+        "annotator-overhaul",
+        progress="prototype landed; wiring the beta cut-over and the review gate",
+        progress_updated_at=NOW - 3,
+        progress_reported_by="fa11bacc0001",
+        milestones=[
+            {"name": "prototype", "target_date": "2026-09-01", "completed_at": "2026-09-02"},
+            {"name": "beta", "target_date": "2026-12-01", "completed_at": None},
+        ],
+        sessions=[_session("fa11bacc0001", "live", todos={"open": 1, "total": 2})],
+    )
+
+
+def test_detail_footer_sheds_whole_clauses_to_fit() -> None:
+    """UX U1: the footer fits its width by dropping clauses, never mid-word."""
+    view = _long_footer_view()
+    full = detail_footer(view, now=NOW)
+    assert "prototype" in full.plain and "sessions:" in full.plain
+    assert "\u2026" not in full.plain  # no "more exists" marker on the full rung
+    # 148 cells: identity + milestones + rollup fit; the progress body sheds.
+    fitted = detail_footer(view, now=NOW, width=148)
+    assert "sessions: fa11bacc0001 [live]" in fitted.plain
+    assert "prototype [completed]" in fitted.plain
+    assert "prototype landed" not in fitted.plain
+    assert fitted.plain.endswith("\u2026")
+    # 98 cells: milestones survive, the rollup sheds (its counts are on the row).
+    narrow = detail_footer(view, now=NOW, width=98)
+    assert "prototype [completed]" in narrow.plain
+    assert "sessions:" not in narrow.plain
+    assert not narrow.plain.endswith(" ")
+    # Every rung is a whole-clause prefix: no word is cut mid-way.
+    for fitted_text in (fitted, narrow):
+        for clause in fitted_text.plain.split("  \u00b7  "):
+            assert clause == clause.strip()
+        assert "prototy " not in fitted_text.plain
+
+
+def test_detail_footer_truncates_explicitly_when_even_the_identity_overflows() -> None:
+    """A name longer than the page is ellipsized, never silently cut."""
+    view = _view("x" * 120)
+    narrow = detail_footer(view, now=NOW, width=20)
+    assert narrow.plain.endswith("\u2026")
+    assert len(narrow.plain) <= 20
+
+
+def test_detail_footer_omits_unknown_todo_counts() -> None:
+    """UX U2: ``todos`` with null counts is omitted, not printed as ``None/None``."""
+    view = _view("tiny", sessions=[_session("fa11bacc0001", "live", todos={})])
+    text = detail_footer(view, now=NOW, width=400)
+    assert "todos" not in text.plain
+    known = _view(
+        "tiny", sessions=[_session("fa11bacc0001", "live", todos={"open": 3, "total": 5})]
+    )
+    assert "todos 3/5" in detail_footer(known, now=NOW, width=400).plain
+
+
+def test_detail_footer_marks_a_missing_session() -> None:
+    """F5 / GUIDE: a linked session whose directory is gone renders ``missing``."""
+    view = _view("stale-link", sessions=[_session("deadbeef0000", exists=False, todos=None)])
+    text = detail_footer(view, now=NOW, width=400).plain
+    assert "deadbeef0000 [missing]" in text
+    assert "[stopped]" not in text
+
+
+def test_footer_overdue_milestone_uses_the_late_token() -> None:
+    """D3: one derived state, one colour — the timeline's ``!`` red, not amber."""
+    seen: list[str] = []
+
+    def resolve(key: str) -> Any:
+        seen.append(key)
+        return Style()
+
+    view = _view(
+        "late",
+        milestones=[{"name": "beta", "target_date": "2025-06-01", "completed_at": None}],
+    )
+    detail_footer(view, now=NOW, style_for=resolve, width=400)
+    assert "milestone_late" in seen
+    assert "stale" not in seen
+
+
+def test_status_chips_use_the_per_status_styles() -> None:
+    """D4: the colour channel carries the scan — paused/done are not accent."""
+    seen: list[str] = []
+
+    def resolve(key: str) -> Any:
+        seen.append(key)
+        return Style()
+
+    result = render_project_list(
+        [_view("alpha"), _view("beta", status="paused"), _view("gamma", status="done")],
+        cursor=0,
+        style_for=resolve,
+    )
+    assert result.text.plain.count("[active]") == 1
+    assert "status_active" in seen and "status_paused" in seen and "status_done" in seen
+
+
+def test_truncate_row_caps_cells_not_characters() -> None:
+    """F4: the cap bounds what the reader SEES — a CJK row wraps no more."""
+    from rich.cells import cell_len
+
+    from local_operator.projects import PROJECT_ROW_CAP, truncate_row
+
+    row = "漢" * 120
+    capped = truncate_row(row)
+    assert capped.endswith("\u2026")
+    assert cell_len(capped) <= PROJECT_ROW_CAP
+    # The point of the fix: the CAP is in cells, so the row is 79 glyphs, not
+    # 159 characters — a 160-character CJK row wrapped to three visual lines.
+    assert len(capped) == 80
