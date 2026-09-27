@@ -111,9 +111,13 @@ def render_broker_error(
             "usual failover to another of your own logins is already running."
         )
     if error.code == "interactive_required":
+        # "can run", not "has been asked to": nothing asks the owner (review round 2, M3 —
+        # the design's §4.7 ``credential_repair`` op is not built, which is what the
+        # amended row records). A sentence promising a request nobody sent is the same
+        # class of drift the amendment exists to remove.
         return (
             f"'{label}' needs an interactive sign-in on {owner} before it can be lent out; "
-            f"the operator there has been asked to run '{login}'."
+            f"the operator there can run '{login}'."
         )
     if error.code == "epoch_stale":
         return (
@@ -174,6 +178,41 @@ def _generic(error: BrokerError, *, label: str, owner: str, login: str) -> str:
     )
 
 
+def render_borrowed_signin(owner: str, name: str) -> str:
+    """The borrower's line when an MCP server refuses a BROKERED sign-in.
+
+    WHY THIS EXISTS (review round 1, R1 — audit round 2's F5). ``_auth_required_text``
+    answered every 401-without-a-local-grant with ``/mcp login <name> to authorize``,
+    and on a BORROWING device that command is wrong twice over: a headless borrower
+    cannot open a browser at all, and a borrower with one creates a LOCAL grant that
+    wins over the borrow (``manager._brokered_mcp_auth``'s local-wins rule) — a silent
+    account switch. The sign-in this failure is about lives on ``owner``, so the line
+    names the owning device and puts the command THERE.
+
+    Short on purpose: this string is the tail of the toast's ``failed: <name> — …``,
+    whose budget has already paid for the label — measured at the widest card as 56
+    cells (``TOAST_MAX_WIDTH 60 - TOAST_PADDING_CELLS 2`` minus the detail row's own
+    2), of which the label spends 17 for ``linear`` (review round 2, M1: the first
+    version of this sentence was 55 cells and composed into a 72-cell row, so the
+    command the operator was told to run was cut to ``/mcp l…``).
+
+    The COMPOSED row is the contract, not this string: 38 cells here and 55 composed
+    for the canonical pair (19-cell device name ``damians-MacBook-Pro``, 6-cell
+    server ``linear``), which fits. Longer names do not, and then
+    ``toast._fit_failure_line`` keeps the OWNER and the command's HEAD and sheds the
+    server name the command repeats from the row's own label —
+    ``failed: launchdarkly — damians-MacBook-Pro: /mcp login …``, 56 cells against the
+    widest card's budget (design round 1, D1: the owner is WHERE the sign-in is, so a
+    row that sheds it prints the local instruction this family exists to replace,
+    while the elided argument is the one part the row already carries in its label).
+    Only below THAT does the command outrank the owner, and then it is the command
+    base printed (design round 1, D2). The owner still leads whenever both fit,
+    because the command is only meaningful on that device: a reader who cannot see
+    WHERE it runs may run it here.
+    """
+    return f"{owner}: /mcp login {name}"
+
+
 def render_success(provider: str, owner_name: str, *, cached: bool = False) -> str:
     """What `lop network credential ... --json`-less output says about a live borrow."""
     verb = "using the borrowed" if cached else "borrowed"
@@ -183,8 +222,27 @@ def render_success(provider: str, owner_name: str, *, cached: bool = False) -> s
     )
 
 
-#: The owner-side toast when a peer needs an interactive sign-in the operator must
-#: perform. One line, because it is raised beside whatever they were doing.
+#: The WIRE DIAGNOSTIC an owner sends with an ``interactive_required`` refusal.
+#:
+#: WHAT IT IS NOT: the sentence the borrower's operator reads. Since review round 1
+#: (audit round 2, F1) the requester renders EVERY code from this module, so an
+#: owner's own words reach a person only through :func:`_generic`'s parenthetical,
+#: where they are the detail of a code this build cannot classify. This string's
+#: reader is therefore a human reading a wire capture or the owner's logs, not a
+#: session's operator.
+#:
+#: The "owner-side toast" a first draft of this docstring described does not exist:
+#: the design's §4.7 row asks for a ``credential_repair`` op that raises a durable
+#: notice on the owning device, and NO SUCH OP IS BUILT (grep ``credential_repair``:
+#: nothing outside that design row). What the owner has today is the
+#: ``credential.report`` audit record written beside this refusal, and what the
+#: borrower has is the ``interactive_required`` sentence in
+#: :func:`render_broker_error` — which names the owner and the command to run there,
+#: and is the reason the composed MCP failure line can be truthful without a repair
+#: op.
+#:
+#: ``key`` is the placement key (``mcp:<url>`` or a provider name); the quoting is
+#: deliberate, because the operator pastes the command.
 def render_repair_notice(peer_name: str, key: str) -> str:
     is_mcp = key.startswith("mcp:")
     verb = f"/mcp login {key[4:]}" if is_mcp else f"/login {key}"

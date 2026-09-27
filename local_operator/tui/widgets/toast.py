@@ -211,6 +211,45 @@ def _network_group_line(names: list[str], max_cells: int) -> str:
     return truncate_cells(counted, max(1, max_cells))
 
 
+def _borrowed_signin_parts(text: str, name: str) -> tuple[str, str] | None:
+    """``(owner, verb)`` from a BORROWED-SIGN-IN line, or ``None`` for any other text.
+
+    The shape is ``"<owner>: /mcp login <name>"`` — a device name, a colon, then a
+    command that is only valid ON that device
+    (``network.credentials.messages.render_borrowed_signin``). Returned as the owner
+    and the VERB rather than as one string, because the rungs below the whole-pair fit
+    keep the owner and the verb while shedding the server name the command repeats
+    from the row's own label.
+
+    WHY A SHAPE TEST AND NOT A FLAG (review round 2, M1): the composer is called with
+    ``(name, text, budget)`` and nothing else, and the family is the only text that
+    puts a command after a colon-prefixed head. The recognition is deliberately TIGHT
+    (exactly one space-free token, ``": "``, then the command lead) so no existing row
+    can be re-shaped by accident: every other family either starts with the command
+    (rungs 2/3 own those), starts with the ``network: `` marker, or carries no
+    ``/mcp `` at all — and a text that merely MENTIONS a command later is left to the
+    backstop, which is what it had before this rung existed.
+
+    THE DESIGN ROUND TIGHTENED IT ONCE MORE, and the rewrite is why. The rungs below
+    REWORD this tail rather than only choosing how much of it to show, so a text that
+    merely LOOKED like the family — ``note: /mcp login other`` — would have had its
+    words reshuffled by a rung written for a different failure. The command must
+    therefore be exactly this row's own ``/mcp login <name>``: the composer is handed
+    the failure dict's key and ``_auth_failure_text`` composes the text with that same
+    name, so the rewrite is reachable only for the family's real spelling. Comparing
+    the WHOLE command (rather than taking its last token as the argument) keeps that
+    exact for a name that itself contains a space, where a token split would read the
+    name's last word as the argument and the rank above it as the verb.
+    """
+    head, sep, command = text.partition(": ")
+    if not sep or not head or " " in head:
+        return None
+    verb = f"{_COMMAND_LEAD}login"
+    if command != f"{verb} {name}":
+        return None
+    return head, verb
+
+
 def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
     """``failed: <name> — <text>``, composed against the card's real budget.
 
@@ -262,6 +301,18 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
       not fit (a 51-cell terminal has a 43-cell card, exactly the width of
       ``failed: minerva-qa — /mcp reauth minerva-qa``). Without this rung the
       clamp cut the name's last character — the same D11 defect, one cell over.
+    * **The borrowed-sign-in ladder** — the one family whose command does NOT lead
+      its text: ``"<owner>: /mcp login <name>"`` (``render_borrowed_signin``, review
+      round 2 M1). Its tail cannot be shrunk the way rung 2's can, because both halves
+      are facts a borrower needs: the owner is WHERE the sign-in is, and a command
+      with no owner is the local instruction this family exists to replace (a local
+      grant silently wins over the borrow), while the server name the command ends on
+      is already printed by the row's own label. So below the whole-pair fit the row
+      keeps the owner and the command's head and drops that repeat
+      (``failed: launchdarkly — damians-MacBook-Pro: /mcp login …``, design round 1,
+      D1), and only when not even THAT fits does the command outrank the owner
+      (``failed: linear — /mcp login linea…``, design round 1, D2 — the row base
+      printed, and the reason both findings are one fix).
     * **Backstop** — the clamp, for a text that is not a command-with-reason
       (every plain diagnostic, the D10 challenge line, a 200-cell error) and for
       a name so long that not even the command fits on the row. Never worse than
@@ -293,6 +344,35 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
         for shed in (f"{label}{command}…", f"{label}{command}"):
             if cell_len(shed) <= max_cells:
                 return shed
+    borrowed = _borrowed_signin_parts(text, name)
+    if borrowed is not None:
+        # THE BORROWED-SIGN-IN LADDER. What may NOT go first is the OWNER: it is
+        # WHERE the sign-in lives, so a row that sheds it prints ``/mcp login
+        # launchdarkly`` — the local instruction this family exists to replace, and
+        # indistinguishable at a glance from a device whose own credential is dead
+        # (design round 1, D1). What may go is the server name the command repeats
+        # from the row's own label, and the ``…`` is not decoration: without it the
+        # row would show ``/mcp login`` as though it were the whole command, which
+        # answers ``usage: /mcp login <name>``. The mark is truthful here (the
+        # argument really was elided) where trailing a COMPLETE command it read as a
+        # broken one (D3). Measured against the widest card's 56-cell detail budget:
+        # ``failed: launchdarkly — damians-MacBook-Pro: /mcp login …`` is 56 cells and
+        # names both halves, while shedding the owner instead would have shed it for
+        # every server name longer than 6 cells.
+        owner, verb = borrowed
+        with_owner = f"{label}{owner}: {verb} …"
+        if cell_len(with_owner) <= max_cells:
+            return with_owner
+        # Below the owner rung the COMMAND outranks the owner, which is the repair
+        # D2 asks for: this ladder used to end on ``full``, whose head is the owner,
+        # so from 43 columns down the card read ``failed: linear — damians-MacBook…``
+        # — a truncated machine name and no command at all, where base kept
+        # ``/mcp login linea…``. The whole command is returned UNMARKED when it fits,
+        # because a complete command with rung 2's ``…`` is the other half of D3.
+        command_row = f"{label}{verb} {name}"
+        if cell_len(command_row) <= max_cells:
+            return command_row
+        return truncate_cells(command_row, max_cells)
     return truncate_cells(full, max_cells)
 
 
