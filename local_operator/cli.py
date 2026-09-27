@@ -7746,7 +7746,8 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
         DEFAULT_RADIENT_API_BASE_URL,  # quoted, never spelled (see below)
     )
     from local_operator.providers.radient_credentials import (  # lazy: auth stack
-        ORG_ALLOW_NONCANONICAL_ENV,
+        ORG_LOGIN_REMEDY,
+        org_destination_refused_sentence,
         org_oauth_destination_allowed,
         resolve_radient_oauth_access_sync,
     )
@@ -7756,22 +7757,18 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
     access = resolve_radient_oauth_access_sync(config_manager.config_dir, base_url)
     if access is None:
         if not org_oauth_destination_allowed(base_url):
-            # The sentence names the canonical host WITHOUT spelling it: cli.py
-            # must stay free of URL-shaped Radient literals
-            # (test_radient_hub_base_resolution's single-reader invariant), so
-            # the destination is quoted from env.py's constant.
+            # The sentence comes from the ONE definition the CLI and the local
+            # server share, and the canonical host in it is quoted at runtime
+            # from env.py's constant: cli.py must stay free of URL-shaped
+            # Radient literals (test_radient_hub_base_resolution's
+            # single-reader invariant), which the shared renderer keeps true.
             print(
-                "\n\033[1;31mError: organization operations are refused because the "
-                f"configured Radient hub is not the Radient cloud API ({base_url}), and "
-                "the signed-in account's bearer is not sent to other hosts. Point "
-                f"`radient_base_url` at {DEFAULT_RADIENT_API_BASE_URL}, or set "
-                f"{ORG_ALLOW_NONCANONICAL_ENV}=1 if this hub is local or staging.\033[0m"
+                "\n\033[1;31mError: "
+                + org_destination_refused_sentence(base_url, DEFAULT_RADIENT_API_BASE_URL)
+                + "\033[0m"
             )
         else:
-            print(
-                "\n\033[1;31mError: organization operations need a signed-in Radient "
-                "account. Run `lop login radient`.\033[0m"
-            )
+            print(f"\n\033[1;31mError: {ORG_LOGIN_REMEDY}\033[0m")
         return None
     return RadientClient(api_key=SecretStr(access.access_token), base_url=base_url)
 

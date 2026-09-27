@@ -17,9 +17,15 @@ from pydantic import SecretStr
 from local_operator.agents import AgentEditFields, AgentRegistry, instruction_set_fields
 from local_operator.clients._http import REDACTION_MARKER, APIError
 from local_operator.clients.radient import INSTRUCTION_SET_FIELDS
-from local_operator.env import resolve_radient_api_base_url
-from local_operator.server.routes.agents import (
+from local_operator.env import (
+    DEFAULT_RADIENT_API_BASE_URL,
+    resolve_radient_api_base_url,
+)
+from local_operator.providers.radient_credentials import (
     ORG_LOGIN_REMEDY,
+    org_destination_refused_sentence,
+)
+from local_operator.server.routes.agents import (
     PUBLICATION_STATUS_BY_CODE,
     AgentPublicationRequest,
 )
@@ -990,9 +996,11 @@ async def test_publish_org_target_at_a_refused_hub_names_the_configuration_remed
             )
 
     assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert "not the Radient cloud API (http://127.0.0.1:4999/v1)" in detail
-    assert "RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1" in detail
+    # Byte-equal to the ONE shared sentence the CLI prints too (agent review
+    # round 1, MINOR-2): the two surfaces render the same object.
+    assert response.json()["detail"] == org_destination_refused_sentence(
+        "http://127.0.0.1:4999/v1", DEFAULT_RADIENT_API_BASE_URL
+    )
     mock_client.assert_not_called()
 
 
@@ -1148,3 +1156,31 @@ async def test_republish_org_target_without_a_login_shows_the_re_login_remedy(
     assert response.status_code == 401
     assert response.json()["detail"] == ORG_LOGIN_REMEDY
     mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_org_masks_a_reflected_credential(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential
+) -> None:
+    """The relayed result is scrubbed of this call's credential (S-1).
+
+    An upstream is free to reflect the request it received -- the bearer
+    included -- into its answer; the relay must not carry it back to the
+    renderer.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+    result = {
+        "agent_id": "hub-9",
+        "moderation": {"echo": "Bearer org-access-token"},
+    }
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.return_value = result
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1", json={}
+        )
+
+    assert response.status_code == 200, response.text
+    assert "org-access-token" not in response.text
+    assert "[redacted]" in response.text

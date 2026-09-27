@@ -412,8 +412,14 @@ class RadientTokenRefreshAPIResponse(BaseModel):
         return super().model_dump(*args, **kwargs)
 
 
-def _org_target_params(visibility: Optional[str], tenant_id: Optional[str]) -> Dict[str, str]:
+def org_target_params(visibility: Optional[str], tenant_id: Optional[str]) -> Dict[str, str]:
     """The ``visibility``/``tenant_id`` query params an org-targeted call sends.
+
+    Public because it has readers on both sides of the client boundary: this
+    client's publish/republish AND the local server's routes, which apply the
+    same rule before choosing which credential a call spends (review round 1:
+    the rule is load-bearing for both refusal classes, so it is a reader, not an
+    implementation detail reached into across the module boundary).
 
     Mirrors the hub's own input rule (agent-server ``parseOrgTarget``, §4.4):
     the two params travel together or not at all -- ``tenant_id`` without
@@ -523,6 +529,27 @@ class RadientClient:
         """
 
         return [self.api_key.get_secret_value()] if self.api_key else []
+
+    @staticmethod
+    def _refuse_redirect(response: requests.Response) -> None:
+        """Refuse an upstream redirect instead of following it (review round 1, S-2).
+
+        ``allow_redirects=False`` on every org-capable call makes a 3xx visible
+        here instead of ``requests`` following it -- and, when the target shares
+        the hostname, silently RE-SENDING the caller's bearer to wherever it
+        points. The desktop transport reads its own upstream the same way
+        (``follow_redirects=False`` plus a 502 "unexpected redirect"), so the
+        two transports refuse the same answer in the same direction; the local
+        routes relay this as a hub_unavailable 502 rather than treating a 3xx
+        body as a result.
+        """
+
+        if 300 <= response.status_code < 400:
+            raise APIError(
+                "Radient returned an unexpected redirect",
+                status_code=response.status_code,
+                code="unexpected_redirect",
+            )
 
     def _surfaceable_body(self, body: str) -> str:
         """An upstream error body with this client's credential removed.
@@ -775,10 +802,13 @@ class RadientClient:
         """
         url = f"{self.base_url}/agents/publish"
         headers = self._get_headers(content_type="application/json")
-        params = _org_target_params(visibility, tenant_id)
+        params = org_target_params(visibility, tenant_id)
         try:
-            response = requests.post(url, headers=headers, json=dict(document), params=params)
+            response = requests.post(
+                url, headers=headers, json=dict(document), params=params, allow_redirects=False
+            )
             response.raise_for_status()
+            self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
@@ -829,10 +859,13 @@ class RadientClient:
         """
         url = f"{self.base_url}/agents/{agent_id}/publish"
         headers = self._get_headers(content_type="application/json")
-        params = _org_target_params(visibility, tenant_id)
+        params = org_target_params(visibility, tenant_id)
         try:
-            response = requests.put(url, headers=headers, json=dict(document), params=params)
+            response = requests.put(
+                url, headers=headers, json=dict(document), params=params, allow_redirects=False
+            )
             response.raise_for_status()
+            self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
@@ -935,8 +968,9 @@ class RadientClient:
         url = f"{self.base_url}/me/memberships"
         headers = self._get_headers(content_type="application/json")
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, allow_redirects=False)
             response.raise_for_status()
+            self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
@@ -1033,8 +1067,9 @@ class RadientClient:
         url = f"{self.base_url}/teams/{team_id}"
         headers = self._get_headers(content_type="application/json")
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, allow_redirects=False)
             response.raise_for_status()
+            self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
@@ -1072,9 +1107,14 @@ class RadientClient:
         headers = self._get_headers(content_type="application/json")
         try:
             response = requests.post(
-                url, headers=headers, json=dict(document), params={"tenant_id": tenant_id}
+                url,
+                headers=headers,
+                json=dict(document),
+                params={"tenant_id": tenant_id},
+                allow_redirects=False,
             )
             response.raise_for_status()
+            self._refuse_redirect(response)
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
                 e.response,
