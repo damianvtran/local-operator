@@ -179,6 +179,14 @@ failed there, is still running, or was queued for a retiring runtime exits 1 wit
 `outcome` naming which (`failed`, `running`, `queued`) so a script cannot read a
 delivery as a completion.
 
+THE TEXT IS TAKEN AS-IS, from the session id to the end of the command line. A
+prompt that talks about flags is delivered whole — `--send <session> check the
+--name field` sends those five words — because nothing after the session id is
+re-read as a flag. The cost of that rule is the other half of it: **this
+command's own flags must come BEFORE the session id**, since a trailing `--json`
+is text like everything else, and `--` is the explicit separator when the text
+itself starts with a dash (`--send <session> -- --json is the field I mean`).
+
 EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
 acting on one (QA round 5, Q-R5-1):
 
@@ -194,10 +202,13 @@ acting on one (QA round 5, Q-R5-1):
 - `peer_unreachable` — the relay ANSWERED, and the DEVICE NAMED is the reason: it
   is not in the network, or it is in it and did not answer. An unreachable peer is a
   `doctor` question and not an error to retry (`lop network doctor --json`).
-- `stop_unreported` / `engage_unreported` / `create_unreported` — a receipt arrived
-  without the field it is a receipt for, so whether the peer acted is UNKNOWN:
-  restart the relay and ask again, and do not read the answer as a failure of the
-  act.
+- `stop_unreported` / `engage_unreported` / `create_unreported` / `slash_unreported`
+  — a receipt arrived without the field it is a receipt for, so whether the peer
+  acted is UNKNOWN: restart the relay and ask again, and do not read the answer as a
+  failure of the act. `slash_unreported` is the routed-slash case: the owner's
+  `SlashResult` is `kind`/`text`/`style`/`data`, and one whose `style` this build
+  does not know (including a receipt with no `style` at all, which used to read as
+  success) cannot be read as an outcome.
 - `turn_not_running` — a `--steer` reached a session that is not running a turn
   there, so there was nothing for it to correct. The sentence names the two ways
   forward (`--send` to start a turn, `--slash` to change the session); nothing was

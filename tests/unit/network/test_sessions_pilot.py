@@ -123,10 +123,15 @@ class _Message:
 class _Opened:
     def __init__(self) -> None:
         self.calls = 0
+        #: What the verb told the SEAM, per call. The viewer's declaration of the
+        #: action receipts it consumes is made here and nowhere else, so asserting
+        #: it needs the kwargs rather than the viewer's behaviour.
+        self.viewer_kwargs: list[dict[str, Any]] = []
 
     def __call__(self, viewer: _FakeViewer | None, row: Any = None):  # type: ignore[no-untyped-def]
         async def _open(session_id: str, **kwargs: Any) -> Any:
             self.calls += 1
+            self.viewer_kwargs.append(dict(kwargs))
             return viewer
 
         return _open
@@ -163,6 +168,24 @@ def _patch(monkeypatch: pytest.MonkeyPatch, viewer: _FakeViewer | None, row: Any
 
 def _run(argv: list[str]) -> int:
     return int(net_cli.main(_parser().parse_args(["network", *argv])))
+
+
+def _real_parse(argv: list[str]) -> argparse.Namespace:
+    """Parse through the REAL top-level parser (``cli.build_cli_parser``).
+
+    The payload cells need the entry point a person runs: ``--force`` and ``--json``
+    are options the PARENT parser owns alongside this subcommand's own, and the
+    local ``_parser`` above declares neither — a payload question asked through it
+    would be easier than the one round 1 reproduced.
+    """
+    from local_operator.cli import build_cli_parser
+
+    return build_cli_parser().parse_args(["network", *argv])
+
+
+def _run_real(argv: list[str]) -> int:
+    """``_run`` through that same parser, so a cell exercises one path end to end."""
+    return int(net_cli.main(_real_parse(argv)))
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +232,7 @@ def test_without_a_peer_the_verb_says_which_flag_it_needs(
     rather than by raising it out of the handler: the rendering IS the contract —
     a code a script branches on and a sentence a person can act on.
     """
-    assert _run(["sessions", "--send", SESSION, "hi", "--json"]) == 1
+    assert _run(["sessions", "--json", "--send", SESSION, "hi"]) == 1
     body = capsys.readouterr()
     assert '{"ok": false, "code": "peer_required"' in body.out
     assert "--send needs --peer" in body.out
@@ -237,7 +260,7 @@ def test_a_pipe_carries_the_text_when_the_positional_is_empty(
     piped = io.StringIO("line one\nline two\n")
     piped.isatty = lambda: False  # type: ignore[method-assign]
     monkeypatch.setattr("sys.stdin", piped)
-    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "--json"]) == 0
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION]) == 0
     capsys.readouterr()
     assert viewer.waited == ["line one\nline two"]
 
@@ -311,7 +334,7 @@ def test_an_id_that_resolves_to_nothing_says_which_of_the_three_it_is(
     _patch(monkeypatch, _FakeViewer(), None)
     _patch_unresolved(monkeypatch, answer=answer, refusal=refusal)
 
-    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
     printed = capsys.readouterr().out
     assert f'"code": "{code}"' in printed, printed
     assert named in printed, printed
@@ -361,8 +384,16 @@ def test_a_dial_that_produced_no_session_names_the_far_end(
     refused before the dial), because the first version classified by asking the
     peer's catalogue a second time — a read that is not usable at that moment: a
     link this device's relay still believes in reports the peer as reachable for
-    seconds after it died. The classification is now by construction, and only this
-    device's own relay record — a local file read — can change it.
+    seconds after it died. The classification is now by construction, and the
+    rungs answer the two DIFFERENT questions they actually are:
+
+    * the OPEN that never happened is this device's link to the peer, so the relay
+      record still decides it (``relay_unavailable`` with no relay, otherwise
+      ``peer_unreachable``);
+    * an open stream that then produced no session is the far END of it, which is
+      what ``session_unreachable`` means and what the bind's own TIMEOUT rung has
+      always raised — the GUIDE row for that code already said "or a bind that
+      could not be completed" (round 1, MINOR-4).
     """
     import local_operator.network.store as store_mod
     import local_operator.session.remote_open as remote_open
@@ -374,9 +405,18 @@ def test_a_dial_that_produced_no_session_names_the_far_end(
         store_mod, "find_own_relay", lambda root=None: object() if relay_up else None
     )
 
-    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
     printed = capsys.readouterr().out
-    if relay_up:
+    if rung == "bind":
+        # ONE situation, one code, whatever this device's relay record says: the
+        # stream was open and the owner never spoke on it. The transport's own
+        # words are carried verbatim, and the one command that separates a stopped
+        # runtime from a dead link is named.
+        assert '"code": "session_unreachable"' in printed, printed
+        assert "the remote owner did not send its state" in printed, printed
+        assert PEER in printed, printed
+        assert "doctor" in printed, printed
+    elif relay_up:
         assert '"code": "peer_unreachable"' in printed, printed
         assert "doctor" in printed, printed
         assert PEER in printed, printed
@@ -391,7 +431,7 @@ def test_an_unreachable_peer_gets_the_one_sentence_and_no_dial(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     opened = _patch(monkeypatch, _FakeViewer(), _remote_row(reachable=False, reason="timeout"))
-    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["code"] == "peer_unreachable"
     assert payload["ok"] is False
@@ -427,7 +467,7 @@ def test_send_reports_a_failed_turn_as_a_failure(
     """The owner's own error is the receipt, and the exit code does not launder it."""
     viewer = _FakeViewer(send_error=RuntimeError("No API key configured for that provider"))
     _patch(monkeypatch, viewer, _remote_row())
-    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["code"] == "turn_failed"
@@ -442,7 +482,7 @@ def test_send_reports_a_retiring_owner_as_queued_and_not_as_ran(
     the turn did not run here, and the exit code says which of those happened."""
     viewer = _FakeViewer(send_error=RuntimeRetiring(leaving="a build handover", queued=True))
     _patch(monkeypatch, viewer, _remote_row())
-    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["outcome"] == "queued"
     assert payload["ok"] is False
@@ -456,7 +496,7 @@ def test_send_reports_a_turn_that_outlived_the_bound_as_still_running(
     viewer = _FakeViewer(send_sleep_s=30.0)
     _patch(monkeypatch, viewer, _remote_row())
     monkeypatch.setattr(net_cli, "PILOT_TURN_TIMEOUT_S", 0.05)
-    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["outcome"] == "running"
     assert payload["code"] == "turn_running"
@@ -476,7 +516,7 @@ def test_steer_refuses_a_session_with_no_turn_to_correct(
     that skipped this check would quietly start a turn the caller did not ask for."""
     viewer = _FakeViewer(streaming=False)
     _patch(monkeypatch, viewer, _remote_row())
-    assert _run(["sessions", "--peer", PEER, "--steer", SESSION, "wait, not that", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--steer", SESSION, "wait, not that"]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["code"] == "turn_not_running"
     assert payload["ok"] is False
@@ -529,7 +569,7 @@ def test_slash_exit_code_comes_from_the_owners_own_receipt(
         slash_receipt={"kind": "notice", "text": "no such command", "style": "error"}
     )
     _patch(monkeypatch, viewer, _remote_row())
-    assert _run(["sessions", "--peer", PEER, "--slash", SESSION, "/nope", "--json"]) == 1
+    assert _run(["sessions", "--json", "--peer", PEER, "--slash", SESSION, "/nope"]) == 1
     payload = ok(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["outcome"] == "refused"
@@ -557,7 +597,7 @@ def test_json_prints_the_payload_and_the_human_run_prints_sentences(
     pipe that asked for lines and prose in a pipe that parses JSON are both wrong."""
     viewer = _FakeViewer(streaming=True, steer_receipt="steering queued")
     _patch(monkeypatch, viewer, _remote_row())
-    assert _run(["sessions", "--peer", PEER, "--steer", SESSION, "go", "--json"]) == 0
+    assert _run(["sessions", "--json", "--peer", PEER, "--steer", SESSION, "go"]) == 0
     printed = capsys.readouterr().out
     payload = ok(printed)
     assert payload["ok"] is True
@@ -565,3 +605,197 @@ def test_json_prints_the_payload_and_the_human_run_prints_sentences(
     assert payload["session_id"] == SESSION
     assert payload["peer"] == PEER
     assert payload["receipt"] == "steering queued"
+
+
+# ---------------------------------------------------------------------------
+# the payload is the user's, verbatim (round 1, MAJOR-1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "words",
+    [
+        ["check", "the", "--name", "field"],
+        ["use", "--force"],
+        ["pass", "--yes", "to", "it"],
+        ["explain", "the", "--peer", "flag"],
+        ["a", "--", "b"],
+    ],
+    ids=["name", "force", "yes", "peer", "dash-in-prose"],
+)
+def test_a_flag_shaped_prompt_is_delivered_whole(
+    monkeypatch: pytest.MonkeyPatch, words: list[str]
+) -> None:
+    """The defect that made a prompt undeliverable: with ``nargs="*"`` every word
+    matching a declared option was consumed as that option, wherever it appeared,
+    so this verb ran a turn on ``check the`` and exited 0 — and a prompt containing
+    ``--force`` (a flag of ``--stop``) never became a turn at all, just a usage
+    error about the wrong flag. The payload is a REMAINDER now, so the owner is
+    asked the user's own words and the command still says what it did."""
+    viewer = _FakeViewer()
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run_real(["sessions", "--peer", PEER, "--send", SESSION, *words]) == 0
+    assert viewer.waited == [" ".join(words)], viewer.waited
+
+
+def test_a_leading_separator_is_the_separator_and_not_a_word(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--`` is documented as the explicit separator, and argparse does NOT
+    consume it under a REMAINDER — measured through this parser: the token stays
+    in the list. So the spelling every other CLI taught the user is taken back off
+    rather than delivered as the prompt's first word."""
+    viewer = _FakeViewer()
+    _patch(monkeypatch, viewer, _remote_row())
+    assert (
+        _run_real(
+            [
+                "sessions",
+                "--peer",
+                PEER,
+                "--send",
+                SESSION,
+                "--",
+                "explain",
+                "the",
+                "--peer",
+                "flag",
+            ]
+        )
+        == 0
+    )
+    assert viewer.waited == ["explain the --peer flag"], viewer.waited
+
+
+def test_a_second_separator_keeps_a_dash_leading_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One token, so a payload that genuinely begins with a dash keeps an escape
+    — and a ``--`` in the MIDDLE of the text is a word the user typed, because
+    nothing between the session id and the end of the line is reinterpreted."""
+    viewer = _FakeViewer()
+    _patch(monkeypatch, viewer, _remote_row())
+    assert (
+        _run_real(["sessions", "--peer", PEER, "--send", SESSION, "--", "--", "dash", "prose"]) == 0
+    )
+    assert viewer.waited == ["-- dash prose"], viewer.waited
+
+
+def test_a_separator_with_nothing_after_it_is_the_empty_payload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half of taking the text as-is: the separator alone is NOT a
+    prompt whose text is ``--``. An empty payload is refused before dialling,
+    which is the rule the sibling cell below pins for the plain empty case too."""
+    opened = _patch(monkeypatch, _FakeViewer(), _remote_row())
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert _run_real(["sessions", "--peer", PEER, "--send", SESSION, "--"]) == 2
+    assert "needs some text" in capsys.readouterr().err
+    assert opened.calls == 0
+
+
+def test_this_commands_own_flags_come_before_the_session_id() -> None:
+    """The COST of "the payload is what you typed", pinned so it is a documented
+    trade rather than a surprise: a flag written after the session id is payload,
+    and one written before it is a flag. Both halves are asserted because only the
+    pair makes the rule checkable."""
+    first = _real_parse(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hello", "world"])
+    assert first.json is True
+    assert first.text == ["hello", "world"]
+
+    last = _real_parse(["sessions", "--peer", PEER, "--send", SESSION, "hello", "--json"])
+    assert last.json is False
+    assert last.text == ["hello", "--json"]
+
+
+# ---------------------------------------------------------------------------
+# what the viewer declares (round 1, MAJOR-2)
+# ---------------------------------------------------------------------------
+
+
+def test_the_one_shot_viewer_declares_no_action_receipt_consumer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner completes an action receipt only when its client did NOT declare
+    it (``runtime_must_complete``), so a viewer that declared the attached
+    vocabulary and rendered nothing left ``/goal``, ``/agent`` and ``/team``
+    setting state on the peer and starting no turn — at exit 0. A process that
+    prints the owner's receipt and exits declares ``()``, and this is the only
+    place that decision is visible before a frame is written."""
+    viewer = _FakeViewer()
+    opened = _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi"]) == 0
+    assert [call["slash_consumers"] for call in opened.viewer_kwargs] == [()], opened.viewer_kwargs
+
+
+def test_the_tui_child_budget_is_derived_from_this_verbs_own_worst_case() -> None:
+    """Round-1 MAJOR-3: the composer's child budget claimed to sit above what this
+    verb waits and did not — 480 s against an act whose parts add up to 540 s — so
+    a `/network sessions --send …` typed in a session reaped its child part-way
+    through a wait the verb itself promises, and the composer showed a timeout
+    about a command that was still working.
+
+    The number is DERIVED now (``tui/network_cli.PILOT_CALL_TIMEOUT_S`` off
+    ``PILOT_ACT_TIMEOUT_S``, which is off the three budgets), and this cell is what
+    keeps a future edit from hardcoding it again: it fails the moment either term
+    stops following the others.
+    """
+    from local_operator.tui.network_cli import PILOT_CALL_TIMEOUT_S
+
+    assert net_cli.PILOT_ACT_TIMEOUT_S == 2 * net_cli.PILOT_BIND_TIMEOUT_S + max(
+        net_cli.PILOT_TURN_TIMEOUT_S, net_cli.PILOT_REPLY_TIMEOUT_S
+    )
+    assert PILOT_CALL_TIMEOUT_S > net_cli.PILOT_ACT_TIMEOUT_S
+
+
+def test_the_whole_act_is_bounded_by_that_worst_case(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half of MAJOR-3: the number is ENFORCED, not merely stated.
+
+    One bound wraps the whole act at ``PILOT_ACT_TIMEOUT_S``, so the reads with no
+    rung of their own — the row lookup, the teardown — are inside it too. The
+    constant is turned down here rather than waiting 540 s for the real one: what
+    the cell proves is that a hung act is reaped and REPORTED, which is the
+    property a caller holds.
+    """
+    viewer = _FakeViewer(send_sleep_s=5.0)
+    _patch(monkeypatch, viewer, _remote_row())
+    monkeypatch.setattr(net_cli, "PILOT_ACT_TIMEOUT_S", 0.5)
+
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "session_unreachable"
+    assert "worst case this verb budgets for" in payload["message"], payload
+    # The viewer is torn down on the way out, cancelled turn or not.
+    assert viewer.disposed
+
+
+# ---------------------------------------------------------------------------
+# a receipt this build cannot read (round 1, NIT-6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"kind": "notice", "text": "goal set", "data": {}},
+        {"kind": "notice", "text": "goal set", "style": "celebratory", "data": {}},
+        "goal set",
+    ],
+    ids=["no-style", "unknown-style", "prose"],
+)
+def test_a_receipt_this_build_cannot_read_is_unreported(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], receipt: Any
+) -> None:
+    """``ok`` used to be ``style != "error"``, which is TRUE for a receipt carrying
+    no style at all — a success claim about a field the owner never sent — and a
+    non-dict answer was reported ``ok=True, outcome="answered"`` even when it was
+    a refusal. Both are ``slash_unreported`` now, the family's own word for a
+    receipt that does not carry the fact it is a receipt for."""
+    viewer = _FakeViewer(slash_receipt=receipt)
+    _patch(monkeypatch, viewer, _remote_row())
+    assert _run(["sessions", "--json", "--peer", PEER, "--slash", SESSION, "/goal ship it"]) == 1
+    payload = ok(capsys.readouterr().out)
+    assert payload["code"] == "slash_unreported"
+    assert payload["ok"] is False

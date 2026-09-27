@@ -138,12 +138,14 @@ async def test_a_follow_up_turn_reaches_the_peer_from_a_shell(
             root_a,
             _home(tmp_path),
             "sessions",
+            "--json",
             "--peer",
             "device-b",
             "--send",
             created.session_id,
+            # FLAGS COME BEFORE THE PAYLOAD: the text is an argparse REMAINDER, so
+            # a flag written after it is delivered as part of the prompt.
             "second turn from the shell",
-            "--json",
         )
         assert code == 0, (code, out, err)
         payload = json.loads(out)
@@ -204,6 +206,7 @@ async def test_a_device_without_the_prompt_capability_is_refused_in_words(
             root_a,
             _home(tmp_path),
             "sessions",
+            "--json",
             "--peer",
             "device-b",
             "--send",
@@ -247,6 +250,7 @@ async def test_an_unreachable_peer_fails_fast_and_truthfully(
             root_a,
             _home(tmp_path),
             "sessions",
+            "--json",
             "--peer",
             "device-b",
             "--send",
@@ -257,14 +261,113 @@ async def test_an_unreachable_peer_fails_fast_and_truthfully(
         assert code == 1, (code, out, err)
         # NOT a hang, NOT an empty answer, and NOT the transport's own words: the
         # DEVICE is named as the component that failed, with the command that
-        # diagnoses it. The transport reports a stopped peer and a refused session
-        # with one identical sentence ("the remote owner did not send its state"),
-        # so this code is read from the peer's own catalogue rather than assumed —
-        # which is exactly what makes it deterministic between a cached row and a
-        # fresh one (CI caught the first version answering two ways for one state).
+        # diagnoses it. A peer that is GONE is caught a rung higher than the dial,
+        # by the reachability read that refuses before any viewer is opened —
+        # which is why this scenario answers `peer_unreachable` while an open
+        # stream whose owner never speaks answers `session_unreachable` (the
+        # fake-viewer cell at BOTH rungs, and round 1, MINOR-4, is what pinned
+        # that split: the read is cache-first, so a peer that dies between the
+        # read and the dial must not answer with a second code).
         assert '"code": "peer_unreachable"' in out, (out, err)
         combined = out + err
         assert "unreachable" in combined.lower(), combined
         assert "doctor" in combined, combined
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_a_flag_shaped_prompt_reaches_the_peers_journal_whole(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-1 MAJOR-1, through the REAL entry point over a real relay pair.
+
+    ``--name`` is an option THIS subcommand declares, so the old parse consumed it
+    as one: the owner ran a turn on ``check the`` and the command exited 0. The
+    peer's own journal is what settles it — the words are in the record of the
+    device that ran the turn, not in anything this side printed.
+    """
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="pilot-argv",
+        prompt="",
+    )
+    try:
+        root_a = created.server_a.root
+        (root_a / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--json",
+            "--peer",
+            "device-b",
+            "--send",
+            created.session_id,
+            "check",
+            "the",
+            "--name",
+            "field",
+        )
+        assert code == 0, (code, out, err)
+        payload = json.loads(out)
+        assert payload["outcome"] == "finished", payload
+        assert await asyncio.to_thread(_said, created, "check the --name field"), _user_texts(
+            created
+        )
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_a_goal_slash_from_the_shell_runs_its_request_on_the_peer(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round-1 MAJOR-2, end to end: an ACTION-carrying receipt runs on the device
+    that owns the conversation.
+
+    ``/goal``, ``/agent`` and ``/team`` answer with a receipt whose ``request`` the
+    owner submits ITSELF — unless the client declared that it renders that
+    receipt, which is what the attached vocabulary means and what this verb used to
+    declare by default. A one-shot viewer that declares nothing gets the turn run
+    over there, and the peer's journal is where that shows.
+    """
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="pilot-goal",
+        prompt="",
+    )
+    try:
+        root_a = created.server_a.root
+        (root_a / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--json",
+            "--peer",
+            "device-b",
+            "--slash",
+            created.session_id,
+            "/goal wire the mesh end to end",
+        )
+        assert code == 0, (code, out, err)
+        payload = json.loads(out)
+        assert payload["ok"] is True, payload
+        # THE RECEIPT IS THE OWNER'S, and so is the turn it asked for: the request
+        # is in the peer's journal, which a declaring viewer suppresses.
+        assert await asyncio.to_thread(_said, created, "wire the mesh end to end"), _user_texts(
+            created
+        )
     finally:
         await asyncio.to_thread(created.stop)
