@@ -114,7 +114,19 @@ class ProjectParams(BaseModel):
     )
     milestones: list[ProjectMilestone] | None = Field(
         default=None,
-        description="create/update: FULL replace, <= 20, names unique; prefer op='milestone'.",
+        description=(
+            "create: the list to store (<= 20, names unique). update: replaces "
+            "the WHOLE list, and is refused unless replace_milestones=true; use "
+            "op='milestone' to change ONE milestone by name."
+        ),
+    )
+    replace_milestones: bool = Field(
+        default=False,
+        description=(
+            "update: pass true to DELIBERATELY replace the whole milestones "
+            "list; without it, supplying 'milestones' to update is refused "
+            "(use op='milestone' for one milestone)."
+        ),
     )
     milestone: str | None = Field(
         default=None, description="milestone: its name (add-or-update by name)."
@@ -266,6 +278,10 @@ def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:
         "milestone_target_date",
         "milestone_completed",
         "remove",
+        # The REPLACE guard's switch: consumed by `_op_update`, never a row
+        # field (ProjectEdit forbids extras, so a leak here would be a
+        # validation error on every deliberate replace).
+        "replace_milestones",
     }
     for field in params.model_fields_set:
         if field in dispatch_only:
@@ -380,6 +396,18 @@ async def _op_update(
         return _error(
             tool_call_id, "project", f"no project named {name!r} to update (try op='list')."
         )
+    if "milestones" in params.model_fields_set and not params.replace_milestones:
+        # The incident this guard exists for: an agent read "update a milestone"
+        # as `op='update'` with a one-entry list, and the store did what its
+        # field said — replaced the whole list, silently wiping the siblings.
+        # Refuse BEFORE any edit is built; the safe path is one op away.
+        return _error(
+            tool_call_id,
+            "project",
+            f"update would REPLACE all milestones ({len(project.milestones)} currently "
+            "stored). Use op='milestone' to add/update/remove ONE milestone by name, "
+            "or pass replace_milestones=true to replace the list deliberately.",
+        )
     reporter = _calling_session_id(context) or "operator"
     try:
         fields = _project_edit(params, creating=False)
@@ -415,6 +443,13 @@ async def _op_update(
         # status-only update that says "progress 3h ago" invites the model to
         # think it reported something.
         detail = f"status {updated.status}"
+    if params.replace_milestones and "milestones" in params.model_fields_set:
+        # The receipt must NAME the replace: a bare "updated project" is
+        # exactly the sentence that hid the wipe this guard now stops.
+        detail += (
+            f"; milestones replaced deliberately ({_milestone_counts(updated)}; "
+            "replace_milestones=true)"
+        )
     return _text(
         tool_call_id,
         "project",
