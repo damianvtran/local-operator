@@ -326,6 +326,27 @@ async def test_agent_name_availability_requires_the_desktop_bearer(desktop) -> N
     assert gated.json()["detail"] == "Desktop authorization is required."
 
 
+async def test_org_share_routes_require_the_desktop_bearer(desktop) -> None:
+    """The organization surfaces are behind the boundary, not beside it.
+
+    Memberships and team publish/pull are EGRESS this machine performs with
+    the operator's stored OAuth access token, on an app whose CORS policy
+    allows every origin, so an unauthenticated caller must not be able to
+    drive any of them. The refusals come from the middleware, before any
+    route code -- and before any hub client -- runs.
+    """
+    client, _ = desktop
+
+    for method, path in (
+        ("get", "/v1/memberships"),
+        ("post", "/v1/teams/team-1/publish?tenant_id=org-1"),
+        ("get", "/v1/teams/pull/team-1"),
+    ):
+        gated = await getattr(client, method)(path, headers={"Authorization": ""})
+        assert gated.status_code == 401, path
+        assert gated.json()["detail"] == "Desktop authorization is required."
+
+
 def test_managed_gate_covers_every_desktop_route() -> None:
     """Every ``/v1/desktop/*`` route carries ``require_desktop``, but one.
 

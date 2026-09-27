@@ -274,3 +274,54 @@ def test_get_agent_carries_the_bearer_only_when_asked(
 
         radient_client.get_agent("agent-1", with_credential=True)
         assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer test_api_key"
+
+
+def test_republish_agent_instruction_set_org_target_rides_on_query_params(
+    radient_client: RadientClient, base_url: str
+) -> None:
+    """The republish's org target is the publish's query pair, on the PUT."""
+    document = build_instruction_set_document(
+        name="Coder",
+        description="Writes code.",
+        instructions="You write code.",
+        kind="role",
+        version="1.1.0",
+    )
+    result = {"agent_id": "hub-1", "name": "Coder", "version": "1.1.0"}
+
+    with patch("requests.put", return_value=_envelope(result)) as mock_put:
+        republished = radient_client.republish_agent_instruction_set(
+            "hub-1", document, visibility="org", tenant_id="org-a"
+        )
+
+    assert republished == result
+    args, kwargs = mock_put.call_args
+    assert args[0] == f"{base_url}/agents/hub-1/publish"
+    assert kwargs["params"] == {"visibility": "org", "tenant_id": "org-a"}
+    assert kwargs["json"] == document
+    assert "visibility" not in document and "tenant_id" not in document
+
+
+def test_republish_agent_instruction_set_without_a_target_is_todays_call(
+    radient_client: RadientClient,
+) -> None:
+    document = {"document_type": "agent-instruction-set", "document_version": 1}
+
+    with patch("requests.put", return_value=_envelope({"agent_id": "hub-1"})) as mock_put:
+        radient_client.republish_agent_instruction_set("hub-1", document)
+
+    _args, kwargs = mock_put.call_args
+    assert kwargs["params"] == {}
+
+
+def test_republish_agent_instruction_set_refuses_a_malformed_target(
+    radient_client: RadientClient,
+) -> None:
+    with patch("requests.put") as mock_put:
+        with pytest.raises(ValueError) as exc_info:
+            radient_client.republish_agent_instruction_set(
+                "hub-1", {"name": "Coder"}, visibility="org"
+            )
+
+    assert str(exc_info.value) == "tenant_id is required when visibility=org"
+    mock_put.assert_not_called()

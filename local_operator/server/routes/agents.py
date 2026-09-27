@@ -27,7 +27,7 @@ from fastapi import (
 )
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from local_operator.agents import (
     AgentData,
@@ -638,7 +638,7 @@ async def download_agent_from_radient(
 #: unchanged; these are the fallback when a code arrives without one, and they are
 #: the mapping the tests pin per code.
 #:
-#: ``name_claim_in_flight`` is the ninth code and the newest (agent-server #31): no
+#: ``name_claim_in_flight`` is the ninth code (agent-server #31): no
 #: row holds the name, but a concurrent write holds it transiently. It is a 409
 #: like ``name_taken`` and it needs a different next step — the caller RETRIES,
 #: where a taken name is answered by choosing another — which is why the hub gives
@@ -647,6 +647,10 @@ async def download_agent_from_radient(
 #: passed through untouched, which is what tells the renderer what to do.
 PUBLICATION_STATUS_BY_CODE: Dict[str, int] = {
     "invalid_instruction_set": 422,
+    # The team family's invalid-document code (§4.5): the same 422 class as
+    # ``invalid_instruction_set`` -- the schema or the review refused the
+    # document, and `details.field`/`details.rule` say which either way.
+    "invalid_team_document": 422,
     "moderation_rejected": 422,
     "payload_too_large": 413,
     "name_taken": 409,
@@ -654,7 +658,18 @@ PUBLICATION_STATUS_BY_CODE: Dict[str, int] = {
     "name_reserved_builtin": 409,
     "not_owner": 403,
     "agent_not_found": 404,
+    "team_not_found": 404,
     "moderation_unavailable": 503,
+    # The frozen membership refusals of organization sharing (§2.2/§4.4/§4.5):
+    # a 403 here is NOT a credential refusal, and without its code the auth arm
+    # below would answer "re-authenticate" for refusals a login cannot fix --
+    # "ask an admin" (insufficient_role, whose `required` detail names the
+    # rank), "get invited" (not_a_member) and "activate the plan"
+    # (team_plan_required) are three different next steps a renderer must be
+    # able to switch on.
+    "not_a_member": 403,
+    "insufficient_role": 403,
+    "team_plan_required": 403,
 }
 
 #: The three codes this proxy adds to the hub's vocabulary. They exist because the
@@ -815,14 +830,98 @@ def _invalid_document_error(exc: InstructionSetError) -> HTTPException:
     )
 
 
+# --- Organization operations (design §4.7/§8.3) -------------------------------
+#
+# Organization calls authenticate with the stored Radient OAuth access token --
+# the signed-in PERSON -- never the tenant API key, because an API key proves an
+# application tenant, not a person's membership (§2.2). Resolution and the
+# destination guard live in ``providers/radient_credentials.py``, shared with
+# the CLI's org commands; this module only renders the two refusals the resolver
+# cannot tell apart on its own, because their remedies differ.
+
+#: The remedy for an org call with no signed-in account -- the same sentence the
+#: CLI prints (``cli.py::_resolve_org_client``): one instruction, one login.
+ORG_LOGIN_REMEDY = (
+    "organization operations need a signed-in Radient account. Run `lop login radient`."
+)
+
+#: The refusal for an org call at a hub that must not receive the account's
+#: bearer: only the canonical Radient cloud API -- or the explicit
+#: ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` opt-in -- resolves a token at all
+#: (§2.2; explicit gates must not receive a centrally signed-in bearer), so this
+#: names the configuration change that unblocks the call. The same sentence the
+#: CLI prints, with the canonical host quoted from ``env.py`` rather than
+#: spelled here -- the single-reader invariant
+#: ``test_radient_hub_base_resolution.py`` pins for CLI and server alike.
+ORG_DESTINATION_REFUSED = (
+    "organization operations are refused because the configured Radient hub is not the "
+    "Radient cloud API ({base_url}), and the signed-in account's bearer is not sent "
+    "to other hosts. Point `radient_base_url` at {default_url}, or set "
+    "RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1 if this hub is local or staging."
+)
+
+
+async def _org_radient_credentials(
+    config_manager: ConfigManager, provider_auth_store: AuthStore
+) -> tuple[SecretStr, str]:
+    """The credential and destination an org call spends, or the refusal to show.
+
+    One place resolves an org call's credential, for the same reason the CLI has
+    one (``cli.py::_resolve_org_client``): the publish, republish, membership and
+    team routes must not each decide which token an organization call spends.
+    The base URL resolves through the config-aware reader the CLI uses
+    (``configured_radient_base_url``) rather than the public paths'
+    environment-derived one, so the destination the guard judges and the
+    destination the request addresses cannot disagree -- a guard checking one
+    host while the call travels to another is the failure the single-reader rule
+    exists to prevent.
+
+    The pair rather than a constructed client: every route here builds the hub
+    client only once its request is otherwise valid (after document validation
+    for the publication routes, after the local team resolves for its publish),
+    so a refusal that never touches the hub never constructs one -- the exact
+    ordering the public paths pin in their tests.
+
+    Raises:
+        HTTPException: 401 with the re-login remedy when no OAuth row resolves
+            (no login, a pasted API key, or a dead grant -- all one fix), or 400
+            naming the configuration remedy when the configured hub is one the
+            account's bearer must not be sent to.
+    """
+
+    from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
+    from local_operator.providers.radient_credentials import (
+        configured_radient_base_url,
+        org_oauth_destination_allowed,
+        resolve_radient_oauth_access,
+    )
+
+    base_url = configured_radient_base_url(config_manager)
+    access = await resolve_radient_oauth_access(
+        config_manager.config_dir, base_url, store=provider_auth_store
+    )
+    if access is None:
+        if not org_oauth_destination_allowed(base_url):
+            raise HTTPException(
+                status_code=400,
+                detail=ORG_DESTINATION_REFUSED.format(
+                    base_url=base_url, default_url=DEFAULT_RADIENT_API_BASE_URL
+                ),
+            )
+        raise HTTPException(status_code=401, detail=ORG_LOGIN_REMEDY)
+    return SecretStr(access.access_token), base_url
+
+
 @router.post(
     "/v1/agents/{agent_id}/publish",
     response_model=CRUDResponse,
     summary="Publish an agent's instruction set to the Radient Agent Hub",
     description=(
         "Publish the agent with the given ID to the Radient Agent Hub as a version-1 "
-        "instruction-set document. Requires RADIENT_API_KEY. Failures answer with a "
-        "structured detail carrying the hub's own error code."
+        "instruction-set document. Requires RADIENT_API_KEY for the public hub, or "
+        "a signed-in account when `visibility=org&tenant_id=...` targets an "
+        "organization workspace. Failures answer with a structured detail carrying "
+        "the hub's own error code."
     ),
     openapi_extra={
         "responses": {
@@ -902,6 +1001,19 @@ async def publish_agent_to_radient(
         ..., description="ID of the local agent to publish", examples=["agent123"]
     ),
     publication: AgentPublicationRequest = Body(default_factory=AgentPublicationRequest),
+    visibility: Optional[str] = Query(
+        None,
+        description=(
+            "Publication target: `org` publishes into the organization named by "
+            "`tenant_id`; omit for the public hub."
+        ),
+        examples=["org"],
+    ),
+    tenant_id: Optional[str] = Query(
+        None,
+        description="The organization to publish into; required with `visibility=org`.",
+        examples=["org-tab-1"],
+    ),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
     config_manager: ConfigManager = Depends(get_config_manager),
@@ -916,18 +1028,45 @@ async def publish_agent_to_radient(
     endpoint. Nothing else about the row travels: no conversation, no execution
     history, no learnings, no schedules, no plan, no pickled context, no working
     directory, no model, no hosting, no security prompt.
-    """
-    try:
-        # Get config and credentials
-        from local_operator.providers.radient_credentials import (
-            resolve_radient_credential,
-        )
 
-        api_key = await resolve_radient_credential(
-            config_manager.config_dir, env_config.radient_api_base_url, store=provider_auth_store
-        )
-        if not api_key:
-            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+    With ``visibility=org`` and a ``tenant_id`` the publication lands in that
+    organization's private workspace instead of the public hub, and the call
+    authenticates as the signed-in account (§2.2: an API key proves a tenant,
+    not a person's membership). The target rides on query params; the document
+    shape is unchanged (§4.4).
+    """
+    target: Dict[str, str] = {}
+    try:
+        # The target rule has ONE reader -- the client's -- so a request the wire
+        # would refuse cannot be credentialed differently from one it accepts:
+        # the same call decides whether this is an org call below (§4.4).
+        from local_operator.clients.radient import _org_target_params
+
+        try:
+            target = _org_target_params(visibility, tenant_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        if target:
+            # Organization calls spend the signed-in account's OAuth access token
+            # (§2.2), resolved here so both refusal classes stay ahead of any
+            # client construction; the server still owns the credential, exactly
+            # as it owns the public path's API key.
+            api_key, base_url = await _org_radient_credentials(config_manager, provider_auth_store)
+        else:
+            # Get config and credentials
+            from local_operator.providers.radient_credentials import (
+                resolve_radient_credential,
+            )
+
+            api_key = await resolve_radient_credential(
+                config_manager.config_dir,
+                env_config.radient_api_base_url,
+                store=provider_auth_store,
+            )
+            if not api_key:
+                raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+            base_url = env_config.radient_api_base_url
 
         try:
             agent = agent_registry.get_agent(agent_id)
@@ -942,14 +1081,19 @@ async def publish_agent_to_radient(
         except InstructionSetError as exc:
             raise _invalid_document_error(exc)
 
-        radient_client = RadientClient(api_key=api_key, base_url=env_config.radient_api_base_url)
+        # Built only once the request is otherwise valid, exactly as the public
+        # path always did: a refusal that never touches the hub must not
+        # construct one.
+        radient_client = RadientClient(api_key=api_key, base_url=base_url)
         try:
             # On a worker thread: a publication is reviewed by a model on the hub,
             # which takes seconds to tens of seconds, and the legacy zip upload's
             # precedent of calling the client inline would park this server's
             # event loop -- and therefore every other session -- for that whole
             # time.
-            result = await asyncio.to_thread(radient_client.publish_agent_instruction_set, document)
+            result = await asyncio.to_thread(
+                radient_client.publish_agent_instruction_set, document, **target
+            )
         except APIError as exc:
             logger.info(
                 "Radient Agent Hub refused a publication (code=%s, HTTP %s)",
@@ -967,8 +1111,11 @@ async def publish_agent_to_radient(
         raise
     except Exception as e:
         logger.exception("Error publishing agent to Radient")
-        # If the error is about missing API key, return a clear message
-        if "RADIENT_API_KEY" in str(e) or "credential" in str(e):
+        # The no-key heuristic belongs to the PUBLIC path only: an org call's
+        # credential is the OAuth row, and its own remedies were raised above --
+        # mapping an org failure onto "RADIENT_API_KEY is required" would name a
+        # key the org path never reads.
+        if not target and ("RADIENT_API_KEY" in str(e) or "credential" in str(e)):
             raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
         raise HTTPException(
             status_code=500,
@@ -985,7 +1132,8 @@ async def publish_agent_to_radient(
     description=(
         "Update a hub listing with the agent's current instruction set. Requires "
         "RADIENT_API_KEY and the id of the listing to update; only the account that "
-        "published it may."
+        "published it may. With `visibility=org&tenant_id=...` it updates an "
+        "organization workspace listing as the signed-in account."
     ),
 )
 async def republish_agent_to_radient(
@@ -993,6 +1141,19 @@ async def republish_agent_to_radient(
         ..., description="ID of the local agent to republish", examples=["agent123"]
     ),
     publication: AgentPublicationRequest = Body(default_factory=AgentPublicationRequest),
+    visibility: Optional[str] = Query(
+        None,
+        description=(
+            "Publication target: `org` updates a listing in the organization named "
+            "by `tenant_id`; omit for the public hub."
+        ),
+        examples=["org"],
+    ),
+    tenant_id: Optional[str] = Query(
+        None,
+        description="The organization whose listing to update; required with `visibility=org`.",
+        examples=["org-tab-1"],
+    ),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     env_config: EnvConfig = Depends(get_env_config),
     config_manager: ConfigManager = Depends(get_config_manager),
@@ -1004,17 +1165,42 @@ async def republish_agent_to_radient(
     The listing is named by ``hub_agent_id``: the local registry holds no link to
     the listing an agent was published as, so the caller -- which is looking at
     the listing -- is the only side that knows it.
-    """
-    try:
-        from local_operator.providers.radient_credentials import (
-            resolve_radient_credential,
-        )
 
-        api_key = await resolve_radient_credential(
-            config_manager.config_dir, env_config.radient_api_base_url, store=provider_auth_store
-        )
-        if not api_key:
-            raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+    With ``visibility=org`` and a ``tenant_id`` the update targets an
+    organization-workspace listing as the signed-in account, exactly as the
+    publish route does (§4.4).
+    """
+    target: Dict[str, str] = {}
+    try:
+        # The target rule has ONE reader -- the client's -- so a request the wire
+        # would refuse cannot be credentialed differently from one it accepts:
+        # the same call decides whether this is an org call below (§4.4).
+        from local_operator.clients.radient import _org_target_params
+
+        try:
+            target = _org_target_params(visibility, tenant_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        if target:
+            # Organization calls spend the signed-in account's OAuth access token
+            # (§2.2), resolved here so both refusal classes stay ahead of any
+            # client construction; the server still owns the credential, exactly
+            # as it owns the public path's API key.
+            api_key, base_url = await _org_radient_credentials(config_manager, provider_auth_store)
+        else:
+            from local_operator.providers.radient_credentials import (
+                resolve_radient_credential,
+            )
+
+            api_key = await resolve_radient_credential(
+                config_manager.config_dir,
+                env_config.radient_api_base_url,
+                store=provider_auth_store,
+            )
+            if not api_key:
+                raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
+            base_url = env_config.radient_api_base_url
 
         if not publication.hub_agent_id:
             raise HTTPException(
@@ -1040,12 +1226,13 @@ async def republish_agent_to_radient(
         except InstructionSetError as exc:
             raise _invalid_document_error(exc)
 
-        radient_client = RadientClient(api_key=api_key, base_url=env_config.radient_api_base_url)
+        radient_client = RadientClient(api_key=api_key, base_url=base_url)
         try:
             result = await asyncio.to_thread(
                 radient_client.republish_agent_instruction_set,
                 publication.hub_agent_id,
                 document,
+                **target,
             )
         except APIError as exc:
             logger.info(
@@ -1064,7 +1251,10 @@ async def republish_agent_to_radient(
         raise
     except Exception as e:
         logger.exception("Error republishing agent to Radient")
-        if "RADIENT_API_KEY" in str(e) or "credential" in str(e):
+        # The no-key heuristic belongs to the PUBLIC path only: an org call's
+        # credential is the OAuth row, and its own remedies were raised above
+        # (see the publish route's arm for the same reasoning).
+        if not target and ("RADIENT_API_KEY" in str(e) or "credential" in str(e)):
             raise HTTPException(status_code=401, detail="RADIENT_API_KEY is required")
         raise HTTPException(
             status_code=500,
@@ -1163,6 +1353,232 @@ async def check_agent_name_availability(
             status_code=500,
             detail=_publication_detail(
                 LOCAL_FAILURE_CODE, "The agent name could not be checked from this machine."
+            ),
+        )
+
+
+# --- Organization share surfaces (design §4.7/§8.3) ---------------------------
+#
+# The reads and writes a client needs to work inside an organization: the org
+# picker's own rows, and team publish/pull. All three resolve the credential
+# through `_org_radient_credentials`, so the signed-in account's bearer -- never
+# the tenant API key -- is the one on the wire (§2.2).
+
+
+@router.get(
+    "/v1/memberships",
+    response_model=CRUDResponse,
+    summary="List your Radient organization memberships",
+    description=(
+        "The signed-in account's organization memberships, each with the caller's "
+        "role and the tenant plan summary (design §4.1/§4.2), for org pickers and "
+        "upgrade decisions. Authenticates as the signed-in account, never with the "
+        "tenant API key."
+    ),
+)
+async def list_radient_memberships(
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """
+    List the signed-in account's organization memberships.
+
+    A membership list is person-scoped, so no tenant names it: the hub answers
+    for whoever the stored OAuth access token signs in as. Each row carries the
+    plan summary, which is what lets a caller render "org available / upgrade
+    needed" without a second call.
+    """
+    try:
+        api_key, base_url = await _org_radient_credentials(config_manager, provider_auth_store)
+        radient_client = RadientClient(api_key=api_key, base_url=base_url)
+        try:
+            memberships = await asyncio.to_thread(radient_client.list_memberships)
+        except APIError as exc:
+            logger.info(
+                "Radient Agent Hub refused a membership list (code=%s, HTTP %s)",
+                exc.code,
+                exc.status_code,
+            )
+            raise _publication_http_error(exc)
+
+        return CRUDResponse(
+            status=200,
+            message="Memberships retrieved successfully",
+            result={"memberships": memberships},
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error listing Radient organization memberships")
+        raise HTTPException(
+            status_code=500,
+            detail=_publication_detail(
+                LOCAL_FAILURE_CODE,
+                "Your organization memberships could not be read from this machine.",
+            ),
+        )
+
+
+@router.post(
+    "/v1/teams/{team_id}/publish",
+    response_model=CRUDResponse,
+    summary="Publish a local team into an organization on the Radient Agent Hub",
+    description=(
+        "Publish the local team named by `team_id` into the organization named by "
+        "`tenant_id` (design §4.5). The team document is built from the local row "
+        "(`teams.hub_team_document`) and reviewed by the hub's pipeline."
+    ),
+)
+async def publish_team_to_radient(
+    team_id: str = Path(..., description="ID of the local team to publish", examples=["team123"]),
+    tenant_id: str = Query(
+        ..., description="The organization to publish into.", examples=["org-tab-1"]
+    ),
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """
+    Publish the local team with the given ID into an organization.
+
+    Teams are org-only in v1, so ``tenant_id`` is required, exactly as the hub's
+    ``POST /v1/teams/publish`` requires it. The document is built by
+    ``teams.hub_team_document`` -- the same one-way mapping the CLI's ``teams
+    push`` sends -- so one team cannot publish two different documents depending
+    on which surface ran.
+    """
+    try:
+        from local_operator.teams import TeamRegistry, hub_team_document
+
+        api_key, base_url = await _org_radient_credentials(config_manager, provider_auth_store)
+
+        try:
+            # A malformed id and a missing row are one answer: neither names a
+            # local team this machine can publish. The registry read runs off
+            # the event loop with the rest of this handler's file work.
+            team = await asyncio.to_thread(
+                TeamRegistry(config_manager.config_dir).get_team, team_id
+            )
+        except (KeyError, ValueError):
+            raise HTTPException(status_code=404, detail=f"Team with ID {team_id} not found")
+
+        document = hub_team_document(team)
+        # Built once the local row is known to be publishable: an unknown team
+        # never constructs a hub client, matching the agent routes' ordering.
+        radient_client = RadientClient(api_key=api_key, base_url=base_url)
+        try:
+            result = await asyncio.to_thread(
+                radient_client.publish_team_document, document, tenant_id
+            )
+        except APIError as exc:
+            logger.info(
+                "Radient Agent Hub refused a team publication (code=%s, HTTP %s)",
+                exc.code,
+                exc.status_code,
+            )
+            raise _publication_http_error(exc)
+
+        return CRUDResponse(
+            status=200,
+            message="Team published to Radient successfully",
+            result=result,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error publishing team to Radient")
+        raise HTTPException(
+            status_code=500,
+            detail=_publication_detail(
+                LOCAL_FAILURE_CODE, "This team could not be published from this machine."
+            ),
+        )
+
+
+@router.get(
+    "/v1/teams/pull/{team_id}",
+    response_model=CRUDResponse,
+    summary="Pull a published team into the local registry",
+    description=(
+        "Download the organization team document named by `team_id` and reconstruct "
+        "it locally (design §8.3). `tenant_id`, when given, is the caller's "
+        "statement of which organization owns it."
+    ),
+)
+async def pull_team_from_radient(
+    team_id: str = Path(..., description="ID of the published team to pull", examples=["team-1"]),
+    tenant_id: Optional[str] = Query(
+        None,
+        description=(
+            "The owning organization: a document owned by another tenant is refused "
+            "rather than stored under the wrong expectation."
+        ),
+        examples=["org-tab-1"],
+    ),
+    config_manager: ConfigManager = Depends(get_config_manager),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """
+    Pull the published team ``team_id`` and reconstruct it locally.
+
+    ``GET /v1/teams/:teamid`` is org-agnostic by id (§4.5), so ``tenant_id`` --
+    when given -- is the caller's statement of which organization it means; a
+    document owned by a different tenant is refused (409) rather than stored
+    under the wrong expectation. The reconstruction is
+    ``TeamRegistry.import_hub_team``: a fresh local id, the published name
+    wherever the local rules can hold it, and the rename report the caller can
+    render -- the pull reports what it actually stored.
+    """
+    try:
+        from local_operator.teams import TeamRegistry
+
+        api_key, base_url = await _org_radient_credentials(config_manager, provider_auth_store)
+        radient_client = RadientClient(api_key=api_key, base_url=base_url)
+        try:
+            document = await asyncio.to_thread(radient_client.get_team, team_id)
+        except APIError as exc:
+            logger.info(
+                "Radient Agent Hub refused a team pull (code=%s, HTTP %s)",
+                exc.code,
+                exc.status_code,
+            )
+            raise _publication_http_error(exc)
+
+        owner = str(document.get("tenant_id") or "")
+        if tenant_id and owner and owner != tenant_id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"That team belongs to organization {owner}, not {tenant_id}. "
+                    "Check the tenant."
+                ),
+            )
+
+        try:
+            outcome = await asyncio.to_thread(
+                TeamRegistry(config_manager.config_dir).import_hub_team, document
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Cannot reconstruct this team locally: {exc}",
+            )
+
+        result = outcome.team.model_dump()
+        result["renamed_from"] = outcome.renamed_from
+        result["invalid_name"] = outcome.invalid_name
+        return CRUDResponse(
+            status=200,
+            message="Team pulled from Radient successfully",
+            result=result,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error pulling team from Radient")
+        raise HTTPException(
+            status_code=500,
+            detail=_publication_detail(
+                LOCAL_FAILURE_CODE, "This team could not be pulled from this machine."
             ),
         )
 

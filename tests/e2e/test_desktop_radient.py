@@ -59,6 +59,52 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if path.startswith("tenants/wrong/"):
             return JSONResponse({"error": "wrong tenant", "access_token": access}, status_code=403)
+        if path == "me/memberships":
+            return {
+                "status": 200,
+                "result": {
+                    "memberships": [
+                        {
+                            "tenant_id": "org-alpha",
+                            "tenant_name": "Org Alpha",
+                            "role": "admin",
+                            "status": "active",
+                            "is_home": False,
+                            "plan": {"status": "active", "seats": 3},
+                        }
+                    ]
+                },
+            }
+        if path == "tenants/org-alpha/agents":
+            return {
+                "status": 200,
+                "result": {
+                    "page": 1,
+                    "per_page": 10,
+                    "total_pages": 1,
+                    "total_records": 1,
+                    "records": [{"id": "org-agent-1", "name": "Org Screener", "visibility": "org"}],
+                },
+            }
+        if path == "tenants/org-alpha/teams":
+            return {
+                "status": 200,
+                "result": {"teams": [{"id": "team-fixture", "name": "Release Crew"}]},
+            }
+        if path == "teams/team-fixture":
+            return {
+                "status": 200,
+                "result": {
+                    "id": "team-fixture",
+                    "tenant_id": "org-alpha",
+                    "name": "Release Crew",
+                    "instructions": "You ship.",
+                    "members": [],
+                    "version": "1.0.0",
+                },
+            }
+        if path == "teams/missing":
+            return JSONResponse({"error": "team not found"}, status_code=404)
         if path == "agents/redirect":
             return JSONResponse({}, status_code=302, headers={"Location": "https://example.org"})
         return {
@@ -108,6 +154,16 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
                 {"operation": "agents.list", "query": {"page": 1, "per_page": 10}},
                 {"operation": "account.agents", "account_id": "fixture"},
                 {"operation": "agents.get", "agent_id": "fixture"},
+                # Organization operations (design §4.7): the selector list, the
+                # workspace list, and the team reads.
+                {"operation": "memberships.list"},
+                {
+                    "operation": "org_agents.list",
+                    "tenant_id": "org-alpha",
+                    "query": {"page": 1, "per_page": 10},
+                },
+                {"operation": "org_teams.list", "tenant_id": "org-alpha"},
+                {"operation": "org_team.get", "team_id": "team-fixture"},
                 *[
                     {
                         "operation": "agents." + operation,
@@ -173,8 +229,25 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
             assert len(calls) == len(requests)
             replay = await client.post(route, json=requests[-1])
             assert replay.json()["result"]["replayed"] and len(calls) == len(requests)
+            # The org operations relay the hub's rows, and the workspace list
+            # pins `visibility=org` on the server side (a caller never has to
+            # know that rule).
+            membership = await client.post(route, json={"operation": "memberships.list"})
+            assert membership.status_code == 200
+            relayed = membership.json()["result"]["data"]
+            assert relayed["result"]["memberships"][0]["tenant_id"] == "org-alpha"
+            org_lists = [call for call in calls if call[1] == "tenants/org-alpha/agents"]
+            assert org_lists and org_lists[0][2]["visibility"] == "org"
             wrong = await client.post(route, json={"operation": "credits", "tenant_id": "wrong"})
             assert wrong.status_code == 403 and access not in wrong.text
+            org_denied = await client.post(
+                route, json={"operation": "org_agents.list", "tenant_id": "wrong"}
+            )
+            assert org_denied.status_code == 403 and access not in org_denied.text
+            missing_team = await client.post(
+                route, json={"operation": "org_team.get", "team_id": "missing"}
+            )
+            assert missing_team.status_code == 404 and access not in missing_team.text
             redirect = await client.post(
                 route, json={"operation": "agents.get", "agent_id": "redirect"}
             )
@@ -191,6 +264,9 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
                     "request_id": request_id(),
                     "payload": {"name": "x", "api_key": "bad"},
                 },
+                # Org operations name their subject or are refused at once.
+                {"operation": "org_agents.list"},
+                {"operation": "org_team.get"},
             ):
                 assert (await client.post(route, json=body)).status_code == 422
             assert len(calls) == before
@@ -203,6 +279,21 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
             assert (
                 await client.delete("/v1/auth/accounts/" + str(key_account["id"]))
             ).status_code == 404
+            # An org operation with every account removed is the plane's own
+            # signed-out refusal: 409 `radient_no_credential`, and no upstream
+            # call happens. The removal goes through the auth surface, including
+            # whatever the earlier provisioning left stored, so the store really
+            # is the empty one a fresh install has.
+            signed_out_count = len(calls)
+            remaining = (await client.get("/v1/auth/status")).json()["result"]["accounts"]
+            for row in remaining:
+                removed = await client.delete("/v1/auth/accounts/" + str(row["id"]))
+                assert removed.status_code in (200, 404), row
+            assert await store.get_oauth_access("radient") is None
+            signed_out = await client.post(route, json={"operation": "memberships.list"})
+            assert signed_out.status_code == 409
+            assert signed_out.json()["detail"]["code"] == "radient_no_credential"
+            assert len(calls) == signed_out_count
             print(
                 (
                     f"Fake Radient upstream (no real third-party credentials): "
