@@ -602,10 +602,15 @@ def test_owner_team_and_title_round_trip_set_clear_and_absent(store) -> None:
 
 def test_owner_team_and_title_caps_refuse_with_the_field_name(store) -> None:
     project = create(store)
-    for field in ("owner", "team", "title"):
-        with pytest.raises(ValueError) as excinfo:
-            store.update_project(project.id, ProjectEdit(**{field: "x" * 81}))
-        assert f"{field} must be at most 80 characters" in str(excinfo.value)
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(project.id, ProjectEdit(owner="x" * 81))
+    assert "owner must be at most 80 characters" in str(excinfo.value)
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(project.id, ProjectEdit(team="x" * 81))
+    assert "team must be at most 80 characters" in str(excinfo.value)
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(project.id, ProjectEdit(title="x" * 81))
+    assert "title must be at most 80 characters" in str(excinfo.value)
 
 
 def test_the_staleness_window_is_four_hours(store) -> None:
