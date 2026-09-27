@@ -65,6 +65,10 @@ _ROWS: list[tuple[str, dict[str, object]]] = [
     ("edit", {"path": "local_operator/tui/glyphs.py"}),
     ("grep", {"query": "nerd_icons_enabled"}),
     ("task", {"prompt": "run the review gate"}),
+    # The project pair, so the gallery's ledger frames carry the board glyph
+    # and its removal sibling alongside the rest of the icon family.
+    ("project", {"op": "update", "name": "ui-update-account-robustness"}),
+    ("project_delete", {"name": "ui-update-account-robustness"}),
     # display_name() strips the ``mcp__linear_`` prefix to the call segment,
     # so pick one whose call fits the 8-cell name spine without truncation
     # (``search`` -> ``search``); a longer call would clip and muddy the shot.
