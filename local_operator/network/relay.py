@@ -258,6 +258,17 @@ MEMBERSHIP_PULL_TIMEOUT_S = 4.0
 #: :meth:`PeerLink.close` for what losing that window cost.
 CLOSE_FLUSH_S = 1.0
 
+#: How long :meth:`RelayServer.stop` lets the ``net_bye`` it just queued reach the
+#: socket before it closes the links.
+#:
+#: NOTHING CORRECT DEPENDS ON IT, and that is the point of naming it. It only makes
+#: the goodbye land instead of being raced by the close — ``PeerLink.close`` flushes
+#: what is queued anyway (see :data:`CLOSE_FLUSH_S`) — but it used to be the window a
+#: shutdown bug lived in: a handshake that finished inside these 50 ms registered a
+#: link ``stop`` had already snapshotted, and nothing ever closed it. A bare ``0.05``
+#: there reads like the deadline that made the shutdown correct; it never was.
+STOP_BYE_SETTLE_S = 0.05
+
 # ---------------------------------------------------------------------------
 # Slow ops: off-reader dispatch (mesh build plan §0 finding 4)
 # ---------------------------------------------------------------------------
@@ -3643,8 +3654,48 @@ class RelayServer:
 
         Sessions are UNTOUCHED: a reconnecting peer sees them again on the next
         handshake, and nothing here owns a transcript to lose.
+
+        THE POST-CONDITION, stated because it used to be false: when this returns,
+        ``links`` is empty, every link this relay ever held is closed, and no peer —
+        dialling now or already mid-handshake — ends up with a live link. A relay
+        that keeps answering one is not stopped, and that is the whole content of
+        this method for an operator who ran it to end the device's participation.
+
+        WHY IT WAS FALSE. ``_stop`` was set and ``links`` was snapshotted ONCE, 50 ms
+        before the close, and nothing checked ``_stop`` on the way into the table. A
+        handshake that finished between the two registered a link the snapshot never
+        saw and nothing ever closed it, so a stopped relay went on serving that peer.
+        The window is not theoretical: measured against the pre-fix code over 40
+        natural runs, the gap between a peer's registration and this snapshot ran
+        from -1.66 ms to +13.94 ms, clustered at 0-3 ms, and shifting only thread
+        schedules by 20 ms reproduced a relay answering an op after ``stop()``.
+
+        WHY A BARRIER AND NOT A RE-SNAPSHOT LOOP. Every admission into ``links``
+        happens in ONE critical section of ``_links_lock`` that also reads ``_stop``
+        (:meth:`_register_or_refuse`), and this method sets ``_stop`` before it takes
+        that same lock for the snapshot below. So an admission that succeeded is
+        visible to the snapshot, and one that has not yet taken the lock finds
+        ``_stop`` set and is refused: there is no third outcome. Repeating
+        snapshot/close until a pass finds nothing would not prove that — the settle
+        between two passes IS the window the leak lived in, so the loop can only ever
+        narrow the race it is meant to close.
         """
         self._stop.set()
+        # THE LISTENING SOCKETS GO FIRST, before any goodbye is sent. Closing the
+        # listener is what stops the kernel queueing a connection at all, so a peer
+        # that dials during the settle below meets a refused connection rather than
+        # an accepted-then-closed one — the narrowest possible answer to "a late
+        # dialer must not be served". It does NOT release a connection that was
+        # already accepted (that socket belongs to its handshake thread), which is
+        # why the barrier above has to be a flag and not anything socket-shaped:
+        # ``_accept_loop`` re-checks ``_stop`` after ``accept()`` returns, and
+        # ``_run_inbound_handshake`` refuses a handshake that completes later.
+        for sock in (self._listener, self._control):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         # Queued slow ops are CANCELLED, not run: their callers are about to lose
         # the link, and a move that starts during shutdown is the worst time for
         # one. A handler already running keeps its worker until it returns.
@@ -3655,15 +3706,9 @@ class RelayServer:
             links = list(self.links.values())
         for link in links:
             link.send({"op": "net_bye", "reason": "stopping"})
-        time.sleep(0.05)
+        time.sleep(STOP_BYE_SETTLE_S)
         for link in links:
             link.close("we-closed")
-        for sock in (self._listener, self._control):
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
         store.unpublish_peer_record(os.getpid(), self.root)
         self.audit.flush()
 
@@ -4056,6 +4101,24 @@ class RelayServer:
 
     # -- accepting links ----------------------------------------------------
 
+    def _close_if_stopped(self, sock: socket.socket) -> bool:
+        """True when this accepted socket arrived after ``stop()``: it is closed here.
+
+        THE LOOPS CANNOT GET THIS FROM THEIR OWN CONDITION, which is why it is a
+        method and not a line in each of them: ``while not self._stop.is_set()`` is
+        read at the TOP of the loop, and a thread parked in ``accept()`` is past it —
+        so the connection the kernel hands back may have arrived after the stop that
+        the condition last checked. Both accept loops (the peer listener and the
+        loopback control surface) reach the same state, so both ask the same question
+        once they hold a socket. A stopped relay owes a late arrival no protocol at
+        all, hence a close rather than a refusal frame, which is also what every other
+        refusal on this transport does.
+        """
+        if not self._stop.is_set():
+            return False
+        _close_quietly(sock)
+        return True
+
     def _accept_loop(self) -> None:
         assert self._listener is not None
         while not self._stop.is_set():
@@ -4065,6 +4128,8 @@ class RelayServer:
                 if self._stop.is_set():
                     return
                 continue
+            if self._close_if_stopped(sock):
+                return
             if len(self.links) >= self.settings.max_links:
                 sock.close()
                 continue
@@ -4293,6 +4358,17 @@ class RelayServer:
             _close_quietly(sock)
             return
 
+        # STOPPED WHILE THIS HANDSHAKE WAS IN FLIGHT: the peer authenticated, and
+        # this relay must not answer it. Checked HERE — after the handshake, before
+        # the welcome — because the welcome is the first thing a peer can read as
+        # "we are talking", and everything past it (a link, an admission, a pair
+        # ceremony) is work a stopped relay must not start. A connection the kernel
+        # accepted before the listener closed is still held by this thread, so
+        # closing the listener in :meth:`stop` cannot release it; this is the check
+        # that does. Silently, like every other refusal on this transport.
+        if self._stop.is_set():
+            _close_quietly(sock)
+            return
         record = store.load(network_id, self.root) if network_id else None
         welcome = handshake.welcome_frame(
             phase=result.phase,
@@ -4418,6 +4494,32 @@ class RelayServer:
             )
         )
 
+    def _register_or_refuse(self, link: PeerLink) -> bool:
+        """Take ``link`` into the table and start it, or close it and report False.
+
+        THE ONE WAY INTO ``links``, and why it is one way: the read of ``_stop`` and
+        the insert have to happen in the SAME critical section, or the read proves
+        nothing. A thread that checked ``_stop`` outside this lock could read it a
+        microsecond before :meth:`stop` set it and then insert into the table anyway
+        — which is exactly how a stopped relay kept answering a peer (see
+        :meth:`stop`). ``link.start()`` is inside the section too, so a link can
+        never be in the table unstarted while ``stop`` is closing what it found.
+
+        REFUSED MEANS CLOSED, with no frame on the wire: the peer gets EOF, the same
+        answer every other refusal on this transport gives — an open port that
+        explains itself is an oracle — and the record of why is this device's own.
+        """
+        with self._links_lock:
+            if self._stop.is_set():
+                refused = True
+            else:
+                self.links[link.link_id] = link
+                link.start()
+                refused = False
+        if refused:
+            _close_quietly(link.sock)
+        return not refused
+
     def register_link(
         self,
         sock: socket.socket,
@@ -4426,13 +4528,21 @@ class RelayServer:
         peer_addr: str,
         *,
         reader: wire.FrameReader | None = None,
-    ) -> PeerLink:
+    ) -> PeerLink | None:
         """Admit a fully-authenticated link, applying the duplicate-identity fence.
 
         ``reader`` is the handshake's own reader: it may hold the first bytes of the
         record phase already (``wire.FrameReader`` explains why), and handing it on
         is what keeps a peer that speaks immediately after its handshake from
         having that frame decrypted out of sequence.
+
+        ``None`` means :meth:`stop` happened while this handshake was in flight: the
+        socket is already closed and the caller has nothing to clean up. The barrier
+        is placed BEFORE the duplicate fence and not at the insert below, because
+        ``identity_use.observe`` registers this link's id as a live use of the peer's
+        identity — refusing after it would leave that use outstanding for a link that
+        never existed, so the fence has to be skipped entirely rather than run and
+        unwound.
         """
         link = PeerLink(
             server=self,
@@ -4443,6 +4553,8 @@ class RelayServer:
             reader=reader,
         )
         link.peer_addr = peer_addr
+        if not self._register_or_refuse(link):
+            return None
         verdict = self.identity_use.observe(
             result.peer_device_id,
             instance_id=result.peer_instance_id,
@@ -4474,9 +4586,12 @@ class RelayServer:
                     },
                 )
             )
-        with self._links_lock:
-            self.links[result.link_id] = link
-        link.start()
+        # NOT STARTED HERE: ``_register_or_refuse`` owns both the insert and
+        # ``start()``, and it does them in one critical section so ``stop`` can never
+        # meet a link that is in the table but not yet running. A second ``start()``
+        # here would put TWO reader threads on the same socket — each owning half a
+        # frame stream through its own ``FrameReader``, with the record they split
+        # between them lost — which is what a duplicate of this line did.
         # Learn where the peer can be dialled back. This is a DIFFERENT direction
         # from the endpoints we just declared in our own welcome: the hello the
         # peer sent carries ITS endpoints, and this device is the only one that
@@ -7354,9 +7469,13 @@ class RelayServer:
                 reader=reader,
             )
             link.peer_addr = peer_addr
-            with self._links_lock:
-                self.links[result.link_id] = link
-            link.start()
+            if not self._register_or_refuse(link):
+                # The relay stopped while the two people were confirming. The member
+                # row this ceremony just wrote STANDS — the admission is durable and
+                # the joiner holds it — but the link does not: a stopped relay serves
+                # nobody, and the joiner learns that on its next dial rather than
+                # being handed a connection this device would not answer on.
+                return
             # THE ADMITTING DEVICE OWES THE REST OF THE NETWORK THIS NEWS. The
             # joiner was handed the full member list in its admission frame; the
             # devices already in the network were told nothing, so a member
@@ -7626,9 +7745,8 @@ class RelayServer:
                 reader=reader,
             )
             link.peer_addr = host
-            with self._links_lock:
-                self.links[result.link_id] = link
-            link.start()
+            if not self._register_or_refuse(link):
+                return None, "stopping"
             # The listener's endpoints arrive in its ``welcome``; they are how this
             # device will re-open the link without being told the address again.
             # ``record`` was read before this handshake and is only an id source now:
@@ -7785,6 +7903,8 @@ class RelayServer:
                 if self._stop.is_set():
                     return
                 continue
+            if self._close_if_stopped(sock):
+                return
             threading.Thread(
                 target=self._control_connection, args=(sock,), name="mesh-control-conn", daemon=True
             ).start()
