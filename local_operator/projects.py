@@ -570,6 +570,68 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     return (moment - project.progress_updated_at) > PROJECT_PROGRESS_STALE_S
 
 
+def reported_age(project: Project, *, now: float | None = None) -> str | None:
+    """``2h``-style age of the progress snippet, or ``None`` when none is stored.
+
+    The caller composes the sentence, so one implementation of the age
+    arithmetic serves the listing row, the ``show`` block, the update receipt
+    and the completion-time reminder (``Session._project_reminder_text``)
+    without any of them disagreeing about how old the snippet is. Lived in
+    ``tools/project_tool.py`` until the completion check gained a fourth
+    sentence to compose; it moved here with ``progress_is_stale`` for the same
+    reason — the tool layer imports this module, never the other way round.
+    """
+    if not project.progress or project.progress_updated_at is None:
+        return None
+    moment = time.time() if now is None else now
+    age = max(0.0, moment - project.progress_updated_at)
+    if age < 90:
+        return f"{int(age)}s"
+    if age < 5400:
+        return f"{int(age // 60)}m"
+    if age < 172800:
+        return f"{int(age // 3600)}h"
+    return f"{age / 86400:.0f}d"
+
+
+def stale_projects_for_session(
+    registry: ProjectRegistry, session_id: str, *, now: float | None = None
+) -> list[Project]:
+    """The active, stale projects ``session_id`` is linked to, name-sorted.
+
+    THE single reading behind the completion-time project check: the producer
+    (``Session._project_continuation``) and the expiry scan
+    (``Session._live_project_reminders``) compute their set through here, so
+    the nudge and the check that retires it can never disagree about which
+    projects are stale. Only ``active`` projects can be named — paused, done
+    and archived are deliberate statements that the record is settled, and a
+    reminder about one would nag the session to revive it — and a project with
+    no progress yet is stale by construction, because the first honest line is
+    still owed.
+    """
+    return [
+        project
+        for project in registry.projects_for_session(session_id)
+        if project.status == "active" and progress_is_stale(project, now=now)
+    ]
+
+
+def stale_projects_fingerprint(projects: Sequence[Project]) -> tuple[tuple[str, str, int], ...]:
+    """The latch/expiry identity of a stale set: ``(id, status, int(stamp))``.
+
+    Sorted so two reads of the same set compare equal; the integer stamp is
+    ``progress_updated_at`` floored (``0`` when unset), which is the freshness
+    state the reminder asserts — any report or status change moves it, so the
+    remaining stale projects earn another nudge in the same turn.
+    """
+    return tuple(
+        sorted(
+            (project.id, project.status, int(project.progress_updated_at or 0))
+            for project in projects
+        )
+    )
+
+
 def _utc_now() -> float:
     return time.time()
 
