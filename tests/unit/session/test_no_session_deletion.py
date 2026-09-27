@@ -476,6 +476,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only this call's own .device.json.<pid>.tmp sidecar in identity/",
     ),
     (
+        "local_operator/network/projection.py::_write_tombstones",
+        "os.replace",
+        "Staged write of the tombstone FILE <config>/network/tombstones.json (the map of "
+        "session ids handed to another device, §6.3): a tmp FILE over its target, both "
+        "direct children of network/, a sibling of sessions/. Added by #1666's review "
+        "round 1, R1-2, which also found the file written 0644 while every sibling in "
+        "the plane is 0600",
+    ),
+    (
+        "local_operator/network/projection.py::_write_tombstones",
+        "os.unlink",
+        "Removes only this call's own .tombstones.json.<rand>.tmp sidecar in "
+        "<config>/network/, and only on the failure path",
+    ),
+    (
         "local_operator/network/audit.py::AuditLog._rotate",
         "<path>.unlink",
         "Closes the live audit FILE (<config>/network/audit.jsonl) into its "

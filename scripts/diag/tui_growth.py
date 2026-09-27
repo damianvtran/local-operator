@@ -190,7 +190,7 @@ def _publish_per_session() -> None:
     from local_operator.session.runtime import registry
 
     def publish(record: Any, root: Path | None = None) -> Path:
-        directory = registry.run_dir(root)
+        directory = registry.ensure_run_dir(root)
         record.heartbeat_at = time.time()
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".x.", suffix=".tmp")
         with os.fdopen(fd, "w") as handle:

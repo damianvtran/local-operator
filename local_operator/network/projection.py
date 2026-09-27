@@ -45,6 +45,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -497,6 +499,12 @@ def write_tombstone(
     path and must not create one (the reader above answers "nothing moved" on a
     machine that has never moved a session), and a bare ``mkdir(parents=True)``
     for the root would take the umask's mode.
+
+    THE FILE IS 0600 AS WELL, staged and renamed (:func:`_write_tombstones`). It
+    used to be a bare ``write_text``, which takes the umask and made this the only
+    non-0600 file in the network plane — ``-rw-r--r--`` beside 0600 records,
+    secrets and invites, holding the same class of content (review round 1, R1-2;
+    QA Q-2).
     """
     from local_operator.network.identity import ensure_network_root
 
@@ -510,25 +518,52 @@ def write_tombstone(
         "network_id": network_id,
         "moved_at": time.time(),
     }
-    path.write_text(
-        json.dumps({"version": 1, "sessions": entries}, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    _write_tombstones(path, entries)
     return path
 
 
+def _write_tombstones(path: Path, entries: dict[str, Any]) -> None:
+    """Publish the tombstone map 0600, staged then renamed into place.
+
+    TWO PROPERTIES, and each had a cheaper shape that was wrong:
+
+    * the mode is set AT CREATION, not after it. A following ``os.chmod`` leaves a
+      window in which the file is world-readable, and the content is device ids
+      and the session ids handed to them (review round 1, R1-2);
+    * the write is atomic. A truncated tombstone reads as "nothing ever moved",
+      which would re-offer a session that now lives on another device — the same
+      reasoning ``definitions.py`` gives for staging its own index rather than
+      reaching for ``store``'s private writer.
+    """
+    payload = json.dumps({"version": 1, "sessions": entries}, indent=2, sort_keys=True)
+    descriptor, temporary = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def forget_tombstone(session_id: str, *, config_dir: Path | None = None) -> bool:
-    """Drop one tombstone (the reverse of a move). Returns whether one was there."""
+    """Drop one tombstone (the reverse of a move). Returns whether one was there.
+
+    Same staged 0600 write as :func:`write_tombstone` (review round 1, R1-2).
+    """
     entries = read_tombstones(config_dir)
     if session_id not in entries:
         return False
     entries.pop(session_id, None)
     path = tombstones_path(config_dir)
     try:
-        path.write_text(
-            json.dumps({"version": 1, "sessions": entries}, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        _write_tombstones(path, entries)
     except OSError:
         return False
     return True

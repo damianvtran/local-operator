@@ -680,11 +680,26 @@ def read_config(path: tuple[str, ...], default: Any, root: Path | None = None) -
 
     Function-local import of ``ConfigManager``: it pulls the YAML store, and this
     module is on the CLI startup path.
+
+    A READ OF A SETTING DOES NOT CREATE THE STORE IT READS (review round 1, R1-3).
+    ``ConfigManager.__init__`` → ``_load_config`` mkdirs the config root whenever
+    ``config.yml`` is absent (its documented "create with defaults on first run"
+    behaviour — correct for a WRITER, wrong for a read of one nested value), so a
+    read against a root that did not exist yet materialised ``<config>``. The
+    short-circuit below is not an approximation of the same answer: it IS the same
+    answer, measured — ``DEFAULT_CONFIG`` carries no ``network`` block, so
+    ``get_nested_value`` on the freshly-created default returns the caller's
+    ``default`` for every path this module asks about. QA reproduced the scope
+    precisely (Q-3): the CONFIG root, not ``network/``, and nothing at all when
+    ``root`` is passed explicitly.
     """
-    from local_operator.config import ConfigManager
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
     from local_operator.paths import config_dir
 
-    manager = ConfigManager(root or config_dir())
+    directory = Path(root) if root is not None else config_dir()
+    if not (directory / CONFIG_FILE_NAME).exists():
+        return default
+    manager = ConfigManager(directory)
     return manager.get_nested_value(path, default)
 
 
@@ -836,7 +851,17 @@ def prune(record: NetworkRecord, *, now: float | None = None) -> dict[str, int]:
 
 
 def run_record_path(pid: int, root: Path | None = None) -> Path:
-    """Where one relay's discovery record lives: ``run/peers/<pid>.json``."""
+    """Where one relay's discovery record lives: ``run/peers/<pid>.json``.
+
+    A PURE RESOLVER. It used to CREATE ``run/`` and ``run/peers/``, because
+    ``registry.record_path`` routed through ``registry.run_dir``, which mkdirs —
+    and that made every caller that only wanted to NAME a path, or to scan for
+    one, the reason a mesh-shaped run tree existed on a device that had never run
+    a relay. ``server.utils.desktop_mesh._relay_record`` is the caller that made
+    it visible from the desktop plane: ``GET /v1/desktop/networks`` created
+    ``run/peers`` on a fresh install (review round 1, R1-1). The creating spelling
+    is ``registry.ensure_run_dir``, which only the writers call.
+    """
     from local_operator.session.runtime import registry
 
     return registry.record_path(pid, root, dirname=PEERS_RUN_DIRNAME)
@@ -864,7 +889,12 @@ def unpublish_peer_record(pid: int, root: Path | None = None) -> None:
 def scan_peer_records(
     root: Path | None = None, *, reap: bool = True
 ) -> list[tuple[PeerRecord, str]]:
-    """Every relay record, each with its ``live``/``wedged``/``stale`` verdict."""
+    """Every relay record, each with its ``live``/``wedged``/``stale`` verdict.
+
+    A READ, and it creates nothing on the way: ``registry.scan`` resolves its
+    directory without creating and answers ``[]`` when it is absent, so "no relay
+    has ever run here" costs a glob rather than a mkdir (review round 1, R1-1).
+    """
     from local_operator.session.runtime import registry
 
     return registry.scan(root, dirname=PEERS_RUN_DIRNAME, parse=PeerRecord.from_json, reap=reap)

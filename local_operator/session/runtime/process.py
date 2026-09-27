@@ -1305,14 +1305,15 @@ def _clear_boot_record() -> None:
     not one per runtime ever spawned.
 
     THE GUARD IS NOT AN OPTIMISATION. Nothing is attempted when this process
-    never published a record, and that is load-bearing twice over. The exit path
-    is TIMED by the reaper's own tests (``test_process_reaper`` measures the
-    spread of ``_clean_exit`` elapsed times to 40 ms), so an instrument must not
-    add work to it for a host that has no record to withdraw — an in-process
-    session, a reduced handle, every test that never binds instrumentation.
-    And the withdrawal is not free even when it does nothing: it resolves
-    ``run_dir()``, which MKDIRS the namespace, so an unconditional call would
-    make every clean exit create a directory it has nothing to put in.
+    never published a record, and the exit path is TIMED by the reaper's own tests
+    (``test_process_reaper`` measures the spread of ``_clean_exit`` elapsed times
+    to 40 ms), so an instrument must not add work to it for a host that has no
+    record to withdraw — an in-process session, a reduced handle, every test that
+    never binds instrumentation. (The other half of this reasoning is gone: the
+    withdrawal used to resolve ``run_dir()``, which MKDIRS the namespace, so an
+    unconditional call also created a directory it had nothing to put in. Since
+    #1666's review round 1, R1-1 the resolvers are pure and only the WRITERS'
+    ``ensure_*`` spellings create, so the call is now free of that side effect.)
     """
     if _boot_record_pid != os.getpid():
         return
