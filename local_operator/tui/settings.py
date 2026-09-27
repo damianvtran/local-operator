@@ -192,6 +192,29 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # roster and on a live edit (applied only if the user has not cycled it
     # this session). Unknown strings read as full.
     "display.dock": "full",
+    # --- the composer widget-visibility family (operator request, 2026-09-27) ---
+    #
+    # One BOOL per composable piece of the composer, all default True because
+    # the family's whole job is to REMOVE pieces of the shipped band: "unset"
+    # must paint today's shape. The two widget keys (``band``, ``chevron``) are
+    # applied by ``OperatorApp._apply_composer_settings``; the six segment keys
+    # ride the band's drop ladder via ``status_line._composer_hidden_segments``,
+    # so a hidden segment is ABSENT from the painted row — it spends no width
+    # in the fit and its cells go to the siblings — rather than painted blank
+    # or as a dash. All eight are LIVE: an edit from this process or another's
+    # (via the config watcher) repaints the running TUI without a relaunch.
+    "display.composer.band": True,
+    "display.composer.chevron": True,
+    "display.composer.model": True,
+    "display.composer.cwd": True,
+    "display.composer.context": True,
+    # The ladder rung for this key is ``last-rate`` — it names the READING (the
+    # last completed call's throughput), not the ``last`` label the segment
+    # used to carry (dropped 2026-09-27). Do not rename the rung to match the
+    # key.
+    "display.composer.rate": True,
+    "display.composer.cost": True,
+    "display.composer.duration": True,
     "display.time_format": "12h",
 }
 
