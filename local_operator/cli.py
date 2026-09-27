@@ -7742,6 +7742,9 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
     from pydantic import SecretStr  # lazy: pydantic stays off the startup path
 
     from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
+    from local_operator.env import (
+        DEFAULT_RADIENT_API_BASE_URL,  # quoted, never spelled (see below)
+    )
     from local_operator.providers.radient_credentials import (  # lazy: auth stack
         ORG_ALLOW_NONCANONICAL_ENV,
         org_oauth_destination_allowed,
@@ -7753,11 +7756,15 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
     access = resolve_radient_oauth_access_sync(config_manager.config_dir, base_url)
     if access is None:
         if not org_oauth_destination_allowed(base_url):
+            # The sentence names the canonical host WITHOUT spelling it: cli.py
+            # must stay free of URL-shaped Radient literals
+            # (test_radient_hub_base_resolution's single-reader invariant), so
+            # the destination is quoted from env.py's constant.
             print(
                 "\n\033[1;31mError: organization operations are refused because the "
                 f"configured Radient hub is not the Radient cloud API ({base_url}), and "
                 "the signed-in account's bearer is not sent to other hosts. Point "
-                "`radient_base_url` at https://api.radienthq.com/v1, or set "
+                f"`radient_base_url` at {DEFAULT_RADIENT_API_BASE_URL}, or set "
                 f"{ORG_ALLOW_NONCANONICAL_ENV}=1 if this hub is local or staging.\033[0m"
             )
         else:

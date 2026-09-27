@@ -523,6 +523,12 @@ def test_org_calls_refuse_a_non_canonical_hub_by_default(
 
     out = capsys.readouterr().out
     assert "not the Radient cloud API" in out
+    # The canonical destination is QUOTED at runtime (cli.py must stay free of
+    # URL-shaped Radient literals -- the single-reader guard), so pin that the
+    # sentence still names it.
+    from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
+
+    assert DEFAULT_RADIENT_API_BASE_URL in out
     assert "RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1" in out
     assert constructed == []
 
