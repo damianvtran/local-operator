@@ -59,6 +59,7 @@ for _key in tuple(os.environ):
 import asyncio  # noqa: E402
 
 from rich.cells import cell_len  # noqa: E402
+from rich.text import Text  # noqa: E402
 from textual.widgets import Static  # noqa: E402
 
 from local_operator import settings_io  # noqa: E402
@@ -155,7 +156,9 @@ def _report(app: OperatorApp, label: str) -> None:
         # below from reading as "the band is still painted".
         print("  note: band hidden — content retained but not laid out")
     content = band.content
-    painted = content.plain if hasattr(content, "plain") else str(content)
+    # ``Static.content`` is typed as the general renderable union; the band
+    # always updates it with a rich ``Text``, so narrow rather than cast.
+    painted = content.plain if isinstance(content, Text) else str(content)
     print(f"  painted({cell_len(painted)}): {painted!r}")
     if status is not None:
         shown = ", ".join(f"{s}={status.is_showing(s)}" for s in SHOWN_IDS)
