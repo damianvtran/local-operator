@@ -1035,10 +1035,15 @@ Retries: a billed reply that fails strict decision parsing is a **model**
 error, not a provider outage. The client raises `DecisionRejected` carrying
 the call's full billing provenance and appends both the bad reply and a
 correction naming the observation and its valid frame ids, so the runner's
-re-call is corrective by construction. `max_decision_retries` defaults to 2
-(`0` restores one-strike behaviour). Every attempt writes its own
+re-call is corrective by construction. Two bounds apply, and they are split by
+the SHAPE of the streak: a streak that keeps REPEATING one refusal class -- a
+defect the harness named and the model reproduced -- ends the episode at
+`max_decision_retries + 2` (4) consecutive refusals, while a streak that keeps
+CHANGING class ends at `max_rejection_streak` (default 6), because variation is
+the model applying the corrections rather than ignoring them (`0` restores
+one-strike behaviour on either shape). Every attempt writes its own
 `model_request`/`model_response`/`usage_cost` triple and counts as a model
-cycle; a rejected attempt also writes a retryable `error`. Exhausting the
+cycle; a rejected attempt also writes a retryable `error`. Exhausting either
 bound seals as `model_failure` — distinct from `provider` (nothing was down)
 and `crash` (nothing broke).
 
