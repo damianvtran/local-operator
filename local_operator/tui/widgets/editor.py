@@ -7927,12 +7927,14 @@ class Editor(TextArea):
                 self._name_choices = frozenset()
                 self._name_choices_family = None
                 self.post_message(ArgumentQueryOpened(command or ""))
-            elif command in ("mcp", "team", "teams"):
-                # `/mcp` and `/team` are two-level: `/mcp` reserves verbs in the
-                # first argument slot and offers servers in the second; `/team`
-                # reserves the `chart` subcommand in the first slot and, once
-                # `chart ` is present, re-offers TEAM NAMES in the second (the
-                # [name] the chart wants). ArgumentQueryOpened fires on the
+            elif command in ("mcp", "team", "teams", "project"):
+                # `/mcp`, `/team` and `/project` are two-level: `/mcp` reserves
+                # verbs in the first argument slot and offers servers in the
+                # second; `/team` reserves the `chart` subcommand in the first
+                # slot and, once `chart ` is present, re-offers TEAM NAMES in
+                # the second (the [name] the chart wants); `/project` reserves
+                # its six verbs and re-offers PROJECT NAMES once a name-taking
+                # verb's space is typed. ArgumentQueryOpened fires on the
                 # command WORD, so without this the first-slot rows would stay
                 # up after the subcommand was completed and the second slot
                 # would have nothing to offer. Tracked rather than refreshed per
@@ -7968,6 +7970,23 @@ class Editor(TextArea):
                     # does for the chart slot.
                     if subcommand != (self._argument_subcommand or ""):
                         self._argument_subcommand = subcommand
+                        self.post_message(RefreshArgumentChoices(command, cursor))
+                elif command == "project":
+                    # `/project` is two-level exactly as `/mcp` is: reserved
+                    # verbs in the first slot, that verb's project NAMES in the
+                    # second — for the NAME-TAKING verbs only; `list` and `new`
+                    # offer nothing once their space is there, and the builder
+                    # is what decides (it reads the space itself, like
+                    # `/mcp`'s). Keyed on `verb + sep` for the whole transition,
+                    # the `/mcp` branch's rule: the builder flips precisely on
+                    # the terminating space, so a token-only key would never
+                    # fire the edge that changes the answer (#377), and a key
+                    # that only tracked name-taking verbs would leave the verb
+                    # rows standing after `/project new ` instead of clearing
+                    # them.
+                    project_key = f"{first_tok.casefold()}{sep}" if list_argument else ""
+                    if project_key != (self._argument_subcommand or ""):
+                        self._argument_subcommand = project_key
                         self.post_message(RefreshArgumentChoices(command, cursor))
                 else:
                     # `/team` has exactly ONE thing that changes its choice set:
