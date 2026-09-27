@@ -423,7 +423,17 @@ class ProjectsView(Vertical):
         def leads_of(
             *leads: tuple[HintButton, str, bool] | None,
         ) -> list[tuple[HintButton, str, bool]]:
-            return [lead for lead in leads if lead is not None]
+            # The seam (` · `) belongs to the ROW: re-derive it here so the
+            # first hint in a rung never paints a leading separator. With
+            # `↔↕ scroll` shed the row used to open with a dangling `·`
+            # (UX round 2, U6), and measuring the same plan the row will be
+            # painted from keeps the ladder's arithmetic honest.
+            return [
+                (hint, label, index > 0)
+                for index, (hint, label, _lead) in enumerate(
+                    lead for lead in leads if lead is not None
+                )
+            ]
 
         all_leads = leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, zoom)
         rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = [

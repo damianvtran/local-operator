@@ -188,6 +188,7 @@ from local_operator.slash_commands import (
     project_store_unreadable_text,
     project_subcommand_rows,
     project_unavailable_text,
+    refresh_project_store,
     run_project_slash_op,
     slash_command_for,
     unknown_flag_refusal,
@@ -18714,7 +18715,12 @@ class OperatorApp(App[None]):
             if getattr(registry, "load_error", None) is not None:
                 # The page reads the same store the receipt does: an unreadable
                 # one must refuse in the same words rather than resolve every
-                # name to "no project named" (QA round 1, Q4).
+                # name to "no project named" (QA round 1, Q4) — and the
+                # refusal must not be STICKY: this check runs before the read
+                # that would refresh the snapshot, so re-read once first
+                # (QA round 2, Q5).
+                refresh_project_store(registry)
+            if getattr(registry, "load_error", None) is not None:
                 notice(project_store_unreadable_text(), "warning")
                 return
             try:

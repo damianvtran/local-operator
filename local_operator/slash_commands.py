@@ -293,6 +293,22 @@ def project_listing_rows(
     return rows
 
 
+def refresh_project_store(registry: Any) -> None:
+    """Give a refusal ONE bounded re-read before it is believed.
+
+    Both refusal checks (the runner's verb gate and the app's ``show`` branch)
+    run BEFORE any store read, and a read is what refreshes the snapshot — so
+    a store repaired since the flag was set kept refusing on the LIVE surface
+    (QA round 2, Q5: eight receipts over eleven seconds after a ``chmod``
+    back, all stale; fresh registries and ``new`` recovered, which is how the
+    gap was spotted). Entities without a ``refresh`` (test doubles) are left
+    alone; the real registry's is one stat + one listing.
+    """
+    refresh = getattr(registry, "refresh", None)
+    if callable(refresh):
+        refresh()
+
+
 def project_store_unreadable_text() -> str:
     """The refusal an UNREADABLE store answers — never the empty-store sentence.
 
@@ -506,6 +522,11 @@ def run_project_slash_op(
         # readable, and a reader told otherwise is being lied to by the
         # surface (QA round 1, Q4). `new` is exempt — the write itself carries
         # the honest failure below.
+        if getattr(registry, "load_error", None) is not None:
+            # …but a refusal must not be STICKY: this check runs before any
+            # read would refresh the snapshot, so re-read once before believing
+            # it (QA round 2, Q5 — a repaired store kept refusing here).
+            refresh_project_store(registry)
         if getattr(registry, "load_error", None) is not None:
             return (project_store_unreadable_text(), "warning")
 

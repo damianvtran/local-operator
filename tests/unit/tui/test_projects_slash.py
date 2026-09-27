@@ -572,3 +572,63 @@ async def test_picker_offers_the_delete_confirmation_row(tmp_path: Path) -> None
         names = [name for name, _choice in typed]
         assert "delete alpha yes" in names
         assert "delete beta yes" not in names
+
+
+@pytest.mark.asyncio
+async def test_unreadable_store_recovers_on_the_live_surface(tmp_path: Path) -> None:
+    """QA round 2, Q5: the refusal must not be sticky on a repaired store.
+
+    Same app, same registry, no restart: ``chmod`` 000 answers the refusal;
+    ``chmod`` back and the VERY NEXT verb reads the store. A permission repair
+    moves the inode's ctime, not the directory mtime, and the refusal check
+    runs before any read that would refresh the snapshot — so the pre-fix
+    surface stayed unreadable for the life of the process (QA measured eight
+    receipts over eleven seconds).
+    """
+    import os
+
+    from local_operator.slash_commands import run_project_slash_op
+
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    seed = ProjectRegistry(tmp_path)
+    seed.create_project(ProjectEdit(name="alpha"))
+    os.chmod(projects_dir, 0o000)
+    try:
+        # The LIVE reader is built while the store is unreadable, so its flag
+        # is genuinely set — the state QA reproduced (a surface that has
+        # already answered the refusal). ONE registry for the whole run: a
+        # fresh one after the repair would mask the bug (re-reading on
+        # construction is what made round 1's test pass).
+        registry = ProjectRegistry(tmp_path)
+        assert registry.load_error is not None
+        session = _ProjectSession()
+        session.project_registry = registry
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(120, 32)) as pilot:
+            await _boot(pilot, app)
+            app._run_slash_command("/project list")
+            await pilot.pause()
+            assert "unreadable" in _notices(app)[-1]
+            os.chmod(projects_dir, 0o755)
+            # No sleep, no restart, no fresh registry.
+            app._run_slash_command("/project list")
+            await pilot.pause()
+            assert "unreadable" not in _notices(app)[-1]
+            assert "alpha" in _notices(app)[-1]
+            app._run_slash_command("/project show alpha")
+            await pilot.pause()
+            await pilot.pause()
+            assert app._projects_view is not None
+            # The runner path (phone/mobile receipts) recovers on the same
+            # registry object, for both the verb gate and `show`.
+            text, _style = run_project_slash_op(
+                "list", "", registry=registry, config_dir=tmp_path, session_id=None
+            )
+            assert "unreadable" not in text and "alpha" in text
+            text, _style = run_project_slash_op(
+                "show", "alpha", registry=registry, config_dir=tmp_path, session_id=None
+            )
+            assert "no project named" not in text
+    finally:
+        os.chmod(projects_dir, 0o755)

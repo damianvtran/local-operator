@@ -47,6 +47,7 @@ from rich.text import Text
 from local_operator.projects import PROJECT_ROW_CAP
 from local_operator.projects import age_text as derived_age_text
 from local_operator.projects import milestone_state as derived_milestone_state
+from local_operator.projects import truncate_row
 
 #: Cap on projects a single canvas renders. Past it the canvas names the
 #: overflow in one truncation row; the cap exists so one runaway store cannot
@@ -756,8 +757,9 @@ def detail_footer(
 
     clauses: dict[str, Text] = {}
     identity = Text(no_wrap=True)
+    name_text = str(project.get("name") or "(unnamed)")
     status = str(project.get("status") or "active")
-    identity.append(str(project.get("name") or "(unnamed)"), style=resolver("name"))
+    identity.append(name_text, style=resolver("name"))
     identity.append(f" [{status}]", style=chip(status))
     clauses["identity"] = identity
 
@@ -830,19 +832,29 @@ def detail_footer(
             sessions.append(f" · +{len(rows) - 4} more", style=resolver("dim"))
     clauses["sessions"] = sessions
 
-    order = ("identity", "progress", "milestones", "sessions")
-    # Preference ladder, longest first. Every rung keeps the identity; the
-    # FULL rung is preferred whenever it fits, and each rung below sheds the
-    # clause whose information survives elsewhere first (the progress age is
-    # also on the canvas row; the rollup counts are too), so a narrow terminal
-    # loses the least.
-    rungs = (
-        order,
-        order[:3],
-        ("identity", "milestones", "sessions"),
-        ("identity", "milestones"),
-        ("identity",),
+    # An EMPTY clause is not a clause: a milestone-less project must not paint
+    # a doubled seam (`·  ·`) where its milestone list would be, and the five
+    # cells a phantom slot costs flip the shed ladder on an 82-86-cell box,
+    # hiding a rollup that fits (UX round 2, U4 — the pre-remediation builder
+    # guarded this and the guard was lost in the ladder rewrite).
+    order = tuple(
+        key
+        for key in ("identity", "progress", "milestones", "sessions")
+        if clauses[key].plain.strip()
     )
+    # Preference ladder, longest first, by PROGRESSIVE shedding in the order
+    # the docstring states: the progress body goes first (its age is also on
+    # the canvas row), then the session rollup, then the milestones — so the
+    # 192-235-cell band keeps the rollup instead of the body (agent review
+    # round 2: the rollup used to shed before the body, against this ladder's
+    # own statement). Every rung keeps the identity.
+    rungs: list[tuple[str, ...]] = [order]
+    remaining = order
+    for shed in ("progress", "sessions", "milestones"):
+        candidate = tuple(key for key in remaining if key != shed)
+        if candidate != remaining:
+            rungs.append(candidate)
+        remaining = candidate
 
     def compose(keys: tuple[str, ...]) -> Text:
         row_text = Text(no_wrap=True)
@@ -865,7 +877,16 @@ def detail_footer(
             fitted = candidate
             break
     if cell_len(fitted.plain) > width:
-        fitted.truncate(width, overflow="ellipsis")
+        # A blind truncate can cut INSIDE the status chip (`… [p…` — UX round
+        # 2, U5). The chip is a whole token, so when it fits alone the NAME
+        # gives way first and the chip survives intact; only when even the
+        # chip cannot fit does the line ellipsize mid-token.
+        chip_text = f"[{status}]"
+        if cell_len(chip_text) + 2 <= width:
+            name_cap = max(width - cell_len(chip_text) - 1, 1)
+            fitted = Text(truncate_row(name_text, cap=name_cap) + " " + chip_text)
+        if cell_len(fitted.plain) > width:
+            fitted.truncate(width, overflow="ellipsis")
     return fitted
 
 
