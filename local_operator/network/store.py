@@ -73,11 +73,13 @@ from typing import Any, Callable, Iterator, TextIO
 from local_operator.network.identity import network_root
 from local_operator.network.types import (
     PEERS_RUN_DIRNAME,
+    JoinAnswer,
     MemberRecord,
     MeshRefusal,
     NetworkRecord,
     PairDecision,
     PeerRecord,
+    PendingJoin,
     PendingPairing,
     SecretState,
 )
@@ -401,6 +403,21 @@ def decision_path(invite_id: str, root: Path | None = None) -> Path:
     return pending_dir(root) / f"{invite_id}.decision.json"
 
 
+def parked_join_path(invite_id: str, root: Path | None = None) -> Path:
+    """The JOINING device's parked ceremony — the mirror of :func:`pending_path`.
+
+    A distinct suffix on purpose: ``pending_pairings`` globs ``*.pending.json`` and
+    would try to parse one of these as a :class:`PendingPairing`, quarantine it, and
+    delete a live ceremony's record (its own comment calls that file pair the
+    inviter's). Two records, two readers, one directory.
+    """
+    return pending_dir(root) / f"{invite_id}.joining.json"
+
+
+def join_answer_path(invite_id: str, root: Path | None = None) -> Path:
+    return pending_dir(root) / f"{invite_id}.join-answer.json"
+
+
 def save_pending_pairing(pending: PendingPairing, root: Path | None = None) -> Path:
     """Write the waiting pairing, 0600. Deleted with its decision."""
     return _write_private_json(pending_path(pending.invite_id, root), pending.to_json())
@@ -461,6 +478,68 @@ def pair_decision(invite_id: str, root: Path | None = None) -> PairDecision | No
 
 def clear_pair_decision(invite_id: str, root: Path | None = None) -> None:
     decision_path(invite_id, root).unlink(missing_ok=True)
+
+
+def save_pending_join(pending: PendingJoin, root: Path | None = None) -> Path:
+    """Write the JOINER's parked ceremony, 0600. Readable until it is answered."""
+    return _write_private_json(parked_join_path(pending.invite_id, root), pending.to_json())
+
+
+def pending_join(invite_id: str, root: Path | None = None) -> PendingJoin | None:
+    """The parked ceremony, or ``None`` when the file is not there or unreadable.
+
+    Expiry is NOT judged here, exactly as :func:`pending_pairing` leaves it to its
+    callers: the CLI is the only place that has sentences for "this ran out of
+    time" and "the process that held it is gone", and a reader that silently
+    dropped an expired record could not tell those two from "nobody is pairing".
+    """
+    data = _read_json(parked_join_path(invite_id, root))
+    if data is None:
+        return None
+    try:
+        return PendingJoin.from_json(data)
+    except (TypeError, ValueError):
+        _quarantine(parked_join_path(invite_id, root))
+        return None
+
+
+def pending_joins(root: Path | None = None) -> list[PendingJoin]:
+    """Every parked ceremony on this device, oldest first.
+
+    A listing that CLEARS nothing, unlike :func:`pending_pairings`: an expired
+    record whose process is still running is a ceremony someone is about to answer,
+    and the answerer needs to find it to refuse it by name.
+    """
+    found: list[PendingJoin] = []
+    for path in sorted(pending_dir(root).glob("*.joining.json")):
+        record = pending_join(path.name[: -len(".joining.json")], root)
+        if record is not None:
+            found.append(record)
+    return sorted(found, key=lambda row: row.issued_at)
+
+
+def clear_pending_join(invite_id: str, root: Path | None = None) -> None:
+    parked_join_path(invite_id, root).unlink(missing_ok=True)
+
+
+def save_join_answer(answer: JoinAnswer, root: Path | None = None) -> Path:
+    """Write the joiner's human answer where the waiting ceremony will see it."""
+    return _write_private_json(join_answer_path(answer.invite_id, root), answer.to_json())
+
+
+def join_answer(invite_id: str, root: Path | None = None) -> JoinAnswer | None:
+    data = _read_json(join_answer_path(invite_id, root))
+    if data is None:
+        return None
+    try:
+        return JoinAnswer.from_json(data)
+    except (TypeError, ValueError):
+        _quarantine(join_answer_path(invite_id, root))
+        return None
+
+
+def clear_join_answer(invite_id: str, root: Path | None = None) -> None:
+    join_answer_path(invite_id, root).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +628,17 @@ def purge_network_artifacts(
             continue
         pending_file.unlink()
         clear_pair_decision(row.invite_id, root)
+        removed["pending"] += 1
+    # And the ceremonies THIS device parked as the joiner, attributed the same exact
+    # way. ``removed["pending"]`` counts them together with the inviter's rows because
+    # the receipt's own words are "parked pairing file(s)": to the device holding them
+    # they are one class of leftover, and a purge that left a join record naming a
+    # network it just forgot would resurrect half a ceremony on the next answer.
+    for own in pending_joins(root):
+        if own.network_id not in targets:
+            continue
+        clear_pending_join(own.invite_id, root)
+        clear_join_answer(own.invite_id, root)
         removed["pending"] += 1
     return removed
 

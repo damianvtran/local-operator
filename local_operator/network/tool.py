@@ -9,16 +9,36 @@ a tool that opened the store itself would be a second one.
 Three rules shape the code below, and they are the reason it is not a thin
 subprocess wrapper:
 
-* **The token and the SAS never appear in a result.** ``invite`` returns the
-  token's *path*; ``join`` is never completed from here. The CLI's stdout is
-  PARSED, never passed through: a raw blob would put a token in the transcript
-  the moment a command printed one (``mesh-ui.md`` §3.2), and every payload is
-  scrubbed of secret-shaped keys on the way out as a second line of defence.
-* **No confirmation, ever.** Pairing is two humans reading a code off each
-  other's screens; ``panic``/``disconnect``/``member rm`` mutate the trust state
-  of every device in a network. The CLI has no ``--yes``/``--confirm`` to pass
-  and the argv table below cannot invent one, so a refusal comes back as the
-  CLI's own sentence rather than as an action taken on the user's behalf.
+* **The invite token never appears in a result, and the SAS only as the code two
+  people compare.** ``invite`` returns the token's *path*; the code a pairing shows
+  is returned because the user has to be shown it. It is not a credential, but it
+  DOES travel: both devices derive the same digits from the live handshake, and the
+  joining device sends its transcription inside a SEALED frame for the inviter to
+  compare against its own derivation (``handshake.pair_ready_frame``, compared in
+  ``relay.py``'s ``net_pair_ready``). It therefore never appears in cleartext on the
+  wire, in a log line or in an error — and its security never rested on secrecy in
+  the first place: it rests on a human having read it off the other device's screen.
+  The earlier wording here ("never travels") was wrong, and it was the premise this
+  tool's own rewrite used to relax the design's invariant (agent review round 1,
+  semantic finding 2). The CLI's
+  stdout is PARSED, never passed through: a raw blob would put a token in the
+  transcript the moment a command printed one (``mesh-ui.md`` §3.2), and every
+  payload is scrubbed of secret-shaped keys on the way out as a second line of
+  defence.
+* **No confirmation, ever — the second phase is the PERSON's, and this tool
+  cannot answer a park at all.** Pairing is two people reading a code off each
+  other's screens. ``join`` opens the ceremony, parks it and hands back the code
+  together with the sentence the user needs; the person then runs ``lop network join
+  --confirm <code>`` at their own terminal (or answers the inviter's ``lop network
+  confirm`` prompt), and ``_argv_for`` spells no ``--confirm`` anywhere — no field,
+  no default, no branch that can produce one. The earlier revision took that code as
+  a field on this tool, which is decorative rather than safe: the code both devices
+  derive is the SAME digits, so a model holding the code it just printed can echo it
+  back and satisfy the very comparison that exists to detect a substitution (agent
+  review round 1, semantic finding 1; the operator's ruling was to remove the field,
+  not to guard it). ``panic``/``disconnect``/``member rm`` mutate the trust state of
+  every device in a network and still take no ``--yes``. So a refusal comes back as
+  the CLI's own sentence rather than as an action taken on the user's behalf.
 * **Creation cannot be gated.** ``init`` is how the first network comes to
   exist, so the tool exists in every session (``build_network_tool`` never
   returns ``None`` — ``mesh-ui.md`` §3.2's ladder discussion).
@@ -56,8 +76,31 @@ _TOOL = "network"
 
 #: The CLI's own tier split (``mesh-ui.md`` §3.2): the reads never prompt, and
 #: every op that changes a record, the trust state or the epoch does.
-READ_ACTIONS = frozenset({"status", "ls", "show", "peers", "log", "doctor"})
-WRITE_ACTIONS = frozenset({"init", "invite", "join", "member_rm", "disconnect", "panic"})
+READ_ACTIONS = frozenset(
+    {
+        "status",
+        "ls",
+        "show",
+        "peers",
+        "log",
+        "doctor",
+        "credentials",
+        "definitions_state",
+        # Its BARE form is a listing, which is why it is on this side of the union the
+        # tests assert; ``_approval_tier`` upgrades it per call when the arguments
+        # carry a mutation.
+        "sessions",
+    }
+)
+WRITE_ACTIONS = frozenset({"init", "invite", "join", "member_rm", "disconnect", "panic", "trust"})
+
+#: The one action whose tier depends on WHICH verb it carries: ``sessions`` presents
+#: one peer's session list, which is a read, and can create, engage, stop or delete a
+#: session on it, which are not. The split is therefore made on the arguments the
+#: model actually sent, rather than on a second family of action names it would have
+#: to keep in step with its own flags — a ``sessions_create`` that forgot ``peer``
+#: would be the same call under a friendlier name.
+_SESSION_MUTATIONS = ("create", "engage", "stop", "delete")
 
 #: Local reads answer in well under a second; ``doctor`` dials endpoints. The
 #: bound exists so a wedged subprocess can never hold a turn open.
@@ -65,6 +108,11 @@ _DEFAULT_TIMEOUT_S = 30.0
 #: ``join`` performs a real handshake against the far device, which is bounded by
 #: that relay's own timers, not by ours.
 _JOIN_TIMEOUT_S = 120.0
+
+#: How long a parked pairing's FIRST body may take. A dial and a handshake, which the
+#: CLI bounds internally — so this is the "the pairing never announced itself" bound,
+#: not a patience budget for the person who has to read a code off another screen.
+_PARK_READY_TIMEOUT_S = 30.0
 
 #: A refusal sentence is one line; a traceback is not, and neither belongs in a
 #: result whole.
@@ -98,6 +146,21 @@ NetworkAction = Literal[
     "panic",
     "log",
     "doctor",
+    # The session plane's client half (``mesh-session-mobility.md`` §9.3): one peer's
+    # sessions, and the four verbs that act on one. Before this the tool could see a
+    # peer and drive nothing it held.
+    "sessions",
+    # Re-admitting a network this device marked untrusted is a WRITE about a record
+    # every member's trust rests on, and it is the one command ``panic`` names as its
+    # follow-up — a tool that could raise a panic and not clear it left the operator
+    # with a terminal step the tool itself pointed at.
+    "trust",
+    # What this device owns and what it borrows (``lop network credentials``), and the
+    # definitions it holds for its peers (``lop network definitions state``): both are
+    # reads of this device's own files, and both answer a question an agent asked to
+    # get here — "why does the peer resolve this name to the wrong thing".
+    "credentials",
+    "definitions_state",
 ]
 
 
@@ -106,39 +169,65 @@ class NetworkParams(BaseModel):
 
     action: NetworkAction = Field(
         description=(
-            "Which network operation to run. init/invite/join/member_rm/"
-            "disconnect/panic all need a human or change what other devices "
-            "trust; status/ls/show/peers/log/doctor only read."
+            "Which operation to run. Writes: init, invite, join, member_rm, trust, "
+            "disconnect, panic, and sessions with a mutating field. Otherwise a read."
         )
     )
     network: str = Field(
         default="",
         description=(
-            "A network name or id. Required by show and member_rm; for init it "
-            "is the new network's name. Optional for invite/disconnect/panic, "
-            "where omitting it means 'the one network this device is in'. "
-            "`log` reads every network this device is in."
+            "A network name or id. Required by show, member_rm and trust; for init, "
+            "the new name. Omitted means the one network this device is in."
         ),
     )
     token: str = Field(
         default="",
         description=(
-            "For join: the invite token, or '@<path>' to a token file. "
-            "Never echoed back, and the tool writes it to a private file so it "
-            "does not land in this machine's process list."
+            "For join: the invite token or '@<path>' to a token file. Never echoed "
+            "back; kept out of `ps`."
         ),
+    )
+    expires: str = Field(
+        default="",
+        description="For invite: how long the token stays open, e.g. 30m or 2h (default 10m).",
+    )
+    peer: str = Field(
+        default="",
+        description=(
+            "For sessions: the device to ask (a name from `peers`). Required by "
+            "create/engage/stop/delete."
+        ),
+    )
+    all_peers: bool = Field(default=False, description="For sessions: list every device.")
+    create: bool = Field(default=False, description="For sessions: create a session on `peer`.")
+    prompt: str = Field(default="", description="For create: the new session's first turn.")
+    engage: str = Field(default="", description="For sessions: a session id on `peer` to warm up.")
+    stop: str = Field(default="", description="For sessions: a session id on `peer` to end.")
+    delete: str = Field(
+        default="",
+        description=(
+            "For sessions: a session id on `peer` to delete. Always the owner's dry "
+            "run — a real delete needs the user's `--yes`, so report no deletion."
+        ),
+    )
+    trust_state: Literal["active", "untrusted"] = Field(
+        default="active",
+        description="For trust: 'active' re-admits an untrusted network, 'untrusted' refuses it.",
     )
     role: Literal["read", "drive", "admin"] = Field(
         default="read",
         description=(
-            "For invite: what the joining device may do. read = see sessions, "
-            "drive = prompt/steer/stop them, admin = also manage membership. "
-            "State it explicitly when the user asks for more than viewing."
+            "For invite: what the joiner may do — read (see sessions), drive "
+            "(prompt/stop), admin (also membership)."
         ),
     )
     device: str = Field(
         default="",
-        description="For member_rm: the device id to revoke (see `lop network show`).",
+        description=(
+            "For member_rm: the device id to revoke. For invite: a device id to bind "
+            "the token to, so only it may redeem it (others are refused and the "
+            "invite burns)."
+        ),
     )
     since: str = Field(
         default="",
@@ -185,15 +274,68 @@ def _scrub(value: Any) -> Any:
     return value
 
 
+#: The text spellings a model may send for "no". Absent for BOTH readers of the verb
+#: set, because the approval tier is not a second opinion: a call tiered ``read`` that
+#: still reaches the CLI as a mutation is the defect this constant exists to prevent.
+_FALSY_TOKENS: frozenset[str] = frozenset({"", "0", "false", "no", "none", "null"})
+
+
+def _session_verbs(args: dict[str, Any]) -> dict[str, str]:
+    """The mutating verbs this ``sessions`` call really carries, normalised ONCE.
+
+    ONE PREDICATE, TWO READERS — the approval tier and the argv table — because the
+    tier claim is "a function of the arguments that reach argv". Review round 1
+    (MINOR 4) reproduced the two disagreeing: ``{"stop": "0"}`` was tiered ``read``
+    (``"0"`` being the text spelling of "no") while argv still spelled ``--stop 0``,
+    so a mutation rode a call that raised no approval. That is latent rather than live
+    only because session ids are ``uuid4().hex[:12]`` and none of those literals can
+    name one — luck, not safety. ``create`` is a boolean and the other three are
+    operands; a falsy spelling is no verb at all.
+    """
+    verbs: dict[str, str] = {}
+    create = args.get("create")
+    if create is True or (isinstance(create, str) and create.strip().lower() not in _FALSY_TOKENS):
+        verbs["create"] = ""
+    for name in _SESSION_MUTATIONS:
+        if name == "create":
+            continue
+        value = args.get(name)
+        if isinstance(value, str) and value.strip().lower() not in _FALSY_TOKENS:
+            verbs[name] = value.strip()
+    return verbs
+
+
+def _session_mutation(args: dict[str, Any]) -> str:
+    """Which mutating verb this ``sessions`` call carries, if any — the TIER's reader."""
+    return next(iter(_session_verbs(args)), "")
+
+
+def _approval_tier(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
+    """The tier of ONE call, as the CLI's own split states it (``mesh-ui.md`` §3.2).
+
+    A read never prompts and a write always does, so the answer has to be a function
+    of the arguments rather than of the action name alone: ``sessions`` is the one
+    action that is both, and choosing its tier by which verb the call carries is what
+    keeps a listing silent without making a stop silent too.
+    """
+    action = str(args.get("action") or "")
+    if action == "sessions":
+        return "write" if _session_mutation(args) else "read"
+    return "read" if action in READ_ACTIONS else "write"
+
+
 def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
     """``(argv, error)`` — the CLI's argv for this call, or the sentence saying
     what the call is missing.
 
     Every branch is explicit and every flag is spelled here rather than
-    constructed from user text, which is what makes "the tool can never pass a
-    confirmation flag" a property of the code instead of a promise. ``--json`` is
-    added once, at the end, for the same reason the CLI refuses ``--print``
-    beside it: one of the two must win, and the agent's path is the JSON one.
+    constructed from user text, which is what makes three promises properties of the
+    code instead of promises: no ``--yes`` and no ``--force`` is ever spelled, and
+    ``--confirm`` is not spelled AT ALL — the human's second phase is not a field on
+    this tool, so no argument combination can answer a park (agent review round 1,
+    semantic finding 1). ``--json`` is added once, at the end, for the same reason the
+    CLI refuses ``--print`` beside it: one of the two must win, and the agent's path
+    is the JSON one.
     """
     action = params.action
     network = params.network.strip()
@@ -210,6 +352,10 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         argv = ["network", "peers"]
     elif action == "doctor":
         argv = ["network", "doctor"]
+    elif action == "credentials":
+        argv = ["network", "credentials"]
+    elif action == "definitions_state":
+        argv = ["network", "definitions", "state"]
     elif action == "log":
         argv = ["network", "log"]
         if params.since.strip():
@@ -222,13 +368,71 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         argv = ["network", "invite", "--role", params.role]
         if network:
             argv += ["--network", network]
+        if params.expires.strip():
+            argv += ["--expires", params.expires.strip()]
+        if params.device.strip():
+            argv += ["--device", params.device.strip()]
     elif action == "join":
         if not params.token.strip():
             return [], (
                 "action='join' needs 'token' (the invite token, or '@<path>' to "
-                "the token file the other device minted)."
+                "the token file the other device minted). It PARKS the pairing and "
+                "hands the person their step — this tool has no way to answer one."
             )
-        argv = ["network", "join", params.token.strip()]
+        # PHASE ONE parks the ceremony, which is what lets the code be handed to a
+        # person: a pairing that only prompted would have nobody to prompt. Phase two
+        # is theirs to run at their own terminal (`lop network join --confirm <code>`),
+        # which is why no branch here spells it.
+        argv = ["network", "join", params.token.strip(), "--park"]
+    elif action == "sessions":
+        # THE SAME PREDICATE THE TIER READS (``_session_verbs``), so argv and the
+        # approval decision cannot disagree about whether this call mutates.
+        verbs = _session_verbs(params.model_dump())
+        mutation = next(iter(verbs), "")
+        peer = params.peer.strip()
+        if mutation and not peer:
+            return [], (
+                f"action='sessions' with '{mutation}' needs 'peer': the session lives on "
+                "one device, and only its owner may act on it."
+            )
+        if mutation and params.all_peers:
+            # REFUSED rather than sent: ``--all-peers`` is read only on the two listing
+            # paths, so beside a mutating verb the CLI accepts the flag and silently
+            # drops it — the class the CLI's own ``--force`` guard names ("a flag that
+            # is accepted and then quietly dropped is the same class of untruth"), and
+            # the agent would be told a stop happened across every device when exactly
+            # one was asked for (agent review round 1, MINOR 5).
+            return [], (
+                f"action='sessions' with '{mutation}' acts on ONE device's session, so "
+                "'all_peers' means nothing here and the CLI drops it silently. Send "
+                "'peer' instead, or a plain listing with 'all_peers'."
+            )
+        if not mutation and not peer and not params.all_peers:
+            return [], (
+                "action='sessions' needs 'peer' (one device you are paired with) or "
+                "'all_peers' (every device), or one of create/engage/stop/delete."
+            )
+        argv = ["network", "sessions"]
+        if "create" in verbs:
+            argv += ["--create"]
+            if params.prompt.strip():
+                argv += ["--prompt", params.prompt.strip()]
+        if "engage" in verbs:
+            argv += ["--engage", verbs["engage"]]
+        if "stop" in verbs:
+            argv += ["--stop", verbs["stop"]]
+        if "delete" in verbs:
+            # NEVER with ``--yes``: this verb's real form is the owner's deletion, and
+            # the human's confirmation is the point of it, not a formality to skip.
+            argv += ["--delete", verbs["delete"]]
+        if peer:
+            argv += ["--peer", peer]
+        if params.all_peers:
+            argv += ["--all-peers"]
+    elif action == "trust":
+        if not network:
+            return [], "action='trust' needs 'network' (a name or id)."
+        argv = ["network", "trust", network, f"--{params.trust_state}"]
     elif action == "member_rm":
         device = params.device.strip()
         if not network or not device:
@@ -251,10 +455,12 @@ def _describe_approval(args: dict[str, Any], _cwd: str) -> str:
     detail = {
         "init": "create a network on this device",
         "invite": "mint a single-use invite token",
-        "join": "join a network from an invite (needs a person at the terminal)",
+        "join": "join a network from an invite (a person reads a code off the other device)",
         "member_rm": "revoke a member and rotate the secret",
         "disconnect": "leave the network and delete its local secret",
         "panic": "raise a panic: rotate the secret for every member",
+        "trust": "change whether this device trusts the network",
+        "sessions": "act on a session that runs on another device",
     }.get(action, action)
     return f"{detail}{f' ({target})' if target else ''}"
 
@@ -286,6 +492,123 @@ async def _run_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
         out.decode("utf-8", "replace"),
         err.decode("utf-8", "replace"),
     )
+
+
+async def _reap(process: asyncio.subprocess.Process, *, grace: float = 5.0) -> None:
+    """Wait for it to exit, and kill it if it will not: nothing outlives this call."""
+    try:
+        await asyncio.wait_for(process.wait(), grace)
+    except (asyncio.TimeoutError, TimeoutError):
+        process.kill()
+        await process.wait()
+
+
+def _reap_when_it_exits(pid: int) -> None:
+    """Reap a DETACHED child from a thread, because this call's loop will be gone.
+
+    The parked ceremony outlives the call that started it by design, and the loop it
+    was started under does not: the harness runs each tool call in its own
+    ``asyncio.run``, so asyncio's child watcher is dead long before the ceremony ends
+    and something has to wait for the child or it stays a zombie for the rest of the
+    session's life — one per completed pairing, each holding a pid, which is also what
+    made a liveness probe answer "alive" for a process that had finished (agent review
+    round 1, code finding 1). A blocking ``os.waitpid`` on ONE pid, in one daemon
+    thread, is that waiter: it returns the moment this child exits, whenever that is.
+
+    ``os.waitpid`` exists on POSIX only, and so do zombies — the capability check is
+    the guard rather than a platform name. On a host that runs the tool inside a
+    LONG-LIVED loop, asyncio's own watcher may win the race instead: this thread then
+    gets ``ChildProcessError`` and does nothing, which is the intended outcome either
+    way (the child is reaped exactly once).
+    """
+    if not hasattr(os, "waitpid"):  # pragma: no cover — no zombies off POSIX
+        return
+    import threading
+
+    def wait() -> None:
+        try:
+            os.waitpid(pid, 0)
+        except (ChildProcessError, OSError):
+            # Somebody else reaped it first (an alive loop's watcher), or it was never
+            # ours: either way the process table is already consistent.
+            pass
+
+    threading.Thread(target=wait, name="network-park-reap", daemon=True).start()
+
+
+async def _start_parked_join(argv: list[str]) -> tuple[int, str, str]:
+    """Start a parked pairing, return the FIRST JSON body it prints, leave it running.
+
+    WHY THIS IS NOT ``_run_cli``, and it is the whole point of the two-phase pair: a
+    parked ceremony ends when a PERSON answers it — minutes later, and from wherever
+    they are — so waiting for the process here would burn the turn and then kill the
+    very process the answer has to reach (``_run_cli`` kills a timed-out child). The
+    child is therefore started in its own session, its first complete JSON document is
+    read off stdout, and it is left holding the socket: the PERSON's own ``lop network
+    join --confirm <code>`` (or the inviter's ``lop network confirm`` prompt) is what
+    answers it, and it exits by itself at the end of its window.
+
+    Nothing is left unreaped, but NOT because asyncio reaps it: that belief held only
+    for a loop that outlives the child, and the harness runs each tool call under its
+    own short-lived one — so a parked child that exits minutes later is a ZOMBIE, not a
+    reaped process, and a liveness probe reads it as alive forever (agent review round
+    1, code finding 1, which caught exactly that: ``state=Z`` for 300 consecutive
+    polls). A child left holding the socket is therefore handed to
+    ``_reap_when_it_exits``, a waiter of its own. A body that never arrives (the CLI
+    refused first, or the dial hung) is a failure, and the child is killed and waited
+    for before this returns.
+    """
+    process = await asyncio.create_subprocess_exec(
+        *_cli_argv(),
+        *argv,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ.copy(),
+        # Its own session, so a session restart or a killed tool call does not take the
+        # ceremony with it mid-handshake.
+        start_new_session=True,
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _PARK_READY_TIMEOUT_S
+    buffer = ""
+    decoder = json.JSONDecoder()
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0 or process.stdout is None:
+            break
+        try:
+            line = await asyncio.wait_for(process.stdout.readline(), remaining)
+        except (asyncio.TimeoutError, TimeoutError):
+            break
+        if not line:
+            break
+        buffer += line.decode("utf-8", "replace")
+        text = _strip_ansi(buffer)
+        start = text.find("{")
+        if start < 0:
+            continue
+        try:
+            document, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            # An unfinished document: the rest of it is still on its way.
+            continue
+        if not isinstance(document, dict):
+            continue
+        if document.get("ok") is False:
+            # A refusal: printed, then the process exits. Wait for it, so the caller
+            # reports it like any other refusal and nothing is left running.
+            await _reap(process)
+        else:
+            # THE SOCKET IS STILL OPEN, so this child is still ours and will exit long
+            # after this loop is gone: hand it a waiter that outlives the call.
+            _reap_when_it_exits(process.pid)
+        return 0, text[start : start + end], ""
+    # No body, so nothing is parked and nobody could answer it: the socket goes now
+    # rather than at the end of a window nothing is watching.
+    await _reap(process)
+    err = await process.stderr.read() if process.stderr is not None else b""
+    return 1, "", _clean(err.decode("utf-8", "replace"))
 
 
 def _write_token_file(token: str) -> str:
@@ -474,6 +797,26 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             lines.append(str(payload["relay"]))
         return lines
     if action == "join":
+        if str(payload.get("status") or "") == "awaiting_confirmation":
+            # PHASE ONE's receipt. It says what the person needs and what has NOT
+            # happened yet, because the one way this digest could mislead is by reading
+            # as a completed pair: nothing has been sent to the other device, and the
+            # code below is THIS device's own derivation.
+            code_text = str(payload.get("sas") or "")
+            if len(code_text) == 6:
+                code_text = f"{code_text[:3]} {code_text[3:]}"
+            return [
+                f"pairing started with {payload.get('name') or payload.get('network_id')} "
+                f"({payload.get('inviter') or 'the other device'})",
+                f"this device's code: {code_text}",
+                f"{payload.get('sentence')}",
+                f"{int(float(payload.get('seconds_left') or 0))}s left; nothing is "
+                "joined until the person confirms, and the confirmation has to come "
+                "from them.",
+            ]
+        # A finished ceremony's receipt. This tool cannot produce it — phase two is
+        # the person's, run at their own terminal — but the CLI does report it, and a
+        # report that arrived is rendered rather than dumped as JSON.
         lines = [
             f"joined {payload.get('name')} ({payload.get('network_id')}) at epoch "
             f"{payload.get('epoch')}, role {payload.get('role')}, "
@@ -481,6 +824,92 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             f"fingerprint {payload.get('fingerprint')}",
         ]
         return lines
+    if action == "sessions":
+        rows = payload.get("sessions")
+        if rows is None:
+            # A MUTATION's receipt: the peer's own sentence, never a re-rendering
+            # of it (the CLI renders the owner's words verbatim, and a second
+            # vocabulary for "did it stop" is the thing that gets out of step).
+            sentence = str(payload.get("detail") or payload.get("message") or "").strip()
+            return [sentence] if sentence else [json.dumps(payload, sort_keys=True)]
+        from local_operator.resume import peer_reason_words, session_state_words
+
+        lines = [
+            "  ".join(
+                part
+                for part in (
+                    f"{session_state_words(str(row.get('state') or '')) or '?':10}",
+                    str(row.get("conversation_name") or "").strip() or "(untitled)",
+                    str(row.get("session_id") or ""),
+                    "on "
+                    + str(
+                        (row.get("peer") or {}).get("name")
+                        or (row.get("peer") or {}).get("device_id")
+                        or "this device"
+                    ),
+                )
+                if part
+            )
+            for row in rows[:_ROW_CAP]
+        ]
+        # Bound to a narrow local first: ``dict.get`` is `Any | None`, and the loop
+        # below iterates it as a mapping (the CLI's own listing takes the same
+        # precaution for the same reason).
+        peers_block = payload.get("peers")
+        facts: dict[str, Any] = peers_block if isinstance(peers_block, dict) else {}
+        for device_id, block in sorted(facts.items()):
+            if isinstance(block, dict) and not block.get("reachable"):
+                lines.append(
+                    f"{str(block.get('name') or device_id)}: did not answer "
+                    f"({peer_reason_words(str(block.get('reason') or ''))})"
+                )
+        if not rows:
+            # THE SENTENCE IS NARROWED TO WHAT WAS ESTABLISHED: with a device that
+            # did not answer, "no sessions" is a claim about every device, and the
+            # line above already says which one is missing from the answer.
+            lines.append(
+                "no sessions are held by the devices that answered"
+                if lines
+                else "no sessions are held by other devices right now"
+            )
+        return lines
+    if action == "trust":
+        lines = [f"{payload.get('network_id')} is now {payload.get('trust')}"]
+        if payload.get("applied_locally"):
+            lines.append("the relay is not running on this device: applied locally")
+        return lines
+    if action == "credentials":
+        networks = payload.get("networks") or []
+        lines: list[str] = []
+        for network in networks:
+            lines.append(f"{network.get('network')}:")
+            for row in network.get("credentials") or []:
+                owner = (
+                    "this device"
+                    if row.get("owned_here")
+                    else (row.get("owner_device_name") or row.get("owner_device"))
+                )
+                # ``credential_name``, and the SPELLING is load-bearing: ``_scrub``
+                # drops any field whose NAME contains a secret marker, the markers are
+                # substring matches, and ``key`` — and ``credential_key``, the first
+                # attempt at this fix — both contain "key". The production path therefore
+                # rendered ``None`` where the credential's name belongs (agent review
+                # round 1, code findings 4 and 5). The markers and the scrub boundary stay
+                # exactly where they are; the CLI's field is named so the heuristic cannot
+                # eat the one fact this listing exists to convey.
+                lines.append(f"  {row.get('credential_name')}  {row.get('kind')}  owner: {owner}")
+        return lines or ["nothing is shared with or by this device"]
+    if action == "definitions_state":
+        lines = []
+        mirrored = payload.get("mirrored") or {}
+        for kind in ("agents", "teams"):
+            for name in sorted(payload.get(kind) or {}):
+                origin = (mirrored.get(kind) or {}).get(name) or ""
+                lines.append(
+                    f"{kind[:-1]}: {name}"
+                    + (f" (mirrored from {origin})" if origin else " (yours)")
+                )
+        return lines or ["no agent or team definitions on this device"]
     if action == "member_rm":
         lines = [
             f"removed {payload.get('removed')}; epoch is now {payload.get('epoch')}",
@@ -513,11 +942,17 @@ def _hint(action: str) -> str:
     """The one sentence an agent needs after a refusal, where a generic failure
     message would leave it to guess (and to retry)."""
     if action == "join":
+        # THE SENTENCE THAT USED TO BE HERE TOLD THE AGENT TO PASS THE CODE BACK, and
+        # its absence is load-bearing: the code a park prints is THIS device's own
+        # derivation, and both devices derive the same digits, so a model echoing it
+        # satisfies the comparison by construction (agent review round 1, semantic
+        # finding 1 — the field is gone, so this hint must not describe one). What
+        # survives is the property the two-phase pair exists to protect.
         return (
-            "Pairing needs a person at a terminal on the joining device: have the "
-            "user run `lop network join @<token-file>` themselves and read the code "
-            "back from the other device's screen. No flag completes this for them, "
-            "by design."
+            "Pairing needs a person: `join` parks the ceremony and returns the code for "
+            "THEM to read out, and the second phase is theirs — `lop network join "
+            "--confirm <code>` at a terminal, or the inviter's own `lop network confirm` "
+            "prompt. This tool has no way to answer a pairing."
         )
     if action in ("panic", "disconnect", "member_rm"):
         return (
@@ -526,6 +961,16 @@ def _hint(action: str) -> str:
         )
     if action == "invite":
         return "The token is written to a file; the result carries its path, never the token."
+    if action == "sessions":
+        return (
+            "A session's owner is the device it runs on, so every verb here is asked "
+            "of 'peer' rather than done locally."
+        )
+    if action == "trust":
+        return (
+            "`panic` and `disconnect` mark a network untrusted; `trust` is the only "
+            "way back, and it does NOT restore a member that was removed."
+        )
     return ""
 
 
@@ -547,8 +992,14 @@ async def execute_network(
     if problem:
         return _error(tool_call_id, _TOOL, problem)
 
+    # PHASE ONE KEEPS RUNNING AFTER THIS CALL RETURNS, which is why it is not
+    # ``_run_cli``: the ceremony is held by the process that dialled, and the code has
+    # to reach a person before that process may finish. See ``_start_parked_join``.
+    # EVERY join is phase one: there is no field that answers a park, so there is no
+    # spelling of `join` on this tool that is anything but a park.
+    parked = params.action == "join"
     token_path: str | None = None
-    if params.action == "join":
+    if parked:
         token_arg = params.token.strip()
         if not token_arg.startswith("@"):
             token_path = _write_token_file(token_arg)
@@ -556,11 +1007,14 @@ async def execute_network(
         # Rebuilt rather than patched in place: the token is the ONE positional
         # this action takes, and a stray argv entry after it would be parsed as
         # one rather than reported.
-        argv = ["network", "join", token_arg, "--json"]
+        argv = ["network", "join", token_arg, "--park", "--json"]
 
     timeout = _JOIN_TIMEOUT_S if params.action == "join" else _DEFAULT_TIMEOUT_S
     try:
-        code, stdout, stderr = await _run_cli(argv, timeout)
+        if parked:
+            code, stdout, stderr = await _start_parked_join(argv)
+        else:
+            code, stdout, stderr = await _run_cli(argv, timeout)
     except (asyncio.TimeoutError, TimeoutError):
         return _error(
             tool_call_id,
@@ -571,7 +1025,9 @@ async def execute_network(
         if token_path:
             # The invite is single-use, so a leaked copy is not a live credential
             # forever — but it is one until it is redeemed or expires, and this
-            # file is the one place the tool holds it.
+            # file is the one place the tool holds it. Deleting it here is safe for
+            # the parked ceremony: the child read the token before it dialled, and
+            # nothing after the handshake reads it again.
             Path(token_path).unlink(missing_ok=True)
 
     payload: dict[str, Any] | None = None
@@ -633,20 +1089,22 @@ def build_network_tool(context: ToolContext) -> AgentTool | None:
         name=_TOOL,
         label="Mesh network",
         description=(
-            "Read and drive a lop mesh network from this device: pairing, peers, "
-            "membership, the audit log, and the incident controls. Pairing and the "
-            "incident controls need a human — this tool reports what the CLI "
-            "refused and why. Sessions on other devices are not reachable in this "
-            "build."
+            "Read and drive a lop mesh network from this device: peers, their sessions, "
+            "creating a session on a peer, and the network's own lifecycle. Pairing and "
+            "incident controls need a human: `join` parks a pairing and returns the code "
+            "for the user to read out, answering it is theirs to run, and this tool "
+            "reports what the CLI refused and why."
         ),
         parameters=NetworkParams.model_json_schema(),
         # Write tier because the highest op needs it (``panic`` rotates a secret
         # for every member); the reads downgrade per call so looking at the
         # network never prompts.
         approval_tier="write",
-        call_approval_tier=lambda args: (
-            "read" if str(args.get("action") or "") in READ_ACTIONS else "write"
-        ),
+        # PER CALL, and a function of the arguments rather than of the action name:
+        # a plain ``sessions`` listing is a read and the same action carrying
+        # ``stop`` is not, so the tier is decided by ``_approval_tier`` beside the
+        # argv table that spells both.
+        call_approval_tier=_approval_tier,
         # EXCLUSIVE for the same reason ``hub`` is: the design asks for it on
         # panic/disconnect/member_rm, where two racing calls would mutate the
         # epoch or the trust state into a shape nobody designed. A static field
