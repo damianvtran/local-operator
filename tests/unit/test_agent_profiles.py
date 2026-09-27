@@ -737,6 +737,7 @@ def test_a_package_move_backward_still_applies_and_shows_both_versions(
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     assert (verdict.installed_version, verdict.packaged_version) == ("1.0.1", "0.9.0")
+    assert verdict.replaced_instructions is not None
     assert verdict.replaced_instructions.strip() == "REVIEWER v1.0.1 GUIDANCE"
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v0.9.0 GUIDANCE"
 
