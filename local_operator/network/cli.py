@@ -1638,7 +1638,8 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             # So the file IS the channel, and the line has to say so. The
             # `--host` half still rides along, because that value is genuinely
             # this device's own answer.
-            "then, on the other device: lop network join @<the file, carried across>"
+            "then, on the other device: carry that file over and run "
+            "lop network join @<token-file>"
             + (f" --host {payload['hosts'][0]}" if payload.get("hosts") else ""),
         ],
     )
