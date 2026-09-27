@@ -78,6 +78,7 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
+    from local_operator.tools.eval import KERNEL_MARKER_NAME
 
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
@@ -98,6 +99,14 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         json.dumps({"version": FORK_BOUNDARY_VERSION}), encoding="utf-8"
     )
     (directory / DESKTOP_MARKER_NAME).write_text(json.dumps({"cwd": "/tmp"}), encoding="utf-8")
+    # The eval kernel's restart marker: it TRAVELS with the session so a copy's
+    # first cell still gets the restart notice instead of silently fresh state
+    # (0b20e09d5 put it in the copy set). The round trip below asserts every
+    # COPY_SET_NAMES member arrives, so the fixture has to give the session one
+    # of each — this included — or the assertion is testing the fixture.
+    (directory / KERNEL_MARKER_NAME).write_text(
+        json.dumps({"generation": "seed-000000000000", "written_at_ms": 1}), encoding="utf-8"
+    )
     # THE TWO THE FOLD AND THE FORK ADDED, in the fixture for the same reason the two
     # below are: a test that asserts "every name in COPY_SET_NAMES arrives" has to give the
     # session one of each, or it is testing the fixture. A judged goal (``resume``) and a
@@ -168,6 +177,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         STOP_MARKER_NAME,
         TURN_JOURNAL_NAME,
     )
+    from local_operator.tools.eval import KERNEL_MARKER_NAME
 
     assert set(sync.COPY_SET_NAMES) == {
         "transcript.jsonl",
@@ -188,6 +198,12 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # list while this branch was open.
         GOAL_SIDECAR_NAME,
         BOOT_PROMPT_NAME,
+        # The eval kernel's restart marker: a fact about the SESSION, not a
+        # liveness claim about the source process, so it travels — the
+        # destination of a move has no kernel from the source, and this file is
+        # how its first cell still learns the namespace was left behind
+        # (0b20e09d5; the why is spelled out at ``sync.COPY_SET_NAMES``).
+        KERNEL_MARKER_NAME,
     }
     # And the deny-list is a real deny-list: every name on it is a file a session
     # directory actually holds, so the copy's allow-list is the only thing keeping

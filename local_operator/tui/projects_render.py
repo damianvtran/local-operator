@@ -45,8 +45,8 @@ from rich.style import Style
 from rich.text import Text
 
 from local_operator.projects import PROJECT_ROW_CAP
+from local_operator.projects import age_text as derived_age_text
 from local_operator.projects import milestone_state as derived_milestone_state
-from local_operator.projects import reported_age
 
 #: Cap on projects a single canvas renders. Past it the canvas names the
 #: overflow in one truncation row; the cap exists so one runaway store cannot
@@ -121,12 +121,13 @@ def _row(view: dict[str, Any]) -> dict[str, Any]:
 def age_text(updated_at: float | None, *, now: float | None = None) -> str | None:
     """``3s``/``5m``/``2h``/``1d`` age of a timestamp, or ``None``.
 
-    Thin alias for :func:`local_operator.projects.reported_age` — THE age
-    arithmetic, one copy (the 90 s / 90 min / 48 h cut points live there), so
+    Thin alias for :func:`local_operator.projects.age_text` — THE age
+    arithmetic, one copy (the 90 s / 90 min / 48 h cut points live there, and
+    ``reported_age`` layers the progress guard on top for model callers), so
     the list, the board, the detail footer, the terminal listing and the
     project tool cannot disagree about how old a progress line is.
     """
-    return reported_age(updated_at, now=now)
+    return derived_age_text(updated_at, now=now)
 
 
 def progress_age_text(view: dict[str, Any], *, now: float | None = None) -> str | None:

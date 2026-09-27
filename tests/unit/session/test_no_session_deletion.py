@@ -1928,6 +1928,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes ONE <config_dir>/projects/<id>.json row; session directories are " "never touched",
     ),
+    # The eval tool's cross-process restart marker (``tools/eval.py``): the same
+    # atomic-write shape as ``registry._staged_write`` above — a
+    # ``<session>/eval-kernel.json.<pid>.tmp`` FILE renamed onto the
+    # ``<session>/eval-kernel.json`` FILE, both built from the context's session
+    # directory plus a literal basename and this pid. The target is the session
+    # directory's own ENTRY, never the directory itself: ``os.replace`` onto a
+    # directory fails (EISDIR/ENOTEMPTY) instead of removing it, and the unlink
+    # clears only the temp file this same call just wrote.
+    (
+        "local_operator/tools/eval.py::_write_marker",
+        "os.replace",
+        "tmp FILE -> <session>/eval-kernel.json FILE; cannot rename a directory",
+    ),
+    (
+        "local_operator/tools/eval.py::_write_marker",
+        "os.unlink",
+        "clears the pid-suffixed .tmp FILE this call just wrote, on the failure path",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}

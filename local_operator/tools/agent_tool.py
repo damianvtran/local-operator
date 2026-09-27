@@ -22,6 +22,9 @@ tool is how an agent works with them:
   authored one.
 - ``reset`` — put the packaged starter back over an installed role that was
   edited into a bad state, printing the text it replaced.
+- ``sync`` — pull the latest for installed starters and hub-pulled agents:
+  unedited copies update in place (echoing what they replaced), edited ones
+  are reported and only replaced with ``force``.
 - ``create`` / ``update`` — author a new role, or fix one whose instructions
   produced a bad run. ``when_to_use`` is stored as the routing description, so
   a role written today is discoverable by ``search`` tomorrow.
@@ -50,6 +53,7 @@ relevant, and the body loads on demand.
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 from pathlib import Path
@@ -67,6 +71,8 @@ from pydantic import (
 from local_operator.agent_profiles import (
     MAX_INSTRUCTIONS_CHARS,
     SEED_ORIGIN_PREFIX,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
     AgentProfile,
     NameTakenError,
     install_seed,
@@ -111,14 +117,14 @@ logger = logging.getLogger(__name__)
 class AgentParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    op: Literal["list", "show", "search", "install", "reset", "create", "update"] = Field(
+    op: Literal["list", "show", "search", "install", "reset", "create", "update", "sync"] = Field(
         description=(
             "search: find a role by meaning; list/show: what exists and what it "
             "says (show also prints the packaged text when an installed role "
             "has diverged from it); install: add a packaged starter; reset: "
-            "restore the packaged starter over an edited role, reporting what "
-            "it replaced; create/update: author or fix a role or a specialist "
-            "profile."
+            "restore it over an edited role, reporting what it replaced; sync: "
+            "pull the latest for installed roles (force overrides edits); "
+            "create/update: author or fix a role or a specialist profile."
         )
     )
     # The no-spaces guidance is a modularity contract, not registry law: the
@@ -204,8 +210,8 @@ class AgentParams(BaseModel):
     delegate: bool | None = Field(
         default=None,
         description=(
-            "create/update: may this profile launch its own subagents? Default "
-            "no — only coordinating roles should."
+            "create/update: may this profile launch subagents? Default no; "
+            "only coordinating roles should."
         ),
     )
     kind: Literal["role", "specialist"] | None = Field(
@@ -213,10 +219,18 @@ class AgentParams(BaseModel):
         description=(
             "create: 'role' (default) is a reusable delegation target tagged "
             "for task(agent=...). 'specialist' is a durable named agent with "
-            "its own instruction set — a User Dashboard Agent, a support "
-            "triager — that can sit on a team roster without being a role. "
-            "Ignored on update: a profile cannot change kind."
+            "its own instruction set, and can sit on a team roster without "
+            "being a role. Ignored on update: a profile cannot change kind."
         ),
+    )
+    # A plain bool, not ``bool | None``: the tri-state costs ~55 characters of
+    # JSON on EVERY session's tools array (the anyOf branch), and "unset" has
+    # no meaning for a force flag — the budget gate in
+    # ``scripts/bench_context_budget.py`` is the reason to care which shape a
+    # schema field takes, not a style preference.
+    force: bool = Field(
+        default=False,
+        description="sync: apply over local edits.",
     )
 
 
@@ -986,13 +1000,65 @@ async def _op_reset(context: ToolContext | None, tool_call_id: str, name: str) -
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
+async def _op_sync(
+    context: ToolContext | None, tool_call_id: str, name: str | None, force: bool
+) -> ToolResult:
+    """Pull the latest for installed starters and hub-pulled agents.
+
+    Read-tier and refusal-first, like its siblings: the seed arm applies only
+    rows the install fingerprint proves were not edited (a local edit refuses
+    without ``force``), and the hub arm applies the same policy on its own
+    recorded baseline — so an agent can never silently overwrite a role a
+    person wrote in.
+
+    The hub arm needs a Radient credential and network access; without either
+    it degrades to ``unavailable`` per row while the local seed updates still
+    run (design §9.2). Nothing here is called on boot — sync is only ever the
+    word a caller typed.
+    """
+
+    registry = _registry(context)
+    if registry is None:
+        return _error(
+            tool_call_id, "agent", "no agent registry attached to this session; cannot sync."
+        )
+    from local_operator.agent_sync import resolve_hub_client, sync_agent_profiles
+
+    names = [name] if name and name.strip() else None
+    radient_client = None
+    config_dir = getattr(registry, "config_dir", None)
+    if config_dir is not None:
+        try:
+            # The async resolver, not the CLI bridge: the bridge refuses to
+            # run inside a live event loop, and a tool executor is exactly that.
+            radient_client = await resolve_hub_client(config_dir)
+        except Exception:  # noqa: BLE001 - hub arm only; local updates still run
+            logger.warning("hub credential resolution failed; syncing local starters only")
+
+    # The registry and the hub both do blocking I/O; run them off the loop so a
+    # slow marketplace listing cannot stall the session's other work.
+    report = await asyncio.to_thread(
+        sync_agent_profiles,
+        registry,
+        radient_client=radient_client,
+        names=names,
+        force=bool(force),
+    )
+    text, spill = spill_truncate(report.render(), "agent", context)
+    return _text(tool_call_id, "agent", text, details=spill or None)
+
+
 def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tuple[str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
     Returning structured identity keeps transport adapters out of tool prose.
     The registry remains the only storage authority.
     """
-    from local_operator.agents import AgentEditFields
+    from local_operator.agents import (
+        HUB_ORIGIN_PREFIX,
+        HUB_SHA256_PREFIX,
+        AgentEditFields,
+    )
 
     if registry is None:
         raise ValueError("no agent registry attached to this session; cannot save roles.")
@@ -1102,6 +1168,24 @@ def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tupl
         origin = seed_origin(existing)
         if origin:
             tags.append(f"{SEED_ORIGIN_PREFIX}{origin}")
+        # The sync baseline rides along for the same reason, and the failure
+        # without it is concrete: `seed_sha256:`/`hub_sha256:` is the fingerprint
+        # `sync` compares against, so a tool-side edit that dropped it would make
+        # an UNMOVED starter read as "differs — re-run with force" (divergence
+        # plus no install record) instead of "no update to pull". Copying it is
+        # exactly as truthful as `seed:` is: it records what was installed, not
+        # what the row now says, and the comparison is what detects the edit.
+        for marker_prefix in (
+            SEED_VERSION_PREFIX,
+            SEED_SHA256_PREFIX,
+            HUB_ORIGIN_PREFIX,
+            HUB_SHA256_PREFIX,
+        ):
+            for tag in existing.tags or []:
+                text = str(tag).strip()
+                if text.lower().startswith(marker_prefix):
+                    tags.append(text)
+                    break
     categories = ["role"] if kind == "role" else ["specialist"]
 
     # Every field is spelled out (``AgentEditFields`` is validated in strict
@@ -1220,6 +1304,10 @@ async def execute_agent(
         return await _op_install(context, tool_call_id, str(params.name))
     if params.op == "reset":
         return await _op_reset(context, tool_call_id, str(params.name))
+    if params.op == "sync":
+        return await _op_sync(
+            context, tool_call_id, str(params.name) if params.name else None, bool(params.force)
+        )
     return await _op_write(context, tool_call_id, params, creating=params.op == "create")
 
 

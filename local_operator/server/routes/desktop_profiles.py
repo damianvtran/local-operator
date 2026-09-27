@@ -10,6 +10,13 @@ from pydantic import Field
 
 from local_operator.agent_profiles import NameTakenError, install_seed
 from local_operator.agents import AgentRegistry
+from local_operator.config import ConfigManager
+from local_operator.env import EnvConfig, get_env_config
+from local_operator.providers.auth_store import AuthStore
+from local_operator.server.dependencies import (
+    get_config_manager,
+    get_provider_auth_store,
+)
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import (
@@ -32,6 +39,21 @@ router = APIRouter(tags=["Desktop profiles"], dependencies=[Depends(require_desk
 class NamedMutation(Input):
     request_id: RequestID
     name: str = Field(min_length=1, max_length=128)
+
+
+class ProfileSync(Input):
+    """A sync request: one profile by ``name``, or everything.
+
+    ``all``/``name`` are the design's ``{name?|all}``; passing both is refused
+    (422) rather than silently resolved, because each reading of that request
+    does materially different work — "sync reviewer" and "sync everything"
+    are not two phrasings of one action.
+    """
+
+    request_id: RequestID
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    all: bool = False
+    force: bool = False
 
 
 class ProfileEdit(Input):
@@ -124,6 +146,69 @@ async def install(body: NamedMutation, request: Request):
                 "profile-install:" + body.request_id,
                 body.model_dump(),
                 lambda: asyncio.to_thread(mutate),
+                retry_safe=True,
+            )
+        )
+
+
+@router.post("/v1/desktop/profiles/sync", response_model=CRUDResponse)
+async def sync_profiles(
+    body: ProfileSync,
+    request: Request,
+    config_manager: ConfigManager = Depends(get_config_manager),
+    env_config: EnvConfig = Depends(get_env_config),
+    provider_auth_store: AuthStore = Depends(get_provider_auth_store),
+):
+    """Pull the latest for installed starter profiles and hub-pulled agents.
+
+    One request can do two very different kinds of work: an unedited starter
+    updates its local text in place, and a hub-pulled row re-fetches its
+    marketplace listing — so the response carries every verdict with the echo
+    of any replaced instructions (the same recoverability ``reset`` gives),
+    never just a count. The hub arm needs a credential: without one those rows
+    report ``unavailable`` and the local seed updates still run (design §9.2),
+    which is why credential resolution here is best-effort rather than a 401.
+    """
+
+    if body.name and body.all:
+        raise HTTPException(422, "Pass either name or all, not both")
+    names = [body.name] if body.name else None
+
+    # Imported per call, not at module scope: this pulls the sync coordinator's
+    # graph (agents + radient client), which is dead weight on every `lop serve`
+    # boot for a route that only runs when someone asks for an update.
+    from local_operator.agent_sync import (
+        resolve_hub_client,
+        sync_agent_profiles,
+        sync_payload,
+    )
+
+    async def mutate() -> dict[str, Any]:
+        agents, _ = registries(request)
+        agents.require_complete_metadata()
+        # The async resolver with the route's shared AuthStore, the pattern the
+        # Radient routes already use so a credential refresh persists in the
+        # one place the login owns.
+        client = await resolve_hub_client(
+            config_manager.config_dir,
+            base_url=env_config.radient_api_base_url,
+            store=provider_auth_store,
+        )
+        report = await asyncio.to_thread(
+            sync_agent_profiles,
+            agents,
+            radient_client=client,
+            names=names,
+            force=body.force,
+        )
+        return sync_payload(report)
+
+    async with errors(request):
+        return reply(
+            await receipts(request).run(
+                "profile-sync:" + body.request_id,
+                body.model_dump(),
+                mutate,
                 retry_safe=True,
             )
         )

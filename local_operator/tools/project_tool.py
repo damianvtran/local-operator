@@ -71,7 +71,7 @@ class ProjectParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     op: Literal["list", "show", "create", "update", "link", "unlink", "milestone"] = Field(
-        description="The verb to run. project_delete removes irreversibly."
+        description="The verb to run."
     )
     name: str | None = Field(default=None, description="Project name (all ops but list).")
     description: str | None = Field(
@@ -153,17 +153,6 @@ def _calling_session_id(context: ToolContext | None) -> str | None:
     return candidate if _SESSION_ID_RE.fullmatch(candidate) else None
 
 
-def _reported_age(project: Project, *, now: float | None = None) -> str | None:
-    """``2h``-style age of the progress snippet, or ``None`` when none is stored.
-
-    Delegates to :func:`local_operator.projects.reported_age` — THE age
-    arithmetic, one copy — so the listing row, the ``show`` block, the update
-    receipt and the operator's own surfaces cannot disagree about how old a
-    snippet is (agent review round 1, F3).
-    """
-    return reported_age(project.progress_updated_at if project.progress else None, now=now)
-
-
 def _milestone_counts(project: Project) -> str:
     done = sum(1 for m in project.milestones if m.completed_at)
     return f"M {done}/{len(project.milestones)}"
@@ -189,7 +178,7 @@ def _row(project: Project, *, now: float | None = None) -> str:
         parts.append(_milestone_counts(project))
     sessions = len(project.sessions)
     parts.append(f"{sessions} session" + ("" if sessions == 1 else "s"))
-    age = _reported_age(project, now=now)
+    age = reported_age(project, now=now)
     if age is None:
         parts.append("no progress")
     else:
@@ -214,7 +203,7 @@ def _field_lines(project: Project) -> list[str]:
         f" · completed {project.completed_at or '—'}",
         f"tags: {', '.join(project.tags) if project.tags else '(none)'}",
     ]
-    age = _reported_age(project)
+    age = reported_age(project)
     stale = ", stale" if progress_is_stale(project) else ""
     freshness = f"reported {age} ago{stale}" if age is not None else "none recorded"
     lines.append(f"progress ({freshness}): {project.progress or '—'}")
@@ -419,7 +408,7 @@ async def _op_update(
             f"refreshed project {updated.name!r} — the progress line is unchanged, "
             f"re-stamped just now ({reporter}).",
         )
-    age = _reported_age(updated)
+    age = reported_age(updated)
     detail = f"progress {age} ago" if age is not None else "no progress recorded"
     if "progress" not in params.model_fields_set:
         # Only mention the snippet when the call itself touched it: a

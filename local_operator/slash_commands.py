@@ -279,7 +279,7 @@ def project_listing_rows(
             parts.append(f"{sessions} session{'' if sessions == 1 else 's'} ({live} live)")
         else:
             parts.append(f"{sessions} session{'' if sessions == 1 else 's'}")
-        age = reported_age(project.progress_updated_at if project.progress else None, now=now)
+        age = reported_age(project, now=now)
         if age is None:
             parts.append("no progress")
         else:
@@ -351,7 +351,9 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     """
     raw_project = view.get("project")
     project: Mapping[str, Any] = raw_project if isinstance(raw_project, dict) else {}
-    from local_operator.projects import reported_age
+    # ``age_text``: the receipt holds a composed JSON row, not a ``Project``,
+    # so it reads the raw-stamp arithmetic the model-side helper layers over.
+    from local_operator.projects import age_text
 
     name = project.get("name") or "(unnamed)"
     lines = [f"{name} [{project.get('status') or 'active'}]"]
@@ -370,7 +372,7 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     tags_value = project.get("tags")
     tags = [str(tag) for tag in tags_value] if isinstance(tags_value, list) else []
     lines.append(f"tags: {', '.join(tags) if tags else '(none)'}")
-    age = reported_age(
+    age = age_text(
         project.get("progress_updated_at") if project.get("progress") else None, now=now
     )
     if age is None:

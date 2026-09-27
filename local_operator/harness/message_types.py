@@ -274,3 +274,12 @@ HUB_MESSAGE_TYPE = "hub_message"
 #: tell a real reminder from the newest already-injected one without importing
 #: the tool layer.
 TODO_REMINDER_MESSAGE_TYPE = "todo_reminder"
+
+#: The custom-message type the completion-time project check injects at the
+#: yield boundary (``Session._project_continuation``). Defined here beside
+#: ``TODO_REMINDER_MESSAGE_TYPE`` for the identical reason — the renderer, the
+#: session's expiry scan and its compaction render must agree about the type
+#: without importing each other — and deliberately NOT added to
+#: ``Session._PERSISTABLE_CUSTOM_TYPES``: like the todo reminder it is a
+#: point-in-time assertion that a resume must never replay.
+PROJECT_REMINDER_MESSAGE_TYPE = "project_reminder"

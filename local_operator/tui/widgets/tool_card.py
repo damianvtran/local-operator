@@ -162,6 +162,20 @@ _PARTIAL_LEADS = ("Partial results:", "Partial search:")
 #: interpret: a foreign or older payload still has to say WHICH state it is in
 #: (design review round 2, D2-3).
 _PARTIAL_LABEL = "Partial"
+#: The lead the reset notice is composed with by ``tools/eval.py``
+#: (``_build_render_result``). A flag alone is not enough, for the same reason
+#: :data:`_PARTIAL_LEADS` exists: ``details["kernel_reset"]`` says the CALL ran
+#: on a fresh kernel, the prefix says THIS LINE is the notice — a card rebuilt
+#: from a payload whose text predates the wording, or a result that leads with
+#: anything else, keeps the ordinary crop instead of promoting a line that is
+#: not the claim (design review round 1, D1).
+_RESET_LEADS = ("Session state was reset",)
+#: The word the collapsed row falls back to when ``kernel_reset`` is set but
+#: the result text carries no notice to promote — the reset twin of
+#: :data:`_PARTIAL_LABEL`, and it exists for the same reason: the flag says the
+#: session was reset, so the row must state that even where there is no notice
+#: sentence to promote (design review round 1, D2).
+_RESET_LABEL = "session reset"
 #: Expansion affordance trailing the summary. Both spellings are the same
 #: click target; only the label flips so the row always says what a click does.
 EXPAND_HINT = "⟨expand⟩"
@@ -1465,6 +1479,14 @@ class ToolCard(ExpandableActionBlock):
         #: unreachable from the state an operator scans unless the flag rides here
         #: too (design review D1). Set in :meth:`_absorb_result`.
         self._partial = False
+        #: True when the result came back from a call that ran on a FRESH kernel
+        #: after a reset (``details["kernel_reset"]``, set by ``tools/eval.py``
+        #: only for a call that really ran). Read by the COLLAPSED row the way
+        #: ``_partial`` is — the row takes its structure from ``details`` and
+        #: never from the result text, so without the flag a rebuilt or freshly
+        #: settled card shows `✓ 0.4s` and nothing about the session (design
+        #: review round 1, D2). Set in :meth:`_absorb_result`.
+        self._kernel_reset = False
         #: Rows the card currently occupies (1 collapsed, N expanded).
         self._row_count = 1
         #: ``_row_count`` as of the last content APPLIED to the widget, or -1
@@ -2363,6 +2385,13 @@ class ToolCard(ExpandableActionBlock):
         self._partial = (
             bool(details.get("partial_result")) if isinstance(details, Mapping) else False
         )
+        # The reset twin of the flag above, read the same defensive way and
+        # reset per result for the same reason: a rebuilt card must never
+        # inherit it from a previous body, and the key is written only by
+        # ``tools/eval.py``.
+        self._kernel_reset = (
+            bool(details.get("kernel_reset")) if isinstance(details, Mapping) else False
+        )
         name = self.tool_name.lower()
         search_output = _search_result_output(details) if name == "web_search" else []
         # A web_fetch (and a `read <url>`, which records tool_name "read" but
@@ -2958,9 +2987,24 @@ class ToolCard(ExpandableActionBlock):
         head = self._output[0].strip()
         return head if head.startswith(_PARTIAL_LEADS) else ""
 
+    def _reset_reason(self) -> str:
+        """The body's LEADING line when the call ran on a reset kernel.
+
+        The reset twin of :meth:`_partial_reason`, with the same shape and the
+        same reason: only the head line qualifies, so the card does not grow a
+        synthetic row restating what the collapsed row already carries, and it
+        promotes a line only when BOTH halves agree — ``details["kernel_reset"]``
+        says the CALL ran on a fresh kernel, :data:`_RESET_LEADS` says THIS LINE
+        is the notice (design review round 1, D1/D2).
+        """
+        if not self._kernel_reset or not self._output:
+            return ""
+        head = self._output[0].strip()
+        return head if head.startswith(_RESET_LEADS) else ""
+
     def _promoted_lead(self) -> str:
         """The lead line the collapsed row claims, whichever state owns it."""
-        return self._failure_reason() or self._partial_reason()
+        return self._failure_reason() or self._partial_reason() or self._reset_reason()
 
     def _promoted_paint(self, fallback: Style) -> tuple[str, Style]:
         """``(glyph, ink)`` for the promoted lead line, in the state's own pair.
@@ -2970,7 +3014,9 @@ class ToolCard(ExpandableActionBlock):
         ordinary result line beneath it, so the frame carried no signal that this
         was the state rather than more output (design review D9). It takes the
         same `warning` ink the collapsed row's partial marker does, which is also
-        what puts the state on the pixel plane at all (D1).
+        what puts the state on the pixel plane at all (D1). A reset notice rides
+        that ink too, with the success `✓` its call earned: the state is loud
+        without painting the call as a failure (round 1, D1/D2).
         """
         if self._failure_reason():
             # The error's own pair wins: an error card paints `✗` in `danger` in
@@ -2980,6 +3026,8 @@ class ToolCard(ExpandableActionBlock):
             return ICON_ERROR, fallback
         if self._partial_reason():
             return ICON_PARTIAL, bindings.style("tool.status.partial_glyph")
+        if self._reset_reason():
+            return ICON_SUCCESS, bindings.style("tool.status.partial_glyph")
         return ICON_ERROR, fallback
 
     def _captured_output(self) -> list[str]:
@@ -3025,8 +3073,9 @@ class ToolCard(ExpandableActionBlock):
         After the indent every row of the block carries a two-cell LEAD — the
         caller's ``glyph`` on the first, two blanks on the continuations. (The
         glyph needs no state lookup: :meth:`_promoted_lead` answers "" for every
-        state but ``error`` and for every card whose result is not partial, so a
-        card cannot reach this painter without owning a glyph for it.) The lead
+        state but ``error``, for every card whose result is not partial, and for
+        every card without a reset notice, so a card cannot reach this painter
+        without owning a glyph for it.) The lead
         is the cue that tells these rows from the tool's captured bytes on the
         same card (design round 1, D1: same fill, same ``OUTPUT_INDENT``, nothing
         separating one paragraph of prose from a log dump), and it is a GLYPH
@@ -3056,9 +3105,14 @@ class ToolCard(ExpandableActionBlock):
         lead = glyph + " "
         blanks = " " * cell_len(lead)
         # The lead's ink follows its glyph, so the state's mark and its colour
-        # cannot disagree: `danger` for an error, `warning` for a partial result.
+        # cannot disagree: `danger` for an error, and `warning` for a partial
+        # result and for a reset notice — the notice's glyph is the success `✓`
+        # because the call ran, but the sentence it opens is a session-state
+        # warning (design review round 1, D1/D2).
         lead_ink = bindings.style(
-            "tool.status.partial_glyph" if glyph == ICON_PARTIAL else "tool.status.error_glyph"
+            "tool.status.partial_glyph"
+            if glyph in (ICON_PARTIAL, ICON_SUCCESS)
+            else "tool.status.error_glyph"
         )
         wrapped = wrap_cells(reason, line_width)
         # Greedy fit inside both budgets: the cell budget bounds the CONTENT at
@@ -3106,7 +3160,10 @@ class ToolCard(ExpandableActionBlock):
         result's disclosure is claimed and wrapped the same way — a stop clause
         the crop would otherwise cut in half, which is where the design round
         found it (design review D2) — and it paints in the state's own ink rather
-        than the captured rows' ``dim`` (D9).
+        than the captured rows' ``dim`` (D9). A reset notice is the third
+        claimant (round 1, D1): its consequence and remedy half fell past the
+        crop exactly as the partial disclosure did, and it paints in the warning
+        pair with the call's own `✓`.
         """
         dim = bindings.style("tool.output.dim")
         ink = bindings.style("tool.output.error") if self._state == "error" else dim
@@ -3484,7 +3541,9 @@ class ToolCard(ExpandableActionBlock):
         icon = tool_icon(self.tool_name)
         label = display_name(self.tool_name)
         name_budget = width - (2 + status_cells + 2)
-        if name_budget < 2 and (self._state in ("error", "interrupted") or self._partial):
+        if name_budget < 2 and (
+            self._state in ("error", "interrupted") or self._partial or self._kernel_reset
+        ):
             # The status is the only segment carrying free text, so it is the
             # one that gives way first. A failing row used to be the ONLY row
             # in a narrow ledger to lose its name — its neighbours kept three
@@ -3853,7 +3912,7 @@ class ToolCard(ExpandableActionBlock):
             else:
                 duration = format_duration(elapsed)
             duration = duration.rjust(DURATION_COL)
-        if self._state == "success" and not self._partial:
+        if self._state == "success" and not self._partial and not self._kernel_reset:
             # See `bindings.BY_ELEMENT["tool.status.success_glyph"].note`.
             success_ink = bindings.style("tool.status.success_glyph")
             return [(f"{ICON_SUCCESS} ", success_ink), (duration, dim)]
@@ -3876,30 +3935,44 @@ class ToolCard(ExpandableActionBlock):
         # carries the state alone — which it can, being distinguishable from
         # ✓ and ✗ with no colour at all.
         if self._state == "success":
-            # PARTIAL: the tool answered, but not about the whole tree it was
-            # asked about. It gets its own glyph and the state's own ink —
-            # `warning`, the amber this card already spends on a harness state
-            # line (`tool.live.advisory`) — because the collapsed row is where an
-            # operator decides whether an answer is WHOLE, and design review D1
-            # measured the alternative: nine cards in one frame, six of them
-            # truncated searches, every one painting `✓ 0.4s` beside its
-            # arguments. A bound nobody can see does not fix the reported
-            # problem. The disclosure itself is promoted exactly as an error's
-            # cause is, so the row that cannot show the note still says it.
-            glyph = ICON_PARTIAL
-            # The lead when the text carries one, and a fixed label when it does
-            # not: the flag is what says the RESULT is partial, so the row must be
-            # able to state that even where there is no disclosure sentence to
-            # promote (design review round 2, D2-3).
-            reason = self._partial_reason() or _PARTIAL_LABEL
-            if self._switch_row_names_its_outcome():
-                # A model switch that took but raised afterwards: the row already
-                # leads with `switched (error)`, and "Partial" would misname it —
-                # the switch is whole, the error came after (design round 2, D9).
-                # The glyph and tint carry the warning.
-                reason = ""
-            tint = bindings.style("tool.status.partial_glyph")
-            abbreviates = True
+            if self._partial:
+                # PARTIAL: the tool answered, but not about the whole tree it was
+                # asked about. It gets its own glyph and the state's own ink —
+                # `warning`, the amber this card already spends on a harness state
+                # line (`tool.live.advisory`) — because the collapsed row is where
+                # an operator decides whether an answer is WHOLE, and design review
+                # D1 measured the alternative: nine cards in one frame, six of them
+                # truncated searches, every one painting `✓ 0.4s` beside its
+                # arguments. A bound nobody can see does not fix the reported
+                # problem. The disclosure itself is promoted exactly as an error's
+                # cause is, so the row that cannot show the note still says it.
+                glyph = ICON_PARTIAL
+                # The lead when the text carries one, and a fixed label when it
+                # does not: the flag is what says the RESULT is partial, so the row
+                # must be able to state that even where there is no disclosure
+                # sentence to promote (design review round 2, D2-3).
+                reason = self._partial_reason() or _PARTIAL_LABEL
+                if self._switch_row_names_its_outcome():
+                    # A model switch that took but raised afterwards: the row
+                    # already leads with `switched (error)`, and "Partial" would
+                    # misname it — the switch is whole, the error came after
+                    # (design round 2, D9). The glyph and tint carry the warning.
+                    reason = ""
+                tint = bindings.style("tool.status.partial_glyph")
+                abbreviates = True
+            else:
+                # KERNEL RESET (design review round 1, D2): the call RAN, so the
+                # outcome glyph and the settled ground stay a success — but the
+                # session fact must be visible WITHOUT expanding. The notice's own
+                # head (or, when the text carries none, its short label) rides the
+                # reason slot in the amber warning pair the partial marker spends,
+                # promoted exactly as a partial disclosure is, so a row that
+                # cannot show the note still names the state. Nothing here claims
+                # the call failed: it is a fact about the session it ran on.
+                glyph = ICON_SUCCESS
+                reason = self._reset_reason() or _RESET_LABEL
+                tint = bindings.style("tool.status.partial_glyph")
+                abbreviates = True
         elif self._state == "interrupted":
             # `bindings.BY_ELEMENT["tool.status.interrupted"]` deliberately
             # keeps `dim`, not a hue: see its note.

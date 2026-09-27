@@ -1,29 +1,18 @@
-"""A send that could not reach a runtime hands the message back, and says why ONCE.
+"""A send that could not reach a runtime KEEPS its row, and says why ONCE.
 
-Two failures share this row because they are one fact to the user: a prompt
+Two failures share this file because they are one fact to the user: a prompt
 whose ``prompt()`` raised on a dead socket, and — since QA round 2 (Q-1) — a
 queued STEER whose bind was refused after the recovery give-up released it (that
-half is pinned in ``test_queued_steer_receipt.py``, where the held-steer harness
-lives). In both the runtime is not there and the text is back in the composer.
+half is pinned in ``test_queued_steer_receipt.py``, which still drives
+``UNSENT_RUNTIME_NOTICE``, the steer path's own row). The dead-socket half was
+REWRITTEN by the boundary rule (see the S1 review round): a post-paint failure
+keeps its row and is resolved ON the failure record — ``send again`` / ``edit``
+— instead of withdrawing the row and returning the payload to the composer, so
+the cells below assert the record's row, its one notice, and its verbs.
 
-What this file adds is the RETRY shape U6 measured: while a stale record still
-claims a live owner, the resend is refused again in ~0.4 s, so a user who does
-what the row says presses twice or three times. Each press used to leave its own
-message row and its own copy of the warning — one message became three rows and
-the screen grew two identical amber blocks. The message row comes down with the
-withdrawal (it was never sent), and the warning is a STATE, so it is painted
-once while it stands.
-
-ROUND 3 CHANGED BOTH HALVES OF THAT, and the cells at the bottom pin them. The
-row no longer names `/resume`, because QA MINOR-4 and UX U2 measured it as a
-lever this shape cannot use (it reopens onto `owner socket unreachable`, and
-`/resume` typed into the composer holding the returned text is consumed as a
-command that takes the message with it). And the row STANDS ONLY WHILE IT IS
-TRUE: U1 measured it still asserting `your message is back in the composer` at
-t+40, with an empty composer and the answered exchange below it, so the served
-send now retires it — and a draft with no caret of its own lands at the END of
-the restored text, which is what stops the next input being glued in front of
-it (U2).
+What this file still adds is the RETRY shape U6 measured: while a stale record
+still claims a live owner, a resend is refused again in ~0.4 s, so the screen
+must hold ONE row and ONE notice however many attempts are made — never a tally.
 """
 
 from __future__ import annotations
@@ -34,8 +23,8 @@ from typing import Any
 import pytest
 
 from local_operator.tui.app import RESTORE_SEAM, UNSENT_RUNTIME_NOTICE, OperatorApp
-from local_operator.tui.events import UserMessageStart
 from local_operator.tui.session_interaction import SessionDraft, SessionInteraction
+from local_operator.tui.session_presentation import SendFailureNotice
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 
@@ -87,59 +76,85 @@ async def _boot(pilot: Any, app: OperatorApp) -> Editor:
     return editor
 
 
-async def _send(pilot: Any, editor: Editor, text: str) -> None:
+async def _send(pilot: Any, app: OperatorApp, editor: Editor, text: str) -> None:
     editor.text = text
     await pilot.pause()
     await pilot.press("enter")
-    # The prompt runs in a worker; the failure path paints after it settles.
+    # The refusal is painted by the prompt worker; under the boundary rule the
+    # landing is its failure record, and the composer stays empty.
     for _ in range(100):
         await pilot.pause()
         await asyncio.sleep(0.01)
-        if editor.text:
+        if app._interaction.turn.failed_sends:
             return
 
 
+async def _pump(pilot: Any, predicate, *, turns: int = 200) -> bool:
+    for _ in range(turns):
+        await pilot.pause()
+        await asyncio.sleep(0.01)
+        if predicate():
+            return True
+    return bool(predicate())
+
+
+def _failure_notice(app: OperatorApp) -> SendFailureNotice:
+    (notice,) = [block for block in _blocks(app) if isinstance(block, SendFailureNotice)]
+    return notice
+
+
 @pytest.mark.asyncio
-async def test_a_prompt_on_a_dead_runtime_comes_back_with_one_named_reason() -> None:
-    """The first refusal: text back, no row claiming delivery, one reason."""
+async def test_a_prompt_on_a_dead_runtime_keeps_its_row_and_names_the_reason() -> None:
+    """The first refusal: the row stays, the composer stays empty, one reason."""
     session = _dead_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "are you there?")
+        await _send(pilot, app, editor, "are you there?")
 
-        # The handback carries the SEAM: the restore lands inside the submit,
-        # so the operator's next thought would otherwise continue this sentence
-        # (UX round 3, U2 — the same boundary the drain refusal shows, since
-        # round 4 filed the two routes as one behaviour).
-        assert editor.text == "are you there?" + RESTORE_SEAM, "the user's text was not handed back"
-        assert _user_texts(app) == [], "a row stood for a message nobody received"
-        assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE]
+        assert editor.text == "", "the payload returned to the composer by itself"
+        assert _user_texts(app) == ["are you there?"], "the row was withdrawn"
+        (notice,) = _notice_texts(app)
+        assert "this session's runtime stopped" in notice, notice
+        assert "your message was not sent" in notice, notice
+        assert "send again enter · edit e" in " ".join(notice.split()), notice
+        assert UNSENT_RUNTIME_NOTICE not in notice, notice
 
 
 @pytest.mark.asyncio
 async def test_pressing_again_does_not_pile_up_rows_or_warnings() -> None:
-    """U6's measurement, reproduced: two presses, one message row, one warning.
+    """U6's measurement restated for the boundary rule: attempts do not tally.
 
     Before this, press two added a second message row AND a second copy of the
-    warning. The first press's row is already gone with its own withdrawal, so
-    what the user ends up with is one standing state rather than a tally of
-    their attempts.
+    warning. Under the boundary rule the composer stays EMPTY after the refusal
+    (the payload lives on the failure record), so a stray press sends nothing;
+    the retry is the notice's own `send again`, which retires its predecessor in
+    the same handler that resubmits (J1) — the screen holds one row and one
+    notice, never a tally of attempts.
     """
     session = _dead_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "are you there?")
-        await _send(pilot, editor, "are you there?")
+        await _send(pilot, app, editor, "are you there?")
 
-        # ONE seam, not two: this helper ASSIGNS the composer before each press,
-        # so the second submit sends the seamed text and the restore lands the
-        # same draft again. The real flow differs and grows a seam per press —
-        # pinned in `test_retiring_refusal.py`, which presses for real.
-        assert editor.text == "are you there?" + RESTORE_SEAM
-        assert _user_texts(app) == [], _user_texts(app)
-        assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE], _notice_texts(app)
+        # A bare press on the empty composer: nothing to send, nothing may grow.
+        await pilot.press("enter")
+        assert await _pump(pilot, lambda: False, turns=20) is False  # settle a beat
+        assert _user_texts(app) == ["are you there?"], _user_texts(app)
+        assert len(_notice_texts(app)) == 1, _notice_texts(app)
+
+        # The notice's own retry: retire-then-resubmit, one row again.
+        notice = _failure_notice(app)
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _pump(
+            pilot, lambda: len(app._interaction.turn.failed_sends) == 1 and bool(_notice_texts(app))
+        ), (_notice_texts(app), app._interaction.turn.failed_sends)
+        assert _user_texts(app) == ["are you there?"], _user_texts(app)
+        assert len(_notice_texts(app)) == 1, _notice_texts(app)
+        assert editor.text == "", editor.text
 
 
 @pytest.mark.asyncio
@@ -162,64 +177,63 @@ async def test_the_row_does_not_name_a_lever_the_shape_cannot_use() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_row_is_retired_once_the_message_it_describes_is_served() -> None:
-    """UX round 3, U1: the row is a STATE, so being painted once is not enough.
+async def test_the_notice_is_retired_when_the_payload_is_resent() -> None:
+    """U1 restated: the notice is a STATE, and its resolution retires it.
 
-    Measured on the real app: hand-back at ~t+8.5, a refused resend at t+12.2,
-    the ghost record gone at t+20.1, the resend SERVED at t+25.4 — and at t+40
-    the row still read `your message is back in the composer` over an empty
-    composer with the answered exchange directly below it. The served send is
-    the first moment the claim is false, so that is where it is taken down.
+    SUPERSEDES the retire-on-served rule, which belonged to the old
+    "back in the composer" row: this notice is the failure RECORD's, and its
+    resolution points are its own verbs — `send again` retires it at the press
+    (retire-then-resubmit, one handler), so a delivered resend leaves no notice
+    standing over the message it described.
     """
     session = _dead_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "are you there?")
-        assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE]
+        await _send(pilot, app, editor, "are you there?")
+        assert len(_notice_texts(app)) == 1, _notice_texts(app)
 
-        # The runtime comes back and the message goes out: the draft the row
-        # describes leaves the composer.
+        # The runtime comes back and the notice's own retry goes out: the row
+        # it describes is resolved with the resubmit (one row, no notice).
         session.prompt = _serving_prompt  # type: ignore[assignment]
-        editor.text = "are you there?"
+        notice = _failure_notice(app)
+        notice.focus()
         await pilot.pause()
         await pilot.press("enter")
-        for _ in range(50):
-            await pilot.pause()
-            await asyncio.sleep(0.01)
-            if app._pending_user_echoes:
-                break
-        # The session announces the prompt back the way a real one does, which
-        # is the event that consumes the echo and retires the row.
-        app.post_message(UserMessageStart("are you there?", 0))
-        for _ in range(50):
-            await pilot.pause()
-            await asyncio.sleep(0.01)
-            if not _notice_texts(app):
-                break
+        assert await _pump(pilot, lambda: not _notice_texts(app)), _notice_texts(app)
 
-        assert UNSENT_RUNTIME_NOTICE not in _notice_texts(app), _notice_texts(app)
-        assert app._unsent_runtime_notice is None
+        assert _notice_texts(app) == [], _notice_texts(app)
+        assert _user_texts(app) == ["are you there?"], "one row for the delivered resend"
 
 
 @pytest.mark.asyncio
-async def test_a_refused_press_leaves_the_row_standing() -> None:
-    """The other half of the same rule: a refusal does NOT retire it.
+async def test_a_refused_resend_leaves_a_notice_standing() -> None:
+    """The other half of the same rule: a refusal keeps a notice up.
 
-    The state is unchanged by a refused press — the text is back in the composer
-    and nothing can still carry it — so the row that names it must survive, or
-    U6's fix is undone in the opposite direction and the user is left with a
-    refusal and no explanation.
+    The state is unchanged by a refused resend — the message is still unsent —
+    so a notice must still name it. Under the boundary rule it is the RESEND's
+    own record (one record per failed row): the first row is retired with the
+    resubmit, the resend's refusal draws its own notice, and the screen still
+    holds exactly one row and one notice.
     """
     session = _dead_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "are you there?")
-        await _send(pilot, editor, "are you there?")
+        await _send(pilot, app, editor, "are you there?")
 
-        assert _notice_texts(app) == [UNSENT_RUNTIME_NOTICE], _notice_texts(app)
-        assert app._unsent_runtime_notice is not None
+        notice = _failure_notice(app)
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        assert await _pump(
+            pilot, lambda: len(app._interaction.turn.failed_sends) == 1 and bool(_notice_texts(app))
+        ), (_notice_texts(app), app._interaction.turn.failed_sends)
+
+        (standing,) = _notice_texts(app)
+        assert "your message was not sent" in standing, standing
+        assert _user_texts(app) == ["are you there?"], _user_texts(app)
+        assert app._interaction.turn.failed_sends[0].failure_class == "runtime-gone"
 
 
 @pytest.mark.asyncio
@@ -246,26 +260,27 @@ async def test_a_hidden_conversations_stored_row_is_retired_by_text() -> None:
 
 @pytest.mark.asyncio
 async def test_a_draft_with_no_caret_of_its_own_lands_at_the_end() -> None:
-    """UX round 3, U2: the restored draft must not eat the user's next input.
+    """UX round 3, U2 restated for `edit`: the restored draft must not eat the next input.
 
     Serialised from the seat that measured it. Step A/B: the user's next words
     used to be glued IN FRONT of the returned message (measured as one message
-    reading `second message [bash:2]are you there?`) — and since round 4 THIS
-    route's handback lands behind a SEAM (a blank line; the drain route has shown
-    one since round 3), so the next words are their own paragraph rather than a
-    continuation of the sentence above. Step C: the row's own
-    `/resume` advice typed there was consumed as a command and took the message
-    with it, leaving the screen with no composer text at all. With the caret at
-    the end, the words append (the message is intact and first) and a `/resume`
-    typed the same way does not start the line, so it cannot dispatch — which is
-    the property, independent of the copy above moving off `/resume` entirely.
+    reading `second message [bash:2]are you there?`); the restore (now the
+    user's own `edit`) lands behind a SEAM (a blank line), so the next words are
+    their own paragraph. Step C: a `/resume` typed below the draft does not
+    start the line, so it cannot dispatch — the property, independent of the
+    copy having moved off `/resume` entirely.
     """
     session = _dead_session()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         editor = await _boot(pilot, app)
-        await _send(pilot, editor, "are you there?")
+        await _send(pilot, app, editor, "are you there?")
 
+        notice = _failure_notice(app)
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        assert await _pump(pilot, lambda: bool(editor.text)), "the payload never loaded"
         assert editor.text == "are you there?" + RESTORE_SEAM
         # The caret is on the line BELOW the seam, not at the end of the drafted
         # sentence, which is what makes the two separable.
@@ -277,8 +292,7 @@ async def test_a_draft_with_no_caret_of_its_own_lands_at_the_end() -> None:
         assert editor.text == "are you there?" + RESTORE_SEAM + "second message ", editor.text
 
         # Step C — the advice case, on a clean hand-back so the state is exactly
-        # the one the row describes: the seam the refusal uses does the restore.
-        await _send(pilot, editor, "are you there?")
+        # the one the row describes.
         app._load_editor_draft(SessionDraft(text="are you there?"))
         await pilot.pause()
         editor.insert("/resume silent-owner-drive")

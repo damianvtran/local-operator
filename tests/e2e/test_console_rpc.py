@@ -585,6 +585,48 @@ async def test_the_secret_ref_cell_against_the_real_store(
 
 
 @pytest.mark.asyncio
+async def test_a_session_credential_is_relayed_without_the_store(
+    peer: Peer, tmp_path: Path, broker_reaped: None
+) -> None:
+    """The `ask` handover, end to end: a session credential alone is enough.
+
+    The value is stored exactly the way an `ask` secret answer stores it —
+    `store_credential(question.id, pasted, "ask")` — and nothing is written to
+    the encrypted store, so the call must succeed off the session store alone.
+    That is also what pins the session-first precedence: the store holds no such
+    key, so a resolver that checked it first would refuse where the user's own
+    handover should work.
+    """
+    peer.publish()
+    peer.serve(**{"console_input": {"accepted": True, "bytes": len(SECRET)}})
+
+    session = _session(tmp_path)
+    try:
+        assert session.variables is not None
+        stored = session.variables.store_credential("SUDO_PASSWORD", SECRET, "ask")
+        assert stored.ok
+
+        args = {"method": "input", "surface": "con:1:a", "secret_ref": "SUDO_PASSWORD"}
+        result = await execute_console("c-input", args, None, None, session._build_tool_context())
+        assert result.is_error is False, result.text
+
+        # The app receives the value; the model's result and arguments do not.
+        assert peer.received == [("console_input", {"surface": "con:1:a", "text": SECRET})]
+        assert SECRET not in result.text
+        assert SECRET not in repr(args)
+        assert "SUDO_PASSWORD" in result.text
+
+        # And the session's redaction seam contains it, exactly as it does for a
+        # value resolved from the encrypted store.
+        redactor = session._redact_tool_result_text
+        masked = redactor(f"the app printed {SECRET} on its own")
+        assert SECRET not in masked
+        assert "[redacted]" in masked
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_surface_the_user_opened_is_readable_and_named_as_theirs(
     peer: Peer, tmp_path: Path
 ) -> None:
