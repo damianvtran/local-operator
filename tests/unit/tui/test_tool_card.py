@@ -2112,10 +2112,11 @@ def test_expanded_output_never_widens_the_card() -> None:
 #: on an error card (both resolve to `tint-danger`) — so ink separates nothing,
 #: and on a colourless terminal it would say nothing either.
 REASON_LEAD = f"{ICON_ERROR} "
-#: Every lead a promoted block can open with: an error's cause, and — design
-#: review round 1, D1 — a partial result's disclosure. Same mechanism, so the
-#: helpers below locate the block by either rather than by one card's state.
-_REASON_LEADS = (REASON_LEAD, f"{ICON_PARTIAL} ")
+#: Every lead a promoted block can open with: an error's cause, a partial
+#: result's disclosure (design review round 1, D1), and a reset notice (round 1,
+#: D1). Same mechanism, so the helpers below locate the block by any of them
+#: rather than by one card's state.
+_REASON_LEADS = (REASON_LEAD, f"{ICON_PARTIAL} ", f"{ICON_SUCCESS} ")
 
 
 def _collapsed(text: str) -> str:
@@ -3840,3 +3841,110 @@ def test_a_partial_flag_without_a_lead_line_still_names_the_state() -> None:
         line.lstrip().startswith((f"{ICON_PARTIAL} ", f"{ICON_ERROR} ")) for line in lines[1:]
     )
     assert "src/a.py:1:needle" in body, "the ordinary result still paints"
+
+
+# ---------------------------------------------------------------------------
+# A RESET KERNEL: the call ran on fresh state after a rebuild.
+#
+# Design review round 1, D1 (the notice cropped mid-sentence in the expanded
+# success card — its consequence and remedy half never painted) and D2 (the
+# collapsed row said `✓ 0.4s`, indistinguishable from any quiet call). The
+# notice below is the shipped shape from `tools/eval.py`'s
+# `_build_render_result`; this file is about where it LANDS.
+
+_RESET_NOTICE = (
+    "Session state was reset (idle kernel expired) — this call ran on a FRESH "
+    "kernel. Variables, imports and functions from earlier calls are gone; "
+    "re-create anything this code needed."
+)
+
+
+def test_a_reset_result_is_marked_in_the_collapsed_row() -> None:
+    """The row an operator scans must state the reset without expanding (D2).
+
+    The base revision carried `Session state was rese…` here on the danger
+    ground; after the call itself went back to a settled ground the row said
+    `✓ 0.4s` and nothing else. The notice's own head rides the reason slot in
+    the amber warning pair, and a card without the flag keeps the quiet row —
+    the marker tracks the state, not the text.
+    """
+    card = ToolCard("t", "eval", {"code": "totals = df.groupby('region')['amount'].sum()"})
+    card.mark_done(_RESET_NOTICE + "\nresult: {'north': 12}", {"kernel_reset": True})
+    row = card._build_row(100)
+
+    assert "Session state was reset" in row.plain
+    assert ICON_SUCCESS in row.plain, "the call ran; the outcome glyph stays"
+    assert _triplet(_style_at(row, ICON_SUCCESS).color) == _triplet(
+        Style(color=theme_mod.semantic_color("warning")).color
+    )
+    _assert_fits(card)
+
+    # The claim survives the crop at every width, and the row never falls apart.
+    for width in WIDTHS:
+        shown = card._build_row(width)
+        assert ICON_SUCCESS in shown.plain, (width, shown.plain)
+        _assert_fits(card)
+
+    # The control: the same sentence WITHOUT the flag keeps the quiet `✓` row, so
+    # the marker tracks the state and not the text.
+    control = ToolCard("t2", "eval", {"code": "1 + 1"})
+    control.mark_done(_RESET_NOTICE + "\nresult: 2")
+    assert ICON_SUCCESS in control._build_row(100).plain
+    assert "Session state" not in control._build_row(100).plain
+
+
+def test_a_reset_notice_wraps_whole_in_the_body() -> None:
+    """The notice's consequence and remedy must reach the frame (D1).
+
+    Every captured line is cropped to its measure, and this 179-cell notice
+    measured ABSENT from all three success frames the design round probed
+    (`re-create anything this code needed.` never rendered). It is the promoted
+    lead line instead — the bounded block the partial disclosure opened — and it
+    paints in the warning pair rather than the captured rows' `dim`.
+    """
+    card = ToolCard("t", "eval", {"code": "totals = 3"})
+    card.mark_done(_RESET_NOTICE + "\nresult: 3", {"kernel_reset": True})
+    card.toggle_expanded()
+    content = card._build_content(80)
+    lines = content.plain.splitlines()
+
+    body = _collapsed("\n".join(lines))
+    assert "re-create anything this code needed." in body
+    assert "result: 3" in body, "the answer itself still paints"
+    # Located by its lead rather than by index, and only the BLOCK is handed to
+    # the shape helper: the captured rows below it keep the ordinary crop.
+    rows = _reason_rows(_reason_block(lines))
+    assert rows and rows[0].startswith("Session state was reset"), rows
+
+    assert _triplet(_style_at(content, "Session state was reset").color) == _triplet(
+        Style(color=theme_mod.semantic_color("warning")).color
+    )
+
+
+def test_a_reset_flag_without_the_notice_line_names_the_state() -> None:
+    """The flag says the session was reset, so the row must say so too (D2).
+
+    A payload whose text carries no notice promotes nothing — a line that is
+    not the claim must not be dressed as one — but the row still names the
+    state with its short label. Both halves are required:
+    ``details["kernel_reset"]`` says the CALL ran on a fresh kernel,
+    ``_RESET_LEADS`` says whether a line is the notice.
+    """
+    card = ToolCard("t", "eval", {"code": "1 + 1"})
+    card.mark_done("result: 2", {"kernel_reset": True})
+    row = card._build_row(100)
+
+    assert ICON_SUCCESS in row.plain
+    assert "session reset" in row.plain, "the state is named, not only marked"
+    _assert_fits(card)
+
+    card.toggle_expanded()
+    lines = card._build_content(80).plain.splitlines()
+    # Nothing is claimed, so nothing is promoted: no glyph lead on any body row
+    # and no row dropped from the captured output. Asserted over the WHOLE block
+    # rather than at an index, which is what made this brittle (review R2-7).
+    assert not any(
+        line.lstrip().startswith((f"{ICON_SUCCESS} ", f"{ICON_PARTIAL} ", f"{ICON_ERROR} "))
+        for line in lines[1:]
+    )
+    assert "result: 2" in "\n".join(lines)
