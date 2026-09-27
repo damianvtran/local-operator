@@ -475,6 +475,56 @@ async def test_a_warmed_runtime_outlives_the_drain_it_used_to_die_on(
 
 
 @pytest.mark.asyncio
+async def test_the_cap_outranks_an_engage_claim(
+    monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """A warmed runtime that is OUTSIDE the cap gives its window up.
+
+    The memory bound is not overridden by an engage: an engage is another device's
+    request, and a request that could outrank the cap would let one device make an
+    unbounded number of processes resident on another. So the claim buys a window
+    only while the runtime is inside ``keep_alive_max``; outside it the engage
+    degrades to "no warm", which is the state it was in before this change.
+
+    WHAT IS ASSERTED IS THE ORDER (cap before window), not the production
+    cadence: the reaper asks the LRU every ``KEEP_ALIVE_SCAN_S`` (5 s), and a cell
+    that waited for that would be measuring the wait. The window here is long
+    enough that leaving before it ran out can only be the cap, which is the
+    distinction that matters — and the reason the product's own corner case is
+    "the runtime leaves about 5 s after the engage" rather than "instantly".
+    """
+    WINDOW = 3.0
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.4")
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
+    monkeypatch.setattr(child_mod, "KEEP_ALIVE_SCAN_S", 0.2)
+    monkeypatch.setattr(child_mod, "_keep_alive_seconds", lambda: WINDOW)
+    monkeypatch.setattr(child_mod, "_keep_alive_max", lambda: 4)
+    runtime = FakeRuntime(engaged_at=time.time())
+    own_pid = runtime._record.pid
+    monkeypatch.setattr(
+        child_mod,
+        "_keep_alive_candidates",
+        # Four claims NEWER than this runtime's, plus ITS OWN — because the
+        # comparison refuses to place a runtime in a population that does not
+        # contain it (``_keep_alive_victim``'s blind-instrument rule), so a cell
+        # that omitted its own pid would pin "not a victim" and pass for the
+        # wrong reason.
+        lambda: [(time.time() + 10 * n, 9000 + n) for n in range(4)]
+        + [(time.time() - 100, own_pid)],
+    )
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    started = time.monotonic()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    await asyncio.wait_for(stop.wait(), 3.0)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.5 * WINDOW, f"the cap did not preempt the window ({elapsed:.2f}s)"
+    assert handle.disposed and runtime.closed
+    assert await task is True
+
+
+@pytest.mark.asyncio
 async def test_a_viewer_that_comes_and_goes_inside_one_tick_still_starts_the_window(
     monkeypatch: pytest.MonkeyPatch, keep_alive: None
 ) -> None:
