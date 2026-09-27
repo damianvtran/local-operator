@@ -3301,7 +3301,15 @@ def _render_custom_step(index: int, payload: dict[str, Any]) -> PeekStep:
         # operator is meant to READ rather than skim: it lands in a peek far more
         # often than the MCP notices do, so the raw wire type as a heading is
         # machine noise exactly where a human phrase matters. The phrase is the
-        # one the live receipt already uses (``Session.journal_shape_incident``),
-        # so the peek and the receipt name the same thing the same way.
+        # one the live receipt already used (``Session.journal_shape_incident``),
+        # so the peek and the receipt named the same thing the same way.
+        #
+        # PAST TENSE in that sentence is the change (2026-09-27): the operator
+        # ruled the notice false-positive noise — "Remove the operator-facing
+        # information too, it's false positive so it would confuse users" — and no
+        # live session produces a new row of this type any more. This branch stays
+        # because ``hub peek`` serves STORED transcripts, and one written before
+        # that date still carries the rows: without it a parent peeking an old
+        # child would see the raw wire type where it used to read a phrase.
         return PeekStep(index, "system", "credential masked", _clip(str(details.get("text", ""))))
     return PeekStep(index, "system", custom_type, _clip(str(details.get("text", ""))))

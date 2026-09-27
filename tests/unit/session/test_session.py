@@ -5833,11 +5833,18 @@ def test_the_credential_redaction_row_is_persistable() -> None:
     Agent review round 1 (F1-1): the comment beside the literal claimed this
     membership and the frozenset literal did not contain it — the member line
     was never added. The row survived anyway, because ``journal_shape_incident``
-    writes it with an explicit ``append_message`` rather than through this
+    wrote it with an explicit ``append_message`` rather than through this
     predicate, so the defect was latent: a comment asserting an invariant that a
     future path relying on the predicate would silently break. Pinned here so a
     comment cannot drift from the set again — this is the same shape the MCP
     pair is pinned with, for the same reason.
+
+    STILL EXPECTED TO HOLD after the notice was retired (2026-09-27): no NEW row
+    is written, but every transcript written before that date carries the ones
+    already persisted, and a resumed session reloads them. Dropping the type here
+    would silently change how those stored rows age the session's clock, which is
+    a migration decision and not this change; the membership is what makes the
+    replay of an old notice honest about the session's real activity.
 
     Persisted rather than live-only because what the row records (a credential
     reached a tool result, and it is readable in this context) is still true in
