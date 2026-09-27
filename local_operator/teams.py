@@ -287,6 +287,14 @@ class Team(BaseModel):
         if self.description.strip():
             parts.append(self.description.strip())
         parts.append("You are the manager of this team. You coordinate; you do not implement.")
+        # The other "built-in manager prompt" beside ``agent_seeds/manager.md``
+        # (design §V2.G.2, exact text). It sits here — ahead of the
+        # delegation mechanics — because it states the manager's standing
+        # duties before the roster says who does the work.
+        parts.append(
+            "Track this team's workstream with the `project` tool and keep its "
+            "progress current; keep the todo list updated the same way."
+        )
         parts.append(
             "Delegate with task(agent='<role>') using the roster below. "
             "Each member already carries this team's collaboration and project "
