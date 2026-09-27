@@ -381,9 +381,15 @@ class PrintRenderer:
                     except Exception:
                         provider = ""
                 # The same two additive remedies the TUI's helper applies, so
-                # headless and TUI agree about what one failure says. The
-                # Radient probe is bounded (5s) and swallowing; the module
-                # documents why nothing on this path may raise.
+                # headless and TUI agree about what one failure says. This is
+                # the ONE surface allowed to block on the Radient probe: the
+                # module documents the three access patterns, and the renderer
+                # is the bounded-sync arm's sole caller — it cannot await, and
+                # a cache-only answer would render the generic fallback
+                # forever because every headless run is a fresh process that
+                # exits with this line. The probe's wall envelope is ~5.5s
+                # worst case; the module swallows every failure and nothing
+                # on this path may raise.
                 sentence = append_auth_recovery(event.error, provider or None)
                 sentence = append_usage_limit_recovery(sentence, provider or None)
                 self.console.print(

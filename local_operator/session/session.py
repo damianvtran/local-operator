@@ -11060,14 +11060,23 @@ class Session:
             # no-op for every other failure. Bounded and swallowing — see the
             # module — and the append is idempotent, so a reappearing incident
             # cannot stack a second remedy.
-            from local_operator.providers.radient_recovery import (
-                append_recovery_line_once,
-                usage_limit_recovery_applies,
-                usage_limit_recovery_line,
-            )
+            #
+            # The local guard is explicit even though the module's contract
+            # already covers the await: the property this method relies on
+            # (nothing here can raise) must be LOCAL, not borrowed, or an
+            # import-time failure would escape and take the incident's own
+            # write with it (review round 1, R4).
+            try:
+                from local_operator.providers.radient_recovery import (
+                    append_recovery_line_once,
+                    usage_limit_recovery_applies,
+                    usage_limit_recovery_line,
+                )
 
-            if usage_limit_recovery_applies(raw, self._model.provider):
-                text = append_recovery_line_once(text, await usage_limit_recovery_line())
+                if usage_limit_recovery_applies(raw, self._model.provider):
+                    text = append_recovery_line_once(text, await usage_limit_recovery_line())
+            except Exception:  # noqa: BLE001 — a remedy must never replace the incident
+                logger.debug("Radient usage-limit remedy could not be derived", exc_info=True)
         details: dict[str, Any] = {"text": text, "raw": raw[:1000]}
         if token:
             details["token"] = token
