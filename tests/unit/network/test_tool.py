@@ -248,8 +248,12 @@ def test_the_tool_exposes_no_way_to_answer_a_park() -> None:
     # A caller reaching for any of the names a code could arrive under is refused by the
     # MODEL rather than quietly routed: ``extra="forbid"`` is part of the pin.
     for name in ("confirm", "sas", "code", "confirmation", "typed"):
+        # ``dict[str, Any]`` because this is a RAW payload — what a caller (or the
+        # harness's tier callback) hands over before validation — and not a
+        # ``NetworkParams`` the checker can hold to its field types.
+        loose: dict[str, Any] = {"action": "join", "token": "tok", name: "481926"}
         with pytest.raises(Exception):
-            NetworkParams(**{"action": "join", "token": "tok", name: "481926"})
+            NetworkParams(**loose)
     # The parked spelling is the ONLY spelling: a code in any other field changes
     # nothing, because no other field reaches the CLI's argv.
     argv, problem = net_tool._argv_for(NetworkParams(action="join", token="tok"))
@@ -277,13 +281,13 @@ def test_the_tier_and_the_argv_read_the_same_verb_set() -> None:
     tier and argv — so a divergence fails here rather than in the audit."""
     for value in ("0", "false", "no", "none", "null", "", "  "):
         for verb in ("stop", "delete", "engage"):
-            args = {"action": "sessions", "peer": "d1", verb: value}
-            assert net_tool._approval_tier(args) == "read", (verb, value)
-            argv, problem = net_tool._argv_for(NetworkParams(**args))
+            raw: dict[str, Any] = {"action": "sessions", "peer": "d1", verb: value}
+            assert net_tool._approval_tier(raw) == "read", (verb, value)
+            argv, problem = net_tool._argv_for(NetworkParams(**raw))
             assert problem == "", (verb, value, problem)
             assert f"--{verb}" not in argv, (verb, value, argv)
     # A real operand raises the tier AND reaches argv.
-    args = {"action": "sessions", "peer": "d1", "stop": "s_1"}
+    args: dict[str, Any] = {"action": "sessions", "peer": "d1", "stop": "s_1"}
     assert net_tool._approval_tier(args) == "write"
     argv, problem = net_tool._argv_for(NetworkParams(**args))
     assert problem == "" and argv[argv.index("--stop") + 1] == "s_1", argv
@@ -292,7 +296,8 @@ def test_the_tier_and_the_argv_read_the_same_verb_set() -> None:
         net_tool._approval_tier({"action": "sessions", "peer": "d1", "create": "false"}) == "read"
     )
     assert net_tool._approval_tier({"action": "sessions", "peer": "d1", "create": True}) == "write"
-    argv, problem = net_tool._argv_for(NetworkParams(action="sessions", peer="d1", create="false"))
+    bad: dict[str, Any] = {"action": "sessions", "peer": "d1", "create": "false"}
+    argv, problem = net_tool._argv_for(NetworkParams(**bad))
     assert problem == "" and "--create" not in argv, argv
 
 
