@@ -150,9 +150,11 @@ What to expect, in order:
    so `sudo`'s prompt appears there. The password is the user's to give: they
    type it into the surface themselves, or hand it over through an `ask` secret
    question and the agent relays it with `input secret_ref=<key>`. Keystrokes
-   into a pty are not recorded and a relayed value is registered for redaction,
-   so the password does not enter the surface's output, the transcript or the
-   record — and the agent never sees it, nor types it as text.
+   into a pty are not recorded, and at an echo-off prompt (as `sudo` uses) the
+   entered value stays out of the surface's output, the transcript and the
+   record; a relayed value is also registered for redaction, so a later bare
+   appearance reads `[redacted]` — and the agent never sees it, nor types it as
+   text.
 4. **Prompts the agent cannot answer.** macOS's Command Line Tools dialog and
    Windows's UAC consent dialog are drawn by the OS: the pty cannot see them and
    the agent cannot click them — the macOS install path is exercised, the Windows

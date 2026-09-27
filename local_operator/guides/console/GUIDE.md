@@ -149,10 +149,14 @@ machine. The streamlined handover, step by step:
 
 1. **`ask` first**, carrying the exact command(s) and what they will change —
    and ask for the password in the same call: a secret question (`secret: true`)
-   whose id is the credential key, e.g. `SUDO_PASSWORD`. Say plainly that
-   entering the password approves exactly those commands, and leave `persist`
-   off unless the user asks you to remember it — their login password does not
-   go to disk by default.
+   whose id is the credential key, e.g. `SUDO_PASSWORD`. **The card shows the
+   question's first line (~one card row) and cuts the rest; `^e` expands it, but
+   nothing the user must read to approve may sit after that line.** Lead with
+   the decision itself — "Enter your login password to approve the two `sudo`
+   commands I described — esc declines." — put the commands and their
+   consequences immediately after, and restate them in the message you wrote
+   before the question. Leave `persist` off unless the user asks you to
+   remember it — their login password does not go to disk by default.
 2. **If no key comes back** (declined, closed, blank), do NOT run the command.
    Report what is left undone; a declined secret is an answer, not an obstacle.
 3. **Run the command in a surface.** Create one if you need to (`reveal` stays
@@ -160,12 +164,20 @@ machine. The streamlined handover, step by step:
    works) and read until the password challenge appears on the screen.
 4. **Type the relayed value**: `input secret_ref=<the key the ask reported>`,
    then `keys ['enter']`, and read to the end. The value never passes through
-   your context — the ref is not the password, and it stays usable for later
-   admin commands in the session while the credential is stored. Close the
-   surface if you opened it.
+   your context — the ref is not the password. It stays usable for later admin
+   commands while the credential is stored, but each new command still gets its
+   own `ask` for consent; only the password entry is reused. Close the surface
+   if you opened it.
 5. **If the challenge returns** (a rejected value, a second prompt), stop and
    report — no blind retries; a password prompt that does not accept the
    credential is a fact for the user, not a loop to grind.
+
+**If this session cannot ask** (a delegated child has no ask hook), the routes
+that work are: the parent runs the privileged step itself; the user types the
+password into THIS session's surface; or — only with the user's explicit
+consent, because it writes to disk — the value is collected once with `persist`
+so your `secret_ref` resolves it from the encrypted store. Do not ask the
+parent to collect it into the parent's session: that store is not yours.
 
 There is no "run as root" surface: a surface starts as the user's own shell, so
 `sudo`'s prompt arrives where the relay above (or the user's own typing) can
