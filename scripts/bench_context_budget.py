@@ -475,6 +475,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: What was NOT paid for out of the budget: the tool DESCRIPTION. It replaced a
 #: sentence claiming sessions on other devices were unreachable — a capability
 #: the relay has served for rounds — so that half is a correction, not a cost.
+#:
+#: RE-MEASURED AT THE FOLD onto origin/main 7737441e, the tree this branch now
+#: merges at: the figures in the entry above were taken against the branch's
+#: original base (a937895ce), and this file's header is explicit that a ceiling
+#: is only a guard if the number under it is the one the MERGED tree produces, so
+#: they are re-taken here by the same method — one host, two trees, one after the
+#: other:
+#:
+#:   baseline (origin/main 7737441e)       90,993 chars = ~32,731 billed
+#:   head (this branch, folded)            92,124 chars = ~33,138 billed
+#:     = +1,131 chars = +407 billed — the SAME delta the entry above records, so
+#:       the fold changed nothing about what this change costs; what moved is the
+#:       baseline, by 39 billed tokens of ``main``'s own incoming surface (the
+#:       streamlined-sudo handover above and the remote-interaction wiring).
+#:
+#: The ceiling stays where this change put it, and on the merged head it carries
+#: 55 tokens of headroom (33,193 - 33,138) rather than the 94 the pre-fold pair
+#: above produces, because ``main`` raised its OWN ceiling from 32,737 to 32,791
+#: while this branch was open: main's ceiling now sits 60 above main's head, and
+#: this change asks for +402 while costing +407, so five of those tokens net out.
+#: Still far inside the tighten band below, so the ratchet does not move.
 BUDGET_BILLED_TOKENS = 33_193
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
