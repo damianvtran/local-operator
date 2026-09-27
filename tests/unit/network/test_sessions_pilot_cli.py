@@ -109,6 +109,29 @@ def _said(created: Any, needle: str) -> bool:
     return any(needle in row for row in _user_texts(created))
 
 
+async def _journals(created: Any, needle: str, timeout_s: float = 30.0) -> bool:
+    """Whether the OWNER's journal holds ``needle``, waiting out the flush.
+
+    ADMISSION IS NOT COMPLETION: a receipt that carries a ``request`` gets a turn
+    started on the peer, and the journal line for that turn lands a moment AFTER
+    the receipt comes back — while a read that lands inside the write raises rather
+    than answering (CI saw ``JSONDecodeError`` at char 202 on exactly this cell).
+    Both are timing, so the question is polled, and a malformed read is retried
+    instead of reported as an answer.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while True:
+        try:
+            if await asyncio.to_thread(_said, created, needle):
+                return True
+        except ValueError:  # a partially flushed journal line: not an answer yet
+            pass
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+
+
 @pytest.mark.asyncio
 async def test_a_follow_up_turn_reaches_the_peer_from_a_shell(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -261,13 +284,12 @@ async def test_an_unreachable_peer_fails_fast_and_truthfully(
         assert code == 1, (code, out, err)
         # NOT a hang, NOT an empty answer, and NOT the transport's own words: the
         # DEVICE is named as the component that failed, with the command that
-        # diagnoses it. A peer that is GONE is caught a rung higher than the dial,
-        # by the reachability read that refuses before any viewer is opened —
-        # which is why this scenario answers `peer_unreachable` while an open
-        # stream whose owner never speaks answers `session_unreachable` (the
-        # fake-viewer cell at BOTH rungs, and round 1, MINOR-4, is what pinned
-        # that split: the read is cache-first, so a peer that dies between the
-        # read and the dial must not answer with a second code).
+        # diagnoses it. WHICH RUNG NOTICES IS A RACE — the reachability read can
+        # refuse before any viewer is opened when its cached row already knows, and
+        # the dial's own bind rung answers when the row was still fresh — so what
+        # this cell pins is the CODE both rungs agree on, which is what a script
+        # branches on (round 1, MINOR-4: a dial that produced no stream is the
+        # device, and the guide's `session_unreachable` row moved to say so).
         assert '"code": "peer_unreachable"' in out, (out, err)
         combined = out + err
         assert "unreachable" in combined.lower(), combined
@@ -366,8 +388,6 @@ async def test_a_goal_slash_from_the_shell_runs_its_request_on_the_peer(
         assert payload["ok"] is True, payload
         # THE RECEIPT IS THE OWNER'S, and so is the turn it asked for: the request
         # is in the peer's journal, which a declaring viewer suppresses.
-        assert await asyncio.to_thread(_said, created, "wire the mesh end to end"), _user_texts(
-            created
-        )
+        assert await _journals(created, "wire the mesh end to end"), _user_texts(created)
     finally:
         await asyncio.to_thread(created.stop)

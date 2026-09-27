@@ -2758,27 +2758,19 @@ async def _pilot_act(
                 f"`lop network doctor --peer {peer}` diagnoses the link",
             ) from exc
         except ConnectionError as exc:
-            # THE SAME SITUATION AS THE TIMEOUT ABOVE, so the same code: the dial
-            # reached the peer's relay and died producing no session, which is the
-            # owner's runtime rather than this device's link. ``peer_unreachable``
-            # would tell a reader to ask again when it is back (the code's own
-            # meaning) about a peer whose relay had just answered, and it made one
-            # situation carry two codes depending on which rung it died on — while
-            # the GUIDE's own row already calls this ``session_unreachable``
-            # (review round 1, MINOR-4). This is also the rung CI's stopped-peer
-            # case lands on: the viewer is cold until ``bind_runtime``, so the dial
-            # that produces no welcome frame fails HERE, not at the open.
-            #
-            # The transport's own words are carried verbatim because this side
-            # cannot see further than they do, and the one command that separates
-            # "the link is down" from "that runtime is stopped" is named.
-            raise MeshRefusal(
-                "session_unreachable",
-                f"{peer} opened the stream for {session_id} but its runtime never "
-                f"answered ({exc}) — a runtime that is stopped and a link that is "
-                f"down look the same from here; `lop network doctor --peer {peer}` "
-                f"tells them apart, and the conversation is untouched",
-            ) from exc
+            # A DIAL THAT PRODUCED NO STREAM IS THE DEVICE, whichever rung noticed:
+            # this is the one CI's stopped-peer case lands on (the viewer is cold
+            # until ``bind_runtime``, so the dial that produces no welcome frame
+            # fails HERE), and it must answer what the OPEN rung answers — one
+            # situation, one code, because the reachability read that catches most
+            # stopped peers answers ``peer_unreachable`` and a script branches on
+            # the code, not on which rung was unlucky (review round 1, MINOR-4,
+            # settled on the GUIDE side: its ``session_unreachable`` row says a
+            # bind that ran out of its BUDGET, which is the timeout rung above).
+            code, sentence = await asyncio.to_thread(
+                _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            )
+            raise MeshRefusal(code, sentence) from exc
         if verb == "send":
             return await _pilot_send(viewer, session_id, peer, text)
         if verb == "steer":

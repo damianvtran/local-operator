@@ -384,16 +384,16 @@ def test_a_dial_that_produced_no_session_names_the_far_end(
     refused before the dial), because the first version classified by asking the
     peer's catalogue a second time — a read that is not usable at that moment: a
     link this device's relay still believes in reports the peer as reachable for
-    seconds after it died. The classification is now by construction, and the
-    rungs answer the two DIFFERENT questions they actually are:
+    seconds after it died. Both rungs answer ONE thing now: a dial that produced no
+    stream is the DEVICE, whether it died at the open or at the bind, which is what
+    the reachability read already says.
 
-    * the OPEN that never happened is this device's link to the peer, so the relay
-      record still decides it (``relay_unavailable`` with no relay, otherwise
-      ``peer_unreachable``);
-    * an open stream that then produced no session is the far END of it, which is
-      what ``session_unreachable`` means and what the bind's own TIMEOUT rung has
-      always raised — the GUIDE row for that code already said "or a bind that
-      could not be completed" (round 1, MINOR-4).
+    Round 1's MINOR-4 offered the other settlement — ``session_unreachable`` at the
+    bind rung — and CI refused it: with the read still answering
+    ``peer_unreachable``, one stopped peer answered two codes again depending on
+    which rung was unlucky. So the GUIDE's row moved instead, to what that code
+    really covers: a bind that ran out of its BUDGET (the timeout rung below), and
+    the act as a whole running out of ``PILOT_ACT_TIMEOUT_S``.
     """
     import local_operator.network.store as store_mod
     import local_operator.session.remote_open as remote_open
@@ -407,16 +407,7 @@ def test_a_dial_that_produced_no_session_names_the_far_end(
 
     assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 1
     printed = capsys.readouterr().out
-    if rung == "bind":
-        # ONE situation, one code, whatever this device's relay record says: the
-        # stream was open and the owner never spoke on it. The transport's own
-        # words are carried verbatim, and the one command that separates a stopped
-        # runtime from a dead link is named.
-        assert '"code": "session_unreachable"' in printed, printed
-        assert "the remote owner did not send its state" in printed, printed
-        assert PEER in printed, printed
-        assert "doctor" in printed, printed
-    elif relay_up:
+    if relay_up:
         assert '"code": "peer_unreachable"' in printed, printed
         assert "doctor" in printed, printed
         assert PEER in printed, printed
