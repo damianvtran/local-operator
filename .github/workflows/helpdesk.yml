@@ -59,11 +59,12 @@
 #   approval (harness/subagent.py copies both to child sessions).
 name: Sir Knight Lop the Second
 
-# Run titles ARE the attempt dedupe's input: the sweep recognizes an
-# engagement by its title (`… — <mode> PR #<n>`, ` (sweep)` appended on sweep
-# dispatches) — see `verdict_attempt_recorded` in reconcile.sh; keep the two
-# in step. The expression covers every event that runs this workflow: the
-# sweep itself, issue triage, PR mentions, and dispatches.
+# Run titles ARE the attempt dedupe's and the daily budget's input: the sweep
+# recognizes an engagement by its title (`… — <mode> PR #<n>`, ` (sweep)`
+# appended on sweep dispatches) — see `attempt_skip_reason` and
+# `sweep_dispatched_24h` in reconcile.sh; keep them in step. The expression
+# covers every event that runs this workflow: the sweep itself, issue triage,
+# PR mentions, and dispatches.
 run-name: >-
   ${{ (github.event_name == 'schedule' && 'Sir Knight Lop the Second — sweep')
       || ((inputs.issue != '' || github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request))
@@ -223,9 +224,15 @@ jobs:
     # `pull_request` trigger, so pushes, reopens and draft flips never start a
     # run: the sweep is the only automatic path, and each engagement costs
     # provider tokens.
-    # Mention aliases: the current trigger is `@sir-knight-lop-the-second`;
-    # `@aida` and `@Aida` stay in the condition as legacy aliases, so threads
-    # from before the rename keep working.
+    # The mention filter is PAIRED — keep the pair in sync whenever the
+    # accepted spellings change: the `if:` below is the deliberately BROADER
+    # prefilter (`contains()` over the accepted spellings, so unrelated
+    # comments never start a job at all), and the `Guard the target` step
+    # narrows to the exact forms as TOKENS (its `mention_re=` pattern), so a
+    # lookalike like "@aidan" cannot buy an engagement. The job side must
+    # stay a SUPERSET of the guard. Mention aliases: the current trigger is
+    # `@sir-knight-lop-the-second`; `@aida` and `@Aida` stay in the condition
+    # as legacy aliases, so threads from before the rename keep working.
     if: >-
       (github.event_name == 'issue_comment'
         && github.event.issue.pull_request
@@ -312,6 +319,8 @@ jobs:
       - name: Guard the target (open, same-repo, non-draft PR only)
         if: steps.key.outputs.enabled == 'true'
         id: guard
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           # The PR number arrives from a dispatch: validate it before it
           # reaches an API path, so a typo fails with a clear error instead
@@ -322,6 +331,18 @@ jobs:
               exit 1
               ;;
           esac
+          # The precise half of the paired mention filter (see the job `if:`):
+          # the job-level `contains()` is deliberately BROADER (a raw substring
+          # test), so for a comment run re-check that an accepted form appears
+          # as a TOKEN — "@aidan" or an email path must not buy an engagement.
+          # Keep `mention_re` in sync with the accepted spellings above and in
+          # the triage job.
+          mention_re='(^|[^A-Za-z0-9_-])(@sir-knight-lop-the-second|@aida|@Aida)([^A-Za-z0-9_-]|$)'
+          if [ "${GITHUB_EVENT_NAME}" = "issue_comment" ] && ! grep -Eq "$mention_re" <<<"${COMMENT_BODY:-}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sir Knight Lop the Second skips PR #${PR_NUMBER}: the comment carries no accepted mention form."
+            exit 0
+          fi
           # `|| true`: an empty API response makes `read` return 1 at EOF, and
           # under `bash -e` that aborts the step with no message — the checks
           # below must be what name the cause. A conflicted PR (`mergeable` is
@@ -383,18 +404,23 @@ jobs:
       #       `.github/helpdesk/**` (prompts, team, setup.sh) in its merge ref;
       #   (c) behaviour is then defined by main — the same copy the sweep
       #       decides with, and the same copy this workflow file runs from.
-      # `rm -rf` first, so the surface is EXACTLY main's: the plain checkout
-      # would only add or overwrite main's paths, and setup.sh installs
-      # whatever sits in `agents/*` and `teams/*` — a PR-added file or
-      # directory must not survive. The fetch authenticates with the
-      # credentials actions/checkout persists. The PR checkout still provides
-      # the code under review; the model's diffs come from the API anyway.
-      - name: Overlay the helpdesk surface from the default branch
+      # The surface is EXTRACTED to a temp dir and used FROM THERE, never
+      # overlaid onto the checkout: the old overlay rewrote and STAGED
+      # `.github/helpdesk/**` in the worktree, and a live review engagement
+      # flagged the pre-staged files as unrelated diff noise (lo run
+      # 36336021019: "two pre-staged files unrelated to this diff"). The
+      # archive carries the whole directory, so the PR checkout keeps its own
+      # copy for the record and nothing the model diffs changes shape. The
+      # fetch authenticates with the credentials actions/checkout persists.
+      # The PR checkout still provides the code under review; the model's
+      # diffs come from the API anyway. reconcile.test.sh guards this step,
+      # its order, and the absence of the old overlay.
+      - name: Extract the helpdesk surface from the default branch
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         run: |
+          mkdir -p "$RUNNER_TEMP/surface"
           git fetch --depth=1 origin main
-          rm -rf .github/helpdesk
-          git checkout FETCH_HEAD -- .github/helpdesk
+          git archive FETCH_HEAD .github/helpdesk | tar -x -C "$RUNNER_TEMP/surface"
       - name: Set up Python
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         uses: actions/setup-python@v7
@@ -405,7 +431,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
       - name: Install the helpdesk team and roles into the runner's lop config
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
-        run: bash .github/helpdesk/setup.sh
+        run: bash "$RUNNER_TEMP/surface/.github/helpdesk/setup.sh"
       - name: Run the engagement
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         timeout-minutes: 35
@@ -414,10 +440,11 @@ jobs:
         run: |
           # `mode` selects the brief: pr-review.md is the concise
           # guidelines-compliance review for a PR with no contributor rounds;
-          # pr-verdict.md is the terminal verdict for a settled thread.
-          prompt_file=".github/helpdesk/prompts/pr-review.md"
+          # pr-verdict.md is the terminal verdict for a settled thread. The
+          # brief comes from the temp surface (main's copy), not the checkout.
+          prompt_file="$RUNNER_TEMP/surface/.github/helpdesk/prompts/pr-review.md"
           if [ "$MODE" = "verdict" ]; then
-            prompt_file=".github/helpdesk/prompts/pr-verdict.md"
+            prompt_file="$RUNNER_TEMP/surface/.github/helpdesk/prompts/pr-verdict.md"
           fi
           {
             cat "$prompt_file"
@@ -433,6 +460,85 @@ jobs:
             --tools bash,read,write,glob,grep,eval,todo,web_search,web_read,web_fetch,task,wait,jobs,hub,list_variables,read_variable \
             --name "Sir Knight Lop the Second ${MODE}: PR #${PR_NUMBER}" \
             "$(cat "$RUNNER_TEMP/helpdesk-prompt.txt")"
+      # What the engagement spent, straight from the recorded ledger: the
+      # same on-disk store `/analytics` summarises ($HOME/.local-operator/
+      # analytics.db), one `calls` row per provider call with cost priced at
+      # record time (`cost_micro`, USD x 1e6, `cost_known` marks an unpriced
+      # model). `always()`, so a failed engagement still reports what it
+      # spent; the enabled/guard gates match the engagement step, so skipped
+      # runs report nothing. Best-effort by contract: a missing ledger is a
+      # no-op, an unreadable one is a note — this step runs after the
+      # engagement and must never fail the run or mask its result.
+      - name: Report the engagement's token spend
+        if: always() && steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
+        run: |
+          python3 - <<'PY' || true
+          # Report the engagement's token spend from local-operator's recorded
+          # ledger (stdlib only; read-only). A partial `cost_known` is a LOWER
+          # bound and carries the `+` marker in `cost_usd`.
+          import os
+          import sqlite3
+          import sys
+
+          DB = os.path.join(os.environ.get("HOME", ""), ".local-operator", "analytics.db")
+          SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY", "")
+
+
+          def emit(line=""):
+              print(line)
+              if SUMMARY:
+                  try:
+                      with open(SUMMARY, "a", encoding="utf-8") as fh:
+                          fh.write(line + "\n")
+                  except OSError:
+                      pass
+
+
+          def spend_line(label, calls, inp, out, cache_read, cost_micro, known):
+              usd = f"${cost_micro / 1e6:.4f}" + ("" if known == calls else "+")
+              return (
+                  f"{label}: {calls:,} calls; input {inp:,}; output {out:,}; "
+                  f"cache_read {cache_read:,}; cost_usd {usd}; cost_known {known:,}/{calls:,}"
+              )
+
+
+          def report():
+              if not os.path.exists(DB):
+                  emit(f"no analytics recorded — {DB} is not present.")
+                  return
+              try:
+                  con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+                  try:
+                      rows = con.execute(
+                          "SELECT provider || '/' || model_id, COUNT(*), "
+                          "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+                          "COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cost_micro), 0), "
+                          "COALESCE(SUM(cost_known), 0) "
+                          "FROM calls GROUP BY provider, model_id ORDER BY provider, model_id"
+                      ).fetchall()
+                  finally:
+                      con.close()
+              except sqlite3.Error as exc:
+                  emit(f"analytics spend unavailable ({DB}): {exc}")
+                  return
+              if not rows:
+                  emit("no analytics recorded — the ledger holds no calls.")
+                  return
+              emit("Sir Knight Lop the Second — engagement spend")
+              total = [0, 0, 0, 0, 0, 0]
+              for (label, calls, inp, out, cache_read, cost_micro, known) in rows:
+                  for i, value in enumerate((calls, inp, out, cache_read, cost_micro, known)):
+                      total[i] += value
+                  emit("  " + spend_line(label, calls, inp, out, cache_read, cost_micro, known))
+              emit(spend_line("spend", *total))
+
+
+          try:
+              report()
+          except Exception as exc:  # never fail the run, whatever happens
+              emit(f"analytics spend unavailable: {exc}")
+          sys.exit(0)
+          PY
       - name: Report a failed run
         if: failure() && steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         env:
@@ -455,9 +561,15 @@ jobs:
     # design: the wait that defers pull-request engagements does not apply to
     # issues; a mention comment on an issue by someone with write access; a
     # manual dispatch with an issue number.
-    # Mention aliases: the current trigger is `@sir-knight-lop-the-second`;
-    # `@aida` and `@Aida` stay in the condition as legacy aliases, so threads
-    # from before the rename keep working.
+    # The mention filter is PAIRED — keep the pair in sync whenever the
+    # accepted spellings change: the `if:` below is the deliberately BROADER
+    # prefilter (`contains()` over the accepted spellings, so unrelated
+    # comments never start a job at all), and the `Guard the target` step
+    # narrows to the exact forms as TOKENS (its `mention_re=` pattern), so a
+    # lookalike like "@aidan" cannot buy an engagement. The job side must
+    # stay a SUPERSET of the guard. Mention aliases: the current trigger is
+    # `@sir-knight-lop-the-second`; `@aida` and `@Aida` stay in the condition
+    # as legacy aliases, so threads from before the rename keep working.
     if: >-
       (github.event_name == 'issues'
         && github.event.issue.user.type != 'Bot'
@@ -538,7 +650,20 @@ jobs:
       - name: Guard the target (open issue only)
         if: steps.key.outputs.enabled == 'true' && github.event_name != 'issues'
         id: guard
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
+          # The precise half of the paired mention filter (see the job `if:`):
+          # the job-level `contains()` is deliberately BROADER (a raw substring
+          # test), so for a comment run re-check that an accepted form appears
+          # as a TOKEN. Keep `mention_re` in sync with the accepted spellings
+          # above and in the review job.
+          mention_re='(^|[^A-Za-z0-9_-])(@sir-knight-lop-the-second|@aida|@Aida)([^A-Za-z0-9_-]|$)'
+          if [ "${GITHUB_EVENT_NAME}" = "issue_comment" ] && ! grep -Eq "$mention_re" <<<"${COMMENT_BODY:-}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sir Knight Lop the Second skips issue #${ISSUE_NUMBER}: the comment carries no accepted mention form."
+            exit 0
+          fi
           # `|| true`: an empty API response must reach the emptiness check
           # below instead of aborting the step with no message (see the review
           # job's guard for the full note).

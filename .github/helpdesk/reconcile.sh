@@ -24,15 +24,28 @@
 #   and timeout. `check` is the already-engaged gate a sweep-dispatched run
 #   re-runs before spending provider tokens.
 #
-#   The sweep also dedupes ATTEMPTS per family state: before emitting a
-#   `verdict` it looks for a dispatch run of helpdesk.yml for this PR created
-#   after FAMILY_LAST_TIME. A still-running or completed-successfully attempt
-#   means this exact state was already judged (the verdict prompt may have
+#   The sweep also dedupes ATTEMPTS per family state, for BOTH modes: before
+#   emitting `review` or `verdict` it looks for a dispatch run of helpdesk.yml
+#   for the same (PR, mode) created after the state's anchor (a verdict is
+#   anchored at FAMILY_LAST_TIME; a review has no family comments, so any
+#   attempt for the PR counts). A still-running or completed-successfully
+#   attempt means this exact state was already judged (a prompt may have
 #   posted nothing on purpose), so the sweep does not re-fire every 15
-#   minutes; a completed-unsuccessful attempt does not block — the retry
-#   path. The workflow's `run-name:` is what makes an attempt visible
+#   minutes. A completed-unsuccessful attempt backs off
+#   FAILED_ATTEMPT_BACKOFF_MINUTES before the retry: failed attempts used to
+#   retry every sweep and posted a failure notice each time (three landed on
+#   one PR); a mention or a manual dispatch is the immediate recovery. The
+#   workflow's `run-name:` is what makes an attempt visible
 #   (`Sir Knight Lop the Second — {mode} PR #<n> (sweep)`), so this file and
 #   the workflow's run-name move together.
+#
+#   Two dispatch bounds keep a busy window's spend finite without a human:
+#   one sweep emits at most SWEEP_MAX_DISPATCH engagements (the OLDEST by
+#   updatedAt; the rest ride the next sweep), and a repository's sweeps
+#   dispatch at most DAILY_ENGAGEMENT_CAP per rolling 24h (mention and manual
+#   runs are not budgeted) — launch-day backfill dispatched 4-7 engagements in
+#   a single sweep. Both constants are env-overridable in the config block
+#   below; raise them when a window genuinely needs more.
 #
 # THE MARKER CONTRACT — keep these spellings stable; the README documents them
 # as a contract and every consumer greps exactly these:
@@ -63,11 +76,22 @@
 # Pure read-only (QA relies on it): only reads through `gh` and prints. The
 # workflow's dispatch step is the one that writes (workflow_dispatch), not this.
 #
-# Requires: bash, jq, gh. Thresholds are env-overridable (tests, operators):
+# Requires: bash, jq, gh. Thresholds and cost bounds are env-overridable
+# (tests, operators):
 set -euo pipefail
 REVIEW_DELAY_MINUTES="${REVIEW_DELAY_MINUTES:-30}"
 VERDICT_SETTLE_MINUTES="${VERDICT_SETTLE_MINUTES:-15}"
 WINDOW_DAYS="${WINDOW_DAYS:-7}"
+# Cost bounds (2026-09-27 spend review — an engagement is the only thing here
+# that spends provider tokens; a typical review is ~26 model calls ≈ $0.10):
+#   * a young FAILED attempt backs off instead of retrying every sweep;
+#   * one sweep dispatches at most SWEEP_MAX_DISPATCH (the oldest first), so
+#     a burst (e.g. a launch-day backfill) cannot fan out unbounded;
+#   * the rolling-24h DAILY_ENGAGEMENT_CAP caps a repository's day.
+# Raise any of them when a window genuinely needs more.
+FAILED_ATTEMPT_BACKOFF_MINUTES="${FAILED_ATTEMPT_BACKOFF_MINUTES:-30}"
+SWEEP_MAX_DISPATCH="${SWEEP_MAX_DISPATCH:-5}"
+DAILY_ENGAGEMENT_CAP="${DAILY_ENGAGEMENT_CAP:-50}"
 
 # ---------------------------------------------------------------------------
 # The marker contract, in ONE place (README, "Marker contract").
@@ -143,21 +167,52 @@ pr_last_push_time() {
     | jq -sr 'add // [] | [ .[] | select(.event == "committed" or .event == "head_ref_force_pushed") | (.created_at // .committer.date // .author.date) ] | map(select(. != null)) | max // empty'
 }
 
-# The per-state attempt dedupe: helpdesk.yml names every run through its
+# The generalized per-state attempt matcher (was verdict-only
+# `verdict_attempt_recorded`). helpdesk.yml names every run through its
 # `run-name:` (`… — {mode} PR #{n}`, with ` (sweep)` on sweep dispatches), so
-# an attempt is visible from a run list. An attempt created AFTER the latest
-# family comment that is still running, or completed successfully, already
-# judged this exact state — do not re-dispatch it. A completed-unsuccessful
-# attempt does not block (the retry path), and a lookup failure does not
-# block either. Prints "true"/"false".
-verdict_attempt_recorded() { # <pr>
-  local pr="$1" runs
+# attempts are visible from a run list: a dispatch run of this workflow for
+# the same (PR, mode) created after the state's anchor — a verdict is
+# anchored at the latest family comment; a review has no family state, so
+# `since` is empty and any attempt for the PR counts.
+#
+# Prints a skip reason when this exact state must not be re-dispatched, or
+# nothing when it may proceed. Two rules, in order:
+#   1. an attempt still running (queued/in_progress) or completed
+#      successfully already judged this exact state — do not re-dispatch it;
+#   2. the newest attempt completed UNSUCCESSFULLY within
+#      FAILED_ATTEMPT_BACKOFF_MINUTES — a young failure waits before the
+#      retry (a mention or a manual dispatch is the immediate recovery).
+# A lookup failure prints nothing: it must not block the retry path.
+attempt_skip_reason() { # <pr> <mode> [<since-iso>]
+  local pr="$1" mode="$2" since="${3:-}" runs
   runs="$(gh run list -R "$GH_REPO" --workflow helpdesk.yml --event workflow_dispatch \
-    --limit 50 --json displayTitle,status,conclusion,createdAt)" || { echo false; return 0; }
-  jq -r --arg pr "$pr" --arg family "$FAMILY_LAST_TIME" '
-    [ .[] | select(.displayTitle | test("— verdict PR #" + $pr + "( |$)"))
-          | select(.status != "completed" or .conclusion == "success")
-          | select((.createdAt | fromdateiso8601) > ($family | fromdateiso8601)) ] | length > 0' <<<"$runs"
+    --limit 50 --json displayTitle,status,conclusion,createdAt)" || return 0
+  jq -r --arg pr "$pr" --arg mode "$mode" --arg since "$since" \
+        --argjson now "$(now_epoch)" --argjson backoff "$((FAILED_ATTEMPT_BACKOFF_MINUTES * 60))" '
+    [ .[] | select(.displayTitle | test("— " + $mode + " PR #" + $pr + "( |$)"))
+          | select($since == "" or ((.createdAt | fromdateiso8601) > ($since | fromdateiso8601)))
+          | {status, conclusion, epoch: (.createdAt | fromdateiso8601)} ] as $attempts
+    | ($attempts | map(select(.status != "completed" or .conclusion == "success")) | length) as $blocked
+    | ($attempts | sort_by(.epoch) | last) as $newest
+    | if $blocked > 0 then
+        "a \($mode) attempt for this exact state is already on record"
+      elif $newest != null and $newest.status == "completed" and $newest.conclusion != null
+           and $newest.conclusion != "success" and (($now - $newest.epoch) < $backoff) then
+        "a recent \($mode) attempt failed \(((($now - $newest.epoch) / 60) | floor)) min ago; retrying after it ages"
+      else empty end' <<<"$runs"
+}
+
+# Sweep-dispatched attempts in the rolling 24h, for DAILY_ENGAGEMENT_CAP.
+# Counted from the run names (` (sweep)` suffix — mention and manual runs are
+# not budgeted). A lookup failure counts 0: the cap bounds a burst, it must
+# not become a second outage.
+sweep_dispatched_24h() {
+  local runs
+  runs="$(gh run list -R "$GH_REPO" --workflow helpdesk.yml --event workflow_dispatch \
+    --limit 200 --json displayTitle,createdAt)" || { echo 0; return 0; }
+  jq -r --argjson now "$(now_epoch)" '
+    [ .[] | select(.displayTitle | endswith(" (sweep)"))
+          | select(($now - (.createdAt | fromdateiso8601)) < 86400) ] | length' <<<"$runs"
 }
 
 # Classify one PR's comments into the scan globals. One PR is in flight at a
@@ -214,10 +269,13 @@ record_skip() {
   record_row "$1" "skip" "$2"
   printf 'pr #%s: skip — %s\n' "$1" "$2" >&2
 }
-record_action() {
+record_action() { # <num> <mode> <reason> <updated-epoch>
   record_row "$1" "$2" "$3"
   printf 'pr #%s: %s — %s\n' "$1" "$2" "$3" >&2
   actions+=("$2 $1")
+  # The updatedAt epoch rides along for the SWEEP_MAX_DISPATCH ordering:
+  # when more actions are due than one sweep may emit, the OLDEST go first.
+  action_updated+=("$4")
 }
 
 # The step summary. Written only when the runner provides the channel file;
@@ -236,11 +294,19 @@ write_summary() {
         printf ' %s #%s;' "${a%% *}" "${a#* }"
       done
       echo
+    elif [ -n "$daily_cap_note" ]; then
+      echo "Dispatched: nothing — ${daily_cap_note}."
     else
       echo "Dispatched: nothing — no engagement is due."
     fi
+    if [ -n "$more_due_note" ]; then
+      echo
+      echo "${more_due_note}."
+    fi
     echo
     echo "Thresholds: review after ${REVIEW_DELAY_MINUTES}m, verdict after ${VERDICT_SETTLE_MINUTES}m settle, window ${WINDOW_DAYS}d (reconcile.sh constants; env-overridable)."
+    echo
+    echo "Bounds: failed-attempt backoff ${FAILED_ATTEMPT_BACKOFF_MINUTES}m; ≤${SWEEP_MAX_DISPATCH} dispatched per sweep; ≤${DAILY_ENGAGEMENT_CAP} per rolling 24h."
     echo
     echo "| PR | Decision | Reason |"
     echo "| --- | --- | --- |"
@@ -256,13 +322,16 @@ run_sweep() {
   local prs count i num draft login author_bot owner name mergeable created updated
   local repo_owner repo_name head_label
   local created_epoch updated_epoch start ready start_epoch head settle_epoch now latest_push
-  local -a actions rows
+  local skip_reason dispatched_today more_due_note daily_cap_note n_pick picked
+  local k best best_epoch
+  local -a actions rows action_updated keep_actions keep_updated
 
   [ -n "${GH_REPO:-}" ] || die "GH_REPO is not set (owner/name)"
   for tool in jq gh; do command -v "$tool" >/dev/null || die "$tool is required"; done
 
   actions=()
   rows=()
+  action_updated=()
   now="$(now_epoch)"
   repo_owner="${GH_REPO%%/*}"
   repo_name="${GH_REPO#*/}"
@@ -347,11 +416,15 @@ run_sweep() {
       # One attempt per family state: a still-running or successful attempt
       # newer than the latest family comment already judged this state, and
       # posting nothing is a legitimate outcome — do not re-fire every sweep.
-      if [ "$(verdict_attempt_recorded "$num")" = "true" ]; then
-        record_skip "$num" "a verdict attempt for this exact state is already on record"
+      # A young failed attempt backs off first (attempt_skip_reason). The
+      # mask keeps the documented fail-open: a jq error on an rc-0 run list
+      # must not abort the sweep under `set -e`.
+      skip_reason="$(attempt_skip_reason "$num" "verdict" "$FAMILY_LAST_TIME" || true)"
+      if [ -n "$skip_reason" ]; then
+        record_skip "$num" "$skip_reason"
         continue
       fi
-      record_action "$num" "verdict" "rounds settled and terminal-ish; no verdict for this head yet"
+      record_action "$num" "verdict" "rounds settled and terminal-ish; no verdict for this head yet" "$updated_epoch"
       continue
     fi
 
@@ -381,8 +454,63 @@ run_sweep() {
       record_skip "$num" "marked ready for review less than ${REVIEW_DELAY_MINUTES}m ago"
       continue
     fi
-    record_action "$num" "review" "waited ${REVIEW_DELAY_MINUTES}m+ with no rounds and no bot review"
+    # Same attempt dedupe as the verdict path: a still-running or successful
+    # review attempt already judged this state (a review has no family anchor,
+    # so any attempt for the PR counts), and a young failure backs off first.
+    # This is what keeps a second sweep from re-dispatching a review while the
+    # first run is still going, or re-firing a review that posted nothing.
+    # Masked like the verdict path: the lookup must fail open (a jq error on
+    # an rc-0 run list would otherwise abort the sweep under `set -e`).
+    skip_reason="$(attempt_skip_reason "$num" "review" "" || true)"
+    if [ -n "$skip_reason" ]; then
+      record_skip "$num" "$skip_reason"
+      continue
+    fi
+    record_action "$num" "review" "waited ${REVIEW_DELAY_MINUTES}m+ with no rounds and no bot review" "$updated_epoch"
   done
+
+  # The dispatch cost bounds — due → caps → dispatch. The rolling-24h budget
+  # is checked first: at/over cap nothing dispatches (the day's engagements
+  # are spent; the summary says so). Otherwise a sweep with more than
+  # SWEEP_MAX_DISPATCH actions keeps the OLDEST and lets the rest ride the
+  # next sweep. Both notes go to stderr and (via the globals) the summary.
+  more_due_note=""
+  daily_cap_note=""
+  if [ "${#actions[@]}" -gt 0 ]; then
+    # Masked to the documented count-0 fallback: a lookup failure counts 0 —
+    # the cap must bound a burst, not become a second outage.
+    dispatched_today="$(sweep_dispatched_24h || echo 0)"
+    if [ "$dispatched_today" -ge "$DAILY_ENGAGEMENT_CAP" ]; then
+      daily_cap_note="daily engagement budget reached (${dispatched_today}/${DAILY_ENGAGEMENT_CAP}); due engagements resume after the window rolls"
+      printf '%s\n' "$daily_cap_note" >&2
+      actions=()
+      action_updated=()
+    elif [ "${#actions[@]}" -gt "$SWEEP_MAX_DISPATCH" ]; then
+      # Selection with no pipes: `sort | head` would close the pipe early
+      # and `pipefail` would turn a full read into a dead sweep.
+      n_pick="${#actions[@]}"
+      picked=" "
+      keep_actions=(); keep_updated=()
+      for ((k = 0; k < SWEEP_MAX_DISPATCH; k++)); do
+        best=-1
+        best_epoch=""
+        for ((i = 0; i < n_pick; i++)); do
+          case "$picked" in *" $i "*) continue ;; esac
+          if [ "$best" -lt 0 ] || [ "${action_updated[$i]}" -lt "$best_epoch" ]; then
+            best="$i"
+            best_epoch="${action_updated[$i]}"
+          fi
+        done
+        picked="${picked}${best} "
+        keep_actions+=("${actions[$best]}")
+        keep_updated+=("$best_epoch")
+      done
+      more_due_note="$((n_pick - SWEEP_MAX_DISPATCH)) more due; they ride the next sweep"
+      printf '%s\n' "$more_due_note" >&2
+      actions=("${keep_actions[@]}")
+      action_updated=("${keep_updated[@]}")
+    fi
+  fi
 
   # The machine-readable output: one action per line for the workflow to
   # dispatch. Everything else above is stderr / the step summary.
