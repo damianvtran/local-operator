@@ -372,9 +372,7 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     tags_value = project.get("tags")
     tags = [str(tag) for tag in tags_value] if isinstance(tags_value, list) else []
     lines.append(f"tags: {', '.join(tags) if tags else '(none)'}")
-    age = age_text(
-        project.get("progress_updated_at") if project.get("progress") else None, now=now
-    )
+    age = age_text(project.get("progress_updated_at") if project.get("progress") else None, now=now)
     if age is None:
         freshness = "none recorded"
     else:

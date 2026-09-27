@@ -641,13 +641,6 @@ def reported_age(project: Project, *, now: float | None = None) -> str | None:
     if not project.progress or project.progress_updated_at is None:
         return None
     return age_text(project.progress_updated_at, now=now)
-    if age < 90:
-        return f"{int(age)}s"
-    if age < 5400:
-        return f"{int(age // 60)}m"
-    if age < 172800:
-        return f"{int(age // 3600)}h"
-    return f"{age / 86400:.0f}d"
 
 
 def truncate_row(row: str, *, cap: int = PROJECT_ROW_CAP) -> str:
