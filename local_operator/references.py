@@ -566,15 +566,19 @@ def _project_registry() -> Any | None:
 
 
 def _read_project_rows() -> list[Any]:
-    """Every project row, read OFF the event loop; republishes the ink snapshot.
+    """Every project row, read OFF the event loop; publishes the ink snapshot.
 
-    The ONLY reader of :data:`_project_registry_cache` that may construct or
-    reload it, and it is called exclusively from daemon threads: the submit
-    arm's :func:`_off_loop` lookup, :func:`_refresh_project_names`, and the
-    picker's :func:`project_picker_rows`. ``list_projects`` is where the
-    registry's own 5 s / directory-mtime refresh runs, so at store scale this
-    can take about a second — which is exactly why it belongs off the loop
-    (review round 1, M-4) and why nothing on the event loop calls it.
+    THE one publisher of :data:`_project_names_cache`, and it is called only by
+    :func:`_refresh_project_names` (the scheduler's thread) and
+    :func:`project_picker_rows` (the picker's). It is NOT the only off-loop
+    route into the registry — the submit arm reaches it through
+    :func:`_project_for_query` → :func:`_project_registry`, which can also
+    construct or reload (review round 2's nit: name it precisely). What every
+    route shares is the property that matters: each runs on a daemon thread,
+    so nothing on the event loop ever constructs or reloads the store.
+    ``list_projects`` is where the registry's own 5 s / directory-mtime refresh
+    runs, so at store scale this can take about a second — which is exactly why
+    it belongs off the loop (review round 1, M-4).
 
     Never raises: no registry, an unreadable store or a failing list all read
     as "no projects", and every caller is a keystroke-adjacent path that
