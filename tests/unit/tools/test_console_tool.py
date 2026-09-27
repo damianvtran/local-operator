@@ -769,6 +769,32 @@ async def test_an_unresolvable_secret_ref_is_refused_without_dialling(
     assert client.calls == []
 
 
+@pytest.mark.asyncio
+async def test_the_refusal_closes_the_stores_own_sentence_with_one_period(
+    monkeypatch: pytest.MonkeyPatch, live_app: None, stored_secret: None
+) -> None:
+    """The store's own not-found text already ends in a period and the refusal
+    template appends its own, so the first wording printed `...in this store..
+    Get the value...` (QA round 1, Q2). The detail is normalised so the model
+    reads exactly one closing period."""
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretNotFound
+
+    def boom(name: str, base: Path | None = None) -> bytes:
+        raise SecretNotFound(f"No secret named {name!r} in this store.")
+
+    monkeypatch.setattr(access, "retrieve_secret", boom)
+    client = _install(monkeypatch, _FakeClient())
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "NOPE"},
+        _context(variables=_store()),
+    )
+    assert result.is_error is True
+    assert "in this store. Get the value" in result.text
+    assert ".." not in result.text
+    assert client.calls == []
+
+
 # --- the ask handover: session credentials ----------------------------------
 #
 # The streamlined sudo flow: the user answers an `ask` secret question (their
@@ -864,6 +890,52 @@ async def test_a_loosely_spelled_session_key_still_resolves(
     )
     assert result.is_error is False, result.text
     assert client.calls[0][1]["text"] == "hunter2"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_session_store_falls_through_to_the_encrypted_store(
+    monkeypatch: pytest.MonkeyPatch, live_app: None, stored_secret: None
+) -> None:
+    """A duck-typed store's accessor can raise; the resolver then degrades to
+    "no session value" and lets the encrypted store answer. The alternative —
+    letting the exception escape — would kill `execute_console` with an
+    unhandled traceback instead of the typed `_error` its contract promises
+    (M1, review round 1)."""
+    from local_operator.variables import VariableStore
+
+    class Hostile(VariableStore):
+        def credential_env(self) -> dict[str, str]:
+            raise RuntimeError("store exploded")
+
+    client = _install(monkeypatch, _FakeClient({"accepted": True, "bytes": len(SECRET)}))
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "SUDO_PASSWORD"},
+        _context(variables=Hostile(cwd=".")),
+    )
+    assert result.is_error is False, result.text
+    assert client.calls[0][1]["text"] == SECRET
+
+
+@pytest.mark.asyncio
+async def test_a_non_dict_session_store_read_falls_through_too(
+    monkeypatch: pytest.MonkeyPatch, live_app: None, stored_secret: None
+) -> None:
+    """The shape guard, separately: a store whose accessor returns something
+    that is not a mapping is treated as "no session value" rather than being
+    subscripted, and the encrypted store still answers."""
+    from local_operator.variables import VariableStore
+
+    class Shapeless(VariableStore):
+        def credential_env(self) -> Any:
+            return ["not", "a", "mapping"]
+
+    client = _install(monkeypatch, _FakeClient({"accepted": True, "bytes": len(SECRET)}))
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "SUDO_PASSWORD"},
+        _context(variables=Shapeless(cwd=".")),
+    )
+    assert result.is_error is False, result.text
+    assert client.calls[0][1]["text"] == SECRET
 
 
 # --- the approval prompt ----------------------------------------------------

@@ -265,10 +265,10 @@ its own line:
 The value is the user's to give: ask for it with an `ask` secret question (their
 entry into it is the approval — `guide://console` has the step-by-step
 handover), then relay it with `console_input {surface, secret_ref: "<key>"}`,
-never as `text`. Keystrokes into a pty are never recorded and the relayed value
-is registered for redaction, so the password does not enter the surface's output
-or your record. A user who would rather type it into the prompt themselves can
-simply be handed the surface.
+never as `text`. Keystrokes into a pty are never recorded, and at an echo-off
+prompt (as `sudo` uses) the value does not enter the surface's output or your
+record; a relayed value is also registered for redaction. A user who would
+rather type it into the prompt themselves can simply be handed the surface.
 
 **When the user will not or cannot grant root.** A static build into the user's
 own `~/.local/bin` needs no privileges at all and is the honest alternative:
