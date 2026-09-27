@@ -1,0 +1,475 @@
+{
+  "00-entry": {
+    "note": "sessions screen: the projects entry in the footer",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": null,
+    "scroller": null,
+    "headings": [],
+    "buttons": []
+  },
+  "01-list": {
+    "note": "footer entry opened the sheet; list rows",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 375,
+      "height": 469
+    },
+    "scroller": {
+      "scrollH": 412,
+      "clientH": 412
+    },
+    "headings": [],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "list",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "board",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "new project",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "projects-featureactiveprogress 2d ago2 sessions \u00b7 1/3 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "payments-migrationactiveprogress just now2 sessions \u00b7 1 live \u00b7 1/3 mil",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "docs-sweepactiveno progressno sessions",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "travel-planningpausedprogress 5d ago1 session",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "site-refreshdoneprogress just nowno sessions \u00b7 2/2 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "old-notesarchivedno progressno sessions",
+        "height": 57,
+        "disabled": false
+      }
+    ]
+  },
+  "02-board": {
+    "note": "status-grouped sections",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 261,
+      "height": 583
+    },
+    "scroller": {
+      "scrollH": 526,
+      "clientH": 526
+    },
+    "headings": [
+      "active",
+      "paused",
+      "done",
+      "archived"
+    ],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "list",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "board",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "new project",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "projects-featureprogress 2d ago2 sessions \u00b7 1/3 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "payments-migrationprogress just now2 sessions \u00b7 1 live \u00b7 1/3 milestone",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "docs-sweepno progressno sessions",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "travel-planningprogress 5d ago1 session",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "site-refreshprogress just nowno sessions \u00b7 2/2 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "old-notesno progressno sessions",
+        "height": 57,
+        "disabled": false
+      }
+    ]
+  },
+  "03-detail": {
+    "note": "progress, milestones, sessions with state",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 257,
+      "height": 587
+    },
+    "scroller": {
+      "scrollH": 530,
+      "clientH": 530
+    },
+    "headings": [
+      "progress",
+      "milestones (1/3)",
+      "sessions (2)"
+    ],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2039projects",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2611beta cut",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2610audit2026-09-05",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2610cutover window2026-10-15",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "delete project",
+        "height": 44,
+        "disabled": false
+      }
+    ]
+  },
+  "04-milestone-toggled": {
+    "note": "after tapping the overdue milestone",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 257,
+      "height": 587
+    },
+    "scroller": {
+      "scrollH": 530,
+      "clientH": 530
+    },
+    "headings": [
+      "progress",
+      "milestones (2/3)",
+      "sessions (2)"
+    ],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2039projects",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2611beta cut",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2611audit2026-09-05",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2610cutover window2026-10-15",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "delete project",
+        "height": 44,
+        "disabled": false
+      }
+    ]
+  },
+  "05-create": {
+    "note": "create form with a typed name",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 491,
+      "height": 353
+    },
+    "scroller": {
+      "scrollH": 296,
+      "clientH": 296
+    },
+    "headings": [],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2039projects",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "create",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "cancel",
+        "height": 44,
+        "disabled": false
+      }
+    ]
+  },
+  "06-list-after-create": {
+    "note": "receipt + the new row",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 296,
+      "height": 548
+    },
+    "scroller": {
+      "scrollH": 491,
+      "clientH": 491
+    },
+    "headings": [],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "list",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "board",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "new project",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "capture-demoactiveno progressno sessions",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "payments-migrationactiveprogress just now2 sessions \u00b7 1 live \u00b7 2/3 mil",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "projects-featureactiveprogress 2d ago2 sessions \u00b7 1/3 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "docs-sweepactiveno progressno sessions",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "travel-planningpausedprogress 5d ago1 session",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "site-refreshdoneprogress just nowno sessions \u00b7 2/2 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "old-notesarchivedno progressno sessions",
+        "height": 57,
+        "disabled": false
+      }
+    ]
+  },
+  "07-delete-confirm": {
+    "note": "confirm view",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 620,
+      "height": 224
+    },
+    "scroller": {
+      "scrollH": 167,
+      "clientH": 167
+    },
+    "headings": [],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "\u2039back",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "delete",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "cancel",
+        "height": 44,
+        "disabled": false
+      }
+    ]
+  },
+  "08-list-after-delete": {
+    "note": "receipt + the row gone",
+    "viewport": [
+      390,
+      844
+    ],
+    "panel": {
+      "top": 353,
+      "height": 491
+    },
+    "scroller": {
+      "scrollH": 434,
+      "clientH": 434
+    },
+    "headings": [],
+    "buttons": [
+      {
+        "text": "\u2715",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "list",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "board",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "new project",
+        "height": 44,
+        "disabled": false
+      },
+      {
+        "text": "payments-migrationactiveprogress just now2 sessions \u00b7 1 live \u00b7 2/3 mil",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "projects-featureactiveprogress 2d ago2 sessions \u00b7 1/3 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "docs-sweepactiveno progressno sessions",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "travel-planningpausedprogress 5d ago1 session",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "site-refreshdoneprogress just nowno sessions \u00b7 2/2 milestones",
+        "height": 57,
+        "disabled": false
+      },
+      {
+        "text": "old-notesarchivedno progressno sessions",
+        "height": 57,
+        "disabled": false
+      }
+    ]
+  }
+}
