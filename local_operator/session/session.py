@@ -12307,8 +12307,9 @@ class Session:
         it is stuck, and the reminder's own exits — update / refresh /
         unlink — are what move it), while a refresh or a status change moves
         the fingerprint and lets the REMAINING stale projects earn another
-        nudge in the same turn. A fresh user turn re-arms it (see
-        ``_run_turn_pipeline``).
+        nudge in the same turn (a refresh cannot collide with the floored
+        stamp it replaces — see ``stale_projects_fingerprint``). A fresh user
+        turn re-arms it (see ``_run_turn_pipeline``).
 
         Budget: shares ``max_follow_up_continuations`` with the todo producer
         through the ONE hook below (``_guardrail_continuations``), so the

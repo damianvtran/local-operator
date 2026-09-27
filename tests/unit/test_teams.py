@@ -292,6 +292,27 @@ def test_manager_preamble_states_the_projects_tracking_duty(registry: TeamRegist
     ) in team.manager_preamble()
 
 
+def test_the_two_manager_prompts_agree_on_the_projects_duty(registry: TeamRegistry) -> None:
+    """The duty is stated twice BY DESIGN (the seed §V2.G.1, the team preamble
+    §V2.G.2) and the two populations are not fully disjoint — a
+    ``task(agent='manager')`` outside a team sees only the seed, a team with a
+    custom manager sees only the preamble — so the pair must stay aligned on
+    the facts that matter without collapsing the texts."""
+    from local_operator.agent_profiles import load_seed
+
+    seed = load_seed("manager")
+    assert seed is not None
+    team = registry.create_team(
+        TeamEditFields(name="aligned", manager="manager", members=[TeamMember(role="coder")])
+    )
+    preamble = team.manager_preamble()
+
+    for text in (seed.instructions, preamble):
+        assert "`project` tool" in text
+    assert "in real time" in seed.instructions
+    assert "keep its progress current" in preamble
+
+
 def test_oversized_briefs_are_refused(registry: TeamRegistry) -> None:
     with pytest.raises(ValueError, match="exceed"):
         registry.create_team(

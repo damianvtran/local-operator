@@ -621,8 +621,11 @@ def stale_projects_fingerprint(projects: Sequence[Project]) -> tuple[tuple[str, 
 
     Sorted so two reads of the same set compare equal; the integer stamp is
     ``progress_updated_at`` floored (``0`` when unset), which is the freshness
-    state the reminder asserts — any report or status change moves it, so the
-    remaining stale projects earn another nudge in the same turn.
+    state the reminder asserts. A report or status change ALWAYS moves it —
+    the stamp being replaced is at least the staleness window old, so even a
+    refresh cannot land on the same floored integer, and an unset stamp starts
+    at ``0`` — so the remaining stale projects earn another nudge in the same
+    turn.
     """
     return tuple(
         sorted(
