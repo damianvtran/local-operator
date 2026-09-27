@@ -110,9 +110,11 @@ user is entitled to hear that before they agree to the small one.
 ### 4. Approve: `ask`, with the exact command
 
 Use `ask` with the exact command and what it will change, every time, before
-anything privileged runs. Do not type a password yourself: if the command needs
-one, it must be the user's to type (see the platform sections). Where a stored
-secret exists for it, pass it by name with `secret_ref` — never as text.
+anything privileged runs. If the command needs the password, ask for it in the
+same call as a secret question (`secret: true`): their entry into it is the
+approval, and the stored key is relayed to the prompt with `console_input
+{surface, secret_ref: "<key>"}` — never as `text`. The step-by-step handover is
+in `guide://console`.
 
 Do not batch several packages into one approval to save a round trip, and do not
 sneak an install into a longer command the user already approved. Approval is per
@@ -260,11 +262,13 @@ its own line:
 [sudo] password for <user>:
 ```
 
-The user types it. Keystrokes into a pty are never recorded, so the password does
-not enter the surface's output or your record — but the assistant is not
-authorised to type it either, whether or not it could. If they have stored it,
-`console_input {surface, secret_ref: "SUDO_PASSWORD"}` supplies it without you
-ever seeing the value; otherwise hand the surface to them and wait.
+The value is the user's to give: ask for it with an `ask` secret question (their
+entry into it is the approval — `guide://console` has the step-by-step
+handover), then relay it with `console_input {surface, secret_ref: "<key>"}`,
+never as `text`. Keystrokes into a pty are never recorded and the relayed value
+is registered for redaction, so the password does not enter the surface's output
+or your record. A user who would rather type it into the prompt themselves can
+simply be handed the surface.
 
 **When the user will not or cannot grant root.** A static build into the user's
 own `~/.local/bin` needs no privileges at all and is the honest alternative:

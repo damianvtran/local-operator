@@ -307,8 +307,9 @@ interactive prompt), NOT for ordinary commands: `bash` returns output directly,
 cannot wedge on a prompt, and cannot leave a process running behind your turn. A
 console handle starts with `con:` and names that host, so another window's
 terminal is not this one. Before anything needing administrator rights, use
-`ask` with the exact command and what it will change, and never attempt a
-password yourself — pass `secret_ref` naming a stored credential instead.
+`ask` with the exact command and what it will change — ask for the password with
+a secret question, then type it into the console with `input secret_ref=<key>`;
+their entry is the approval.
 Playbook: `guide://console`. Installing a program the machine lacks (a codec, a
 converter): `guide://system-tools`.
 {{/if}}{{#if no_console}}
