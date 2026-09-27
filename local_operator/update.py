@@ -4315,9 +4315,12 @@ def _git(repo: Path, *args: str) -> str:
 def _project_version(root: Path) -> str:
     """The ``version`` in ``root``'s ``pyproject.toml``, or ``""``.
 
-    Only ever decoration on the marker: the generation's REAL version is read
-    from the installed distribution metadata (``disk_build``), which uv writes
-    from the same tree a moment later.
+    Not only marker decoration any more: ``_snapshot_command`` passes this value
+    as the ``version=`` of :func:`install_into_generation`, where it arms the
+    refusal guard that checks the built tree's own dist-info against it
+    (2026-09-26) — and it still labels the marker. The generation's REAL version
+    is read from the installed distribution metadata (``disk_build``), which uv
+    writes from the same tree a moment later.
     """
     try:
         import tomllib
@@ -4660,7 +4663,7 @@ def unknown_refusal(
         f"  sys.prefix: {prefix or sys.prefix}\n"
         f"  sys.executable: {executable or sys.executable}\n"
         "supported upgrades:\n"
-        "  uv tool upgrade local-operator\n"
+        "  uv tool install --force local-operator\n"
         "  pipx upgrade local-operator\n"
         "  python -m pip install -U local-operator"
     )
@@ -4716,8 +4719,9 @@ def perform_upgrade(
     substituted the installer has not produced a tree to point at, and flipping
     the host's ``current`` onto a directory an injected runner never filled would
     break every session on the machine — so the injected-runner shape keeps the
-    old behaviour exactly (argv, exit status, marker at ``prefix``) and never
-    touches the pointer.
+    old SHAPE (argv observed — for uv it carries the resolved-version pin and
+    ``--refresh-package`` — exit status honoured, marker at ``prefix``) and
+    never touches the pointer.
 
     Ordering is deliberate and load-bearing: the marker is written only after
     the installer has exited 0 and — on the generation path — the built tree's
