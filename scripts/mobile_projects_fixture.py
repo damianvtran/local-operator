@@ -50,7 +50,13 @@ import uvicorn
 import scripts.probe_isolation  # noqa: F401  -- must be the first local import
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
-from local_operator.projects import MilestoneEdit, ProjectEdit, ProjectRegistry
+from local_operator.projects import (
+    EstimateUnit,
+    MilestoneEdit,
+    ProjectEdit,
+    ProjectRegistry,
+    ProjectStatus,
+)
 from local_operator.resume import write_session_title
 
 #: The variable name a caller may use instead of the second argument. A NAME,
@@ -120,19 +126,52 @@ def _backdate_progress(project_id: str, seconds: float) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _create(
+    registry: ProjectRegistry,
+    ids: dict[str, str],
+    name: str,
+    *,
+    description: str | None = None,
+    status: ProjectStatus | None = None,
+    tags: list[str] | None = None,
+    estimate: float | None = None,
+    estimate_unit: EstimateUnit | None = None,
+    start_date: str | None = None,
+    target_date: str | None = None,
+) -> str:
+    """Create one seeded row, typed explicitly rather than through ``**fields``.
+
+    The scalar parameters are not ceremony: ``**fields: object`` loses the
+    ``ProjectEdit`` field types, and pyright (rightly) refuses an ``object``
+    where a ``str | None`` is required — the same check CI runs, which caught
+    this on the first push.
+    """
+    project = registry.create_project(
+        ProjectEdit(
+            name=name,
+            description=description,
+            status=status,
+            tags=tags,
+            estimate=estimate,
+            estimate_unit=estimate_unit,
+            start_date=start_date,
+            target_date=target_date,
+        )
+    )
+    ids[name] = project.id
+    return project.id
+
+
 def seed() -> dict[str, str]:
     """Write the six rows through the store; return ``{name: id}``."""
     registry = ProjectRegistry(config_dir())
     ids: dict[str, str] = {}
 
-    def create(name: str, **fields: object) -> str:
-        project = registry.create_project(ProjectEdit(name=name, **fields))
-        ids[name] = project.id
-        return project.id
+    _create(registry, ids, "docs-sweep")
 
-    create("docs-sweep")
-
-    payments = create(
+    payments = _create(
+        registry,
+        ids,
         "payments-migration",
         description="Move billing onto the new ledger, then cut the switch-over.",
         tags=["q4", "payments"],
@@ -158,7 +197,9 @@ def seed() -> dict[str, str]:
     _conversation(STOPPED_SESSION, "Staging dry run fixes")
     _live_record(LIVE_SESSION)
 
-    feature = create(
+    feature = _create(
+        registry,
+        ids,
         "projects-feature",
         description="Projects primitive: store, tool, and the three view surfaces.",
         tags=["q4"],
@@ -179,7 +220,9 @@ def seed() -> dict[str, str]:
     _conversation(TITLED_ONLY_SESSION, None)
     _backdate_progress(feature, 2.2 * 86400)
 
-    travel = create(
+    travel = _create(
+        registry,
+        ids,
         "travel-planning",
         description="Reykjavik in November — flights, car, northern lights.",
         status="paused",
@@ -188,14 +231,24 @@ def seed() -> dict[str, str]:
     registry.link_session(travel, MISSING_SESSION)
     _backdate_progress(travel, 5.4 * 86400)
 
-    done = create(
-        "site-refresh", description="Marketing site: new hero, faster build.", status="done"
+    done = _create(
+        registry,
+        ids,
+        "site-refresh",
+        description="Marketing site: new hero, faster build.",
+        status="done",
     )
     registry.update_project(done, ProjectEdit(progress="shipped"), reporter="operator")
     registry.set_milestone(done, MilestoneEdit(name="design", completed=True))
     registry.set_milestone(done, MilestoneEdit(name="launch", completed=True))
 
-    create("old-notes", description="Scratch notes from the old setup.", status="archived")
+    _create(
+        registry,
+        ids,
+        "old-notes",
+        description="Scratch notes from the old setup.",
+        status="archived",
+    )
     return ids
 
 
