@@ -412,6 +412,29 @@ class RadientTokenRefreshAPIResponse(BaseModel):
         return super().model_dump(*args, **kwargs)
 
 
+def _org_target_params(visibility: Optional[str], tenant_id: Optional[str]) -> Dict[str, str]:
+    """The ``visibility``/``tenant_id`` query params an org-targeted call sends.
+
+    Mirrors the hub's own input rule (agent-server ``parseOrgTarget``, §4.4):
+    the two params travel together or not at all -- ``tenant_id`` without
+    ``visibility=org``, ``visibility=org`` without a ``tenant_id``, or a third
+    visibility value are each refused with the same sentence the hub answers
+    400 with, so a malformed target fails locally instead of on the wire. No
+    params (or an explicit ``"public"``) is the public hub: today's call
+    exactly, which is why an absent target cannot silently change namespace.
+    """
+
+    if visibility in (None, "", "public"):
+        if tenant_id:
+            raise ValueError("tenant_id is only valid together with visibility=org")
+        return {}
+    if visibility == "org":
+        if not tenant_id:
+            raise ValueError("tenant_id is required when visibility=org")
+        return {"visibility": "org", "tenant_id": tenant_id}
+    raise ValueError('visibility must be "public" or "org"')
+
+
 def _is_an_error_envelope(response: requests.Response) -> bool:
     """Is this successful response actually an error the upstream reported?
 
@@ -595,20 +618,30 @@ class RadientClient:
         finally:
             files["file"][1].close()
 
-    def download_agent_from_marketplace(self, agent_id: str, dest_path: Path) -> None:
+    def download_agent_from_marketplace(
+        self, agent_id: str, dest_path: Path, *, with_credential: bool = False
+    ) -> None:
         """
         Download an agent from the Radient Agent Hub.
+
+        Downloads are optional-auth on the hub: a PUBLIC row answers an
+        anonymous request, which is why the default stays credentialless for
+        every pre-organization caller (design §11 R-6). An ORGANIZATION row is
+        answered 404 to anyone who cannot prove membership (§8.2), so the org
+        pull passes ``with_credential=True`` and the same signed-in person's
+        bearer the org reads use travels here too (§8.3).
 
         Args:
             agent_id (str): The agent ID to download.
             dest_path (Path): Path to save the downloaded ZIP file.
+            with_credential (bool): Send this client's bearer with the request.
+                Defaults to the anonymous public download.
 
         Raises:
             RuntimeError: If the download fails.
         """
         url = f"{self.base_url}/agents/{agent_id}/download"
-        # Download does not require API key
-        headers = self._get_headers(content_type=None, require_api_key=False)
+        headers = self._get_headers(content_type=None, require_api_key=with_credential)
         try:
             response = requests.get(url, headers=headers, stream=True)
             response.raise_for_status()
@@ -623,7 +656,9 @@ class RadientClient:
                 f"Response Body: {error_body}"
             ) from e
 
-    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def get_agent(
+        self, agent_id: str, *, with_credential: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """Get agent details from the Radient Agent Hub by ID.
 
         The path joins this client's base like every sibling method does — no
@@ -637,6 +672,12 @@ class RadientClient:
 
         Args:
             agent_id (str): The agent ID to fetch.
+            with_credential (bool): Send this client's bearer with the request.
+                The public default stays anonymous (the same shape
+                :meth:`download_agent_from_marketplace` keeps); an
+                ORGANIZATION row is answered 404 to anyone who cannot prove
+                membership (§8.2), so the org pull's tenant check passes
+                ``True`` and reads the row as the signed-in person.
 
         Returns:
             Optional[Dict[str, Any]]: The agent details as a dictionary if found,
@@ -646,8 +687,10 @@ class RadientClient:
             RuntimeError: If the API request fails for reasons other than 404.
         """
         url = f"{self.base_url}/agents/{agent_id}"
-        # This is a public endpoint, no API key required
-        headers = self._get_headers(content_type="application/json", require_api_key=False)
+        # Public by default: no credential unless the caller asks for one.
+        headers = self._get_headers(
+            content_type="application/json", require_api_key=with_credential
+        )
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
@@ -677,7 +720,13 @@ class RadientClient:
                 f"{str(e)}"
             ) from e
 
-    def publish_agent_instruction_set(self, document: Mapping[str, Any]) -> Dict[str, Any]:
+    def publish_agent_instruction_set(
+        self,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Publish an agent to the Radient Agent Hub as an instruction-set document.
 
         The document is the version-1 JSON document of
@@ -685,6 +734,14 @@ class RadientClient:
         The legacy zip methods on this class stay as they are: they are how an
         agent published before this standard is updated and pulled, and an older
         desktop build still pushes through them.
+
+        Organization sharing (§8.3): ``visibility="org"`` together with the
+        target ``tenant_id`` publishes into an organization's private workspace
+        instead of the public hub. The target rides on QUERY PARAMS and the
+        document shape is unchanged — the hub's strict instruction-set schema
+        keeps refusing unknown fields, so a scope cannot be smuggled inside it
+        (§4.4). With neither param the call is exactly today's public
+        publication.
 
         No client-side timeout, deliberately. The hub reviews the submission with a
         model before it accepts it (two attempts at 20s each is a legitimate
@@ -696,6 +753,10 @@ class RadientClient:
 
         Args:
             document: The instruction-set document to publish.
+            visibility: ``"org"`` to publish into an organization workspace;
+                omit (or ``"public"``) for the public hub.
+            tenant_id: The organization tenant to publish into; required with
+                ``visibility="org"`` and refused without it.
 
         Returns:
             The hub's publication result (``agent_id``, ``name``, ``version``,
@@ -709,11 +770,14 @@ class RadientClient:
                 ``invalid_instruction_set``, ``payload_too_large`` — so the caller
                 can render a different next step for each without reading prose.
             RuntimeError: When no API key is configured for this client.
+            ValueError: When ``visibility``/``tenant_id`` do not form a valid
+                target (§4.4's rule, refused before the request is sent).
         """
         url = f"{self.base_url}/agents/publish"
         headers = self._get_headers(content_type="application/json")
+        params = _org_target_params(visibility, tenant_id)
         try:
-            response = requests.post(url, headers=headers, json=dict(document))
+            response = requests.post(url, headers=headers, json=dict(document), params=params)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
@@ -823,6 +887,182 @@ class RadientClient:
                 status_code=response.status_code,
             )
         return body["result"]
+
+    # ------------------------------------------------------------------
+    # Organization sharing (design §8.3): memberships and org-scoped hub reads.
+    # Every method here requires a PERSON's bearer -- the stored Radient OAuth
+    # access token -- never an application key (§2.2). The client sends whatever
+    # credential it was constructed with; the CLI resolves the OAuth row for
+    # these calls through ``providers/radient_credentials.py``.
+    # ------------------------------------------------------------------
+
+    def list_memberships(self) -> List[Dict[str, Any]]:
+        """The signed-in account's organization memberships (``GET /me/memberships``).
+
+        The org switcher's read (§4.1): a person's call, authenticated with the
+        stored Radient OAuth access token (§8.3), and a membership the account
+        no longer holds is simply absent. Each entry carries ``tenant_id``,
+        ``tenant_name``, ``role``, ``status``, ``is_home`` and the tenant plan
+        summary (``status``/``seats``).
+
+        Returns:
+            The ``memberships`` array, in the hub's order. No memberships is an
+            empty list, not an error.
+
+        Raises:
+            APIError: When the hub refuses -- 401 for a missing or expired
+                login, which the caller renders as the re-login remedy.
+        """
+        url = f"{self.base_url}/me/memberships"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not list your Radient organization memberships",
+                secrets=self._credential_values(),
+            ) from e
+        result = self._publication_result(response, action="list your organization memberships")
+        memberships = result.get("memberships")
+        return list(memberships) if isinstance(memberships, list) else []
+
+    def list_org_agents(
+        self, tenant_id: str, *, page: int = 1, per_page: int = 20
+    ) -> Dict[str, Any]:
+        """List an organization's shared agents (``GET /tenants/:tenantid/agents``).
+
+        The org workspace's list (§4.4): member+ with an active plan (an owner
+        is excepted, §3.2). The route lists exactly one namespace, so
+        ``visibility=org`` is sent explicitly -- ``public`` there is invalid
+        input, never a fallback that would silently answer a different question.
+
+        Returns:
+            The paginated result: ``records`` (ag listings without the
+            instruction body) plus ``page``/``per_page``/``total_pages``/
+            ``total_records`` -- the same envelope the public hub list uses.
+
+        Raises:
+            APIError: When the hub refuses (401 no login; 403
+                ``not_a_member``/``insufficient_role``/``team_plan_required``;
+                400 bad input).
+        """
+        url = f"{self.base_url}/tenants/{tenant_id}/agents"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                params={"visibility": "org", "page": page, "per_page": per_page},
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not list the organization's shared agents",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="list the organization's shared agents")
+
+    def list_org_teams(self, tenant_id: str) -> List[Dict[str, Any]]:
+        """List an organization's shared teams (``GET /tenants/:tenantid/teams``).
+
+        Member+ with an active plan, like the org agent list (§4.5). List rows
+        omit the team brief (``instructions``); :meth:`get_team` is the pull
+        path that carries it.
+
+        Returns:
+            The ``teams`` array; no teams is an empty list, not an error.
+
+        Raises:
+            APIError: When the hub refuses (401/403, §2.2's frozen vocabulary).
+        """
+        url = f"{self.base_url}/tenants/{tenant_id}/teams"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not list the organization's shared teams",
+                secrets=self._credential_values(),
+            ) from e
+        result = self._publication_result(response, action="list the organization's shared teams")
+        teams = result.get("teams")
+        return list(teams) if isinstance(teams, list) else []
+
+    def get_team(self, team_id: str) -> Dict[str, Any]:
+        """Pull one organization team by id (``GET /teams/:teamid``).
+
+        The pull path (§8.2): no tenant in the URL so a client can pull by the
+        id it holds, and the full document -- brief included -- for a member of
+        the owning organization. Anyone else is answered 404 (existence is not
+        disclosed), which surfaces here as an :class:`APIError` with
+        ``status_code == 404``.
+
+        Returns:
+            The team document: ``id``, ``tenant_id``, ``name``, ``description``,
+            ``manager``, ``members``, ``instructions``, ``project``,
+            ``version`` and the moderation record.
+
+        Raises:
+            APIError: When the hub refuses (404 ``team_not_found`` for a missing
+                team or a non-member; 403 ``team_plan_required``).
+        """
+        url = f"{self.base_url}/teams/{team_id}"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.get(url, headers=headers)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not pull the team from the organization",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="pull the team")
+
+    def publish_team_document(self, document: Mapping[str, Any], tenant_id: str) -> Dict[str, Any]:
+        """Publish a team document into an organization (``POST /teams/publish``).
+
+        The team half of org sharing (§4.5/§8.3): ``tenant_id`` is a required
+        query param, admin+ of that tenant, and the hub re-runs the same
+        reviewer pipeline agent publications run. The document is the shape of
+        ``local_operator.teams.hub_team_document`` -- ``{name, description,
+        manager, members[], instructions, project, version}`` -- deliberately
+        NOT an agent instruction set (§8.1: teams are a parallel family and the
+        instruction-set schema refuses unknown fields).
+
+        Returns:
+            The publication result: ``{"team": {"id", "name", "version"}}``.
+
+        Raises:
+            APIError: When the hub refuses -- ``name_taken``,
+                ``name_reserved_builtin``, ``invalid_team_document`` (with
+                ``field``/``rule`` details), ``moderation_rejected``,
+                ``moderation_unavailable``, ``not_a_member``,
+                ``insufficient_role``, ``team_plan_required``.
+            ValueError: When ``tenant_id`` is empty -- the hub's required
+                param, refused before the request is sent.
+        """
+        if not tenant_id or not tenant_id.strip():
+            raise ValueError("tenant_id is required to publish a team")
+        url = f"{self.base_url}/teams/publish"
+        headers = self._get_headers(content_type="application/json")
+        try:
+            response = requests.post(
+                url, headers=headers, json=dict(document), params={"tenant_id": tenant_id}
+            )
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise api_error_from_response(
+                e.response,
+                fallback_message="Could not publish the team to the organization",
+                secrets=self._credential_values(),
+            ) from e
+        return self._publication_result(response, action="publish the team")
 
     def list_models(self) -> RadientListModelsResponse:
         """Lists all available models on Radient along with their pricing.

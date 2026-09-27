@@ -70,6 +70,16 @@ _AMBIENT_VARS = (
     # ``test_bash_long_sleep_guard.py`` asserts. Read off the command's own
     # assignments only, never the process environment.
     "LOCAL_OPERATOR_ALLOW_LONG_SLEEP",
+    # The org destination guard's escape hatch (``providers/radient_credentials``
+    # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
+    # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
+    # inherited value would waive the refusal the org-guard cells assert
+    # (``test_cli_org_sharing.py::test_org_calls_refuse_a_non_canonical_hub_by_default``
+    # among them) — the same ESCAPE-HATCH class as ``ALLOW_NESTED_SESSION`` — and
+    # it is a name the harness's own QA rigs export, so an operator's shell
+    # plausibly carries it. Cells that want it on set it through ``monkeypatch``
+    # explicitly.
+    "RADIENT_ORG_ALLOW_NONCANONICAL_BASE",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit
