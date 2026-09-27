@@ -656,7 +656,9 @@ class RadientClient:
                 f"Response Body: {error_body}"
             ) from e
 
-    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def get_agent(
+        self, agent_id: str, *, with_credential: bool = False
+    ) -> Optional[Dict[str, Any]]:
         """Get agent details from the Radient Agent Hub by ID.
 
         The path joins this client's base like every sibling method does — no
@@ -670,6 +672,12 @@ class RadientClient:
 
         Args:
             agent_id (str): The agent ID to fetch.
+            with_credential (bool): Send this client's bearer with the request.
+                The public default stays anonymous (the same shape
+                :meth:`download_agent_from_marketplace` keeps); an
+                ORGANIZATION row is answered 404 to anyone who cannot prove
+                membership (§8.2), so the org pull's tenant check passes
+                ``True`` and reads the row as the signed-in person.
 
         Returns:
             Optional[Dict[str, Any]]: The agent details as a dictionary if found,
@@ -679,8 +687,10 @@ class RadientClient:
             RuntimeError: If the API request fails for reasons other than 404.
         """
         url = f"{self.base_url}/agents/{agent_id}"
-        # This is a public endpoint, no API key required
-        headers = self._get_headers(content_type="application/json", require_api_key=False)
+        # Public by default: no credential unless the caller asks for one.
+        headers = self._get_headers(
+            content_type="application/json", require_api_key=with_credential
+        )
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)

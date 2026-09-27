@@ -254,3 +254,23 @@ def test_org_transport_failure_reports_no_status(radient_client: RadientClient) 
 
     assert exc_info.value.status_code is None
     assert str(exc_info.value) == "Could not pull the team from the organization"
+
+
+def test_get_agent_carries_the_bearer_only_when_asked(
+    radient_client: RadientClient, base_url: str
+) -> None:
+    """The org pull's pre-flight reads the row AS THE PERSON; others stay anonymous.
+
+    §8.2: an organization row is answered 404 to anyone who cannot prove
+    membership, so the pull's tenant check passes ``with_credential=True`` --
+    and every existing caller of ``get_agent`` keeps its pre-change anonymous
+    request (the public default is untouched).
+    """
+    with patch("requests.get", return_value=_envelope({"id": "agent-1"})) as mock_get:
+        radient_client.get_agent("agent-1")
+        args, kwargs = mock_get.call_args
+        assert args[0] == f"{base_url}/agents/agent-1"
+        assert "Authorization" not in kwargs["headers"]
+
+        radient_client.get_agent("agent-1", with_credential=True)
+        assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer test_api_key"

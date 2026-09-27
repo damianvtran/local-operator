@@ -2355,3 +2355,77 @@ def test_hub_team_document_round_trips_through_import(tmp_path: Path) -> None:
     ]
     assert outcome.team.instructions == "You ship the release."
     assert outcome.team.project == "rad-1"
+
+
+def test_import_hub_team_strips_a_trailing_separator_the_mapping_left(tmp_path: Path) -> None:
+    """A name this mapping MINTs must itself survive a later re-push (R1-5).
+
+    ``Crew!`` maps its invalid run to ``-``, which would leave ``Crew-`` --
+    locally legal (``_NAME_RE`` allows a trailing hyphen) but refused by the
+    hub's ``-``/``.`` endpoint rule, so a pull-then-push round trip would fail.
+    The length cut can leave the same artifact; both are stripped. A published
+    name never ends in either character, so the strip can only remove what the
+    mapping introduced -- an already-legal ending is untouched.
+    """
+    registry = TeamRegistry(tmp_path)
+
+    outcome = registry.import_hub_team(
+        {"name": "Crew!", "members": [], "instructions": "You ship."}
+    )
+
+    assert outcome.invalid_name is True
+    assert outcome.team.name == "Crew"
+
+    truncated = registry.import_hub_team(
+        {"name": "x" * 63 + "!", "members": [], "instructions": "You ship."}
+    )
+    assert truncated.team.name == "x" * 63
+
+    kept = registry.import_hub_team({"name": "Crew-2", "members": [], "instructions": "You ship."})
+    assert kept.team.name == "Crew-2"
+
+
+def test_import_hub_team_retries_the_next_suffix_on_a_name_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stale first probe converges through create_team's under-lock authority.
+
+    The collision probe reads the SNAPSHOT only (``_find_cached_team_by_name``,
+    the module's rule for mutation paths); when another writer wins a name
+    between probe and lock, ``create_team`` raises and the import must take the
+    next suffix instead of surfacing a spurious error (review round 1, R1-3).
+    Simulated here by making the first probe lie, as a stale cache would.
+    """
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="crew"))
+
+    real = TeamRegistry._find_cached_team_by_name
+    calls = {"n": 0}
+
+    def stale_once(self: TeamRegistry, name: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # the race: the snapshot had not seen the winner yet
+        return real(self, name)
+
+    monkeypatch.setattr(TeamRegistry, "_find_cached_team_by_name", stale_once)
+
+    outcome = registry.import_hub_team({"name": "crew", "members": [], "instructions": "You ship."})
+
+    assert outcome.team.name == "crew-2"
+    assert calls["n"] >= 2
+
+
+def test_import_hub_team_re_raises_a_refusal_a_suffix_cannot_fix(tmp_path: Path) -> None:
+    """Only a name race is retried; an oversized brief still fails fast (R1-3).
+
+    The retry loop distinguishes "the name was taken" (the candidate is visible
+    in the refreshed snapshot) from every other ``ValueError`` -- otherwise a
+    document that can never be created would spin the suffix forever.
+    """
+    registry = TeamRegistry(tmp_path)
+
+    with pytest.raises(ValueError):
+        registry.import_hub_team({"name": "crew", "members": [], "instructions": "x" * 9000})
+
+    assert registry.list_teams() == []

@@ -14,6 +14,7 @@ wire behavior is the client suite's and the integration run's.
 
 from __future__ import annotations
 
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,11 @@ class _FakeOrgHub:
         self.published_agents: list[tuple[dict[str, Any], Any, Any]] = []
         self.pulled_teams: list[str] = []
         self.team_documents: dict[str, dict[str, Any]] = {}
+        #: Rows ``get_agent`` answers, and every (id, with_credential) it was asked for.
+        self.agent_rows: dict[str, dict[str, Any]] = {
+            "hub-agent-1": {"tenant_id": "org-a", "visibility": "org"}
+        }
+        self.agent_get_calls: list[tuple[str, bool]] = []
 
     def list_memberships(self) -> list[dict[str, Any]]:
         return self.memberships
@@ -71,6 +77,15 @@ class _FakeOrgHub:
     def get_team(self, team_id: str) -> dict[str, Any]:
         self.pulled_teams.append(team_id)
         return self.team_documents[team_id]
+
+    def get_agent(self, agent_id: str, *, with_credential: bool = False) -> dict[str, Any] | None:
+        self.agent_get_calls.append((agent_id, with_credential))
+        row = self.agent_rows.get(agent_id)
+        if row is None:
+            return None
+        # The real hub envelopes this read; the client returns the envelope
+        # as-is (legacy shape), so the fake mirrors it.
+        return {"msg": "Agent retrieved successfully", "result": row}
 
     def publish_agent_instruction_set(
         self, document: dict[str, Any], *, visibility: Any = None, tenant_id: Any = None
@@ -340,10 +355,186 @@ def test_agents_pull_org_downloads_through_the_person_client(
     out = capsys.readouterr().out
     assert seen["client"] is org_hub
     assert seen["agent_id"] == "hub-agent-1"
-    # The org pull must prove membership at the wire: the bearer travels with
-    # the download (the public pull stays anonymous, §11 R-6).
+    # The org pull must prove membership at the wire: the pre-flight read and
+    # the download both carry the bearer (the public pull stays anonymous, R-6).
+    assert org_hub.agent_get_calls == [("hub-agent-1", True)]
     assert seen["with_credential"] is True
     assert "Successfully pulled agent 'Pulled'" in out
+    assert "from organization 'org-a'" in out
+
+
+def test_agents_pull_org_refuses_a_row_from_another_organization(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Provenance is verified, teams-style, BEFORE anything is written (Q-1)."""
+    from local_operator.agents import AgentRegistry
+
+    org_hub.agent_rows["hub-agent-1"] = {"tenant_id": "org-b", "visibility": "org"}
+
+    def fail_download(*args: Any, **kwargs: Any):
+        raise AssertionError("nothing may be downloaded for a mismatched row")
+
+    monkeypatch.setattr(AgentRegistry, "download_agent_from_radient", fail_download)
+    monkeypatch.setattr(
+        "sys.argv", ["program", "agents", "pull", "--id", "hub-agent-1", "--org", "org-a"]
+    )
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "belongs to organization 'org-b', not 'org-a'" in out
+    assert "Check --org" in out
+
+
+def test_agents_pull_org_answers_a_missing_row_like_the_non_member_404(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The hub's 404 (missing id == non-member, §8.2) is reported curated."""
+    from local_operator.agents import AgentRegistry
+
+    org_hub.agent_rows.pop("hub-agent-1")
+
+    def fail_download(*args: Any, **kwargs: Any):
+        raise AssertionError("nothing may be downloaded for a missing row")
+
+    monkeypatch.setattr(AgentRegistry, "download_agent_from_radient", fail_download)
+    monkeypatch.setattr(
+        "sys.argv", ["program", "agents", "pull", "--id", "hub-agent-1", "--org", "org-a"]
+    )
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "agent not found" in out
+    assert "not a member" in out
+
+
+def test_agents_pull_org_refuses_a_public_row_for_an_org_pull(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A public row is not an org's: the flag's provenance claim would be false.
+
+    Public agents pull anonymously, without the flag; under ``--org`` the row
+    must be that organization's (uniform with the mismatch refusal above).
+    """
+    from local_operator.agents import AgentRegistry
+
+    org_hub.agent_rows["hub-agent-1"] = {"tenant_id": "home-x", "visibility": "public"}
+
+    def fail_download(*args: Any, **kwargs: Any):
+        raise AssertionError("nothing may be downloaded for a non-org row")
+
+    monkeypatch.setattr(AgentRegistry, "download_agent_from_radient", fail_download)
+    monkeypatch.setattr(
+        "sys.argv", ["program", "agents", "pull", "--id", "hub-agent-1", "--org", "org-a"]
+    )
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "is not shared with organization 'org-a'" in out
+
+
+def test_empty_org_value_refuses_instead_of_falling_back_to_public(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--org ""` is a PASSED flag: refuse it, never run the public path (R1-1)."""
+    from local_operator.agents import AgentEditFields, AgentRegistry
+    from local_operator.paths import config_dir
+
+    registry = AgentRegistry(config_dir())
+    registry.create_agent(AgentEditFields.model_validate({"name": "PushProbe"}))
+    monkeypatch.setattr(
+        "sys.argv", ["program", "agents", "push", "--name", "PushProbe", "--org", ""]
+    )
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "needs an organization tenant id" in out
+    assert "RADIENT_API_KEY" not in out  # the public path's refusal, not ours
+    assert org_hub.published_agents == []
+
+    monkeypatch.setattr(
+        "sys.argv", ["program", "agents", "pull", "--id", "hub-agent-1", "--org", ""]
+    )
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "needs an organization tenant id" in out
+    assert org_hub.agent_get_calls == []
+
+
+def test_org_calls_refuse_a_non_canonical_hub_by_default(
+    tmp_home: Path,
+    quiet_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The person's bearer does not travel to a non-canonical configured hub.
+
+    Security round 1 (S-1/R1-2): the org resolver shares the public resolver's
+    destination boundary, so the command refuses with a remedy that names the
+    cause and never constructs a client; the documented opt-in
+    (``RADIENT_ORG_ALLOW_NONCANONICAL_BASE``) lets a local/QA hub receive it.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(config_dir() / "auth.db", config_dir=config_dir())
+    try:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": "jwt-fixture",
+                "refresh": "refresh-fixture",
+                "expires": int(time.time() * 1000) + 3600000,
+            },
+        )
+    finally:
+        store.close()
+
+    monkeypatch.setenv("RADIENT_API_BASE_URL", "http://127.0.0.1:9/v1")
+    constructed: list[dict[str, Any]] = []
+
+    def note_client(**kwargs: Any) -> _FakeOrgHub:
+        constructed.append(kwargs)
+        return _FakeOrgHub()
+
+    monkeypatch.setattr("local_operator.clients.radient.RadientClient", note_client)
+    _make_team()
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "not the Radient cloud API" in out
+    assert "RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1" in out
+    assert constructed == []
+
+    # The explicit opt-in (local/QA hubs) lets the same command reach it.
+    monkeypatch.setenv("RADIENT_ORG_ALLOW_NONCANONICAL_BASE", "1")
+    hub = _FakeOrgHub()
+    monkeypatch.setattr("local_operator.clients.radient.RadientClient", lambda **kwargs: hub)
+
+    assert main() == 0
+
+    assert len(hub.published_teams) == 1
+    assert hub.published_teams[0][1] == "org-a"
 
 
 # --- the credential rule --------------------------------------------------------
@@ -407,3 +598,25 @@ def test_agents_push_without_org_never_runs_the_org_resolver(
     assert main() == 0
     assert calls["org"] == 0
     assert "New agent ID: hub-listing-1" in capsys.readouterr().out
+
+
+def test_teams_push_with_an_empty_org_names_the_empty_value(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A passed-but-empty value must not read like an omitted flag (R1-1).
+
+    The picker still runs (the empty value cannot name a tenant), but its
+    first line says WHAT was wrong rather than implying the flag was missing.
+    """
+    _make_team()
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "", "release-crew"])
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "the value was empty" in out
+    assert "tenant_id: org-a" in out
+    assert org_hub.published_teams == []
