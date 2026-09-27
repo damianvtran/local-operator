@@ -179,13 +179,19 @@ failed there, is still running, or was queued for a retiring runtime exits 1 wit
 `outcome` naming which (`failed`, `running`, `queued`) so a script cannot read a
 delivery as a completion.
 
-THE TEXT IS TAKEN AS-IS, from the session id to the end of the command line. A
-prompt that talks about flags is delivered whole — `--send <session> check the
---name field` sends those five words — because nothing after the session id is
-re-read as a flag. The cost of that rule is the other half of it: **this
-command's own flags must come BEFORE the session id**, since a trailing `--json`
-is text like everything else, and `--` is the explicit separator when the text
-itself starts with a dash (`--send <session> -- --json is the field I mean`).
+THE TEXT IS WHAT FOLLOWS THE LAST FLAG THIS COMMAND READS, taken as-is to the end
+of the command line. A prompt that talks about flags is delivered whole —
+`--send <session> check the --name field` sends those five words — because nothing
+after the first plain word is re-read as a flag. The boundary is the parser's own
+and it is worth knowing exactly: **a token that IS one of this command's flags is
+still that flag**, so `--send <session> --json is the field` delivers `is the field`
+with JSON output on, and this command's own flags therefore go BEFORE the session
+id. `--` is the separator for text that starts with a dash, in either direction
+(`--send <session> -- --json is the field I mean`), and a flag that only describes a
+NEW session — `--model`, `--hosting`, `--run-in`, `--name`, `--cwd`, `--prompt`,
+`--profile`, `--team`, `--effort`, `--agent`, `--agent-name`, `--agent-id` — is
+**refused** when an act is present rather than accepted and dropped, which was the
+other way words went missing here (review round 2, MINOR-1).
 
 EVERY SUCCESS RECEIPT NAMES THE DEVICE THE ACT RAN ON, and `--peer` is not that
 name — the session id is what routes the act, so the receipt answers from the

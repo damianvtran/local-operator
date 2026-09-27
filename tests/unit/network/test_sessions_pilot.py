@@ -781,6 +781,115 @@ def test_the_human_run_names_the_device_too(
     assert "no-such-device" in printed, printed
 
 
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--name", "a-title"),
+        ("--cwd", "/tmp"),
+        ("--prompt", "first turn"),
+        ("--team", "a-team"),
+        ("--profile", "a-role"),
+        ("--effort", "high"),
+    ],
+    ids=["name", "cwd", "prompt", "team", "profile", "effort"],
+)
+def test_a_create_only_flag_with_an_act_is_refused_not_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    value: str,
+) -> None:
+    """Round 2, MINOR-1, the half a refusal can fix: the flag was accepted, then
+    DROPPED, and the words it ate were the user's own — `--send <s> --model X is the
+    field` came back as "is the field" with rc 0.
+
+    A payload cannot be told from a flag (that is the parser's boundary), so the
+    flags that can never mean anything with an act are refused, and the sentence
+    names `--` as the way to send those words as text. Same class as ``--force`` and
+    ``--create`` beside an act: accepted-and-dropped is an untruth.
+
+    These are the ones ``network sessions`` declares ITSELF; the parent's launch
+    flags are the sibling cell below, because they parse in a different place.
+    """
+    opened = _patch(monkeypatch, _FakeViewer(), _remote_row())
+
+    assert _run(["sessions", "--peer", PEER, "--send", SESSION, flag, value, "is", "the"]) == 2
+    err = capsys.readouterr().err
+    assert flag in err, err
+    assert "`--`" in err, err
+    assert opened.calls == 0, "nothing may be dialled for a refused command line"
+
+
+@pytest.mark.parametrize("flag", ["--model", "--hosting", "--run-in"])
+def test_a_parent_launch_flag_with_an_act_is_refused_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], flag: str
+) -> None:
+    """The reviewer's own shape: `--model` is a PARENT flag (it parses after the
+    subcommand as well as before it), and with an act it is just as dropped as the
+    ones above — `--send <s> --model X is the field` delivered "is the field".
+
+    Parsed through the REAL entry point because that is where the parent's flags
+    exist at all; the local stand-in in this file has no parent.
+    """
+    opened = _patch(monkeypatch, _FakeViewer(), _remote_row())
+
+    assert _run_real(["sessions", "--peer", PEER, "--send", SESSION, flag, "X", "is", "the"]) == 2
+    err = capsys.readouterr().err
+    assert flag in err, err
+    assert opened.calls == 0
+
+
+def test_a_leading_flag_token_is_read_as_that_flag_and_the_rest_is_the_payload(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The BOUNDARY the narrowed help text and guide now describe, pinned so the
+    prose cannot drift from the parser again (that gap is what round 2 found).
+
+    A token that IS this verb's flag is still that flag: `--send <s> --json is the
+    field I mean` turns JSON output ON and delivers `is the field I mean`. The
+    honest shape is the documented one — flags before the session id, `--` to send a
+    dash-shaped first word deliberately.
+    """
+    viewer = _FakeViewer(rows=[_Message("assistant", "the reply")])
+    _patch(monkeypatch, viewer, _remote_row())
+
+    argv = ["sessions", "--json", "--peer", PEER, "--send", SESSION, "--json", "is", "the", "field"]
+    assert _run(argv) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["ok"] is True, payload
+    assert viewer.waited == ["is the field"], viewer.waited
+
+
+def test_a_dash_shaped_first_word_can_be_sent_with_the_separator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The escape the refusal sentences name, asserted on the exact string the
+    reviewer used: with `--`, the flag-shaped first word IS the payload."""
+    viewer = _FakeViewer()
+    _patch(monkeypatch, viewer, _remote_row())
+
+    assert (
+        _run_real(
+            [
+                "sessions",
+                "--peer",
+                PEER,
+                "--send",
+                SESSION,
+                "--",
+                "--json",
+                "is",
+                "the",
+                "field",
+                "I",
+                "mean",
+            ]
+        )
+        == 0
+    )
+    assert viewer.waited == ["--json is the field I mean"], viewer.waited
+
+
 # ---------------------------------------------------------------------------
 # what the viewer declares (round 1, MAJOR-2)
 # ---------------------------------------------------------------------------
