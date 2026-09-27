@@ -231,34 +231,49 @@ to be byte-exact.
 
 ## What actually counts as a compromise
 
-When the harness masks a credential, the OPERATOR is told — a `[credential
-redaction] …` row in the transcript and a live receipt — and the notice
-classifies itself. **It is deliberately not sent to you (the model), and you
-should not act on one as though it were.** The row reports a value that was
-masked out of the text you were given, so you never held it and there is nothing
-for you to do. The distinction below is what the OPERATOR reads it against, and
-is worth knowing anyway, because a rotation is the user's work and a false alarm
-spends it:
+Detection still runs on every result, and masking and containment still work —
+but since v0.63.12 a shape hit is **silent**. Nothing is narrated to you and
+nothing is narrated to the OPERATOR: no `[credential redaction] …` row is
+written to the transcript, no live receipt is emitted, and no credential-
+detection context is injected into the model. A credential-shaped value the
+table catches is still masked out of the text you are given and still registered
+to the session's store, so the same value is masked wherever it appears next;
+what is gone is the *notice*, not the protection.
+
+**Silence is not a claim that the detector got smarter.** The shape rules are
+unchanged and they still fire on benign, credential-SHAPED text — a CI workflow
+YAML being read, a usage counter, or a `docker -p 27019` published port have all
+tripped it. What changed is only that those firings no longer surface as an
+incident: the false positives were **not reduced**, they stopped being reported
+(a ruling on the noise, verbatim: *"Remove the operator-facing information too,
+it's false positive so it would confuse users."*). So do not read a quiet session
+as evidence that no credential-shaped text was seen.
+
+The distinction below is what *you* act on, because you are the one who decides
+once you have actually seen a value — and a rotation is the user's work that a
+false alarm spends:
 
 - **A value in the MODEL'S CONTEXT is compromised.** Something of it is readable
   there — the mask did not remove every copy, whether it fell short or a rule
   kept a run by design — so it is in the transcript in plain text, replays into
   later requests, and may be in training data. Nothing can undo that: the
-  credential has to be rotated, and only the user can do it. The notice says
-  `rotate it — … its value is readable in this session's context`, and it means
-  it.
+  credential has to be rotated, and only the user can do it. No notice asks for
+  it any more, so the judgement is yours: if you have seen a real credential in
+  your own context, say so and ask for the rotation.
 - **A value that reached `bash` is not compromised.** A command's `argv`, a
   child's environment, a pipeline, an output pipe: the value was *used*, not
   *read*, and the model never saw it. **Do not ask for a rotation for this** —
-  the harness masks it, reports that it happened, and asks only for cleanup.
+  the harness masks it, and the only thing it owes is cleanup (above).
 - **A value in this process's memory is not compromised.** Same reason.
 - **A plaintext file on disk is not compromised either** — but it is the one
   case with work in it: delete the copy without reading it (`rm -f`), then
   carry on. Reading it to "check" is exactly what would create the compromise.
 
-So when a notice arrives, read its second half: a `rotate it` head is a real
-incident, and the contained wording is the harness saying the event happened,
-it was handled, and there is no exposure.
+One residual you may still meet: transcripts written by an **older build** carry
+these rows and a resume replays them, so a resumed session can paint a
+`[credential redaction] …` row that no current build would have written. The row
+keeps its own message type and replays exactly as it did live; read it as
+history, not as a signal about this session.
 
 ## What you must never do
 
