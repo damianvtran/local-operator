@@ -30,9 +30,14 @@ the two HTTP surfaces cannot drift apart in behaviour:
 TRANSPORT DIFFERENCES, and only these. The daemon's handlers speak flat JSON
 bodies rather than the desktop ``CRUDResponse`` envelope, and this module
 raises :class:`ProjectRouteError` instead of ``HTTPException`` so it stays
-importable without FastAPI's request stack. The *payloads* are the desktop wire
-models, dumped to JSON — field-for-field what the desktop serves, which is what
-lets the phone render the same summary/view fields without a translation layer.
+importable without FastAPI's request stack. A body that parses but is not a
+JSON OBJECT gets the daemon's own body-shape refusal, ``400`` — the desktop's
+model validation answers that same body ``422``, and the daemon's five
+pre-existing handlers carry the identical 400/422 split. The *payloads* are
+the desktop wire models, dumped to JSON — field-for-field what the desktop
+serves, which is what lets the phone render the same summary/view fields
+without a translation layer; the request-side vocabulary is the desktop's too,
+derived from its request models (see ``_CREATE_FIELDS`` below).
 
 THREADING. Every function here is synchronous and touches the filesystem (and,
 for the live-session counts, the runtime record directory), so the daemon runs
@@ -62,37 +67,28 @@ from local_operator.projects import (
     scan_runtime_states,
 )
 from local_operator.server.models.desktop_projects import (
+    STATUS_RANK,
+    LinkMutation,
+    MilestoneMutation,
+    ProjectCreate,
+    ProjectDelete,
+    ProjectPatch,
     linked_session_view,
     project_summary,
     project_view,
 )
 
-#: The fixed board order, and therefore the listing's sort: ``archived`` last,
-#: a status the board only draws when non-empty. An unknown status (a row from a
-#: newer build) sorts after them all rather than crashing the sort. The same
-#: table the desktop listing sorts on.
-_STATUS_RANK = {"active": 0, "paused": 1, "done": 2, "archived": 3}
-
-#: The keys each write body may carry, mirroring the desktop request models'
-#: shapes. An unknown key is refused rather than ignored: the desktop models run
-#: with ``extra="forbid"``, and a typo'd field silently dropped is a client that
-#: believes it saved something it did not.
-_CREATE_FIELDS = ("name", "description", "status", "tags")
-_DELETE_FIELDS = ("confirm",)
-_LINK_FIELDS = ("session_id",)
-_PATCH_FIELDS = (
-    "name",
-    "description",
-    "status",
-    "progress",
-    "tags",
-    "start_date",
-    "target_date",
-    "completed_at",
-    "estimate",
-    "estimate_unit",
-)
-_MILESTONE_FIELDS = ("name", "target_date", "completed")
+#: The keys each write body may carry, DERIVED from the desktop request models
+#: (round-1 review, [m]3): a literal copy of these five tuples drifted silently
+#: — the parity test compared response shapes only — so adding a field to a
+#: desktop model now widens the phone's gate in the same commit. These tuples
+#: answer "is this key part of the vocabulary"; values still validate in the
+#: store, whose refusals are the same sentences the desktop receives.
+_CREATE_FIELDS = tuple(ProjectCreate.model_fields)
+_DELETE_FIELDS = tuple(ProjectDelete.model_fields)
+_LINK_FIELDS = tuple(LinkMutation.model_fields)
+_PATCH_FIELDS = tuple(ProjectPatch.model_fields)
+_MILESTONE_FIELDS = tuple(MilestoneMutation.model_fields)
 
 
 class ProjectRouteError(Exception):
@@ -152,6 +148,21 @@ def _not_found(registry: ProjectRegistry, key: str) -> ProjectRouteError:
     return ProjectRouteError(404, "project_not_found", f"no project with id or name {key!r}{names}")
 
 
+def _reader_error(exc: Exception) -> str:
+    """``readable_error``, minus pydantic's wrapper, for the reader's eyes.
+
+    A store validator raising ``ValueError`` reaches :func:`readable_error` as
+    ``<field>: Value error, <the store's sentence>``; the wrapper is machinery
+    no reader should meet first, and every store sentence names its own subject
+    ("project name must be…", "estimate must be…"), so the field prefix goes
+    with it. Anything not in that exact shape passes through untouched — the
+    wrapper is all this removes (round-1 design, D4).
+    """
+    message = readable_error(exc)
+    _, marker, sentence = message.partition(": Value error, ")
+    return sentence if marker else message
+
+
 def _refusal(exc: Exception) -> ProjectRouteError:
     """Map one store refusal to the refusal the client can act on."""
     if isinstance(exc, ProjectNameConflictError):
@@ -168,7 +179,7 @@ def _refusal(exc: Exception) -> ProjectRouteError:
     if isinstance(exc, ProjectRegistryLockTimeout):
         # Contention is transient; the client retries.
         return ProjectRouteError(503, "project_store_busy", str(exc))
-    return ProjectRouteError(422, "project_invalid", readable_error(exc))
+    return ProjectRouteError(422, "project_invalid", _reader_error(exc))
 
 
 #: What one store mutation can raise and this module answers as a refusal.
@@ -224,7 +235,7 @@ def list_payload(config_dir: Path) -> dict[str, Any]:
     listed = registry.list_projects()
     live = _live_counts(registry, listed)
     rows = [project_summary(project, live_sessions=live.get(project.id, 0)) for project in listed]
-    rows.sort(key=lambda row: (_STATUS_RANK.get(row.status, 99), -row.updated_at))
+    rows.sort(key=lambda row: (STATUS_RANK.get(row.status, 99), -row.updated_at))
     return {"projects": [row.model_dump(mode="json") for row in rows]}
 
 
