@@ -154,7 +154,7 @@ REPLAY_COUNT = 256
 REPLAY_BYTES = 8 * 1024 * 1024
 
 #: The largest frame a subscriber-queue fold may produce. A MERGE THAT WOULD
-#: NOT FIT IS REFUSED (lossless: both frames stay, in order), because a frame
+#: NOT FIT IS REFUSED (both frames stay, in order), because a frame
 #: past this ceiling stops being one the stream's consumers are built to carry:
 #: the runtime's own compaction refuses above its ``_MAX_LINE_BYTES`` (1 MiB,
 #: the same value here) and the desktop relay silently drops anything past
@@ -2039,10 +2039,15 @@ class DesktopSessionBridge:
         overflow a viewer's queue are the delta-grade streaming bursts --
         measured, a reasoning burst reaches the count arm holding ~62-150 KB of
         the 8 MiB budget, while frame sizes for those families sit at 243-583 B.
-        Those runs fold LOSSLESSLY (a later ``message_update`` already contains
-        the earlier text, ``reasoning_delta`` is append-only, and
-        ``tool_execution_update`` re-sends its full snapshot), which is the same
-        fold the runtime already runs on its own attach FIFO
+        The three families fold under their own contracts: ``message_update``
+        and ``reasoning_delta`` CONCATENATE (a later update already carries the
+        earlier text; fragments are append-only), while
+        ``tool_execution_update`` KEEPS THE NEWEST -- a frame re-sends the
+        tool's current live view (a bounded tail for ``bash``, a bounded
+        display for ``eval``, never the whole transcript), and the family's
+        self-replacing contract is that the newest frame supersedes the earlier
+        ones, with the settled result riding ``tool_execution_end``. This is
+        the same fold the runtime already runs on its own attach FIFO
         (``session/runtime/server.py::_compact_event_queue``) and for the same
         reason: without it a stalled viewer's queue fills with incompressible
         fragments. Only when folding cannot make room is the subscriber
@@ -2058,15 +2063,30 @@ class DesktopSessionBridge:
         it.
 
         A merge is refused when the result would pass ``MERGE_CAP_BYTES``
-        (lossless: both frames stay, in order), and a refusal that leaves no
-        room falls through to the valve. Running sizes are computed as
-        ``encoded(incoming) + escaped_bytes(prior accumulated delta)`` -- exact,
-        because JSON escaping is per-character and the delta's quotes cancel --
-        so no merge ever re-dumps an accumulated frame; measuring the whole
-        frame per merge is what made the runtime's pass quadratic before it
-        split the measurement. Every size stored here is the frame's exact
-        encoded length, because ``events`` subtracts that stored size on
-        dequeue.
+        (both frames stay, in order), and a refusal that leaves no room falls
+        through to the valve. Running sizes are computed as
+        ``encoded(incoming) + escaped_bytes(prior accumulated delta)`` -- exact
+        while the incoming ``delta`` is a ``str`` (both delta families publish
+        ``delta: str`` from their event models, so no real producer can break
+        it; a hand-built non-``str`` delta would drift the stored size) --
+        because JSON escaping is per-character and replacing a string value
+        changes only its escaped bytes. No merge ever re-dumps an accumulated
+        frame; measuring the whole frame per merge is what made the runtime's
+        pass quadratic before it split the measurement. Every size stored here
+        is the frame's exact encoded length, because ``events`` subtracts that
+        stored size on dequeue.
+
+        CUT-1 SCOPE, STATED SO "THE STREAMING FAMILIES" IS NOT READ AS
+        EXHAUSTIVE: the two residual families the runtime folds on its own wire
+        -- ``aside_delta`` (keyed by its ``req``) and the keep-newest
+        ``tool_call_compose`` -- are NOT in this fold, so a queue full of them
+        still rides the count arm and still takes the valve; extending the fold
+        to them needs its own measurement and review round. Folding is also
+        ADJACENT-ONLY: distinct streams interleaved at short run lengths are
+        rescued far less -- measured, two interleaved reasoning streams at runs
+        of two are still cut, at ~512 frames rather than ~260 with the fold
+        off -- so this is relief for bursts, not a guarantee for arbitrarily
+        interleaved traffic.
 
         SYNC ON THE EVENT LOOP, like every other queue mutation in this file:
         drain and re-put happen with no awaits between them, so the reader (an
@@ -2113,9 +2133,10 @@ class DesktopSessionBridge:
                 snapshot = key is not None
             if compacted and key is not None and key == head_keys[-1]:
                 if snapshot:
-                    # The newer frame REPLACES the run outright: a full-output
-                    # snapshot makes the older frame's content redundant, and
-                    # the newer seq is the one the cursor must advance to.
+                    # The newer frame REPLACES the run outright: the family
+                    # re-sends its current live view, and by contract the newest
+                    # frame supersedes the earlier ones; its seq is the one the
+                    # cursor must advance to.
                     compacted[-1] = (frame, size)
                     continue
                 own_delta = str(payload.get("delta", ""))
@@ -2129,8 +2150,8 @@ class DesktopSessionBridge:
                     continue
                 # A MERGE THAT WOULD NOT FIT IS REFUSED: above the cap the
                 # frame stops being one the stream's consumers carry, and the
-                # refusal is lossless -- the incoming frame becomes a new head
-                # below, both frames keeping their order.
+                # refusal keeps both frames -- the incoming one becomes a new
+                # head below, order preserved.
             compacted.append((frame, size))
             head_keys.append(key)
             head_delta_esc.append(len(json.dumps(str(payload.get("delta", ""))).encode()) - 2)
@@ -2184,8 +2205,8 @@ class DesktopSessionBridge:
                 if sub.opened:
                     # A READER that is behind: first try to FOLD the queued
                     # delta runs (``_compact_subscriber_queue``) -- the
-                    # families that in fact overflow this queue are the ones
-                    # that merge losslessly, so a cut is for a reader that
+                    # families that in fact overflow this queue fold under
+                    # their own contracts, so a cut is for a reader that
                     # folding cannot help. Then the relief valve, unchanged:
                     # closing forces an authoritative gap snapshot on
                     # reconnect, and revokes presence -- which is why a

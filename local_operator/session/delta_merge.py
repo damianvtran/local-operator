@@ -7,7 +7,10 @@ viewer's subscriber FIFO). The bridge must NOT import ``session.runtime.server``
 — that would pull the whole runtime graph into the desktop daemon — so the keys
 live in this zero-import leaf module instead, and neither side re-spells them.
 The failure this prevents is taxonomy drift: a family renamed or re-keyed on one
-side only would silently stop folding the other side's queue.
+side only would silently stop folding the other side's queue. What this leaf
+carries is the key SPELLING — it is not family MEMBERSHIP: a family named here
+still folds nothing until each folder's own fold is edited to consume its key,
+so each queue keeps its own set and only the names are shared.
 
 Families, and the RULE each key implies (the rule lives with the folder that
 applies it; this module only answers "which stream is this frame a fragment of"):
@@ -17,12 +20,14 @@ applies it; this module only answers "which stream is this frame a fragment of")
   append-only, so a fold concatenates deltas onto the later frame.
 * ``reasoning_delta`` — one fragment per reasoning token, no accumulated
   payload; a fold concatenates deltas in arrival order.
-* ``tool_execution_update`` — a SNAPSHOT family: every frame re-sends the tool's
-  full streamed output so far, so the newest frame of a run REPLACES its
-  predecessors outright rather than concatenating anything. Deliberately not
-  folded by the runtime's compact pass (which predates this family's volume);
-  the desktop bridge folds it, and the key lives here so its spelling exists
-  once.
+* ``tool_execution_update`` — a SELF-REPLACING family: every frame re-sends the
+  tool's CURRENT LIVE VIEW (for ``bash`` a bounded ~128 KiB output tail, for
+  ``eval`` a bounded display — not the whole transcript), and the family's
+  contract is that the newest frame supersedes the earlier ones (the settled
+  result rides ``tool_execution_end``), so a fold keeps the newest frame and
+  concatenates nothing. Deliberately not folded by the runtime's compact pass
+  (which predates this family's volume); the desktop bridge folds it, and the
+  key lives here so its spelling exists once.
 * ``aside_delta`` — mergeable too, but its stream identity is on the FRAME (the
   ``req``), not the payload, so ``mergeable_frame_key`` answers for it.
 
@@ -77,10 +82,12 @@ def mergeable_snapshot_key(payload: Mapping[str, Any]) -> str | None:
     """The stream one queued frame is a SNAPSHOT of, or ``None``.
 
     ``tool_execution_update`` is the family this answers for: each frame
-    re-sends the tool's full streamed output so far (``AgentToolUpdate`` carries
-    the accumulated content, and the ``bash``/``eval`` producers republish the
-    whole current view), which is what makes keep-the-newest lossless where the
-    delta families need concatenation. The frames arrive as a chunk stream
+    re-sends the tool's CURRENT LIVE VIEW — for ``bash`` a bounded ~128 KiB
+    output tail, for ``eval`` a bounded display, never the whole transcript —
+    and the family's self-replacing contract is that the newest frame
+    supersedes the earlier ones (the settled result rides
+    ``tool_execution_end``). That contract is why a fold keeps the newest frame
+    of a run instead of concatenating. The frames arrive as a chunk stream
     during a tool run, so a viewer stalled behind one queues an unbroken run of
     them that a fold can collapse to the single newest frame.
 
