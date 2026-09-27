@@ -269,6 +269,8 @@ _TOOL_CATEGORY: dict[str, str] = {
     "agent": "tool.row.name_meta",
     "hub": "tool.row.name_meta",
     "todo": "tool.row.name_meta",
+    "project": "tool.row.name_meta",
+    "project_delete": "tool.row.name_meta",
     "send": "tool.row.name_meta",
     "wake": "tool.row.name_meta",
     "ask": "tool.row.name_meta",
