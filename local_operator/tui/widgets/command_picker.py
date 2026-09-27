@@ -1226,6 +1226,15 @@ def argument_suggestions(
     return prefixed or matches
 
 
+#: How many PROJECT rows the ``@`` list will ever show at once. The candidate
+#: set the app pushes is the FULL project vocabulary — so any project is
+#: reachable by typing its name (review round 1, M-2) — and this is the cap on
+#: the MATCHES, applied in :func:`file_matches`, because the design's "≤8" is
+#: about how much of the picker a shortcut may occupy, not about what it may
+#: find.
+PROJECT_CHOICES_MAX = 8
+
+
 def file_suggestions(query: str, choices: list[ArgumentChoice]) -> list[tuple[str, ArgumentChoice]]:
     """``(display_name, choice)`` suggestions for an ``@path`` token.
 
@@ -1249,11 +1258,14 @@ def file_suggestions(query: str, choices: list[ArgumentChoice]) -> list[tuple[st
     reference at all, so the list was offering a rewrite of prose — the one
     thing a composer must never do silently.
 
-    The evidence required is therefore the same SHAPE of evidence
+    Evidence required is therefore the same SHAPE of evidence
     :func:`skill_suggestions` demands, adapted to what a path can show. A skill
     name has case to testify with; a path does not, so the test is the one a
     shell user already has in their fingers: the typed segment must be a
-    case-INSENSITIVE PREFIX of the entry. ``@ap`` keeps ``app.py``, ``@read``
+    case-INSENSITIVE PREFIX of the entry — of any of its NAMES, aliases
+    included (a project row's ``name`` is the namespaced token while the screen
+    spells its bare name, so ``@al`` must find the row that paints ``alpha`` —
+    review round 1, F9). ``@ap`` keeps ``app.py``, ``@read``
     keeps ``README.md`` (the case-insensitive half is what makes that work, and
     is why the letter-for-letter rule below it is NOT reused here), ``@src/su``
     keeps ``sub/``, and a bare ``@`` — an explicit "what is here" — still lists
@@ -1278,8 +1290,42 @@ def file_suggestions(query: str, choices: list[ArgumentChoice]) -> list[tuple[st
     # is what makes the top row the one Tab takes), then the prefix test as a
     # filter on top. Case-folded with ``.lower()`` rather than ``casefold()``,
     # matching ``argument_suggestions`` above: the fold only ever has to
-    # agree with itself on both sides of the comparison.
-    return [pair for pair in match_choices(query, choices) if pair[0].lower().startswith(lowered)]
+    # agree with itself on both sides of the comparison. The test runs over
+    # every NAME of the row — aliases are how an argument is FOUND, and this
+    # filter must not un-find what the ranking just found (F9).
+    return [
+        pair
+        for pair in match_choices(query, choices)
+        if any(name.lower().startswith(lowered) for name in pair[1].names)
+    ]
+
+
+def file_matches(
+    query: str, choices: list[ArgumentChoice], prepended: int = 0
+) -> tuple[list[tuple[str, ArgumentChoice]], int]:
+    """``file_suggestions`` plus the PROJECT SHORTCUT's cap. ``(matches, kept)``.
+
+    ``prepended`` is how many LEADING ``choices`` are project rows (the app's
+    ``set_choices(..., prepended=…)``). They are matched by the same rules as
+    every other row and then trimmed to :data:`PROJECT_CHOICES_MAX`, ahead of
+    the directory matches; ``kept`` is how many project matches survived,
+    which the widget needs for its initial-selection rule (F7) and its
+    overflow row (F11).
+
+    WHY THE CAP IS HERE AND NOT AT THE APP (review round 1, M-2): the picker
+    re-filters one candidate list on every keystroke, so a candidate-side cap
+    made the ninth project unreachable even by its exact name while the ink
+    still painted the token as a valid reference. Capping the MATCHES keeps
+    the shortcut bounded on screen without bounding what it can find.
+    """
+    matches = file_suggestions(query, choices)
+    if prepended <= 0:
+        return matches, 0
+    shortcut_ids = {id(choice) for choice in choices[:prepended]}
+    shortcut = [pair for pair in matches if id(pair[1]) in shortcut_ids]
+    rest = [pair for pair in matches if id(pair[1]) not in shortcut_ids]
+    kept = shortcut[:PROJECT_CHOICES_MAX]
+    return [*kept, *rest], len(kept)
 
 
 def _pad_to(row: Text, width: int, style: Style) -> Text:
@@ -1421,6 +1467,14 @@ class CommandPicker(Static):
         #: suggestion this widget holds, so it deliberately does NOT move
         #: ``visible_window``'s total.
         self._unlisted = 0
+        #: How many LEADING candidates are the project shortcut — see
+        #: `set_choices`. Caps the shortcut's matches and keeps them out of the
+        #: overflow row's directory count; a fact about the FILL, like
+        #: ``_unlisted``, so it survives the per-keystroke re-derivations.
+        self._prepended = 0
+        #: How many leading MATCHES the shortcut actually contributed on the
+        #: last derivation (`file_matches`'s ``kept``); set by `_apply`.
+        self._prepended_rows = 0
 
     # -- public API ---------------------------------------------------------
     def set_commands(self, commands: list[SlashCommand]) -> None:
@@ -1476,6 +1530,7 @@ class CommandPicker(Static):
         highlight: str | None = None,
         *,
         unlisted: int = 0,
+        prepended: int = 0,
     ) -> None:
         """Replace the values offered for the current command's ARGUMENT.
 
@@ -1502,9 +1557,20 @@ class CommandPicker(Static):
         which the editor does not know, so it has to survive those
         re-derivations. Reset by ``_close`` and by a mode change for the same
         reason the notice is.
+
+        ``prepended`` is how many LEADING choices are the project shortcut
+        (§6.3). The candidates are the whole project vocabulary — the picker's
+        own per-keystroke filter is what narrows them — so the widget is told
+        which rows the shortcut owns: it caps those rows' MATCHES at
+        :data:`PROJECT_CHOICES_MAX`, seeds a bare ``@``'s highlight past them
+        (review round 1, F7) and keeps them out of the overflow row's
+        directory count (F11). Held as state beside ``unlisted`` because the
+        editor re-derives on every keystroke and the count is a property of
+        the FILL. Reset by ``_close`` and by a mode change.
         """
         self._choices = list(choices)
         self._unlisted = max(0, unlisted)
+        self._prepended = min(max(0, prepended), len(self._choices))
         # SKILL and FILE ride the same fill path as ARGUMENT: all three are
         # app-pushed ``ArgumentChoice`` sets that land one message-loop tick
         # after the keystroke that opened the list, so all three need the
@@ -1523,10 +1589,11 @@ class CommandPicker(Static):
             # ``@me`` closed on the keystroke and REOPENED one tick later when
             # the app answered ``FileQueryOpened``, so the prose rewrite Q-2
             # names came back on a path no test of the keystroke could see.
+            kept = 0
             if self._mode is PickerMode.SKILL:
                 matches = skill_suggestions(self._query, self._choices, self._skill_inline)
             elif self._mode is PickerMode.FILE:
-                matches = file_suggestions(self._query, self._choices)
+                matches, kept = file_matches(self._query, self._choices, self._prepended)
             else:
                 matches = argument_suggestions(self._query, self._choices)
             seeding = highlight is not None and not self._query and not self._chosen_by_hand
@@ -1541,7 +1608,7 @@ class CommandPicker(Static):
                 # wrong one here would be read as a mode CHANGE by `_apply` and
                 # would reset the highlight, the window and the Esc latch on
                 # every fill.
-                self._apply(self._mode, self._query, matches)
+                self._apply(self._mode, self._query, matches, prepended_matches=kept)
             finally:
                 self._suppress_report = False
             if seeding:
@@ -1846,7 +1913,8 @@ class CommandPicker(Static):
         # directory that produced the rows and the query they are matched
         # against cannot drift apart.
         _, name_query = split_token(token.query)
-        self._apply(PickerMode.FILE, name_query, file_suggestions(name_query, self._choices))
+        matches, kept = file_matches(name_query, self._choices, self._prepended)
+        self._apply(PickerMode.FILE, name_query, matches, prepended_matches=kept)
 
     def sync_argument(self, query: str) -> None:
         """Re-derive the ARGUMENT suggestions for the current command.
@@ -1875,7 +1943,13 @@ class CommandPicker(Static):
             return
         self._apply(PickerMode.ARGUMENT, query, argument_suggestions(query, self._choices))
 
-    def _apply(self, mode: PickerMode, query: str, matches: Sequence[_Suggestion]) -> None:
+    def _apply(
+        self,
+        mode: PickerMode,
+        query: str,
+        matches: Sequence[_Suggestion],
+        prepended_matches: int = 0,
+    ) -> None:
         """Adopt a freshly derived candidate set, whichever list produced it.
 
         ``Sequence``, not ``list``: a list is invariant, so the concrete
@@ -1902,6 +1976,7 @@ class CommandPicker(Static):
             # editor's own sync).
             if mode is not PickerMode.FILE:
                 self._unlisted = 0
+                self._prepended = 0
             # The rungs go with the notice they phrase, for the same reason.
             self._notice_rungs = ()
             # The loading reserve goes with the notice it was riding: it
@@ -1996,6 +2071,23 @@ class CommandPicker(Static):
             self._selected = 0
             self._window_start = 0
             self._chosen_by_hand = False
+            if (
+                mode is PickerMode.FILE
+                and not query
+                and prepended_matches > 0
+                and len(matches) > prepended_matches
+            ):
+                # A BARE `@` SEEDS PAST THE PROJECT SHORTCUT (review round 1,
+                # F7). The project rows lead the list, but Enter on an empty
+                # token completes the highlighted row — so seeding them would
+                # silently rewrite the draft into `@project:<first>`, a jump to
+                # another namespace the user did not ask for. Seeding the first
+                # NON-project row keeps the completion a bare `@` had before
+                # projects existed. With nothing but project rows there is no
+                # non-project row to prefer, and the sole section completes
+                # like any sole-section list.
+                self._selected = prepended_matches
+        self._prepended_rows = prepended_matches
         self._matches = list(matches)
         self.display = True
         # Real rows landed, so the transient loading reserve is over wherever
@@ -2450,7 +2542,19 @@ class CommandPicker(Static):
 
     def _overflow_row(self, width: int) -> Text | None:
         start, end, total = self.visible_window()
-        hidden = total - (end - start)
+        # The PROJECT SHORTCUT is not part of the DIRECTORY, so neither it nor
+        # the rows its own cap keeps off screen belongs in this count (review
+        # round 1, F11): with rows prepended, counting them made ``… 6 more``
+        # sit beside ``unlisted=0``, describing the shortcut as if it were
+        # directory entries. The shortcut's matches are the FIRST
+        # ``_prepended_rows`` of the row list, so their overlap with the
+        # visible window is an interval overlap; the rest of the arithmetic is
+        # the directory's alone.
+        project_rows = self._prepended_rows
+        visible_projects = max(0, min(end, project_rows) - min(start, project_rows))
+        file_total = max(0, total - project_rows)
+        file_visible = max(0, (end - start) - visible_projects)
+        hidden = max(0, file_total - file_visible)
         # PLUS what the scan never returned. The two are different facts and
         # this row is the only place the user can learn either: ``total`` counts
         # the rows this widget was GIVEN, and ``_unlisted`` counts the entries
@@ -2651,6 +2755,7 @@ class CommandPicker(Static):
         self._selected = 0
         self._window_start = 0
         self._hovered = None
+        self._prepended_rows = 0
 
     def _close(self) -> None:
         self._reset_rows()
@@ -2668,6 +2773,7 @@ class CommandPicker(Static):
         # it, and until then any stale count belongs to a listing that is no
         # longer on screen.
         self._unlisted = 0
+        self._prepended = 0
         self._loading = False
         self.display = False
         self._report_highlight()

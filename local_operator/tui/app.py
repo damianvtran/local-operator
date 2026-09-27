@@ -40489,7 +40489,7 @@ class OperatorApp(App[None]):
             ]
         )
 
-    def on_file_query_opened(self, message: FileQueryOpened) -> None:
+    async def on_file_query_opened(self, message: FileQueryOpened) -> None:
         """The buffer just entered an ``@`` token — offer that directory's entries.
 
         The ``@`` twin of :meth:`on_skill_query_opened`, answering on the message
@@ -40503,15 +40503,22 @@ class OperatorApp(App[None]):
         an ``@path`` is expanded against at submit, so the list can never offer
         a row the expander would then fail to find.
 
-        SYNCHRONOUS, and deliberately so (design D6). ``scan_directory`` does one
-        ``os.scandir`` of one directory, measured at 0.04–0.07 ms against the
-        0.29 ms fingerprint probe this same keystroke path already accepts.
-        Do NOT move it to ``run_worker``, ``asyncio.to_thread`` or a debounce:
-        this codebase has no cancellation for a stale list beyond
+        ``scan_directory`` STAYS SYNCHRONOUS, and deliberately so (design D6).
+        It does one ``os.scandir`` of one directory, measured at 0.04–0.07 ms
+        against the 0.29 ms fingerprint probe this same keystroke path already
+        accepts. Do NOT move it to ``run_worker``, ``asyncio.to_thread`` or a
+        debounce: this codebase has no cancellation for a stale list beyond
         ``_dismissed_query`` and ``_apply`` re-matching the current query, so a
         worker would mean BUILDING cancellation to make a 0.04 ms call
         affordable. The staleness it would introduce is a real bug; the latency
         it would save is not measurable.
+
+        THE PROJECT READ is the one part that does not run inline, and this
+        handler is ``async`` for exactly that reason: ``list_projects`` may
+        refresh the whole store (review round 1 M-4 measured ~1 s at 500
+        max-field rows), so it is awaited off the event loop through
+        :func:`local_operator.references.project_picker_rows` while the scan
+        above still runs right here. Two reads, two cost contracts, one list.
 
         An empty directory sets a notice rather than leaving a bare list, exactly
         as an empty skill vocabulary does: "this directory has nothing to offer"
@@ -40525,63 +40532,80 @@ class OperatorApp(App[None]):
         what the name column paints. Carrying the namespaced token as the NAME
         is what lets the existing FILE completion, its ghost and its
         "already in the buffer" rule write ``@project:<name>`` with no second
-        code path, and the picker's own prefix filter is what shows these rows
-        while the query is a prefix of the project token — a bare ``@``, the
-        typed route to ``project:``, or a fragment of a project's own name.
+        code path.
+
+        FOUR RULES PIN THE COMPOSITION (review round 1, M-2/M-3 and F6/F9):
+
+        * only under a token with NO directory part. ``@src/`` is not "typing
+          toward ``project:``", and a project row accepted there would complete
+          to ``@src/project:<name>`` — a token the resolver reads as prose. The
+          message already carries exactly that fact as ``message.directory``.
+        * the full project vocabulary is the CANDIDATE list, not a capped
+          prefix of it: the picker's own filter narrows per keystroke, so a
+          project past the eighth must still be reachable by typing its name.
+          The cap lives on the MATCHES, in ``command_picker.file_matches``.
+        * the painted name is also a way to FIND the row: each row carries its
+          bare name as an alias, so ``@al`` reaches the row that paints
+          ``alpha`` instead of only ``@project:al`` reaching it.
+        * the row says what it is: ``detail="project"`` fills the state column
+          every argument row already paints (skills spell ``hidden`` there), so
+          a project row is distinguishable from a file row without hovering
+          the ghost.
 
         It also passes on how many entries the scan's own cap kept OUT
-        (``unlisted``), because the picker's overflow row is where the user finds
-        out how much of the directory is not on screen and the picker has no way
-        to know it: it holds the rows it was given (design round 1, D6).
+        (``unlisted``) and how many leading rows are the project shortcut
+        (``prepended``), because the picker's overflow row is where the user
+        finds out how much of the DIRECTORY is not on screen and the picker
+        cannot know either fact: it holds the rows it was given (design round
+        1, D6).
         """
         message.stop()
         picker = self._editor().picker
-        from local_operator.references import scan_directory_report
+        from local_operator.references import project_picker_rows, scan_directory_report
 
         choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
-        choices = [*self._project_picker_choices(), *choices]
+        projects: list[ArgumentChoice] = []
+        if not message.directory:
+            projects = self._project_picker_choices(await project_picker_rows())
+        prepended = len(projects)
+        choices = [*projects, *choices]
         if not choices:
             picker.set_choices([])
             where = message.directory or "this directory"
             picker.set_notice(f"nothing to reference in {where}")
             return
         picker.set_notice("")
-        picker.set_choices(choices, unlisted=unlisted)
+        picker.set_choices(choices, unlisted=unlisted, prepended=prepended)
 
-    def _project_picker_choices(self) -> list[ArgumentChoice]:
-        """Project rows to PREPEND to the ``@`` list, or ``[]``.
+    def _project_picker_choices(self, projects: list[Any]) -> list[ArgumentChoice]:
+        """The project rows to PREPEND to the ``@`` list, from the store's rows.
 
-        Sorted by the store's own listing rule (name, case-insensitive) and
-        CAPPED: this is a shortcut into the namespace, not a browse of the
-        store — ``/project list`` and the projects view are the browse
-        surfaces — so a store with hundreds of rows can never push the
-        directory listing out of the picker. The cap applies AFTER the sort,
-        so the rows offered are stable across opens.
+        The FULL vocabulary, deliberately (review round 1, M-2): the picker's
+        own prefix filter runs per keystroke over these candidates, so capping
+        the CANDIDATES at eight is what made the ninth project unreachable even
+        by its exact name. The cap belongs on the matches, and it lives in
+        ``command_picker.file_matches`` where the matches are known. What this
+        function must get right instead is that every row is FINDABLE — alias
+        and all — and that the row says it is a project.
 
-        Never raises and never blocks on anything but the store read: a session
-        with no registry (an older runtime, a store that failed to open) or an
-        unreadable store reads as "no projects", and the directory list stands
-        alone — the degrade-one-feature rule every store read on a keystroke
-        path follows.
+        Never raises and never touches the store itself: the rows arrive from
+        :func:`local_operator.references.project_picker_rows`, which reads the
+        store off the event loop and returns ``[]`` for every failure — a
+        session with no store reads as "no projects", and the directory list
+        stands alone (the degrade-one-feature rule every store read on a
+        keystroke path follows).
         """
         from local_operator.references import PROJECT_REFERENCE_PREFIX
 
-        session = self._session
-        registry = getattr(session, "project_registry", None) if session is not None else None
-        if registry is None or not hasattr(registry, "list_projects"):
-            return []
-        try:
-            projects = list(registry.list_projects())
-        except Exception:  # noqa: BLE001 — a picker never fails on the store
-            return []
-        # ≤8: see the docstring. The rows keep the store's name order.
         return [
             ArgumentChoice(
                 name=f"{PROJECT_REFERENCE_PREFIX}{project.name}",
                 display=project.name,
                 description=project.description,
+                detail="project",
+                aliases=(project.name,),
             )
-            for project in projects[:8]
+            for project in projects
         ]
 
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
