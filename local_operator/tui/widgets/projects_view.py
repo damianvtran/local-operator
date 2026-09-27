@@ -244,10 +244,12 @@ class ProjectsView(Vertical):
         self._detail = Static(classes="projects-view-detail")
         self._scroll_hint = HintButton("↔↕", self._focus_canvas)
         # `↵` opens the selected project's conversation (S3b). The rung is a
-        # PURE ADDITION to the ladder (10 cells; design round 1, D1) — the
-        # headline action of the page must be on screen, and it sheds before
-        # `r refresh` on a 60-column terminal.
-        self._open_hint = HintButton("↵ open", lambda: self.action_jump())
+        # pure addition to the BOARD's ladder — ` · ↵  open` = 10 cells (key +
+        # label + seam) — and sheds first, ahead of `r refresh`. On the
+        # TIMELINE it defers `+/- zoom`: measured, zoom returns at 110 columns
+        # where it returned at ~97 before open existed (open outranks zoom in
+        # `all_leads` — the recorded trade, review round 2 R2-2b).
+        self._open_hint = HintButton("↵", lambda: self.action_jump())
         self._list_hint = HintButton("1", lambda: self.action_show_list())
         self._board_hint = HintButton("2", lambda: self.action_show_board())
         self._timeline_hint = HintButton("3", lambda: self.action_show_timeline())
@@ -276,11 +278,28 @@ class ProjectsView(Vertical):
         a named canvas directly (``/project board`` and ``/project timeline``,
         which do not force the list), and ``associated`` marks the calling
         session's own project ids with ``◆`` (the nameless ``/project show``;
-        S3b) — the title says whose set it is.
+        S3b) — the title says whose set it is, and a load CARRYING a set seeds
+        the cursor onto it (an entry), while one that carries none (a refresh)
+        never moves the reader.
         """
         self._views = list(views)
         if associated is not None:
             self._associated = frozenset(str(pid) for pid in associated)
+            if self._associated:
+                # The caller's own set seeds the SELECTION (UX round 1, U1):
+                # the nameless entry's one action (`↵`) must aim at a MEMBER,
+                # and with several links the cursor otherwise stayed on row 0
+                # — a project the reader has no link to. A reader already
+                # inside their set keeps their row. The seed rides the load
+                # that SPECIFIES a set: a refresh passes none (it must not move
+                # the reader — R2-3), and an entry naming no set has nothing
+                # to seed from.
+                if self.current_project_id() not in self._associated:
+                    for index, view_row in enumerate(self._views):
+                        project = view_row.get("project") if isinstance(view_row, dict) else None
+                        if isinstance(project, dict) and str(project.get("id")) in self._associated:
+                            self._cursor = index
+                            break
         if updated_at is not None:
             self._updated_at = updated_at
         if view is not None and view in VIEWS:
@@ -296,18 +315,6 @@ class ProjectsView(Vertical):
                 # means being able to see it, so it lands on the list. A
                 # requested `view` (the board/timeline entries) outranks that.
                 self._view = "list"
-        if self._associated:
-            # Seed the selection onto the caller's own set (UX round 1, U1):
-            # the nameless entry's one action (`↵`) must aim at a MEMBER, and
-            # with several links the cursor otherwise stayed on row 0 — a
-            # project the reader has no link to. A reader already inside their
-            # set keeps their row (the kept-cursor rule).
-            if self.current_project_id() not in self._associated:
-                for index, view_row in enumerate(self._views):
-                    project = view_row.get("project") if isinstance(view_row, dict) else None
-                    if isinstance(project, dict) and str(project.get("id")) in self._associated:
-                        self._cursor = index
-                        break
         self._cursor = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
         if self._view == "timeline":
             # A recomposition can change the dated span (a new target date),
@@ -428,12 +435,13 @@ class ProjectsView(Vertical):
         dim = Style(color=theme_mod.semantic_color("dim"))
         # The nameless entry's set (S3b): whose projects the `◆` markers are,
         # and how many. It SHEDS FIRST when the title cannot hold the whole
-        # line (design round 1, D2): the title Static clips silently — Rich's
-        # `overflow="ellipsis"` is inert on it — so the newest, longest clause
-        # yields rather than letting `updated` be cut with no `…`.
+        # line (design round 1, D2; round 2 extended the ladder to the
+        # timeline's `zoom:` clause, D6): the title Static clips silently —
+        # Rich's `overflow="ellipsis"` is inert on it — so the newest clauses
+        # yield rather than letting `tracked`/`updated` be cut with no `…`.
         set_clause = f" · this session ({len(self._associated)})" if self._associated else None
 
-        def build_title(*, with_set: bool) -> Text:
+        def build_title(*, with_set: bool, with_zoom: bool = True) -> Text:
             title = Text(no_wrap=True, overflow="ellipsis")
             title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
             title.append(f" · {self._view}", style=muted)
@@ -441,9 +449,10 @@ class ProjectsView(Vertical):
                 title.append(set_clause, style=muted)
             tracked = len(self._views)
             title.append(f" · {tracked} tracked", style=dim)
-            if self._view == "timeline":
+            if with_zoom and self._view == "timeline":
                 # The tier is always stated so an auto-chosen axis explains
-                # itself (the org chart's tier-title rule).
+                # itself (the org chart's tier-title rule) — until the row
+                # cannot hold it, which was the pre-existing 60-col clip D6.
                 title.append(f" · zoom: {self._tier}", style=dim)
             if self._updated_at is not None:
                 import time as _time
@@ -452,13 +461,15 @@ class ProjectsView(Vertical):
                 title.append(f" · updated {stamp}", style=dim)
             return title
 
-        title = build_title(with_set=True)
-        if set_clause is not None:
-            from rich.cells import cell_len
+        from rich.cells import cell_len
 
-            available = self._title.content_size.width or self._title.size.width
-            if available and cell_len(title.plain) > available:
+        title = build_title(with_set=True)
+        available = self._title.content_size.width or self._title.size.width
+        if available and cell_len(title.plain) > available:
+            if set_clause is not None:
                 title = build_title(with_set=False)
+            if cell_len(title.plain) > available and self._view == "timeline":
+                title = build_title(with_set=False, with_zoom=False)
         self._title.update(title)
 
         width = max(self.size.width - 2, 1)
@@ -548,10 +559,12 @@ class ProjectsView(Vertical):
                 "back",
                 state=False,
             ),
-            # `↵ open` sheds HERE, before `r refresh`: at 60 columns the page
-            # keeps its refresher and loses the action hint (the dock still
-            # says `Read-only · esc back`, and the guide states the key) — the
-            # one-rung decision design round 1 asked for.
+            # `↵ open` sheds HERE, before `r refresh` in the RUNG ORDER. The
+            # measured boundaries (terminal columns, this harness): `scroll`
+            # returns at 72, `refresh` at 85, `open` at 95; at 60 all three are
+            # absent and the row is `1 list · 2 board · 3 timeline · v next ·
+            # esc back` (review round 2 R2-2a corrected the earlier claim that
+            # 60 keeps the refresher).
             rung(
                 leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh),
                 "back",

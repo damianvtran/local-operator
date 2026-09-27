@@ -693,3 +693,20 @@ def test_past_the_board_cap_the_selected_card_is_still_painted() -> None:
     assert position is not None
     lines = canvas.splitlines()
     assert f"p{selected_index:02d}" in lines[position[1]]
+
+
+def test_the_cap_note_disappears_when_nothing_is_left_hidden() -> None:
+    """R2-1: the selected card alone past the cap must not print `… +0 more`."""
+    from local_operator.tui.projects_render import board_position
+
+    views = [_view(f"p{index:02d}") for index in range(BOARD_CARDS_MAX + 1)]
+    selected_index = BOARD_CARDS_MAX  # the only card past the cap
+    result = render_project_board(views, cursor=selected_index)
+    canvas = result.text.plain
+    assert "+0 more" not in canvas
+    assert f"▸ p{selected_index:02d}" in canvas
+    # The position helper mirrors the note-less layout: 2 + 4 * V.
+    position = board_position(views, selected_index)
+    assert position is not None
+    assert position[1] == 2 + 4 * BOARD_CARDS_MAX
+    assert f"p{selected_index:02d}" in canvas.splitlines()[position[1]]

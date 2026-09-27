@@ -543,13 +543,16 @@ def render_project_board(
             # The note names the hidden remainder — and, when the session's own
             # set is in it, how many of those are theirs, so a marker the
             # column cannot paint is at least COUNTED where the reader looks
-            # for it (UX round 1, U3).
-            note = f"… +{len(hidden)} more"
-            yours = sum(1 for view in hidden if str(_row(view).get("id") or "") in mine)
-            if yours:
-                note += f" ({yours} yours)"
-            block.append(Text(""))
-            block.append(Text(note, style=resolver("dim")))
+            # for it (UX round 1, U3). When nothing is hidden (the selected
+            # card was the only one past the cap) there is no remainder to
+            # name: a `… +0 more` reads as leftovers (review round 2, R2-1).
+            if hidden:
+                note = f"… +{len(hidden)} more"
+                yours = sum(1 for view in hidden if str(_row(view).get("id") or "") in mine)
+                if yours:
+                    note += f" ({yours} yours)"
+                block.append(Text(""))
+                block.append(Text(note, style=resolver("dim")))
         if extra is not None:
             # The selected card is painted even past the cap: `↵` acts on it,
             # and an action must have a visible object (UX round 1, U2/U3).
@@ -869,7 +872,7 @@ def board_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] 
     target = str(_row(rendered[cursor]).get("id") or "")
     x = 0
     for _status, rows in _columns_of(rendered):
-        visible, _hidden, extra = _painted_cards(rows, target)
+        visible, hidden, extra = _painted_cards(rows, target)
         for index, view in enumerate(visible):
             if str(_row(view).get("id") or "") == target:
                 # Each card is a blank line and three content lines under the
@@ -877,9 +880,12 @@ def board_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] 
                 return (x * BOARD_COLUMN_WIDTH, 2 + index * 4)
         if extra is not None and str(_row(extra).get("id") or "") == target:
             # Past the cap the selected card is painted after the overflow
-            # note: 4 lines per visible card, then the note's blank + line,
-            # then this card's blank — its NAME line lands at 4 + 4 * V.
-            return (x * BOARD_COLUMN_WIDTH, 4 + 4 * len(visible))
+            # note (or straight after the last card, when nothing is hidden):
+            # 4 lines per visible card, then the note's blank + line when one
+            # is painted, then this card's blank — its NAME line lands at
+            # 4 + 4 * V with a note and 2 + 4 * V without one.
+            y = (4 if hidden else 2) + 4 * len(visible)
+            return (x * BOARD_COLUMN_WIDTH, y)
         x += 1
     return None
 
