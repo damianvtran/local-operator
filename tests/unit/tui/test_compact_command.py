@@ -697,25 +697,25 @@ async def test_the_pass_ends_and_the_held_prompt_is_sent_with_its_image(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_held_prompt_refused_on_the_wire_takes_its_echo_back(tmp_path) -> None:
-    """Review round 2, MAJOR-3. The withdrawal has to reach the compaction route.
+async def test_a_held_prompt_refused_on_the_wire_keeps_its_row_and_edits_home(tmp_path) -> None:
+    """Review round 2, MAJOR-3 restated for the boundary rule.
 
-    The echo is painted at submit so the app answers the keystroke, and a send
-    the transport REFUSES is the one path where that row is a durable lie: same
-    styling as a delivered message, still standing after the user follows the
-    refusal's advice and resends, so the transcript shows one message twice
-    with an attachment that never left the machine (design round 1, D3).
+    The held prompt's rows must be OWNED by the worker that dispatches it —
+    that half is unchanged — but under the boundary rule the refusal KEEPS the
+    row, states the fate on a failure notice below it, and returns the payload
+    only through `edit`, which carries the ATTACHMENT home with the words.
+    The old shape withdrew the row and refilled the composer; the row a user
+    can still see is not erased (superseded preference).
 
-    Round 1 fixed that for a direct submit by holding the blocks on
-    ``turn.submitted_blocks`` — but set them PAST the compaction branch's own
-    ``return``, so a prompt held through a pass and dispatched minutes later
-    ran the same ``except OversizedRequest`` with nothing to withdraw and
-    reproduced D3's exact symptom on that route. Reachability is ordinary: a
-    pass runs for minutes, the hold exists because users keep typing, and the
-    hold deliberately carries the attachments.
+    Round 1 fixed the ownership seam for a direct submit by holding the blocks
+    on ``turn.submitted_blocks`` — but set them PAST the compaction branch's
+    own ``return``, so a prompt held through a pass and dispatched minutes
+    later ran the same ``except OversizedRequest`` with nothing it could find.
+    Reachability is ordinary: a pass runs for minutes, the hold exists because
+    users keep typing, and the hold deliberately carries the attachments.
 
     Driven through the real hold and the real dispatch, and asserted in BOTH
-    directions in the sibling below — a withdrawal that fires when the send
+    directions in the sibling below — anything that fired when the send
     SUCCEEDS would eat a real turn, which is the worse failure.
     """
     from PIL import Image
@@ -776,37 +776,57 @@ async def test_a_held_prompt_refused_on_the_wire_takes_its_echo_back(tmp_path) -
         # The pass ends and the held prompt is dispatched — into a refusal.
         app._compacting = False
         app._consume_compaction_input(app._interaction)
+
+        def _failure_notice() -> NoticeBlock | None:
+            from local_operator.tui.session_presentation import SendFailureNotice
+
+            return next(
+                (
+                    block
+                    for block in app.query_one(TranscriptView).blocks()
+                    if isinstance(block, SendFailureNotice)
+                ),
+                None,
+            )
+
         for _ in range(40):
             await pilot.pause()
             await asyncio.sleep(0.05)
-            if _rows() == (0, 0):
+            if _failure_notice() is not None:
                 break
 
-        assert _rows() == (0, 0), (
-            "the refused prompt's rows are still on the transcript, so the "
-            f"scroll-back asserts a message that never went: {_rows()}"
+        # THE ROW STAYS (the boundary rule supersedes the withdrawal this cell
+        # used to pin): a message the user can see is not erased, and the
+        # refusal is stated on the failure record's notice below it.
+        assert _rows() == (1, 1), (
+            "the refused prompt's row was withdrawn (superseded preference): " f"{_rows()}"
         )
-        # And the QUEUED notice went with them (design round 3, D15): a row
-        # announcing a send that will never happen, sitting where the message
-        # it described used to be, is the same durable lie the withdrawal
-        # exists to remove.
-        assert _queued_notice() is None, (
-            "the queued notice outlived the refusal it was narrating; the "
-            "transcript still promises a send that will not happen"
-        )
-        # AND THE DRAFT CAME BACK BEHIND A SEAM. This cell asserted the
-        # withdrawal and never looked at the composer, so the sibling routes'
-        # `seam=True` could be deleted with the suite still green — the same
-        # "the cell cannot see its subject" shape review round 4 filed against
-        # the notice's own gate (review round 5, MINOR 1). The seam is the
-        # boundary between the returned draft and whatever the operator types
-        # next, and it is the same funnel the drain refusal uses. The text is
-        # matched by its own words rather than by equality: the restore carries
-        # the image's marker, and the marker's rendered form is the editor's.
+        # And the QUEUED notice went at dispatch (design round 3, D15): a row
+        # narrating the HOLD has no business beside the row it described once
+        # the hold has ended, refused or not.
+        assert _queued_notice() is None, "the queued notice outlived the hold it was narrating"
+        notice = _failure_notice()
+        assert notice is not None, "the refusal was stated nowhere"
+        assert "image 1 is too large to send" in notice._text, notice._text
+        assert "send again enter · edit e" in " ".join(notice._text.split()), notice._text
+        assert editor.text == "", "the payload returned to the composer by itself"
+
+        # `edit` is the way back, and the ATTACHMENT comes home with the words:
+        # the same funnel the direct routes use, so the paste that caused the
+        # refusal is restored whole (marker and pixels), not as text alone.
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        for _ in range(60):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if editor.text:
+                break
         assert editor.text.endswith(RESTORE_SEAM), "the returned draft lost the seam: " + repr(
             editor.text
         )
         assert "what does this show" in editor.text, repr(editor.text)
+        assert len(editor.referenced_images()) == 1, "the attachment did not come home"
 
 
 @pytest.mark.asyncio

@@ -18,11 +18,12 @@ from typing import Any
 import pytest
 
 from local_operator.tui.app import COMPOSER_FOCUSED_CLASS, OperatorApp
-from local_operator.tui.session_interaction import SessionDraft
+from local_operator.tui.session_interaction import FailedSend, SessionDraft
 from local_operator.tui.session_presentation import (
     DraftRecoveryNotice,
     HistoryPageNotice,
     OlderHistoryNotice,
+    SendFailureNotice,
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -55,9 +56,12 @@ def _seed_cards(app: OperatorApp, count: int) -> list[ToolCard]:
 def _row_kinds() -> list[tuple[str, Any]]:
     """One factory per FOCUSABLE row kind that inherits the tab binding.
 
-    The three notices are the point of the list: they descend from
+    The four notices are the point of the list: they descend from
     ``NoticeBlock``, not from ``ExpandableActionBlock``, so a binding placed one
-    level too low passes the first rows here and fails the last three.
+    level too low passes the first rows here and fails the last four.
+    ``SendFailureNotice`` joined the family with the failure-record change
+    (design R2; agent review round 1, R-MINOR-4) and is the one row whose
+    click is focus-first — its tab contract is the same binding all the same.
     """
     return [
         ("ToolCard", lambda: ToolCard("t", "bash", {"command": "ls"})),
@@ -68,6 +72,13 @@ def _row_kinds() -> list[tuple[str, Any]]:
         (
             "DraftRecoveryNotice",
             lambda: DraftRecoveryNotice("token", SessionDraft(text="unsent")),
+        ),
+        (
+            "SendFailureNotice",
+            lambda: SendFailureNotice(
+                "token",
+                FailedSend(text="unsent", sent="unsent", typed="unsent"),
+            ),
         ),
     ]
 
@@ -659,3 +670,61 @@ async def test_expanding_a_row_at_the_tail_still_follows_the_tail() -> None:
         await pilot.pause()
         assert cards[-1].expanded is True
         assert view.scroll_y >= view.max_scroll_y - 1
+
+
+class _VerbRecordingNotice(SendFailureNotice):
+    """``SendFailureNotice`` that NOTES its verbs instead of dispatching them.
+
+    The subject here is the row's CLICK CONTRACT; what a verb then does with a
+    record needs the app's failure plumbing, which the failure-row suite owns.
+    """
+
+    def __init__(self, text: str, record: FailedSend) -> None:
+        super().__init__(text, record)
+        self.verbs: list[str] = []
+
+    def action_resolve(self) -> None:
+        self.verbs.append("resolve")
+
+    def action_edit(self) -> None:
+        self.verbs.append("edit")
+
+
+@pytest.mark.asyncio
+async def test_the_two_verb_notice_focuses_on_the_first_click_and_acts_second() -> None:
+    """U1: focus-first, activate-second — and Enter and `e` still work.
+
+    Measured harm (UX round 1, U1): a single click ran ``send again``
+    immediately, so a mouse user who meant ``edit`` had already resent, and
+    from the composer neither advertised key reached the row at all. The
+    discrimination cannot live in ``has_focus`` at ``on_click`` time — Textual
+    focuses on MouseDown before the press is forwarded, so the row would
+    always find itself focused — which is why ``focus_on_click`` is False and
+    the click focuses explicitly. The single-offer sibling keeps click-to-run:
+    with one verb there is no ambiguity to resolve.
+    """
+    app = _app()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        app.query_one(Editor).focus()
+        await pilot.pause()
+        notice = _VerbRecordingNotice(
+            "token", FailedSend(text="unsent", sent="unsent", typed="unsent")
+        )
+        app._append_block(notice)
+        await pilot.pause()
+
+        await pilot.click(notice)
+        await pilot.pause()
+        assert app.focused is notice, "the first click did not focus the row"
+        assert notice.verbs == [], "the first click ran a verb"
+
+        await pilot.click(notice)
+        await pilot.pause()
+        assert notice.verbs == ["resolve"], notice.verbs
+
+        notice.focus()
+        await pilot.pause()
+        await pilot.press("e")
+        await pilot.pause()
+        assert notice.verbs == ["resolve", "edit"], notice.verbs
