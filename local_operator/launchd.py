@@ -61,6 +61,15 @@ the parts that are dangerous are written once:
   about a plist that CHANGED, and the two must not be confused: this is the
   narrower repair of the two (it never unregisters the label).
 
+- **A loaded-but-stopped job is a NAMED decision, not a silent skip.** Both
+  questions above decline for a daemon that is not running — correctly, each on
+  its own terms — and nothing then owned the state. Measured 2026-09-27: the
+  Radient tunnel connector was found loaded and stopped, ~12 hours down, with no
+  park record and ``config.stopped: false``, while five ``lop update`` installs
+  walked this refresh in silence. The missing arm is
+  :func:`start_if_stopped`, wired where a caller can state the one policy it
+  cannot know: whether a stop was the operator's own.
+
 WHY THE REPAIR MUST RUN IN A NEW PROCESS
 ----------------------------------------
 ``lop update`` upgrading the wheel does not change the code its own process has
@@ -95,6 +104,8 @@ PlistRefreshKind = Literal[
     "current",
     "repaired",
     "restarted",
+    "revived",
+    "left-stopped",
     "failed",
 ]
 
@@ -259,6 +270,17 @@ class PlistRefresh:
         no process back, is not reported as this at all
         (:func:`build_move_failure`).
 
+        THE ``revived`` LINE REPORTS A THIRD REPAIR, and it names the one fact a
+        reader cannot infer: the daemon was DOWN before this refresh looked, and
+        nothing about the plist or the build said so. "stopping silently" is the
+        part that matters — no rewrite happened, no generation moved, and
+        launchd's own contract means nothing was retrying it, so until this line
+        the stop was invisible (2026-09-27: ~12 hours down, five upgrades, no
+        line). It carries the same discipline as ``restarted``: the confirmation
+        proves a new PROCESS came up, never that everything is well, and the
+        clause is the caller's. 78 columns with the tunnel's clause, so it is
+        still one row at 80.
+
         THE CONSEQUENCE CLAUSE DISPLACES THE GENERATION ID (round 2 ruling), rather
         than following it: following it put this line at 119 columns, which re-opened
         the width D2 had just closed, and the id is the one span a reader who has not
@@ -272,6 +294,10 @@ class PlistRefresh:
             if self.consequence:
                 return f"{self.name} daemon: restarted onto the new build — {self.consequence}"
             return f"{self.name} daemon: restarted onto the new build (was on {self.detail})"
+        if self.kind == "revived":
+            if self.consequence:
+                return f"{self.name} daemon: restarted after stopping silently — {self.consequence}"
+            return f"{self.name} daemon: restarted after stopping silently"
         return ""
 
     def warning(self) -> str:
@@ -366,6 +392,34 @@ def build_move_failure(name: str, recovery: str, stale: Path, *, why: str) -> Pl
             f"it was still on an older install ({stale.name}) and {why} "
             f"— run `{recovery}` to move it onto this build"
         ),
+    )
+
+
+def revive_failure(name: str, recovery: str, *, why: str) -> PlistRefresh:
+    """Outcome for a daemon that had stopped and could not be started again.
+
+    THE THIRD FAILURE SHAPE, and it deliberately borrows neither sibling's
+    sentence. :func:`reload_failure`'s is about a plist this repair just rewrote
+    ("the daemon is now STOPPED"); :func:`build_move_failure`'s is about an
+    install that had moved. Here neither is true — nothing was written, no
+    generation is named, and the daemon was already down before this refresh
+    looked — so the honest line is what both failures share: it had stopped, the
+    restart did not happen, and a command exists that brings it back.
+
+    ``why`` is what the attempt actually establishes, and like
+    :func:`build_move_failure` it is a parameter because there are two shapes:
+    ``kickstart`` refused (nothing was asked to happen, so the operator's next
+    move is what it always was), or ``kickstart`` accepted and no new process
+    came up (a daemon that died on start — a bad build, a port already taken, a
+    park flapping). The recovery command is the same installer spelling the
+    other two sentences carry, for the same reason: the reader is deciding
+    whether to touch anything, and the answer may not depend on which of the
+    three shapes they hit.
+    """
+    return PlistRefresh(
+        name=name,
+        kind="failed",
+        detail=f"it had stopped and {why} — run `{recovery}` to bring it back",
     )
 
 
@@ -609,9 +663,13 @@ _KICKSTART_PID_POLL_S = 0.05
 
 
 def _await_new_pid(
-    *, label: str, path: Path, previous: int, run: Callable[..., object]
+    *, label: str, path: Path, previous: int | None, run: Callable[..., object]
 ) -> int | None:
     """The pid launchd reports once it DIFFERS from ``previous``, or ``None``.
+
+    ``previous`` may be ``None``, for a job that had NO process at all: then any
+    live pid is the new one (see :func:`start_if_stopped`, the one caller that
+    starts from nothing).
 
     THE CONFIRMATION :func:`kickstart` CANNOT GIVE (review round 1, R3). Its exit
     code says launchd ACCEPTED the request — it kills and respawns — and a daemon
@@ -1259,3 +1317,111 @@ def restart_if_build_moved(
             ),
         )
     return PlistRefresh(name=name, kind="restarted", detail=stale.name, consequence=consequence)
+
+
+def start_if_stopped(
+    *,
+    name: str,
+    label: str,
+    path: Path,
+    recovery: str,
+    run: Callable[..., object],
+    consequence: str = "",
+    may_start: Callable[[], bool] | None = None,
+) -> PlistRefresh | None:
+    """Start a job launchd has LOADED but is not running — the stranded state.
+
+    THE THIRD STATE ON THE REFRESH PATH, and until this arm existed nobody's: a
+    daemon that exited CLEANLY is loaded-but-stopped, ``KeepAlive{SuccessfulExit:
+    false}`` deliberately does not retry it, and BOTH questions this module
+    already had decline for it in their own words — a rewrite cannot see it (the
+    plist is content-identical), and :func:`restart_if_build_moved` declines
+    before posting its probe ("a stopped daemon has no build to compare", its
+    docstring naming the repair as "the installers' own ``kickstart`` path" — a
+    path no caller on this refresh ever took).
+
+    MEASURED, 2026-09-27, and why this exists: the Radient tunnel connector was
+    found loaded and stopped at 14:47, ~12 hours down, with no park record and
+    ``config.stopped: false``; five ``lop update`` installs in the window had
+    each walked this refresh and printed nothing for it. ``lop tunnel install``
+    brought it back instantly — its ``install()`` has always had the kickstart
+    arm for a dead job — and that arm was simply unreachable from the refresh.
+
+    WHAT IT ASKS, and what it does NOT touch, all silent (``None``):
+
+    * **no generation layout** — the same first question, and the same
+      ``readlink``, that :func:`restart_if_build_moved` opens with: this arm is
+      part of that refresh's contract, not a second one. On a machine the
+      layout has not reached, a stopped job is the installers' to repair and
+      this walks on without consulting ``launchd`` at all.
+    * **a plist this run does not own** (:func:`is_own_plist`) — the guard that
+      keeps a sandboxed run (a test, a review worktree) away from the
+      operator's real session; asked before any ``launchctl`` call.
+    * **a label launchd does not have, or a runner that does not answer** — a
+      job that was booted out entirely wants a ``bootstrap`` (the installers'
+      reload), not a kickstart, and an unanswerable ``launchctl`` is a reading
+      every other question here also declines on.
+    * **a job that IS running** — :func:`restart_if_build_moved` owns that
+      state, and starting a live job is not a repair.
+
+    A LOADED LABEL WITH NO PID IS THE ONE STATE IT OWNS. One ``launchctl
+    print`` answers both halves — exit 0 means the label is registered; the
+    absence of the ``pid =`` line (:func:`_pid_from_print`) means no process is
+    behind it — and the repair is :func:`kickstart`, the same choice
+    ``wakes.install`` makes for a stopped supervisor and the tunnel's own
+    ``install()`` makes for a dead job.
+
+    ``may_start`` IS THE CALLER'S GATE, consulted only once the stopped state is
+    established, because the policy it carries cannot be read off the system:
+    the tunnel passes one that refuses a PARK (a person owns that —
+    ``rearm_if_parked`` starts it when the login is fixed) and a deliberate
+    ``config.stopped`` (starting would restore remote access against the
+    operator's own decision). A refusal is the ``left-stopped`` outcome and
+    prints nothing: neither state is news to the person who chose it.
+
+    CONFIRMATION AND FAILURE follow the sibling repair's terms exactly. A
+    changed pid is the only evidence a start happened — ``launchctl`` exits 0 for
+    an attempt that dies instantly (see :func:`_await_new_pid`, whose
+    ``previous`` is ``None`` here: there was no process to differ from) — and
+    either failure shape is reported through :func:`revive_failure`, which names
+    this daemon's installer. Nothing here raises: the upgrade it is part of has
+    already succeeded. ONE kick: a revival that lands is running the next time
+    this asks, and a revival that does not is reported rather than retried.
+
+    WHY A SEPARATE FUNCTION rather than a branch inside
+    :func:`restart_if_build_moved`: that repair stays policy-free (it is shared
+    by all four daemons, and only one of them has a stop somebody can
+    deliberately ask for), and the stopped case is a DIFFERENT question with a
+    different answer line — so reverting or widening it here is a one-site
+    decision instead of a new arm inside a function three other daemons call.
+    """
+    # Function-local, this module's habit for the one edge it has into `update`
+    # (`update` imports `launchd` at module level; see `procname.supervised_image`).
+    from local_operator import update
+
+    if update.current_generation() is None:
+        return None
+    if not is_own_plist(path, label):
+        return None
+    result, _why = _call(run, "print", f"{job_domain()}/{label}")
+    if result is None or getattr(result, "returncode", 1) != 0:
+        # Not registered at all (or not answerable): this arm owns a job launchd
+        # HAS and is not running — a booted-out label wants the installers'
+        # reload, not a kickstart. See the docstring's declining list.
+        return None
+    if _pid_from_print(_text(getattr(result, "stdout", ""))) is not None:
+        return None
+    if may_start is not None and not may_start():
+        return PlistRefresh(name=name, kind="left-stopped")
+    if not kickstart(label=label, path=path, run=run):
+        return revive_failure(name, recovery, why="launchctl would not restart it")
+    if _await_new_pid(label=label, path=path, previous=None, run=run) is None:
+        return revive_failure(
+            name,
+            recovery,
+            why=(
+                "the restart it accepted did not report a new process within "
+                f"{_KICKSTART_PID_DEADLINE_S:g} s"
+            ),
+        )
+    return PlistRefresh(name=name, kind="revived", consequence=consequence)
