@@ -187,6 +187,15 @@ command's own flags must come BEFORE the session id**, since a trailing `--json`
 is text like everything else, and `--` is the explicit separator when the text
 itself starts with a dash (`--send <session> -- --json is the field I mean`).
 
+EVERY SUCCESS RECEIPT NAMES THE DEVICE THE ACT RAN ON, and `--peer` is not that
+name — the session id is what routes the act, so the receipt answers from the
+session's own row and costs no extra read. `peer` is therefore the device
+(`cloud-node-1`), not whatever `--peer` was typed; when the two disagree, the
+caller's own word is carried beside it as `peer_named` and the human run says so in
+a line of its own. A receipt you can trust to name the machine that did the work is
+the point: before this, `--peer no-such-device --send <id> hello` answered
+`peer: no-such-device` with exit 0 while the turn really ran elsewhere.
+
 EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
 acting on one (QA round 5, Q-R5-1):
 

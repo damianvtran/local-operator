@@ -347,6 +347,51 @@ async def test_a_flag_shaped_prompt_reaches_the_peers_journal_whole(
 
 
 @pytest.mark.asyncio
+async def test_a_success_receipt_names_the_device_the_turn_ran_on(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """QA round 1, Q1, over a real relay pair: a wrong ``--peer`` still runs the turn
+    (the session id is what ROUTES it), and the receipt says which device that was
+    instead of echoing the caller's string back as though it were the answer.
+
+    Both halves matter: the device named is the one the turn LANDED on — its own
+    journal has the text below — and the caller's word is kept beside it so the
+    mistake is visible rather than silently corrected.
+    """
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="pilot-named",
+        prompt="",
+    )
+    try:
+        root_a = created.server_a.root
+        (root_a / "config.yml").write_text(
+            "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n", encoding="utf-8"
+        )
+        code, out, err = await asyncio.to_thread(
+            _run_cli,
+            root_a,
+            _home(tmp_path),
+            "sessions",
+            "--json",
+            "--peer",
+            "no-such-device",
+            "--send",
+            created.session_id,
+            "name check",
+        )
+        assert code == 0, (code, out, err)
+        payload = json.loads(out)
+        assert payload["peer"] == "device-b", payload
+        assert payload["peer_named"] == "no-such-device", payload
+        assert await _journals(created, "name check"), _user_texts(created)
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
 async def test_a_goal_slash_from_the_shell_runs_its_request_on_the_peer(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

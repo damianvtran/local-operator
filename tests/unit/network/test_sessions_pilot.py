@@ -700,6 +700,88 @@ def test_this_commands_own_flags_come_before_the_session_id() -> None:
 
 
 # ---------------------------------------------------------------------------
+# the receipt names the DEVICE, not the string typed (QA round 1, Q1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "act",
+    [
+        ["--send", SESSION, "hello"],
+        ["--steer", SESSION, "hello"],
+        ["--slash", SESSION, "/rename x"],
+    ],
+    ids=["send", "steer", "slash"],
+)
+def test_a_success_receipt_names_the_device_the_work_happened_on(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], act: list[str]
+) -> None:
+    """QA round 1, Q1: `--peer no-such-device --send <id> hello` answered rc 0 with
+    `peer: no-such-device` while the turn ran on the real peer, because the receipt
+    echoed the string the user typed and only a FAILURE path ever resolved a name.
+
+    `--peer` is not what routes the act — the session id is — so the receipt names
+    the device the session's own row says holds it, which is a fact this act already
+    read and which therefore costs no second fan-out. The string the user typed is
+    kept beside it when the two disagree, so a wrong `--peer` is visible instead of
+    silently believed.
+    """
+    viewer = _FakeViewer(
+        streaming=True, slash_receipt={"kind": "notice", "text": "renamed", "style": "info"}
+    )
+    _patch(monkeypatch, viewer, _remote_row())
+
+    assert _run(["sessions", "--json", "--peer", "no-such-device", *act]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["peer"] == PEER, payload
+    assert payload["peer_named"] == "no-such-device", payload
+
+
+def test_a_matching_peer_name_carries_no_mismatch_note(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ordinary case stays ordinary: the name the user typed IS the device, so
+    nothing is repeated back at them."""
+    viewer = _FakeViewer(rows=[_Message("assistant", "the reply")])
+    _patch(monkeypatch, viewer, _remote_row())
+
+    assert _run(["sessions", "--json", "--peer", PEER, "--send", SESSION, "hi"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["peer"] == PEER
+    assert "peer_named" not in payload
+
+
+def test_the_device_id_is_an_accepted_way_to_name_the_peer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same exact-match rule ``_pilot_peer_block`` already uses (name OR device
+    id), so naming the peer by its id does not read as a mismatch — and the receipt
+    still answers with the canonical NAME, which is what a person reads."""
+    row = _remote_row()
+    viewer = _FakeViewer(rows=[_Message("assistant", "the reply")])
+    _patch(monkeypatch, viewer, row)
+
+    assert _run(["sessions", "--json", "--peer", row.owner_device, "--send", SESSION, "hi"]) == 0
+    payload = ok(capsys.readouterr().out)
+    assert payload["peer"] == PEER
+    assert "peer_named" not in payload
+
+
+def test_the_human_run_names_the_device_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The lines are a receipt as well, so the same fact is in them — and the wrong
+    name is called out rather than dropped."""
+    viewer = _FakeViewer(rows=[_Message("assistant", "the reply")])
+    _patch(monkeypatch, viewer, _remote_row())
+
+    assert _run(["sessions", "--peer", "no-such-device", "--send", SESSION, "hi"]) == 0
+    printed = capsys.readouterr().out
+    assert PEER in printed, printed
+    assert "no-such-device" in printed, printed
+
+
+# ---------------------------------------------------------------------------
 # what the viewer declares (round 1, MAJOR-2)
 # ---------------------------------------------------------------------------
 
