@@ -492,9 +492,17 @@ def write_tombstone(
     reason ``archived.py`` gives for refusing the same shape: this file is
     written by the ONE device that handed the session away, at the commit of a
     move, and at no other time (§6.3) — it is not a per-listing write path.
+
+    The root is created HERE, by the writer, 0700: ``tombstones_path`` resolves a
+    path and must not create one (the reader above answers "nothing moved" on a
+    machine that has never moved a session), and a bare ``mkdir(parents=True)``
+    for the root would take the umask's mode.
     """
+    from local_operator.network.identity import ensure_network_root
+
+    root = Path(config_dir) if config_dir is not None else paths.config_dir()
+    ensure_network_root(root)
     path = tombstones_path(config_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
     entries = read_tombstones(config_dir)
     entries[session_id] = {
         "device_id": device_id,
