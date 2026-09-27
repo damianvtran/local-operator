@@ -1488,6 +1488,12 @@ def _is_type_expression(value: str) -> bool:
     return parsed and index == len(value) and is_a_type_name
 
 
+#: A BARE IDENTIFIER: one token, letters/digits/underscore, starting with a
+#: letter or underscore. The shape ordinary code gives an assigned NAME —
+#: ``BUCKET_KEY=bucket_v4``, ``KEYSTORE=schema_registry``, ``REGION=ca_central_1``.
+_BARE_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -1536,6 +1542,26 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # them; a JWT — the one credential that looks dotted — is caught by its own
     # bare-token rule rather than by a name-driven one.
     if _DOTTED_PATH.fullmatch(value):
+        return True
+    # A BARE IDENTIFIER is a NAME, not a secret, and this clause is what keeps one
+    # out of the session-wide registration set. The name beside it says only that a
+    # credential COULD sit there; the value says none did.
+    #
+    # Measured, and the failure it exists for: a read carrying ``BUCKET_KEY=bucket_v4``
+    # made ``bucket_v4`` a registered redaction, so EVERY later occurrence in that
+    # session was masked — including inside a Go struct tag. An agent reading its own
+    # file back saw ``bson:"[redacted],omitempty"`` where two DISTINCT field names had
+    # been, took the marker for a display quirk, and wrote it back into source
+    # (radient-ml/agent-server #52): the two tags came out byte-identical, Mongo index
+    # creation failed at boot with no error, and only a byte hash showed it. The damage
+    # outlives the line that caused it, which is why the refusal belongs on the VALUE
+    # rather than on any one rule's name list.
+    #
+    # WEAK names only, deliberately: a STRONG name (``password``, ``api_key``, ``…_token``)
+    # must keep masking any opaque value, which is the split ``strong`` already encodes
+    # and the reason the corpus positives — ``PASSWORD=swordfish``, ``token=abcdefghijklmnop``
+    # — stay caught.
+    if not strong and _BARE_IDENTIFIER.fullmatch(value):
         return True
     # A lowercase hyphenated word-phrase under a CODE-ish name is a NAME, not a
     # secret (``_PUBLIC_LISTING_TOKEN = "public-catalogue-read"``). The
