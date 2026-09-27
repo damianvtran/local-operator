@@ -1,0 +1,617 @@
+"""The full-page ``/project`` view — every tracked workstream on one page.
+
+A MODE of the main screen, cloned from :class:`SettingsView` and, through it,
+:class:`OrgChartView`/:class:`SubagentView`: the page takes the transcript's
+region and leaves the dock (band, status, composer) where it is, greyed, so it
+reads as the same app looking somewhere else. It is deliberately NOT a
+``textual.push_screen`` and not a floating card — the design's refinement
+(§V2.B.2) fixes the mechanics as ``SettingsView``'s.
+
+WHAT THIS PAGE OWES THE USER
+============================
+
+- **Three views, one canvas.** ``1``/``2``/``3`` jump between list, board and
+  timeline; ``v`` cycles. The list keeps a real cursor (clamped, reveal-then-act
+  — the full-page exception AGENTS.md documents), board and timeline are
+  canvases scrolled by the arrows. ``r`` asks the app to recompose; the page
+  itself does no I/O — the same split ``/settings`` makes with its resolved
+  rows, so a repaint costs no registry or filesystem read.
+- **Honest absence.** A field the store does not know renders as a sentence
+  (``no progress``, ``no estimate or dates``), and subagent/todo counts the
+  data marks ``null`` are omitted, never shown as zeroes.
+- **A way back.** The footer names ``esc`` and sheds whole hints widest-first
+  the way the org chart's does, so a 50-column terminal still says how to leave.
+
+The canvas is sized in Python to what :mod:`local_operator.tui.projects_render`
+returns (the org-chart mechanics): the ``ScrollableContainer``'s virtual size
+equals the canvas, so scrollbars appear exactly when the content overflows.
+
+Identified by CLASS and not id, all the way down — the ``DuplicateIds``-on-fast-
+reopen lesson ``org_chart_view`` records: ``remove()`` only POSTS a prune, so a
+reopen inside that window would mount a second same-id widget.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
+from rich.style import Style
+from rich.text import Text
+from textual.binding import Binding
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.message import Message
+from textual.widgets import Static
+
+from local_operator.tui import theme as theme_mod
+from local_operator.tui.projects_render import (
+    TIMELINE_TIERS,
+    RenderResult,
+    aggregate_footer,
+    auto_timeline_tier,
+    detail_footer,
+    render_project_board,
+    render_project_list,
+    render_project_timeline,
+)
+from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
+
+#: The view vocabulary, in the order ``1``/``2``/``3`` address it and ``v``
+#: cycles through it. One tuple so the bindings, the cycle and the title cannot
+#: disagree about what the third view is.
+VIEWS: tuple[str, ...] = ("list", "board", "timeline")
+
+
+class ProjectsViewDismissed(Message):
+    """The page's ``esc`` hint was clicked. The app owns leaving the mode.
+
+    A dedicated message, for the reason ``OrgChartView`` states: reusing a
+    sibling mode's message would hit that mode's handler, which does not own
+    this widget.
+    """
+
+
+class ProjectsViewRefreshRequested(Message):
+    """``r`` was pressed. The APP recomposes — the page never reads the store.
+
+    The page is a pure viewer (see the module docstring): recomposition means
+    a registry read, a runtime scan and per-session tail reads, all of which
+    belong to the app so the widget can be exercised without a filesystem.
+    """
+
+
+def _style_resolver() -> Callable[[str], Style]:
+    """A style-key → ``rich.Style`` resolver bound to the CURRENT theme.
+
+    Rebuilt on each render so a theme switch while the page is open repaints in
+    the new palette — the org chart's rule, same implementation shape. The keys
+    are the ones ``projects_render`` paints.
+    """
+
+    def color(token: str) -> str:
+        return theme_mod.semantic_color(token)
+
+    styles = {
+        "name": Style(color=color("fg"), bold=True),
+        "status": Style(color=color("accent")),
+        "cursor": Style(color=color("accent"), bold=True),
+        "dim": Style(color=color("dim")),
+        # A live session is the accent-of-success: the one fact the page exists
+        # to surface ("what is actually running?").
+        "live": Style(color=color("success")),
+        # Stale progress is a warning tone — the whole point of showing an age
+        # is that an old line must not read like a fresh one.
+        "stale": Style(color=color("warning")),
+        "bar": Style(color=color("muted")),
+        "milestone_done": Style(color=color("success")),
+        "milestone_late": Style(color=color("danger")),
+        "milestone_due": Style(color=color("muted")),
+        "today": Style(color=color("accent")),
+    }
+
+    def resolve(key: str) -> Style:
+        return styles.get(key, Style())
+
+    return resolve
+
+
+class ProjectsView(Vertical):
+    """The page: a title, a rule, the scrollable canvas, the detail footer, hints.
+
+    Class-identified (see the module docstring). ``can_focus`` so the view
+    keys, the list cursor and the canvas scrolling land here rather than on the
+    composer the mode made inert.
+    """
+
+    can_focus = True
+
+    # Arrows CLAMP — this is the full-page mode AGENTS.md names as the second
+    # member of the clamp exception (`/settings` is the first): its list is
+    # several times its viewport, so the bottom is a destination, not a place
+    # to wrap away from. In the list view up/down move the CURSOR (clamped);
+    # in the board/timeline views they scroll the canvas. `←→` are NOT
+    # view-switch keys — they belong to the canvas scroll, because a page that
+    # scrolls horizontally must keep its pan axis (the settings PANE-cycle
+    # convention does not transfer). Shift+arrows page horizontally and
+    # PageUp/Down vertically, the org-chart scheme.
+    BINDINGS = [
+        Binding("1", "show_list", "List view", show=False),
+        Binding("2", "show_board", "Board view", show=False),
+        Binding("3", "show_timeline", "Timeline view", show=False),
+        Binding("v", "cycle_view", "Next view", show=False),
+        Binding("r", "refresh", "Refresh", show=False),
+        # Zoom is TIME resolution on the timeline (the org-chart "zoom is level
+        # of detail" rule); in the other views it is inert and the footer sheds
+        # the hint rather than advertising a key that does nothing.
+        Binding("plus,equals_sign,equal", "zoom_in", "Finer time", show=False),
+        Binding("minus,underscore", "zoom_out", "Coarser time", show=False),
+        Binding("up", "up", "Up", show=False),
+        Binding("down", "down", "Down", show=False),
+        Binding("left", "scroll_left", "Scroll left", show=False),
+        Binding("right", "scroll_right", "Scroll right", show=False),
+        Binding("pageup", "page_up", "Page up", show=False),
+        Binding("pagedown", "page_down", "Page down", show=False),
+        Binding("shift+left", "page_left", "Page left", show=False),
+        Binding("shift+right", "page_right", "Page right", show=False),
+        # Home/End jump to the ends of the CURSOR in the list view and to the
+        # canvas corners elsewhere (org chart's explicit scroll_to, because
+        # Textual's scroll_end reaches the bottom-LEFT, not the right edge).
+        Binding("home", "scroll_home", "To start", show=False),
+        Binding("end", "scroll_end", "To end", show=False),
+        Binding("escape", "leave", "Back", show=False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__(classes="projects-view")
+        #: The composed project views (``build_project_view`` payloads), handed
+        #: in by the app. Held so view/zoom/cursor repaints never re-read.
+        self._views: list[dict[str, Any]] = []
+        #: Current view type, the list cursor (list view only; clamped), the
+        #: timeline tier, and the one-clock "updated at" the title states.
+        self._view: str = "list"
+        self._cursor: int = 0
+        self._tier: str = "month"
+        self._updated_at: float | None = None
+        #: Last render, kept for the geometry probes and rendered_rows().
+        self._last: RenderResult | None = None
+        self._title = Static(classes="projects-view-title")
+        self._rule = Static(classes="projects-view-rule")
+        # The canvas is a Static inside a BOTH-AXES scroll container: the
+        # Static is sized to the painted canvas and the container clips and
+        # scrolls it, so Textual's own scrollbars appear exactly when over.
+        self._canvas = Static(classes="projects-view-canvas")
+        self._body = ScrollableContainer(self._canvas, classes="projects-view-body")
+        # The pinned footer: the highlighted project's detail in the list view,
+        # aggregate counts elsewhere. ALWAYS one row (a footer that appeared
+        # and disappeared would move the body on every view switch).
+        self._detail = Static(classes="projects-view-detail")
+        self._scroll_hint = HintButton("↔↕", self._focus_canvas)
+        self._list_hint = HintButton("1", lambda: self.action_show_list())
+        self._board_hint = HintButton("2", lambda: self.action_show_board())
+        self._timeline_hint = HintButton("3", lambda: self.action_show_timeline())
+        self._next_hint = HintButton("v", lambda: self.action_cycle_view())
+        self._refresh_hint = HintButton("r", lambda: self.action_refresh())
+        self._zoom_hint = HintButton("+/-", self._cycle_tier)
+        self._exit_hint = HintButton("esc", self._leave)
+        self._state_hint = HintButton(READ_ONLY_NOTE)
+        self._hints = Horizontal(classes="projects-view-hints")
+
+    # -- data ---------------------------------------------------------------
+    def load(
+        self,
+        *,
+        views: list[dict[str, Any]],
+        highlight: str | None = None,
+        updated_at: float | None = None,
+    ) -> None:
+        """Point the page at a fresh composition and paint it.
+
+        ``highlight`` names a project id to put the list cursor on (``/project
+        show <name>`` lands here); left ``None`` the cursor is KEPT — a refresh
+        must not move the reader off the row they were reading.
+        """
+        self._views = list(views)
+        if updated_at is not None:
+            self._updated_at = updated_at
+        if highlight is not None:
+            for index, view in enumerate(self._views):
+                project = view.get("project") if isinstance(view, dict) else None
+                if isinstance(project, dict) and str(project.get("id")) == str(highlight):
+                    self._cursor = index
+                    break
+            if self._view != "list":
+                # The cursor only exists on the list canvas; showing a project
+                # means being ABLE to see it, so a `show` lands on the list.
+                self._view = "list"
+        self._cursor = max(0, min(self._cursor, max(len(self._views) - 1, 0)))
+        if self._view == "timeline":
+            # A recomposition can change the dated span (a new target date),
+            # and the auto tier exists to fit it; an explicit zoom is only kept
+            # while the span it was chosen for still fits.
+            self._tier = auto_timeline_tier(self._views)
+        self._repaint()
+
+    def focus_project(self, project_id: str) -> None:
+        """Move the list cursor to a project (an already-open page, re-shown)."""
+        for index, view in enumerate(self._views):
+            project = view.get("project") if isinstance(view, dict) else None
+            if isinstance(project, dict) and str(project.get("id")) == str(project_id):
+                self._view = "list"
+                self._cursor = index
+                self._repaint()
+                return
+
+    @property
+    def tracked(self) -> int:
+        """How many projects the page was handed."""
+        return len(self._views)
+
+    # -- rendering ----------------------------------------------------------
+    def _render_view(self) -> RenderResult:
+        """The canvas for the CURRENT view type. Named ``_render_view`` and NOT
+        ``_render``: ``Widget._render`` is Textual's own hook (it promotes
+        ``render()``'s result to a Visual), and a same-named method returning
+        our ``RenderResult`` made the widget hand Textual a plain dataclass as
+        its visual — every frame raised ``'RenderResult' object has no
+        attribute 'render_strips'``. The ``render``/``query``/``visible``
+        shadowing rule AGENTS.md states extends to this one.
+        """
+        resolver = _style_resolver()
+        if self._view == "board":
+            return render_project_board(self._views, style_for=resolver)
+        if self._view == "timeline":
+            return render_project_timeline(self._views, tier=self._tier, style_for=resolver)
+        return render_project_list(
+            self._views,
+            cursor=self._cursor if self._views else None,
+            style_for=resolver,
+        )
+
+    def _repaint(self) -> None:
+        result = self._render_view()
+        self._last = result
+        self._canvas.update(result.text)
+        # Pin the Static to the painted canvas size so the ScrollableContainer's
+        # virtual size equals the canvas (Textual scrolls the difference).
+        self._canvas.styles.width = result.width
+        self._canvas.styles.height = result.height
+        self._paint_chrome()
+
+    def _paint_chrome(self) -> None:
+        muted = Style(color=theme_mod.semantic_color("muted"))
+        dim = Style(color=theme_mod.semantic_color("dim"))
+        title = Text(no_wrap=True, overflow="ellipsis")
+        title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+        title.append(f" · {self._view}", style=muted)
+        tracked = len(self._views)
+        title.append(f" · {tracked} tracked", style=dim)
+        if self._view == "timeline":
+            # The tier is always stated so an auto-chosen axis explains itself
+            # (the org chart's tier-title rule).
+            title.append(f" · zoom: {self._tier}", style=dim)
+        if self._updated_at is not None:
+            import time as _time
+
+            stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
+            title.append(f" · updated {stamp}", style=dim)
+        self._title.update(title)
+
+        width = max(self.size.width - 2, 1)
+        self._rule.update(Text("─" * width, style=dim))
+
+        if self._view == "list" and self._views:
+            index = max(0, min(self._cursor, len(self._views) - 1))
+            self._detail.update(detail_footer(self._views[index], style_for=_style_resolver()))
+        else:
+            tier = self._tier if self._view == "timeline" else None
+            self._detail.update(
+                aggregate_footer(self._views, tier=tier, style_for=_style_resolver())
+            )
+        self._paint_hints()
+
+    def _paint_hints(self) -> None:
+        """Lay out the footer hints, shedding WHOLE hints until the row fits.
+
+        The org-chart ladder, same rule: the affordances a reader needs most
+        (scroll, views, esc) survive, and ``esc`` is never dropped because it
+        is the only way out. Each rung is measured before it is committed.
+        """
+
+        def rung(
+            leads: list[tuple[HintButton, str, bool]],
+            esc_label: str,
+            *,
+            state: bool,
+        ) -> tuple[list[tuple[HintButton, str, bool]], str]:
+            row = list(leads)
+            row.append((self._exit_hint, esc_label, bool(row)))
+            if state:
+                row.append((self._state_hint, "", True))
+            return (row, esc_label)
+
+        scroll = (self._scroll_hint, " scroll", False)
+        list_hint = (self._list_hint, " list", True)
+        board_hint = (self._board_hint, " board", True)
+        timeline_hint = (self._timeline_hint, " timeline", True)
+        refresh = (self._refresh_hint, " refresh", True)
+        nxt = (self._next_hint, " next", True)
+        # `+/-` is TIME zoom: it acts only on the timeline, and a hinted key
+        # that changes nothing is worse than an absent one (the org chart's own
+        # rule for its zoom hint) — so the button is advertised where it works
+        # and dropped from every rung elsewhere.
+        zoom: tuple[HintButton, str, bool] | None = (
+            (self._zoom_hint, " zoom", True) if self._view == "timeline" else None
+        )
+
+        def plan(*leads: tuple[HintButton, str, bool] | None) -> list[tuple[HintButton, str, bool]]:
+            return [lead for lead in leads if lead is not None]
+
+        all_leads = plan(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, zoom)
+        rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = [
+            rung(all_leads, "back to conversation", state=True),
+            rung(all_leads, "back to conversation", state=False),
+            rung(all_leads, "back", state=False),
+            rung(plan(scroll, list_hint, board_hint, timeline_hint, refresh), "back", state=False),
+            rung(plan(scroll, list_hint, board_hint, timeline_hint), "back", state=False),
+            rung(plan(scroll, list_hint, board_hint), "back", state=False),
+            rung(plan(scroll, list_hint), "back", state=False),
+            rung(plan(scroll), "back", state=False),
+            rung(plan(), "back", state=False),
+        ]
+        width = max(self.size.width - 2, 1)
+        chosen = rungs[-1]
+        for plan, esc_label in rungs:
+            if self._measure_hints(plan, esc_label) <= width:
+                chosen = (plan, esc_label)
+                break
+        plan, esc_label = chosen
+        visible = {hint for hint, _label, _lead in plan}
+        for hint, label, lead in plan:
+            hint.paint(esc_label if hint is self._exit_hint else label, lead=lead)
+        for hint in (
+            self._scroll_hint,
+            self._list_hint,
+            self._board_hint,
+            self._timeline_hint,
+            self._next_hint,
+            self._refresh_hint,
+            self._zoom_hint,
+            self._exit_hint,
+            self._state_hint,
+        ):
+            hint.display = hint in visible
+
+    def _measure_hints(self, plan: list[tuple[HintButton, str, bool]], esc_label: str) -> int:
+        """Cell width of a candidate hint row, measured before it is painted."""
+        from rich.cells import cell_len
+
+        row = Text()
+        for hint, label, lead in plan:
+            row.append(hint.preview(esc_label if hint is self._exit_hint else label, lead=lead))
+        return cell_len(row.plain)
+
+    # -- lifecycle ----------------------------------------------------------
+    def compose(self):  # type: ignore[override]
+        yield self._title
+        yield self._rule
+        yield self._body
+        yield self._detail
+        with self._hints:
+            yield self._scroll_hint
+            yield self._list_hint
+            yield self._board_hint
+            yield self._timeline_hint
+            yield self._next_hint
+            yield self._refresh_hint
+            yield self._zoom_hint
+            yield self._exit_hint
+            yield self._state_hint
+
+    def on_mount(self) -> None:
+        # Focus lands here rather than at the app's open call: focus() on a
+        # widget not yet in the focus chain is a silent no-op (the subagent
+        # view's recorded bug), and the advertised keys would go to the inert
+        # composer. Repaint after focus so the first frame is the settled one.
+        self._repaint()
+        try:
+            self.focus()
+        except Exception:
+            pass
+
+    def on_resize(self) -> None:
+        # The rule spans the page and the hints shed against a width only the
+        # layout knows, so both repaint on resize. The canvas is
+        # width-independent (it scrolls), so only the chrome moves.
+        self._paint_chrome()
+
+    # -- geometry probes (for tests / visual validation) --------------------
+    @property
+    def canvas_size(self) -> tuple[int, int]:
+        """The painted canvas (width, height) in cells — the body's virtual."""
+        if self._last is None:
+            return (0, 0)
+        return (self._last.width, self._last.height)
+
+    @property
+    def last_result(self) -> RenderResult | None:
+        return self._last
+
+    @property
+    def view_type(self) -> str:
+        return self._view
+
+    @property
+    def tier(self) -> str:
+        return self._tier
+
+    @property
+    def cursor(self) -> int:
+        return self._cursor
+
+    def rendered_rows(self) -> list[str]:
+        """The page as plain strings — title, rule, canvas rows. Assertable."""
+        rows = [self._title.render().plain, self._rule.render().plain]
+        if self._last is not None:
+            rows.extend(text.plain for text in self._last.text.split("\n"))
+        return rows
+
+    # -- view switching -----------------------------------------------------
+    def _set_view(self, view: str) -> None:
+        if view not in VIEWS or view == self._view:
+            return
+        self._view = view
+        if view == "timeline":
+            # An auto tier per composition: the axis exists to fit the data it
+            # was opened on, and a manual zoom survives until the span changes.
+            self._tier = auto_timeline_tier(self._views)
+        # The canvas is a different shape now; start the reader at its origin
+        # rather than at a scroll offset computed for the previous canvas.
+        self._body.scroll_to(x=0, y=0, animate=False)
+        self._repaint()
+
+    def action_show_list(self) -> None:
+        self._set_view("list")
+
+    def action_show_board(self) -> None:
+        self._set_view("board")
+
+    def action_show_timeline(self) -> None:
+        self._set_view("timeline")
+
+    def action_cycle_view(self) -> None:
+        self._set_view(VIEWS[(VIEWS.index(self._view) + 1) % len(VIEWS)])
+
+    def action_refresh(self) -> None:
+        self.post_message(ProjectsViewRefreshRequested())
+
+    # -- zoom (timeline only) ----------------------------------------------
+    def _set_tier(self, tier: str) -> None:
+        if tier not in TIMELINE_TIERS or tier == self._tier:
+            return
+        self._tier = tier
+        if self._view == "timeline":
+            self._body.scroll_to(x=0, y=0, animate=False)
+            self._repaint()
+
+    def action_zoom_in(self) -> None:
+        # "In" = MORE detail = a finer unit (the org chart's rule: zoom is
+        # level of detail). Inert off the timeline: the footer does not offer
+        # it there, and a key that changes nothing is worse than absent.
+        if self._view != "timeline":
+            return
+        index = TIMELINE_TIERS.index(self._tier)
+        self._set_tier(TIMELINE_TIERS[max(0, index - 1)])
+
+    def action_zoom_out(self) -> None:
+        if self._view != "timeline":
+            return
+        index = TIMELINE_TIERS.index(self._tier)
+        self._set_tier(TIMELINE_TIERS[min(len(TIMELINE_TIERS) - 1, index + 1)])
+
+    def _cycle_tier(self) -> None:
+        # The +/- hint click steps finer and wraps, the way the org chart's
+        # sole zoom hint does (a single click target cannot mean both).
+        if self._view != "timeline":
+            return
+        index = TIMELINE_TIERS.index(self._tier)
+        self._set_tier(TIMELINE_TIERS[(index + 1) % len(TIMELINE_TIERS)])
+
+    # -- movement and scrolling (all CLAMP; no wrap on a canvas) ------------
+    def action_up(self) -> None:
+        if self._view == "list":
+            self._move(-1)
+            return
+        self._body.scroll_up()
+
+    def action_down(self) -> None:
+        if self._view == "list":
+            self._move(1)
+            return
+        self._body.scroll_down()
+
+    def _move(self, delta: int) -> None:
+        """Move the list cursor, CLAMPED, then reveal it (reveal-then-act)."""
+        if not self._views:
+            return
+        position = max(0, min(self._cursor + delta, len(self._views) - 1))
+        if position == self._cursor:
+            return
+        self._cursor = position
+        self._repaint()
+        self._scroll_cursor_into_view()
+
+    def _scroll_cursor_into_view(self) -> None:
+        """Keep the cursor row inside the scrolled viewport.
+
+        The body is a ScrollableContainer around ONE painted Static, so there
+        is no child widget to call ``scroll_visible`` on — the offset is
+        computed from the row index directly. Guarded because the container has
+        no size until it is laid out.
+        """
+        height = self._body.size.height
+        if height <= 0:
+            return
+        offset = self._body.scroll_offset.y
+        if self._cursor < offset:
+            target = self._cursor
+        elif self._cursor >= offset + height:
+            target = self._cursor - height + 1
+        else:
+            return
+        self._body.scroll_to(x=self._body.scroll_offset.x, y=max(0, target), animate=False)
+
+    def action_scroll_left(self) -> None:
+        self._body.scroll_left()
+
+    def action_scroll_right(self) -> None:
+        self._body.scroll_right()
+
+    def action_page_up(self) -> None:
+        if self._view == "list":
+            self._move(-max(1, self._body.size.height))
+            return
+        self._body.scroll_page_up()
+
+    def action_page_down(self) -> None:
+        if self._view == "list":
+            self._move(max(1, self._body.size.height))
+            return
+        self._body.scroll_page_down()
+
+    def action_page_left(self) -> None:
+        self._body.scroll_page_left()
+
+    def action_page_right(self) -> None:
+        self._body.scroll_page_right()
+
+    def action_scroll_home(self) -> None:
+        if self._view == "list":
+            self._move(-self._cursor)
+            return
+        # Top-left corner, both axes pinned (Textual's scroll_home resets only
+        # the Y axis unless x is passed).
+        self._body.scroll_to(x=0, y=0, animate=False)
+
+    def action_scroll_end(self) -> None:
+        if self._view == "list":
+            self._move(len(self._views) - 1 - self._cursor)
+            return
+        # Bottom-RIGHT, the org chart's explicit maxima: ``scroll_end`` reaches
+        # the bottom-LEFT on this Textual, and the wide axis is the one a
+        # timeline overflows.
+        self._body.scroll_to(
+            x=self._body.max_scroll_x,
+            y=self._body.max_scroll_y,
+            animate=False,
+        )
+
+    def _focus_canvas(self) -> None:
+        """Focus the view so the arrow/scroll keys land here (hint click)."""
+        self.focus()
+
+    # -- leaving ------------------------------------------------------------
+    def action_leave(self) -> None:
+        self._leave()
+
+    def _leave(self) -> None:
+        self.post_message(ProjectsViewDismissed())
