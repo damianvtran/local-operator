@@ -147,11 +147,13 @@ def test_a_taken_name_is_a_409_and_invalid_values_are_422() -> None:
     assert nameless.status_code == 422
 
     # A body that is not a JSON object is a 400, the daemon's body-shaped
-    # refusal — distinct from a well-formed body the store rejects.
+    # refusal — distinct from a well-formed body the store rejects, and in the
+    # daemon's own sentence (the five pre-existing handlers', verbatim).
     not_an_object = client.post(
         "/api/projects", content=b"[]", headers={"content-type": "application/json"}
     )
     assert not_an_object.status_code == 400
+    assert not_an_object.json()["error"] == "request body must be an object"
     assert (
         client.request(
             "DELETE",
@@ -307,6 +309,48 @@ def test_lock_contention_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     busy = client.patch(f"/api/projects/{project_id}", json={"description": "x"})
     assert busy.status_code == 503
     assert busy.json()["code"] == "project_store_busy"
+
+
+def test_an_invalid_value_reads_as_the_stores_own_sentence() -> None:
+    """Design round 1, D4: the 422 body carries prose, not a validator dump.
+
+    ``readable_error`` renders pydantic as ``<field>: Value error, <sentence>``;
+    the phone's refusal boundary drops that wrapper so the reader meets the
+    store's own sentence — the way the 409 case reads ("project 'x' already
+    exists"). The machine code is what a client keys on; the sentence is for
+    the person holding the phone.
+    """
+    client = _client()
+    bad = client.post("/api/projects", json={"name": "bad name"})
+    assert bad.status_code == 422
+    body = bad.json()
+    assert body["code"] == "project_invalid"
+    assert "Value error" not in body["error"]
+    assert body["error"].startswith("project name must be")
+
+
+def test_the_request_key_tuples_are_the_desktop_models_fields() -> None:
+    """Round 1, [m]3: the phone's accepted-key tuples are DERIVED from the
+    desktop request models, never a hand copy that drifts when a model grows.
+
+    With the derivation in place this pin exists for the revert: a literal
+    copy that matches today's fields passes until a model changes, and then
+    this test fails — which is the drift the round-1 review found.
+    """
+    from local_operator.mobile import projects as mobile_projects
+    from local_operator.server.models.desktop_projects import (
+        LinkMutation,
+        MilestoneMutation,
+        ProjectCreate,
+        ProjectDelete,
+        ProjectPatch,
+    )
+
+    assert mobile_projects._CREATE_FIELDS == tuple(ProjectCreate.model_fields)
+    assert mobile_projects._DELETE_FIELDS == tuple(ProjectDelete.model_fields)
+    assert mobile_projects._LINK_FIELDS == tuple(LinkMutation.model_fields)
+    assert mobile_projects._PATCH_FIELDS == tuple(ProjectPatch.model_fields)
+    assert mobile_projects._MILESTONE_FIELDS == tuple(MilestoneMutation.model_fields)
 
 
 def test_the_summary_and_view_shapes_are_the_desktop_wire_models() -> None:

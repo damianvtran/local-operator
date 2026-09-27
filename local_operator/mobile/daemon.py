@@ -4053,7 +4053,7 @@ def build_app(daemon: MobileDaemon):
             return denied
         body = await _project_body(request)
         if body is None:
-            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         from local_operator.paths import config_dir
 
         return await _project_call(mobile_projects.create_payload, config_dir(), body)
@@ -4086,7 +4086,7 @@ def build_app(daemon: MobileDaemon):
             return denied
         body = await _project_body(request)
         if body is None:
-            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         from local_operator.paths import config_dir
 
         return await _project_call(
@@ -4104,7 +4104,7 @@ def build_app(daemon: MobileDaemon):
             return denied
         body = await _project_body(request)
         if body is None:
-            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         from local_operator.paths import config_dir
 
         return await _project_call(
@@ -4118,7 +4118,7 @@ def build_app(daemon: MobileDaemon):
             return denied
         body = await _project_body(request)
         if body is None:
-            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         from local_operator.paths import config_dir
 
         return await _project_call(
@@ -4146,7 +4146,7 @@ def build_app(daemon: MobileDaemon):
             return denied
         body = await _project_body(request)
         if body is None:
-            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
         from local_operator.paths import config_dir
 
         return await _project_call(
