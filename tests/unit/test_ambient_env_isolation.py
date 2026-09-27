@@ -66,6 +66,14 @@ _HARMLESS: dict[str, str] = {
     # Windows, turning every installer guard into "not addressable" and refusing
     # the very paths a Windows test means to exercise.
     "USERPROFILE": "Windows profile root; redirected to a scratch home, never deleted",
+    # The POSIX half of the pair above, read by `local_operator/sdk.py`'s
+    # isolation checks for two COMPARISON-only answers: whether the process
+    # home is the uid's real one (the cache tripwire — a read that can only
+    # REFUSE), and what to restore after scoping a spawned child (which
+    # REPLACES HOME with the declared agent home rather than forwarding it).
+    # Redirected (never deleted) for the same reason as USERPROFILE: the
+    # scratch value is what every cell is written against.
+    "HOME": "redirected to a scratch home for every test; SDK reads compare, never forward",
     # `supervisors.current_user_id()` (the Task Scheduler logon trigger) and
     # `mobile.auth._account()` (the portal's account key) both name the PERSON,
     # not a resource a test can damage. The trigger is best-effort by design: an
