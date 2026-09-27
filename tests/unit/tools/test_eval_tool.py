@@ -664,7 +664,18 @@ async def test_mid_run_loss_reports_on_killing_call_and_next_call_is_silently_fr
 ) -> None:
     """Preserved contract: a call that had to KILL state mid-run reports it on
     the killing call, and the next call starts fresh WITHOUT a reset notice —
-    the marker must not re-announce a loss this process already reported."""
+    the marker must not re-announce a loss this process already reported.
+
+    The successful exchange FIRST is load-bearing (review round 1, R1-2): it is
+    what writes the restart marker, and with no marker on disk the two calls
+    below cannot tell the guard from its absence — a neutralised
+    ``_SERVED_KERNEL_KEYS`` reads no file either way, so the old body passed
+    against a guard that was deleted. With the marker written, a neutralised
+    guard reads it back and paints the spurious notice this test refuses.
+    """
+    warm = await _call(managed_context, "x = 1")
+    assert not warm.is_error
+    assert (Path(managed_context.session_dir) / eval_tool.KERNEL_MARKER_NAME).is_file()
     killed = await _call(managed_context, "import time\ntime.sleep(10)", timeout=1.0)
     assert killed.is_error
     assert "TIMEOUT" in killed.text
