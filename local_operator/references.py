@@ -5,6 +5,15 @@ THE GOVERNING RULE
 A token that does not resolve to an existing path is not a reference. It is
 prose, and it is left byte-identical.
 
+ONE NAMESPACE RESOLVES OUTSIDE THE FILESYSTEM. ``@project:<name>`` is a
+project reference when a project with that name exists in the projects store,
+and the filesystem rule is its FALLBACK rather than its replacement: a real
+file named ``project:<name>`` still expands when no such project exists, and a
+token naming neither is still prose. The store is the operator's own metadata
+under the config root — no path outside it is ever read — and it is reached by
+a function-local import (:func:`_project_for_query`), the same lazy-import
+discipline this module keeps for every host it must not pull in.
+
 That one sentence is the whole safety argument for D7 (expansion fires on ANY
 text, with no provenance flag threaded through fifteen call sites). ``glab mr
 create --assignee @me`` is a boundary ``@`` and therefore a candidate token —
@@ -70,6 +79,10 @@ CONSTRAINT — this is a SESSION-layer leaf. It may import stdlib,
 :mod:`local_operator.harness.approval`, and nothing from
 ``local_operator.tui.*`` at module scope (see :func:`scan_directory`) or from
 ``local_operator.session.*`` (that direction is the cycle).
+:mod:`local_operator.projects` — and :mod:`local_operator.paths` beside it —
+arrive the same way ``ArgumentChoice`` does: a function-local import inside the
+project arm (:func:`_project_for_query`), so this module's module-scope import
+graph is unchanged.
 
 The ``@`` GRAMMAR IS NOT HERE. :func:`~local_operator.sigils.at_token` and
 :func:`~local_operator.sigils.split_token` live in :mod:`local_operator.sigils`
@@ -88,9 +101,10 @@ import os
 import re
 import stat
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, TypeVar, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast
 
 from local_operator.harness.approval import (
     ApprovalGate,
@@ -136,6 +150,47 @@ _T = TypeVar("_T")
 #: The name every abandoned-read thread carries, so a leaked one is
 #: identifiable in a dump and assertable in a test.
 _READ_THREAD_NAME = "lop-reference-read"
+
+#: One ``ProjectRegistry`` per config root, for the process lifetime — see
+#: :func:`_project_registry` for the cost argument behind keeping it. ``None``
+#: until the first project lookup; (config root, registry) so a run whose root
+#: moves (a test's isolated ``HOME``) never answers from another root's store.
+#:
+#: WRITTEN ONLY OFF THE EVENT LOOP (review round 1, M-4/M-5): every construction
+#: and every reload happens in a daemon thread — the submit arm's
+#: :func:`_off_loop` lookup or :func:`_refresh_project_names` — so the composer's
+#: ink can never block a keystroke on a store read, and no two event-loop
+#: callers race on one instance. The ink reads :data:`_project_names_cache`
+#: below instead.
+_project_registry_cache: tuple[str, Any] | None = None
+
+#: (config root, casefolded names, monotonic read time) — the INK's view of the
+#: store, published only by :func:`_read_project_rows` (off the event loop) and
+#: read by :func:`_project_name_known` without any I/O. A cold or stale snapshot
+#: schedules a refresh and answers from what it has: a project published a
+#: second ago paints ink on the next keystroke rather than stalling this one,
+#: and the SUBMIT path never reads this snapshot, so a missed ink can never
+#: change what the model receives.
+_project_names_cache: tuple[str, frozenset[str], float] | None = None
+
+#: How long a names snapshot may answer before a refresh is scheduled. Matches
+#: ``ProjectRegistry``'s own default refresh interval — the store's freshness
+#: contract, kept here so the ink and the registry agree on it by name.
+_PROJECT_NAMES_TTL_S = 5.0
+
+#: Single-flight for the refresh thread: a keystroke storm past the TTL spawns
+#: one refresh, not one per keystroke. Non-blocking, so a scheduler never waits
+#: on a read that might be wedged (the same abandonment rule :func:`_off_loop`
+#: documents).
+_project_refresh_lock = threading.Lock()
+
+#: Bumped every time :data:`_project_names_cache` is published. The editor reads
+#: it into the reference-ink memo key (``Editor._reference_runs``), so a store
+#: read that LANDS while the draft sits untouched invalidates a memo taken
+#: before it — the path arm has no such signal and keeps its documented
+#: one-draft-edit lag; the store arm does not have to share it. An int rebind
+#: under the GIL is the whole of the synchronisation a reader needs.
+_project_names_epoch = 0
 
 
 class ExpansionResult(NamedTuple):
@@ -189,6 +244,22 @@ BLOCK_LIMIT_CHARS = TOOL_OUTPUT_LIMIT_CHARS * 4
 #: so the ROWS were never the cost; this stops a pathological directory from
 #: making the SORT the cost on a keystroke path (design §2.5, R6).
 SCAN_CANDIDATE_LIMIT = 2000
+
+#: The ``@`` namespace for projects: ``@project:<name>``. Colon is NOT special
+#: to the token grammar (``sigils._token_end`` terminates on whitespace only),
+#: so the whole ``project:payments`` is one token whose QUERY is
+#: ``project:payments`` — the classifier is resolver policy and lives here,
+#: beside the path rule it falls back to, not in the grammar both surfaces
+#: share.
+PROJECT_REFERENCE_PREFIX = "project:"
+
+#: Ceiling on ONE project element, independent of :data:`BLOCK_LIMIT_CHARS`.
+#: This bounds a single ``<reference type="project">`` so one project row can
+#: never eat the whole block, and overflow past it truncates the PROGRESS
+#: snippet — the one prose field — with a marker. The row's identity
+#: (name/status) and the liveness line always survive; see
+#: :func:`_project_body` for the truncation order and why.
+PROJECT_REFERENCE_LIMIT_CHARS = 1500
 
 #: Names, suffixes and ancestor directories that force an approval prompt even
 #: when the path is INSIDE the workspace. This is the one guard ``read`` does
@@ -461,6 +532,220 @@ def scan_directory_report(directory: str, cwd: str) -> tuple[list["ArgumentChoic
     return rows, unlisted
 
 
+def _project_registry() -> Any | None:
+    """The process's :class:`~local_operator.projects.ProjectRegistry`, or ``None``.
+
+    Cached per config root for the life of the process, and that is a COST
+    decision the design names outright (§11 item 11): constructing a registry
+    loads every row, and :func:`reference_resolves` runs on the composer's
+    keystroke path. The registry owns its own freshness — a 5 s interval AND a
+    directory-mtime check — so one long-lived instance sees a peer's publish
+    the way a fresh construction would, without re-reading the store per
+    keystroke.
+
+    The import is function-local on purpose: this module's MODULE-SCOPE imports
+    are a contract (docstring, CONSTRAINT) and ``projects`` pulls ``pydantic``
+    in. Any construction failure reads ``None``: the caller's fallback is the
+    path rule, and a store this process cannot read must degrade a feature,
+    never a keystroke.
+    """
+    global _project_registry_cache
+    from local_operator.paths import config_dir
+    from local_operator.projects import ProjectRegistry
+
+    root = str(config_dir())
+    cached = _project_registry_cache
+    if cached is not None and cached[0] == root:
+        return cached[1]
+    try:
+        registry = ProjectRegistry(config_dir())
+    except Exception:  # noqa: BLE001 — a store this process cannot read is "no projects"
+        return None
+    _project_registry_cache = (root, registry)
+    return registry
+
+
+def _read_project_rows() -> list[Any]:
+    """Every project row, read OFF the event loop; publishes the ink snapshot.
+
+    THE one publisher of :data:`_project_names_cache`, and it is called only by
+    :func:`_refresh_project_names` (the scheduler's thread) and
+    :func:`project_picker_rows` (the picker's). It is NOT the only off-loop
+    route into the registry — the submit arm reaches it through
+    :func:`_project_for_query` → :func:`_project_registry`, which can also
+    construct or reload (review round 2's nit: name it precisely). What every
+    route shares is the property that matters: each runs on a daemon thread,
+    so nothing on the event loop ever constructs or reloads the store.
+    ``list_projects`` is where the registry's own 5 s / directory-mtime refresh
+    runs, so at store scale this can take about a second — which is exactly why
+    it belongs off the loop (review round 1, M-4).
+
+    Never raises: no registry, an unreadable store or a failing list all read
+    as "no projects", and every caller is a keystroke-adjacent path that
+    degrades one feature rather than failing.
+    """
+    registry = _project_registry()
+    if registry is None:
+        return []
+    try:
+        projects = list(registry.list_projects())
+    except Exception:  # noqa: BLE001 — a keystroke path never fails on the store
+        return []
+    global _project_names_cache
+    global _project_names_epoch
+    try:
+        root = str(registry.config_dir)
+    except Exception:  # noqa: BLE001
+        root = ""
+    _project_names_cache = (
+        root,
+        frozenset(project.name.casefold() for project in projects),
+        time.monotonic(),
+    )
+    _project_names_epoch += 1
+    return projects
+
+
+def _refresh_project_names() -> None:
+    """Refresh the ink's names snapshot; single-flight and silent.
+
+    Runs in a daemon thread (see :func:`_schedule_project_names_refresh`) and
+    reuses :func:`_read_project_rows` so there is exactly ONE code path that
+    reads the store off the loop and exactly one publisher of the snapshot.
+    """
+    if not _project_refresh_lock.acquire(blocking=False):
+        return
+    try:
+        _read_project_rows()
+    finally:
+        _project_refresh_lock.release()
+
+
+def _schedule_project_names_refresh() -> None:
+    """Kick :func:`_refresh_project_names` onto a daemon thread.
+
+    Fire-and-forget by design: the caller is the synchronous ink predicate,
+    which must return now. The daemon flag and the thread name are the same
+    rules :func:`_off_loop` follows — an abandoned read must never outrank
+    interpreter shutdown, and a leaked one must be identifiable.
+    """
+    threading.Thread(target=_refresh_project_names, name=_READ_THREAD_NAME, daemon=True).start()
+
+
+def _project_name_known(name: str) -> bool:
+    """Whether the store holds ``name`` — the ink predicate, and it does no I/O.
+
+    THE synchronous half of the project arm (review round 1, M-4). It reads
+    :data:`_project_names_cache` and nothing else: a cold snapshot for this
+    config root schedules a refresh and answers ``False`` for now; a snapshot
+    older than :data:`_PROJECT_NAMES_TTL_S` schedules a refresh and still
+    answers from it, so the composer never waits on a store read. The lag is
+    bounded and named — a project published a moment ago can miss its ink
+    until the refresh lands, and the next keystroke paints it — and it can
+    never change what the MODEL receives, because the submit path re-resolves
+    against the live store through :func:`_project_for_query`.
+
+    Matched the way the store matches: stripped and casefolded
+    (``ProjectRegistry.get_project_by_name``'s own rule), so the ink and the
+    expansion cannot disagree about which spellings name the same row.
+    """
+    from local_operator.paths import config_dir
+
+    snapshot = _project_names_cache
+    root = str(config_dir())
+    if snapshot is None or snapshot[0] != root:
+        # Cold for this root: no answer yet, and the refresh that will produce
+        # one is already on its way. Fail closed this keystroke.
+        _schedule_project_names_refresh()
+        return False
+    if (time.monotonic() - snapshot[2]) > _PROJECT_NAMES_TTL_S:
+        _schedule_project_names_refresh()
+    return name.strip().casefold() in snapshot[1]
+
+
+async def project_picker_rows() -> list[Any]:
+    """Every project row for the ``@`` picker, read OFF the event loop.
+
+    The picker's half of the store-read policy above: ``list_projects``
+    refreshes on the registry's own 5 s / mtime rule and at store scale that
+    is a ~1 s read, which must not land on the event loop while the user is
+    typing (review round 1, M-4). It also republishes the ink's names
+    snapshot as a side effect, so opening the picker warms the ink for free.
+
+    Never raises: no registry, an unreadable store or a failing list all read
+    as "no projects", and the directory listing stands alone.
+    """
+    return await _off_loop(_read_project_rows)
+
+
+def project_ink_epoch() -> int:
+    """A counter that changes whenever the project names snapshot is republished.
+
+    The editor's reference ink is memoized on ``(text, cwd, enabled)`` and its
+    staleness contract is deliberately bounded at one draft edit (see
+    ``Editor._reference_runs``). That bound is unavoidable for a PATH — nothing
+    tells the editor a file appeared on disk. The project arm has a signal, and
+    this is it: a landed store read bumps the counter, which rides the memo key,
+    so the next ask re-runs the predicate instead of trusting a decision made
+    before the store was read (review round 1, M-4's follow-on: without this, a
+    token pasted and left alone kept its pre-read ink until the next keystroke).
+    """
+    return _project_names_epoch
+
+
+def _project_for_query(query: str) -> tuple[Any, Path] | None:
+    """``(project, row_path)`` when ``query`` names a project, else ``None``.
+
+    THE CLASSIFIER (§6.1). A query starting with ``project:`` is a project
+    reference IF a project with that name exists — matched case-insensitively,
+    the store's own uniqueness rule — and only then; otherwise the caller falls
+    back to the PATH rule, because POSIX permits ``:`` in file names and a real
+    file named ``project:<name>`` must keep working. A token that resolves to
+    neither stays prose, byte-identical: the governing rule, unchanged.
+
+    The empty name is not a project: ``@project:`` falls straight through to
+    the path arm, where a file literally named ``project:`` still resolves.
+
+    ``row_path`` is the row's own address (``projects/<id>.json``). Nothing
+    reads it — the project arm carries the row's CONTENT — and it is carried so
+    the entry holds the real address of the thing it names rather than a
+    placeholder.
+    """
+    if not query.startswith(PROJECT_REFERENCE_PREFIX):
+        return None
+    name = query[len(PROJECT_REFERENCE_PREFIX) :]
+    if not name:
+        return None
+    registry = _project_registry()
+    if registry is None:
+        return None
+    try:
+        project = registry.get_project_by_name(name)
+    except Exception:  # noqa: BLE001 — a store read never fails the resolver
+        return None
+    if project is None:
+        return None
+    return project, Path(registry.projects_dir) / f"{project.id}.json"
+
+
+def _project_runtime_states() -> dict[str, dict[str, Any]]:
+    """One runtime scan for the liveness line; ``{}`` when it cannot be read.
+
+    The same lazy-import and never-fail contract as :func:`_project_registry`:
+    the liveness line is a courtesy on an element that must still render
+    without it, so a machine that has never run a runtime — or one whose
+    registry is unreadable — degrades to "stopped" counts rather than failing
+    the expansion.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.projects import scan_runtime_states
+
+    try:
+        return scan_runtime_states(config_dir())
+    except Exception:  # noqa: BLE001 — a summary never fails an expansion
+        return {}
+
+
 def reference_resolves(query: str, cwd: str) -> bool:
     """Whether ``@query`` names something that EXISTS — the composer's ink gate.
 
@@ -473,19 +758,27 @@ def reference_resolves(query: str, cwd: str) -> bool:
     "structured token, not text" claim ``text-area--at-reference`` makes, made
     about text the operator is not, in fact, referencing.
 
-    THE SAME THREE PARTS as one entry of :func:`_resolve_tokens`, in the same
+    THE SAME FOUR PARTS as one entry of :func:`_resolve_tokens`, in the same
     order, so the ink and the expansion cannot drift:
 
     1. the kill switch, read per call — with ``@`` expansion off, no token is a
        reference and none of them gets reference ink;
-    2. :func:`_resolve_workspace_path`, whose ``resolvable`` is the first half of
+    2. the PROJECT arm — asked first, and only for a ``project:``-prefixed
+       query, because §6.1 makes the project rule the namespace's rule and the
+       path its fallback. It is answered from :func:`_project_name_known`'s
+       in-memory snapshot, so the ink path never constructs or reloads the
+       store (review round 1, M-4); agreement with the submit-side classifier
+       is by construction — both strip and casefold by the store's own name
+       rule, and both fall through on an empty or unknown name;
+    3. :func:`_resolve_workspace_path`, whose ``resolvable`` is the first half of
        the governing rule;
-    3. :func:`_kind_of`, which is one ``stat`` answering ``is_dir``/``is_file``,
+    4. :func:`_kind_of`, which is one ``stat`` answering ``is_dir``/``is_file``,
        the second half.
 
-    One ``stat`` per call, and the caller memoizes per frame, so this is the
-    same order of cost as the ``scandir`` the picker already runs per keystroke
-    — measured at 0.04-0.07 ms — rather than a new budget.
+    A path token costs one ``stat``; a project token costs a set membership in
+    the in-memory snapshot and NO I/O. The caller memoizes per frame, so the
+    gate stays at the same order of cost as the ``scandir`` the picker already
+    runs per keystroke — measured at 0.04-0.07 ms — rather than a new budget.
 
     ``OSError`` is ``False``, matching the resolver rather than the operating
     system's opinion: an unstatable path takes the ``could not be read``
@@ -497,6 +790,14 @@ def reference_resolves(query: str, cwd: str) -> bool:
     """
     if not query or not at_references_enabled():
         return False
+    if query.startswith(PROJECT_REFERENCE_PREFIX):
+        # The name after the prefix, judged by the store's own match rule
+        # (strip + casefold, inside the predicate) so ink and expansion cannot
+        # disagree. `project:` with an empty name falls through to the path
+        # rule, exactly as it does at submit.
+        name = query[len(PROJECT_REFERENCE_PREFIX) :]
+        if name.strip() and _project_name_known(name):
+            return True
     try:
         path, _inside, resolvable = _resolve_workspace_path(query, cwd)
         if not resolvable:
@@ -525,8 +826,10 @@ _TYPED_ATTRIBUTE = 'typed="'
 #: ``read @forge.txt`` then ``<pass 1> and also check @secret.txt`` expanded
 #: ``False`` with ``notices == []``.
 #:
-#: ATTRIBUTE ORDER is contractual here (``path=`` then ``typed=``), which is
-#: exactly what :func:`_render` emits. ``[^"]*`` per value is sound because
+#: ATTRIBUTE ORDER is contractual here, for BOTH head forms: ``path=`` then
+#: ``typed=`` for a path element, ``type="project"`` then ``name=`` then
+#: ``typed=`` for a project one — exactly what :func:`_render` and
+#: :func:`_render_project` emit. ``[^"]*`` per value is sound because
 #: :func:`_attribute` escapes ``"`` to ``&quot;``, and ``[^>]*`` before the
 #: closing ``>`` for the same reason with ``>`` and ``&gt;``.
 #:
@@ -535,7 +838,10 @@ _TYPED_ATTRIBUTE = 'typed="'
 #: :func:`_defuse` on why neither is acceptable — it is the file's content), and
 #: its cost is one suppressed token in the same message, not a doubled block.
 _ELEMENT_HEAD_RE = re.compile(
-    r'^<(?:reference|listed) path="[^"]*" ' + re.escape(_TYPED_ATTRIBUTE) + r'([^"]*)"[^>]*>$'
+    r"^<(?:reference|listed) "
+    r'(?:path="[^"]*"|type="project" name="[^"]*") '
+    + re.escape(_TYPED_ATTRIBUTE)
+    + r'([^"]*)"[^>]*>$'
 )
 
 #: RESIDUAL HAZARD, accepted deliberately: a marker copied out of the payload
@@ -622,6 +928,16 @@ class _Resolved(NamedTuple):
     ``listed`` is the rendered ``<listed>`` element, precomputed so the
     reservation sums each remaining token's REAL length instead of multiplying
     the current token's length by a count.
+
+    ``project`` SET means the token named a project row (``@project:<name>``
+    and the store holds that name) rather than a path. Pass 2 renders such an
+    entry from the row itself, never asks the approval gate and never reads a
+    file — the row is the operator's own metadata under the config root — and
+    dedupes it by ROW ID rather than by path: one project named twice is named
+    once and listed once, because a silently-skipped duplicate would not be
+    recoverable through ``typed=`` and would expand again on pass 2. Its
+    ``path`` is the row's own file (``projects/<id>.json``), the real address
+    of the thing named; nothing else reads it.
     """
 
     token: _Token
@@ -631,6 +947,8 @@ class _Resolved(NamedTuple):
     is_dir: bool
     notice: str | None
     listed: str
+    #: The row when this entry is a project reference; ``None`` otherwise.
+    project: Any | None = None
 
     @property
     def chargeable(self) -> bool:
@@ -1173,6 +1491,175 @@ def _render_listed(path: Path, typed: str, cwd: str) -> str:
     return _render(path, typed, _LISTED_BODY, {}, cwd, tag="listed")
 
 
+#: The body of a project's ``<listed>`` element. Parallel to
+#: :data:`_LISTED_BODY` and deliberately not shared with it: a path says "read
+#: this", a project says "open it with the project tool" — the two name
+#: different acts, and the surface a reader reaches for is the difference.
+_PROJECT_LISTED_BODY = "not included — ask for it with the project tool if you need it"
+
+#: Appended to a progress snippet the element cap had to cut. NAMED rather than
+#: an ellipsis so a reader can tell a truncated snippet from a short one, and
+#: spelled with the field's name so the marker cannot be mistaken for content.
+_PROJECT_PROGRESS_MARKER = " [progress truncated]"
+
+
+def _project_head(project: Any, tag: str, typed: str) -> str:
+    """The single-line ``<reference|listed type="project" …>`` head.
+
+    Attribute ORDER (``type``, ``name``, ``typed``) is contractual: it is what
+    :data:`_ELEMENT_HEAD_RE` reads back for idempotence, the same way
+    :func:`_render`'s ``path``-then-``typed`` order is.
+    """
+    return (
+        f'<{tag} type="project" name="{_attribute(project.name)}" '
+        f'{_TYPED_ATTRIBUTE}{_attribute(typed)}"'
+    )
+
+
+def _render_project_listed(project: Any, typed: str) -> str:
+    """Name a project without carrying its content — the dedupe/overflow form.
+
+    Built through the same escaping as the full element, so a project name can
+    no more forge a block marker than a path can (the injection vector
+    :func:`_render_listed` documents applies to every name the block carries).
+    """
+    return f'{_project_head(project, "listed", typed)}>\n{_PROJECT_LISTED_BODY}\n</listed>'
+
+
+def _compact_age(seconds: float) -> str:
+    """A short age for the progress attribution: ``59s``, ``59m``, ``23h``, ``3d``."""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _project_progress_attribution(project: Any) -> str:
+    """`` (reported 2h ago by session <id>)`` — the freshness pair, in the block.
+
+    The attribution is what stops a stale snippet masquerading as live (§11
+    item 10), so it names WHO reported the text and WHEN, compactly. A row with
+    no timestamp (hand-written, or never reported) says nothing at all rather
+    than "reported None ago"; ``operator`` is named as such because it is not a
+    session id and a reader must not take it for one.
+    """
+    if project.progress_updated_at is None:
+        return ""
+    age = _compact_age(time.time() - project.progress_updated_at)
+    reporter = (project.progress_reported_by or "").strip()
+    if reporter == "operator":
+        who = " by operator"
+    elif reporter:
+        who = f" by session {reporter}"
+    else:
+        who = ""
+    return f" (reported {age} ago{who})"
+
+
+def _project_sessions_line(project: Any, states: dict[str, dict[str, Any]]) -> str:
+    """``sessions: 2 linked — 1 live, busy, 1 stopped`` — the settled Q3 line.
+
+    COUNTS, not ids: the block answers "is someone working on this" without
+    spending its budget on 64 session ids, and the fixed category order makes
+    two elements comparable by eye.
+
+    THE LABELS ARE THE OTHER SURFACES' VOCABULARY, not a parallel one (review
+    round 1, F8): ``project_tool._session_lines`` writes ``state + ", busy"``,
+    and ``build_project_view`` classifies a runtime record ``live`` / ``wedged``
+    / ``stale`` — so this line spells exactly those words. ``stale`` used to be
+    folded into ``stopped`` here while the view and the desktop reported it as
+    its own state; that divergence is closed.
+
+    ``stopped`` therefore means what it means everywhere else: no runtime
+    record at all. That is the common case, and on this evidence a deleted
+    session directory is indistinguishable from a never-started one, so
+    neither is claimed.
+    """
+    counts = {"live, busy": 0, "live": 0, "wedged": 0, "stale": 0, "stopped": 0}
+    for session_id in project.sessions:
+        record = states.get(session_id) or {}
+        state = record.get("state")
+        if state == "live":
+            counts["live, busy" if record.get("busy") else "live"] += 1
+        elif state == "wedged":
+            counts["wedged"] += 1
+        elif state == "stale":
+            counts["stale"] += 1
+        else:
+            counts["stopped"] += 1
+    linked = len(project.sessions)
+    if not linked:
+        return "sessions: none linked"
+    breakdown = ", ".join(f"{count} {label}" for label, count in counts.items() if count)
+    return f"sessions: {linked} linked — {breakdown}"
+
+
+def _project_body(project: Any, states: dict[str, dict[str, Any]], budget: int) -> str:
+    """The element body, clamped to ``budget`` chars by truncating PROGRESS.
+
+    Progress is cut first because it is the one unbounded-in-practice field
+    (≤ 1000 chars of tool-authored prose) and the one the design names as the
+    truncation target; the description (≤ 240) and the identity/liveness lines
+    survive wherever the budget allows. Both text fields are defused BEFORE the
+    length decisions: ``_defuse`` can lengthen a string by one cell per marker,
+    so clamping first and defusing after could push the element back over its
+    cap.
+
+    The final slice is a BOUND OF LAST RESORT: with today's field caps it is
+    unreachable — head plus name/status, a marker-only progress line and the
+    liveness line sit well inside the element budget — and it exists so the
+    cap stays hard if a future field cap grows.
+    """
+    progress = _defuse(project.progress)
+    description = _defuse(project.description)
+    marker = _PROJECT_PROGRESS_MARKER
+
+    def render() -> str:
+        lines = [f"name: {project.name}", f"status: {project.status}"]
+        if description:
+            lines.append(f"description: {description}")
+        if progress:
+            attribution = _project_progress_attribution(project)
+            lines.append(f"progress{attribution}: {progress}")
+        lines.append(_project_sessions_line(project, states))
+        return "\n".join(lines)
+
+    body = render()
+    over = len(body) - budget
+    if over > 0 and progress:
+        # Trim so the marker lands where the content stops: the kept prefix and
+        # the marker together come to exactly ``over`` fewer chars than the
+        # full snippet, which is what makes ONE cut land the body on budget.
+        keep = len(progress) - over - len(marker)
+        progress = (progress[:keep] if keep > 0 else "") + marker
+        body = render()
+    if len(body) > budget:
+        body = body[: max(0, budget)]
+    return body
+
+
+def _render_project(project: Any, typed: str, states: dict[str, dict[str, Any]]) -> str:
+    """One ``<reference type="project" …>`` element, capped at 1500 chars.
+
+    The cap is per-ELEMENT: one project can never eat the whole block, and a
+    long progress snippet degrades by truncation HERE rather than by demoting
+    the element. The whole-block budget (:data:`BLOCK_LIMIT_CHARS`) still
+    governs after this, charged through :class:`_Block` like every other
+    element — an element that cannot fit the block is what degrades to
+    :func:`_render_project_listed`.
+    """
+    head = _project_head(project, "reference", typed)
+    tail = "</reference>"
+    # The closing ``>`` of the head and the two newlines joining head/body/tail
+    # are part of the element's size.
+    budget = PROJECT_REFERENCE_LIMIT_CHARS - len(head) - len(tail) - 3
+    return f"{head}>\n{_project_body(project, states, max(0, budget))}\n{tail}"
+
+
 def _kind_of(path: Path) -> tuple[bool, bool]:
     """``(is_dir, is_file)`` for ``path`` — one ``stat``, answering both.
 
@@ -1485,6 +1972,29 @@ async def _resolve_tokens(tokens: list[_Token], cwd: str) -> list[_Resolved]:
     """
     entries: list[_Resolved] = []
     for token in tokens:
+        # THE PROJECT ARM, FIRST — §6.1's order. Only a `project:`-prefixed
+        # query can be a project reference, and only a token the STORE answers
+        # takes this branch; every other token — including a `project:` token
+        # naming no row — proceeds to the path rule below, unchanged.
+        if token.raw.startswith(PROJECT_REFERENCE_PREFIX):
+            # Off the loop with the reads below: a registry refresh may load
+            # the store, and this runs on the submit path of every surface.
+            found = await _off_loop(_project_for_query, token.raw)
+            if found is not None:
+                project, row_path = found
+                entries.append(
+                    _Resolved(
+                        token=token,
+                        path=row_path,
+                        inside=True,
+                        resolvable=True,
+                        is_dir=False,
+                        notice=None,
+                        listed=_render_project_listed(project, token.typed),
+                        project=project,
+                    )
+                )
+                continue
         path, inside, resolvable = _resolve_workspace_path(token.raw, cwd)
         # `Path.exists()` PROPAGATES `PermissionError` — it swallows only
         # ENOENT/ENOTDIR/EBADF/ELOOP — so an unstatable path used to escape past
@@ -1584,6 +2094,14 @@ async def _expand(
     # approval nobody declined, the copy class this branch exists to avoid
     # (review round 1, MINOR/D1). See the dedupe branch below.
     declined: dict[Path, str] = {}
+    # Project rows already carried, by ROW ID: the project arm's dedupe key,
+    # kept separate from `seen` because a project is not addressed by a path
+    # even though its entry carries its row's address.
+    seen_projects: set[str] = set()
+    # One runtime scan for every project element's liveness line, taken on the
+    # first project that actually reaches the block; a message without project
+    # references never touches the runtime registry. None means "not scanned".
+    states: dict[str, dict[str, Any]] | None = None
 
     # PASS 2 — carry what fits, name what does not.
     for entry in entries:
@@ -1598,6 +2116,32 @@ async def _expand(
         # still owe. The reservation can only shrink as tokens are consumed,
         # which is what lets `_Block.fits` treat it as a bound.
         pending -= len(_BLOCK_JOIN) + len(entry.listed)
+        if entry.project is not None:
+            # PROJECT ARM. Deduped by ROW ID — a second spelling of one project
+            # is NAMED for the same reason a path duplicate is (a
+            # silently-skipped token is invisible to `_already_expanded` and
+            # expands again on pass 2), never carried twice. No approval gate
+            # and no file read: the row is the operator's own metadata in their
+            # own config root, and there is no filesystem read outside the
+            # store (§6.2).
+            if str(entry.project.id) in seen_projects:
+                if not block.list_only(entry.listed):
+                    return _too_many(text, notices)
+                continue
+            seen_projects.add(str(entry.project.id))
+            if states is None:
+                # Off the loop with the file reads below: the scan walks the
+                # runtime registry. `pending` never charges it — the liveness
+                # line lives INSIDE the element, whose length `fits` already
+                # accounts for.
+                states = await _off_loop(_project_runtime_states)
+            element = _render_project(entry.project, token.typed, states)
+            if not block.fits(element, pending):
+                if not block.list_only(entry.listed):
+                    return _too_many(text, notices)
+                continue
+            block.carry(element)
+            continue
         # Dedupe by RESOLVED path, so `@./README.md` and `@README.md` are one
         # reference. Both tokens stay in the prose: the user wrote them, and
         # the model reads the sentence, not the block.
@@ -1703,6 +2247,8 @@ async def _expand(
 __all__ = [
     "AT_REFERENCES_ENV",
     "BLOCK_LIMIT_CHARS",
+    "PROJECT_REFERENCE_LIMIT_CHARS",
+    "PROJECT_REFERENCE_PREFIX",
     "REFERENCE_BLOCK_CLOSE",
     "REFERENCE_BLOCK_OPEN",
     "SCAN_CANDIDATE_LIMIT",
@@ -1710,6 +2256,8 @@ __all__ = [
     "at_references_enabled",
     "at_token",
     "expand_references",
+    "project_ink_epoch",
+    "project_picker_rows",
     "reference_block_spans",
     "reference_resolves",
     "scan_directory",

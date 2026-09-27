@@ -4720,6 +4720,14 @@ class Editor(TextArea):
         the prompt carries the token verbatim — and a stale prose ink never
         blocks a path that does exist. The ink is a hint about what the resolver
         will do; the resolver's own verdict, not the hint, decides what is sent.
+
+        THE PROJECT ARM IS NOT LEFT TO THAT BOUND, because it does not have to
+        be: the store read hands over a publish counter that rides the memo key
+        (`project_ink_epoch`), so a store read that lands while the draft sits
+        untouched re-asks the question on the very next evaluation instead of
+        waiting for a keystroke. The path arm keeps the one-edit lag — nothing
+        tells the editor a file appeared on disk — and this entry is the only
+        difference between them.
         """
         if "@" not in self.text:
             # No token can resolve in a draft without an `@`, whatever the kill
@@ -4728,11 +4736,20 @@ class Editor(TextArea):
             # off the first paint: `render_line` reaches this on every frame,
             # including the empty composer at boot (backend load report B-F10).
             return {}
-        from local_operator.references import at_references_enabled, reference_resolves
+        from local_operator.references import (
+            at_references_enabled,
+            project_ink_epoch,
+            reference_resolves,
+        )
 
         cwd = self._reference_cwd()
         enabled = at_references_enabled()
-        key: tuple[object, ...] = (self.text, cwd, enabled)
+        # The project store's publish counter rides the key: a store read that
+        # LANDS while the draft sits untouched invalidates a memo taken before
+        # it, so the project arm does not share the path arm's one-draft-edit
+        # lag (`project_ink_epoch` documents why the path arm must). This entry
+        # only re-ENABLES the question — the predicate still answers it.
+        key: tuple[object, ...] = (self.text, cwd, enabled, project_ink_epoch())
         cached = self._reference_runs_cache
         if cached is not None and cached[0] == key:
             return cached[1]
