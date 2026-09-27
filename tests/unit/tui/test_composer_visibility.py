@@ -22,6 +22,7 @@ are bound by loop turns, never by the 2 s cadence (same harness as
 from __future__ import annotations
 
 import pytest
+from rich.text import Text
 
 from local_operator import settings_io
 from local_operator.config import ConfigManager
@@ -49,6 +50,18 @@ def _write_here(config_dir, key: str, value) -> None:
     setting = settings_io.resolve_key(key)
     assert setting is not None, key
     settings_io.write_setting(ConfigManager(config_dir), setting, value)
+
+
+def _painted_band(app) -> str:
+    """The band's painted row as text (the pixels, not the receipt).
+
+    ``Static.content`` is typed as the general renderable union; the band always
+    updates it with a rich ``Text``, so narrow here rather than cast at each
+    assertion.
+    """
+    content = app.query_one("#status-band", Chrome).content
+    assert isinstance(content, Text), type(content).__name__
+    return content.plain
 
 
 async def _adopted(app, pilot) -> None:
@@ -112,8 +125,7 @@ async def test_a_disk_change_leaves_a_hidden_segment_out_of_the_painted_band(
     app = _boot(monkeypatch, tmp_path)
     async with app.run_test(size=(100, 24)) as pilot:
         await _adopted(app, pilot)
-        band = app.query_one("#status-band", Chrome)
-        painted = band.content.plain
+        painted = _painted_band(app)
         assert "test/model" in painted and "◆" in painted, painted
 
         _write_elsewhere(tmp_path, "display.composer.model", False)
@@ -121,14 +133,14 @@ async def test_a_disk_change_leaves_a_hidden_segment_out_of_the_painted_band(
         await pilot.pause()
         assert app._status is not None
         assert app._status.is_showing("model") is False
-        repainted = band.content.plain
+        repainted = _painted_band(app)
         assert "◆" not in repainted and "test/model" not in repainted, repainted
         assert "⌂" in repainted, "the siblings the freed cells went to are still there"
 
         _write_elsewhere(tmp_path, "display.composer.model", True)
         process_watcher(tmp_path).poll_now()
         await pilot.pause()
-        assert "test/model" in band.content.plain
+        assert "test/model" in _painted_band(app)
 
 
 @pytest.mark.asyncio
