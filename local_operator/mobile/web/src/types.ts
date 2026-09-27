@@ -424,3 +424,98 @@ export type CommandOp =
 			question_index: number;
 	  }
 	| { op: "snapshot" };
+
+/* ---- projects (GET/POST/DELETE ``/api/projects…``) ------------------------ */
+
+/* The wire shapes below mirror the daemon's project payloads, which are the
+   desktop wire models (``local_operator/server/models/desktop_projects.py``)
+   dumped to JSON — one derivation of derived status and staleness, shared by
+   every surface. Two fields are worth naming:
+
+   * ``milestones[].status`` is DERIVED server-side (``completed`` when
+     ``completed_at`` is set, else ``overdue`` when the target date has passed,
+     else ``upcoming``); the client never computes it, so a chip here and a line
+     in a tool result cannot disagree about which milestone is late.
+   * ``progress_stale`` is the server's one 30-minute verdict — the same value
+     the completion-time check reads, so the phone's badge and the agent's
+     nudge can never disagree about one record. */
+
+/** The project's status word; an unknown status from a newer build passes
+    through as its own string (the union is the shipped vocabulary, not a
+    parse bar). */
+export type ProjectStatus = "active" | "paused" | "done" | "archived";
+
+/** One milestone, with its DERIVED status — see the note above. */
+export interface ProjectMilestone {
+	name: string;
+	target_date: string | null;
+	completed_at: string | null;
+	status: "completed" | "overdue" | "upcoming";
+}
+
+/** One row of the listing / board — the fields those views paint. */
+export interface ProjectSummary {
+	id: string;
+	name: string;
+	description: string;
+	status: string;
+	tags: string[];
+	start_date: string | null;
+	target_date: string | null;
+	completed_at: string | null;
+	estimate: number | null;
+	estimate_unit: string;
+	milestones_completed: number;
+	milestones_total: number;
+	sessions: number;
+	/** Live linked sessions, from one machine-wide runtime scan per listing. */
+	live_sessions: number;
+	progress_stale: boolean;
+	progress_updated_at: number | null;
+	updated_at: number;
+}
+
+/** The full record — the detail sheet's read. NOT an extension of
+    ``ProjectSummary``: ``sessions`` changes MEANING between the two (a count on
+    the summary, the id list on the view), so the two shapes are kept apart
+    rather than made to lie in a hierarchy. */
+export interface ProjectView {
+	id: string;
+	name: string;
+	description: string;
+	status: string;
+	progress: string;
+	progress_updated_at: number | null;
+	progress_reported_by: string;
+	progress_stale: boolean;
+	tags: string[];
+	sessions: string[];
+	created_at: number;
+	updated_at: number;
+	start_date: string | null;
+	target_date: string | null;
+	completed_at: string | null;
+	estimate: number | null;
+	estimate_unit: string;
+	milestones: ProjectMilestone[];
+}
+
+export interface ProjectLinkedSession {
+	session_id: string;
+	exists: boolean;
+	title: string | null;
+	created_at: number | null;
+	archived: boolean;
+	runtime: {
+		/** ``live`` / ``wedged`` / ``stale`` / ``stopped`` — or an unknown word
+		    from a newer build, which the row renders verbatim. */
+		state: string;
+		busy?: boolean | null;
+		heartbeat_age_s?: number | null;
+		pid?: number | null;
+	};
+	/** ``null`` means UNKNOWN (no roster sidecar), never zero. */
+	subagents: { running: number; settled: number; names: string[] } | null;
+	/** ``null`` means UNKNOWN (no persisted snapshot), never zero. */
+	todos: { open: number; total: number } | null;
+}
