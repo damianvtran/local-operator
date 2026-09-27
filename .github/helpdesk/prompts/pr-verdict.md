@@ -35,14 +35,27 @@ the diff.
 
 ## Stop conditions — check these first
 
-- **If the thread is NOT terminal, post NOTHING.** This applies to every run,
-  including a manual dispatch: the operator asked for a verdict, and a verdict
-  only exists when the thread is terminal. When it is not, print a short
-  summary naming what is still moving; the run log is the output.
-- `Source: sweep` runs only (a mention or a manual dispatch skips this bullet):
-  post NOTHING when review-family activity does not exist, or when a verdict
-  already exists for the current head — a `### Sir Knight Lop the Second —
-  verdict` comment carrying a `**Head:** <sha>` line for this head.
+The outcome mapping is total — decide which one this run is before posting:
+
+- **NOT terminal** (rounds still in flight, findings unanswered, the head
+  moved after the latest round so the rounds are stale, or the thread is
+  otherwise before it settles): **post NOTHING** — print a short summary
+  naming what is still moving; the run log is the output. This applies to
+  every run, including a manual dispatch: a verdict only exists when the
+  thread is terminal.
+- **TERMINAL but with checklist gaps**: **POST the ❌ verdict** listing the
+  exact additional requirements — never silence as a rejection.
+- **TERMINAL and clean**: **POST the ✅ verdict**.
+- Confirmed-terminal signals — a merged PR, an explicit rounds-clean note, or
+  operator confirmation — count as terminal.
+- `Source: sweep` runs only (a mention or a manual dispatch skips this bullet
+  and the mapping decides): post NOTHING when review-family activity does not
+  exist, or when a verdict already exists for the current head — a
+  `### Sir Knight Lop the Second — verdict` comment carrying a
+  `**Head:** <sha>` line for this head.
+
+A genuinely terminal thread always gets a verdict; silence is only for
+not-yet-terminal.
 
 ## Judge terminality
 
@@ -63,7 +76,9 @@ CURRENT head:
 - **Testing evidence** — commands and their ACTUAL output shown in the PR, not
   just green CI.
 - **Visual evidence** — rendered frames/screenshots for a user-visible change
-  (in this repository, per `AGENTS.md`'s visual-validation section); `➖` when
+  (in this repository, per `AGENTS.md`'s visual-validation section — evidence
+  goes on the PR, never into the repository). Three states, explicit: ✅ the
+  rendered evidence is provided, ❌ it is required but missing, or `N/A` when
   the change has no visual surface.
 - **Review rounds** — terminal on the current head; list the rounds you
   counted and the head they cover.
@@ -81,7 +96,7 @@ Post through a body file so shell quoting cannot corrupt it:
 **Head:** <full sha>
 **Requirements:** ✅ all met — or ❌ additional requirements needed
 - Testing evidence — ✅/❌/➖ <one line>
-- Visual evidence — ✅/❌/➖ <one line>
+- Visual evidence — ✅/N/A/❌ <one line>
 - Review rounds — ✅ terminal on <sha> (rounds: …) | ❌ <what's missing>
 - Security — ✅ no concerns | ⚠️ <concern>
 **Additional requirements:** (only under ❌ — the exact list)
