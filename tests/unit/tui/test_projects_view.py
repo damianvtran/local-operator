@@ -17,9 +17,12 @@ import pytest
 
 from local_operator.projects import ProjectEdit, ProjectRegistry
 from local_operator.tui.app import PROJECTS_LAYOUT_CLASS, OperatorApp
-from local_operator.tui.widgets.projects_view import ProjectsView
+from local_operator.tui.widgets.projects_view import (
+    ProjectsView,
+    ProjectsViewJumpRequested,
+)
 from local_operator.tui.widgets.subagent_view import HintButton
-from local_operator.tui.widgets.transcript import UserBlock
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 SESSION_ID = "ab12cd34ef56"
@@ -42,6 +45,15 @@ def _registry(tmp_path: Path, *names: str) -> ProjectRegistry:
     for name in names:
         registry.create_project(ProjectEdit(name=name))
     return registry
+
+
+def _notices(app: OperatorApp) -> list[str]:
+    """The transcript's notice texts, oldest first."""
+    return [
+        block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
+    ]
 
 
 async def _boot(pilot: Any, app: OperatorApp) -> None:
@@ -526,3 +538,120 @@ async def test_hint_row_has_no_leading_seam_when_scroll_sheds(tmp_path: Path) ->
             if isinstance(hint, HintButton) and hint.display
         ]
         assert painted[0].startswith("↔↕")
+
+
+# -- S3b: the selection's jump, in the view that owns the cursor --------------
+
+
+@pytest.mark.asyncio
+async def test_enter_asks_the_host_to_open_the_selected_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`↵` posts ONE message naming the selection and its linked sessions (S3b)."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="beta"))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    seen: list[Any] = []
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        # `post_message` is the WRONG seam: Textual delivers the key TO the
+        # focused widget through it (and posts its shutdown handshake through
+        # it), so an instance patch of it swallows the very press under test —
+        # measured here as three captured posts (Key, Callback, Callback) and a
+        # hung `run_test` exit. Recording the message at construction leaves
+        # the machinery intact, and the real handler still receives it.
+        original_init = ProjectsViewJumpRequested.__init__
+
+        def _record(recorded_self: Any, **kwargs: Any) -> None:
+            original_init(recorded_self, **kwargs)
+            seen.append(recorded_self)
+
+        monkeypatch.setattr(ProjectsViewJumpRequested, "__init__", _record)
+        await pilot.press("enter")
+        await pilot.pause()
+    assert len(seen) == 1
+    message = seen[0]
+    assert message.project_name == "alpha"
+    # The state travels as the RUNTIME scan classified it: the app publishes a
+    # discovery record for its own session while it runs (the same record
+    # `lop sessions` reads), so the fixture's link is genuinely `live` here.
+    # The message carries STATES, not a guess.
+    assert message.sessions == ((SESSION_ID, "live"),)
+
+
+@pytest.mark.asyncio
+async def test_jump_with_no_live_session_names_what_exists(tmp_path: Path) -> None:
+    """`↵` on a stopped link: the page closes and the notice says what exists."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=((SESSION_ID, "stopped"),),
+            )
+        )
+        await pilot.pause()
+        assert app._projects_view is None
+        notice = _notices(app)[-1]
+        assert "no live session to open for 'alpha'" in notice
+        assert f"{SESSION_ID} [stopped]" in notice
+        assert "/resume <id> starts one." in notice
+
+
+@pytest.mark.asyncio
+async def test_jump_with_a_live_session_switches_through_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live link goes through `_resume_session` — the one switch machinery."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    switched: list[str] = []
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        monkeypatch.setattr(
+            app,
+            "_resume_session",
+            lambda resume_id, notice, **kw: switched.append(resume_id),
+        )
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=(("live-session-1", "live"),),
+            )
+        )
+        await pilot.pause()
+    assert switched == ["live-session-1"]
+    assert app._projects_view is None
+
+
+@pytest.mark.asyncio
+async def test_jump_on_the_current_session_says_so(tmp_path: Path) -> None:
+    """`↵` on the project THIS terminal is already in is answered, not rebooted."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=((SESSION_ID, "live"),),
+            )
+        )
+        await pilot.pause()
+        assert "already in 'alpha'" in _notices(app)[-1]
+        assert app._projects_view is None
