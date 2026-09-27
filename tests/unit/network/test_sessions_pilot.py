@@ -365,7 +365,6 @@ def test_a_dial_that_produced_no_session_names_the_far_end(
     device's own relay record — a local file read — can change it.
     """
     import local_operator.network.store as store_mod
-
     import local_operator.session.remote_open as remote_open
 
     _patch(monkeypatch, _BlindViewer(rung), _remote_row())
