@@ -70,6 +70,15 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
                 "refresh_token": refresh,
                 "balance": 123,
                 "items": [],
+                # The frozen /me contract's sibling object: it must ride the
+                # proxy's public_data filter untouched (asserted below), since
+                # the UI's verify-to-claim callout reads it from this response.
+                "verification": {
+                    "email_verified": False,
+                    "signup_grant": "pending",
+                    "grant_amount": 5.0,
+                    "claim_url": "https://console.radienthq.com/dashboard/verification",
+                },
             },
         }
 
@@ -194,6 +203,16 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
             ):
                 assert (await client.post(route, json=body)).status_code == 422
             assert len(calls) == before
+            # The verification object PASSES THROUGH unfiltered (the Radient
+            # quota-recovery contract): public_data strips secret-shaped keys
+            # only, and the UI's verify-to-claim callout reads exactly this
+            # path. Pinned end to end because a future positive-allowlist
+            # filter would blank the callout with no server-side error.
+            account = (await client.post(route, json={"operation": "account"})).json()
+            verification = account["result"]["data"]["result"]["verification"]
+            assert verification["signup_grant"] == "pending"
+            assert verification["grant_amount"] == 5.0
+            assert verification["claim_url"].endswith("/dashboard/verification")
             accounts = (await client.get("/v1/auth/status")).json()["result"]["accounts"]
             key_account = next(row for row in accounts if row["type"] == "api_key")
             removed = await client.delete("/v1/auth/accounts/" + str(key_account["id"]))

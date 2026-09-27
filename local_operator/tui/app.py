@@ -46416,13 +46416,25 @@ class OperatorApp(App[None]):
             logger.debug("MCP recovery hint could not be derived", exc_info=True)
         try:
             from local_operator.providers.failover import append_auth_recovery
+            from local_operator.providers.radient_recovery import (
+                append_usage_limit_recovery,
+            )
 
             # The provider is the first segment of the model label, the same
             # convention /model uses.
             provider = ""
             if self._session is not None:
                 provider = (self._session.model_label or "").partition("/")[0]
-            return append_auth_recovery(error, provider or None)
+            # TWO additive remedies, each keyed off the RENDERED string so a
+            # kind this app cannot classify stays untouched: the auth hint
+            # (whose own gate leaves a quota error alone — a login cannot fix
+            # it) and the Radient usage-limit remedy (whose gate leaves every
+            # other kind and provider alone). The kinds are disjoint, so
+            # neither can double-fire the other's sentence. The Radient probe
+            # is bounded and swallowing, and the module's short-TTL cache
+            # keeps its cost off a retry; it never raises.
+            hinted = append_auth_recovery(error, provider or None)
+            return append_usage_limit_recovery(hinted, provider or None)
         except Exception:  # noqa: BLE001 — same contract as above
             logger.debug("provider recovery hint could not be derived", exc_info=True)
         return error

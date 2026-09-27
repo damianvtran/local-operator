@@ -370,6 +370,9 @@ class PrintRenderer:
                 # every other kind. Provider is the first segment of the active
                 # model label.
                 from local_operator.providers.failover import append_auth_recovery
+                from local_operator.providers.radient_recovery import (
+                    append_usage_limit_recovery,
+                )
 
                 provider = ""
                 if self._session is not None:
@@ -377,8 +380,14 @@ class PrintRenderer:
                         provider = (self._session.model_label or "").partition("/")[0]
                     except Exception:
                         provider = ""
+                # The same two additive remedies the TUI's helper applies, so
+                # headless and TUI agree about what one failure says. The
+                # Radient probe is bounded (5s) and swallowing; the module
+                # documents why nothing on this path may raise.
+                sentence = append_auth_recovery(event.error, provider or None)
+                sentence = append_usage_limit_recovery(sentence, provider or None)
                 self.console.print(
-                    f"Error: {append_auth_recovery(event.error, provider or None)}",
+                    f"Error: {sentence}",
                     style="red",
                     highlight=False,
                     markup=False,

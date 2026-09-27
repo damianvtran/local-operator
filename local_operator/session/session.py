@@ -11050,6 +11050,24 @@ class Session:
         if self._disposed or not raw:
             return
         text = rendered or format_incident_message(raw, self._model.provider, self._model.model_id)
+        if not rendered:
+            # THE DESKTOP/SSE COPY of the Radient usage-limit remedy. The
+            # incident text is what the desktop renders as its
+            # `[session incident …]` row (and what the next turn's model
+            # context replays), so guidance a user must see has to live in
+            # THIS string rather than only in the TUI's error line. Gated on
+            # the RAW error's rendered form and the session's provider; a
+            # no-op for every other failure. Bounded and swallowing — see the
+            # module — and the append is idempotent, so a reappearing incident
+            # cannot stack a second remedy.
+            from local_operator.providers.radient_recovery import (
+                append_recovery_line_once,
+                usage_limit_recovery_applies,
+                usage_limit_recovery_line,
+            )
+
+            if usage_limit_recovery_applies(raw, self._model.provider):
+                text = append_recovery_line_once(text, await usage_limit_recovery_line())
         details: dict[str, Any] = {"text": text, "raw": raw[:1000]}
         if token:
             details["token"] = token
