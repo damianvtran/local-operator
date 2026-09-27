@@ -367,6 +367,27 @@ def test_download_agent_from_marketplace_success(
     assert dest_path.read_bytes() == dummy_content
 
 
+def test_download_agent_from_marketplace_carries_the_credential_when_asked(
+    radient_client: RadientClient, base_url: str, tmp_path: Path
+):
+    """The org pull proves membership: the download can carry the bearer.
+
+    The public default stays anonymous (the test above pins those headers);
+    an organization row is answered 404 to anyone who cannot prove a member
+    (design §8.2), so the org pull passes ``with_credential=True``.
+    """
+    dest_path = tmp_path / "downloaded.zip"
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.iter_content = MagicMock(return_value=[b"zip"])
+
+    with patch("requests.get", return_value=mock_response) as mock_get:
+        radient_client.download_agent_from_marketplace("agent123", dest_path, with_credential=True)
+
+    _args, kwargs = mock_get.call_args
+    assert kwargs["headers"]["Authorization"] == "Bearer test_api_key"
+
+
 def test_delete_agent_from_marketplace_success(radient_client: RadientClient, base_url: str):
     """Test successful deletion of an agent from the Radient Agent Hub (204)."""
     agent_id = "agent-to-delete"

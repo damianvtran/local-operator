@@ -9,6 +9,8 @@ from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.radient_credentials import (
     resolve_radient_credential,
     resolve_radient_credential_sync,
+    resolve_radient_oauth_access,
+    resolve_radient_oauth_access_sync,
 )
 
 URL = "https://api.radienthq.com/v1"
@@ -127,3 +129,67 @@ async def test_parallel_legacy_readers_share_one_refresh_lock(tmp_path, monkeypa
         assert refreshed.data["access"] == "fresh-fixture"
     finally:
         store.close()
+
+
+# --- Organization (person-scoped) access: design §8.3 -------------------------
+
+
+@pytest.mark.asyncio
+async def test_oauth_access_resolves_only_an_oauth_row(tmp_path) -> None:
+    """Org calls take the PERSON's credential: an OAuth row, never a pasted key.
+
+    An API key proves an application tenant, not a person's membership (§2.2),
+    so a ``radient-key`` login must resolve to None -- the caller answers with
+    the re-login remedy instead of acting under a credential that cannot
+    represent a person.
+    """
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        store.upsert_credential(
+            "radient", {"type": "api_key", "source": "login", "key": "pasted-fixture"}
+        )
+        assert await resolve_radient_oauth_access(tmp_path, store=store) is None
+
+        oauth = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": "oauth-fixture",
+                "refresh": "refresh-fixture",
+                "expires": int(time.time() * 1000) + 3600000,
+            },
+        )
+        access = await resolve_radient_oauth_access(tmp_path, store=store)
+        assert access is not None
+        assert access.kind == "oauth"
+        assert access.access_token == "oauth-fixture"
+
+        store.delete_credential(oauth.id)
+        assert await resolve_radient_oauth_access(tmp_path, store=store) is None
+    finally:
+        store.close()
+
+
+def test_oauth_access_sync_bridge_uses_the_store(tmp_path) -> None:
+    """The CLI-only bridge resolves from the same central store."""
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": "oauth-fixture",
+                "refresh": "refresh-fixture",
+                "expires": int(time.time() * 1000) + 3600000,
+            },
+        )
+    finally:
+        store.close()
+
+    access = resolve_radient_oauth_access_sync(tmp_path)
+    assert access is not None
+    assert access.access_token == "oauth-fixture"
+
+
+def test_oauth_access_sync_bridge_is_empty_with_nothing_stored(tmp_path) -> None:
+    assert resolve_radient_oauth_access_sync(tmp_path) is None

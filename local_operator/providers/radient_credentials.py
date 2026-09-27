@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.auth_store import AuthStore, OAuthAccess
 from local_operator.providers.registry import get_provider_definition
 
 if TYPE_CHECKING:
@@ -111,3 +111,55 @@ def resolve_radient_credential_sync(config_dir: Path | None, base_url: str) -> S
     except RuntimeError:
         return asyncio.run(resolve_radient_credential(config_dir, base_url))
     raise RuntimeError("Await resolve_radient_credential inside an async host")
+
+
+async def resolve_radient_oauth_access(
+    config_dir: Path | None, *, store: AuthStore | None = None
+) -> OAuthAccess | None:
+    """The signed-in Radient account behind an ORGANIZATION (person-scoped) call.
+
+    Design §8.3: organization calls authenticate with the stored Radient OAuth
+    access token -- never the tenant API key, because an API key proves an
+    application tenant, not a person's membership (§2.2). This resolver therefore
+    answers ONLY when the store's cascade picks an OAuth row: a pasted
+    ``radient-key`` login (``kind == "api_key"``) or no login at all resolves to
+    ``None``, and the caller answers with the "run ``lop login radient``" remedy
+    rather than the public hub paths' "RADIENT_API_KEY is required" one.
+
+    There is deliberately no destination branch here, unlike
+    :func:`resolve_radient_credential`: organization routes exist only on the
+    hub the operator configured (``<base_url>/me/memberships`` and friends), so
+    there is no legacy-gateway fallback TO take -- a non-canonical base URL is
+    answered by whatever that host returns, under the same credential selection
+    rule (OAuth row, never the API key). The caller owns the destination; this
+    function owns WHICH stored credential may act as a person.
+
+    ``read_only`` resolves without blocking a credential or moving session
+    stickiness, matching the other hub helpers; a required refresh still
+    persists centrally. A grant the IdP has declared dead comes back as
+    ``None`` (the cascade rotates away from unusable rows), which is exactly the
+    "expired login" case the caller renders as the re-login remedy.
+    """
+    owns_store = store is None
+    store = store or AuthStore(
+        (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
+    )
+    try:
+        access = await store.get_oauth_access("radient", read_only=True)
+    finally:
+        if owns_store:
+            store.close()
+    if access is None or access.kind != "oauth" or access.credential_invalid:
+        return None
+    if not access.access_token:
+        return None
+    return access
+
+
+def resolve_radient_oauth_access_sync(config_dir: Path | None) -> OAuthAccess | None:
+    """CLI-only bridge; async hosts must await the shared resolver directly."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(resolve_radient_oauth_access(config_dir))
+    raise RuntimeError("Await resolve_radient_oauth_access inside an async host")

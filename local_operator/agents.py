@@ -17,7 +17,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -27,7 +37,9 @@ from local_operator.agent_profiles import (
     SEED_SHA256_PREFIX,
     SEED_VERSION_PREFIX,
     is_sha256_hex,
+    is_specialist,
     marker_value,
+    profile_from_agent,
 )
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.optional import missing_extra_error
@@ -574,6 +586,77 @@ def hub_fingerprint(instructions: str, description: str) -> str:
         separators=(",", ":"),
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+#: Local registry tags that ENCODE a profile field rather than tag the agent.
+#: ``role`` marks the row as a delegation role, and ``tools:``/``effort:``/
+#: ``delegate:`` carry fields the document publishes in their own right (the keys
+#: ``profile_from_agent`` decodes). Publishing them as tags as well would put this
+#: machine's registry encoding on the hub.
+PROFILE_ENCODING_TAG_KEYS = frozenset({"role", "tools", "effort", "delegate"})
+
+
+def instruction_set_fields(
+    agent_registry: "AgentRegistry", agent: "AgentData", overrides: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """The document fields a local registry row publishes, before overrides.
+
+    WHY THIS MODULE BUILDS THE DOCUMENT AND NOT THE CALLERS: the instruction
+    body lives here -- in the agent's ``system_prompt.md`` -- so a
+    caller-assembled document would be a second, drifting copy of the
+    local-to-hub mapping. A caller supplies through ``overrides`` only what it
+    actually edits (the desktop renderer's dialog fields); everything else comes
+    from the row the user is looking at. Both publication surfaces -- the local
+    server's publish route and the CLI's org push -- share this function so
+    "the same agent" cannot publish two different documents depending on which
+    one ran.
+
+    The body is read unbounded here on purpose: a publication must not be
+    truncated, because a body silently cut short is a document the author never
+    wrote, published under their name. The document builder's own cap refuses an
+    oversized body with the rule the hub would use.
+    """
+
+    profile = profile_from_agent(agent_registry, agent)
+    instructions = agent_registry.get_agent_system_prompt(agent.id) or ""
+
+    fields: Dict[str, Any] = {
+        "name": agent.name,
+        "description": str(agent.description or ""),
+        "instructions": instructions,
+        # Locally, role and specialist are a registry tag and a category; the hub
+        # has one explicit `kind`. A row that is neither is published as a role: a
+        # published agent IS a role to whoever pulls it, and refusing it would
+        # leave the user unable to publish an agent for a reason the dialog cannot
+        # explain or offer a fix for.
+        "kind": "specialist" if is_specialist(agent) else "role",
+        # The AUTHOR's content version. Deliberately not the row's `version`, which
+        # records the local-operator release that wrote agent.yml: reusing it would
+        # publish an application version as the author's own. (A new document
+        # starts at 1.0.0; a caller that means a different revision supplies it
+        # as an override, exactly as the desktop republish dialog does.)
+        "version": "1.0.0",
+        "tags": [
+            str(tag)
+            for tag in (agent.tags or [])
+            if str(tag).partition(":")[0].strip().lower() not in PROFILE_ENCODING_TAG_KEYS
+            and not str(tag).strip().lower().startswith(PROVENANCE_TAG_PREFIXES)
+        ],
+    }
+    # `when_to_use` and `categories` are NOT derived. Locally a role stores its
+    # routing text AS the description (``profile_from_agent``), so sending both
+    # would publish one sentence twice; and the local category vocabulary is not
+    # the hub's -- `specialist` is a local kind marker, not one of the hub's
+    # categories -- so translating between them silently is the one thing neither
+    # side is allowed to do. The caller supplies them when it means them.
+    if profile.tools is not None:
+        fields["tools"] = list(profile.tools)
+    if profile.effort:
+        fields["effort"] = profile.effort
+    fields["delegate"] = profile.may_delegate
+
+    fields.update(overrides)
+    return fields
 
 
 class AgentRegistry:
@@ -2313,6 +2396,8 @@ class AgentRegistry:
         self,
         radient_client,
         agent_id: str,
+        *,
+        with_credential: bool = False,
     ) -> Tuple[AgentData, Optional[str]]:
         """
         Download an agent from the Radient Agent Hub and import it.
@@ -2326,6 +2411,10 @@ class AgentRegistry:
         Args:
             radient_client: An instance of RadientClient.
             agent_id (str): The agent ID to download.
+            with_credential (bool): Send the client's bearer with the download.
+                A public pull stays anonymous (unchanged); an organization
+                pull must prove the signed-in member, because the hub answers
+                an org row 404 to anyone else (§8.2/§8.3).
 
         Returns:
             Tuple[AgentData, Optional[str]]: the imported agent's metadata, and
@@ -2338,7 +2427,9 @@ class AgentRegistry:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir_path = Path(temp_dir)
             zip_path = temp_dir_path / f"{agent_id}.zip"
-            radient_client.download_agent_from_marketplace(agent_id, zip_path)
+            radient_client.download_agent_from_marketplace(
+                agent_id, zip_path, with_credential=with_credential
+            )
             imported, renamed_from = self.import_agent(zip_path)
         return self._stamp_hub_provenance(imported, agent_id), renamed_from
 
