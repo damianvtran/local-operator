@@ -926,6 +926,20 @@ class ProjectRegistry:
         if stale:
             self._load()
 
+    def refresh(self) -> None:
+        """Force one bounded re-read, ignoring the snapshot interval.
+
+        The refusal surfaces read :attr:`load_error` BEFORE any read reaches
+        the store, and a read is what refreshes the snapshot — so a store
+        repaired since the flag was set kept refusing on the live surface
+        (QA round 2, Q5: eight receipts over eleven seconds after a `chmod`
+        back, every one stale). The snapshot's own staleness test cannot see
+        a permission repair either: `chmod` moves the inode's ctime, not the
+        directory's mtime, and the interval may not have elapsed. One stat +
+        one listing per refusal is the bounded cost of telling the truth.
+        """
+        self._load()
+
     def list_projects(self) -> list[Project]:
         """Every project, metadata only, sorted by name (case-insensitive)."""
         self._refresh_if_needed()

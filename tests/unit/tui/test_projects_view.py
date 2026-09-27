@@ -494,3 +494,26 @@ async def test_footer_shedding_keeps_the_page_geometry(
         assert width_scalar is not None and height_scalar is not None
         assert view.canvas_size == (width_scalar.value, height_scalar.value)
         assert app.screen.virtual_size == app.screen.size  # the screen never scrolls
+
+
+@pytest.mark.asyncio
+async def test_hint_row_has_no_leading_seam_when_scroll_sheds(tmp_path: Path) -> None:
+    """UX round 2, U6: with `↔↕ scroll` shed the row opened with a dangling `·`."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta", "gamma")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app)
+        await pilot.pause()
+        assert view._scroll_hint.display is False
+        painted = [hint.rendered() for hint in view._hints.children if hint.display]
+        assert painted, "the hint row painted nothing"
+        assert painted[0].startswith("1")  # the seam belongs to the row, not the hint
+        assert "·" not in painted[0][:2]
+        # Widening brings the scroll hint back as the row's FIRST hint — still
+        # with no seam in front of it.
+        await pilot.resize_terminal(140, 40)
+        await pilot.pause()
+        painted = [hint.rendered() for hint in view._hints.children if hint.display]
+        assert painted[0].startswith("↔↕")

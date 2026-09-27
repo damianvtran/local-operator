@@ -439,11 +439,20 @@ def test_detail_footer_sheds_whole_clauses_to_fit() -> None:
 
 
 def test_detail_footer_truncates_explicitly_when_even_the_identity_overflows() -> None:
-    """A name longer than the page is ellipsized, never silently cut."""
+    """A name longer than the page is ellipsized, never silently cut.
+
+    The STATUS CHIP is the whole token that survives when it can (U5): the
+    name gives way first, and only a chip that cannot fit at all is ellipsized.
+    """
+    from rich.cells import cell_len
+
     view = _view("x" * 120)
     narrow = detail_footer(view, now=NOW, width=20)
-    assert narrow.plain.endswith("\u2026")
-    assert len(narrow.plain) <= 20
+    assert "\u2026 [active]" in narrow.plain
+    assert cell_len(narrow.plain) <= 20
+    tiny = detail_footer(view, now=NOW, width=6)
+    assert tiny.plain.endswith("\u2026")
+    assert cell_len(tiny.plain) <= 6
 
 
 def test_detail_footer_omits_unknown_todo_counts() -> None:
@@ -512,3 +521,54 @@ def test_truncate_row_caps_cells_not_characters() -> None:
     # The point of the fix: the CAP is in cells, so the row is 79 glyphs, not
     # 159 characters — a 160-character CJK row wrapped to three visual lines.
     assert len(capped) == 80
+
+
+# -- the round-2 footer deltas -------------------------------------------------
+
+
+def test_footer_does_not_paint_a_seam_for_an_empty_clause() -> None:
+    """UX round 2, U4: a milestone-less project showed a doubled separator.
+
+    The empty milestones clause still cost its seam (``·  ·``), and the five
+    cells that phantom slot measured flipped the shed ladder on an 82-86-cell
+    box, hiding a rollup that fits.
+    """
+    from rich.cells import cell_len
+
+    view = _view(
+        "annotator-overhaul",
+        progress="prototype landed",
+        progress_updated_at=NOW - 3,
+        sessions=[_session("fa11bacc0001", "live")],
+    )
+    text = detail_footer(view, now=NOW).plain
+    assert "·  ·" not in text
+    # The phantom slot cannot flip the ladder: four cells narrower than the
+    # composed row, the rollup still fits (it is shed only after the body).
+    fitted = detail_footer(view, now=NOW, width=cell_len(text) - 4).plain
+    assert "sessions: fa11bacc0001 [live]" in fitted
+    assert fitted.endswith("…")
+
+
+def test_footer_sheds_the_progress_body_before_the_session_rollup() -> None:
+    """Agent review round 2: the 192-235 band kept the body and dropped the rollup."""
+    from rich.cells import cell_len
+
+    view = _long_footer_view()
+    full = detail_footer(view, now=NOW).plain
+    fitted = detail_footer(view, now=NOW, width=cell_len(full) - 10).plain
+    assert "sessions: fa11bacc0001 [live]" in fitted
+    assert "prototype landed" not in fitted
+    assert "prototype [completed]" in fitted
+
+
+def test_footer_keeps_the_status_chip_whole_when_the_name_overflows() -> None:
+    """UX round 2, U5: a blind truncate left `… [p…` at 60 columns."""
+    from rich.cells import cell_len
+
+    view = _view("long-horizon-annotator-overhaul-with-many-many-words", status="paused")
+    text = detail_footer(view, now=NOW, width=56).plain
+    assert "[paused]" in text
+    assert "[p…" not in text
+    assert cell_len(text) <= 56
+    assert text.endswith("[paused]")  # the chip is the survivor, the name gives way
