@@ -100,6 +100,36 @@ def test_reading_an_absent_identity_creates_nothing(root: Path) -> None:
     assert not (root / "network").exists()
 
 
+def test_reading_a_setting_does_not_create_the_config_root(root: Path) -> None:
+    """R1-3, with the scope QA measured rather than the scope the review described.
+
+    ``store.read_config`` constructs a ``ConfigManager``, whose ``_load_config``
+    mkdirs when ``config.yml`` is absent — its documented "create with defaults on
+    first run" behaviour, correct for a WRITER and wrong for a read of one nested
+    value. QA's Q-3 pinned WHERE the write lands: the CONFIG root
+    (``<HOME>/.local-operator``), not ``network/``, and nothing at all when
+    ``root`` is passed explicitly. Both halves are asserted here, because the
+    honest scoping is the finding.
+    """
+    sentinel = "SENTINEL-DEFAULT"
+    fresh = root / "never-created"
+
+    assert store.read_config(("network", "audit", "max_bytes"), sentinel, fresh) == sentinel
+    assert not fresh.exists(), "a read of a setting created the config root"
+
+    # A root that DOES hold a config file is read through ConfigManager as before,
+    # so the short-circuit is only the absent-file case. The settings live under a
+    # top-level `values:` mapping — measured, because the flat form parses fine and
+    # silently reads as unset, which would turn this half of the test into a false
+    # pass.
+    fresh.mkdir()
+    (fresh / "config.yml").write_text(
+        "values:\n  network:\n    audit:\n      max_bytes: 4096\n", encoding="utf-8"
+    )
+    assert store.read_config(("network", "audit", "max_bytes"), sentinel, fresh) == 4096
+    assert store.read_config(("network", "audit", "generations"), sentinel, fresh) == sentinel
+
+
 def test_a_purge_of_a_store_that_was_never_written_creates_nothing(root: Path) -> None:
     """The empty-store arm: nothing to forget, and nothing to create on the way."""
     removed = store.purge_network_artifacts(root=root)

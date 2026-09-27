@@ -40,6 +40,7 @@ from local_operator.session.runtime.presence import (
     PRESENCE_TTL_S,
     delivery_dir,
     delivery_record_path,
+    ensure_delivery_dir,
 )
 from local_operator.session.runtime.registry import pid_alive
 
@@ -354,8 +355,9 @@ class DesktopDeliveryPublisher:
             return
 
         # Staged in the record's OWN directory so the replace stays on one
-        # filesystem, and created 0700 with the parent.
-        directory = delivery_dir(self.root)
+        # filesystem, and created 0700 with the parent. THIS is the writer, so
+        # this is where the directory is asked for (see ``presence.delivery_dir``).
+        directory = ensure_delivery_dir(self.root)
         claims = list(self.claims.values())
         # The newest claim's window is the one reported: one app, one window
         # (a second instance is refused by the app itself), so "which window is

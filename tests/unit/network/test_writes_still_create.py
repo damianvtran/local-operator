@@ -74,6 +74,37 @@ def test_the_ensure_twins_create_0700_all_the_way_down(
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
 
 
+def test_the_tombstone_write_is_0600_and_leaves_no_sidecar(root: Path) -> None:
+    """R1-2: the tombstone file was the ONLY 0644 file in the network plane.
+
+    ``write_tombstone`` used a bare ``path.write_text``, which takes the umask, so
+    ``<config>/network/tombstones.json`` came out ``-rw-r--r--`` beside 0600
+    records, secrets and invites while holding the same class of content — device
+    ids and the session ids handed to them. The 0700 parent limited the exposure,
+    which is why it is a MINOR and not more.
+
+    The mode is asserted at BIRTH rather than after a repair: a following
+    ``os.chmod`` leaves a window in which the file is world-readable, and the
+    staged-then-renamed write is also what stops a reader seeing a truncated map
+    (which reads as "nothing ever moved" and would re-offer a session living
+    elsewhere).
+    """
+    from local_operator.network import projection
+
+    path = projection.write_tombstone(
+        "a" * 12, device_id="d_" + "b" * 32, device_name="devon", config_dir=root
+    )
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert projection.read_tombstones(root)["a" * 12]["device_name"] == "devon"
+    assert [p.name for p in path.parent.glob(".tombstones.json.*")] == []
+
+    # The reverse direction keeps the same mode, since it writes the same file.
+    assert projection.forget_tombstone("a" * 12, config_dir=root) is True
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert projection.read_tombstones(root) == {}
+
+
 def test_a_written_network_is_readable_and_its_directories_stay_private(root: Path) -> None:
     """The writer path end to end, through the store's own entry point.
 

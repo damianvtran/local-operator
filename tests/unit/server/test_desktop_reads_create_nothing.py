@@ -107,6 +107,44 @@ def test_the_mesh_reads_answer_empty_and_create_nothing_on_a_fresh_install(
     assert has_any_network(root) is False
 
 
+def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monkeypatch) -> None:
+    """THE SWEEP, AS A TEST — and the reason it exists is that the first version of
+    this file proved ``0 of N`` for ``network/`` while ``run/`` still grew.
+
+    Measured on a fresh isolated root (review round 1, R1-1): ``GET
+    /v1/desktop/info``, ``/networks``, ``/runtimes``, ``/sessions`` and
+    ``/sessions/{id}`` created ``run/mobile``, ``run/peers`` and ``run/viewers``,
+    because each reached a scan and ``registry.scan`` opened with a mkdir. A fix
+    scoped to ``network/`` would have left all five, so the plane this file guards
+    is BOTH namespaces.
+
+    Status is deliberately not asserted: the point is the filesystem, and these
+    routes answer differently on a machine with no relay, no runtime and no
+    session (200 with an empty read, or a refusal sentence). What must hold for
+    every one of them is that the tree afterwards is the tree before it.
+    """
+    root = _isolate(tmp_path, monkeypatch)
+    routes = (
+        "/v1/desktop/commands",
+        "/v1/desktop/info",
+        "/v1/desktop/networks",
+        "/v1/desktop/peers",
+        "/v1/desktop/runtimes",
+        "/v1/desktop/sessions",
+        "/v1/desktop/sessions/aaaaaaaaaaaa",
+    )
+
+    with TestClient(app) as client:
+        for route in routes:
+            before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+            client.get(route, headers=HEADERS)
+            after = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+            assert after == before, f"{route} created {sorted(set(after) - set(before))}"
+
+    assert (root / "network").exists() is False
+    assert (root / "run").exists() is False
+
+
 def test_the_probe_and_the_vocabulary_still_read_a_real_network(tmp_path, monkeypatch) -> None:
     """The fix must not turn an honest probe into a permanently false one.
 

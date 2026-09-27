@@ -702,8 +702,10 @@ def wedged_runtime(config_dir: Path, session_id: str) -> tuple[int, float] | Non
     It is NOT side-effect free, though, and round 2 (R10) was right that
     saying so was a false claim of purity. This delegates to
     ``registry.scan``, whose documented job includes reaping: it unlinks
-    records whose pid is gone or whose file is torn, and ``run_dir()`` creates
-    the directory if absent. That reaping is `scan`'s contract rather than
+    records whose pid is gone or whose file is torn. It no longer CREATES the
+    directory if absent — #1666's review round 1, R1-1 made ``run_dir`` pure and
+    gave scanners an absence short-circuit — so the write it performs is the
+    reaping alone. That reaping is `scan`'s contract rather than
     something this function wants, and it only ever removes records for
     processes that are already dead — but it is a write, and a reader of this
     docstring must not be told otherwise. The classification is read from
