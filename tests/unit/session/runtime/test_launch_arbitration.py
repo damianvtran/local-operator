@@ -108,6 +108,12 @@ class FakeRuntimeFleet:
         self.winners = 0
         self.losers = 0
         self.deferred: list[bool] = []
+        #: The engage CLAIM each spawn asked for (``launch._spawn_runtime``'s
+        #: ``warm``), kept beside the materialisation flag rather than derived
+        #: from it: the two are the same value at every call site TODAY, and
+        #: which one a spawn is keyed on is the difference between a window
+        #: bought by an engage and one bought by a deferral (review round 1, M4).
+        self.warm: list[bool] = []
         #: Set when a candidate wins, so the welcome frame can name the
         #: session the attach client is arbitrating against.
         self.session_id = ""
@@ -123,11 +129,13 @@ class FakeRuntimeFleet:
         cwd: str,
         *,
         defer_materialise: bool,
+        warm: bool = False,
         initial_model=None,
         model_selection_override=False,
     ) -> None:
         self.spawns += 1
         self.deferred.append(defer_materialise)
+        self.warm.append(warm)
         directory = self.config_dir / "sessions" / session_id
         directory.mkdir(parents=True, exist_ok=True)
         try:
@@ -273,10 +281,11 @@ def fleet(tmp_path: Path, monkeypatch):  # noqa: ANN201
         cwd: str,
         *,
         defer_materialise: bool,
+        warm: bool = False,
         initial_model=None,
         model_selection_override=False,
     ) -> None:
-        instance.spawn(session_id, cwd, defer_materialise=defer_materialise)
+        instance.spawn(session_id, cwd, defer_materialise=defer_materialise, warm=warm)
 
     monkeypatch.setattr("local_operator.session.runtime.launch._spawn_runtime", _spawn)
     try:
@@ -691,10 +700,18 @@ async def test_a_claim_naming_an_unrelated_live_pid_spawns_instead_of_waiting(
 async def test_warm_errand_defers_materialisation_and_others_do_not(
     fleet: FakeRuntimeFleet, tmp_path: Path
 ) -> None:
-    """A speculative engage must not commit a directory for an abandoned draft."""
+    """A speculative engage must not commit a directory for an abandoned draft.
+
+    The same cell pins the CALL SITE's two spawn facts, because they are passed
+    separately and must both be right: a ``WarmErrand`` defers materialisation
+    AND asks for the keep-alive claim, every other errand neither — the claim is
+    keyed on the errand so that a caller deferring for its own reason cannot buy
+    a window nobody engaged for (review round 1, M4).
+    """
     fleet.loop = asyncio.get_running_loop()
     await engage_runtime(SESSION_ID, str(tmp_path), WarmErrand(), config_dir=tmp_path)
     assert fleet.deferred == [True]
+    assert fleet.warm == [True], "a warm errand did not ask for the engage claim"
 
     fleet.deferred.clear()
     other = FakeRuntimeFleet(tmp_path)
@@ -716,6 +733,7 @@ async def test_warm_errand_defers_materialisation_and_others_do_not(
             config_dir=tmp_path,
         )
         assert other.deferred == [False], "real work must materialise the session"
+        assert other.warm == [False], "a prompt engage bought the warm window"
     finally:
         launch_module._spawn_runtime = original
         other.close()
@@ -807,6 +825,7 @@ async def test_a_candidate_that_dies_during_construction_is_respawned(
         cwd: str,
         *,
         defer_materialise: bool,
+        warm: bool = False,
         initial_model=None,
         model_selection_override=False,
     ) -> _DeadPopen:
@@ -864,6 +883,7 @@ async def test_a_child_that_dies_reports_its_own_reason_not_a_generic_failure(
         cwd: str,
         *,
         defer_materialise: bool,
+        warm: bool = False,
         initial_model=None,
         model_selection_override=False,
     ) -> _DeadPopen:

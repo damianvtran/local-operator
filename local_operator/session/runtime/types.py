@@ -312,6 +312,20 @@ SERVE_RUN_DIRNAME = "run/serve"
 #: value has to survive as a string either way.
 ENGAGED_ENV = "LOP_SESSION_ENGAGED"
 
+#: The ``kind`` a spawned session RUNTIME publishes of itself (``process.amain``'s
+#: registrant, which is the only population ``process._reaper`` runs in).
+#:
+#: IT IS A NAME BECAUSE THE CLAIM'S READER HAS TO ASK WHICH POPULATION THE
+#: RECORD BELONGS TO. ``ENGAGED_ENV`` above rides in the environment, so any
+#: descendant of a warm child inherits it, while two registrants build a record
+#: straight from ``os.environ`` — ``exec_control``'s ``lop exec`` and the TUI's
+#: own row — and neither one's residency is the reaper's to decide. Charging
+#: those records would spend a slot of the LRU cap on a runtime the policy can
+#: never evict. Both ends spell this kind through this name, so renaming the
+#: runtime's kind cannot silently stop an engage from holding its window
+#: (review round 1, N1).
+RUNTIME_RECORD_KIND = "daemon"
+
 #: Directory (under the config root) holding the BOOT RECORDS of processes that
 #: spawn session runtimes — today the runtime itself, later the supervised
 #: session host (design-session-survival §4).

@@ -97,6 +97,7 @@ from local_operator.session.runtime.types import (
     EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
     OPERATOR_SIGNATURE_CAPABILITY,
+    RUNTIME_RECORD_KIND,
     ClientKind,
     ClientLocality,
     SessionRecord,
@@ -1701,7 +1702,22 @@ class RuntimeServer:
             # the attach it was warmed for — which is the bug this field exists
             # to remove. Set once here and never rewritten: it states how this
             # process came to exist, which does not stop being true.
-            engaged_at=(time.time() if os.environ.get(ENGAGED_ENV, "") == "1" else None),
+            #
+            # A RECORD HOLDS IT ONLY IF IT IS A RUNTIME ITSELF. The variable is
+            # inherited by every descendant of a warm child, while two
+            # registrants build a record straight from ``os.environ`` —
+            # ``exec_control``'s ``lop exec`` and the TUI's own row — and neither
+            # one's residency is the reaper's to decide. Their claim would not
+            # change their own residency, but ``process._keep_alive_candidates``
+            # charges every published record holding one, so a stray claim spends
+            # a slot of the LRU cap and can preempt a genuine warm. The gate is
+            # the kind the runtime itself boots with, which is the population the
+            # window exists for (review round 1, N1).
+            engaged_at=(
+                time.time()
+                if kind == RUNTIME_RECORD_KIND and os.environ.get(ENGAGED_ENV, "") == "1"
+                else None
+            ),
             # THE ONE-SHOT "an update applied" FACT, and this is the only writer
             # that can publish it: the marker the outgoing runtime left was
             # consumed at boot (``process._consume_update_marker``) BEFORE this
