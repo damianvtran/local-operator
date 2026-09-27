@@ -295,6 +295,23 @@ RUN_DIRNAME = "run/mobile"
 #: ``kill -9`` leaves exactly one file behind for the next scan to reap.
 SERVE_RUN_DIRNAME = "run/serve"
 
+#: The spawn-contract variable that says a runtime exists because a PERSON ASKED
+#: FOR IT (a warm engage) rather than to run work somebody already handed over.
+#:
+#: ONE NAME, TWO READERS, and both are the reason it lives here rather than in
+#: either of them: ``launch._spawn_runtime`` writes it (for ``WarmErrand``, the
+#: speculative engage that both ``net_session_engage`` and a draft's first
+#: keystroke use) and the runtime's own boot reads it into
+#: ``SessionRecord.engaged_at``, the residency policy's second claim on the
+#: keep-alive window. ``standby.CONTRACT_KEYS`` carries it too: an adopted spare
+#: must end up in exactly the state a cold child starts in, and a claim that
+#: crossed an adoption but not a cold spawn would make the two disagree.
+#:
+#: Spelled as a literal by both ends rather than passed through a shared import
+#: chain: the child is spawned with ``python -m`` and a bare environment, so the
+#: value has to survive as a string either way.
+ENGAGED_ENV = "LOP_SESSION_ENGAGED"
+
 #: Directory (under the config root) holding the BOOT RECORDS of processes that
 #: spawn session runtimes — today the runtime itself, later the supervised
 #: session host (design-session-survival §4).
@@ -1184,6 +1201,31 @@ class SessionRecord:
     #: ``PROTOCOL_VERSION`` deliberately does not move for it. Nothing is
     #: required to read it: a runtime without it keeps today's residency.
     detached_at: float | None = None
+    #: WHEN THIS RUNTIME WAS LAST ASKED FOR (a warm engage), or ``None`` for
+    #: every other way a runtime starts.
+    #:
+    #: THE SECOND WAY A RUNTIME ACQUIRES A CLAIM ON THE KEEP-ALIVE WINDOW, and a
+    #: different fact from ``detached_at`` above: that one records a person who
+    #: has already LOOKED, this one a person who has already ASKED. An engage
+    #: exists to have a runtime ready for a viewer that has not arrived yet
+    #: (``net_session_engage``, ``launch.WarmErrand``), so the runtime has to
+    #: know it was asked for — without this the ordinary 3 s drain retires it
+    #: before the attach it was warmed for can land. Measured on a two-device
+    #: rig: the peer's ``--engage`` answered ``runtime joining`` and the runtime
+    #: was gone about 3 s later, so the answer promised a runtime that had
+    #: already left (and the warming paid a full cold start for nothing).
+    #:
+    #: SET ONCE, AT BOOT, FROM THE SPAWN (``ENGAGED_ENV``, written by
+    #: ``launch._spawn_runtime`` for a ``WarmErrand``), and never cleared: it
+    #: states how this process came to exist, which does not stop being true, and
+    #: the window it buys is the same bounded one a departing viewer gets
+    #: (``runtime.keep_alive_seconds``, charged to ``runtime.keep_alive_max``
+    #: wherever either claim is read).
+    #:
+    #: ADDITIVE AND KEYLESS ON AN OLDER READER, like the two fields above:
+    #: ``from_json`` drops unknown keys, an older runtime's record defaults to
+    #: None, and ``PROTOCOL_VERSION`` deliberately does not move for it.
+    engaged_at: float | None = None
     #: At least one attach CLIENT is connected — the reaper's own term 3
     #: (``RuntimeServer.attach_clients``), which is NOT the same fact as
     #: ``detached`` directly above.

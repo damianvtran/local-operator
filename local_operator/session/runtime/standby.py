@@ -305,6 +305,13 @@ CONTRACT_KEYS = (
     "LOP_MOBILE_CHILD_EFFORT",
     "LOP_MODEL_SELECTION_OVERRIDE",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The engage claim (``types.ENGAGED_ENV``, spelled out here because this
+    # module deliberately imports nothing from ``local_operator`` at module
+    # level): a spawn fact the runtime reads into its record at boot
+    # (``engaged_at``). A spare that carried it into the pool — or that dropped
+    # it on the way to an engage — would leave an adopted runtime in a DIFFERENT
+    # state from the cold child this list exists to make it identical to.
+    "LOP_SESSION_ENGAGED",
 )
 
 #: The modules warmed beyond the runtime's own top-level imports and
