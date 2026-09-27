@@ -11,21 +11,34 @@ subprocess wrapper:
 
 * **The invite token never appears in a result, and the SAS only as the code two
   people compare.** ``invite`` returns the token's *path*; the code a pairing shows
-  is returned because the user has to be shown it, and it is not a credential — it
-  is derived on both devices from the live handshake and never travels. The CLI's
+  is returned because the user has to be shown it. It is not a credential, but it
+  DOES travel: both devices derive the same digits from the live handshake, and the
+  joining device sends its transcription inside a SEALED frame for the inviter to
+  compare against its own derivation (``handshake.pair_ready_frame``, compared in
+  ``relay.py``'s ``net_pair_ready``). It therefore never appears in cleartext on the
+  wire, in a log line or in an error — and its security never rested on secrecy in
+  the first place: it rests on a human having read it off the other device's screen.
+  The earlier wording here ("never travels") was wrong, and it was the premise this
+  tool's own rewrite used to relax the design's invariant (agent review round 1,
+  semantic finding 2). The CLI's
   stdout is PARSED, never passed through: a raw blob would put a token in the
   transcript the moment a command printed one (``mesh-ui.md`` §3.2), and every
   payload is scrubbed of secret-shaped keys on the way out as a second line of
   defence.
-* **No confirmation, ever — a human's half is a VALUE, never a flag we invent.**
-  Pairing is two people reading a code off each other's screens, and the tool drives
-  that ceremony without ever supplying it: ``join`` without ``confirm`` starts the
-  two-phase pair, parks the ceremony and hands back the code together with the
-  sentence the user needs; ``join`` with ``confirm`` sends ONLY the code the user
-  read back, because the argv table has no default for it and no branch that can
-  reach it otherwise. ``panic``/``disconnect``/``member rm`` mutate the trust state
-  of every device in a network and still take no ``--yes``. So a refusal comes back
-  as the CLI's own sentence rather than as an action taken on the user's behalf.
+* **No confirmation, ever — the second phase is the PERSON's, and this tool
+  cannot answer a park at all.** Pairing is two people reading a code off each
+  other's screens. ``join`` opens the ceremony, parks it and hands back the code
+  together with the sentence the user needs; the person then runs ``lop network join
+  --confirm <code>`` at their own terminal (or answers the inviter's ``lop network
+  confirm`` prompt), and ``_argv_for`` spells no ``--confirm`` anywhere — no field,
+  no default, no branch that can produce one. The earlier revision took that code as
+  a field on this tool, which is decorative rather than safe: the code both devices
+  derive is the SAME digits, so a model holding the code it just printed can echo it
+  back and satisfy the very comparison that exists to detect a substitution (agent
+  review round 1, semantic finding 1; the operator's ruling was to remove the field,
+  not to guard it). ``panic``/``disconnect``/``member rm`` mutate the trust state of
+  every device in a network and still take no ``--yes``. So a refusal comes back as
+  the CLI's own sentence rather than as an action taken on the user's behalf.
 * **Creation cannot be gated.** ``init`` is how the first network comes to
   exist, so the tool exists in every session (``build_network_tool`` never
   returns ``None`` — ``mesh-ui.md`` §3.2's ladder discussion).
@@ -174,14 +187,6 @@ class NetworkParams(BaseModel):
             "back; kept out of `ps`."
         ),
     )
-    confirm: str = Field(
-        default="",
-        description=(
-            "For join: the code the USER read back off the other device's screen, "
-            "answering a pairing a previous call started. Never the code this tool "
-            "printed; omitting it starts a pairing."
-        ),
-    )
     expires: str = Field(
         default="",
         description="For invite: how long the token stays open, e.g. 30m or 2h (default 10m).",
@@ -269,22 +274,40 @@ def _scrub(value: Any) -> Any:
     return value
 
 
-def _session_mutation(args: dict[str, Any]) -> str:
-    """Which mutating verb this ``sessions`` call carries, if any.
+#: The text spellings a model may send for "no". Absent for BOTH readers of the verb
+#: set, because the approval tier is not a second opinion: a call tiered ``read`` that
+#: still reaches the CLI as a mutation is the defect this constant exists to prevent.
+_FALSY_TOKENS: frozenset[str] = frozenset({"", "0", "false", "no", "none", "null"})
 
-    A string is a verb's operand (``engage``/``stop``/``delete`` name a session) and a
-    boolean is ``create``: both are read through the same truthiness rule so a model
-    that sends ``"false"`` as text cannot turn a listing into an approval prompt, or
-    the reverse.
+
+def _session_verbs(args: dict[str, Any]) -> dict[str, str]:
+    """The mutating verbs this ``sessions`` call really carries, normalised ONCE.
+
+    ONE PREDICATE, TWO READERS — the approval tier and the argv table — because the
+    tier claim is "a function of the arguments that reach argv". Review round 1
+    (MINOR 4) reproduced the two disagreeing: ``{"stop": "0"}`` was tiered ``read``
+    (``"0"`` being the text spelling of "no") while argv still spelled ``--stop 0``,
+    so a mutation rode a call that raised no approval. That is latent rather than live
+    only because session ids are ``uuid4().hex[:12]`` and none of those literals can
+    name one — luck, not safety. ``create`` is a boolean and the other three are
+    operands; a falsy spelling is no verb at all.
     """
+    verbs: dict[str, str] = {}
+    create = args.get("create")
+    if create is True or (isinstance(create, str) and create.strip().lower() not in _FALSY_TOKENS):
+        verbs["create"] = ""
     for name in _SESSION_MUTATIONS:
+        if name == "create":
+            continue
         value = args.get(name)
-        if isinstance(value, str):
-            if value.strip() and value.strip().lower() not in ("0", "false", "no", "none"):
-                return name
-        elif value:
-            return name
-    return ""
+        if isinstance(value, str) and value.strip().lower() not in _FALSY_TOKENS:
+            verbs[name] = value.strip()
+    return verbs
+
+
+def _session_mutation(args: dict[str, Any]) -> str:
+    """Which mutating verb this ``sessions`` call carries, if any — the TIER's reader."""
+    return next(iter(_session_verbs(args)), "")
 
 
 def _approval_tier(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
@@ -306,10 +329,11 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
     what the call is missing.
 
     Every branch is explicit and every flag is spelled here rather than
-    constructed from user text, which is what makes two promises properties of the
+    constructed from user text, which is what makes three promises properties of the
     code instead of promises: no ``--yes`` and no ``--force`` is ever spelled, and
-    ``--confirm`` is reached by ONE branch that carries the caller's own value and
-    has no default. ``--json`` is added once, at the end, for the same reason the
+    ``--confirm`` is not spelled AT ALL — the human's second phase is not a field on
+    this tool, so no argument combination can answer a park (agent review round 1,
+    semantic finding 1). ``--json`` is added once, at the end, for the same reason the
     CLI refuses ``--print`` beside it: one of the two must win, and the agent's path
     is the JSON one.
     """
@@ -349,32 +373,39 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         if params.device.strip():
             argv += ["--device", params.device.strip()]
     elif action == "join":
-        confirm = params.confirm.strip()
-        if confirm:
-            # PHASE TWO, and the only place ``--confirm`` is spelled. It carries the
-            # caller's own value and nothing else: there is no default for it, and no
-            # path through this function reaches it without the user having produced
-            # the code. A pair is still two humans reading a code off each other's
-            # screens — this is how an agent HANDS OVER that step rather than skipping
-            # it.
-            return ["network", "join", "--confirm", confirm, "--json"], ""
         if not params.token.strip():
             return [], (
                 "action='join' needs 'token' (the invite token, or '@<path>' to "
-                "the token file the other device minted) to start a pairing. When the "
-                "user has read the code off the other device's screen, send that code "
-                "as 'confirm' instead."
+                "the token file the other device minted). It PARKS the pairing and "
+                "hands the person their step — this tool has no way to answer one."
             )
         # PHASE ONE parks the ceremony, which is what lets the code be handed to a
-        # person: a pairing that only prompted would have nobody to prompt.
+        # person: a pairing that only prompted would have nobody to prompt. Phase two
+        # is theirs to run at their own terminal (`lop network join --confirm <code>`),
+        # which is why no branch here spells it.
         argv = ["network", "join", params.token.strip(), "--park"]
     elif action == "sessions":
-        mutation = _session_mutation(params.model_dump())
+        # THE SAME PREDICATE THE TIER READS (``_session_verbs``), so argv and the
+        # approval decision cannot disagree about whether this call mutates.
+        verbs = _session_verbs(params.model_dump())
+        mutation = next(iter(verbs), "")
         peer = params.peer.strip()
         if mutation and not peer:
             return [], (
                 f"action='sessions' with '{mutation}' needs 'peer': the session lives on "
                 "one device, and only its owner may act on it."
+            )
+        if mutation and params.all_peers:
+            # REFUSED rather than sent: ``--all-peers`` is read only on the two listing
+            # paths, so beside a mutating verb the CLI accepts the flag and silently
+            # drops it — the class the CLI's own ``--force`` guard names ("a flag that
+            # is accepted and then quietly dropped is the same class of untruth"), and
+            # the agent would be told a stop happened across every device when exactly
+            # one was asked for (agent review round 1, MINOR 5).
+            return [], (
+                f"action='sessions' with '{mutation}' acts on ONE device's session, so "
+                "'all_peers' means nothing here and the CLI drops it silently. Send "
+                "'peer' instead, or a plain listing with 'all_peers'."
             )
         if not mutation and not peer and not params.all_peers:
             return [], (
@@ -382,18 +413,18 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
                 "'all_peers' (every device), or one of create/engage/stop/delete."
             )
         argv = ["network", "sessions"]
-        if params.create:
+        if "create" in verbs:
             argv += ["--create"]
             if params.prompt.strip():
                 argv += ["--prompt", params.prompt.strip()]
-        if params.engage.strip():
-            argv += ["--engage", params.engage.strip()]
-        if params.stop.strip():
-            argv += ["--stop", params.stop.strip()]
-        if params.delete.strip():
+        if "engage" in verbs:
+            argv += ["--engage", verbs["engage"]]
+        if "stop" in verbs:
+            argv += ["--stop", verbs["stop"]]
+        if "delete" in verbs:
             # NEVER with ``--yes``: this verb's real form is the owner's deletion, and
             # the human's confirmation is the point of it, not a formality to skip.
-            argv += ["--delete", params.delete.strip()]
+            argv += ["--delete", verbs["delete"]]
         if peer:
             argv += ["--peer", peer]
         if params.all_peers:
@@ -472,6 +503,39 @@ async def _reap(process: asyncio.subprocess.Process, *, grace: float = 5.0) -> N
         await process.wait()
 
 
+def _reap_when_it_exits(pid: int) -> None:
+    """Reap a DETACHED child from a thread, because this call's loop will be gone.
+
+    The parked ceremony outlives the call that started it by design, and the loop it
+    was started under does not: the harness runs each tool call in its own
+    ``asyncio.run``, so asyncio's child watcher is dead long before the ceremony ends
+    and something has to wait for the child or it stays a zombie for the rest of the
+    session's life — one per completed pairing, each holding a pid, which is also what
+    made a liveness probe answer "alive" for a process that had finished (agent review
+    round 1, code finding 1). A blocking ``os.waitpid`` on ONE pid, in one daemon
+    thread, is that waiter: it returns the moment this child exits, whenever that is.
+
+    ``os.waitpid`` exists on POSIX only, and so do zombies — the capability check is
+    the guard rather than a platform name. On a host that runs the tool inside a
+    LONG-LIVED loop, asyncio's own watcher may win the race instead: this thread then
+    gets ``ChildProcessError`` and does nothing, which is the intended outcome either
+    way (the child is reaped exactly once).
+    """
+    if not hasattr(os, "waitpid"):  # pragma: no cover — no zombies off POSIX
+        return
+    import threading
+
+    def wait() -> None:
+        try:
+            os.waitpid(pid, 0)
+        except (ChildProcessError, OSError):
+            # Somebody else reaped it first (an alive loop's watcher), or it was never
+            # ours: either way the process table is already consistent.
+            pass
+
+    threading.Thread(target=wait, name="network-park-reap", daemon=True).start()
+
+
 async def _start_parked_join(argv: list[str]) -> tuple[int, str, str]:
     """Start a parked pairing, return the FIRST JSON body it prints, leave it running.
 
@@ -480,13 +544,19 @@ async def _start_parked_join(argv: list[str]) -> tuple[int, str, str]:
     they are — so waiting for the process here would burn the turn and then kill the
     very process the answer has to reach (``_run_cli`` kills a timed-out child). The
     child is therefore started in its own session, its first complete JSON document is
-    read off stdout, and it is left holding the socket: ``join`` with a ``confirm``
-    value is what answers it, and it exits by itself at the end of its window.
+    read off stdout, and it is left holding the socket: the PERSON's own ``lop network
+    join --confirm <code>`` (or the inviter's ``lop network confirm`` prompt) is what
+    answers it, and it exits by itself at the end of its window.
 
-    Nothing is left unreaped — asyncio's transport reaps a subprocess when it exits,
-    and the window bounds how long this one can live. A body that never arrives (the
-    CLI refused first, or the dial hung) is a failure, and the child is killed and
-    waited for before this returns.
+    Nothing is left unreaped, but NOT because asyncio reaps it: that belief held only
+    for a loop that outlives the child, and the harness runs each tool call under its
+    own short-lived one — so a parked child that exits minutes later is a ZOMBIE, not a
+    reaped process, and a liveness probe reads it as alive forever (agent review round
+    1, code finding 1, which caught exactly that: ``state=Z`` for 300 consecutive
+    polls). A child left holding the socket is therefore handed to
+    ``_reap_when_it_exits``, a waiter of its own. A body that never arrives (the CLI
+    refused first, or the dial hung) is a failure, and the child is killed and waited
+    for before this returns.
     """
     process = await asyncio.create_subprocess_exec(
         *_cli_argv(),
@@ -529,6 +599,10 @@ async def _start_parked_join(argv: list[str]) -> tuple[int, str, str]:
             # A refusal: printed, then the process exits. Wait for it, so the caller
             # reports it like any other refusal and nothing is left running.
             await _reap(process)
+        else:
+            # THE SOCKET IS STILL OPEN, so this child is still ours and will exit long
+            # after this loop is gone: hand it a waiter that outlives the call.
+            _reap_when_it_exits(process.pid)
         return 0, text[start : start + end], ""
     # No body, so nothing is parked and nobody could answer it: the socket goes now
     # rather than at the end of a window nothing is watching.
@@ -740,6 +814,9 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                 "joined until the person confirms, and the confirmation has to come "
                 "from them.",
             ]
+        # A finished ceremony's receipt. This tool cannot produce it — phase two is
+        # the person's, run at their own terminal — but the CLI does report it, and a
+        # report that arrived is rendered rather than dumped as JSON.
         lines = [
             f"joined {payload.get('name')} ({payload.get('network_id')}) at epoch "
             f"{payload.get('epoch')}, role {payload.get('role')}, "
@@ -812,7 +889,15 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                     if row.get("owned_here")
                     else (row.get("owner_device_name") or row.get("owner_device"))
                 )
-                lines.append(f"  {row.get('key')}  {row.get('kind')}  owner: {owner}")
+                # ``credential_name``, and the SPELLING is load-bearing: ``_scrub``
+                # drops any field whose NAME contains a secret marker, the markers are
+                # substring matches, and ``key`` — and ``credential_key``, the first
+                # attempt at this fix — both contain "key". The production path therefore
+                # rendered ``None`` where the credential's name belongs (agent review
+                # round 1, code findings 4 and 5). The markers and the scrub boundary stay
+                # exactly where they are; the CLI's field is named so the heuristic cannot
+                # eat the one fact this listing exists to convey.
+                lines.append(f"  {row.get('credential_name')}  {row.get('kind')}  owner: {owner}")
         return lines or ["nothing is shared with or by this device"]
     if action == "definitions_state":
         lines = []
@@ -857,16 +942,17 @@ def _hint(action: str) -> str:
     """The one sentence an agent needs after a refusal, where a generic failure
     message would leave it to guess (and to retry)."""
     if action == "join":
-        # THE OLD SENTENCE HERE IS GONE, and its absence is load-bearing: it told the
-        # agent that "no flag completes this for them, by design" and to have the user
-        # run a terminal command — which stopped being true when the two-phase pair
-        # landed, and an agent following it would have handed the user a step the agent
-        # can now do the legwork for. What is left is the property that did NOT change:
-        # the code has to come from the person.
+        # THE SENTENCE THAT USED TO BE HERE TOLD THE AGENT TO PASS THE CODE BACK, and
+        # its absence is load-bearing: the code a park prints is THIS device's own
+        # derivation, and both devices derive the same digits, so a model echoing it
+        # satisfies the comparison by construction (agent review round 1, semantic
+        # finding 1 — the field is gone, so this hint must not describe one). What
+        # survives is the property the two-phase pair exists to protect.
         return (
-            "Pairing needs a person: without 'confirm', join parks the pairing and "
-            "returns the code to show THEM, and 'confirm' takes the code they read off "
-            "the other device's screen — never the one this tool printed back."
+            "Pairing needs a person: `join` parks the ceremony and returns the code for "
+            "THEM to read out, and the second phase is theirs — `lop network join "
+            "--confirm <code>` at a terminal, or the inviter's own `lop network confirm` "
+            "prompt. This tool has no way to answer a pairing."
         )
     if action in ("panic", "disconnect", "member_rm"):
         return (
@@ -909,7 +995,9 @@ async def execute_network(
     # PHASE ONE KEEPS RUNNING AFTER THIS CALL RETURNS, which is why it is not
     # ``_run_cli``: the ceremony is held by the process that dialled, and the code has
     # to reach a person before that process may finish. See ``_start_parked_join``.
-    parked = params.action == "join" and not params.confirm.strip()
+    # EVERY join is phase one: there is no field that answers a park, so there is no
+    # spelling of `join` on this tool that is anything but a park.
+    parked = params.action == "join"
     token_path: str | None = None
     if parked:
         token_arg = params.token.strip()
@@ -1002,9 +1090,10 @@ def build_network_tool(context: ToolContext) -> AgentTool | None:
         label="Mesh network",
         description=(
             "Read and drive a lop mesh network from this device: peers, their sessions, "
-            "creating a session on a peer, and the network's own lifecycle. Pairing "
-            "and incident controls need a human — this tool reports what the CLI "
-            "refused and why."
+            "creating a session on a peer, and the network's own lifecycle. Pairing and "
+            "incident controls need a human: `join` parks a pairing and returns the code "
+            "for the user to read out, answering it is theirs to run, and this tool "
+            "reports what the CLI refused and why."
         ),
         parameters=NetworkParams.model_json_schema(),
         # Write tier because the highest op needs it (``panic`` rotates a secret

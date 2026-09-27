@@ -452,19 +452,25 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: change and nothing else:
 #:
 #:   baseline (origin/main a937895ce)      90,883 chars = ~32,692 billed
-#:   head (this branch, rebased on it)     92,152 chars = ~33,148 billed
-#:     = +1,269 chars = +456 billed: the four added ``action`` values
+#:   head (this branch, rebased on it)     92,014 chars = ~33,099 billed
+#:     = +1,131 chars = +407 billed: the four added ``action`` values
 #:       (sessions / trust / credentials / definitions_state), the fields that
 #:       drive them (peer, create, prompt, engage, stop, delete, all_peers,
-#:       trust_state, role, device, expires) and ``confirm``, which is the
-#:       two-phase pair's own half — one schema where sixteen tools would be
-#:       sixteen, the trade this tool's entry further up records.
+#:       trust_state, role, device, expires) — one schema where sixteen tools
+#:       would be sixteen, the trade this tool's entry further up records.
+#:
+#: ``confirm`` IS NOT IN THAT FIGURE, and its absence is the point: the field
+#: this branch first shipped was REMOVED in the same PR's remediation round on the
+#: operator's ruling (a tool able to echo the code it printed satisfies a
+#: comparison both devices derive from — see the tool's own docstring), so a
+#: saving sits inside the figure rather than a cost.
 #:
 #: The raise RESTORES the headroom rather than loosening it, the same way the
 #: projects entry does: the tree carried 45 tokens before this change
-#: (32,737 - 32,692) and carries 45 after (33,193 - 33,148), so the next
-#: addition finds the ratchet as tight as this one did. The tighten band below
-#: (1,200) is not in play.
+#: (32,737 - 32,692) and carries 94 after (33,193 - 33,099) — the 49-token
+#: difference is exactly the removed field, banked rather than spent, and the
+#: ceiling stays where this change put it because a later round can only put a
+#: field back by arguing for it. The tighten band below (1,200) is not in play.
 #:
 #: What was NOT paid for out of the budget: the tool DESCRIPTION. It replaced a
 #: sentence claiming sessions on other devices were unreachable — a capability

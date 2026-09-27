@@ -1155,9 +1155,17 @@ class PendingJoin:
     ``result`` is what lets it report what actually happened rather than a claim
     that something did.
 
-    ``sas`` is derived from this device's own handshake and is never sent to the
-    peer in either direction, so it lives in a 0600 file under a 0700 directory for
-    the seconds the ceremony lasts and never reaches the audit log.
+    ``sas`` is derived from this device's own handshake, and BOTH devices derive the
+    same digits — that equality is the check, not a coincidence. The value therefore
+    does travel: the joining device sends its transcription inside a frame sealed with
+    the session key (``handshake.pair_ready_frame``, compared in ``relay.py``'s
+    ``net_pair_ready``). What it never does is appear in cleartext on the wire, in a
+    log line, in an error message or in the audit log, and it lives in a 0600 file
+    under a 0700 directory for the seconds the ceremony lasts. Its security was never
+    secrecy in the first place: it rests on a person having read it off the other
+    device's screen. The earlier wording here ("never sent to the peer in either
+    direction") was false and is the premise agent review round 1 corrected (semantic
+    finding 2).
     """
 
     invite_id: str

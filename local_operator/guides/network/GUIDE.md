@@ -73,36 +73,46 @@ rendering is not a contract.
 
    ```bash
    lop network join @<token-file> --park --json
-   # → {"status":"awaiting_confirmation","sas":"481 926","fingerprint":…,
-   #    "expires_at":…,"seconds_left":…,"sentence":…}     exit code 0
-   lop network join --confirm <code> --json
-   # → {"ok":true,"status":"joined","network_id":…,"epoch":…}   exit code 0
+   # → {"status":"awaiting_confirmation","sas":"481926","shown":"481 926",
+   #    "fingerprint":…,"expires_at":…,"seconds_left":…,"sentence":…}   exit code 0
    ```
 
-   The first call prints this device's code and then WAITS (up to the same window
-   the prompt does). Show the user the code and the `sentence` it carries, and ask
-   them to read the code off the OTHER device's screen; the second call takes that
-   value. Nothing is sent to the other device until the code arrives, and the
-   ceremony's socket belongs to the parked process — which is why phase two is a
-   second invocation rather than a second dial, and why `--park` must be left
-   running (do not kill it, and do not start a second park for the same invite).
+   (`sas` is the compact spelling, `shown` and the `sentence` carry the spaced one —
+   the same six digits either way. A ceremony nobody answers exits `3`
+   (`pairing_unanswered`), having sent nothing.)
 
-   **The code is the user's, never yours.** You may pass the value they read back;
-   never the code this device printed, and never a value you derived, guessed or
-   constructed. If they cannot read it, that is the interlock working, not a
-   problem to route around. `join` without `--confirm` does not complete a pairing;
-   a wrong code is refused with `sas_mismatch` and leaves the ceremony open (the
-   invite is not spent), and a ceremony nobody answers exits `3`
-   (`pairing_unanswered`) having sent nothing.
+   The first call prints this device's code and then WAITS (up to the same window the
+   prompt does). Show the user the code and the `sentence` it carries, and ask them to
+   read the code off the OTHER device's screen. The ceremony's socket belongs to the
+   parked process, so leave it running: do not kill it, and do not start a second park
+   for the same invite.
+
+   **You cannot do this step.** The second phase is the user's, run at their own
+   terminal:
+
+   ```bash
+   lop network join --confirm <code> --json      # the code THEY read, never one you chose
+   # → {"ok":true,"status":"joined","network_id":…,"epoch":…}
+   ```
+
+   Hand them that command and the code, and let them run it. There is deliberately no
+   flag on the `network` tool that completes a pairing: the digits both devices derive
+   are the SAME ones, so an agent able to answer with the code it just printed would
+   satisfy the very comparison that exists to catch a substitution — the interlock is
+   real only because the second phase is not the agent's to run. If the user cannot
+   read the code, that is the interlock working, not a problem to route around. A wrong
+   code is refused with `sas_mismatch` and leaves the ceremony open (the invite is not
+   spent).
    The one non-interactive spelling of the PROMPT, `--sas-stdin`, is refused unless
    `LOP_NETWORK_TEST_MODE=1` is set: it is the e2e harness's seam, and setting that
    variable to finish a real pairing would turn the human check into a formality.
    Never set it.
 
-   The `network` tool carries both halves (`action="join"` with `token`, then with
-   `confirm`), and the inviter's half is deliberately NOT in that tool: a full
-   pairing always needs one person, and that is the side where their comparison
-   decides.
+   The `network` tool PARKS a pairing (`action="join"` with `token`) and reports the
+   code, the sentence and the window for the user; it has no `confirm` field, so no
+   argument combination lets an agent answer a park. The inviter's half
+   (`lop network confirm`) is deliberately NOT in that tool either: a full pairing
+   always needs one person, and that is the side where their comparison decides.
 5. Verify from both sides: `lop network peers --json` must show the other device
    with `reachable: true`, and `lop network ls --json` must agree on the epoch
    and member count. `peers` exits 1 and returns

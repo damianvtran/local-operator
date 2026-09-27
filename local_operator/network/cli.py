@@ -1196,7 +1196,17 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         for key in sorted(document.entries):
             entry = document.entries[key]
             row: dict[str, Any] = {
-                "key": key,
+                # ``credential_name``, and the SPELLING is load-bearing: the agent tool
+                # scrubs any field whose NAME contains a secret marker, the markers are
+                # matched as substrings, and both ``key`` and ``credential_key`` carry
+                # "key" — so this row's NAME (a provider name like OPENAI_API_KEY, never
+                # a value) was dropped on the tool's side and the digest rendered
+                # ``None`` where the credential's name belongs (agent review round 1,
+                # code finding 4). The scrubber and its markers stay exactly where they
+                # are, because the boundary is worth more than the spelling; the field
+                # is named so the heuristic cannot eat the one fact this listing exists
+                # to convey.
+                "credential_name": key,
                 "kind": entry.kind,
                 "owner_device": entry.owner_device,
                 "owner_device_name": entry.owner_device_name,
@@ -1225,7 +1235,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     else (row["owner_device_name"] or row["owner_device"])
                 )
                 who = f" ({row['identity_label']})" if row["identity_label"] else ""
-                lines.append(f"  {row['key']:<14} {row['kind']:<15} owner: {owner}{who}")
+                lines.append(
+                    f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
+                )
                 for holder in row["holders"]:
                     # The owner's own row and this device's are not "shares": the first
                     # is what makes the entry coherent and the second is the reader.
@@ -2541,7 +2553,7 @@ def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
             invite_id=chosen.invite_id,
             decision="admit",
             code=typed,
-            answered_by="harness" if getattr(args, "sas_stdin", False) else "human",
+            answered_by=_answered_by(args),
         )
         store.save_join_answer(answer)
         outcome = _await_join_result(chosen, store)
@@ -4507,7 +4519,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         decision="admit" if admit else "decline",
         matched=admit,
         reason="" if admit else "declined",
-        answered_by="harness" if args.sas_stdin else "human",
+        answered_by=_answered_by(args),
         allow_no_answer=True,
     )
     if live is None:
@@ -4588,6 +4600,27 @@ def _read_confirmation(args: argparse.Namespace) -> str:
     except (EOFError, KeyboardInterrupt):
         typed = ""
     return "yes" if typed in ("y", "yes") else "no"
+
+
+def _answered_by(args: argparse.Namespace) -> str:
+    """Who supplied a code or a yes/no — decided once, and only claimed when true.
+
+    ``human`` IS A CLAIM ABOUT A PERSON, so it may only be made where a person could
+    have typed the answer: this process has to own a terminal. Two things force that
+    reading. ``--sas-stdin`` is the explicit pipe seam (the e2e harness, or a script),
+    and a piped answer that did not announce itself is still a pipe — no person is
+    behind it, and the CLI cannot see one. And the audit's question is exactly "did a
+    person read this back?", which is what ``pairing_confirmed``'s ``answered_by`` is
+    for, so an unattributable answer must not be dressed up as a human one. Agent
+    review round 1 (semantic finding 3) found this field claiming ``human`` for a
+    machine-supplied code: the tool's phase two passed no seam, so the old rule — "not
+    ``--sas-stdin``, therefore human" — was reading a machine as a person. The tool has
+    no phase two any more (its ``confirm`` field is gone), and a script that runs this
+    command is now recorded as what it is.
+    """
+    if getattr(args, "sas_stdin", False):
+        return "harness"
+    return "human" if _has_terminal() else "harness"
 
 
 def _has_terminal() -> bool:
