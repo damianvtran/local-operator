@@ -74,9 +74,9 @@
       "name": "manager",
       "description": "Coordinates delegated work and reports honest status: what is done, what is in flight, what is blocked and on whom.",
       "when_to_use": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
-      "version": "1.0.0",
-      "instructions_sha256": "29c38ffb2f19fc05ac40bb7877ad39b509e17b64a50090a59b10ffdf6781ce72",
-      "instructions_chars": 1056,
+      "version": "1.1.0",
+      "instructions_sha256": "b786dabba22f0a33179701fce905306413ff115bfc7beece98109516b80c686e",
+      "instructions_chars": 1562,
       "tools": [
         "read",
         "glob",
@@ -85,6 +85,7 @@
         "read_variable",
         "bash",
         "todo",
+        "project",
         "web_search",
         "web_fetch"
       ],
@@ -92,7 +93,7 @@
       "delegate": true,
       "tags": [
         "role",
-        "tools:read,glob,grep,list_variables,read_variable,bash,todo,web_search,web_fetch",
+        "tools:read,glob,grep,list_variables,read_variable,bash,todo,project,web_search,web_fetch",
         "delegate:yes"
       ],
       "categories": [
