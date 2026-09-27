@@ -57,7 +57,8 @@ round can appear and make the run moot. The sweep also waits for the thread to
 move: a verdict whose rounds predate the current head (a push landed after the
 latest round) is deferred to the new head's rounds, and an engagement whose
 exact family state a recent attempt already covered is not re-dispatched while
-that attempt is pending or was successful (a failed attempt retries). Runs are
+that attempt is pending or was successful — for reviews and verdicts alike.
+A failed attempt retries only after `FAILED_ATTEMPT_BACKOFF_MINUTES`. Runs are
 named to make this visible: `Sir Knight Lop the Second — <mode> PR #<n>`, with
 ` (sweep)` on sweep dispatches. The `source` input is what marks a run as
 sweep-dispatched; a manual dispatch passes an empty `source` and bypasses that
@@ -77,7 +78,8 @@ provider tokens.
 
 The thresholds are the documented contract and live at the top of
 `.github/helpdesk/reconcile.sh` (`REVIEW_DELAY_MINUTES`,
-`VERDICT_SETTLE_MINUTES`, `WINDOW_DAYS`); the 15-minute sweep cadence is the
+`VERDICT_SETTLE_MINUTES`, `WINDOW_DAYS`; the cost bounds in "Cost and its
+bounds" below live beside them); the 15-minute sweep cadence is the
 wait's granularity (a PR fires after the delay plus at most one sweep interval
 of slack). The reconciler is pure read-only and its decisions are tested in
 `.github/helpdesk/tests/reconcile.test.sh` (stubbed `gh`, no network; run it
@@ -88,6 +90,48 @@ skips anything not updated within the window; the sweep itself is a cheap
 read-only `gh` pass, and the only thing that spends provider tokens is a due
 engagement — one workflow run each.
 
+## Cost and its bounds
+
+An engagement is the only thing in this workflow that spends provider tokens;
+this section is what it costs and what keeps a busy window from fanning out.
+
+**Calibration** (2026-09-27, Radient `auto`): a review engagement is 15-58
+model calls (typically ~26), a verdict is 5-19. At the published rates —
+prompt $0.30/M, completion $1.20/M, cache-read $0.006/M — a call is ~$0.004
+fleet-calibrated, so a typical review is **≈ $0.10** and a verdict ≈ $0.02-0.08.
+The sweep itself is model-free (~30 s of runner time); only a dispatch spends.
+
+| Knob (top of `reconcile.sh`; env-overridable) | Default | Effect |
+| --- | --- | --- |
+| `SWEEP_MAX_DISPATCH` | 5 | One sweep dispatches at most this many engagements — the OLDEST by `updatedAt` first; the rest ride the next sweep |
+| `DAILY_ENGAGEMENT_CAP` | 50 | Rolling 24h, per repository, counting sweep dispatches only; at/over the cap no sweep dispatch until the window rolls (mention and manual runs are not budgeted) |
+| `FAILED_ATTEMPT_BACKOFF_MINUTES` | 30 | A failed attempt must age this long before the retry (a mention or a manual dispatch is the immediate recovery) |
+
+**Reading the spend line.** After the engagement, the review job reports what
+it spent straight from the recorded analytics ledger (`$HOME/.local-operator/
+analytics.db` — the same store `/analytics` summarises) to the run log and the
+step summary:
+
+    Sir Knight Lop the Second — engagement spend
+      radient/auto: 26 calls; input 189,421; output 3,012; cache_read 51,234; cost_usd $0.1043; cost_known 26/26
+    spend: 26 calls; input 189,421; output 3,012; cache_read 51,234; cost_usd $0.1043; cost_known 26/26
+
+`cost_usd` is `SUM(cost_micro)/1e6` at four decimals (priced at record time);
+a trailing `+` marks a LOWER bound — `cost_known` is the fraction of calls
+whose model has a published price. An absent ledger prints "no analytics
+recorded"; the step never fails the run.
+
+**The mention filter is paired.** The job-level `if:` gates `issue_comment`
+runs with `contains(...)` over the accepted spellings
+(`@sir-knight-lop-the-second`, `@aida`, `@Aida`) — deliberately BROADER than
+the guard step, which narrows to the exact forms as tokens, so a lookalike
+like "@aidan" cannot buy an engagement. Change one side, change the other.
+
+**The surface rule.** `prompts/`, `teams/`, `agents/` and `setup.sh` are
+extracted from `main` into `$RUNNER_TEMP/surface` and read from there — never
+overlaid onto the PR checkout (an overlay stages `.github/helpdesk/**` files
+into the worktree and pollutes the diff the model reviews).
+
 Each run is a fresh GitHub-hosted runner that installs the pinned
 [local-operator](https://pypi.org/project/local-operator/) harness, installs
 the team from this directory (`setup.sh`), and then runs:
@@ -96,15 +140,17 @@ the team from this directory (`setup.sh`), and then runs:
 
 The engagement's helpdesk surface — this directory's `prompts/`, `teams/`,
 `agents/` and `setup.sh` — always comes from the **default branch**: the
-review job replaces the PR checkout's copy wholesale with `main`'s before
-anything reads it. A `refs/pull/<n>/merge` checkout can be stale — a PR
-branched before a helpdesk change carries the old prompts and none of the new
-ones (a verdict engagement once crashed on a missing `prompts/pr-verdict.md`)
-— and without the overlay a PR could steer its own review by editing
-`.github/helpdesk/**`. Behaviour is therefore defined by `main`: the same copy
-the sweep decides with, and the same copy the workflow file itself runs from.
-The PR checkout still provides the code under review; the model's diffs come
-from the API.
+review job extracts it to a temp directory (`$RUNNER_TEMP/surface`, via
+`git archive` of `main`) and reads it from there — never by overlaying the
+PR checkout, whose copy would otherwise be rewritten and staged (a live run
+flagged those staged files as unrelated diff noise). A `refs/pull/<n>/merge`
+checkout can be stale — a PR branched before a helpdesk change carries the
+old prompts and none of the new ones (a verdict engagement once crashed on a
+missing `prompts/pr-verdict.md`) — and this way a PR cannot steer its own
+review by editing `.github/helpdesk/**`. Behaviour is therefore defined by
+`main`: the same copy the sweep decides with, and the same copy the workflow
+file itself runs from. The PR checkout still provides the code under review;
+the model's diffs come from the API.
 
 The session attaches the `helpdesk` team: a manager (the run itself) plus
 `architect`, `scout`, `reviewer`, `qa-tester`, `designer`, `ux-reviewer`. The
