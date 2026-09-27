@@ -447,9 +447,11 @@ Sequence per user message:
    skill tree (roots plus per-file `(mtime_ns, size)`, ~0.29 ms at 8 roots / 57 skills) and on
    the projects store's `(count, max(updated_at))`, so a skill installed or a project written
    mid-conversation is a candidate on the very next message — after a steer, in the parent session
-   and in any child started afterwards. The same signal RE-OPENS the frozen knowledge block, whose
-   previous render is parked in `superseded_block` because a subagent's block is built
-   synchronously and must not come back empty in the window before the next render. An unchanged
+   and in any child started afterwards. The skill-tree fingerprint is also what RE-OPENS the frozen
+   knowledge block — not the projects one: the frozen block is the embedder's selection, and
+   projects do not enter it. The block's previous render is parked in `superseded_block` because a
+   subagent's block is built synchronously and must not come back empty in the window before the
+   next render. An unchanged
    tree costs one stat walk and nothing else. Candidates past `maxCandidates` per kind are chosen
    by `shortlist`, not by discovery order (§5); project rows enter the roster already capped to
    the newest 12 by `updated_at` (§8 of the projects design).

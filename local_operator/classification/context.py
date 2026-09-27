@@ -20,7 +20,7 @@ serialized state fits ``values.classification.maxStateChars``:
 
 1. drop ``context`` entirely;
 2. trim each candidate line to 120 chars, then to 60;
-3. drop the lowest-priority candidate kind (``mcp`` → ``guide`` → ``skill``);
+3. drop the lowest-priority candidate kind (``project`` → ``mcp`` → ``guide`` → ``skill``);
 4. truncate ``request`` to the remaining budget, appending a truncation marker.
 
 The order is the contract and it is also the right order: the context line is
@@ -120,10 +120,10 @@ TRUNCATION_MARKER = " …[truncated]"
 #: Rung 2's two line limits, in the order they are tried.
 CANDIDATE_LINE_LIMITS: tuple[int, ...] = (120, 60)
 
-#: Rung 3's drop order — lowest priority first. Projects drop first: their
-#: lines are the largest, and a missing project line is the least costly
-#: absence — the request itself still names the work being done, and the
-#: roster rebuilds the row the moment the store changes.
+#: Rung 3's drop order — lowest priority first. Projects drop first: a
+#: missing project line is the least costly absence — the request itself
+#: still names the work being done, and the roster rebuilds the row the
+#: moment the store changes.
 KIND_DROP_ORDER: tuple[ResourceKind, ...] = ("project", "mcp", "guide", "skill")
 
 #: How each kind is keyed on the wire. The plural/`mcp_servers` spelling is the

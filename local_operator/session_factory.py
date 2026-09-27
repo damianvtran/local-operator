@@ -1507,9 +1507,10 @@ class _KnowledgeHooks:
     #: on every turn is what would push the wiring's added latency toward the
     #: per-message budget (see :func:`_classification_roster`).
     classification_roster: tuple[Any, ...] | None = None
-    #: ``(index, row count, mcp server names)`` — the identity of the inputs the
-    #: cached roster was built from. The index OBJECT, not just its size: a
-    #: rebuild replaces it, and its ``skills`` list is never mutated in place.
+    #: ``(index, row count, mcp server names, skill-tree fingerprint, projects
+    #: fingerprint)`` — the identity of the inputs the cached roster was built
+    #: from. The index OBJECT, not just its size: a rebuild replaces it, and its
+    #: ``skills`` list is never mutated in place.
     classification_roster_key: tuple[Any, ...] | None = None
     #: The skill tree's signature (roots + per-file ``(mtime_ns, size)``; see
     #: ``skills/discovery.roots_fingerprint``) as of the last roster build and of the
@@ -1595,11 +1596,13 @@ class _ClassificationCandidate:
     real types.
 
     ``description`` is HARNESS-OWNED text only (§6): a skill's or guide's own
-    description as discovered from the local filesystem, or an MCP server's name
-    plus a release-owned capability hint. Config-authored or remote-authored
-    prose here would re-open the prompt-injection surface ``mcp/resources.py``
-    deliberately excludes — the option text is the one part of the request the
-    model reads as a rubric.
+    description as discovered from the local filesystem, an MCP server's name
+    plus a release-owned capability hint, or — for a ``project`` row — the
+    operator's OWN stored project metadata routed back to the operator's own
+    model (the same accepted case the package ``Candidate`` docstring names).
+    Config-authored or remote-authored prose here would re-open the
+    prompt-injection surface ``mcp/resources.py`` deliberately excludes — the
+    option text is the one part of the request the model reads as a rubric.
     """
 
     kind: str
@@ -2207,9 +2210,13 @@ def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_Classificatio
 
 
 #: How many project rows one roster carries (§8): the newest twelve, by
-#: ``updated_at`` desc. Recency IS the selection order, so the cap is applied
-#: here, where the rows are ordered — past it, older projects are simply not
-#: offered; the ladder's first drop (``context.KIND_DROP_ORDER``) is this kind.
+#: ``updated_at`` desc — the kind the ladder drops first when the state is over
+#: budget (``context.KIND_DROP_ORDER``). Recency IS the selection order, so the
+#: cap is applied here, where the rows are ordered: past it, older projects are
+#: simply not offered, even when a message names one — the roster never exceeds
+#: the layer's per-kind cap, so the message-aware shortlist never sees more than
+#: it can carry. §8 chose recency over reachability for this kind (review round
+#: 1 / QA round 1).
 _PROJECT_ROSTER_LIMIT = 12
 
 #: One project roster row's description bound (§8's "(truncated)"; the design
@@ -2229,6 +2236,14 @@ def _project_roster_rows(hooks: _KnowledgeHooks) -> list[_ClassificationCandidat
     ``done``/``archived`` project is rarely where a message's work goes) — and a
     project with no description is its status alone, never a dangling separator.
 
+    The description is COLLAPSED to one line (``" ".join(text.split())``), not
+    merely stripped: it is the first free text any candidate kind carries, and a
+    description containing a newline would forge a block line — one carrying
+    ``</resource_recommendations>`` would close the advisory block and spill the
+    rest into the prompt as top-level text (review round 1, blocker). Collapsing
+    makes the row exactly one line, so the tag can never be closed from inside;
+    the 160-char bound is applied AFTER the collapse so it bounds what travels.
+
     Provenance: operator-authored text routed back to the operator's own model —
     the §6-accepted case of a user skill's description (see
     ``_ClassificationCandidate``) — never remote-authored.
@@ -2244,7 +2259,7 @@ def _project_roster_rows(hooks: _KnowledgeHooks) -> list[_ClassificationCandidat
     ordered = sorted(projects, key=lambda project: (-project.updated_at, project.name.casefold()))
     rows: list[_ClassificationCandidate] = []
     for project in ordered[:_PROJECT_ROSTER_LIMIT]:
-        summary = (project.description or "").strip()
+        summary = " ".join((project.description or "").split())
         description = f"{project.status} · {summary}" if summary else str(project.status)
         if len(description) > _PROJECT_ROSTER_DESCRIPTION_LIMIT:
             description = description[: _PROJECT_ROSTER_DESCRIPTION_LIMIT - 1].rstrip() + "…"

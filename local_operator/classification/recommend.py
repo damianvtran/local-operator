@@ -3,7 +3,7 @@
 QUESTION DESIGN, AND WHY IT IS SHAPED THIS WAY
 ==============================================
 
-Three questions, one per resource kind — a ``choice`` over that kind's
+One question per resource kind — a ``choice`` over that kind's
 candidates plus an explicit ``none``. That is the whole set, and the shape is
 the result of what the model can and cannot do:
 
@@ -11,8 +11,8 @@ the result of what the model can and cannot do:
   typed question; it cannot emit a list. Asking "which skill?" once per KIND is
   therefore the cheapest way to get a per-kind pick, and the alternative — a
   ``noul`` per candidate ("does this one apply?") — costs one question block
-  each: 12 candidates × 3 kinds would be 36 question objects, i.e. 36
-  instructions strings, where the choice form needs 3. Measured on the live
+  each: 12 candidates × 4 kinds would be 48 question objects, i.e. 48
+  instructions strings, where the choice form needs 4. Measured on the live
   alpha route (2026-09-18): one ``choice`` question with 2 options and one
   ``noul`` question together cost 380 input tokens, while test calls show the
   per-question instructions are the dominant fixed cost of a small request.
@@ -41,7 +41,8 @@ the result of what the model can and cannot do:
 MEASURED COST (live, OpenRouter alpha route, 2026-09-18)
 =======================================================
 
-Three questions over 5 options total with a ~430-char state: **519 input
+Three questions over 5 options total with a ~430-char state (measured
+2026-09-18, when the layer shipped three kinds): **519 input
 tokens, 102 output tokens, $0.0000218** reported by the vendor. Deriving the
 price from three calls (519/102 → 0.000021798; 380/60 → 0.00001596;
 421/42 → 0.000017682) gives **$0.042 per Mtok of input and output costed at
@@ -296,11 +297,12 @@ def collect_resources(
     """Map answers back to candidates, best first, capped.
 
     Ordering is by the model's own confidence in the pick, then by question
-    order (skills before guides before MCP servers) as a stable tie-break — a
-    model that is 51% sure about a skill and 95% about a guide should spend the
-    first line of the block on the guide. Resources the model explicitly
-    declined (``none``) contribute nothing, and a duplicate pick across two
-    kinds cannot happen because a candidate belongs to exactly one kind.
+    order (skills before guides before MCP servers before projects) as a stable
+    tie-break — a model that is 51% sure about a skill and 95% about a guide
+    should spend the first line of the block on the guide. Resources the model
+    explicitly declined (``none``) contribute nothing, and a duplicate pick
+    across two kinds cannot happen because a candidate belongs to exactly one
+    kind.
     """
     picks: list[tuple[float, int, Candidate]] = []
     for index, question in enumerate(plan.questions):
