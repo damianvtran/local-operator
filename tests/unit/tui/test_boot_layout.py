@@ -713,6 +713,51 @@ async def test_notices_under_the_splash_never_scroll_the_region(notices: int) ->
         assert welcome.region.height > 0
 
 
+@pytest.mark.asyncio
+async def test_the_first_send_keeps_the_row_at_the_top_and_the_composer_empty() -> None:
+    """Behaviours 1 and 2 at the same pause, read from the frame the send paints.
+
+    The desktop's bottom-packing defect has no analogue here — the transcript is
+    a top-origin column and a short conversation sits at offset 0 — but the
+    property is only observable on the painted frame, so this cell reads BOTH
+    registers of that pause: the user row's top edge is the transcript content
+    region's own top (not "just above the composer"), and the composer the
+    keystroke emptied is still empty (the payload is not held there).
+    """
+
+    class _Parked(FakeSession):
+        """A send that never settles, so the frame under test is the pending one."""
+
+        async def prompt(self, text, images=None, **kwargs):  # noqa: ANN001, ANN201
+            await asyncio.Event().wait()
+
+    app = OperatorApp(lambda: _factory(_Parked()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        for _ in range(80):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        editor = app.query_one(Editor)
+        editor.focus()
+        await pilot.pause()
+        editor.text = "what does this show?"
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        transcript = app.query_one(TranscriptView)
+        row = next(block for block in transcript.blocks() if isinstance(block, UserBlock))
+        region = transcript.content_region
+        assert row.region.y == region.y, (
+            "the row must sit at the column's top inset, not above the composer",
+            row.region.y,
+            region.y,
+        )
+        assert transcript.scroll_offset.y == 0, transcript.scroll_offset
+        assert transcript.virtual_size.height <= transcript.size.height
+        assert editor.text == "", "the composer kept the payload"
+
+
 #: Widths the boot-notice column is asserted at. The parametrization is the
 #: POINT of these two tests, not thoroughness for its own sake: the offset
 #: defect they guard CANCELLED at exactly the width the older single-width test

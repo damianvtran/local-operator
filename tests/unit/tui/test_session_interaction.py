@@ -72,7 +72,14 @@ async def test_loop_continues_source_and_other_context_stop_does_not_cancel_it()
 
 
 @pytest.mark.asyncio
-async def test_failed_source_prompt_restores_only_its_own_input():
+async def test_failed_source_prompt_records_the_failure_on_its_own_source():
+    """A failure under a parked source lands on THAT source, never the one in front.
+
+    The boundary-rule shape: the payload does NOT return anywhere by itself —
+    the failure record holds it (with `send again` / `edit`), the other
+    conversation's composer is untouched, and the failed source's own draft
+    stays empty.
+    """
     first = HeldSession(fail=True)
     second = FakeSession()
     app = OperatorApp(lambda: _factory(first))
@@ -87,7 +94,9 @@ async def test_failed_source_prompt_restores_only_its_own_input():
         first.release.set()
         await app.workers.wait_for_complete()
         await pilot.pause()
-        assert source.draft.text == "source A message"
+        assert [record.text for record in source.turn.failed_sends] == ["source A message"]
+        assert source.turn.failed_sends[0].failure_class == "runtime-gone"
+        assert source.draft.text == "", "a failure must not park a draft"
         assert source.unsent == []
         assert app._editor().text == "source B draft"
         assert not second.prompts

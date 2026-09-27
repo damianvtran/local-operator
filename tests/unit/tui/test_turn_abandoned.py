@@ -828,6 +828,11 @@ async def test_both_error_routes_offer_the_same_recovery() -> None:
     because an MCP auth failure is what makes `prompt()` raise. Asserted as
     "the two routes agree" rather than against a fixed string, so the next
     person to change the wording cannot re-open the gap on one side only.
+
+    UPDATED for the boundary rule: the two routes still share the explanation
+    (the hint, asserted as a prefix), and the send-halting route adds the
+    `send again` / `edit` verbs because ITS failure held a payload. What the
+    incident pinned — never a bare `str(error)` — is the part that stays.
     """
     raising = OperatorApp(lambda: _factory(McpAuthRaisingSession()))
     async with raising.run_test(size=(100, 30)) as pilot:
@@ -851,8 +856,19 @@ async def test_both_error_routes_offer_the_same_recovery() -> None:
         await pilot.pause()
         from_event = _error_notices(ending)
 
-    assert from_raise == from_event, "the same failure was explained two different ways"
+    assert from_raise[0].startswith(from_event[0]), (
+        "the same failure was explained two different ways",
+        from_raise,
+        from_event,
+    )
     assert any("/mcp reauth linear" in text for text in from_raise)
+    assert any("/mcp reauth linear" in text for text in from_event)
+    # AND THE RAISE ROUTE OWES ONE MORE FACT, by the boundary rule: the send
+    # itself died, so its message never left and its notice adds the verbs the
+    # failure record owns. The event route's turn was ADMITTED — there is no
+    # payload to home, and `send again` there would be a lie about the send.
+    assert " ".join(from_raise[0].split()).endswith("send again enter · edit e"), from_raise
+    assert "send again" not in from_event[0], from_event
 
 
 @pytest.mark.asyncio
