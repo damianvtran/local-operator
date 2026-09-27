@@ -4,12 +4,15 @@ Run from the worktree root, ONCE per env so the gate is resolved against that
 env (the gate reads ``os.environ`` and the settings cache at row-build time):
 
     env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-        scripts/nerd_glyph_shot.py OUT.svg {nerd|plain} [COLSxROWS]
+        scripts/nerd_glyph_shot.py OUT.svg {nerd|plain} [settled] [COLSxROWS]
 
 - ``nerd``  seeds a ghostty marker (GHOSTTY_BIN) so autodetect enables the
   expanded Font Awesome glyphs.
 - ``plain`` seeds Apple_Terminal and strips every bundling-emulator marker so
   autodetect falls back to the ASCII table (no tofu).
+- ``settled`` marks every seeded card done before the shot, so each row paints
+  its settled ink — for the project pair, the ``tool.row.name_meta`` category
+  colour that a running-only frame cannot show (review round 1, PR #1672).
 
 Both frames render the SAME seeded tool rows, so the only difference between
 the two SVGs is the icon column — which is the whole point of the fix.
@@ -25,7 +28,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+from scripts.visual_capture import (  # noqa: E402
+    isolate_capture,
+    save_capture,
+    settle_status_line,
+)
 
 isolate_capture()
 
@@ -82,9 +89,18 @@ async def main() -> None:
     _seed_env(mode)
 
     size = (100, 24)
-    if len(sys.argv) > 3:
-        cols, rows = sys.argv[3].split("x")
-        size = (int(cols), int(rows))
+    # Order-independent trailing tokens: `settled` and/or `COLSxROWS`. The
+    # gallery calls this script with the mode alone, so both stay optional and
+    # those runs keep rendering live rows exactly as before.
+    settled = False
+    for token in sys.argv[3:]:
+        if token == "settled":
+            settled = True
+        elif "x" in token:
+            cols, rows = token.split("x")
+            size = (int(cols), int(rows))
+        else:
+            raise SystemExit(f"unknown option {token!r}; want 'settled' or COLSxROWS")
 
     # Imported AFTER _seed_env so module-level env reads (if any) see our env.
     from local_operator.tui import settings as settings_mod  # noqa: E402
@@ -106,11 +122,19 @@ async def main() -> None:
         prose = AssistantBlock()
         prose.update_text("Working through the tool ledger below.")
         app._append_block(prose)
-        for name, args in _ROWS:
-            app._append_block(ToolCard("t", name, args))
-        # Settle so every row paints its final icon before the capture.
+        cards = [ToolCard("t", name, args) for name, args in _ROWS]
+        for card in cards:
+            app._append_block(card)
+        if settled:
+            for card in cards:
+                card.mark_done("ok")
+        # Let layout settle, then wait out the status band's sentinel: a fixed
+        # pause count races the model label's arrival, which painted
+        # `test/model` in one run and `connecting…` in the next — an unrelated
+        # band in a before/after pair (review round 1, PR #1672).
         for _ in range(6):
             await pilot.pause()
+        await settle_status_line(pilot, app)
         save_capture(app, out)
 
 
