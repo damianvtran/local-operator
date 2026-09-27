@@ -8002,7 +8002,19 @@ class RelayServer:
                 state.secret,
                 role=str(frame.get("role") or "read"),
                 ttl_s=float(frame.get("ttl_s") or 600.0),
-                hosts=[str(host) for host in frame.get("hosts") or []] or None,
+                # AN EXPLICIT HOST WINS, and otherwise the invite carries WHAT THIS
+                # DEVICE ACTUALLY ADVERTISES rather than the record's own list. The
+                # record's ``listen.advertised`` is written by the process that ran
+                # ``init``/``join`` from ITS config, so a relay started with ``serve
+                # --port`` on an address the record never learned left the default
+                # EMPTY — and a token that tells the joiner nothing about where to dial
+                # is the one step a pairing flow must not have (QA round 1, Q2: the
+                # mint produced ``"hosts": []``, ``join @file`` then refused
+                # ``no_host``, and the operator had to pass ``--host`` by hand with
+                # nothing on screen saying so).
+                hosts=[str(host) for host in frame.get("hosts") or []]
+                or self.advertised_endpoints()
+                or None,
                 device_id=str(frame.get("device_id") or ""),
             )
             record.invites.append(minted.record)
