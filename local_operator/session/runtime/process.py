@@ -799,11 +799,15 @@ def _detached_at(runtime: object) -> float | None:
     """When this runtime's LAST viewer left, or ``None`` if none ever has.
 
     Term 3 above asks whether a viewer is attached NOW; this asks whether one
-    ever was, which is the question the keep-alive window is keyed on. The stamp
-    is written by ``RuntimeServer._republish_detached`` at the 1->0 transition
-    and cleared at 0->1, so it is NOT "when this runtime last became idle": a
-    runtime nobody has watched carries ``None`` for its whole life and keeps the
-    ordinary 3 s drain, which is the population that drain was written for.
+    ever was, which is half of the question the keep-alive window is keyed on.
+    The stamp is written by ``RuntimeServer._republish_detached`` at the 1->0
+    transition and cleared at 0->1, so it is NOT "when this runtime last became
+    idle": a runtime nobody has watched carries ``None`` for its whole life.
+
+    THE OTHER HALF IS THE ENGAGE CLAIM (:func:`_engaged_at`), and the two are
+    read together by :func:`_claim_stamp` — the window is drawn for a runtime
+    holding either one, and the ordinary 3 s drain is written for the population
+    holding neither.
 
     Read off the server's own record object, which is where the stamp is
     written; a reduced runtime (an older host, a test double) has no record and
@@ -1521,11 +1525,13 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         if not _should_exit(handle, runtime):
             continue
-        # THE WINDOW IS DRAWN HERE, not once at reaper start: for a runtime a
-        # viewer has LEFT it is the keep-alive window rather than the ordinary
-        # drain, and ``detached_at`` does not exist until that viewer leaves —
-        # see ``_drain_window_s``. An ineligible runtime gets the old grace and
-        # an ``lru_cap`` of 0, which keeps the registry scan off it entirely.
+        # THE WINDOW IS DRAWN HERE, not once at reaper start, because the
+        # question it answers can change while this runtime lives: a keep-alive
+        # claim is acquired by a viewer LEAVING (``detached_at`` does not exist
+        # until then) or by being ENGAGED at boot, and it can be re-drawn from a
+        # later departure inside one drain. See ``_drain_window_s`` and
+        # ``_claim_stamp``. A runtime holding neither claim gets the old grace
+        # and an ``lru_cap`` of 0, which keeps the registry scan off it entirely.
         window_s, lru_cap = _drain_window_s(grace_s, runtime)
         deadline = time.monotonic() + window_s
         next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
