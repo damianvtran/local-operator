@@ -436,9 +436,10 @@ export type CommandOp =
      ``completed_at`` is set, else ``overdue`` when the target date has passed,
      else ``upcoming``); the client never computes it, so a chip here and a line
      in a tool result cannot disagree about which milestone is late.
-   * ``progress_stale`` is the server's one 30-minute verdict — the same value
-     the completion-time check reads, so the phone's badge and the agent's
-     nudge can never disagree about one record. */
+   * ``progress_stale`` is the server's one four-hour verdict, read only for
+     `active` records (settled rows never read stale) — the same derivation the
+     completion-time check reads, so the phone's badge and the agent's nudge can
+     never disagree about one record. */
 
 /** The project's status word; an unknown status from a newer build passes
     through as its own string (the union is the shipped vocabulary, not a

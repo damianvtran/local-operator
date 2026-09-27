@@ -46,6 +46,7 @@ from rich.text import Text
 
 from local_operator.projects import PROJECT_ROW_CAP
 from local_operator.projects import age_text as derived_age_text
+from local_operator.projects import display_name
 from local_operator.projects import milestone_state as derived_milestone_state
 from local_operator.projects import truncate_row
 
@@ -306,7 +307,12 @@ def _list_row(
     project = _row(view)
     row = Text(no_wrap=True)
     row.append("▸ " if selected else "  ", style=style_for("cursor") if selected else Style())
-    row.append(str(project.get("name") or "(unnamed)"), style=style_for("name"))
+    row.append(display_name(project) or "(unnamed)", style=style_for("name"))
+    if project.get("title"):
+        # Title-first, key secondary (muted): the key is how the project is
+        # ADDRESSED (slash verbs, ``@project:<name>``), so a titled row keeps
+        # it visible beside the label the reader knows.
+        row.append(f" ({project.get('name') or ''})", style=style_for("dim"))
     status = str(project.get("status") or "active")
     row.append(f" [{status}]", style=_status_style(style_for, status))
     extras: list[tuple[str, str]] = []
@@ -381,7 +387,15 @@ def _card_lines(view: dict[str, Any], *, now: float | None, style_for: StyleFor)
     """One board card: name / facts / freshness — three lines."""
     project = _row(view)
     name = Text(no_wrap=True, style=style_for("name"))
-    name.append(str(project.get("name") or "(unnamed)"))
+    label = display_name(project) or "(unnamed)"
+    name.append(label)
+    key = str(project.get("name") or "")
+    if project.get("title") and key and cell_len(f"{label} ({key})") <= BOARD_COLUMN_WIDTH - 1:
+        # The key joins the title only when the fixed 32-cell column can hold
+        # BOTH: cards truncate at the column edge, and a half-drawn ``(key``
+        # reads as corruption. Title wins otherwise; the key stays recoverable
+        # in the footer/detail.
+        name.append(f" ({key})", style=style_for("dim"))
     facts = Text(no_wrap=True)
     bits: list[str] = []
     estimate = estimate_text(project)
@@ -494,7 +508,13 @@ def _timeline_row(
 ) -> Text:
     project = _row(view)
     row = Text(no_wrap=True)
-    name = Text(str(project.get("name") or "(unnamed)"), style=style_for("name"))
+    label = display_name(project) or "(unnamed)"
+    key = str(project.get("name") or "")
+    name = Text(label, style=style_for("name"))
+    if project.get("title") and key and cell_len(f"{label} ({key})") <= TIMELINE_NAME_WIDTH:
+        # Same rule as the board card: both only when the fixed name column
+        # holds them; the title wins a tight fit.
+        name.append(f" ({key})", style=style_for("dim"))
     name.truncate(TIMELINE_NAME_WIDTH, overflow="ellipsis", pad=True)
     row.append_text(name)
     row.append(" ", style=style_for("dim"))
@@ -670,7 +690,7 @@ def render_project_timeline(
     if undated:
         if lines:
             lines.append(Text(""))
-        names = ", ".join(str(_row(view).get("name") or "(unnamed)") for view in undated)
+        names = ", ".join(display_name(_row(view)) or "(unnamed)" for view in undated)
         lines.append(
             Text(
                 f"no dates ({len(undated)}): {names}",
@@ -757,9 +777,16 @@ def detail_footer(
 
     clauses: dict[str, Text] = {}
     identity = Text(no_wrap=True)
-    name_text = str(project.get("name") or "(unnamed)")
+    # Title-first, key secondary: the tight-width rebuild below keeps the
+    # title and the status chip and trades the key away first — the key stays
+    # recoverable in the detail/receipts, while the title is what the reader
+    # knows the project by.
+    name_text = display_name(project) or "(unnamed)"
     status = str(project.get("status") or "active")
     identity.append(name_text, style=resolver("name"))
+    key = str(project.get("name") or "")
+    if project.get("title") and key:
+        identity.append(f" ({key})", style=resolver("dim"))
     identity.append(f" [{status}]", style=chip(status))
     clauses["identity"] = identity
 

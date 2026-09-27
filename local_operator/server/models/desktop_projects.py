@@ -12,9 +12,10 @@ its ``target_date`` has passed, else ``upcoming``. The derivation is
 and every other reader calls — so a chip on a card and a line in a tool result
 cannot disagree about which milestone is late.
 
-**``progress_stale`` is server-computed**, from the one 30-minute constant in
-:mod:`local_operator.projects`, so the UI's stale badge and the completion check
-can never disagree about one record.
+**``progress_stale`` is server-computed**, from the one staleness constant in
+:mod:`local_operator.projects` — four hours, and only for ``active`` rows
+(settled records never read stale) — so the UI's stale badge and the completion
+check can never disagree about one record.
 
 **``extra="allow"`` on the view models**, matching the other desktop payloads: a
 field added by a later build crosses additively and an older renderer ignores
@@ -48,6 +49,31 @@ class ProjectMilestoneView(BaseModel):
     status: Literal["completed", "overdue", "upcoming"]
 
 
+class ProjectAttachmentView(BaseModel):
+    """One stored attachment on a history entry.
+
+    ``path`` is the stored copy's location — resolvable on the machine that
+    serves the payload — and ``kind`` is the classification made when the
+    file was copied (``image`` for screenshots and image formats, ``data``
+    otherwise).
+    """
+
+    name: str = ""
+    kind: str = "data"
+    path: str = ""
+    bytes: int = 0
+    added_at: str = ""
+
+
+class ProjectUpdateView(BaseModel):
+    """One append-only history entry, newest last (the log's own order)."""
+
+    at: str = ""
+    text: str = ""
+    by: str = ""
+    attachments: list[ProjectAttachmentView] = Field(default_factory=list)
+
+
 class ProjectView(BaseModel):
     """The full record — what ``GET .../{key}`` and every write returns."""
 
@@ -56,6 +82,9 @@ class ProjectView(BaseModel):
     id: str
     name: str
     description: str = ""
+    owner: str | None = None
+    team: str | None = None
+    title: str | None = None
     status: str
     progress: str = ""
     progress_updated_at: float | None = None
@@ -72,6 +101,10 @@ class ProjectView(BaseModel):
     estimate: float | None = None
     estimate_unit: str = "points"
     milestones: list[ProjectMilestoneView] = Field(default_factory=list)
+    #: The append-only history (newest last) — the full log as the row holds
+    #: it, bounded at the store's cap. Detail-only: the LISTING (summary)
+    #: must not carry it (one row's log is not a list-row's payload).
+    updates: list[ProjectUpdateView] = Field(default_factory=list)
 
 
 class ProjectSummary(BaseModel):
@@ -88,6 +121,9 @@ class ProjectSummary(BaseModel):
     id: str
     name: str
     description: str = ""
+    owner: str | None = None
+    team: str | None = None
+    title: str | None = None
     status: str
     tags: list[str] = Field(default_factory=list)
     start_date: str | None = None
@@ -194,6 +230,9 @@ class ProjectPatch(_Request):
 
     name: str | None = Field(default=None, min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
+    owner: str | None = None
+    team: str | None = None
+    title: str | None = None
     status: ProjectStatus | None = None
     progress: str | None = Field(default=None, max_length=PROGRESS_MAX)
     tags: list[str] | None = None
@@ -232,6 +271,9 @@ def project_view(project: Project) -> ProjectView:
         id=project.id,
         name=project.name,
         description=project.description,
+        owner=project.owner,
+        team=project.team,
+        title=project.title,
         status=project.status,
         progress=project.progress,
         progress_updated_at=project.progress_updated_at,
@@ -255,6 +297,24 @@ def project_view(project: Project) -> ProjectView:
             )
             for item in project.milestones
         ],
+        updates=[
+            ProjectUpdateView(
+                at=entry.at,
+                text=entry.text,
+                by=entry.by,
+                attachments=[
+                    ProjectAttachmentView(
+                        name=attachment.name,
+                        kind=attachment.kind,
+                        path=attachment.path,
+                        bytes=attachment.bytes,
+                        added_at=attachment.added_at,
+                    )
+                    for attachment in entry.attachments
+                ],
+            )
+            for entry in project.updates
+        ],
     )
 
 
@@ -265,6 +325,9 @@ def project_summary(project: Project, *, live_sessions: int) -> ProjectSummary:
         id=project.id,
         name=project.name,
         description=project.description,
+        owner=project.owner,
+        team=project.team,
+        title=project.title,
         status=project.status,
         tags=list(project.tags),
         start_date=project.start_date,

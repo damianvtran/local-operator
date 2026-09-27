@@ -19,9 +19,11 @@ from typing import Any
 import pytest
 
 from local_operator.projects import (
+    ATTACHMENTS_MAX,
     MILESTONES_MAX,
     PROJECT_PROGRESS_STALE_S,
     PROJECT_SCHEMA,
+    UPDATES_MAX,
     MilestoneEdit,
     Project,
     ProjectEdit,
@@ -31,6 +33,7 @@ from local_operator.projects import (
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
+    display_name,
     milestone_status,
     progress_is_stale,
     scan_runtime_states,
@@ -561,3 +564,268 @@ def test_the_tui_overlay_wins_only_for_the_fields_it_passes(
     assert row["todos"] == {"open": 0, "total": 0}
     assert row["runtime"] == {"state": "live"}  # overridden wholesale, as documented
     assert row["subagents"] is None  # untouched
+
+
+# -- attribution, title, the history log, and attachments --------------------
+
+
+def test_owner_team_and_title_round_trip_set_clear_and_absent(store) -> None:
+    project = create(store)
+    assert project.owner is None and project.team is None and project.title is None
+    assert display_name(project) == project.name  # absent falls back to the key
+
+    set_row = store.update_project(
+        project.id, ProjectEdit(owner="  Damian Tran ", team="Platform", title=" Q4 Payments ")
+    )
+    # Trimmed on write, merge-only on read.
+    assert (set_row.project.owner, set_row.project.team, set_row.project.title) == (
+        "Damian Tran",
+        "Platform",
+        "Q4 Payments",
+    )
+    assert display_name(set_row.project) == "Q4 Payments"
+    reloaded = store.get_project(project.id)
+    assert (reloaded.owner, reloaded.team, reloaded.title) == (
+        "Damian Tran",
+        "Platform",
+        "Q4 Payments",
+    )
+
+    merged = store.update_project(project.id, ProjectEdit(progress="moved"))
+    assert merged.project.owner == "Damian Tran" and merged.project.title == "Q4 Payments"
+
+    cleared = store.update_project(project.id, ProjectEdit(title="", owner="team ", team=""))
+    assert cleared.project.title is None and cleared.project.team is None
+    assert cleared.project.owner == "team"
+    assert display_name(cleared.project) == cleared.project.name
+
+
+def test_owner_team_and_title_caps_refuse_with_the_field_name(store) -> None:
+    project = create(store)
+    for field in ("owner", "team", "title"):
+        with pytest.raises(ValueError) as excinfo:
+            store.update_project(project.id, ProjectEdit(**{field: "x" * 81}))
+        assert f"{field} must be at most 80 characters" in str(excinfo.value)
+
+
+def test_the_staleness_window_is_four_hours(store) -> None:
+    project = create(store, progress="still true")
+    stamp = project.progress_updated_at
+    assert stamp is not None
+    row = store.get_project(project.id)
+    assert not progress_is_stale(row, now=stamp + 4 * 3600 - 60)  # 3:59 — fresh
+    assert progress_is_stale(row, now=stamp + 4 * 3600 + 60)  # 4:01 — stale
+    # The rule is "more than": exactly at the window is still fresh, and the
+    # ONE constant is what the boundary is measured against.
+    assert not progress_is_stale(row, now=stamp + PROJECT_PROGRESS_STALE_S)
+    assert PROJECT_PROGRESS_STALE_S == 4 * 3600
+
+
+def test_settled_records_never_read_stale(store) -> None:
+    project = create(store, progress="settled")
+    row = store.get_project(project.id)
+    stale_moment = row.progress_updated_at + PROJECT_PROGRESS_STALE_S + 60
+    assert progress_is_stale(row, now=stale_moment)  # active + an old report
+
+    for status in ("paused", "done", "archived"):
+        settled = store.update_project(project.id, ProjectEdit(status=status)).project
+        assert not progress_is_stale(settled, now=stale_moment)
+        assert not progress_is_stale(settled)  # and against the real clock
+
+
+def test_never_reported_is_stale_only_while_active(store) -> None:
+    project = create(store)
+    assert progress_is_stale(project)  # the first honest line is still owed
+    done = store.update_project(project.id, ProjectEdit(status="done")).project
+    assert not progress_is_stale(done)
+
+
+def test_every_new_line_appends_to_the_history(store) -> None:
+    project = create(store)
+    assert project.updates == []
+
+    first = store.update_project(project.id, ProjectEdit(progress="first"), reporter=SESSION_A)
+    (entry,) = first.project.updates
+    assert (entry.text, entry.by) == ("first", SESSION_A)
+    assert entry.at.endswith("Z") and "T" in entry.at  # ISO-8601 UTC
+
+    second = store.update_project(project.id, ProjectEdit(progress="second"), reporter=SESSION_B)
+    assert [update.text for update in second.project.updates] == ["first", "second"]
+
+    # A refresh of the SAME text on a stale record re-stamps freshness but
+    # appends nothing (no new report); a clear appends nothing either.
+    path = store.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["progress_updated_at"] = 0.0
+    path.write_text(json.dumps(payload))
+    refreshed = store.update_project(project.id, ProjectEdit(progress="second"), reporter=SESSION_A)
+    assert refreshed.refreshed
+    assert [update.text for update in refreshed.project.updates] == ["first", "second"]
+    cleared = store.update_project(project.id, ProjectEdit(progress=""))
+    assert [update.text for update in cleared.project.updates] == ["first", "second"]
+
+
+def test_creating_with_a_progress_line_appends_it(store) -> None:
+    project = store.create_project(
+        ProjectEdit(name="alpha", progress="created with a line"),
+        sessions=[SESSION_A],
+        progress_reported_by=SESSION_A,
+    )
+    assert [(entry.text, entry.by) for entry in project.updates] == [
+        ("created with a line", SESSION_A)
+    ]
+
+
+def test_the_history_is_bounded_at_five_hundred_oldest_first_out(store) -> None:
+    project = create(store)
+    path = store.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["updates"] = [
+        {
+            "at": f"2026-01-01T{i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}Z",
+            "text": f"seed {i}",
+        }
+        for i in range(UPDATES_MAX)
+    ]
+    path.write_text(json.dumps(payload))
+    outcome = store.update_project(project.id, ProjectEdit(progress="newest"), reporter=SESSION_A)
+    texts = [entry.text for entry in outcome.project.updates]
+    assert len(texts) == UPDATES_MAX
+    assert texts[0] == "seed 1" and texts[-1] == "newest"
+    # The bound also holds on a pure reload (the reader keeps the same slice).
+    assert len(store.get_project(project.id).updates) == UPDATES_MAX
+
+
+def test_attachments_are_copied_into_the_store_and_described(store, tmp_path: Path) -> None:
+    project = create(store)
+    shot = tmp_path / "frame.png"
+    shot.write_bytes(b"\x89PNG" + b"x" * 2048)
+    log = tmp_path / "out.log"
+    log.write_text("all green")
+
+    outcome = store.update_project(
+        project.id,
+        ProjectEdit(progress="with evidence"),
+        reporter=SESSION_A,
+        attachments=[shot, str(log)],
+    )
+    (entry,) = outcome.project.updates
+    first, second = entry.attachments
+    assert (first.name, first.kind, first.bytes) == ("frame.png", "image", 2052)
+    assert first.added_at.endswith("Z")
+    assert (second.name, second.kind) == ("out.log", "data")
+
+    # The copy lives under the store root with a fresh unique name; the
+    # original location is never referenced (a reaped scratch dir cannot
+    # take the evidence with it).
+    copied = Path(first.path)
+    assert copied.exists()
+    assert copied.parent == store.projects_dir / "attachments" / project.id
+    assert copied.name != "frame.png" and copied.suffix == ".png"
+    shot.unlink()
+    assert copied.read_bytes().startswith(b"\x89PNG")
+
+
+def test_attachment_refusals_name_the_remedy(store, tmp_path: Path) -> None:
+    project = create(store)
+    store.update_project(project.id, ProjectEdit(progress="baseline"), reporter=SESSION_A)
+    shot = tmp_path / "s.png"
+    shot.write_bytes(b"x")
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (5 * 1024 * 1024 + 1))
+
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(
+            project.id,
+            ProjectEdit(progress="many"),
+            reporter=SESSION_A,
+            attachments=[shot] * (ATTACHMENTS_MAX + 1),
+        )
+    assert "at most 10 attachments" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(
+            project.id, ProjectEdit(progress="big"), reporter=SESSION_A, attachments=[big]
+        )
+    assert "limited to 5 MB each" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(
+            project.id,
+            ProjectEdit(progress="missing"),
+            reporter=SESSION_A,
+            attachments=[tmp_path / "nope.png"],
+        )
+    assert "no file at" in str(excinfo.value)
+
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(
+            project.id, ProjectEdit(progress="dir"), reporter=SESSION_A, attachments=[tmp_path]
+        )
+    assert "is not a file" in str(excinfo.value)
+
+    # No NEW line → no entry to carry files: a refresh, a clear and a
+    # progress-less update all refuse.
+    for fields in (
+        ProjectEdit(progress="baseline"),
+        ProjectEdit(progress=""),
+        ProjectEdit(title="t"),
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            store.update_project(project.id, fields, reporter=SESSION_A, attachments=[shot])
+        assert "NEW progress line" in str(excinfo.value)
+
+    assert [entry.text for entry in store.get_project(project.id).updates] == ["baseline"]
+
+
+def test_malformed_history_reads_as_empty_never_refuses_the_row(store) -> None:
+    project = create(store)
+    path = store.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["updates"] = [
+        "junk",
+        42,
+        {
+            "at": 5,
+            "text": None,
+            "by": "x",
+            "attachments": ["junk", {"name": "a.png", "kind": "wat", "bytes": "12"}],
+        },
+        {"text": "kept"},
+    ]
+    path.write_text(json.dumps(payload))
+    reader = ProjectRegistry(store.config_dir)
+    reloaded = reader.get_project(project.id)
+    assert reloaded is not None
+    assert [entry.text for entry in reloaded.updates] == ["", "kept"]
+    malformed = reloaded.updates[0]
+    assert malformed.at == "5" and malformed.by == "x"
+    (attachment,) = malformed.attachments
+    assert (attachment.name, attachment.kind, attachment.bytes) == ("a.png", "data", 12)
+
+    # A wholly non-list history is [] — and the row still loads.
+    reloaded_value = json.loads(path.read_text())
+    reloaded_value["updates"] = "garbage"
+    path.write_text(json.dumps(reloaded_value))
+    assert ProjectRegistry(store.config_dir).get_project(project.id).updates == []
+
+
+def test_a_row_written_before_the_new_fields_loads_as_unknown(store) -> None:
+    project = create(store)
+    path = store.projects_dir / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    for key in ("owner", "team", "title", "updates"):
+        payload.pop(key, None)
+    path.write_text(json.dumps(payload))
+
+    reloaded = ProjectRegistry(store.config_dir).get_project(project.id)
+    assert reloaded is not None
+    assert reloaded.owner is None and reloaded.team is None and reloaded.title is None
+    assert reloaded.updates == []
+    assert display_name(reloaded) == reloaded.name
+    # The view payload carries the same unknowns as nulls, never inventing
+    # a default string.
+    view = build_project_view(reloaded, config_dir=store.config_dir)
+    assert view["project"]["owner"] is None
+    assert view["project"]["title"] is None
+    assert view["project"]["updates"] == []
