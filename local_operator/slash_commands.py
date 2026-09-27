@@ -11,7 +11,7 @@ command registry to diverge from — an entry without one is not offered on the
 desktop at all (see ``/mobile``).
 """
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCommand
 
@@ -197,6 +197,11 @@ def network_subcommand_rows() -> tuple[tuple[str, str], ...]:
 #: slash verb: that is tool/API/UI work, so the vocabulary stays six words.
 PROJECT_SUBCOMMANDS: tuple[str, ...] = ("list", "show", "new", "delete", "link", "unlink")
 
+#: The verbs whose SECOND argument slot is an existing project NAME (so the
+#: editor offers name rows there). ``list`` takes nothing, ``new`` takes a name
+#: that does not exist yet, and the rest resolve an existing row.
+PROJECT_NAME_VERBS: tuple[str, ...] = ("show", "delete", "link", "unlink")
+
 #: The picker's one line of help per word, keyed by the vocabulary word so
 #: :func:`project_subcommand_rows` is total over ``PROJECT_SUBCOMMANDS`` (the
 #: test that pins the two tables equal is what enforces a new word's help line).
@@ -234,34 +239,430 @@ def project_unavailable_text() -> str:
     return "projects are unavailable in this session. Ask the agent to create one."
 
 
-def project_listing_text(projects: Sequence[Any], *, cap: int = 5) -> str:
-    """``N projects: a [status], b [status] +K more`` — the shared listing line.
+def project_listing_rows(
+    projects: Sequence[Any],
+    *,
+    states: Mapping[str, dict[str, Any]] | None = None,
+    now: float | None = None,
+) -> list[str]:
+    """One row per project — the listing receipt both ``/project`` handlers print.
 
-    ``cap`` keeps ONE line: a receipt, not a table. The full rows are the
-    tool's ``list`` and the projects surfaces' job.
+    ``states`` is :func:`local_operator.projects.scan_runtime_states`'s answer,
+    passed by the caller because ONE scan serves a whole listing (the desktop
+    listing's rule); a live count is only stated when the caller could know it.
+    The row cap (``projects.PROJECT_ROW_CAP``), the age arithmetic and the
+    truncation are the store module's — one copy each — so the operator's
+    surface and the model's cannot disagree about them; the rows themselves
+    differ by surface (the tool words its session field differently, this one
+    is context-free).
     """
-    names = [f"{project.name} [{project.status}]" for project in projects[:cap]]
-    tail = "" if len(projects) <= cap else f" +{len(projects) - cap} more"
-    plural = "" if len(projects) == 1 else "s"
-    return f"{len(projects)} project{plural}: " + ", ".join(names) + tail
+    rows: list[str] = []
+    from local_operator.projects import progress_is_stale, reported_age, truncate_row
+
+    for project in projects:
+        parts = [f"- {project.name} [{project.status}]"]
+        if project.estimate is not None:
+            suffix = "pt" if project.estimate_unit == "points" else "d"
+            parts.append(f"est {project.estimate:g}{suffix}")
+        if project.target_date:
+            parts.append(f"→{project.target_date}")
+        if project.milestones:
+            done = sum(1 for milestone in project.milestones if milestone.completed_at)
+            parts.append(f"M {done}/{len(project.milestones)}")
+        sessions = len(project.sessions)
+        if states is not None:
+            live = sum(
+                1
+                for session_id in project.sessions
+                if (states.get(session_id) or {}).get("state") == "live"
+            )
+            parts.append(f"{sessions} session{'' if sessions == 1 else 's'} ({live} live)")
+        else:
+            parts.append(f"{sessions} session{'' if sessions == 1 else 's'}")
+        age = reported_age(project, now=now)
+        if age is None:
+            parts.append("no progress")
+        else:
+            stale = " (stale)" if progress_is_stale(project, now=now) else ""
+            parts.append(f"progress {age} ago{stale}")
+        row = " · ".join(parts)
+        summary = (project.description or "").strip()
+        if summary:
+            row += f' · "{summary}"'
+        rows.append(truncate_row(row))
+    return rows
 
 
-def project_unimplemented_text(word: str) -> str:
-    """The SLICE-1 stand-in sentence for a reserved verb with no handler yet.
+def refresh_project_store(registry: Any) -> None:
+    """Give a refusal ONE bounded re-read before it is believed.
 
-    Shared by both handlers for the same reason the sentences above are: the
-    full-page view ships in a later slice, and until it does every surface must
-    say the same thing about which routes act today.
+    Both refusal checks (the runner's verb gate and the app's ``show`` branch)
+    run BEFORE any store read, and a read is what refreshes the snapshot — so
+    a store repaired since the flag was set kept refusing on the LIVE surface
+    (QA round 2, Q5: eight receipts over eleven seconds after a ``chmod``
+    back, all stale; fresh registries and ``new`` recovered, which is how the
+    gap was spotted). Entities without a ``refresh`` (test doubles) are left
+    alone; the real registry's is one stat + one listing.
+    """
+    refresh = getattr(registry, "refresh", None)
+    if callable(refresh):
+        refresh()
+
+
+def project_store_unreadable_text() -> str:
+    """The refusal an UNREADABLE store answers — never the empty-store sentence.
+
+    "nothing is stored" and "nothing could be read" are different facts, and a
+    reader who sees the empty sentence over a broken store (or the no-such-
+    project refusal while the row exists on disk) is being told a falsehood by
+    the surface about a store it merely failed to open (QA round 1, Q4). No
+    path: the sentence is for a user, not a stack trace.
     """
     return (
-        f"/project {word} is not in this build yet. For now use /project list, "
-        "the agent's project tool, or the desktop Projects tab."
+        "the project store is unreadable — check the projects directory's "
+        "permissions, then try again."
     )
+
+
+def project_empty_text() -> str:
+    """The empty-store sentence, both handlers and the view's empty canvas."""
+    return (
+        "no projects yet — /project new <name> (or ask an agent: create a project "
+        "and link this session)."
+    )
+
+
+def project_needs_name_text(word: str) -> str:
+    """``/project <verb>`` with no name — the one sentence both handlers print."""
+    return f"name a project: /project {word} <name>"
+
+
+def project_show_refusal_text(name: str) -> str:
+    """``no project named …`` — names ``list``; never a silent no-op (design §5.3)."""
+    return f"no project named {name!r} — /project list shows every tracked project."
+
+
+def project_delete_rehearsal_text(name: str) -> str:
+    """The typed-``yes`` rehearsal — what WOULD be removed, and the exact way to say go.
+
+    Mirrors ``/delete``'s two-step shape (``_cmd_delete``): the bare form
+    rehearses, and only a submission carrying ``yes`` removes. The word is
+    typed rather than picked because a row with one keystroke cannot be a
+    confirmation (the ``/delete`` argument row's own reasoning).
+    """
+    return (
+        f"deleting project {name!r} removes its row and every session link; "
+        "session directories are untouched. Nothing was deleted — run "
+        f"/project delete {name} yes to confirm."
+    )
+
+
+def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -> str:
+    """The textual twin of the TUI page's detail: fields, progress, sessions.
+
+    What a caller WITHOUT a page prints for ``/project show <name>`` (the
+    routed/mobile path). Same composition as the page — ``build_project_view``
+    — so the two surfaces cannot disagree about a session's state; ``null``
+    counts are omitted, never rendered as zeroes.
+    """
+    raw_project = view.get("project")
+    project: Mapping[str, Any] = raw_project if isinstance(raw_project, dict) else {}
+    # ``age_text``: the receipt holds a composed JSON row, not a ``Project``,
+    # so it reads the raw-stamp arithmetic the model-side helper layers over.
+    from local_operator.projects import age_text
+
+    name = project.get("name") or "(unnamed)"
+    lines = [f"{name} [{project.get('status') or 'active'}]"]
+    lines.append(f"description: {project.get('description') or '(unstated)'}")
+    estimate = "no estimate"
+    if project.get("estimate") is not None:
+        suffix = "pt" if (project.get("estimate_unit") or "points") == "points" else "d"
+        estimate = f"est {project['estimate']:g}{suffix}"
+    lines.append(f"estimate: {estimate}")
+    lines.append(
+        f"dates: start {project.get('start_date') or '—'} · target "
+        f"{project.get('target_date') or '—'} · completed {project.get('completed_at') or '—'}"
+    )
+    # The tags line the project tool prints: the two `show` readers state the
+    # same fields (agent review round 1, finding 5's related note).
+    tags_value = project.get("tags")
+    tags = [str(tag) for tag in tags_value] if isinstance(tags_value, list) else []
+    lines.append(f"tags: {', '.join(tags) if tags else '(none)'}")
+    age = age_text(project.get("progress_updated_at") if project.get("progress") else None, now=now)
+    if age is None:
+        freshness = "none recorded"
+    else:
+        # The staleness flag comes from the COMPOSITION (one threshold, one
+        # place), never a second derivation here.
+        stale = ", stale" if view.get("progress_stale") else ""
+        freshness = f"reported {age} ago{stale}"
+    reporter = project.get("progress_reported_by") or ""
+    by = f" by {reporter}" if reporter else ""
+    lines.append(f"progress ({freshness}{by}): {project.get('progress') or '—'}")
+    milestones_value = project.get("milestones")
+    milestones: list[Any] = milestones_value if isinstance(milestones_value, list) else []
+    if milestones:
+        from local_operator.projects import ProjectMilestone, milestone_state
+
+        lines.append(f"milestones ({len(milestones)}):")
+        for milestone in milestones:
+            entry: Mapping[str, Any] = milestone if isinstance(milestone, dict) else {}
+            try:
+                model = ProjectMilestone.model_validate(entry)
+                label, state, target = (
+                    model.name,
+                    milestone_state(model.completed_at, model.target_date),
+                    model.target_date or "—",
+                )
+            except Exception:  # noqa: BLE001 — one bad row must not crash a receipt
+                # A malformed entry still PRINTS (a reader should see the row is
+                # there) but without a derived status this reader cannot trust —
+                # the tolerant shape every sibling reader uses. The old direct
+                # `model_validate` raised out of a keystroke handler on the
+                # routed/mobile path (agent review round 1, finding 5).
+                label = str(entry.get("name") or "(unnamed milestone)")
+                state = "unknown"
+                target = str(entry.get("target_date") or "—")
+            lines.append(f"  - {label} [{state}] target {target}")
+    else:
+        lines.append("milestones: (none)")
+    rows_value = view.get("sessions")
+    rows: list[Any] = rows_value if isinstance(rows_value, list) else []
+    if not rows:
+        lines.append("linked sessions: (none)")
+    else:
+        lines.append(f"linked sessions ({len(rows)}):")
+        for row in rows[:8]:
+            if not isinstance(row, dict):
+                continue
+            session_row: Mapping[str, Any] = row
+            session_id = session_row.get("session_id")
+            title = session_row.get("title") or "(untitled)"
+            if session_row.get("exists") is False:
+                # `missing`, the word the guide promises — not `stopped`, which
+                # would be a wrong statement about a session whose directory is
+                # gone (agent review round 1, finding 5; QA F5).
+                lines.append(f"  - {session_id} [missing] {title}")
+                continue
+            runtime_value = session_row.get("runtime")
+            runtime: Mapping[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
+            state = str(runtime.get("state") or "stopped")
+            busy = ", busy" if runtime.get("busy") else ""
+            bits = [state + busy]
+            subagents_value = session_row.get("subagents")
+            subagents: Mapping[str, Any] = (
+                subagents_value if isinstance(subagents_value, dict) else {}
+            )
+            if subagents.get("running") is not None and subagents.get("settled") is not None:
+                bits.append(
+                    f"{int(subagents['running'])} running · "
+                    f"{int(subagents['settled'])} settled subagents"
+                )
+            todos_value = session_row.get("todos")
+            todos: Mapping[str, Any] = todos_value if isinstance(todos_value, dict) else {}
+            # Both counts must exist: a snapshot-less session carries the key
+            # with null counts and `todos None/None` is user-visible junk
+            # (UX round 1, U2).
+            if todos.get("open") is not None and todos.get("total") is not None:
+                bits.append(f"todos {todos['open']}/{todos['total']}")
+            if session_row.get("archived"):
+                bits.append("archived")
+            lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
+        if len(rows) > 8:
+            lines.append(f"  … +{len(rows) - 8} more")
+    return "\n".join(lines)
 
 
 def project_unknown_word_text(word: str) -> str:
     """``unknown /project subcommand 'x' — try: ...`` — the refusal both print."""
     return f"unknown /project subcommand {word!r} — try: " + ", ".join(PROJECT_SUBCOMMANDS)
+
+
+def run_project_slash_op(
+    word: str,
+    rest: str,
+    *,
+    registry: Any,
+    config_dir: Any,
+    session_id: str | None = None,
+    now: float | None = None,
+) -> tuple[str, str]:
+    """Run ONE ``/project`` verb against the store; return ``(text, style)``.
+
+    THE one implementation both front ends call — the TUI's ``_cmd_project``
+    and the runtime's ``_project_slash`` — so a receipt can never print one way
+    on the owner and another on the viewer (the rule every ``project_*_text``
+    sibling states). ``show`` is answered here as a bounded TEXT receipt for
+    callers with no page to paint; the TUI intercepts ``show`` first and opens
+    the full-page view instead.
+
+    Store failures are sentences, never exceptions: a slash command is a
+    keystroke path and must not crash the app (the same contract the slice-1
+    handlers kept).
+    """
+    from pydantic import ValidationError
+
+    from local_operator.projects import (
+        _SESSION_ID_RE,
+        ProjectEdit,
+        ProjectNameConflictError,
+        ProjectSchemaGuardError,
+        build_project_view,
+        readable_error,
+        scan_runtime_states,
+        store_error_text,
+    )
+
+    word = (word or "list").casefold()
+    linkable = session_id if session_id and _SESSION_ID_RE.fullmatch(session_id) else None
+
+    if word in ("list", "show", "delete", "link", "unlink"):
+        # An UNREADABLE store must not answer with the empty-store sentence or
+        # the no-such-project refusal: the row may exist and simply not be
+        # readable, and a reader told otherwise is being lied to by the
+        # surface (QA round 1, Q4). `new` is exempt — the write itself carries
+        # the honest failure below.
+        if getattr(registry, "load_error", None) is not None:
+            # …but a refusal must not be STICKY: this check runs before any
+            # read would refresh the snapshot, so re-read once before believing
+            # it (QA round 2, Q5 — a repaired store kept refusing here).
+            refresh_project_store(registry)
+        if getattr(registry, "load_error", None) is not None:
+            return (project_store_unreadable_text(), "warning")
+
+    if word == "list":
+        try:
+            projects = list(registry.list_projects())
+        except Exception as exc:  # noqa: BLE001 — a listing is never worth an error
+            return (f"could not list projects: {store_error_text(exc)}", "warning")
+        if not projects:
+            return (project_empty_text(), "info")
+        states = scan_runtime_states(config_dir)
+        return ("\n".join(project_listing_rows(projects, states=states, now=now)), "info")
+
+    if word == "show":
+        name = rest.strip()
+        if not name:
+            return (project_needs_name_text("show"), "warning")
+        try:
+            project = registry.get_project_by_name(name)
+        except Exception as exc:  # noqa: BLE001
+            return (f"could not read the projects store: {store_error_text(exc)}", "warning")
+        if project is None:
+            return (project_show_refusal_text(name), "warning")
+        view = build_project_view(project, config_dir=config_dir)
+        return (project_show_receipt(view, now=now), "info")
+
+    if word == "new":
+        name = rest.strip()
+        if not name:
+            return (project_needs_name_text("new"), "warning")
+        try:
+            project = registry.create_project(
+                ProjectEdit(name=name), sessions=[linkable] if linkable else ()
+            )
+        except ProjectNameConflictError as exc:
+            # BARE name in the embedded command: the quoted form was a command
+            # that did not run when copied (agent review round 1, finding 6 /
+            # QA F6 — the prose keeps its quotes, the command drops them).
+            return (f"{exc} — /project show {name} opens the existing row.", "warning")
+        except ProjectSchemaGuardError as exc:
+            return (str(exc), "warning")
+        except (ValueError, ValidationError) as exc:
+            return (readable_error(exc), "warning")
+        except Exception as exc:  # noqa: BLE001
+            # `store_error_text`, never the exception's own text: an OSError
+            # stringifies with the absolute path it touched, and a receipt must
+            # not leak one (QA round 1, Q4).
+            return (f"could not create the project: {store_error_text(exc)}", "warning")
+        if linkable:
+            return (
+                f"created project {project.name!r} [{project.status}] and linked this "
+                f"session ({linkable}).",
+                "info",
+            )
+        return (
+            f"created project {project.name!r} [{project.status}] with no session link "
+            "(this session has no linkable id).",
+            "info",
+        )
+
+    if word in ("link", "unlink"):
+        name = rest.strip()
+        if not name:
+            return (project_needs_name_text(word), "warning")
+        try:
+            project = registry.get_project_by_name(name)
+        except Exception as exc:  # noqa: BLE001
+            return (f"could not read the projects store: {store_error_text(exc)}", "warning")
+        if project is None:
+            return (project_show_refusal_text(name), "warning")
+        if linkable is None:
+            return ("this session has no linkable id — nothing to link.", "warning")
+        try:
+            if word == "link":
+                project, changed = registry.link_session(project.id, linkable)
+            else:
+                project, changed = registry.unlink_session(project.id, linkable)
+        except (ValueError, ValidationError) as exc:
+            return (readable_error(exc), "warning")
+        except Exception as exc:  # noqa: BLE001
+            return (f"could not update the link set: {store_error_text(exc)}", "warning")
+        if word == "link":
+            if not changed:
+                return (
+                    f"session {linkable} was already linked to {project.name!r} "
+                    f"({len(project.sessions)} linked).",
+                    "info",
+                )
+            return (
+                f"linked session {linkable} to {project.name!r} "
+                f"({len(project.sessions)} linked now).",
+                "info",
+            )
+        if not changed:
+            return (
+                f"session {linkable} is not linked to {project.name!r}; "
+                f"/project show {name} lists its sessions.",
+                "warning",
+            )
+        return (
+            f"unlinked session {linkable} from {project.name!r} "
+            f"({len(project.sessions)} linked now).",
+            "info",
+        )
+
+    if word == "delete":
+        # The typed-`yes` confirm: `/project delete <name>` rehearses, and only
+        # `/project delete <name> yes` removes (the `_cmd_delete` shape). A
+        # trailing `yes` is the confirmation only when something PRECEDES it;
+        # a project literally NAMED `yes` therefore reads as the name and
+        # rehearses, whose receipt spells out the `yes yes` form — the old
+        # parse stripped the lone `yes` as a confirmation and answered
+        # `name a project`, which neither said the row existed nor named its
+        # spelling (agent review round 1, finding 7 / QA F7).
+        tokens = rest.split()
+        confirmed = bool(tokens) and tokens[-1].casefold() == "yes" and len(tokens) > 1
+        name = " ".join(tokens[:-1]) if confirmed else rest.strip()
+        if not name:
+            return (project_needs_name_text("delete"), "warning")
+        try:
+            project = registry.get_project_by_name(name)
+        except Exception as exc:  # noqa: BLE001
+            return (f"could not read the projects store: {store_error_text(exc)}", "warning")
+        if project is None:
+            return (project_show_refusal_text(name), "warning")
+        if not confirmed:
+            return (project_delete_rehearsal_text(project.name), "warning")
+        try:
+            registry.delete_project(project.id)
+        except ProjectSchemaGuardError as exc:
+            return (str(exc), "warning")
+        except Exception as exc:  # noqa: BLE001
+            return (f"could not delete the project: {exc}", "warning")
+        return (f"deleted project {project.name!r}.", "info")
+
+    return (project_unknown_word_text(word), "warning")
 
 
 #: Slash commands handled synchronously before any prompt is sent. One

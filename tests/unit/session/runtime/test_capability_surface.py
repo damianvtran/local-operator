@@ -491,40 +491,79 @@ def test_the_runtime_applies_fast_mode_to_the_spec_it_builds_requests_from() -> 
     assert session.model.fast_mode is False
 
 
-def test_project_slash_lists_from_the_store_and_names_the_surfaces_that_act(
+def test_project_slash_runs_the_verbs_with_the_shared_receipts(
     tmp_path: Path,
 ) -> None:
-    """The slice-1 stand-in, exercised the way a routed command reaches it.
+    """Slice 3's routed handler: the same verbs, receipts and refusals as the TUI.
 
-    Two facts matter and both are the user's: the listing comes from the
-    session's own store (one bounded line), and every reserved verb with no
-    handler yet says which surfaces DO act today rather than answering nothing
-    — a command advertised as ``authoritative_session`` must never go silent
-    (the defect class the parity test above names), so the receipts are
-    asserted here, not just the branch's existence.
+    The RECEIPTS are the contract this test exists for: both front ends call
+    ``slash_commands.run_project_slash_op``, so proving the routed path emits
+    the shared strings — and mutates the store the way the sentence claims — is
+    what makes "identical receipts" checkable from the routed side alone.
+    ``/delete``'s typed-``yes`` shape is asserted explicitly (rehearsal first,
+    nothing removed; only the ``yes`` form removes), because on this surface a
+    missed confirm is an irreversible act.
     """
     from types import SimpleNamespace
 
-    from local_operator.projects import ProjectEdit, ProjectRegistry
+    from local_operator import slash_commands as sc
+    from local_operator.projects import ProjectRegistry
     from local_operator.session.frontend_state import SlashResult
     from local_operator.session.runtime.serving import ServingSessionHandle
 
     registry = ProjectRegistry(tmp_path)
-    registry.create_project(ProjectEdit(name="alpha"), sessions=["4e92693767fa"])
-    registry.create_project(ProjectEdit(name="beta"))
     handle = ServingSessionHandle.__new__(ServingSessionHandle)
-    session = SimpleNamespace(project_registry=registry)
+    session = SimpleNamespace(project_registry=registry, session_id="4e92693767fa")
 
-    listing = handle._project_slash(session, "", SlashResult)
-    assert listing.kind == "notice"
-    assert listing.text == "2 projects: alpha [active], beta [active]"
+    # Empty store: the shared empty sentence, info.
+    empty = handle._project_slash(session, "", SlashResult)
+    assert empty.kind == "notice" and empty.style == "info"
+    assert empty.text == sc.project_empty_text()
 
-    unimplemented = handle._project_slash(session, "delete alpha", SlashResult)
-    assert "not in this build yet" in unimplemented.text
-    assert "/project list" in unimplemented.text
+    # new: creates and auto-links the calling session.
+    created = handle._project_slash(session, "new alpha", SlashResult)
+    assert created.style == "info"
+    assert created.text == (
+        "created project 'alpha' [active] and linked this session (4e92693767fa)."
+    )
+    stored = registry.get_project_by_name("alpha")
+    assert stored is not None
+    assert stored.sessions == ["4e92693767fa"]
 
-    unknown = handle._project_slash(session, "frobnicate", SlashResult)
-    assert "unknown /project subcommand 'frobnicate'" in unknown.text
+    # A duplicate name is refused by name, with the way in named.
+    duplicate = handle._project_slash(session, "new alpha", SlashResult)
+    assert duplicate.style == "warning" and "already exists" in duplicate.text
 
+    # list: one shared row per project.
+    listing = handle._project_slash(session, "list", SlashResult)
+    assert listing.text.splitlines() == ["- alpha [active] · 1 session (0 live) · no progress"]
+
+    # link/unlink round-trip with the resulting link set in the receipt.
+    unlinked = handle._project_slash(session, "unlink alpha", SlashResult)
+    assert unlinked.text == "unlinked session 4e92693767fa from 'alpha' (0 linked now)."
+    linked = handle._project_slash(session, "link alpha", SlashResult)
+    assert linked.text == "linked session 4e92693767fa to 'alpha' (1 linked now)."
+    already = handle._project_slash(session, "link alpha", SlashResult)
+    assert already.text == ("session 4e92693767fa was already linked to 'alpha' (1 linked).")
+
+    # remove: rehearsal first (nothing deleted), then the typed-yes form.
+    rehearsal = handle._project_slash(session, "delete alpha", SlashResult)
+    assert rehearsal.style == "warning"
+    assert rehearsal.text == sc.project_delete_rehearsal_text("alpha")
+    assert registry.get_project_by_name("alpha") is not None
+    deleted = handle._project_slash(session, "delete alpha yes", SlashResult)
+    assert deleted.style == "info"
+    assert deleted.text == "deleted project 'alpha'."
+    assert registry.get_project_by_name("alpha") is None
+
+    # show: the unknown name names `list`; an unknown word names the vocabulary.
+    unknown_name = handle._project_slash(session, "show nope", SlashResult)
+    assert unknown_name.style == "warning"
+    assert unknown_name.text == sc.project_show_refusal_text("nope")
+    unknown_word = handle._project_slash(session, "frobnicate", SlashResult)
+    assert unknown_word.text == sc.project_unknown_word_text("frobnicate")
+
+    # A host with no registry answers with the shared sentence.
     unavailable = handle._project_slash(SimpleNamespace(), "", SlashResult)
-    assert "unavailable" in unavailable.text
+    assert sc.project_unavailable_text() in unavailable.text
+    assert unavailable.style == "warning"

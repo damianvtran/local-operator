@@ -178,15 +178,18 @@ from local_operator.session.runtime.types import (
 from local_operator.slash_commands import (
     NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
-    PROJECT_SUBCOMMANDS,
+    PROJECT_NAME_VERBS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     network_subcommand_rows,
     primary_slash_name,
-    project_listing_text,
+    project_needs_name_text,
+    project_show_refusal_text,
+    project_store_unreadable_text,
+    project_subcommand_rows,
     project_unavailable_text,
-    project_unimplemented_text,
-    project_unknown_word_text,
+    refresh_project_store,
+    run_project_slash_op,
     slash_command_for,
     unknown_flag_refusal,
 )
@@ -361,6 +364,11 @@ from local_operator.tui.widgets.network_panel import NetworkCommandRequested
 from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
+)
+from local_operator.tui.widgets.projects_view import (
+    ProjectsView,
+    ProjectsViewDismissed,
+    ProjectsViewRefreshRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
@@ -2180,6 +2188,11 @@ ORG_CHART_LAYOUT_CLASS = "org-chart"
 #: ``_open_settings_view``/``_close_settings_view``. Named to match its
 #: ``Screen.settings`` tcss block, the sibling of ``Screen.org-chart``.
 SETTINGS_LAYOUT_CLASS = "settings"
+
+#: The screen class the projects mode adds, flipped only in
+#: ``_open_projects_view``/``_close_projects_view``. Named to match its
+#: ``Screen.projects`` tcss block, the sibling of ``Screen.settings``.
+PROJECTS_LAYOUT_CLASS = "projects"
 
 #: Class the SCREEN carries while the `/btw` aside card owns the composer. The
 #: transcript is inert then — Enter goes to the card — so it recedes behind it,
@@ -5553,6 +5566,12 @@ class OperatorApp(App[None]):
         # contract. Held here for the same reason the two above are: the Esc
         # chain and every approval/ask/clear yield close it the same way.
         self._settings_view: Any | None = None
+        # The projects mode (``/project show``), a fourth sibling of the same
+        # MODE contract: it replaces the transcript region, so it is held here
+        # for the same reason — the Esc chain and every approval/ask/clear
+        # yield close it the same way, and ``_sync_boot_layout_class`` counts
+        # it against the boot layout.
+        self._projects_view: Any | None = None
         #: The KEY of a ``/settings`` page write this pane could not loosen — the
         #: gate belongs to an attached runtime. Read and cleared by the page right
         #: after its save (`_take_page_kept_loosening`), because
@@ -5564,6 +5583,7 @@ class OperatorApp(App[None]):
         #: rules.
         self._page_kept_loosening: str | None = None
         self._settings_focus_restore: Any | None = None
+        self._projects_focus_restore: Any | None = None
         #: True while a ``/settings`` hotkey row is LISTENING for a key to
         #: bind. :meth:`check_action` reads it and disarms every app binding,
         #: so the key being pressed reaches the capture widget instead of
@@ -8957,6 +8977,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_projects_view()
         editor = self._editor()
         if self._sidebar_transition_from is outgoing:
             # The outgoing draft was frozen at ``pending`` and is STILL what the
@@ -10385,6 +10406,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_projects_view()
         self._set_sidebar_open(not self._session_sidebar.display)
 
     def _set_sidebar_open(self, opened: bool) -> None:
@@ -15037,6 +15059,9 @@ class OperatorApp(App[None]):
         # it hides the same region, so leaving it mounted would put a config
         # editor over a transcript that has just been replaced underneath it.
         self._close_settings_view()
+        # The projects page hides that same region, so it cannot outlive the
+        # conversation either.
+        self._close_projects_view()
         # The aside goes too, and this is the general form of the interrupt
         # case. It is a question ABOUT a conversation that is being replaced,
         # answered from a context that is about to be torn down, and it is
@@ -18378,6 +18403,75 @@ class OperatorApp(App[None]):
             picker.set_choices(choices)
             editor.set_name_choices(frozenset(c.name.lower() for c in choices))
 
+    def _project_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for the ``/project <…>`` list: the reserved verbs, then names.
+
+        Two-level, decided by the BUFFER like ``/mcp``'s and ``/team chart``'s
+        builders: before the first space the argument IS the verb slot, so the
+        six reserved words are offered (help from ``project_subcommand_rows``,
+        so the word the picker offers and the word the handler accepts cannot
+        drift; the `delete` row carries the alert tint). Once a space is there
+        the argument is the NAME slot — but only for the name-taking verbs, so
+        ``/project new `` and ``/project list `` offer nothing and let the user
+        type. Name rows are ``<verb> <name>`` compounds: the matcher compares
+        against the WHOLE argument, so a row must carry the leading verb to
+        match, and completing one lands the ready-to-run command.
+        """
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(
+            editor.text,
+            editor._argument_commands,
+            editor._caret_offset(),
+            editor._command_names,
+        )
+        if argument is None:
+            return []
+        first, space, _rest = argument.partition(" ")
+        if not space:
+            return [
+                ArgumentChoice(word, help_text, alert=(word == "delete"))
+                for word, help_text in project_subcommand_rows()
+            ]
+        verb = first.casefold()
+        if verb not in PROJECT_NAME_VERBS:
+            return []
+        registry = self._project_registry()
+        if registry is None:
+            return []
+        try:
+            projects = registry.list_projects()
+        except Exception:  # noqa: BLE001 — a picker list never crashes the app
+            return []
+        rows = [
+            ArgumentChoice(
+                f"{verb} {project.name}",
+                project.description or "(no description)",
+                detail=project.status,
+            )
+            for project in projects
+        ]
+        if verb == "delete":
+            # The picker path to the confirmation (`/delete` offers its `yes`
+            # row; this verb's `yes` was otherwise typed blind — agent review
+            # round 1, finding 9). The rows are built ONCE PER OPENING
+            # (`ArgumentQueryOpened` fires on the transition), so the confirm
+            # variant is offered for every project up front and the typed name
+            # FILTERS it: after `delete alph`, the scorer keeps
+            # `delete alpha yes` and drops `delete beta yes`. Appended after
+            # the name rows so the empty-query default completion is still a
+            # plain name, never a destructive command.
+            rows.extend(
+                ArgumentChoice(
+                    f"delete {project.name} yes",
+                    "confirm deletion — removes the row and every session link",
+                    detail=project.status,
+                    alert=True,
+                )
+                for project in projects
+            )
+        return rows
+
     def _team_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/team <…>`` list: team NAMES first, then `chart`.
 
@@ -18583,48 +18677,158 @@ class OperatorApp(App[None]):
         self._submit_prompt(row, images, attachments, sent=sent, typed=request)
 
     def _cmd_project(self, arg: str, notice: NoticeFn) -> None:
-        """``/project`` — the read-only listing; the view and the verbs are slice 3.
+        """``/project`` — the operator's own verbs over THIS machine's store.
 
-        SLICE 1 STAND-IN, named as one: the full-page ``ProjectsView`` — the
-        ``new``/``delete``/``link``/``unlink`` actions, the delete confirm and
-        the argument rows — ships in slice 3 (``feat/projects-tui-view``), and
-        this branch exists because the registry refuses a registered command
-        with no TUI path (``test_every_registered_name_and_alias_actually_runs``).
-        It therefore answers the READ-ONLY LISTING from the store, and for every
-        other reserved verb it names the surfaces that act today: no word is
-        offered-but-broken, and nothing here mutates anything.
+        Slice 3's real handler. Bare / ``list`` prints the listing receipt;
+        ``show <name>`` opens the full-page :class:`ProjectsView` on that
+        project; ``new``/``delete``/``link``/``unlink`` mutate the store, with
+        ``delete`` keeping ``/delete``'s typed-``yes`` two-step shape
+        (``/project delete <name>`` rehearses, ``/project delete <name> yes``
+        removes). Every other form — including the unknown-word refusal — is
+        answered by the ONE shared runner
+        (:func:`slash_commands.run_project_slash_op`) the routed runtime mirror
+        calls too, so the two front ends cannot print two different receipts.
 
-        The words it recognises are the same reserved vocabulary the desktop
-        route validates and the picker will offer (``PROJECT_SUBCOMMANDS``), so
-        this refusal cannot contradict completions a later build adds.
+        FRONTEND-LOCAL by design (``project`` is in ``_FRONTEND_LOCAL_SLASHES``):
+        the store this reads is ``config_dir()/projects`` on the machine the
+        user is sitting at — the argument ``/settings`` makes about config.yml —
+        so the command never routes to a session owner, and a viewer's page
+        describes the sessions THIS machine can see (the v2 single-machine
+        limitation the design states).
         """
         session = self._session
         if session is None:
             self._system_notice(*self._no_session_notice())
             return
-        registry = getattr(session, "project_registry", None)
-        if registry is None or not hasattr(registry, "list_projects"):
+        registry = self._project_registry()
+        if registry is None:
             self._system_notice(project_unavailable_text(), "warning")
             return
-        word = arg.split(maxsplit=1)[0].casefold() if arg.split() else ""
-        if word in {"", "list"}:
+        parts = arg.split(maxsplit=1)
+        word = parts[0].casefold() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if word == "show":
+            name = rest.strip()
+            if not name:
+                notice(project_needs_name_text("show"), "warning")
+                return
+            if getattr(registry, "load_error", None) is not None:
+                # The page reads the same store the receipt does: an unreadable
+                # one must refuse in the same words rather than resolve every
+                # name to "no project named" (QA round 1, Q4) — and the
+                # refusal must not be STICKY: this check runs before the read
+                # that would refresh the snapshot, so re-read once first
+                # (QA round 2, Q5).
+                refresh_project_store(registry)
+            if getattr(registry, "load_error", None) is not None:
+                notice(project_store_unreadable_text(), "warning")
+                return
             try:
-                projects = list(registry.list_projects())
+                project = registry.get_project_by_name(name)
             except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
-                self._system_notice(f"could not list projects: {exc}", "warning")
+                from local_operator.projects import store_error_text
+
+                notice(f"could not read the projects store: {store_error_text(exc)}", "warning")
                 return
-            if not projects:
-                notice(
-                    "no projects yet. Ask the agent to create one with the project "
-                    "tool; it links this session automatically."
+            if project is None:
+                notice(project_show_refusal_text(name), "warning")
+                return
+            self._open_projects_view(highlight=project.id)
+            return
+        from local_operator.paths import config_dir
+
+        try:
+            text, style = run_project_slash_op(
+                word,
+                rest,
+                registry=registry,
+                config_dir=config_dir(),
+                session_id=str(getattr(session, "session_id", "") or "") or None,
+            )
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            notice(f"could not run /project {word}: {exc}", "warning")
+            return
+        notice(text, "warning" if style == "warning" else "info")
+
+    def _project_registry(self) -> Any | None:
+        """This machine's project registry, or ``None`` when there is none.
+
+        A READER's resolution, through the session facade: for an attached
+        session ``AttachedSession.project_registry`` builds the registry from
+        ITS OWN config dir, which is exactly the local-first rule this page
+        follows. The shape check (``list_projects``) mirrors the slice-1
+        handlers' guard, so a reduced facade degrades to the same sentence
+        rather than an AttributeError.
+        """
+        session = self._session
+        registry = getattr(session, "project_registry", None) if session is not None else None
+        if registry is None or not hasattr(registry, "list_projects"):
+            return None
+        return registry
+
+    def _projects_payload(self) -> list[Any]:
+        """Compose every project's view ONCE — the page's whole data input.
+
+        One runtime scan serves every project (``records=``), so a listing of N
+        projects does not walk the runtime registry N times, and the TUI-only
+        live overlay is merged for THIS process's own session. Never raises: a
+        store that cannot be read degrades to an empty page rather than a crash
+        on a keystroke path, and one unreadable row does not hide the rest.
+        """
+        registry = self._project_registry()
+        if registry is None:
+            return []
+        from local_operator.paths import config_dir
+        from local_operator.projects import build_project_view, scan_runtime_states
+
+        root = config_dir()
+        try:
+            projects = list(registry.list_projects())
+            states = scan_runtime_states(root)
+        except Exception:  # noqa: BLE001 — the page degrades, it does not crash
+            logger.debug("projects: composition failed", exc_info=True)
+            return []
+        overlay = self._projects_live_overlay()
+        views: list[Any] = []
+        for project in projects:
+            try:
+                views.append(
+                    build_project_view(project, config_dir=root, records=states, live=overlay)
                 )
-                return
-            notice(project_listing_text(projects))
-            return
-        if word in PROJECT_SUBCOMMANDS:
-            self._system_notice(project_unimplemented_text(word), "warning")
-            return
-        notice(project_unknown_word_text(word), "warning")
+            except Exception:  # noqa: BLE001 — one row must not hide the rest
+                logger.debug("projects: view composition failed", exc_info=True)
+        return views
+
+    def _projects_live_overlay(self) -> dict[str, dict[str, Any]] | None:
+        """Fresher in-memory TODOS for this process's own session (§3 source 3).
+
+        The overlay is narrow ON PURPOSE: it carries the one field whose disk
+        form is a persisted snapshot (the transcript's newest ``todo_snapshot``
+        row), while subagent counts are written by this same process's roster
+        sidecar on every transition and are therefore not stale in that way.
+
+        ``session.frontend_state`` clones the whole state (~30 ms), which is why
+        this runs on OPEN and ``r`` (the page's two composition events) and
+        never on a keystroke or a scroll.
+        """
+        session = self._session
+        if session is None:
+            return None
+        session_id = str(getattr(session, "session_id", "") or "")
+        if not session_id:
+            return None
+        state = getattr(session, "frontend_state", None)
+        todos = getattr(state, "todos", None) if state is not None else None
+        if not todos:
+            return None
+        open_count = 0
+        total = 0
+        for phase in todos:
+            for item in getattr(phase, "items", None) or ():
+                total += 1
+                if getattr(item, "status", "") == "pending":
+                    open_count += 1
+        return {session_id: {"todos": {"open": open_count, "total": total}}}
 
     def _cmd_team(
         self,
@@ -22702,13 +22906,18 @@ class OperatorApp(App[None]):
                 return True
         except Exception:  # noqa: BLE001
             return True
-        # The three full-page modes and the login prompt: each hides the
+        # The four full-page modes and the login prompt: each hides the
         # transcript or is the only thing on the frame the user can answer.
         try:
             if (
                 self._subagent_view is not None
                 or self._org_chart_view is not None
                 or self._settings_view is not None
+                # The projects page is listed EXPLICITLY even though its
+                # read-only composer already claims the keyboard: the claim
+                # must not depend on that side effect, or a future focusable
+                # mode rebuilds the hole (agent review round 1, finding 11).
+                or self._projects_view is not None
                 or self._key_prompt is not None
             ):
                 return True
@@ -23115,6 +23324,7 @@ class OperatorApp(App[None]):
             self._close_subagent_view()
             self._close_org_chart_view()
             self._close_settings_view()
+            self._close_projects_view()
             self._close_aside()
             # Same two lines the draft and barren-click rungs run for the same
             # reason: the press was absorbed, so a live "ctrl+c again to exit"
@@ -23277,6 +23487,13 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        # The projects page, beside its three siblings: it hides the transcript
+        # exactly as they do, so a ctrl+C that closed every other mode but this
+        # one left the page up — and the "ctrl+c again to exit" warning appended
+        # behind it, where the hidden transcript cannot show it — while a second
+        # press quit the app: a silent dead end (QA round 1, Q1 / review
+        # finding 1).
+        self._close_projects_view()
         # The aside goes with it, for the reason the hint below exists at all.
         # The card floats over the transcript at one elevation step, so a
         # notice appended behind it is drawn where it cannot be read — and this
@@ -23452,6 +23669,10 @@ class OperatorApp(App[None]):
         # expansion), so by the time Esc reaches here the page has nothing left
         # to close and leaving is the right answer.
         if self._close_settings_view():
+            return
+        # The projects page sits at the same precedence, and owns no ladder of
+        # its own: Esc on it means exactly one thing — leave the page.
+        if self._close_projects_view():
             return
         if not self._allow_source_command():
             return
@@ -23963,6 +24184,8 @@ class OperatorApp(App[None]):
         # And the settings page, which hides that same region. An approval is
         # the one thing a user must not be able to miss.
         self._close_settings_view()
+        # The projects page too — the same region, the same reason.
+        self._close_projects_view()
         # The aside yields for the identical reason, one layer up: the card
         # floats OVER the transcript, so the question would be drawn behind it
         # while still taking focus off the composer the card is pointed at —
@@ -24125,6 +24348,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_projects_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
         card.source_binding = (source.token, self._sidebar_gate_identity(source), view_generation)
@@ -24755,6 +24979,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_projects_view()
         # Same rule for the aside card, and the same sentence: Ctrl+L acts on
         # the CONVERSATION, and the aside is a floating question about it that
         # is also holding the composer. Wiping the ledger under an open card
@@ -25362,10 +25587,10 @@ class OperatorApp(App[None]):
         stale while the page was open — a ``/clear`` or a session swap behind
         the page moves ``_welcome_visible`` under it.
 
-        EVERY full-page mode counts, not just ``/settings``. All three replace
+        EVERY full-page mode counts, not just ``/settings``. All four replace
         the transcript region through the same three lines (hide the
         transcript, mount before ``#input-dock``, add the mode's class), so all
-        three collide with the boot layout the same way — measured from the
+        four collide with the boot layout the same way — measured from the
         splash before this term was generalised: the subagent view took 21 of
         28 rows at 100x30 and the org chart 26 of 38 at 140x40, both with the
         card still clamped. Keying on ``_settings_view`` alone made the siblings
@@ -25386,6 +25611,7 @@ class OperatorApp(App[None]):
             and self._settings_view is None
             and self._subagent_view is None
             and self._org_chart_view is None
+            and self._projects_view is None
         )
         self.screen.set_class(boot, BOOT_LAYOUT_CLASS)
 
@@ -31402,6 +31628,104 @@ class OperatorApp(App[None]):
         message.stop()
         self._close_settings_view()
 
+    # -- the projects page (``/project show``) ------------------------------
+    def _open_projects_view(self, *, highlight: str | None = None) -> None:
+        """Enter the full-page projects view, optionally on one project.
+
+        A MODE of this screen, cloned from :meth:`_open_settings_view`: the
+        transcript region is replaced by the page while the dock stays put and
+        greyed (``Screen.projects``). Opening it again RETARGETS the cursor
+        rather than remounting, so a second ``show`` leaves the reader where
+        they were.
+
+        The composed views are gathered HERE (registry + one runtime scan +
+        per-session rollups) and handed to the widget; the widget re-renders on
+        view switch, zoom and cursor movement without ever re-reading, so a
+        repaint costs no registry or filesystem I/O.
+        """
+        if self._projects_view is not None:
+            if highlight:
+                self._projects_view.focus_project(highlight)
+            return
+        payload = self._projects_payload()
+        # Captured before anything is blurred: this is where Esc puts the user
+        # back, almost always the composer.
+        self._projects_focus_restore = self.focused
+        view = ProjectsView()
+        self._projects_view = view
+        self._transcript_view().display = False
+        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.add_class(PROJECTS_LAYOUT_CLASS)
+        # See ``_sync_boot_layout_class``: this mode replaces the transcript
+        # region, so the boot layout's centred card and reserved rows have to
+        # come off or the page renders into the leftovers above them.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(True)
+        # Deliberate ordering: the data is seeded before the deferred
+        # ``on_mount`` repaint lands, so the FIRST painted frame is the page
+        # (the same seed-before-mount rule ``_open_org_chart_view`` records).
+        import time as _time
+
+        view.load(views=payload, highlight=highlight, updated_at=_time.time())
+
+    def _close_projects_view(self) -> bool:
+        """Leave the projects mode and put the conversation back. True if open.
+
+        Mirror of :meth:`_close_settings_view`: everything the mode changed is
+        restored here and nowhere else. The transcript was only hidden, so it
+        comes back with its blocks, scroll position, and any half-typed prompt
+        exactly as they were left.
+        """
+        view = self._projects_view
+        if view is None:
+            return False
+        self._projects_view = None
+        view.remove()
+        self.screen.remove_class(PROJECTS_LAYOUT_CLASS)
+        self._transcript_view().display = True
+        # Re-derived, never restored from a copy: the splash may have been
+        # retired or brought back while the page was up, and another mode may
+        # still be mounted underneath this one.
+        self._sync_boot_layout_class()
+        self._sync_boot_layout()
+        self._set_composer_read_only(False)
+        restore = self._projects_focus_restore
+        self._projects_focus_restore = None
+        try:
+            # Stale-target guard, for the reason `_close_settings_view` records:
+            # `.focus()` on a detached widget is a silent no-op.
+            target = (
+                restore
+                if restore is not None and restore.is_attached and restore.display
+                else self._editor()
+            )
+            target.focus()
+        except Exception:
+            pass  # the widget that had focus is gone; the mode still closed
+        return True
+
+    def on_projects_view_dismissed(self, message: ProjectsViewDismissed) -> None:
+        """The page's ``esc`` hint was clicked — same exit as the key itself."""
+        message.stop()
+        self._close_projects_view()
+
+    def on_projects_view_refresh_requested(self, message: ProjectsViewRefreshRequested) -> None:
+        """``r`` on the page — recompose HERE and hand the widget fresh data.
+
+        The widget does no I/O by construction (see its module docstring), so
+        the refresh is the app's: the same composition the open ran, followed
+        by a ``load`` that KEEPS the cursor — a refresh must not move the
+        reader off the row they were reading.
+        """
+        message.stop()
+        view = self._projects_view
+        if view is None:
+            return
+        import time as _time
+
+        view.load(views=self._projects_payload(), updated_at=_time.time())
+
     def on_settings_capture(self, message: SettingsCapture) -> None:
         """Arm or disarm the binding gate a hotkey row needs to listen.
 
@@ -33270,16 +33594,22 @@ class OperatorApp(App[None]):
         # `test_every_authoritative_slash_routes_to_owner_with_supported_images`,
         # which is why they keep their own pullbacks below.
         #
-        # The three here are different: the store they write is
+        # The four here are different: the store they write is
         # `config_dir()/archived-sessions.json`, the directory they remove is in
-        # this `config_dir()/sessions/`, and the sidebar and picker that render
-        # the result are this terminal's. Routed to an owner — which is what
-        # happened for `/delete` in the state a user is actually in, and what the
-        # wrong-machine split would do to `/archive` on a cross-host attach —
-        # they would act on another machine's store, and `/delete` would be
-        # refused by the owner's own guard because the conversation a viewer is
-        # standing in always holds a live claim (review round 1, MAJOR-1).
-        _LOCAL_WORK_SLASHES = frozenset({"/archive", "/unarchive", "/delete"})
+        # this `config_dir()/sessions/`, and the projects store `/project` reads
+        # and mutates is `config_dir()/projects` — all THIS machine's, with the
+        # sidebar, picker and full-page view that render the result also this
+        # terminal's. Routed to an owner — which is what happened for `/delete`
+        # in the state a user is actually in, and what the wrong-machine split
+        # would do to `/archive` on a cross-host attach — they would act on
+        # another machine's store, and `/delete` would be refused by the owner's
+        # own guard because the conversation a viewer is standing in always
+        # holds a live claim (review round 1, MAJOR-1). `/project` joins on the
+        # projects page's own argument: the page reads THIS machine's store and
+        # sessions, and an OLDER owner still advertises the command
+        # ``authoritative_session`` — this pullback is what keeps that stale
+        # advertisement from routing the command to another machine.
+        _LOCAL_WORK_SLASHES = frozenset({"/archive", "/unarchive", "/delete", "/project"})
 
         if command == "/model" and arg.strip().casefold() == "saved":
             # Saved belongs to the invoking terminal, not the owner's config.
@@ -33633,10 +33963,8 @@ class OperatorApp(App[None]):
         elif command == "/agent":
             self._cmd_agent(arg, notice, attachments)
         elif command == "/project":
-            # SLICE 1 STAND-IN: the listing answers from the store; every other
-            # reserved verb names the surface that acts today (slice 3 ships the
-            # full-page view). See `_cmd_project` — the branch exists because a
-            # registered command must have a TUI path.
+            # Every reserved verb runs (slice 3); `_cmd_project` owns the
+            # branch so a registered command always has a TUI path.
             self._cmd_project(arg, notice)
         else:
             # ``parts[0]``, not the lowered ``command``: with the echo gone this
@@ -40714,6 +41042,14 @@ class OperatorApp(App[None]):
             )
             picker.set_notice("")
             return
+        if message.command == "project":
+            # Two-level like `/mcp`, filled by ONE builder that reads the buffer
+            # (see `_project_argument_choices`): the reserved verbs first, then
+            # — once a verb's space is typed — that verb's project names as
+            # compound rows, so completing one lands the ready-to-run form.
+            picker.set_choices(self._project_argument_choices(editor))
+            picker.set_notice("")
+            return
         if message.command == "new":
             # THERE IS NO KEYWORD-ONLY ROW WHILE A PEER ROW EXISTS. There used to
             # be a leading `remote` row ("Create it on another device") which was
@@ -41069,6 +41405,13 @@ class OperatorApp(App[None]):
             # catch-up used when a team/agent registry appears after the list
             # opened. Reuse the opening fill so rows and snapshots stay paired.
             self._fill_name_argument_list(editor, message.command)
+        elif message.command == "project":
+            # `/project show `/`delete `/`link `/`unlink ` crossing into (or
+            # back out of) the name slot. Same fill as the opening, so the rows
+            # and the buffer can never disagree about which list is up.
+            picker = editor.picker
+            picker.set_notice("")
+            picker.set_choices(self._project_argument_choices(editor))
 
     def _credential_choices(
         self, *, armed: bool = False, cited: bool = False
@@ -42794,6 +43137,7 @@ class OperatorApp(App[None]):
         self._close_subagent_view()
         self._close_org_chart_view()
         self._close_settings_view()
+        self._close_projects_view()
         self._close_aside()
         instructions = None
         if field_label:
