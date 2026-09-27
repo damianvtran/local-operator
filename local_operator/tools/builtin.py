@@ -19407,12 +19407,18 @@ def _task_tool_description(model_choice: bool) -> str:
                 "inherits this session's model and reasoning effort; do not pass "
                 "'effort'."
             )
+    # ``team:<name>`` is documented ONCE, on TaskItem.agent's description
+    # below: both ride this same tool schema on every request (and the
+    # single-task form's ``agent`` field already points at ``tasks[].agent``),
+    # so a second mention here is duplication paid per turn — which is what
+    # pushed the merge-ref over the context-budget ratchet
+    # (scripts/bench_context_budget.py) and why this wording is compressed
+    # rather than merely complete.
     return (
-        "Launch background subagents — one, or a whole concurrent batch "
-        "('tasks' + shared 'context') in a single call. 'agent' names a "
-        "role carrying vetted guidance (reviewer, coder, architect, "
-        "manager, designer, scout — see the `agent` tool), and "
-        "'team:<name>' starts that team's manager. "
+        "Launch background subagents — one, or a concurrent batch "
+        "('tasks' + shared 'context') in one call. 'agent' names a "
+        "vetted-guidance role (reviewer, coder, architect, manager, "
+        "designer, scout — see the `agent` tool). "
         f"{effort}"
     )
 
@@ -19449,11 +19455,10 @@ class TaskItem(BaseModel):
     agent: str = Field(
         default="task",
         description=(
-            "Role for this subagent: 'task' (full child, no role), 'scout' "
-            "(read-only research), or any role from the `agent` tool — e.g. "
-            "'reviewer', 'coder', 'architect', 'manager', 'designer'. A role "
-            "carries vetted guidance and may restrict tools; 'team:<name>' "
-            "starts that team's manager."
+            "Subagent role: 'task' (full child), 'scout' (read-only research), "
+            "any role from the `agent` tool ('reviewer', 'coder', 'architect', "
+            "'manager', 'designer'), or 'team:<name>' (starts that team's "
+            "manager). Roles carry vetted guidance and may restrict tools."
         ),
     )
     # A free string, not a Literal: the valid set is whatever the operator has
