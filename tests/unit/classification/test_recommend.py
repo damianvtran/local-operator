@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.classification.context import Candidate
+from local_operator.classification.context import KIND_DROP_ORDER, Candidate
 from local_operator.classification.recommend import (
     DEFAULT_MAX_RECOMMENDATIONS,
     NONE_OPTION,
@@ -75,6 +75,10 @@ def test_a_project_gets_a_question_and_the_kind_rides_last() -> None:
     first, so the reading order and the budget order agree.
     """
     assert QUESTION_KIND_ORDER[-1] == "project"
+    # …and the claim is a mirror image, pinned (sir-knight round 1, finding 3,
+    # taken as the reviewer's one-line nice-to-have): a kind dropped FIRST by
+    # the state's ladder is asked LAST here.
+    assert QUESTION_KIND_ORDER == tuple(reversed(KIND_DROP_ORDER))
     plan = build_questions(
         three_kinds()
         + [
