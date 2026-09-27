@@ -1284,7 +1284,10 @@ lop agents pull --id "<agent_id>" --org <tenant_id>
 
 Without `--org` every command behaves exactly as before (the public registry
 path), and `lop teams push` without it lists your organizations and asks for
-the flag rather than guessing one.
+the flag rather than guessing one. Organization calls carry your signed-in
+account's token, so they address the Radient cloud API only -- to point them
+at a local or QA hub deliberately, opt in per shell with
+`RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1`.
 
 ## 🔒 Safety Model
 

@@ -2423,10 +2423,20 @@ class AgentRegistry:
 
         Raises:
             RuntimeError: If the download or import fails.
+            ValueError: If ``agent_id`` is not a marketplace id shape. The id
+                addresses BOTH a URL path segment and (below) the temp filename
+                the archive lands in; validating at ENTRY means a crafted value
+                (`../x`, an absolute path) writes nothing and reaches no
+                request (security round 1, S-2; the same shape the provenance
+                helpers enforce with ``_HUB_ID_RE``).
         """
+        if not _HUB_ID_RE.match(agent_id):
+            raise ValueError(f"Refusing to download {agent_id!r}: not a valid marketplace agent id")
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_dir_path = Path(temp_dir)
-            zip_path = temp_dir_path / f"{agent_id}.zip"
+            # A fixed filename: the id is validated above, and nothing about the
+            # local path should depend on caller-supplied text regardless.
+            zip_path = temp_dir_path / "agent.zip"
             radient_client.download_agent_from_marketplace(
                 agent_id, zip_path, with_credential=with_credential
             )

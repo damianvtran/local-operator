@@ -399,12 +399,18 @@ def _local_name_for_published(name: str) -> tuple[str, bool]:
     refuses -- so a pull cannot store every published spelling verbatim. Runs
     of invalid characters become one ``-`` (``Feature Release Crew`` reads as
     ``Feature-Release-Crew``), the leading run is dropped so the result can
-    start, and the length is capped. Deterministic, so the same document always
+    start, the length is capped, and a trailing separator the mapping left
+    behind is stripped so the result also satisfies the hub's ``-``/``.``
+    endpoint rule -- a name this mapping mints must survive a later re-push
+    (review round 1, R1-5). Deterministic, so the same document always
     reconstructs the same name and the collision suffix stays stable.
     """
     candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip())
     candidate = re.sub(r"^[^A-Za-z0-9]+", "", candidate)
     candidate = candidate[:_TEAM_NAME_MAX_CHARS]
+    # A published name never ends in ``-``/``.`` (the hub refuses it), so this
+    # strip can only remove what the mapping itself introduced.
+    candidate = candidate.rstrip("-.")
     if not candidate:
         candidate = "team"
     return candidate, candidate != (name or "").strip()
@@ -1447,22 +1453,41 @@ class TeamRegistry:
                 )
             members.append(TeamMember(role=role, count=count, kind=kind))
 
+        # Snapshot-only probe for the common case (`_find_cached_team_by_name`):
+        # mutation paths must not refresh or hydrate through the public getter
+        # (that getter's own documented rule), and a stale snapshot is safe
+        # here because `create_team` re-checks uniqueness under the writer lock
+        # -- the retry below is what converges a race (review round 1, R1-3).
         candidate = local_name
         suffix = 2
-        while self.get_team_by_name(candidate) is not None:
+        while self._find_cached_team_by_name(candidate) is not None:
             candidate = _suffixed_team_name(local_name, suffix)
             suffix += 1
 
-        team = self.create_team(
-            TeamEditFields(
-                name=candidate,
-                description=str(document.get("description") or ""),
-                manager=str(document.get("manager") or "").strip() or "manager",
-                members=members,
-                instructions=str(document.get("instructions") or ""),
-                project=str(document.get("project") or ""),
-            )
-        )
+        while True:
+            try:
+                team = self.create_team(
+                    TeamEditFields(
+                        name=candidate,
+                        description=str(document.get("description") or ""),
+                        manager=str(document.get("manager") or "").strip() or "manager",
+                        members=members,
+                        instructions=str(document.get("instructions") or ""),
+                        project=str(document.get("project") or ""),
+                    )
+                )
+                break
+            except ValueError:
+                # `create_team` is the authority: its uniqueness check runs
+                # under the lock against a FRESH snapshot, so a name another
+                # writer just took is visible (in the refreshed cache) exactly
+                # when that is what it refused -- take the next suffix. Any
+                # other ValueError (an oversized brief, say) is re-raised,
+                # because a retry cannot fix it.
+                if self._find_cached_team_by_name(candidate) is None:
+                    raise
+                candidate = _suffixed_team_name(local_name, suffix)
+                suffix += 1
         return HubTeamImport(
             team=team,
             # One field for both causes: the caller reports the rename, and

@@ -15,6 +15,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from local_operator.agent_profiles import (
@@ -233,14 +234,29 @@ def test_a_planted_hub_marker_cannot_make_sync_overwrite_the_row(tmp_path) -> No
     assert registry.get_agent_system_prompt(row.id) == "ORIGINAL TEXT"
 
 
-def test_a_pull_with_a_nonconforming_id_records_no_marker(tmp_path) -> None:
-    """Nothing truthful can be recorded for an id the hub could not have minted."""
+def test_a_pull_with_a_nonconforming_id_is_refused_before_any_write(tmp_path) -> None:
+    """The id addresses a URL path AND a temp filename: refuse at entry (S-2).
+
+    A non-conforming id used to reach the download and import before the
+    provenance stamp dropped it; it is now refused up front -- nothing
+    downloaded, nothing imported -- because a crafted value (`../x`, an
+    absolute path) could otherwise steer where the archive is written. The
+    stamp keeps its own guard as the last gate for any future caller.
+    """
 
     registry = AgentRegistry(tmp_path)
-    row = _pull(registry, agent_id="bad id!", name="hunter", description="d", text="PROMPT v1")
 
-    assert hub_origin(row) is None
-    assert not any(tag.startswith(HUB_ORIGIN_PREFIX) for tag in row.tags)
+    with pytest.raises(ValueError):
+        _pull(registry, agent_id="bad id!", name="hunter", description="d", text="PROMPT v1")
+
+    assert registry.list_agents() == []
+
+    from local_operator.agents import AgentEditFields
+
+    probe = registry.create_agent(AgentEditFields.model_validate({"name": "probe"}))
+    stamped = registry._stamp_hub_provenance(probe, "bad id!")
+    assert hub_origin(stamped) is None
+    assert not any(tag.startswith(HUB_ORIGIN_PREFIX) for tag in stamped.tags)
 
 
 def test_hub_sync_walks_identical_changed_and_edited_rows(tmp_path) -> None:

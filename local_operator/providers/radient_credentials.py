@@ -77,6 +77,39 @@ def canonical_radient_destination(base_url: str) -> bool:
         return False
 
 
+#: Explicit opt-in for a NON-canonical organization hub (the harness's own
+#: local/QA runs, a deliberately hosted staging hub): see
+#: :func:`org_oauth_destination_allowed`. OFF by default; nothing infers it.
+ORG_ALLOW_NONCANONICAL_ENV = "RADIENT_ORG_ALLOW_NONCANONICAL_BASE"
+
+#: The accepted spellings of a truthy environment switch.
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def org_oauth_destination_allowed(base_url: str) -> bool:
+    """Whether the signed-in PERSON's org bearer may travel to ``base_url``.
+
+    Organization calls attach the stored OAuth access token (design §8.3), and
+    that token is a central credential: the boundary the public resolver keeps
+    ("an explicit legacy gateway must not receive a centrally signed-in
+    account's bearer") therefore applies here too, enforced by
+    :func:`resolve_radient_oauth_access` BEFORE any credential is attached.
+    Org routes exist only on the hub, so a non-canonical destination has no
+    fallback credential to take -- it is refused, and the caller's remedy names
+    the cause.
+
+    ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` (``1``/``true``/``yes``/``on``) is
+    the explicit opt-in for local runs and a deliberately hosted non-canonical
+    hub: the QA rig points the CLI at 127.0.0.1, and setting the variable is the
+    operator accepting that the account's bearer travels there. Unset means
+    off, and nothing sets it implicitly.
+    """
+    if canonical_radient_destination(base_url):
+        return True
+    value = os.environ.get(ORG_ALLOW_NONCANONICAL_ENV)
+    return bool(value) and value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
 async def resolve_radient_credential(
     config_dir: Path | None, base_url: str, *, store: AuthStore | None = None
 ) -> SecretStr:
@@ -114,7 +147,7 @@ def resolve_radient_credential_sync(config_dir: Path | None, base_url: str) -> S
 
 
 async def resolve_radient_oauth_access(
-    config_dir: Path | None, *, store: AuthStore | None = None
+    config_dir: Path | None, base_url: str, *, store: AuthStore | None = None
 ) -> OAuthAccess | None:
     """The signed-in Radient account behind an ORGANIZATION (person-scoped) call.
 
@@ -126,13 +159,15 @@ async def resolve_radient_oauth_access(
     ``None``, and the caller answers with the "run ``lop login radient``" remedy
     rather than the public hub paths' "RADIENT_API_KEY is required" one.
 
-    There is deliberately no destination branch here, unlike
-    :func:`resolve_radient_credential`: organization routes exist only on the
-    hub the operator configured (``<base_url>/me/memberships`` and friends), so
-    there is no legacy-gateway fallback TO take -- a non-canonical base URL is
-    answered by whatever that host returns, under the same credential selection
-    rule (OAuth row, never the API key). The caller owns the destination; this
-    function owns WHICH stored credential may act as a person.
+    The destination guard applies here exactly as it does to
+    :func:`resolve_radient_credential`: an org call carries a CENTRAL credential,
+    so only a destination allowed to receive it
+    (:func:`org_oauth_destination_allowed` -- canonical by default, or the
+    explicit ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` opt-in) resolves a token at
+    all. A refused destination comes back as ``None`` exactly like a missing
+    login, which is what keeps any credential off a request to a host that must
+    not receive one; the caller tells the two causes apart through the predicate
+    above and names the right remedy.
 
     ``read_only`` resolves without blocking a credential or moving session
     stickiness, matching the other hub helpers; a required refresh still
@@ -140,6 +175,8 @@ async def resolve_radient_oauth_access(
     ``None`` (the cascade rotates away from unusable rows), which is exactly the
     "expired login" case the caller renders as the re-login remedy.
     """
+    if not org_oauth_destination_allowed(base_url):
+        return None
     owns_store = store is None
     store = store or AuthStore(
         (config_dir / "auth.db") if config_dir is not None else None, config_dir=config_dir
@@ -156,10 +193,10 @@ async def resolve_radient_oauth_access(
     return access
 
 
-def resolve_radient_oauth_access_sync(config_dir: Path | None) -> OAuthAccess | None:
+def resolve_radient_oauth_access_sync(config_dir: Path | None, base_url: str) -> OAuthAccess | None:
     """CLI-only bridge; async hosts must await the shared resolver directly."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(resolve_radient_oauth_access(config_dir))
+        return asyncio.run(resolve_radient_oauth_access(config_dir, base_url))
     raise RuntimeError("Await resolve_radient_oauth_access inside an async host")

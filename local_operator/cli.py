@@ -7732,28 +7732,41 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
     Organization operations authenticate with the stored Radient OAuth access
     token -- never the tenant API key, because an API key proves an application
     tenant, not a person's membership (design §8.3/§2.2). The resolver answers
-    only for an OAuth row, so a pasted ``radient-key`` login or no login at all
-    reaches the one sentence that can fix it.
+    only for an OAuth row AND only for a destination allowed to receive the
+    person's bearer: a non-canonical configured hub is refused before any
+    credential is attached (``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` is the
+    explicit local/QA opt-in), and a refused destination gets its own sentence
+    because its fix is a different one from a missing login's (review round 1,
+    R1-2/S-1).
     """
     from pydantic import SecretStr  # lazy: pydantic stays off the startup path
 
     from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
     from local_operator.providers.radient_credentials import (  # lazy: auth stack
+        ORG_ALLOW_NONCANONICAL_ENV,
+        org_oauth_destination_allowed,
         resolve_radient_oauth_access_sync,
     )
 
     config_manager = ConfigManager(base_dir)
-    access = resolve_radient_oauth_access_sync(config_manager.config_dir)
+    base_url = _radient_hub_base_url(config_manager)
+    access = resolve_radient_oauth_access_sync(config_manager.config_dir, base_url)
     if access is None:
-        print(
-            "\n\033[1;31mError: organization operations need a signed-in Radient "
-            "account. Run `lop login radient`.\033[0m"
-        )
+        if not org_oauth_destination_allowed(base_url):
+            print(
+                "\n\033[1;31mError: organization operations are refused because the "
+                f"configured Radient hub is not the Radient cloud API ({base_url}), and "
+                "the signed-in account's bearer is not sent to other hosts. Point "
+                "`radient_base_url` at https://api.radienthq.com/v1, or set "
+                f"{ORG_ALLOW_NONCANONICAL_ENV}=1 if this hub is local or staging.\033[0m"
+            )
+        else:
+            print(
+                "\n\033[1;31mError: organization operations need a signed-in Radient "
+                "account. Run `lop login radient`.\033[0m"
+            )
         return None
-    return RadientClient(
-        api_key=SecretStr(access.access_token),
-        base_url=_radient_hub_base_url(config_manager),
-    )
+    return RadientClient(api_key=SecretStr(access.access_token), base_url=base_url)
 
 
 def _org_target_or_picker(
@@ -7770,7 +7783,8 @@ def _org_target_or_picker(
     client = _resolve_org_client(base_dir)
     if client is None:
         return None
-    tenant = getattr(args, "org", None)
+    declared = getattr(args, "org", None)
+    tenant = (declared or "").strip()
     if tenant:
         return client, tenant
     try:
@@ -7784,10 +7798,18 @@ def _org_target_or_picker(
             "account is not a member of one. Ask an organization owner to invite you.\033[0m"
         )
         return None
-    print(
-        "\n\033[1;33mThis command runs inside an organization -- pass --org <tenant_id>. "
-        "Your organizations:\033[0m"
-    )
+    if declared is not None:
+        # The flag was PASSED but empty: say so rather than letting a blank
+        # value read like an omitted one (review round 1, R1-1's parenthetical).
+        print(
+            "\n\033[1;31mError: --org needs an organization tenant id (the value was "
+            "empty). Your organizations:\033[0m"
+        )
+    else:
+        print(
+            "\n\033[1;33mThis command runs inside an organization -- pass --org <tenant_id>. "
+            "Your organizations:\033[0m"
+        )
     for membership in memberships:
         if not isinstance(membership, dict):
             continue
@@ -7818,6 +7840,17 @@ def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_
         build_instruction_set_document,
     )
 
+    tenant = str(getattr(args, "org", "") or "").strip()
+    if not tenant:
+        # A passed-but-empty `--org` is NOT an absent one: falling through to the
+        # public path would publish to a different namespace than the user asked
+        # for (review round 1, R1-1).
+        print(
+            "\n\033[1;31mError: --org needs an organization tenant id (the value was "
+            "empty). `lop teams push` with no --org lists the organizations you "
+            "belong to.\033[0m"
+        )
+        return 1
     client = _resolve_org_client(base_dir)
     if client is None:
         return 1
@@ -7832,16 +7865,14 @@ def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_
         print(f"\n\033[1;31mError: cannot publish this agent: {exc}\033[0m")
         return 1
     try:
-        result = client.publish_agent_instruction_set(
-            document, visibility="org", tenant_id=args.org
-        )
+        result = client.publish_agent_instruction_set(document, visibility="org", tenant_id=tenant)
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
         print(f"\n\033[1;31mError pushing agent to the organization: {_hub_cause(exc)}\033[0m")
         return 1
     agent_id = result.get("agent_id") if isinstance(result, dict) else None
     print(
         f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to organization "
-        f"'{args.org}'. Agent ID: {agent_id}\033[0m"
+        f"'{tenant}'. Agent ID: {agent_id}\033[0m"
     )
     return 0
 
@@ -7852,12 +7883,56 @@ def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_
     The download flow is the public one (the hub exports an org row's document
     as the same archive); what changes is the credential: the client acts as
     the signed-in person, so a member can pull a row an anonymous caller gets a
-    404 for. The tenant value selects that transport; the row's own organization
-    is enforced by the hub's answer (§8.2), not re-checked here -- the archive
-    carries no tenant to check against.
+    404 for. ``--org`` asserts WHICH organization the row is expected from: the
+    row is read first (the same optional-auth read the desktop uses, with the
+    person's bearer), so a row that belongs to another organization -- or that
+    the hub answers 404 for, which is also the non-member answer (§8.2) -- is
+    refused BEFORE anything is downloaded or written locally (review round 1,
+    Q-1/R1-4).
     """
+    tenant = str(getattr(args, "org", "") or "").strip()
+    if not tenant:
+        print(
+            "\n\033[1;31mError: --org needs an organization tenant id (the value was "
+            "empty). `lop teams push` with no --org lists the organizations you "
+            "belong to.\033[0m"
+        )
+        return 1
     client = _resolve_org_client(base_dir)
     if client is None:
+        return 1
+    try:
+        payload = client.get_agent(args.id, with_credential=True)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError pulling agent from the organization: {_hub_cause(exc)}\033[0m")
+        return 1
+    # The hub envelopes reads ({"msg", "result"}); the row is the result object.
+    row = payload.get("result") if isinstance(payload, dict) else None
+    if row is None:
+        print(
+            "\n\033[1;31mError pulling agent from the organization: agent not found -- "
+            "no such agent, or this account is not a member of the organization it "
+            "belongs to (the hub answers both the same way).\033[0m"
+        )
+        return 1
+    if not isinstance(row, dict):
+        print(
+            "\n\033[1;31mError pulling agent from the organization: the hub did not "
+            "answer with the agent document.\033[0m"
+        )
+        return 1
+    row_tenant = str(row.get("tenant_id") or "")
+    if row_tenant != tenant:
+        if row_tenant and str(row.get("visibility") or "") == "org":
+            print(
+                f"\n\033[1;31mError: that agent belongs to organization '{row_tenant}', "
+                f"not '{tenant}'. Check --org.\033[0m"
+            )
+        else:
+            print(
+                f"\n\033[1;31mError: that agent is not shared with organization "
+                f"'{tenant}'. Check --org (public agents pull without the flag).\033[0m"
+            )
         return 1
     try:
         imported_agent, renamed_from = agent_registry.download_agent_from_radient(
@@ -7865,7 +7940,7 @@ def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_
         )
         print(
             f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
-            f"(ID: {imported_agent.id}) from organization '{args.org}'\033[0m"
+            f"(ID: {imported_agent.id}) from organization '{tenant}'\033[0m"
         )
         if renamed_from is not None:
             print(
@@ -7874,7 +7949,7 @@ def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_
             )
         return 0
     except Exception as e:  # noqa: BLE001 — the hub's refusal is the report
-        print(f"\n\033[1;31mError pulling agent from the organization: {e}\033[0m")
+        print(f"\n\033[1;31mError pulling agent from the organization: {_hub_cause(e)}\033[0m")
         return 1
 
 
@@ -9746,12 +9821,14 @@ def main() -> int:
                 return agents_delete_command(args, agent_registry, base_dir)
             elif args.agents_command == "push":
                 # Push agent to Radient
-                if getattr(args, "org", None):
+                if getattr(args, "org", None) is not None:
                     # Org scope is a different transport and credential (§8.3):
                     # the instruction-set document, published with the signed-in
                     # account's OAuth token. Redirected before the public branch
                     # so that path's code and output stay exactly as they were
-                    # (design §11 R-6).
+                    # (design §11 R-6). `is not None`, not truthiness: a PASSED
+                    # but empty `--org` is the org path's to refuse, and must
+                    # never fall through to the public one (round 1, R1-1).
                     return agents_push_org_command(args, agent_registry, base_dir)
                 from local_operator.clients.radient import RadientClient  # lazy
                 from local_operator.providers.radient_credentials import (
@@ -9810,11 +9887,12 @@ def main() -> int:
                         return 1
             elif args.agents_command == "pull":
                 # Pull agent from Radient
-                if getattr(args, "org", None):
+                if getattr(args, "org", None) is not None:
                     # Org scope: the same download flow, but the client acts as
                     # the signed-in person (§8.3) -- a non-member is answered the
                     # same 404 a missing id gets, so authorization stays the
-                    # hub's (§8.2).
+                    # hub's (§8.2). `is not None` so an empty --org cannot run
+                    # the anonymous public download (round 1, R1-1).
                     return agents_pull_org_command(args, agent_registry, base_dir)
                 from local_operator.clients.radient import RadientClient  # lazy
 
