@@ -59,7 +59,7 @@ process. The tier is recorded per call (`call_approval_tier`) and — this matte
 | `status` | `running`, `exit_code`, grid, `live`, `truncated`, `secure`, `retain`, time since last output. |
 | `read` | Text: `viewport` (the visible screen) or a `scrollback` window (`start`/`count`). |
 | `screenshot` | A PNG of the surface, written by the harness to a file whose path comes back in the result. |
-| `input` | `text`, or a stored secret by `secret_ref`; `paste` asks for a bracketed paste. |
+| `input` | `text`, or a secret by `secret_ref` (a session credential or the encrypted store); `paste` asks for a bracketed paste. |
 | `keys` | Named keys (`['ctrl+c']`, `['up']`, `['shift+tab']`, `['f5']`), in the encoder's own `+` spelling. Common synonyms are accepted and normalised before the call: `ctrl-c`, `CTRL+C`, `^c`, `shift-tab`, `esc`, `cr`, `pgup`, `page-up`. |
 | `resize` | Change the grid. |
 | `secure` | The user's do-not-capture span. |
@@ -87,12 +87,15 @@ every process in the surface).
 
 | path | allowed? | why |
 |---|---|---|
-| the human types it into the surface | **yes, recommended** | the app records no keystrokes, so an echo-off prompt's input never enters the byte log, the record, `read`, `status` or a screenshot |
+| the user's entry — typed into the surface, or handed over through an `ask` secret question and relayed by `secret_ref` | **yes, recommended** | the app records no keystrokes, so an echo-off prompt's input never enters the byte log, the record, `read`, `status` or a screenshot; an `ask` handover lives only in session memory |
 | the agent types a literal credential via `input.text` | **forbidden by policy, not prevented by construction** | the harness cannot know a string is a credential; the description says so and the `secret_ref` alternative is easier to use |
-| the agent passes `secret_ref` | **yes** | resolved from the encrypted store in the session, never returned, never echoed, and registered for redaction |
+| the agent passes `secret_ref` | **yes** | resolved from the session's credential store first (the `ask` answer, `/credential`), then the encrypted store; never returned, never echoed, and registered for redaction |
 
-`secret_ref` in detail: the **Python tool** resolves the ref (`retrieve_secret`,
-the same store `lop secret` and the `secret` tool use), puts the value in that one
+`secret_ref` in detail: the **Python tool** resolves the ref from the session's
+credential store first — the value the user typed into an `ask` secret question,
+or `/credential`; a value just handed over for the task at hand beats a same-named
+stored one — and falls back to the encrypted store (`retrieve_secret`, the same
+store `lop secret` and the `secret` tool use). It puts the value in that one
 call's RPC params, and registers it with `VariableStore.register_redaction`. The
 model's argument is the ref, so the transcript's tool call says
 `secret_ref: "SUDO_PASSWORD"`; the result says `{accepted: true, bytes: <count>}`;
@@ -117,9 +120,12 @@ What is **not** claimed:
 
 Administrator commands are the `ask` path, not the approval tier: before running
 something that needs root — or that permanently changes the user's machine — the
-agent uses `ask` with the exact command and what it will change. Surfaces start as
-the user's own shell (never root), so `sudo`'s prompt lands where the user can
-answer it.
+agent uses `ask` with the exact command and what it will change, asking for the
+password in the same call as a secret question. Their entry into it is the
+approval and the handover in one; the agent relays it to the prompt with `input
+secret_ref=<key>` and never sees the value. Surfaces start as the user's own shell
+(never root), so `sudo`'s prompt lands where that relay (or the user's own typing)
+can answer it.
 
 ## Installing a program a task needs
 
@@ -141,11 +147,14 @@ What to expect, in order:
    the only place that can host its progress output and its prompts. The pane can
    stay closed while it works and the surface keeps running.
 3. **`sudo`, if it is needed.** The surface is the user's own shell, never root,
-   so `sudo`'s prompt appears there and **the user types the password into it**.
-   Keystrokes into a pty are not recorded, so a password typed at an echo-off
-   prompt (as `sudo` uses) does not enter the surface's output, the transcript or
-   the record. The agent never types it; if the user has stored one, the agent
-   can pass it by name (`secret_ref`) and never see the value.
+   so `sudo`'s prompt appears there. The password is the user's to give: they
+   type it into the surface themselves, or hand it over through an `ask` secret
+   question and the agent relays it with `input secret_ref=<key>`. Keystrokes
+   into a pty are not recorded, and at an echo-off prompt (as `sudo` uses) the
+   entered value stays out of the surface's output, the transcript and the
+   record; a relayed value is also registered for redaction, so a later bare
+   appearance reads `[redacted]` — and the agent never sees it, nor types it as
+   text.
 4. **Prompts the agent cannot answer.** macOS's Command Line Tools dialog and
    Windows's UAC consent dialog are drawn by the OS: the pty cannot see them and
    the agent cannot click them — the macOS install path is exercised, the Windows

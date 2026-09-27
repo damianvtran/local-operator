@@ -12,8 +12,9 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.agent_profiles import resolve_profile_or_specialist
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 from local_operator.config import ConfigManager
+from local_operator.env import EnvConfig
 from local_operator.resume import SessionRow, read_session_attachment
 from local_operator.server.routes import (
     capabilities,
@@ -40,6 +41,10 @@ async def api(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "canonical-profile-test")
     app = FastAPI()
     app.state.config_manager = ConfigManager(tmp_path)
+    # The real app sets this at startup (server/app.py) and the sync route's
+    # hub arm reads it for the API root, so the fixture mirrors production
+    # rather than leaving one dependency to blow up only on that route.
+    app.state.env_config = EnvConfig()
     app.include_router(desktop_profiles.router)
     app.include_router(desktop_sessions.router)
     app.include_router(capabilities.router)
@@ -448,3 +453,90 @@ async def test_shared_status_precedence(live, pending, unseen, kind, expected):
     # re-couple what that change separated.
     assert entry.active == bool(live or pending or unseen)
     assert CatalogEntry(SessionRow("123456789abc", 1, "unknown")).status_code == "recent"
+
+
+# -- POST /v1/desktop/profiles/sync --------------------------------------------
+
+
+def _profile_row(**overrides: Any) -> AgentEditFields:
+    """``AgentEditFields`` with every field spelled out, overridden per test."""
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
+async def test_sync_route_reports_seed_and_hub_verdicts(api, monkeypatch) -> None:
+    """One request, both arms: the seed row is current, the hub row degrades.
+
+    No Radient credential is present in the fixture's isolated home, so the hub
+    entry must read ``unavailable`` with the reason rather than failing the
+    request — using local updates must not depend on a marketplace login.
+    """
+
+    from local_operator.agent_profiles import install_seed
+
+    client, root = api
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    registry = AgentRegistry(root)
+    assert install_seed("reviewer", registry=registry) is not None
+    registry.create_agent(
+        _profile_row(name="hunter", description="d", tags=["role", "hub:abc-123"])
+    )
+
+    result = await client.post("/v1/desktop/profiles/sync", json=mutation())
+
+    assert result.status_code == 200
+    payload = result.json()["result"]
+    entries = {entry["name"]: entry for entry in payload["entries"]}
+    assert entries["reviewer"]["kind"] == "seed"
+    assert entries["reviewer"]["verdict"] == "up-to-date"
+    assert entries["hunter"]["kind"] == "hub"
+    assert entries["hunter"]["verdict"] == "unavailable"
+    assert "no Radient credential" in entries["hunter"]["reason"]
+    assert payload["summary"] == {
+        "up-to-date": 1,
+        "updated": 0,
+        "diverged": 0,
+        "unavailable": 1,
+        "not-installed": 0,
+    }
+
+
+async def test_sync_route_refuses_name_and_all_together(api) -> None:
+    client, _root = api
+
+    result = await client.post(
+        "/v1/desktop/profiles/sync", json=mutation(name="reviewer", all=True)
+    )
+
+    assert result.status_code == 422
+    assert "not both" in result.json()["detail"]
+
+
+async def test_sync_route_answers_a_name_that_is_not_installed(api) -> None:
+    client, _root = api
+
+    result = await client.post("/v1/desktop/profiles/sync", json=mutation(name="reviewer"))
+
+    assert result.status_code == 200
+    (entry,) = result.json()["result"]["entries"]
+    assert entry["verdict"] == "not-installed"
+    assert "op='install'" in entry["detail"]

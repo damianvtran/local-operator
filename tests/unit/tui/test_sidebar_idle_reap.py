@@ -420,3 +420,40 @@ def test_the_sweep_re_reads_the_window_constant_every_tick(app_with_clock, monke
         "a window narrowed after startup must be honoured too: the sweep reads "
         "the module attribute per tick, which is what makes the e2e repros real"
     )
+
+
+def test_a_standing_send_failure_keeps_the_source_past_the_window(app_with_clock):
+    """Sir Knight finding 1 under the retention option: a failure pins the source.
+
+    The failure record — with its rows, its notice and its submit-time draft —
+    is in-memory only (never durable), so the idle sweep releasing a source
+    that still carries one would DROP a message the boundary rule keeps
+    reachable: the user comes back to a conversation whose failed message is
+    gone, with only prompt history to rebuild it from. The clause is bounded by
+    user action exactly like its siblings, which the second half asserts: once
+    the record resolves (`send again` / `edit` splice it out), the same sweep
+    releases the source normally.
+    """
+    from local_operator.tui.session_interaction import FailedSend
+
+    app, clock = app_with_clock
+    source = _make_remote(app, "failed", clock, 0.0)
+    source.turn.failed_sends.append(FailedSend(text="unsent", sent="unsent", typed="unsent"))
+    released = []
+    app.run_worker = lambda coro, **kw: released.append(coro) or coro.close()
+
+    clock.advance(app_module.SIDEBAR_IDLE_RELEASE_S + 1)
+    app._sweep_idle_sidebar_sources()
+
+    assert not released, "the sweep released a source with a standing failure"
+    assert (
+        app._sidebar_sources.get("failed") is source
+    ), "the source must survive so its row, notice and payload do"
+    assert source.retained_for_local_work
+
+    # PRECONDITION for the release half: with the record resolved, the clause
+    # is the ONLY thing that was refusing — the source releases on the same tick.
+    source.turn.failed_sends.clear()
+    app._sweep_idle_sidebar_sources()
+
+    assert released, "a resolved source must release again"

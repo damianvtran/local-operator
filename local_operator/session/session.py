@@ -90,6 +90,7 @@ from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asi
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    PROJECT_REMINDER_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
@@ -101,15 +102,20 @@ from local_operator.harness.message_types import (
 from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
 
 # Hoisted to the harness so the evaluation runner can render a transcript
-# through this same function without importing session code. Only these two
+# through this same function without importing session code. Only these three
 # names are re-exported, and each has a caller here: ``_default_convert_to_llm``
 # is what the session, its tests and ``session_factory``'s thin alias resolve
-# through this module, and ``_is_todo_reminder`` is called only by
-# ``Session._live_todo_reminders``, far below in this module (no guardrail is
-# defined in this region). ``_injected_user_message`` is renderer-internal —
+# through this module, and the two reminder predicates are called only by their
+# live expiry scans (``Session._live_todo_reminders`` /
+# ``Session._live_project_reminders``), far below in this module (no guardrail
+# is defined in this region). ``_injected_user_message`` is renderer-internal —
 # the renderer calls it and nothing outside needs it — so it is deliberately NOT
 # reachable from ``local_operator.session.session``.
-from local_operator.harness.render import _default_convert_to_llm, _is_todo_reminder
+from local_operator.harness.render import (
+    _default_convert_to_llm,
+    _is_project_reminder,
+    _is_todo_reminder,
+)
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
@@ -153,6 +159,7 @@ from local_operator.harness.types import (
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
     ToolResult,
     Usage,
@@ -178,6 +185,12 @@ from local_operator.incidents import (
     render_cut_off_reason,
 )
 from local_operator.model.effort import cheapest_real_rung
+from local_operator.projects import (
+    Project,
+    reported_age,
+    stale_projects_fingerprint,
+    stale_projects_for_session,
+)
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
@@ -847,6 +860,69 @@ def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
     )
 
 
+#: How many stale projects the completion-time reminder lists before collapsing
+#: the rest into ``… and N more``. A session can be linked to many projects
+#: (§1.3 caps links at 64); the nudge stays bounded regardless.
+_PROJECT_REMINDER_MAX_ROWS = 4
+
+#: The per-row excerpt cap. Each row is ONE line by construction — the excerpt
+#: is whitespace-collapsed first — so a 1000-char progress snippet cannot wrap
+#: the frame, and the full text is always one ``project op='show'`` away.
+_PROJECT_REMINDER_EXCERPT_CHARS = 80
+
+
+def _project_reminder_text(stale: list[Project], *, now: float | None = None) -> str:
+    """The nudge the completion-time project check injects (``_project_continuation``).
+
+    The todo text's twin, carrying §V2.C.3's exact template: ``<system-reminder>``
+    framing and the explicit "injected by the harness" label because the model
+    reads it as a user turn (without the label it would answer the user about a
+    message the user never sent), the stale rows verbatim, and the honest exits
+    — update progress, update status, refresh an unchanged line, unlink — plus
+    the ``ask`` clause. ``reported_age`` is the same age arithmetic every other
+    project surface composes its sentences from. ``now`` exists for tests, which
+    pin the rendered text against a fixed clock.
+    """
+    rows: list[str] = []
+    for project in stale[:_PROJECT_REMINDER_MAX_ROWS]:
+        age = reported_age(project, now=now)
+        if age is None:
+            rows.append(f"- {project.name} [{project.status}] — no progress recorded")
+            continue
+        # The reporter clause is dropped when the row carries no reporter (a
+        # hand-edited or pre-tool row): "by session " with nothing after it
+        # reads as a truncation bug, and the age plus excerpt are still true.
+        reporter = (
+            f" by session {project.progress_reported_by}" if project.progress_reported_by else ""
+        )
+        excerpt = " ".join(project.progress.split())
+        if len(excerpt) > _PROJECT_REMINDER_EXCERPT_CHARS:
+            excerpt = excerpt[: _PROJECT_REMINDER_EXCERPT_CHARS - 1].rstrip() + "…"
+        rows.append(
+            f"- {project.name} [{project.status}] — progress last reported "
+            f'{age} ago{reporter}: "{excerpt}"'
+        )
+    extra = len(stale) - _PROJECT_REMINDER_MAX_ROWS
+    if extra > 0:
+        rows.append(f"… and {extra} more")
+    return (
+        "<system-reminder>\n"
+        "Injected by the harness at the turn boundary. Not from the user, and "
+        "not shown to them.\n"
+        "This session is linked to projects whose recorded progress is stale:\n"
+        + "\n".join(rows)
+        + "\n"
+        "Keep the record true: if this turn's work moved a project on, write one "
+        "dated line with `project op='update' name='<name>' progress='<line>'`; "
+        "if its state changed, `project op='update' name='<name>' "
+        "status='paused|done'`. If the recorded progress still describes reality, "
+        "re-send the same text to refresh it. If this session no longer belongs "
+        "to a project, `project op='unlink' name='<name>'`. If a decision here "
+        "is the user's to make, put it to them with the `ask` tool.\n"
+        "</system-reminder>"
+    )
+
+
 #: ``CustomMessage`` types that belong in the transcript as message entries.
 #:
 #: An ALLOW-LIST, because the cost of the two mistakes is asymmetric. Omitting a
@@ -1267,6 +1343,30 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
         for item in stamped
         if isinstance(item, (list, tuple)) and len(item) == 3
     )
+
+
+def _stamped_project_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, int], ...]:
+    """The stale-set fingerprint a project reminder was built from, normalized.
+
+    The todo normaliser's twin, with one deliberate addition: the third element
+    is an INTEGER (``int(progress_updated_at or 0)``), so a stamp that will not
+    coerce is dropped rather than raised on — a reminder with no usable stamp
+    compares equal to nothing and expires, which is the safe direction (an
+    unverifiable nudge is worth less than one turn without it). The JSON round
+    trip matters identically: ``details`` is a plain dict and any round trip
+    turns the nested tuples into lists, so a raw ``!=`` against the live
+    fingerprint would expire every reminder on sight.
+    """
+    stamped = details.get("fingerprint") or ()
+    out: list[tuple[str, str, int]] = []
+    for item in stamped:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            continue
+        try:
+            out.append((str(item[0]), str(item[1]), int(item[2])))
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
 
 
 # Relocated to ``compaction.marker`` so hosts that must not import the session
@@ -2851,6 +2951,19 @@ class Session:
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
         self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        # Project-continuation latch: the stale-set fingerprint captured at the
+        # last project nudge in THIS user turn — the sorted
+        # ``(project_id, status, int(progress_updated_at or 0))`` tuples of the
+        # projects that reminder named — so a model that yields twice with a
+        # byte-identical stale set is not nudged a second time. Reset per user
+        # turn beside the todo latch; see :meth:`_project_continuation`.
+        self._project_reminder_fingerprint: tuple[tuple[str, str, int], ...] | None = None
+        # Per-turn count of tool-execution events seen this user turn. The
+        # project guardrail fires only after a worked turn: a turn that ran no
+        # tools cannot have moved a project's record, so nudging it to update
+        # one would be asking for a report on nothing. Reset beside the two
+        # latches in _run_turn_pipeline.
+        self._turn_tool_calls = 0
 
         self._disposed = False
         self._subagent_roster_generation = 0
@@ -3182,10 +3295,13 @@ class Session:
         so the escape hatch has to be covered — and it is ordered after the
         rebound so it measures the real bytes.
 
-        Expired todo reminders are dropped here for the same reason: every path
-        that reaches a provider has to be free of them.
+        Expired continuation reminders (todo and project) are dropped here for
+        the same reason: every path that reaches a provider has to be free of
+        them.
         """
-        rendered = self._convert_to_llm(self._live_todo_reminders(messages))
+        rendered = self._convert_to_llm(
+            self._live_project_reminders(self._live_todo_reminders(messages))
+        )
         # Immediately after the conversion and before any other pass, so EVERY
         # caller of this method is covered by one application: the turn path,
         # compaction, `_wire_legal_snapshot` and the token counter. Repairing at
@@ -3372,7 +3488,11 @@ class Session:
             # (and a Pillow re-encode for any oversized block) on a question
             # the header sniff cannot answer. ``set_model`` calls this on the
             # TUI event loop; a paste-heavy history must not stall a keypress.
-            rendered = self._convert_to_llm(self._live_todo_reminders(list(self._context.messages)))
+            rendered = self._convert_to_llm(
+                self._live_project_reminders(
+                    self._live_todo_reminders(list(self._context.messages))
+                )
+            )
         if not any(
             isinstance(block, ImageContent) for message in rendered for block in message.content
         ):
@@ -3438,6 +3558,39 @@ class Session:
         def expired(message: AgentMessage) -> bool:
             return (
                 _is_todo_reminder(message) and _stamped_todo_fingerprint(message.details) != current
+            )
+
+        return [message for message in messages if not expired(message)]
+
+    def _live_project_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
+        """``messages`` without project reminders the stale set has since outrun.
+
+        The todo scan's twin, one store over: a project reminder asserts "these
+        projects' records are stale", so it expires the instant the stale set
+        moves — the record was refreshed, a status changed, a project was
+        unlinked or archived. Expiry is a RENDER decision exactly as above; the
+        live list is never rewritten, so the guardrail's own latch still reads
+        what it wrote.
+
+        The current fingerprint comes through the same
+        ``stale_projects_for_session``/``stale_projects_fingerprint`` pair the
+        producer uses, so the nudge and the check that retires it cannot
+        disagree about which projects are stale. ``project_registry`` is None
+        only on a host that keeps no projects at all — no project reminder can
+        exist in that list, and the empty set is also the honest answer if one
+        is ever planted: an unverifiable claim expires.
+        """
+        if not any(_is_project_reminder(message) for message in messages):
+            return messages
+        registry = self.project_registry
+        current = stale_projects_fingerprint(
+            stale_projects_for_session(registry, self._session_id) if registry is not None else []
+        )
+
+        def expired(message: AgentMessage) -> bool:
+            return (
+                _is_project_reminder(message)
+                and _stamped_project_fingerprint(message.details) != current
             )
 
         return [message for message in messages if not expired(message)]
@@ -9691,6 +9844,12 @@ class Session:
         # post-compaction continuations of this SAME user turn, and re-arming
         # there would re-nudge an unchanged list the model already declined.
         self._todo_reminder_fingerprint = None
+        # The project guardrail's latch and its worked-turn counter share this
+        # site for twin reasons: the user's next message may be the update the
+        # stale set was waiting for (so a fresh nudge is allowed), and work done
+        # in a PREVIOUS user turn must not license a nudge in this one.
+        self._project_reminder_fingerprint = None
+        self._turn_tool_calls = 0
         begin_message = getattr(self._stream_fn, "begin_message", None)
         if callable(begin_message):
             begin_message()
@@ -10023,7 +10182,15 @@ class Session:
                 # batch's remaining calls; see LoopConfig.has_pending_fork.
                 has_pending_fork=self.has_pending_fork,
                 get_aside_messages=self._drain_asides,
-                get_follow_up_messages=self._todo_continuation,
+                # ONE follow-up hook for BOTH continuation guardrails (todos and
+                # projects). LoopConfig carries a single follow-up slot and the
+                # loop's charging rule is written against it: a batch holding
+                # any follow-up re-enters ONCE and charges the (larger,
+                # self-limiting) follow-up budget, never the 8-budget shared
+                # with steering/asides. Composing the producers here — rather
+                # than registering a second seam the charging rule does not
+                # know about — is what keeps the two in step.
+                get_follow_up_messages=self._guardrail_continuations,
                 resolve_fallback_tool=self._resolve_tool_outside_inventory,
                 # Redact stored credential values out of every tool result
                 # before the message lands in the transcript. The store is
@@ -10098,6 +10265,15 @@ class Session:
                         # pipeline flushes it if no continuation is queued.
                         self._held_end = event
                     continue
+                # The worked-turn guard for the project guardrail: a turn that
+                # ran no tools cannot have moved a project's record. Both halves
+                # of a call (start and end) count, not once per call — the only
+                # question asked of this counter is "≥ 1" — and counting the
+                # start is what keeps a call whose end never arrived (batch
+                # skip, abort) from reading as no work at all. Reset in
+                # _run_turn_pipeline's head, beside the guardrail latches.
+                if isinstance(event, (ToolExecutionStartEvent, ToolExecutionEndEvent)):
+                    self._turn_tool_calls += 1
                 is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
                 if is_todo_end:
                     # The tool has already mutated its store when this event is
@@ -10505,6 +10681,25 @@ class Session:
         root = scratchpad_root(bound if isinstance(bound, (str, Path)) else None)
         return None if root is None else str(root)
 
+    def _session_dir(self) -> str | None:
+        """This session's DIRECTORY as a path string, or ``None``.
+
+        Derived FROM :meth:`_scratchpad_dir` (its parent) rather than from the
+        transcript a second time: the two must gate IDENTICALLY — an agent
+        directory has neither, and a derivation cannot disagree with itself.
+        The consumer is the ``eval`` tool's cross-process kernel marker
+        (``<session dir>/eval-kernel.json``): a runtime that restarts loses the
+        in-memory receipt that announced a kernel reset, so the first cell
+        after the restart reads this directory instead.
+
+        The directory is NOT created here, for the same reason the scratchpad
+        root is not: it is the transcript's own directory and exists (or not)
+        on the transcript's terms — a speculative runtime must leave nothing
+        on disk (``Transcript(defer_materialise=True)``).
+        """
+        scratchpad = self._scratchpad_dir()
+        return None if scratchpad is None else str(Path(scratchpad).parent)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -10517,6 +10712,17 @@ class Session:
             cwd=self._cwd,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
+            # The session's OWN directory: where the eval tool records its
+            # cross-process kernel marker. None wherever the scratchpad is
+            # None — derived from it, so the two gates cannot drift.
+            session_dir=self._session_dir(),
+            # A Session's eval kernel lives exactly as long as this runtime:
+            # the dispose hook this Session registers closes it, and the
+            # eval-side reaper must not second-guess that with a kernel-only
+            # clock (a busy session with a long gap between cells was losing
+            # its namespace mid-task). See the module docstring of
+            # ``local_operator/tools/eval.py``.
+            kernel_managed_by_session=True,
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
@@ -12077,6 +12283,81 @@ class Session:
                 details={"text": _todo_reminder_text(pending), "fingerprint": fingerprint},
             )
         ]
+
+    async def _project_continuation(self) -> list[AgentMessage]:
+        """The completion-time project check: re-assert stale project rows at the yield boundary.
+
+        The todo guardrail's twin, one store over (design §V2.C). A project
+        this session is linked to whose recorded progress has gone stale gets
+        its row put back in front of the model when the turn is about to end:
+        the yield boundary is the last point at which the model can still act
+        on it, and the act (``project op='update'``) is what keeps the
+        operator's record true. In-process and at the boundary by
+        construction — injecting into a live turn is something only the
+        process running that turn's loop can do, which is why no background
+        sweep exists (§V2.C.4).
+
+        Fires only while the turn is MOVING and the record is quiet: at least
+        one tool-execution event landed this turn (``_turn_tool_calls`` — a
+        turn that ran no tools cannot have moved a project's state), and the
+        stale set (``stale_projects_for_session``: linked AND active AND
+        stale) has moved since the last nudge THIS turn. The latch is the
+        stale-set fingerprint ``(id, status, int(progress_updated_at or 0))``:
+        a byte-identical set is never nudged twice (a model yielding twice on
+        it is stuck, and the reminder's own exits — update / refresh /
+        unlink — are what move it), while a refresh or a status change moves
+        the fingerprint and lets the REMAINING stale projects earn another
+        nudge in the same turn (a refresh cannot collide with the floored
+        stamp it replaces — see ``stale_projects_fingerprint``). A fresh user
+        turn re-arms it (see ``_run_turn_pipeline``).
+
+        Budget: shares ``max_follow_up_continuations`` with the todo producer
+        through the ONE hook below (``_guardrail_continuations``), so the
+        loop's batch rule — a mixed todos+projects batch re-enters once,
+        charged to the follow-up budget — applies unchanged; it never touches
+        the steering/aside budget.
+
+        Ephemeral exactly as the todo nudge is: appended by the follow-up
+        drain with no AgentEvent, never in the run's ``new_messages``, never
+        persisted (``PROJECT_REMINDER_MESSAGE_TYPE`` is NOT in
+        ``_PERSISTABLE_CUSTOM_TYPES``), and it stops being SENT the moment
+        the stale set moves — see :meth:`_live_project_reminders`.
+        """
+        registry = self.project_registry
+        if registry is None:
+            return []
+        if self._turn_tool_calls <= 0:
+            return []
+        stale = stale_projects_for_session(registry, self._session_id)
+        if not stale:
+            return []
+        fingerprint = stale_projects_fingerprint(stale)
+        if fingerprint == self._project_reminder_fingerprint:
+            return []
+        self._project_reminder_fingerprint = fingerprint
+        return [
+            CustomMessage(
+                custom_type=PROJECT_REMINDER_MESSAGE_TYPE,
+                attribution="system",
+                # The fingerprint rides ALONG with the text, as on the todo
+                # side: it is what the render path compares to decide the
+                # assertion is still true (see :meth:`_live_project_reminders`).
+                details={"text": _project_reminder_text(stale), "fingerprint": fingerprint},
+            )
+        ]
+
+    async def _guardrail_continuations(self) -> list[AgentMessage]:
+        """The ONE follow-up hook: both continuation guardrails' messages.
+
+        ``LoopConfig`` carries a single follow-up slot and the loop's
+        per-producer charging is written against it (a batch holding any
+        follow-up re-enters ONCE and charges the follow-up budget — see
+        ``_collect_yield_injections`` / the outer-loop tail), so the two
+        producers compose here instead of registering through a second seam
+        the charging rule does not know about. Order is stable — todos first,
+        then projects — so a mixed batch's contents are deterministic.
+        """
+        return [*await self._todo_continuation(), *await self._project_continuation()]
 
     # -- compaction ------------------------------------------------------------
 

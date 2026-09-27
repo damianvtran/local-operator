@@ -595,6 +595,29 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     return (moment - project.progress_updated_at) > PROJECT_PROGRESS_STALE_S
 
 
+def age_text(updated_at: float | None, *, now: float | None = None) -> str | None:
+    """``3s``/``5m``/``2h``/``1d`` age of a raw stamp, or ``None``.
+
+    The 90 s / 90 min / 48 h cut points live HERE — the one copy — and every
+    surface imports this: :func:`reported_age` layers the ``progress`` guard on
+    top for model callers, while the terminal renderers (which hold composed
+    JSON rows, not ``Project`` objects) call it directly, and the row cap below
+    travels with it (agent review round 1, F3/F4: the cut points and the caps
+    had three copies whose comments each claimed canonicity).
+    """
+    if updated_at is None:
+        return None
+    moment = time.time() if now is None else now
+    age = max(0.0, moment - updated_at)
+    if age < 90:
+        return f"{int(age)}s"
+    if age < 5400:
+        return f"{int(age // 60)}m"
+    if age < 172800:
+        return f"{int(age // 3600)}h"
+    return f"{age / 86400:.0f}d"
+
+
 #: One listing/receipt row stays scannable in a transcript. THE number, one
 #: copy: the operator's listing (``slash_commands.project_listing_rows``) and
 #: the model's listing (``tools/project_tool``) both import it, so the two
@@ -602,20 +625,22 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
 PROJECT_ROW_CAP = 160
 
 
-def reported_age(updated_at: float | None, *, now: float | None = None) -> str | None:
-    """``3s``/``5m``/``2h``/``1d`` age of a progress stamp, or ``None``.
+def reported_age(project: Project, *, now: float | None = None) -> str | None:
+    """``2h``-style age of the progress snippet, or ``None`` when none is stored.
 
-    THE age arithmetic, one copy: the 90 s / 90 min / 48 h cut points live here
-    and every surface that prints an age — the terminal listing, the canvas
-    rows and footer, the project tool's listing/show/update lines — imports
-    this, so the operator's view and the model's cannot disagree about how old
-    a progress line is (agent review round 1, F3: the cut points had three
-    copies whose comments each claimed canonicity).
+    The caller composes the sentence, so one implementation of the age
+    arithmetic serves the listing row, the ``show`` block, the update receipt
+    and the completion-time reminder (``Session._project_reminder_text``)
+    without any of them disagreeing about how old the snippet is. Lived in
+    ``tools/project_tool.py`` until the completion check gained a fourth
+    sentence to compose; it moved here with ``progress_is_stale`` for the same
+    reason — the tool layer imports this module, never the other way round.
+    The 90 s / 90 min / 48 h cut points themselves are :func:`age_text`'s,
+    one copy for this and the JSON-row readers.
     """
-    if updated_at is None:
+    if not project.progress or project.progress_updated_at is None:
         return None
-    moment = time.time() if now is None else now
-    age = max(0.0, moment - updated_at)
+    return age_text(project.progress_updated_at, now=now)
     if age < 90:
         return f"{int(age)}s"
     if age < 5400:
@@ -657,6 +682,47 @@ def store_error_text(exc: Exception) -> str:
         detail = exc.strerror or f"errno {exc.errno}"
         return detail[0].lower() + detail[1:] if detail else "i/o error"
     return str(exc)
+
+
+def stale_projects_for_session(
+    registry: ProjectRegistry, session_id: str, *, now: float | None = None
+) -> list[Project]:
+    """The active, stale projects ``session_id`` is linked to, name-sorted.
+
+    THE single reading behind the completion-time project check: the producer
+    (``Session._project_continuation``) and the expiry scan
+    (``Session._live_project_reminders``) compute their set through here, so
+    the nudge and the check that retires it can never disagree about which
+    projects are stale. Only ``active`` projects can be named — paused, done
+    and archived are deliberate statements that the record is settled, and a
+    reminder about one would nag the session to revive it — and a project with
+    no progress yet is stale by construction, because the first honest line is
+    still owed.
+    """
+    return [
+        project
+        for project in registry.projects_for_session(session_id)
+        if project.status == "active" and progress_is_stale(project, now=now)
+    ]
+
+
+def stale_projects_fingerprint(projects: Sequence[Project]) -> tuple[tuple[str, str, int], ...]:
+    """The latch/expiry identity of a stale set: ``(id, status, int(stamp))``.
+
+    Sorted so two reads of the same set compare equal; the integer stamp is
+    ``progress_updated_at`` floored (``0`` when unset), which is the freshness
+    state the reminder asserts. A report or status change ALWAYS moves it —
+    the stamp being replaced is at least the staleness window old, so even a
+    refresh cannot land on the same floored integer, and an unset stamp starts
+    at ``0`` — so the remaining stale projects earn another nudge in the same
+    turn.
+    """
+    return tuple(
+        sorted(
+            (project.id, project.status, int(project.progress_updated_at or 0))
+            for project in projects
+        )
+    )
 
 
 def _utc_now() -> float:

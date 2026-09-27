@@ -288,6 +288,73 @@ def test_mcp_goes_before_guides_and_guides_before_skills() -> None:
     assert set(skills_only["candidates"]) == {"skills"}
 
 
+def test_projects_go_before_mcp_because_their_lines_are_the_largest() -> None:
+    """§8: the ladder spends the project kind first — drop-first is the honest
+    priority when budget has to be given back.
+
+    Ordering is pinned against BOTH neighbours: projects beat MCP servers out the
+    door, and the existing order below them is untouched (the previous test is
+    the other half of that pin).
+    """
+    candidates = (
+        roster("skill", 6, description="d" * 100)
+        + roster("guide", 6, description="d" * 100)
+        + roster("mcp", 6, description="d" * 100)
+        + roster("project", 6, description="d" * 100)
+    )
+
+    def lines_of(kinds: tuple[str, ...]) -> dict[str, list[str]]:
+        keys = {
+            "skill": "skills",
+            "guide": "guides",
+            "mcp": "mcp_servers",
+            "project": "projects",
+        }
+        return {
+            keys[kind]: [candidate_line(item, 60) for item in candidates if item.kind == kind]
+            for kind in kinds
+        }
+
+    size_all_four = size_of(
+        {"request": "hi", "candidates": lines_of(("skill", "guide", "mcp", "project"))}
+    )
+    size_no_project = size_of({"request": "hi", "candidates": lines_of(("skill", "guide", "mcp"))})
+    assert size_no_project < size_all_four
+
+    everything = build_state(
+        user_message="hi", context=None, candidates=candidates, max_chars=size_all_four
+    )
+    assert set(everything["candidates"]) == {"skills", "guides", "mcp_servers", "projects"}
+
+    # One step tighter: projects go first, and MCP servers are still present.
+    no_project = build_state(
+        user_message="hi", context=None, candidates=candidates, max_chars=size_no_project
+    )
+    assert set(no_project["candidates"]) == {"skills", "guides", "mcp_servers"}
+
+
+def test_the_project_state_key_is_projects_and_only_exists_with_candidates() -> None:
+    """The wire key is the contract's (§5), and the empty store is invisible.
+
+    "A kind with no candidates is omitted" is the property that makes projects
+    free for an operator who has none: no `projects` key, nothing to answer, no
+    question asked (the question half is pinned in test_recommend.py).
+    """
+    with_project = build_state(
+        user_message="hi",
+        context=None,
+        candidates=[
+            candidate(
+                "payments-migration", kind="project", resource_url="project:payments-migration"
+            )
+        ],
+    )
+    assert with_project["candidates"] == {"projects": ["payments-migration: does a thing"]}
+
+    without_projects = build_state(user_message="hi", context=None, candidates=[candidate("alpha")])
+    assert "projects" not in without_projects["candidates"]
+
+
 # ---------------------------------------------------------------------------
 # Rung 4: the request itself, truncated last
 # ---------------------------------------------------------------------------

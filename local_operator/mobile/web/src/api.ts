@@ -13,6 +13,9 @@ import type {
 	Directories,
 	ModelEntry,
 	PastSession,
+	ProjectLinkedSession,
+	ProjectSummary,
+	ProjectView,
 	SessionSummary,
 	SlashCommand,
 	SubagentDetail,
@@ -318,4 +321,62 @@ export function getSubagentHistory(
 		`/api/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(jobId)}/history?${q}`,
 		{ signal },
 	);
+}
+
+/* ---- projects ----------------------------------------------------------- */
+
+/** The listing — every project as a summary, in the daemon's board order
+    (status rank, then freshest). The Projects sheet's list and its
+grouped board render this one array; neither re-sorts it. */
+export function getProjects(): Promise<{ projects: ProjectSummary[] }> {
+	return request("/api/projects");
+}
+
+/** One project plus its linked sessions — the detail sheet's read. */
+export function getProject(
+	key: string,
+	signal?: AbortSignal,
+): Promise<{ project: ProjectView; links: ProjectLinkedSession[] }> {
+	return request(`/api/projects/${encodeURIComponent(key)}`, { signal });
+}
+
+/** Create one project. It starts UNLINKED by design (the desktop create body
+    carries no sessions either): linking a session is a deliberate act, never
+    a side effect of creating a row. */
+export function createProject(input: {
+	name: string;
+	description?: string;
+}): Promise<{ ok: boolean; project: ProjectSummary }> {
+	return request("/api/projects", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+/** Delete one project. The confirmation the daemon requires is the NAME it
+    showed the reader — this call takes it from the same row the sheet rendered
+    rather than reconstructing it, so a renamed project can never be deleted by
+    a stale button. */
+export function deleteProject(key: string, confirm: string): Promise<{ ok: boolean; deleted: boolean }> {
+	return request(`/api/projects/${encodeURIComponent(key)}`, {
+		method: "DELETE",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ confirm }),
+	});
+}
+
+/** Add-or-update one milestone by name. ``completed`` is the detail sheet's
+    toggle (true stamps today, false clears it); ``target_date: ""`` clears a
+    date. Answered with the whole project view, so the sheet re-renders from
+    the store's own answer rather than a local guess at what changed. */
+export function setProjectMilestone(
+	key: string,
+	input: { name: string; target_date?: string; completed?: boolean },
+): Promise<{ ok: boolean; project: ProjectView }> {
+	return request(`/api/projects/${encodeURIComponent(key)}/milestones`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
 }

@@ -50,6 +50,7 @@ from local_operator.harness.jobs import JOB_RESULT_MESSAGE_TYPE
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    PROJECT_REMINDER_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
@@ -92,10 +93,11 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     a snapcompact archive in ``preserve_data`` is rendered back into
     text_head → imaged middle → text_tail blocks (base64 ``ImageContent``
     between ``TextContent`` edges). ``fork_boundary`` and ``wake_prompt``
-    deliveries become user messages of their formatted text, and the newest
-    ``todo_reminder`` (only the newest) becomes one too; other custom entries
-    are dropped (bookkeeping never enters LLM context). ``provider_payload``
-    rides along untouched.
+    deliveries become user messages of their formatted text, and the newest of
+    EACH reminder type — ``todo_reminder`` and ``project_reminder`` (each only
+    its own newest; the two are independent claims) — becomes one too; other
+    custom entries are dropped (bookkeeping never enters LLM context).
+    ``provider_payload`` rides along untouched.
 
     ``gate_timed_out_unattended`` is rendered from its STRUCTURED payload
     rather than a ``text`` field, because the same fact is phrased differently
@@ -111,17 +113,23 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
     they both are the moment this function has run.
     """
     out: list[Message] = []
-    # Only the NEWEST todo reminder survives the render. An earlier one asserts
-    # a todo list that has since changed, so replaying it would hand the model a
-    # stale — and by then actively false — claim about its own state, and
-    # re-argue a nudge it has already answered. The pruning belongs here because
-    # the renderer is a pure function of the whole list and reminders are never
-    # persisted, so nothing downstream could do it. Older ones simply fall
-    # through to the allow-list's drop.
+    # Only the NEWEST todo reminder and the NEWEST project reminder survive
+    # the render — one scan per type, because the two are independent claims
+    # about different stores and the latest of each is the one that can still
+    # be true. An earlier one asserts state that has since changed, so
+    # replaying it would hand the model a stale — and by then actively false —
+    # claim and re-argue a nudge it has already answered. The pruning belongs
+    # here because the renderer is a pure function of the whole list and
+    # reminders are never persisted, so nothing downstream could do it. Older
+    # ones simply fall through to the allow-list's drop.
     newest_reminder = -1
+    newest_project_reminder = -1
     for index in range(len(messages) - 1, -1, -1):
-        if _is_todo_reminder(messages[index]):
+        if newest_reminder < 0 and _is_todo_reminder(messages[index]):
             newest_reminder = index
+        if newest_project_reminder < 0 and _is_project_reminder(messages[index]):
+            newest_project_reminder = index
+        if newest_reminder >= 0 and newest_project_reminder >= 0:
             break
     for index, message in enumerate(messages):
         if isinstance(message, Message):
@@ -260,6 +268,24 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
                     id=message.id,
                 )
             )
+        elif (
+            message.custom_type == PROJECT_REMINDER_MESSAGE_TYPE
+            and index == newest_project_reminder
+        ):
+            # The completion-time project check's nudge
+            # (``Session._project_continuation``) rides the same path as the
+            # todo reminder, and for the same reason: without this arm the
+            # allow-list would drop it as bookkeeping and the loop would
+            # re-enter with nothing to react to. It keeps its own newest
+            # (above), so a todo nudge and a project nudge in one batch both
+            # reach the model.
+            out.append(
+                Message(
+                    role="user",
+                    content=[TextContent(text=message.details.get("text", ""))],
+                    id=message.id,
+                )
+            )
     return out
 
 
@@ -275,3 +301,16 @@ def _is_todo_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
     would read compaction's own output back as a fresh nudge.
     """
     return isinstance(message, CustomMessage) and message.custom_type == TODO_REMINDER_MESSAGE_TYPE
+
+
+def _is_project_reminder(message: AgentMessage) -> TypeGuard[CustomMessage]:
+    """Is ``message`` a live project-progress nudge (``_project_continuation``)?
+
+    The todo predicate's twin, for the same three agreements — the newest-only
+    rule here, the expiry scan (:meth:`Session._live_project_reminders`) and
+    the compaction render — and the same load-bearing ``isinstance`` half: a
+    rendered reminder is a plain ``Message`` carrying the same text.
+    """
+    return (
+        isinstance(message, CustomMessage) and message.custom_type == PROJECT_REMINDER_MESSAGE_TYPE
+    )

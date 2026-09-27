@@ -51,10 +51,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
 from local_operator import procname
-from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
+from local_operator.agent_profiles import (
+    SEED_ORIGIN_PREFIX,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
+)
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
-from local_operator.env import get_env_config, resolve_radient_api_base_url
+from local_operator.env import get_env_config
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
@@ -422,6 +426,28 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         required=True,
         help="ID of the agent to pull from Radient",
+    )
+    # Sync command
+    sync_parser = agents_subparsers.add_parser(
+        "sync",
+        help="Update installed starters and hub-pulled agents to their latest text",
+        parents=[parent_parser],
+    )
+    sync_group = sync_parser.add_mutually_exclusive_group()
+    sync_group.add_argument(
+        "--name",
+        type=str,
+        help="Sync only the installed profile with this name",
+    )
+    sync_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Sync every installed starter and hub-pulled agent (default when --name is absent)",
+    )
+    sync_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Also replace copies that were edited locally after their install/pull",
     )
 
     # Teams command
@@ -7358,6 +7384,11 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
 
     # Get agents for current page
     page_agents = agents[start_idx:end_idx]
+    # The agents module is already imported whenever a registry exists — this
+    # is the handler that receives one — so quoting its baseline prefix costs
+    # nothing, and this must not become a second spelling of "hub_sha256:".
+    from local_operator.agents import HUB_SHA256_PREFIX
+
     print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
     for i, agent in enumerate(page_agents):
         is_last = i == len(page_agents) - 1
@@ -7372,12 +7403,23 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
         print(f"\033[1;32m{left_bar}   • Model: {agent.model or 'default'}\033[0m")
         if agent.description:
             print(f"\033[1;32m{left_bar}   • Description: {agent.description}\033[0m")
-        # The `seed:` provenance marker is bookkeeping this listing's reader
-        # cannot act on: it records that a role was installed from a packaged
-        # starter so `agent op='reset'` knows it may restore it. Hiding it
-        # keeps a machine-only tag out of a human-facing inventory.
+        # Provenance markers are bookkeeping this listing's reader cannot act
+        # on: `seed:` records the starter a role was installed from (so
+        # `op='reset'` knows it may restore it), and `seed_version:` /
+        # `seed_sha256:` / `hub_sha256:` are the sync baselines (`lop agents
+        # sync`). Hiding them keeps machine-only tags out of a human-facing
+        # inventory; the tags a person wrote still show. A row's `hub:` marker
+        # stays VISIBLE — it names the marketplace listing the row came from,
+        # which is something a reader can act on (`agents pull --id`).
         shown_tags = [
-            tag for tag in agent.tags if not str(tag).strip().lower().startswith(SEED_ORIGIN_PREFIX)
+            tag
+            for tag in agent.tags
+            if not str(tag)
+            .strip()
+            .lower()
+            .startswith(
+                (SEED_ORIGIN_PREFIX, SEED_VERSION_PREFIX, SEED_SHA256_PREFIX, HUB_SHA256_PREFIX)
+            )
         ]
         if shown_tags:
             print(f"\033[1;32m{left_bar}   • Tags: {', '.join(shown_tags)}\033[0m")
@@ -7392,6 +7434,43 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     if page < total_pages:
         print(f"\033[1;32m│ Use --page {page + 1} to see next page\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+    return 0
+
+
+def agents_sync_command(
+    args: argparse.Namespace, agent_registry: "AgentRegistry", base_dir: Path
+) -> int:
+    """Update installed starters and hub-pulled agents; print the shared report.
+
+    A named function rather than inline dispatch so the command is reachable
+    the way its siblings are (``agents_delete_command`` et al.) — the parser
+    test and the handler test then cover the same callable the CLI runs, and
+    the rendering comes from ``agent_sync`` so this surface cannot grow a
+    second opinion about what a verdict means.
+    """
+
+    # Lazy: the sync coordinator pulls the agent registry module (dill, yaml)
+    # and the Radient client, none of which belong on the startup path.
+    from local_operator.agent_sync import resolve_hub_client_sync, sync_agent_profiles
+
+    # ``--all`` is READ, not decorative: it names "every installed row" — the
+    # same set the absence of --name selects — so the flag does what it says
+    # instead of parsing into nothing (agent review round 1, n1).
+    if getattr(args, "all", False):
+        names = None
+    else:
+        names = [args.name] if getattr(args, "name", None) else None
+    radient_client = resolve_hub_client_sync(
+        agent_registry.config_dir,
+        base_url=_radient_hub_base_url(ConfigManager(base_dir)),
+    )
+    report = sync_agent_profiles(
+        agent_registry,
+        radient_client=radient_client,
+        names=names,
+        force=bool(getattr(args, "force", False)),
+    )
+    print("\n" + report.render())
     return 0
 
 
@@ -7548,7 +7627,7 @@ def teams_delete_command(name: str, team_registry: Any) -> int:
 
 
 def _radient_hub_base_url(config_manager: ConfigManager) -> str:
-    """The ONE place the CLI resolves the Radient Agent Hub API root.
+    """The CLI's name for the hub API root resolution.
 
     ``config.yml``'s ``values.radient_base_url`` — the NESTED key the config
     store actually holds; a flat document-root ``radient_base_url`` is dropped by
@@ -7559,8 +7638,17 @@ def _radient_hub_base_url(config_manager: ConfigManager) -> str:
     push`` and ``agents pull`` each carried their own literal, two of the three
     naming a route or a host that does not exist, so one configuration resolved
     three different destinations and two of them could never work.
+
+    The RULE lives in ``providers.radient_credentials.configured_radient_base_url``
+    (agent review round 1, n2): the sync coordinator needs the same resolution,
+    and a second copy beside the first is how the two drift. This helper stays
+    so the CLI's call sites keep naming their own surface rather than each
+    importing the provider module.
     """
-    return resolve_radient_api_base_url(config_manager.get_config_value("radient_base_url", None))
+
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    return configured_radient_base_url(config_manager)
 
 
 def agents_delete_command(
@@ -9423,6 +9511,13 @@ def main() -> int:
                 except Exception as e:
                     print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
                     return 1
+            elif args.agents_command == "sync":
+                # Update installed starters (and hub-pulled agents). The seed
+                # arm needs no credential and always runs; the hub arm resolves
+                # one in ``agents_sync_command`` and degrades per row (never
+                # fails the run) when it cannot — that policy lives in the
+                # shared sync functions, not in this branch.
+                return agents_sync_command(args, agent_registry, base_dir)
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "teams":

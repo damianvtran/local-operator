@@ -23,9 +23,24 @@ WHY these safety properties
 
 Worker lifecycle is owned HERE, keyed by session: one kernel per
 ``context.session_id`` (object id as the fallback for hosts that pass no
-id), an on-access idle reaper (no background timers to keep alive), an LRU
-cap so one process cannot farm kernels without bound, and ``spill_truncate``
-for the 8 KiB result budget — the same contract every other tool offers.
+id), an LRU cap so one process cannot farm kernels without bound, and
+``spill_truncate`` for the 8 KiB result budget — the same contract every
+other tool offers.
+
+Idle reaping is split by OWNERSHIP, because a kernel-only clock measures the
+wrong thing for a session kernel. A kernel whose session runtime declares it
+(``context.kernel_managed_by_session``) lives exactly as long as that
+runtime: the runtime already evaluates idleness continuously — no work in
+flight, no wake due, no viewer — and closes the kernel from its dispose hook,
+so the eval side keeps no timer that could fire DURING active work (the
+measured incident: an 18.7-minute gap between cells mid-turn, read as idle by
+the eval-side clock, refused the returning call on a kernel that had never
+been idle at all). Only the no-session fallback keys (``ctx-<id>``) keep the
+on-access timer (:data:`KERNEL_IDLE_SECONDS`); there is no owning lifetime to
+anchor those to. Retirement never refuses a call either way: whatever retires
+a kernel, the next call RUNS on a fresh one with a leading notice that the
+earlier namespace is gone (see ``_LOST_KERNELS``) — "Code was NOT run" turned
+a recoverable reset into a dead end in the middle of a task.
 """
 
 from __future__ import annotations
@@ -86,7 +101,13 @@ EVAL_MAX_TIMEOUT_SECONDS = 300.0
 #: description ("training, large fetches, polling loops" — none of which fit in
 #: five minutes). Matches bash's background ceiling so the two modes agree.
 EVAL_MAX_BACKGROUND_TIMEOUT_SECONDS = 3600.0
-#: A kernel untouched for this long is closed on the NEXT eval call. On-access
+#: A kernel untouched for this long is closed on the NEXT eval call — but only
+#: for the no-session fallback keys (``ctx-<id>``): those have no owning
+#: runtime lifetime to anchor to, and KERNEL_IDLE_SECONDS is deliberately
+#: unchanged there (no measurement argues to move it). Kernels a session
+#: runtime owns are never selected by the reaper at all (``_Kernel.managed``):
+#: their life is the runtime's life, and the runtime's own, continuously
+#: evaluated idle notion is what closes them, via the dispose hook. On-access
 #: reaping rather than a background task: a timer would have to be owned by an
 #: event loop that outlives sessions, and 5 minutes of staleness costs nothing
 #: compared to the complexity of keeping one alive correctly.
@@ -156,6 +177,7 @@ class _Kernel:
         *,
         windows_job: int | None = None,
         scrub_read: int | None = None,
+        managed: bool = False,
     ) -> None:
         self.process = process
         # On Windows, closing this Job Object is the process-tree equivalent of
@@ -181,6 +203,17 @@ class _Kernel:
         self.scrub_partial: bytes = b""
         self.last_used = time.monotonic()
         self.generation = uuid.uuid4().hex
+        #: Whether a session runtime owns this kernel's lifetime, stamped at
+        #: spawn from ``ToolContext.kernel_managed_by_session``. ``_reap_idle``
+        #: must never close such a kernel: its kernel-only clock is wrong
+        #: exactly when the runtime is busy (turns, subagents, tool calls).
+        self.managed = managed
+        #: Latched once the cross-process restart marker for this generation
+        #: has been written — set only on a SUCCESSFUL write, so a transient
+        #: failure retries on the next completed exchange. One write per
+        #: generation is all the marker needs: its single question is "did a
+        #: kernel for this session exist before?".
+        self.marker_written = False
 
 
 #: Session key -> kernel, least-recently-used first. Process-wide on purpose:
@@ -188,13 +221,27 @@ class _Kernel:
 #: objects the registry builds for each of them.
 _KERNELS: OrderedDict[str, _Kernel] = OrderedDict()
 
-# A bounded receipt ledger outlives an evicted interpreter. Refuse the first
-# stale-namespace call BEFORE executing it: running code against an empty
-# namespace can silently take a different branch or repeat external effects,
-# which is worse than a NameError. The next call can deliberately rebuild it.
+# A bounded receipt ledger outlives a retired interpreter. The next call
+# RUNS — the old refusal stranded the model mid-task, and "Code was NOT run"
+# is not an honest answer when the code could have run safely — but it runs
+# on a FRESH kernel with the loss as the FIRST line of its result, before any
+# decision can read the empty namespace: running code against a namespace
+# that silently lost its variables can take a different branch or repeat
+# external effects, and naming the reset is what keeps that failure loud.
+# Mid-run losses do not come through here at all: the killing call reports
+# them (``_lost_state_error``) and the next call is silently fresh.
 _LOST_KERNELS: OrderedDict[str, str] = OrderedDict()
 _ACTIVE_KERNELS: set[str] = set()
 _CLOSE_ON_RETURN: set[str] = set()
+#: Session keys this PROCESS has already spawned a managed kernel for. The
+#: cross-process restart marker must announce a restart only for a key whose
+#: kernel state this process never held: within one process every loss is
+#: either reported on the killing call (abort/timeout/crash — the next call
+#: is contractually silent) or recorded as a receipt, so a marker found for a
+#: never-served key can only have been written by a PREVIOUS runtime. Without
+#: this memo the marker would re-announce a restart after every ordinary
+#: mid-run loss; with it, the notice stays confined to the case it names.
+_SERVED_KERNEL_KEYS: set[str] = set()
 _MAX_RESET_RECEIPTS = 4096
 # Includes JSON's worst-case character escaping across all bounded worker
 # output fields; tool-bridge requests have their smaller own protocol budget.
@@ -208,6 +255,65 @@ def _record_reset(key: str, reason: str) -> None:
         _LOST_KERNELS.popitem(last=False)
 
 
+#: Name of the per-session restart marker inside the session directory. Public
+#: because the session copy set has to CLASSIFY it: it travels with the session
+#: (``network.sync.COPY_SET_NAMES``), so a moved session's first cell still gets
+#: the restart notice instead of silently fresh state — which is why
+#: ``tests/unit/network/test_sync_copy_set.py`` pins it against this module.
+#: Its presence is the whole signal; the content (``generation``,
+#: ``written_at_ms``) exists for debugging, not for logic.
+KERNEL_MARKER_NAME = "eval-kernel.json"
+
+
+def _marker_path(session_dir: str) -> str:
+    return os.path.join(session_dir, KERNEL_MARKER_NAME)
+
+
+def _read_marker(session_dir: str) -> bool:
+    """Whether ``session_dir`` holds a readable restart marker.
+
+    Best-effort by contract: absent, unreadable, or corrupt (anything that is
+    not a JSON object) reads as "no marker" — the marker can decorate a
+    result, it can never refuse a call or turn a healthy state into an error.
+    A valid object with unknown keys still counts: this file only ever has to
+    answer "did a kernel exist", and forward compatibility matters more than
+    schema policing for a signal that is purely advisory.
+    """
+    try:
+        with open(_marker_path(session_dir), encoding="utf-8") as handle:
+            return isinstance(json.load(handle), dict)
+    except (OSError, ValueError):
+        return False
+
+
+def _write_marker(session_dir: str, generation: str) -> bool:
+    """Best-effort atomic restart-marker write; True when the file was replaced.
+
+    Atomic (tmp + ``os.replace``) because a reader — this process or its
+    successor — must never see a half-written file and read "corrupt" where
+    the truth is "a kernel ran". The tmp name carries the pid so two runtimes
+    racing the same session's marker (a successor can start before the
+    predecessor's last write lands; last writer wins, both were real kernels)
+    never interleave inside one file. Returns False instead of raising: a
+    read-only or removed directory must never fail the call whose result is
+    already in hand, and the caller's latch stays open so the next completed
+    exchange retries.
+    """
+    path = _marker_path(session_dir)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps({"generation": generation, "written_at_ms": int(time.time() * 1000)})
+            )
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        return False
+
+
 async def close_session_kernel(session_id: str) -> None:
     """Release a retired session's idle interpreter and reset receipt.
 
@@ -217,6 +323,12 @@ async def close_session_kernel(session_id: str) -> None:
     its normal abort/timeout ownership, and can never repopulate the idle pool.
     """
     _LOST_KERNELS.pop(session_id, None)
+    # The process's own history of this key ends here too: if the same process
+    # ever serves the key again (a revived session), the marker file must read
+    # as "a previous kernel existed" again — its state is gone with this one.
+    # The marker FILE itself survives on purpose: a restart's first cell is
+    # exactly who needs it (see the module docstring).
+    _SERVED_KERNEL_KEYS.discard(session_id)
     if session_id in _ACTIVE_KERNELS:
         _CLOSE_ON_RETURN.add(session_id)
     kernel = _KERNELS.pop(session_id, None)
@@ -257,6 +369,31 @@ def _session_key(context: ToolContext | None) -> str:
     if context is None:
         return "no-context"
     return context.session_id or f"ctx-{id(context):x}"
+
+
+def _session_dir_of(context: ToolContext | None) -> str | None:
+    """The session directory a live tool context carries, or ``None``.
+
+    ``""`` reads as absent rather than as a path — matching
+    ``scratchpad_dir_of``, and duck-typed for the same reason: test doubles
+    are not ToolContexts and a bare attribute access would make them raise.
+    """
+    raw = getattr(context, "session_dir", None)
+    if not isinstance(raw, str) or not raw:
+        return None
+    return raw
+
+
+def _kernel_is_managed(context: ToolContext | None) -> bool:
+    """Whether this call's kernel is owned by a session runtime.
+
+    A declared fact on the context (see
+    ``ToolContext.kernel_managed_by_session``), not a liveness probe: at eval
+    time THIS call is turn work, so every "is the session active" probe
+    answers "yes" for an incident session and a dormant one alike. Duck-typed
+    like ``_session_dir_of``.
+    """
+    return bool(getattr(context, "kernel_managed_by_session", False))
 
 
 def _label_id(session_key: str) -> str:
@@ -474,9 +611,19 @@ def _retire(kernel: _Kernel) -> None:
 
 
 def _reap_idle(now: float) -> None:
-    """Close kernels unused for :data:`KERNEL_IDLE_SECONDS` (on access)."""
+    """Close unused FALLBACK kernels (on access) — never a session-managed one.
+
+    A managed kernel's life is its runtime's life, and the runtime's own idle
+    predicate closes it via the dispose hook; this kernel-only clock is blind
+    to everything the runtime is doing, so it must not second-guess it. That
+    distinction is the incident this split exists for: a session busy with
+    turns, subagents and tool calls for 18.7 minutes between cells is not
+    idle, but this clock would read it as such.
+    """
     stale = [
-        key for key, kernel in _KERNELS.items() if now - kernel.last_used > KERNEL_IDLE_SECONDS
+        key
+        for key, kernel in _KERNELS.items()
+        if not kernel.managed and now - kernel.last_used > KERNEL_IDLE_SECONDS
     ]
     for key in stale:
         _retire(_KERNELS.pop(key))
@@ -523,7 +670,12 @@ def _restore(key: str, kernel: _Kernel, position: int) -> None:
     _KERNELS.update(items)
 
 
-async def _spawn(cwd: str, session_key: str = "", scratchpad_dir: str | None = None) -> _Kernel:
+async def _spawn(
+    cwd: str,
+    session_key: str = "",
+    scratchpad_dir: str | None = None,
+    managed: bool = False,
+) -> _Kernel:
     """Start a worker with platform-native process-tree ownership.
 
     POSIX uses a new session/process group. Windows assigns the worker to a
@@ -542,6 +694,12 @@ async def _spawn(cwd: str, session_key: str = "", scratchpad_dir: str | None = N
     created (``open('/tmp/…')``, ``tempfile.mkdtemp()``), and a persistent
     kernel can only read the path if it is exported when the worker STARTS —
     there is no later injection point.
+
+    ``managed`` stamps the kernel as owned by a session runtime
+    (``ToolContext.kernel_managed_by_session``): ``_reap_idle`` never closes
+    such a kernel — its life is the runtime's life, and the dispose hook ends
+    it — so the stamp is taken at spawn, where the spawning context's
+    declaration is the one in hand.
     """
     spawn_options: dict[str, Any] = {
         "stdin": asyncio.subprocess.PIPE,
@@ -671,7 +829,7 @@ async def _spawn(cwd: str, session_key: str = "", scratchpad_dir: str | None = N
     if scrub_write is not None:
         with contextlib.suppress(OSError):
             os.close(scrub_write)
-    return _Kernel(process, windows_job=windows_job, scrub_read=scrub_read)
+    return _Kernel(process, windows_job=windows_job, scrub_read=scrub_read, managed=managed)
 
 
 async def _read_crash_stderr(kernel: _Kernel) -> str:
@@ -1122,24 +1280,11 @@ async def execute_eval(
     _reap_idle(time.monotonic())
     idle = _KERNELS.get(key)
     if idle is not None and idle.process.returncode is not None:
-        # OS-killed interpreters lose the same namespace as LRU/TTL eviction.
-        # Refuse the first subsequent cell before a fresh-state branch can
-        # silently repeat an external effect.
+        # OS-killed interpreters lose the same namespace as LRU/TTL eviction;
+        # the receipt recorded here becomes the notice on the running call.
         _KERNELS.pop(key)
         _retire(idle)
         _record_reset(key, "idle Python kernel exited")
-
-    reset = _LOST_KERNELS.pop(key, None)
-    if reset is not None:
-        result = _error(
-            tool_call_id,
-            "eval",
-            f"Session state was reset: {reset}. Code was NOT run. "
-            "Variables/imports are gone; rebuild the namespace explicitly "
-            "in the next eval call.",
-        )
-        result.details = {"kernel_reset": True, "reset_reason": reset, "code_executed": False}
-        return result
 
     if key in _ACTIVE_KERNELS:
         return _error(
@@ -1147,20 +1292,53 @@ async def execute_eval(
             "eval",
             "Session kernel is busy; wait for the current eval call to finish.",
         )
+
+    # Only a call that will actually RUN consumes the receipt: the busy check
+    # above and a spawn failure below must not swallow the notice a later
+    # running call owes the model (validation/secret-scan/pre-abort refusals
+    # never reach here at all).
+    receipt = _LOST_KERNELS.pop(key, None)
+    reset = receipt
     _ACTIVE_KERNELS.add(key)
 
+    session_dir = _session_dir_of(context)
     kernel = _KERNELS.pop(key, None)
     if kernel is None:
+        if reset is None and session_dir is not None and key not in _SERVED_KERNEL_KEYS:
+            # A fresh process has an empty receipt ledger, so the restart it
+            # just went through cannot be announced from memory; the marker
+            # file can. Read only for a key this process never served — see
+            # the _SERVED_KERNEL_KEYS comment for why that guard is
+            # load-bearing rather than an optimisation.
+            if _read_marker(session_dir):
+                reset = "the session runtime restarted"
         try:
-            kernel = await _spawn(_safe_cwd(context), key, scratchpad_dir_of(context))
+            kernel = await _spawn(
+                _safe_cwd(context),
+                key,
+                scratchpad_dir_of(context),
+                managed=_kernel_is_managed(context),
+            )
         except OSError as exc:
             _ACTIVE_KERNELS.discard(key)
             _CLOSE_ON_RETURN.discard(key)
+            if receipt is not None:
+                # This call never ran, so the notice it would have carried is
+                # still owed to the next one.
+                _record_reset(key, receipt)
             return _error(tool_call_id, "eval", f"failed to start Python kernel: {exc}")
         except BaseException:
             _ACTIVE_KERNELS.discard(key)
             _CLOSE_ON_RETURN.discard(key)
+            if receipt is not None:
+                # Same contract as the OSError branch above: an abort or
+                # cancellation landing during spawn also means this call never
+                # ran, so the notice it consumed is still owed to the next one
+                # (review round 1, R1-3).
+                _record_reset(key, receipt)
             raise
+        if session_dir is not None:
+            _SERVED_KERNEL_KEYS.add(key)
     kernel.last_used = time.monotonic()
 
     request_id = uuid.uuid4().hex
@@ -1258,8 +1436,29 @@ async def execute_eval(
         _retire(kernel)
     else:
         _remember(key, kernel)
-    result = await _render(tool_call_id, response or {}, context, on_update)
-    result.details = {**(result.details or {}), "kernel_generation": kernel.generation}
+    if session_dir is not None and not kernel.marker_written:
+        # Cross-process restart marker, written off the loop (a filesystem
+        # write, however small, has no business in the render path). The latch
+        # is set only on SUCCESS so a transient failure retries on the next
+        # completed exchange; a permanently unwritable directory just means no
+        # marker, which only ever costs a notice nothing can reconstruct.
+        kernel.marker_written = await asyncio.to_thread(
+            _write_marker, session_dir, kernel.generation
+        )
+    result = await _render(tool_call_id, response or {}, context, on_update, reset=reset)
+    details: dict[str, Any] = {
+        **(result.details or {}),
+        "kernel_generation": kernel.generation,
+    }
+    if reset is not None:
+        # Machine-visible half of the notice (its other half is the first line
+        # of ``result.text``). ``code_executed`` is True here BECAUSE the call
+        # ran on a fresh kernel — that flag is exactly what distinguishes this
+        # shape from the old refusal, where it was False and no code ran.
+        details["kernel_reset"] = True
+        details["reset_reason"] = reset
+        details["code_executed"] = True
+    result.details = details
     return result
 
 
@@ -1268,6 +1467,7 @@ async def _render(
     response: dict[str, Any],
     context: ToolContext | None,
     on_update: Callable[[AgentToolUpdate], None] | None,
+    reset: str | None = None,
 ) -> ToolResult:
     """Build the ToolResult from one worker response.
 
@@ -1276,6 +1476,11 @@ async def _render(
     ``details`` is never serialized to providers, so the human sees it and
     the model does not. Everything the model reads is routed through
     ``spill_truncate`` for the shared 8 KiB budget with a spill handle.
+
+    ``reset`` is a retirement reason from this call's kernel: when present it
+    leads the body as a first-line notice (head-biased truncation keeps it),
+    so the model learns that earlier state is gone before it reads anything
+    the fresh code printed as though the old namespace still existed.
 
     The ``spill_truncate`` tail is offloaded with ``asyncio.to_thread`` because
     it runs on the same event loop Textual renders on, and it is not cheap: a
@@ -1318,6 +1523,7 @@ async def _render(
         error,
         display,
         context,
+        reset,
     )
 
 
@@ -1330,6 +1536,7 @@ def _build_render_result(
     error: Any,
     display: list[str],
     context: ToolContext | None,
+    reset: str | None = None,
 ) -> ToolResult:
     """Assemble the ToolResult body off the event loop.
 
@@ -1338,11 +1545,23 @@ def _build_render_result(
     the ``spill_truncate`` that may sweep and rewrite the spill store — is
     CPU/disk work that must not run on the render loop.
     """
+    # FIRST line of the body in BOTH renderings: the model must read that
+    # earlier state is gone before any output or error text it could otherwise
+    # interpret against a namespace it built three calls ago. Leading the body
+    # is also what makes it survive head-biased truncation.
+    notice: list[str] = []
+    if reset is not None:
+        notice.append(
+            f"Session state was reset ({reset}) — this call ran on a FRESH kernel. "
+            "Variables, imports and functions from earlier calls are gone; "
+            "re-create anything this code needed."
+        )
     # The result leads so head-biased truncation keeps it: it is the one line
     # the call existed to produce.
     if ok:
         body = "\n".join(
-            ([f"result: {result_repr}"] if result_repr is not None else [])
+            notice
+            + ([f"result: {result_repr}"] if result_repr is not None else [])
             + [_bash_output_summary(stdout, stderr)]
         )
         text, spill_details = spill_truncate(body, "eval", context, TOOL_OUTPUT_LIMIT_CHARS)
@@ -1352,7 +1571,7 @@ def _build_render_result(
         return _text(tool_call_id, "eval", text, details=details)
 
     error_text = str(error or "(no error reported)")
-    body = "\n".join([error_text, _bash_output_summary(stdout, stderr)])
+    body = "\n".join(notice + [error_text, _bash_output_summary(stdout, stderr)])
     text, spill_details = spill_truncate(body, "eval", context, TOOL_OUTPUT_LIMIT_CHARS)
     return ToolResult(
         tool_call_id=tool_call_id,
@@ -1421,7 +1640,8 @@ async def complete_session_variables(
       refusal means "not confirmed", and the next read is the authority;
     * ``_LOST_KERNELS`` is deliberately not consumed: this verb reports what the
       interpreter holds, and the first *cell* after a reset is where that reset
-      must be reported.
+      is reported — as the first line of a cell that RUNS, never a refusal (see
+      ``execute_eval``).
 
     Returns the frozen envelope: ``{ok, state: observed|busy, kernel, variables,
     truncated}`` for a read, ``{ok, state: "ok", variable?}`` for a write, and
