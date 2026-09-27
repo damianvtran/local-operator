@@ -795,3 +795,47 @@ def test_the_port_and_listen_address_have_rows_too(tmp_path: Path) -> None:
     assert settings.listen_address == "127.0.0.1"
     # The dial-only answer, which is what this pair of values means together.
     assert relay.advertise_endpoints(settings) == ["127.0.0.1:4123"]
+
+
+def test_a_non_string_top_level_key_cannot_take_the_store_down(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """The report must SURVIVE the file it reports on, whatever YAML made of the keys.
+
+    YAML 1.1 resolves bare scalars by its own rules, so a hand-written ``config.yml`` can
+    carry top-level keys that are not strings: ``2024:`` is an int, ``on:``/``yes:`` a
+    bool, and dates, floats and null exist besides. Sorting a mix of those against a
+    string raised ``TypeError: '<' not supported between instances of 'int' and 'str'``
+    inside ``ConfigManager.__init__`` — so every ``lop`` verb died with a stack-trace
+    panel on exactly the file class this mechanism exists to make visible, and
+    ``lop config edit network.port 4098`` wrote nothing at all. The base commit loads that
+    file (it has no report to run), which is what made this a regression rather than a
+    pre-existing limit (review round 1, B1).
+
+    The decision, asserted here: a key this store cannot SPELL — it has no ``values.``
+    home to be moved to — is passed over in silence, and a string key beside it is still
+    reported.
+    """
+    (tmp_path / "config.yml").write_text(
+        "version: 0.1.0\n"
+        "metadata:\n  created_at: x\n  last_modified: x\n  description: d\n"
+        "values:\n  conversation_length: 100\n"
+        "network:\n  advertise_hosts:\n    - 203.0.113.7:4097\n"
+        "2024:\n  archived: true\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        manager = ConfigManager(tmp_path)  # TypeError here before the fix
+
+    reported = [r.getMessage() for r in caplog.records if "top-level" in r.getMessage()]
+    assert len(reported) == 1, reported
+    assert "network" in reported[0]
+    assert "2024" not in reported[0], reported[0]
+
+    # AND THE VERB THAT DIED NOW ROUND-TRIPS, with both keys still in the file.
+    manager._write_config(vars(manager.config))
+
+    document = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))
+    assert document["network"]["advertise_hosts"] == ["203.0.113.7:4097"]
+    assert 2024 in document, sorted(map(repr, document))

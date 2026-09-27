@@ -234,8 +234,20 @@ def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> Non
     ``print`` the version check beside it uses: this one belongs in the log the
     operator can find later, and the version check is about the file being NEWER
     than the build, which the user has to see while it happens.
+
+    ONLY STRING KEYS ARE REPORTED, deliberately. YAML 1.1 parses ``2024:`` as an int,
+    ``on:``/``yes:`` as a bool, and has dates, floats and null besides, so a report that
+    NAMED them could not say where they belong (``values.2024`` is not a setting path)
+    and — worse — a report that merely SORTED them died: ``sorted`` over mixed keys
+    raised ``TypeError: '<' not supported between instances of 'int' and 'str'`` inside
+    ``ConfigManager.__init__``, which is every ``lop`` verb failing with a stack-trace
+    panel on precisely the file class this mechanism exists to make readable (review
+    round 1, B1). A key this store cannot spell is not made visible by naming it, so it
+    is passed over in silence; a string key beside it is still reported.
     """
-    unmodelled = sorted(key for key in config_dict if key not in _MODELLED_TOP_LEVEL)
+    unmodelled = sorted(
+        key for key in config_dict if isinstance(key, str) and key not in _MODELLED_TOP_LEVEL
+    )
     if not unmodelled:
         return
     seen = (str(path), tuple(unmodelled))
