@@ -93,7 +93,9 @@ class _StubHub:
         self._fail = fail or set()
         self.requested: list[str] = []
 
-    def download_agent_from_marketplace(self, agent_id: str, dest_path: Path) -> None:
+    def download_agent_from_marketplace(
+        self, agent_id: str, dest_path: Path, *, with_credential: bool = False
+    ) -> None:
         self.requested.append(agent_id)
         if agent_id in self._fail:
             raise RuntimeError(f"simulated hub failure for {agent_id}")
