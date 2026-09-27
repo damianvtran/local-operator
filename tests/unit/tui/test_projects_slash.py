@@ -893,3 +893,21 @@ async def test_an_in_page_retarget_clears_the_stale_set(tmp_path: Path) -> None:
         assert not view._associated
         assert "this session" not in view.rendered_rows()[0]
         assert "◆" not in view._last.text.plain
+
+
+@pytest.mark.asyncio
+async def test_the_open_hint_paints_its_word_once(tmp_path: Path) -> None:
+    """Q4 / D5 / U6: the key is `↵` and the label ` open` — one word painted."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project board")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._open_hint.display
+        painted = view._open_hint.preview(" open", lead=True)
+        assert painted.count("open") == 1, painted
+        assert "↵  open" in painted  # key `↵`, then the label's two-space seam
