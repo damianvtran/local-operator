@@ -1212,7 +1212,9 @@ def restart_if_build_moved(
       because a machine that cannot have this problem should not pay for the repair.
     * **No live pid.** A stopped daemon has no build to compare, and the repair for a
       stopped-but-loaded job is the installers' own ``kickstart`` path
-      (:func:`kickstart`), not this one.
+      (:func:`kickstart`), not this one. (On the refresh path the tunnel's arm for
+      it is :func:`start_if_stopped`, wired in
+      ``tunnels/install.refresh_plist_if_stale``.)
     * **A live pid whose build is current, or whose build cannot be established.**
       Two different facts with the same consequence, and the direction is chosen: a
       missed reload leaves a daemon where it is, while a reload reasoned from a
@@ -1384,8 +1386,13 @@ def start_if_stopped(
     an attempt that dies instantly (see :func:`_await_new_pid`, whose
     ``previous`` is ``None`` here: there was no process to differ from) — and
     either failure shape is reported through :func:`revive_failure`, which names
-    this daemon's installer. Nothing here raises: the upgrade it is part of has
-    already succeeded. ONE kick: a revival that lands is running the next time
+    this daemon's installer. NOTHING THIS FUNCTION DECIDES RAISES, and every
+    answer is an outcome, never an exception — the upgrade it is part of has
+    already succeeded. ``may_start`` is the one call that is not this function's
+    own, and it deliberately runs outside that guard: the refresh sites already
+    wrap the repair, so a raise from the caller's code surfaces as a reported
+    failure, where swallowing it here would answer ``left-stopped`` for a gate
+    that never spoke. ONE kick: a revival that lands is running the next time
     this asks, and a revival that does not is reported rather than retried.
 
     WHY A SEPARATE FUNCTION rather than a branch inside
