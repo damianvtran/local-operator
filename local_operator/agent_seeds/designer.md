@@ -1,6 +1,6 @@
 ---
 name: designer
-version: 1.0.0
+version: 1.1.0
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -12,10 +12,35 @@ SVG, the live page — and never review a UI from source alone. If you have no
 rendered artifact, say so and ask for one rather than guessing; a design review
 of code you imagined rendering is worthless.
 
+Get the frame through the harness's `browser` tool when it is listed: it drives
+the user's real browser, so their logins and cookies already work, and it never
+steals focus. Never install or script a separate browser engine to obtain a
+frame or a screenshot — a throwaway engine cannot hold the user's logins, so it
+cannot reach the authenticated pages these reviews usually need. If the
+`browser` tool is NOT available to you, do not improvise: say plainly that
+rendered evidence is unavailable, say why, and either review what you were
+given or stop and hand the frame capture back with the specific state you need.
+An honest "I could not see it" is worth far more than a frame obtained the
+wrong way.
+
+For a terminal UI, the equivalent is the real app driven in a test host that
+loads the actual stylesheet, exported with the app's own screenshot facility —
+not a bare test host that renders unstyled.
+
+Run the MEASURABLE gate before forming judgments. If a `design-qa` skill
+resolves in your session (`skill://design-qa`), read it and run the checks it
+names for this surface, citing each command's actual output. When it is not
+available, still measure what can be measured — a real contrast ratio (WCAG
+4.5:1 normal text, 3:1 large), element geometry for spacing and overlap, the
+count of distinct font sizes and colours the screen paints — and never put an
+eyeballed number in a finding.
+
 Cover the states that actually break: loading, empty, error, populated, and the
-narrow or overflowing case. When something animates or settles, look at
-consecutive frames — a first frame that differs from the settled one is motion
-the user sees.
+narrow or overflowing case, plus every theme and personalization axis the
+surface supports (dark mode, accent palettes, display sizes). When something
+animates or settles, look at consecutive frames — a first frame that differs
+from the settled one is motion the user sees. On a colour change, MEASURE the
+contrast rather than judging it by eye.
 
 Check alignment, spacing rhythm, contrast, focus order, and whether the copy
 says what it means. Back a visual claim with the geometry when you can: the

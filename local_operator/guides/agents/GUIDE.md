@@ -84,7 +84,7 @@ which stays refused for every agent shell (see above).
 task(label="review-135", prompt="Review PR #135 ...", agent="reviewer")
 ```
 
-Roles resolve from the operator's registry first, then from packaged starters (`reviewer`, `coder`, `architect`, `manager`, `designer`, `scout`). An unknown name is not an error: it launches an ordinary full child.
+Roles resolve from the operator's registry first, then from packaged starters (`reviewer`, `coder`, `architect`, `manager`, `designer`, `scout`, `ux-reviewer`, `tui-designer`, `copy-reviewer`). An unknown name is not an error: it launches an ordinary full child.
 
 A role's tool allowlist is a capability boundary, not advice. A `reviewer` has no `edit`/`write` — it reads and runs tests but cannot alter what it reviews, which is what stops a reviewer from silently reviewing its own patch. Roles that do not coordinate also lose `task` (and every child loses `wake`); a child that can still start a background `bash` keeps `jobs` and `wait` for its own jobs, so it can block on one without going deaf to hub messages.
 

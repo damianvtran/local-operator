@@ -106,8 +106,34 @@ async def test_list_separates_registered_roles_from_starters(context, registry) 
     body = await call(context, op="list")
     registered, _, starters = body.partition("installable starters")
     assert "reviewer" in registered
-    assert "reviewer" not in starters, "an installed role must not still be offered"
-    assert "architect" in starters
+    # Names, not substrings: `copy-reviewer` CONTAINS "reviewer", so a plain
+    # substring test reports an installed role as still on offer.
+    starter_names = {line.split()[1] for line in starters.splitlines() if line.startswith("- ")}
+    assert "reviewer" not in starter_names, "an installed role must not still be offered"
+    assert "architect" in starter_names
+
+
+@pytest.mark.asyncio
+async def test_the_design_review_starters_are_offered_and_installable(context, registry) -> None:
+    """The design-review family ships packaged (designer updated; ux-reviewer,
+    tui-designer and copy-reviewer added): all four must be visible in the
+    starters offer, and installing one must move only that one to the
+    registered list like any other starter."""
+
+    def starter_names(text: str) -> set[str]:
+        _, _, starters = text.partition("installable starters")
+        return {line.split()[1] for line in starters.splitlines() if line.startswith("- ")}
+
+    body = await call(context, op="list")
+    assert {"designer", "ux-reviewer", "tui-designer", "copy-reviewer"} <= starter_names(body)
+
+    await call(context, op="install", name="ux-reviewer")
+    after = await call(context, op="list")
+    registered, _, _ = after.partition("installable starters")
+    assert "ux-reviewer" in registered
+    names = starter_names(after)
+    assert "ux-reviewer" not in names, "the installed starter must not still be offered"
+    assert "tui-designer" in names, "installing one starter must not hide the rest"
 
 
 @pytest.mark.asyncio
