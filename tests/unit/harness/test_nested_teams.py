@@ -11,7 +11,6 @@ BEN-7 decisions D1-D4 and D7, scored against BEN-1 S3 gates N0-N3:
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 
@@ -39,6 +38,7 @@ from local_operator.teams import (
     TeamRegistry,
     escalation_preamble,
 )
+from tests.unit.harness.test_comms import ChangeSignal, wait_for
 
 MODEL = ModelSpec(provider="test", model_id="m", context_window=100_000)
 
@@ -264,15 +264,26 @@ async def test_a_team_launch_stamps_the_team_prefixed_agent_on_job_and_origin(tm
     assert job is not None and job.agent_role == "team:pod"
 
     comms = root.subagent_comms
-    deadline = asyncio.get_running_loop().time() + 10.0
-    origin_path = None
-    while asyncio.get_running_loop().time() < deadline:
+
+    def origin_stamped() -> bool:
         session_dir = comms.session_dir_of(job_id)
-        if session_dir is not None and (session_dir / "origin.json").exists():
-            origin_path = session_dir / "origin.json"
-            break
-        await asyncio.sleep(0.01)
-    assert origin_path is not None, "the child never stamped origin.json"
+        return session_dir is not None and (session_dir / "origin.json").exists()
+
+    # Wait on the event, never on the clock (AGENTS.md): ride the child's own
+    # publications, both sources watched exactly as test_comms.py's integration
+    # cases do — the parent stream carries the attach that makes
+    # ``session_dir_of`` non-None, the detail registry every durable transcript
+    # append. The attach runs strictly after the builder's
+    # ``mark_session_origin`` stamp, so no publication can wake this wait
+    # before ``origin.json`` exists.
+    signal = ChangeSignal().watch_comms(comms).watch_session(root)
+    try:
+        await wait_for(origin_stamped, signal=signal)
+    finally:
+        signal.close()
+    session_dir = comms.session_dir_of(job_id)
+    assert session_dir is not None, "the child never stamped origin.json"
+    origin_path = session_dir / "origin.json"
     origin = json.loads(origin_path.read_text())
     assert origin["origin"] == "subagent"
     assert origin["agent"] == "team:pod"
