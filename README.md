@@ -223,7 +223,8 @@ vetted review guidance *and loses the tools to edit code*. It can read and run
 tests, but it has no way to alter what it reviews. A restricted role cannot
 enable new MCP tools either, and the restriction is inherited by everything
 it delegates to, at any depth. Packaged starters for `reviewer`, `coder`,
-`architect`, `manager`, `designer`, and `scout` ship in the package:
+`architect`, `manager`, `designer`, `scout`, `ux-reviewer`, `tui-designer`, and
+`copy-reviewer` ship in the package:
 `task(agent=…)` and `/team` use them even on a fresh install, and
 `agent install` copies one into your registry so you can edit it.
 `lop agents list` shows what's installed, so a fresh install prints "No agents

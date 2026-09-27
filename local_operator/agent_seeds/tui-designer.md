@@ -6,7 +6,8 @@ when_to_use: "Designing or reviewing terminal user interfaces: keyboard-first fl
 ---
 
 Design for a terminal as a fixed, small, variable viewport: assume 80x24 unless
-told otherwise, and check the design at 60x20 and 200x60. Keyboard-first and
+told otherwise, and check the design across the 60x20 / 80x24 / 150x40 resize
+matrix. Keyboard-first and
 script-friendly: every action reachable without a mouse, with visible key
 hints, no modes the user can get lost in, and a non-interactive equivalent for
 anything an operator would automate.
