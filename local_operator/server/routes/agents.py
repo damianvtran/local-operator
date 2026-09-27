@@ -29,12 +29,11 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from local_operator.agent_profiles import is_specialist, profile_from_agent
 from local_operator.agents import (
-    PROVENANCE_TAG_PREFIXES,
     AgentData,
     AgentEditFields,
     AgentRegistry,
+    instruction_set_fields,
 )
 from local_operator.clients._http import APIError, scrub_details
 from local_operator.clients.radient import (
@@ -682,13 +681,6 @@ LOCAL_FAILURE_CODE = "local_failure"
 #: either way, so a client that ignores ``code`` loses nothing by the change.
 HUB_UNAUTHORIZED_CODE = "hub_unauthorized"
 
-#: Local registry tags that ENCODE a profile field rather than tag the agent.
-#: ``role`` marks the row as a delegation role, and ``tools:``/``effort:``/
-#: ``delegate:`` carry fields the document publishes in their own right (the keys
-#: ``profile_from_agent`` decodes). Publishing them as tags as well would put this
-#: machine's registry encoding on the hub.
-PROFILE_ENCODING_TAG_KEYS = frozenset({"role", "tools", "effort", "delegate"})
-
 
 class AgentPublicationRequest(BaseModel):
     """The request body of a publish or republish (contract §6.4).
@@ -823,63 +815,6 @@ def _invalid_document_error(exc: InstructionSetError) -> HTTPException:
     )
 
 
-def _instruction_set_fields(
-    agent_registry: AgentRegistry, agent: AgentData, overrides: Dict[str, Any]
-) -> Dict[str, Any]:
-    """The document fields a local registry row publishes, before overrides.
-
-    WHY THIS MACHINE BUILDS THE DOCUMENT AND NOT THE DESKTOP APP: the instruction
-    body lives here -- in the agent's ``system_prompt.md`` -- so an app-assembled
-    document would be a second, drifting copy of the local-to-hub mapping. The
-    renderer supplies through ``document`` only what it actually edits, and
-    everything else comes from the row the user is looking at.
-    """
-
-    profile = profile_from_agent(agent_registry, agent)
-    # The profile's instructions are the delegation PREAMBLE: capped, because they
-    # ride in front of every turn of a child. A publication must not be truncated,
-    # because a body silently cut short is a document the author never wrote,
-    # published under their name. So the body is read unbounded here and the
-    # document's own cap refuses it with the rule the hub would use.
-    instructions = agent_registry.get_agent_system_prompt(agent.id) or ""
-
-    fields: Dict[str, Any] = {
-        "name": agent.name,
-        "description": str(agent.description or ""),
-        "instructions": instructions,
-        # Locally, role and specialist are a registry tag and a category; the hub
-        # has one explicit `kind`. A row that is neither is published as a role: a
-        # published agent IS a role to whoever pulls it, and refusing it would
-        # leave the user unable to publish an agent for a reason the dialog cannot
-        # explain or offer a fix for.
-        "kind": "specialist" if is_specialist(agent) else "role",
-        # The AUTHOR's content version. Deliberately not the row's `version`, which
-        # records the local-operator release that wrote agent.yml: reusing it would
-        # publish an application version as the author's own.
-        "version": "1.0.0",
-        "tags": [
-            str(tag)
-            for tag in (agent.tags or [])
-            if str(tag).partition(":")[0].strip().lower() not in PROFILE_ENCODING_TAG_KEYS
-            and not str(tag).strip().lower().startswith(PROVENANCE_TAG_PREFIXES)
-        ],
-    }
-    # `when_to_use` and `categories` are NOT derived. Locally a role stores its
-    # routing text AS the description (``profile_from_agent``), so sending both
-    # would publish one sentence twice; and the local category vocabulary is not
-    # the hub's -- `specialist` is a local kind marker, not one of the hub's
-    # categories -- so translating between them silently is the one thing neither
-    # side is allowed to do. The caller supplies them when it means them.
-    if profile.tools is not None:
-        fields["tools"] = list(profile.tools)
-    if profile.effort:
-        fields["effort"] = profile.effort
-    fields["delegate"] = profile.may_delegate
-
-    fields.update(overrides)
-    return fields
-
-
 @router.post(
     "/v1/agents/{agent_id}/publish",
     response_model=CRUDResponse,
@@ -975,7 +910,8 @@ async def publish_agent_to_radient(
     """
     Publish the agent with the given ID to the Radient Agent Hub.
 
-    The document is built from the local row (see :func:`_instruction_set_fields`)
+    The document is built from the local row (see
+    ``agents.instruction_set_fields``)
     with any caller-supplied overrides applied, then posted to the hub's publish
     endpoint. Nothing else about the row travels: no conversation, no execution
     history, no learnings, no schedules, no plan, no pickled context, no working
@@ -1001,7 +937,7 @@ async def publish_agent_to_radient(
         try:
             overrides = validate_document_overrides(publication.document)
             document = build_instruction_set_document(
-                **_instruction_set_fields(agent_registry, agent, overrides)
+                **instruction_set_fields(agent_registry, agent, overrides)
             )
         except InstructionSetError as exc:
             raise _invalid_document_error(exc)
@@ -1099,7 +1035,7 @@ async def republish_agent_to_radient(
         try:
             overrides = validate_document_overrides(publication.document)
             document = build_instruction_set_document(
-                **_instruction_set_fields(agent_registry, agent, overrides)
+                **instruction_set_fields(agent_registry, agent, overrides)
             )
         except InstructionSetError as exc:
             raise _invalid_document_error(exc)

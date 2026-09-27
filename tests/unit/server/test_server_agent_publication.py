@@ -14,13 +14,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pydantic import SecretStr
 
-from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry, instruction_set_fields
 from local_operator.clients._http import REDACTION_MARKER, APIError
 from local_operator.clients.radient import INSTRUCTION_SET_FIELDS
 from local_operator.server.routes.agents import (
     PUBLICATION_STATUS_BY_CODE,
     AgentPublicationRequest,
-    _instruction_set_fields,
 )
 from local_operator.types import (
     AgentState,
@@ -885,7 +884,7 @@ def test_a_plain_conversational_row_publishes_as_a_role(
     agent = _new_agent(dummy_registry, name="plain", description="Just an agent.", tags=["misc"])
     dummy_registry.set_agent_system_prompt(agent.id, "You help.")
 
-    fields = _instruction_set_fields(dummy_registry, agent, {})
+    fields = instruction_set_fields(dummy_registry, agent, {})
 
     assert fields["kind"] == "role"
     assert fields["tags"] == ["misc"]
