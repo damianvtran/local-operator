@@ -20632,9 +20632,13 @@ class OperatorApp(App[None]):
           (``WarmErrand`` → ``LOP_RUNTIME_DEFER_MATERIALISE``), so a session
           nobody uses leaves nothing on disk when the runtime exits.
         * A viewer that leaves without using the session offers the runtime
-          back (``_retire_unused_runtime``), and anything that offer does not
-          catch is reaped by the ordinary residency drain within ~3 s of the
-          viewer detaching.
+          back (``_retire_unused_runtime``). What that offer does not catch
+          leaves when its window runs out — the ~3 s drain for a runtime nobody
+          engaged, or the 300 s warm window for one that was
+          (``process._drain_window_s``, ``SessionRecord.engaged_at``), with the
+          machine-wide LRU cap able to preempt either one. Still bounded: a
+          runtime holding no claim keeps the 3 s drain, which is what keeps the
+          mount warm from being a leak.
 
         Shares one implementation with the draft warm-up because they differ
         only in WHEN they fire — engaging twice must be, and is, a no-op

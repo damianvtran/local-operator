@@ -80,6 +80,7 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_ON_SIGNAL,
+    RUNTIME_RECORD_KIND,
     SIGNAL_DRAIN_CAUSE,
     SIGNAL_DRAIN_S,
     UPDATE_UNNAMED_PAIR,
@@ -804,7 +805,8 @@ def _detached_at(runtime: object) -> float | None:
     transition and cleared at 0->1, so it is NOT "when this runtime last became
     idle": a runtime nobody has watched carries ``None`` for its whole life.
 
-    THE OTHER HALF IS THE ENGAGE CLAIM (:func:`_engaged_at`), and the two are
+    THE OTHER HALF IS THE ENGAGE CLAIM (``SessionRecord.engaged_at``, set once at
+    boot from the spawn), and the two are
     read together by :func:`_claim_stamp` — the window is drawn for a runtime
     holding either one, and the ordinary 3 s drain is written for the population
     holding neither.
@@ -819,22 +821,6 @@ def _detached_at(runtime: object) -> float | None:
     cosmetic.
     """
     stamp = getattr(getattr(runtime, "_record", None), "detached_at", None)
-    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
-        return None
-    return float(stamp)
-
-
-def _engaged_at(runtime: object) -> float | None:
-    """When this runtime was last ASKED for (a warm engage), or ``None``.
-
-    Read off the record like :func:`_detached_at` above and refusing foreign
-    types for the same reason: ``SessionRecord.engaged_at`` is set once at boot
-    from the spawn (``types.ENGAGED_ENV``), and a reduced handle — an older host,
-    a test double — has no record and reads as "nobody asked", which is the
-    conservative direction: it keeps the ordinary drain rather than inventing a
-    window for a process no engage started.
-    """
-    stamp = getattr(getattr(runtime, "_record", None), "engaged_at", None)
     if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
         return None
     return float(stamp)
@@ -1539,10 +1525,17 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         preempted = False
         requested = False
         idle_since = time.monotonic()
-        #: The detach stamp this window was drawn from. A DIFFERENT one means a
-        #: viewer attached and left again inside this drain, and the window then
-        #: has to be drawn again from that departure (see the tick).
-        drawn_from = _detached_at(runtime)
+        #: The CLAIM this window was drawn from — the same value
+        #: ``_drain_window_s`` keyed it on (``_claim_stamp``), so the two cannot
+        #: disagree about what the window is anchored to. A DIFFERENT one means the
+        #: claim MOVED inside this drain: a viewer attached and left again, which is
+        #: a fresher statement than the engage the window may have been drawn from,
+        #: and the window then has to be drawn again from that departure (see the
+        #: tick). Watching the detach stamp alone was the same reading only while
+        #: nothing else could move the claim — a fact that would stop being true the
+        #: moment ``engaged_at`` acquired a second writer, and silently (agent review
+        #: round 1, finding 4).
+        drawn_from = _warm_claim_at(runtime)
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
@@ -1568,9 +1561,9 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
                 # stay (review round 2, R2-4).
                 requested = True
                 break
-            stamp = _detached_at(runtime)
+            stamp = _warm_claim_at(runtime)
             if stamp is not None and stamp != drawn_from:
-                # A VIEWER THAT CAME AND WENT INSIDE ONE TICK, or a second
+                # THE CLAIM MOVED INSIDE ONE TICK: a viewer that came and went,
                 # attach/detach later in the same drain, leaves this drain
                 # holding a window drawn BEFORE the departure it is meant to
                 # serve: the tick that would have cancelled the drain saw a
@@ -4499,7 +4492,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
         except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
-    runtime = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
+    runtime = RuntimeServer(handle, kind=RUNTIME_RECORD_KIND, operator_cap=operator_cap)
     # EVERY WAY THIS RUNTIME CAN BE ASKED TO LEAVE IS ARMED HERE, BEFORE THE
     # SERVING PLANE CAN MAKE IT ADDRESSABLE. That order is the fix for a
     # measured race, not tidiness.

@@ -322,6 +322,7 @@ def _spawn_runtime(
     cwd: str,
     *,
     defer_materialise: bool,
+    warm: bool = False,
     initial_model: Any = None,
     model_selection_override: bool = False,
 ) -> "subprocess.Popen[bytes]":
@@ -364,7 +365,11 @@ def _spawn_runtime(
     (``types.ENGAGED_ENV``). It has to travel in the environment because it is a
     fact about the SPAWN — a warm engage delivers no frame by design (see
     ``engage_runtime``'s ``WarmErrand`` arm), so there is no socket it could
-    arrive on, and the child's reaper needs it before the first dial.
+    arrive on, and the child's reaper needs it before the first dial. It rides
+    the ``warm`` argument rather than ``defer_materialise`` beside it: the two
+    coincide at today's call sites and NOTHING makes that equivalence hold for
+    the next caller, and a window bought by a deferral nobody engaged for is
+    exactly the leak the scrub below exists to prevent (review round 1, M4).
     """
     env = dict(os.environ)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
@@ -391,23 +396,39 @@ def _spawn_runtime(
         env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
     if defer_materialise:
         env["LOP_RUNTIME_DEFER_MATERIALISE"] = "1"
-        # THE SAME SPAWN, THE SAME FACT, and the one place the runtime can still
-        # hear it: ``defer`` IS ``isinstance(work, WarmErrand)`` (see
-        # ``engage_runtime``), so a deferred-materialisation child is the
-        # speculative engage itself — a runtime started for somebody who has not
-        # arrived. Without this the child's own reaper has no way to know that,
-        # treats it as a runtime nobody is involved with, and retires it on the
-        # ordinary 3 s drain — measured on a two-device rig: the peer's
-        # ``--engage`` answered ``runtime joining`` and the runtime was gone ~3 s
-        # later, so the wait that warm existed to remove was paid in full AND the
-        # answer named a runtime that had already left. The claim it sets is
-        # bounded and capped like the viewer one it joins (``process``'s
-        # ``DEFAULT_KEEP_ALIVE_SECONDS`` / ``_keep_alive_victim``).
+    else:
+        # A parent that set this for an earlier speculative engage must not leak
+        # it into a runtime that has real work to do.
+        env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+    if warm:
+        # THE SPAWN'S OWN WORD, and the one place the runtime can still hear it:
+        # a warm is the speculative engage itself — a runtime started for
+        # somebody who has not arrived (``engage_runtime``'s ``WarmErrand`` arm,
+        # which is where this argument is passed). Without it the child's own
+        # reaper has no way to know that, treats it as a runtime nobody is
+        # involved with, and retires it on the ordinary 3 s drain — measured on a
+        # two-device rig: the peer's ``--engage`` answered ``runtime joining`` and
+        # the runtime was gone ~3 s later, so the wait that warm existed to
+        # remove was paid in full AND the answer named a runtime that had already
+        # left. The claim it sets is bounded and capped like the viewer one it
+        # joins (``process``'s ``DEFAULT_KEEP_ALIVE_SECONDS`` /
+        # ``_keep_alive_victim``).
+        #
+        # KEYED ON THE ERRAND AND NOT ON THE DEFERRAL. ``defer_materialise`` is
+        # ``isinstance(work, WarmErrand)`` at both call sites today, and that is
+        # the reason this is a separate argument: the two facts agree only by
+        # coincidence of the callers, so a caller that defers materialisation for
+        # another reason (the generation probe in
+        # ``tests/e2e/test_install_generations_e2e.py`` is one already) would
+        # otherwise buy a five-minute window it never asked for, silently. With
+        # the fact passed in, that caller says what it means and gets the ordinary
+        # drain (review round 1, M4).
         env[ENGAGED_ENV] = "1"
     else:
-        # A parent that set these for an earlier speculative engage must not
-        # leak them into a runtime that has real work to do.
-        env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+        # A parent that engaged something earlier must not hand its claim to a
+        # runtime that has real work to do — including its own descendants, which
+        # is why the scrub belongs to every runtime spawn path and not just this
+        # one (``mobile/daemon.py``'s hand-built child environment is the other).
         env.pop(ENGAGED_ENV, None)
     # 0600 at CREATION, via mkstemp. `Path.open("wb")` takes the process umask
     # (measured 0o644 here), leaving the child's entire stdout+stderr --
@@ -1040,6 +1061,11 @@ async def engage_runtime(
     # Deferred materialisation is exactly the speculative case: a warm engage
     # must not create a session directory for a draft the user may abandon.
     # A wake engage is NOT speculative — the session already exists on disk.
+    #
+    # The keep-alive CLAIM is deliberately not derived from this flag: it is
+    # passed as ``warm`` at the spawn, so the two facts stay separable and a
+    # later caller that wants deferral for its own reason cannot buy a window
+    # nobody engaged for (review round 1, M4).
     defer = isinstance(work, WarmErrand)
 
     while time.monotonic() < _deadline():
@@ -1129,6 +1155,7 @@ async def engage_runtime(
                     session_id,
                     cwd,
                     defer_materialise=defer,
+                    warm=isinstance(work, WarmErrand),
                     initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
                     model_selection_override=(
                         work.model_selection_override if isinstance(work, WarmErrand) else False
@@ -1187,6 +1214,7 @@ async def engage_runtime(
                     session_id,
                     cwd,
                     defer_materialise=defer,
+                    warm=isinstance(work, WarmErrand),
                     initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
                     model_selection_override=(
                         work.model_selection_override if isinstance(work, WarmErrand) else False

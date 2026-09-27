@@ -1436,11 +1436,14 @@ def test_a_warm_spawn_carries_the_engage_claim(
 
     A warm engage delivers no frame BY DESIGN — ``launch``'s ``WarmErrand`` arm
     completes when a live runtime is reached — so the environment is the only
-    channel this fact can travel on. Both directions are asserted: a warm spawn
-    carries the claim, and an ordinary spawn SCRUBS it, because a parent that
-    engaged something earlier must not hand its claim to a runtime that has real
-    work to do (the same rule the deferred-materialisation variable beside it
-    follows, and the reason both are written in one branch).
+    channel this fact can travel on. Three directions are asserted: a WARM spawn
+    carries the claim; a spawn that DEFERS materialisation for another reason
+    does not (the claim is keyed on the errand, not on the deferral — review
+    round 1, M4, and the generation probe in
+    ``tests/e2e/test_install_generations_e2e.py`` is a live caller of exactly
+    that shape); and an ordinary spawn SCRUBS it, because a parent that engaged
+    something earlier must not hand its claim to a runtime that has real work to
+    do.
     """
     from local_operator.session.runtime import launch as launch_module
     from local_operator.session.runtime.types import ENGAGED_ENV
@@ -1452,21 +1455,26 @@ def test_a_warm_spawn_carries_the_engage_claim(
         return _FakeChild()
 
     monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
-    # A claim left over in THIS process, which an ordinary spawn must not pass on.
+    # A claim left over in THIS process, which no non-warm spawn may pass on.
     monkeypatch.setenv(ENGAGED_ENV, "1")
 
-    warm = launch_module._spawn_runtime("sess-warm01", str(tmp_path), defer_materialise=True)
+    warm = launch_module._spawn_runtime(
+        "sess-warm01", str(tmp_path), defer_materialise=True, warm=True
+    )
+    deferred = launch_module._spawn_runtime("sess-defer01", str(tmp_path), defer_materialise=True)
     ordinary = launch_module._spawn_runtime("sess-cold01", str(tmp_path), defer_materialise=False)
-    for process in (warm, ordinary):
+    for process in (warm, deferred, ordinary):
         capture = getattr(process, "lop_capture_path", None)
         if capture is not None:
             capture.unlink(missing_ok=True)
 
-    assert len(seen) == 2, "both spawns must reach Popen"
+    assert len(seen) == 3, "every spawn must reach Popen"
     assert seen[0][ENGAGED_ENV] == "1", "a warm spawn did not carry the claim"
     assert seen[0]["LOP_RUNTIME_DEFER_MATERIALISE"] == "1"
-    assert ENGAGED_ENV not in seen[1], "an ordinary spawn inherited a stale claim"
-    assert "LOP_RUNTIME_DEFER_MATERIALISE" not in seen[1]
+    assert seen[1]["LOP_RUNTIME_DEFER_MATERIALISE"] == "1"
+    assert ENGAGED_ENV not in seen[1], "a deferred spawn that is not a warm bought the claim"
+    assert ENGAGED_ENV not in seen[2], "an ordinary spawn inherited a stale claim"
+    assert "LOP_RUNTIME_DEFER_MATERIALISE" not in seen[2]
 
 
 @pytest.mark.asyncio
@@ -1480,27 +1488,41 @@ async def test_the_runtime_reads_the_claim_at_boot_and_publishes_it(
     LRU) and what a peer's catalogue turns into a row. Both states are driven on
     the same environment variable, so the cell cannot pass by reading it
     always-on or always-off: engaged at boot, and not engaged.
+
+    IT CARRIES THE CHARGE AND THE GATE TOO (review round 1, M3 and N1). M3: the
+    cap's arithmetic needs "a warmed boot lands CHARGEABLE", which was an
+    inference across two files — ``server`` constructs the record detached and
+    ``process`` charges a detached record holding a claim — so the real
+    ``_keep_alive_candidates`` is run here over the real published file. N1: the
+    claim belongs to a RUNTIME, and the tree's other two registrants
+    (``exec_control``'s ``lop exec``, the TUI's own row) build a record from the
+    same ``os.environ``, so the same boot is driven under a non-runtime kind and
+    must come back holding no claim at all.
     """
     from local_operator.session.runtime.registry import RecordPublisher
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import ServingSessionHandle
-    from local_operator.session.runtime.types import ENGAGED_ENV
+    from local_operator.session.runtime.types import ENGAGED_ENV, RUNTIME_RECORD_KIND
     from tests.e2e.harness import ScriptedStream, build_session, text_turn
 
-    async def boot(kind: str, *, engaged: bool) -> SessionRecord:
+    async def boot(
+        label: str, *, engaged: bool, kind: str = RUNTIME_RECORD_KIND, viewer: bool = True
+    ) -> SessionRecord:
         if engaged:
             monkeypatch.setenv(ENGAGED_ENV, "1")
         else:
             monkeypatch.delenv(ENGAGED_ENV, raising=False)
-        directory = tmp_path / kind / "keepalive"
+        directory = tmp_path / label / "keepalive"
         directory.mkdir(parents=True, exist_ok=True)
         session = build_session(directory, ScriptedStream([text_turn("ok")]))
         handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
-        server = RuntimeServer(handle, kind="daemon")
+        server = RuntimeServer(handle, kind=kind)
         try:
             server._config_root = tmp_path
             server._publisher = RecordPublisher(server._record, tmp_path)
-            surfaces: set[str] = {"terminal"}
+            # A viewer keeps ``detached`` False; with none, the publish this
+            # publisher already did at construction is the record on disk.
+            surfaces: set[str] = {"terminal"} if viewer else set()
             monkeypatch.setattr(server, "_visible_attach_surfaces", lambda: set(surfaces))
             server._republish_detached()  # a change, so the record reaches the file
             assert server._publisher is not None
@@ -1523,3 +1545,36 @@ async def test_the_runtime_reads_the_claim_at_boot_and_publishes_it(
     ordinary = await boot("cold", engaged=False)
     assert ordinary.engaged_at is None
     assert ordinary.detached_at is None
+
+    # N1: the same environment, a kind that is not the reaper's population.
+    foreign = await boot("foreign", kind="exec", engaged=True)
+    assert foreign.engaged_at is None, "a non-runtime record claimed the warm window"
+    # …and the variable really was set for that boot, so the arm above cannot be
+    # passing because it was simply absent.
+    assert os.environ[ENGAGED_ENV] == "1"
+
+    # M3: the charge, from that same real boot, read the way the reaper reads it.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(registry, "pid_alive", lambda pid, *, check_zombie=False: True)
+    charged = await boot("charged", engaged=True, viewer=False)
+    assert charged.engaged_at is not None
+    assert charged.detached is True, "a runtime born with no viewer is detached"
+    assert _keep_alive_candidates() == [
+        (charged.engaged_at, os.getpid())
+    ], "a warmed boot did not land in the state the LRU cap charges"
+
+
+def test_the_standby_contract_list_carries_the_claim() -> None:
+    """The pair of spellings, pinned (review round 1, nit).
+
+    ``standby.CONTRACT_KEYS`` spells the variable as a literal on purpose — that
+    module imports nothing from ``local_operator`` at module level — so the two
+    spellings can drift with nothing failing. What the list does is on the POOL
+    side: ``_spawn_standby`` pops it, so a spare is born without a claim it never
+    made. A rename that reached only one of the two spellings would make the
+    spare a different thing from the cold child it stands in for.
+    """
+    from local_operator.session.runtime import standby
+    from local_operator.session.runtime.types import ENGAGED_ENV
+
+    assert ENGAGED_ENV in standby.CONTRACT_KEYS
