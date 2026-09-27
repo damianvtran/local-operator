@@ -7298,3 +7298,89 @@ def test_the_settled_cap_bounds_what_is_published_not_the_pass():
 
     assert builtin._REDACT_STREAM_LIMIT_CHARS == SPILL_ENTRY_LIMIT_BYTES
     assert builtin._REDACT_STREAM_LIMIT_CHARS > builtin.TOOL_OUTPUT_LIMIT_CHARS
+
+
+# ---------------------------------------------------------------------------
+# A weak credential name must not PROMOTE a bare identifier
+# ---------------------------------------------------------------------------
+#
+# Registration is a session-wide PROMOTION, so a false positive here outlives
+# the line that caused it. That is how a cosmetic redaction became committed
+# corruption: a read carrying ``BUCKET_KEY=bucket_v4`` registered ``bucket_v4``,
+# every later occurrence was masked — including inside a Go struct tag — and an
+# agent reading its own file back took the marker for a display quirk and wrote
+# it into source. Two DISTINCT field names came out byte-identical, index
+# creation failed at boot with no error, and only a byte hash showed it.
+
+
+def _promotes(line: str, value: str) -> bool:
+    """Whether ``line`` leaves ``value`` registered for the rest of the session.
+
+    The store is asked directly rather than through a rendered transcript: a
+    mask that happens to hide the value in place and a REGISTRATION that masks
+    it in every later result are different claims, and it is the second one that
+    damages a file the agent then writes.
+    """
+    store = VariableStore(cwd=".")
+    store.redact_with_report(line)
+    return store.redact(value) != value
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "BUCKET_KEY=bucket_v4",
+        '{"bucket_key": "bucket_v4"}',
+        "NETWORK_BUCKET_KEY=bucket_v4",
+    ],
+)
+def test_a_weak_credential_name_does_not_promote_a_bare_identifier(line: str) -> None:
+    """The reported false positive: an identifier under a weak name is not a secret.
+
+    ``key`` is a credential word, so the assignment rule reads
+    ``BUCKET_KEY=<value>`` as a credential — but the VALUE says none did. The
+    name only says one COULD sit there.
+    """
+    assert not _promotes(line, "bucket_v4"), (
+        f"{line!r} promoted 'bucket_v4' to a session-wide redaction; every later "
+        "occurrence of an ordinary identifier would be masked, which is the "
+        "damage mode this test exists to keep closed"
+    )
+
+
+def test_a_weak_name_leaves_the_bare_identifier_readable_in_place() -> None:
+    """Not promoted means not masked: the line a coding agent reads stays intact.
+
+    A mask in place would still corrupt the agent's next edit — the value it
+    copies back would be the marker — so the refusal has to cover the mask too,
+    not only the registration.
+    """
+    line = "BUCKET_KEY=bucket_v4"
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert scrubbed == line
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        ("SERVICE_TOKEN=" + "FAKE" + "TOKENVALUE1234567890", "FAKE" + "TOKENVALUE1234567890"),
+        ("GH_TOKEN=" + "ghp_" + "A" * 36, "ghp_" + "A" * 36),
+        (
+            "AWS_SECRET_ACCESS_KEY=" + "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+        ),
+        (
+            "mongodb://app:" + "FAKEPASSWORD" + "word@db.example.com/app",
+            "FAKEPASSWORD" + "word",
+        ),
+    ],
+)
+def test_a_strong_name_or_a_real_shape_still_promotes(line: str, value: str) -> None:
+    """The control: narrowing must not open a hole.
+
+    A STRONG name (``…_token``, ``secret``) must keep masking any opaque value,
+    and a DSN's password must keep being contained whatever its shape. Those are
+    the corpus positives the value proof was relaxed for; this test is what
+    stops the new refusal from being widened into them.
+    """
+    assert _promotes(line, value), f"{line!r} no longer contains {value!r}"
