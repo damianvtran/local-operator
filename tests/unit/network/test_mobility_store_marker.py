@@ -106,6 +106,77 @@ def test_a_promoted_session_marks_the_store_that_adopted_it(
     assert not adopted.exists()
 
 
+def test_an_archived_session_arrives_archived(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hiding a conversation is a property of the conversation, not of one device.
+
+    Review round 1, MINOR 1: the archive index is device-scoped
+    (``session/archived.py``) and nothing on the move path wrote it, so a session
+    archived on the device it left reappeared in the default listing of the device
+    it arrived on — the operator named archiving explicitly as something that must
+    hold on the remote session.
+
+    The bit rides in the staging ``ready.json`` rather than in memory because that
+    file is the one carrier that survives the crash path (§6.5 row 5 adopts from
+    it with the owner possibly gone).
+    """
+    from local_operator.session.archived import archived_ids, set_archived
+
+    server_a, server_b, _host, _port = request.getfixturevalue("pair")
+    # ``settings=server_b.settings`` or the joiner publishes a record nobody can
+    # dial and the move answers ``unreachable`` — see every other cell in this file.
+    _pair(request.getfixturevalue("pair"), monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    assert set_archived(server_a.root, SESSION, True) is True
+    assert SESSION in archived_ids(server_a.root), "the archive must be visible first"
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is True, result
+    assert (server_b.root / "sessions" / SESSION).is_dir()
+    assert SESSION in archived_ids(server_b.root), (
+        "the device that adopted the conversation does not know it was archived, so it "
+        "shows up in every default listing there"
+    )
+    # AND THE SOURCE IS NOT LEFT CLAIMING IT: read_archived prunes ids whose
+    # directory is gone, so the entry on the device that handed it away resolves to
+    # nothing without any cross-device coordination.
+    assert SESSION not in archived_ids(server_a.root)
+
+
+def test_a_keep_copy_does_not_inherit_the_archive(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fork mints a NEW id, and a copy the user just asked for is not hidden.
+
+    The deliberate half of the archive fix: ``--keep`` leaves the source running and
+    the destination under a new id, so inheriting the archive would create a
+    conversation the user asked for and cannot see. Pinned so "the archive travels"
+    cannot silently widen into "every copy arrives archived".
+    """
+    from local_operator.session.archived import archived_ids, set_archived
+
+    server_a, server_b, _host, _port = request.getfixturevalue("pair")
+    _pair(request.getfixturevalue("pair"), monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    set_archived(server_a.root, SESSION, True)
+
+    result = _move(
+        server_a, SESSION, to=server_b.identity.device_id, keep=True, monkeypatch=monkeypatch
+    )
+
+    assert result["ok"] is True, result
+    new_id = str(result["new_session_id"])
+    assert new_id != SESSION
+    assert (server_b.root / "sessions" / new_id).is_dir()
+    assert new_id not in archived_ids(server_b.root), (
+        "the fork of an archived conversation arrived archived, so the copy the user "
+        "asked for is hidden on the device they asked for it on"
+    )
+    assert SESSION in archived_ids(server_a.root), "the source keeps its own state"
+
+
 def test_a_recalled_session_is_no_longer_tombstoned_here(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:

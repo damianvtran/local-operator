@@ -144,9 +144,76 @@ def test_a_half_moved_session_is_legible_from_the_refusal(
     assert "phase: prepared" in message, message
     assert "ago)" in message, f"the refusal does not say how long it has been stuck: {message}"
     assert "handing_off" not in message
+    # AND IT NAMES THE WAY OUT, which is the part a person cannot derive: an entry
+    # written by this device's LIVE relay is skipped by every reconcile, so retrying
+    # never clears it and no other verb does either — restarting this device's relay
+    # is what makes the writer instance stale, after which the next attempt rolls the
+    # entry back (review round 1's ruling; the abandon verb is the follow-up).
+    assert "lop network restart" in message, message
     # AND NOTHING MOVED, which is the half-move's own guarantee.
     assert (server_a.root / "sessions" / SESSION).is_dir()
     assert not (server_b.root / "sessions" / SESSION).exists()
+
+
+def test_a_handoff_entry_without_a_timestamp_is_not_given_a_fake_age(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sentence whose job is legibility may not invent a number.
+
+    ``float(entry.get("at") or 0.0)`` rendered ~1.79e9 seconds for an entry with no
+    ``at`` (review round 1, NIT): every writer on this head stamps the field, so the
+    branch is defensive — and defensiveness that prints an epoch as a duration is how
+    a future reader learns to distrust the whole clause.
+    """
+    import time as time_mod
+
+    from local_operator.session.placement import write_handoff_entry
+
+    both: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = both
+    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    entry = {
+        "role": "source",
+        "phase": "prepared",
+        "to_device": server_b.identity.device_id,
+        "mode": "move",
+        "instance_id": str(server_a.instance_id),
+    }
+    write_handoff_entry(server_a.root, SESSION, entry)
+
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["code"] == "in_progress", result
+    message = str(result["message"])
+    assert "started at an unknown time" in message, message
+    # And the helper itself, for the shapes a journal reader can hand it: a bool is
+    # an int in Python, and ``True`` is not a timestamp either.
+    assert mobility._handoff_age({"at": True}) == "started at an unknown time"
+    assert mobility._handoff_age({"at": "yesterday"}) == "started at an unknown time"
+    assert (
+        str(int(time_mod.time())) not in message
+    ), f"the refusal printed a wall-clock epoch as a duration: {message}"
+
+
+def test_a_malformed_wait_is_read_as_no_wait_at_all() -> None:
+    """A peer's ``wait_s`` is data, and data this side cannot read is not an error.
+
+    Every sibling field in the invite is read with ``or <default>``; this one raised
+    out of the handler for a non-numeric value (review round 1, NIT). The clamp is
+    asserted too, because a peer must not be able to ask this side to re-probe for a
+    week.
+    """
+    assert mobility._wait_seconds(None) == 0.0
+    assert mobility._wait_seconds("soon") == 0.0
+    assert mobility._wait_seconds([1, 2]) == 0.0
+    # ``True`` is not a duration, and ``float(True)`` would read as one second.
+    assert mobility._wait_seconds(True) == 0.0
+    assert mobility._wait_seconds(float("nan")) == 0.0
+    assert mobility._wait_seconds(float("inf")) == 0.0
+    assert mobility._wait_seconds("30") == 30.0
+    assert mobility._wait_seconds(-5) == 0.0
+    assert mobility._wait_seconds(10_000) == mobility.MOVE_MAX_WAIT_S
 
 
 def test_an_offload_with_a_wait_re_probes_a_busy_source(
