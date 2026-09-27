@@ -407,7 +407,7 @@ def project_jump_no_live_text(name: str, sessions: Sequence[tuple[str, str]]) ->
 
 def project_unexpected_argument_text(word: str) -> str:
     """``/project board extra`` — the page entries take no argument (review r1, NIT 4)."""
-    return f"/project {word} takes no argument — it opens every project." ""
+    return f"/project {word} takes no argument — it opens every project."
 
 
 def project_jump_already_text(name: str, session_id: str) -> str:
