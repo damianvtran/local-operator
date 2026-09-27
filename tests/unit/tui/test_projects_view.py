@@ -843,6 +843,8 @@ async def test_the_title_sheds_before_clipping(tmp_path: Path) -> None:
         app._run_slash_command("/project timeline")
         await pilot.pause()
         await pilot.pause()
-        timeline_title = app._projects_view.rendered_rows()[0]
+        timeline_view = app._projects_view
+        assert timeline_view is not None
+        timeline_title = timeline_view.rendered_rows()[0]
         assert "zoom:" not in timeline_title, timeline_title
         assert "tracked" in timeline_title and "updated" in timeline_title
