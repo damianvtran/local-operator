@@ -265,6 +265,7 @@ from local_operator.tui.network_cli import (
     NetworkRun,
     created_session_id,
     run_network,
+    tui_spelling,
 )
 from local_operator.tui.notify import Notifier, notifications_enabled
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
@@ -41408,7 +41409,13 @@ class OperatorApp(App[None]):
         if result.ok:
             text = Text()
             for line in lines:
-                text.append(line + "\n")
+                # THE COMPOSER'S SPELLING, not the shell's (design round 1, D2):
+                # `next: lop network invite --role drive` after `/network new` was
+                # the CLI's dialect on the surface that had just accepted the
+                # family's own. `tui_spelling` translates only the verbs this front
+                # end carries, so `lop network start` keeps the spelling that works
+                # for the reader whose next step is a shell.
+                text.append(tui_spelling(line) + "\n")
             self._append_block(RichBlock(text))
             return
         # A refusal prints its sentence on stderr with the coloured wrapper the

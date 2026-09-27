@@ -855,20 +855,17 @@ class NetworkScreen(ModalScreen[None]):
     def _device_section(self, body: Text, width: int) -> None:
         self._header(body, "This device")
         if not self.local.identity_present:
-            # THE RELAY IS PART OF THIS LINE'S FACT, not a separate complaint.
-            # `init` starts the relay on the way past (the TUI's `/network new`
-            # passes no `--no-start`), so the state the Relay block reports
-            # further down — `installed: no` / `relay: not running` — is the
-            # same act this line is naming, and saying it here is what keeps the
-            # frame from reading as a fault list. The sentence no longer repeats
-            # the Networks block's own remedy word for word: the two rows are
-            # two subjects (this device's identity, and the mesh), and a reader
-            # who meets the same command twice under different headings cannot
-            # tell whether the second one is a second step.
-            body.append(
-                "  no identity yet — /network new <name> mints it and starts the relay\n",
-                style="yellow",
-            )
+            # WHY THIS LINE NAMES ONLY THE IDENTITY, and lost the relay clause it
+            # briefly carried: the row WIDTH, measured (review round 1, MAJOR). The
+            # version with `and starts the relay` was 69 cells, which wraps at 84x16
+            # where the card is 68 — a size inside `_BAND_SIZES` where the row it
+            # replaced (62 cells) did not wrap. No phrasing carrying both facts fits
+            # the 62 cells that keep this block at ONE wrapping threshold, so the
+            # clause went and the Relay block's own rows carry the state, as they
+            # did before. What is left is the half that is this section's subject,
+            # and it keeps its own verb (`mints`, not the Networks row's `creates`)
+            # so the two rows read as two facts rather than one instruction twice.
+            body.append("  no identity yet — /network new <name> mints it\n", style="yellow")
         else:
             # LABEL FIRST, then the abbreviated id (design round 1, D6). The line
             # used to lead with the full 34-cell id, putting the longest token on
@@ -986,14 +983,38 @@ class NetworkScreen(ModalScreen[None]):
             # vertical scrollbar on the screen, and clipped the Relay block's
             # `log:` path, the one row a support request needs. The frame checks
             # in `mesh-ui.md` §4.1 read a scrollbar appearing as a defect for
-            # exactly this reason. So the path is said in one row, and the
-            # joining device's own spelling rides on it rather than under it.
+            # exactly this reason.
+            #
+            # WHAT THAT COST is the trade review round 1 accepted: the clause
+            # that went was also the pool's one statement that placement is not
+            # cmux-only (`lop detects terminal or multiplexer`), and it is
+            # recorded as gone rather than defended.
+            # THE ROW WIDTH IS BOUNDED BY THE CARD, NOT BY THE 100-COLUMN FRAME,
+            # and the first cut of this row got that wrong (review round 1,
+            # MAJOR). This block is drawn across `_BAND_SIZES`, and the body is
+            # 83 cells only at 100x30: MEASURED 81 at 98x30, 79 at 96x30, 68 at
+            # 84x16, 65 at 80x24, 43 at 56x20. An 82-cell row therefore wrapped
+            # at two sizes inside that list, grew the body to 17 rows in a
+            # 16-row viewport and put the scrollbar back on — which is the same
+            # defect the three-row draft below was dropped for, one size down.
+            #
+            # So the invariant is not "one row", it is "no new wrapping
+            # threshold": this row is no LONGER than the line above it (62
+            # cells), so the two wrap together at 56x20 and below and never at
+            # 84x16 or above. It measures 60. The width is pinned by
+            # `test_the_unpaired_empty_state_fits_its_card_at_every_band_size`,
+            # which is the assertion whose absence let the 82-cell row reach
+            # review (review round 1, MINOR 3).
+            #
+            # WHY THE DEVICE CUE SURVIVED AND THE TOKEN CLAUSE DID NOT: the Peers
+            # row one block down already says `/network invite mints a token`, so
+            # repeating it here would spend this row's cells on a duplicate,
+            # while WHICH DEVICE runs the join is said nowhere else on the frame.
             body.append(
                 "  no networks on this device — /network new <name> creates one\n", style="dim"
             )
             body.append(
-                "  then /network invite mints a token; lop network join @<file>"
-                " on the other device\n",
+                "  then /network invite; lop network join @<file> on the peer\n",
                 style="dim",
             )
             return
@@ -1117,8 +1138,14 @@ class NetworkScreen(ModalScreen[None]):
             # (this device's own member lists) are what the frame actually holds.
             return
         if not self.local.peers:
+            # THE CONSEQUENCE, NOT THE COMMAND (design round 1, D1): `invite` is
+            # the step the Networks block above already names, and this row named
+            # it a second time — the same remedy under two headings, which is the
+            # shape this PR's own test files as a defect one block away. What this
+            # section can say that no other row does is what the reader will see
+            # here once it works.
             body.append(
-                "  no peers yet — /network invite mints a token\n",
+                "  no peers yet — a device you pair appears here\n",
                 style="dim",
             )
             return

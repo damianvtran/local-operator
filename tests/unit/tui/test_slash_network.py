@@ -742,6 +742,151 @@ def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
     assert "from this device's records" in text, text
     assert "no peers yet" in text, text
 
+    # AND THAT ROW NAMES A CONSEQUENCE, NOT A COMMAND (design round 1, D1): it used
+    # to say `/network invite mints a token`, which is the step the Networks block
+    # above already names — one remedy under two headings, the shape this PR's own
+    # `test_the_unpaired_empty_state_teaches_the_whole_pairing_path` files as a
+    # defect one block away. Asserted HERE rather than there because the row only
+    # paints once the relay has answered: the pending frame's Peers block is its
+    # `checking with the relay…` line and nothing else.
+    peers = text.split("Peers", 1)[1]
+    assert "/network invite" not in peers, peers
+
+
+#: The sizes the unpaired empty state is expected to fit WHOLE: the card is 83
+#: cells at 100x30, 81 at 98x30, 79 at 96x30, 68 at 84x16 and 65 at 80x24, and no
+#: row of that frame is wider than 62 — the longest of them being the Networks
+#: line it shares with the paired frame. The three smaller sizes in
+#: ``_BAND_SIZES`` (56x20, 50x18, 40x20) are narrower than that shared row and
+#: wrap every line of this block, in both trees, so they are not the property
+#: under test here.
+_UNPAIRED_FIT_SIZES = ((100, 30), (98, 30), (96, 30), (84, 16), (80, 24))
+
+#: The three of those whose BASE frame paints the empty state without a vertical
+#: scrollbar, and therefore the three the change must leave scrollbar-free: at
+#: 84x16 and 80x24 the block already scrolled before this PR (measured on a
+#: throwaway worktree at ``origin/main`` — body 15 rows, bar true), so a bar
+#: appearing there is not this change's doing and is not asserted away.
+_UNPAIRED_SCROLLBAR_FREE = ((100, 30), (98, 30), (96, 30))
+
+
+@pytest.mark.asyncio
+async def test_the_unpaired_empty_state_fits_its_card_at_every_legible_size() -> None:
+    """EVERY ROW OF THE FIRST-RUN FRAME HAS TO FIT THE CARD IT IS PAINTED INTO.
+
+    This is the assertion whose absence let an 82-cell row reach review (review
+    round 1, MAJOR, and MINOR 3 asks for it by name). The row was written against
+    the 100x30 frame, where the body is 83 cells; the panel is drawn across
+    ``_BAND_SIZES``, where it is 81 at 98x30 and 79 at 96x30 — so it wrapped at two
+    sizes inside that list, grew the body to 17 rows in a 16-row viewport and put
+    the vertical scrollbar back on, which is the very thing the empty state had
+    just been arranged to avoid. Order was asserted and fit was not, and a wrapped
+    row is exactly what an order-only assertion cannot see.
+
+    Measured on the PAINTED widget rather than the model: ``render_lines_for_test()``
+    returns unwrapped lines at every size, so a model-side check passes on a row
+    that paints as two. The bound is the body's own ``size.width`` — the frame
+    under test — rather than a constant copied out of it, and the scroll region's
+    virtual height is the second half of the same claim, because a row that wraps
+    is a row that makes the region overflow.
+    """
+    from local_operator.tui.widgets.network_panel import NetworkLocal, NetworkScreen
+
+    local = NetworkLocal(device_id="", device_name="", identity_present=False, relay_state="")
+    for size in _UNPAIRED_FIT_SIZES:
+        app = _app_fixture()
+        async with app.run_test(size=size) as pilot:
+            screen = NetworkScreen(local)
+            app.push_screen(screen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.pause()
+
+            body = screen.query_one("#network-body")
+            too_wide = [
+                row for row in screen.render_lines_for_test() if cell_len(row) > body.size.width
+            ]
+            assert not too_wide, (size, body.size.width, too_wide)
+
+            scroll = screen.query_one("#network-scroll")
+            if size in _UNPAIRED_SCROLLBAR_FREE:
+                assert scroll.virtual_size.height <= scroll.size.height, (
+                    size,
+                    scroll.virtual_size,
+                    scroll.size,
+                )
+                assert not scroll.show_vertical_scrollbar, (size, scroll.virtual_size, scroll.size)
+
+
+def test_every_unpaired_row_is_measured_against_the_narrowest_card_it_fits() -> None:
+    """The two sequence rows are no wider than the row the paired frame shares.
+
+    A guard on the invariant the fit test measures, so the reason a future
+    reword cannot grow past its budget is stated where the words are: this block
+    has ONE wrapping threshold because neither new row is wider than the shared
+    Networks line (62 cells). The failure this pins is a row that fits the
+    100-column frame and no other — the shape review round 1 caught.
+    """
+    from local_operator.tui.widgets.network_panel import (
+        NetworkLocal,
+        build_network_report,
+    )
+
+    local = NetworkLocal(device_id="", device_name="", identity_present=False, relay_state="")
+    rows = [row for row in build_network_report(local).plain.splitlines() if row.strip()]
+    networks = next(row for row in rows if "no networks on this device" in row)
+    sequence = next(row for row in rows if "lop network join" in row)
+    identity = next(row for row in rows if "no identity yet" in row)
+    for row in (networks, sequence, identity):
+        assert cell_len(row) <= cell_len(networks), (cell_len(row), row)
+
+
+def test_a_receipt_is_read_back_in_the_composers_spelling() -> None:
+    """THE RECEIPT IS THE CLI'S; THE READER IS AT A COMPOSER (design round 1, D2).
+
+    Measured on the real path before the fix: `/network new devmesh` printed
+    ``next: lop network invite --role drive``, so the surface that had just
+    accepted the family's own command handed its reader another surface's
+    spelling as the next step — while the panel's empty state and the README both
+    say `/network invite`.
+
+    The second half is the reason the translation consults a vocabulary instead of
+    replacing a string: the same receipts name `lop network start`, `serve` and
+    `install`, which `NETWORK_SUBCOMMANDS` deliberately withholds (a composer row
+    that boots out the operator's relay is the one-keystroke mistake the family's
+    typed confirmations exist to prevent). Those keep the CLI's spelling, because
+    translating them would offer a word this front end then refuses.
+    """
+    from local_operator.tui.network_cli import tui_spelling
+
+    assert tui_spelling(
+        "next: lop network invite --role drive   (the token is written to a file, not printed)"
+    ) == ("next: /network invite --role drive   (the token is written to a file, not printed)")
+
+    for withheld in (
+        "the relay is not running; start it with `lop network start`",
+        "no launchd here: run `lop network serve` in the foreground",
+        "nothing was installed",
+    ):
+        assert tui_spelling(withheld) == withheld, withheld
+
+    # A verb this front end runs is rewritten, and the rest of the sentence is
+    # untouched — the receipt is still the CLI's own wording.
+    assert tui_spelling("then, on the other device: lop network show devmesh") == (
+        "then, on the other device: /network show devmesh"
+    )
+
+    # `join` is the subtler half of the same rule: it IS in the vocabulary (the
+    # picker offers it) but the composer does not run it — pairing needs a
+    # terminal, so its answer here is a sentence telling the reader to use one —
+    # and the receipt naming it is addressed to the OTHER device. Rewriting it
+    # would hand the reader a word this front end then refuses.
+    for untranslated in (
+        "then, on the other device: lop network join @<token-file>",
+        "run: lop network join @/tmp/token.invite",
+    ):
+        assert tui_spelling(untranslated) == untranslated, untranslated
+
 
 def test_the_unpaired_empty_state_teaches_the_whole_pairing_path() -> None:
     """A device with no identity and no networks is where every device starts,

@@ -469,22 +469,30 @@ TIPS: tuple[str, ...] = (
     # glossed: the clause also carried the cluster's capability-shaped
     # reassurance ("not cmux-only"), which is why
     # `test_fork_tips_cover_commands_and_settings` used to assert it — that test
-    # now asserts the two survivors and its docstring says where the third
-    # clause went. Everything the cluster ACTS on survives: the setting's route
-    # (`TIPS[9]`) and the multiplexer case that needs the other spelling
+    # now asserts the two survivors, its docstring says where the third clause
+    # went, and the loss itself was judged ACCEPTABLE at review round 1 rather
+    # than defended here. Everything the cluster ACTS on survives: the setting's
+    # route (`TIPS[9]`) and the multiplexer case that needs the other spelling
     # (`TIPS[10]`) are the two facts a reader can use, and the clause that went
     # was the one the rotation could do nothing with.
     #
-    # The alternatives were each worse, and each for a reason already written
-    # down in this file. `lop config edit classification.auto false turns hints
-    # off` is the OTHER 57-cell entry that sets `TIP_MIN_WIDTH`, so retiring it
-    # would drop the pinned 59-cell floor — the one number here that no change
-    # may move (`test_keymap_pilot.py`). The keyed entries earn their slots
-    # because a remappable key has no picker, unlike every slash command in the
-    # pool. And retiring another SLASH tip would take away a headline command's
-    # only passive advertisement, which is the class this entry is joining
-    # rather than leaving — the mesh is the one slash family whose existence
-    # nothing else in the app states.
+    # The classification entry could NOT have been the one retired, and the
+    # reason is worth stating precisely because the first draft of this note got
+    # it wrong (review round 1, MINOR 1): the pinned 59-cell floor is TIED, not
+    # owned. `lop config edit classification.auto false turns hints off` measures
+    # 57 cells of content, but so does `TIP_SETUP`, and both paint 59 — so
+    # retiring either leaves the other holding the floor at 59 and the number
+    # would not have moved. The floor cannot justify this retirement at all; the
+    # CONTENT argument below carries it on its own, which is what the pool's own
+    # test ("no second discovery route") is for.
+    #
+    # The remaining alternatives were each worse for a reason already written
+    # down in this file: the keyed entries earn their slots because a remappable
+    # key has no picker, unlike every slash command in the pool; and retiring
+    # another SLASH tip would take away a headline command's only passive
+    # advertisement, which is the class this entry is joining rather than
+    # leaving — the mesh is the one slash family whose existence nothing else in
+    # the app states.
     #
     # The cluster keeps its ring positions: `TIPS[9]` and `TIPS[10]` are
     # untouched, and this entry is appended at the END of the literal group,

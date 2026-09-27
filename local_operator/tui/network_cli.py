@@ -61,6 +61,54 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 #: :func:`created_session_id` is the ONE reader of it.
 _CREATE_RECEIPT_ID_LABEL = "session"
 
+#: The family's two spellings: the one a shell types, and the one this front end's
+#: picker offers. Read by :func:`tui_spelling` only.
+_CLI_SPELLING = "lop network "
+_TUI_SPELLING = "/network "
+
+#: The one carried verb the composer does NOT execute, and therefore the one
+#: :func:`tui_spelling` leaves alone. `join` is in ``NETWORK_SUBCOMMANDS`` because
+#: the picker offers it, but its answer in this front end is
+#: ``_network_join_notice``'s sentence — pairing shows a code on each device for a
+#: person to read across, so it needs a terminal, and the receipt that names it
+#: (``invite``'s ``then, on the other device: …``) is addressed to the OTHER
+#: machine, where a shell is what the reader has. Rewriting it here would hand the
+#: reader a word this front end then refuses.
+_NOT_TRANSLATED = frozenset({"join"})
+
+
+def tui_spelling(line: str) -> str:
+    """Rewrite a receipt's ``lop network <verb>`` into the composer's spelling.
+
+    A RECEIPT IS THE CLI'S OWN SENTENCE, and that is right in the front ends that
+    ARE a shell — but it is the wrong dialect at a composer. Measured on the real
+    path: ``/network new devmesh`` prints ``next: lop network invite --role
+    drive``, so the surface that had just accepted ``/network new`` handed its
+    reader a command belonging to another surface's vocabulary (design round 1,
+    D2). The panel's empty state and the README both say ``/network invite``, and
+    this is what makes the three agree.
+
+    ONLY VERBS THIS FRONT END CARRIES AND RUNS ARE TRANSLATED, which is why this
+    consults a vocabulary instead of replacing a string. The same receipts also
+    name ``lop network start``, ``serve`` and ``install``, and
+    ``NETWORK_SUBCOMMANDS`` deliberately withholds those — a composer row that
+    boots out the operator's relay, or deletes this device's identity, is the
+    one-keystroke mistake the family's typed confirmations exist to prevent — so
+    rewriting them would advertise a word this front end refuses. ``join`` is the
+    subtler half of the same rule and has its own comment above. An unrecognised
+    verb, and any line naming no verb at all, is returned exactly as it came.
+    """
+    from local_operator.slash_commands import NETWORK_SUBCOMMANDS
+
+    at = line.find(_CLI_SPELLING)
+    if at == -1:
+        return line
+    rest = line[at + len(_CLI_SPELLING) :]
+    verb = rest.split(" ", 1)[0].split("\n", 1)[0].strip()
+    if verb not in NETWORK_SUBCOMMANDS or verb in _NOT_TRANSLATED:
+        return line
+    return line[:at] + _TUI_SPELLING + rest
+
 
 @dataclass(frozen=True)
 class NetworkRun:
