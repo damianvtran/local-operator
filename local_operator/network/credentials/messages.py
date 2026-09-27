@@ -199,11 +199,16 @@ def render_borrowed_signin(owner: str, name: str) -> str:
     The COMPOSED row is the contract, not this string: 38 cells here and 55 composed
     for the canonical pair (19-cell device name ``damians-MacBook-Pro``, 6-cell
     server ``linear``), which fits. Longer names do not, and then
-    ``toast._fit_failure_line`` keeps the COMMAND whole and sheds the owner with the
-    ``…`` mark — a shown command that errors if followed is the defect D9/D11 exist
-    against, while the shed owner is carried whole by ``/mcp`` and the durable notice.
-    The owner still leads whenever both fit, because the command is only meaningful on
-    that device: a reader who cannot see WHERE it runs may run it here.
+    ``toast._fit_failure_line`` keeps the OWNER and the command's HEAD and sheds the
+    server name the command repeats from the row's own label —
+    ``failed: launchdarkly — damians-MacBook-Pro: /mcp login …``, 56 cells against the
+    widest card's budget (design round 1, D1: the owner is WHERE the sign-in is, so a
+    row that sheds it prints the local instruction this family exists to replace,
+    while the elided argument is the one part the row already carries in its label).
+    Only below THAT does the command outrank the owner, and then it is the command
+    base printed (design round 1, D2). The owner still leads whenever both fit,
+    because the command is only meaningful on that device: a reader who cannot see
+    WHERE it runs may run it here.
     """
     return f"{owner}: /mcp login {name}"
 
