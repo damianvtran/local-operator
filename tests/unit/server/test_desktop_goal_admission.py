@@ -1124,7 +1124,8 @@ def test_the_client_declares_every_action_receipt_this_route_claims() -> None:
         "the dial expression must not spell receipt types itself; the vocabulary "
         f"belongs to the shared constant, not to {sorted(literals)}"
     )
-    default = attached_module.AttachedSession.__init__.__kwdefaults__["slash_consumers"]
+    kwdefaults = getattr(attached_module.AttachedSession.__init__, "__kwdefaults__", None) or {}
+    default = kwdefaults.get("slash_consumers")
     assert default == ATTACHED_SLASH_CONSUMERS, (
         "a viewer that renders receipts must dial the shared constant BY DEFAULT; "
         f"the constructor's default is {default!r}"

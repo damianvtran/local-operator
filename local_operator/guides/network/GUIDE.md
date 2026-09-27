@@ -218,9 +218,13 @@ acting on one (QA round 5, Q-R5-1):
   purpose: one means "ask again when it is back", the other means "that id is not
   there".
 - `session_unreachable` — the peer accepted the act and then its runtime stopped
-  answering (a stopped or wedged session there, or a bind that could not be
-  completed). Nothing on this side changed, and the peer's own sentence is carried
-  verbatim.
+  answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
+  (that runtime may be starting, or wedged), or the act as a whole running out of
+  `PILOT_ACT_TIMEOUT_S`. The peer's own sentence is carried verbatim, and nothing on
+  this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
+  `relay_unavailable` with no local relay) even when the rung that noticed was the
+  bind: the two codes answer "which side of the open died", not "which sentence did
+  I get", because a stopped device and a stopped runtime look identical from here.
 
 `--all-peers` merges the rows it could read and NAMES the peers it could not
 (`<device>: unreachable (<reason>)` on stderr), so a partial listing is never
