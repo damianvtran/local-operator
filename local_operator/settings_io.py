@@ -1824,7 +1824,12 @@ SETTINGS: tuple[Setting, ...] = (
         label="Status band",
         kind=Kind.BOOL,
         default=True,
-        help="The info row under the input: model, working dir, context, cost and rate.",
+        # The disclosure leads, because the tail is the point (design review
+        # round 1, D1): hiding the band also hides its STANDING alerts — the
+        # disarmed-gate `!`, a parked connector, the MCP-failure lamp — and a
+        # help that lists the segments first clips that clause off first.
+        # Measured 67 cells, which paints whole at both 100 and 80 columns.
+        help="Also the standing alerts. Model, dir, context, cost, rate, elapsed.",
         choices=_bool_choices("show the band", "hide it"),
     ),
     Setting(

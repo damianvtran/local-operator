@@ -176,16 +176,17 @@ In the TUI, `/failovers` prints the live cascade and which provider is serving.
   it (`display.shimmer`, not a nested `display:` block). The composer family
   hides pieces of the input area, one boolean per piece, all default `true`
   (the shipped shape): `display.composer.band` (the status row under the
-  input), `display.composer.chevron` (the prompt mark), and the per-segment
-  keys `display.composer.model`, `.cwd`, `.context`, `.rate` (the last
-  completed call's tok/s), `.cost`, `.duration`. A hidden segment is absent
-  from the painted row — its cells go to the remaining segments — not blank.
-  Set one like any scalar: `lop config edit display.composer.cost false`.
-  Composer edits apply live to a running TUI: the band and input row repaint
-  on the next change the config watcher sees, whether the edit came from
-  `/settings`, `lop config edit`, or a hand edit of the file. The other
-  `display.*` flags are listed, with their own effects, on `/settings` under
-  Appearance.
+  input, which also carries the standing alerts: the disarmed-gate `!`, a
+  parked connector, and MCP failures), `display.composer.chevron` (the prompt
+  mark), and the per-segment keys `display.composer.model`, `.cwd`,
+  `.context`, `.rate` (the last completed call's tok/s), `.cost`, `.duration`.
+  A hidden segment is absent from the painted row — its cells go to the
+  remaining segments — not blank. Set one like any scalar: `lop config edit
+  display.composer.cost false`. Composer edits apply live to a running TUI:
+  the band and input row repaint on the next change the config watcher sees,
+  whether the edit came from `/settings`, `lop config edit`, or a hand edit of
+  the file. The other `display.*` flags are listed, with their own effects, on
+  `/settings` under Appearance.
 - `session.cleanup`: the ONE session-cleanup policy, **off by default**. Nothing removes a directory under `sessions/` automatically unless `session.cleanup.enabled: true`; the limits below are inert without it. `max_sessions` (keep the N most recently active; `0` = unlimited), `max_inactive_days` (by last activity, not creation; `0` = never), `max_total_bytes` (`0` = unlimited), `remove_empty` (directories with no transcript). Even when enabled, a session with a live claim/lease, an armed wake, unread spooled mail, the current session, and the 10 most recently active are never removed. Every removal is logged at WARNING with its policy and reason and appended to `sessions/.cleanup-log.jsonl`. Preview or run it by hand with `lop sessions cleanup --dry-run` / `lop sessions cleanup`; the master switch governs the CLI too (`--force` overrides it, listing first and asking for a typed confirmation unless `--yes`). `max_sessions` counts conversations shown by `/resume` (user-origin); subagent runs are never ranked under it. The former `session_retention_*` ceilings are removed on the first `lop` launch (backup written beside `config.yml`, stamp in `.migrations`), and `session.reap_unused: false` is WRITTEN in both its spellings and kept: the current code ignores it, but any older runtime still able to start on the machine reads it as its opt-out. Loading a config never migrates it.
 
 `conversation_length`, `detail_length`, and `max_learnings_history` remain readable for compatibility but are deprecated and do not govern the current compaction engine.
