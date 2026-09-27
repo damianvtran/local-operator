@@ -116,6 +116,39 @@ def test_episode_config_rejects_invalid_action_overhead(tmp_path: Path, rate: fl
         )
 
 
+@pytest.mark.parametrize("value", [-1, True, 2.5])
+def test_episode_config_rejects_invalid_rejection_bounds(tmp_path: Path, value: Any) -> None:
+    """Both rejection knobs refuse the values that would silently mean another.
+
+    A ``bool`` is an ``int`` to ``isinstance`` and would read as a bound of
+    0/1; a negative value would read as the one-strike sentinel; a float is
+    not a count of refusals at all. Refused at construction, on BOTH knobs,
+    so no configuration can reach the ceiling arithmetic as nonsense -- the
+    asymmetry review round 1 flagged (``max_rejection_streak`` validated,
+    ``max_decision_retries`` not) is closed in the direction that refuses.
+    """
+
+    roots = [tmp_path / name for name in ("evidence", "artifacts", "rescue")]
+    for root in roots:
+        root.mkdir()
+    with pytest.raises(ValueError, match="max_decision_retries must be a non-negative integer"):
+        EpisodeConfig(
+            evidence_root=roots[0],
+            artifact_root=roots[1],
+            rescue_root=roots[2],
+            max_steps=4,
+            max_decision_retries=value,
+        )
+    with pytest.raises(ValueError, match="max_rejection_streak must be a non-negative integer"):
+        EpisodeConfig(
+            evidence_root=roots[0],
+            artifact_root=roots[1],
+            rescue_root=roots[2],
+            max_steps=4,
+            max_rejection_streak=value,
+        )
+
+
 @pytest.mark.asyncio
 async def test_default_settle_policy_is_sealed_in_verified_episode_bundle(
     tmp_path: Path, episode_id: str
@@ -1396,13 +1429,12 @@ async def test_exhausted_decision_retries_seal_as_a_model_failure(
 ) -> None:
     """A streak the model cannot convert into a batch ends at its ceiling.
 
-    Every scripted rejection here carries no class, which accumulates as ONE
-    class -- a client that records no class cannot demonstrate variety -- so
-    this is the same-class arm: ``max_decision_retries + 2`` refusals, i.e.
-    four billed calls, one more than the flat bound this replaced. That is
-    the agent's failure, so the bundle says ``model`` / ``model_failure`` --
-    not ``provider`` (nothing was down) and not ``crash`` (nothing broke) --
-    and every billed attempt is in the evidence."""
+    The bound is flat: ``max(max_decision_retries + 2, max_rejection_streak)``
+    = four refusals by default, whichever classes the streak lands on, i.e.
+    four billed calls, one more than the flat three this rule replaced. That
+    is the agent's failure, so the bundle says ``model`` / ``model_failure``
+    -- not ``provider`` (nothing was down) and not ``crash`` (nothing broke)
+    -- and every billed attempt is in the evidence."""
 
     adapter = FakeAdapter(tmp_path, episode_id)
     model = ScriptedModel(["reject", "reject", "reject", "reject", "step", "finish"])
@@ -1424,7 +1456,7 @@ async def test_exhausted_decision_retries_seal_as_a_model_failure(
     assert outcome.score.reason == "model_failure"
     assert outcome.reportability_label == "unscored"
     assert outcome.diagnostic is not None and "4 attempt(s)" in outcome.diagnostic
-    # Exactly the same-class ceiling: no fifth call.
+    # Exactly the flat ceiling: no fifth call.
     assert model.calls == 4
     root = outcome.bundle_root
     assert root is not None
@@ -1448,24 +1480,28 @@ async def test_exhausted_decision_retries_seal_as_a_model_failure(
 class _ClassedRejectingModel(ScriptedModel):
     """``ScriptedModel`` whose refusals state a class, cycling a given tuple.
 
-    ``ScriptedModel``'s own ``"reject"`` carries no class, and that ``None``
-    accumulates as ONE class on purpose -- a client that records none cannot
-    demonstrate variety, so it must not unlock the changing-streak arm. These
-    tests need the variety itself, so every rejection names the next class in
-    ``classes``; the cycling never repeats a class back-to-back, which is the
-    only fact the runner's streak arithmetic reads.
+    These tests exist to prove the bound is FLAT: a streak that keeps changing
+    class must end at the same refusal a repeating one does. The class is
+    still real client data on the rejection (the evidence record quotes it),
+    and the cycling never repeats a class back-to-back -- the maximum variety
+    a streak can present, so a bound that variation could bend would show here.
     """
 
     def __init__(self, script: list[str], classes: list[str]) -> None:
         super().__init__(script)
         self.classes = list(classes)
+        #: Rejections so far, tracked separately from ``calls``: the class
+        #: cycle is indexed by REJECTION ordinal, so a script that ever
+        #: interleaves accepted calls with refusals cannot mis-cycle it.
+        self.rejections = 0
 
     async def decide(self, observation: Any, history: Any, **kwargs: Any) -> Any:
         from local_operator.evaluation.runner.model import DecisionRejected
 
         kind = self.script[self.calls] if self.calls < len(self.script) else "finish"
         if kind == "reject":
-            class_key = self.classes[self.calls % len(self.classes)]
+            class_key = self.classes[self.rejections % len(self.classes)]
+            self.rejections += 1
             self.calls += 1
             raise DecisionRejected(
                 f"Your previous reply was rejected: refused as {class_key}",
@@ -1487,9 +1523,9 @@ async def test_a_repeating_streak_survives_the_old_flat_bound(
     Both measured deaths converged on this shape: three consecutive refusals
     of one observation, sealed ``model_failure`` at the old flat bound of
     three (task_005's three were one repeated class; task_016's were three
-    different ones). The same-class ceiling is now four, so a run whose
-    fourth reply is valid continues -- which is what makes the streak
-    survivable rather than merely differently-counted.
+    different ones). The flat ceiling is now four, so a run whose fourth
+    reply is valid continues -- for EITHER shape, which is what makes the
+    streak survivable rather than merely differently-counted.
     """
 
     adapter = FakeAdapter(tmp_path, episode_id)
@@ -1512,21 +1548,24 @@ async def test_a_repeating_streak_survives_the_old_flat_bound(
 
 
 @pytest.mark.asyncio
-async def test_a_changing_streak_gets_more_room_than_a_repeating_one(
+async def test_a_changing_streak_survives_the_flat_ceiling_too(
     tmp_path: Path, episode_id: str
 ) -> None:
-    """A streak that keeps changing class is evidence of correction, not fixation.
+    """The bound is FLAT: a changing streak gets the repeating streak's room.
 
     task_016's killing streak was three DIFFERENT classes (extra-action-key,
     field-invalid, observation-binding), each reply one repair away from
-    valid; the old flat bound read that as "not converging". Five changing
-    refusals now survive -- the streak ceiling is six -- and the sixth call
-    runs the corrected reply.
+    valid; the old flat bound read that as "not converging". A split revision
+    briefly gave this shape a roomier arm, and review measured the hole in
+    that idea -- a two-class oscillation never repeats a class back-to-back
+    and rode the roomier arm's full bound -- so the flat ceiling gives this
+    shape exactly what it gives a repeating one: three refusals survive and
+    the fourth call runs the corrected reply.
     """
 
     adapter = FakeAdapter(tmp_path, episode_id)
     model = _ClassedRejectingModel(
-        ["reject"] * 5 + ["step", "finish"],
+        ["reject"] * 3 + ["step", "finish"],
         ["extra-action-key", "field-invalid", "observation-binding", "duplicate-key"],
     )
     runner = EpisodeRunner(
@@ -1541,20 +1580,17 @@ async def test_a_changing_streak_gets_more_room_than_a_repeating_one(
     outcome = await runner.run()
 
     assert outcome.status == "completed", outcome.diagnostic
-    # Five refusals, the corrected step, then the finish.
-    assert model.calls == 7
+    # Three refusals, the corrected step, then the finish.
+    assert model.calls == 5
 
 
 @pytest.mark.asyncio
-async def test_the_changing_streak_ceiling_still_ends_the_episode(
-    tmp_path: Path, episode_id: str
-) -> None:
-    """The roomier arm is still a BOUND: six changing refusals are the end.
+async def test_a_changing_streak_ends_at_the_flat_ceiling(tmp_path: Path, episode_id: str) -> None:
+    """Variation is not a licence: the fourth refusal ends it, changing or not.
 
-    Variation is evidence, not a licence -- a model that keeps producing a
-    different defect every call, six times over, is not converging either --
-    so the changing-streak ceiling keeps the worst case explicit while the
-    same-class arm ends earlier.
+    A model that keeps producing a different defect every call is oscillating,
+    not converging, so the streak dies at the same fourth refusal a repeating
+    one does (the removed split let this streak run to six).
     """
 
     adapter = FakeAdapter(tmp_path, episode_id)
@@ -1575,8 +1611,8 @@ async def test_the_changing_streak_ceiling_still_ends_the_episode(
 
     assert outcome.status == "failed"
     assert outcome.score is not None and outcome.score.reason == "model_failure"
-    assert outcome.diagnostic is not None and "6 attempt(s)" in outcome.diagnostic
-    assert model.calls == 6
+    assert outcome.diagnostic is not None and "4 attempt(s)" in outcome.diagnostic
+    assert model.calls == 4
 
 
 #: The reasoning ladder the canary's route publishes, and the rung it ran at.
@@ -1718,13 +1754,13 @@ async def test_the_retreat_allowance_is_spent_before_the_corrective_bound_sees_i
     The retreat must not become a way to buy unbounded retries. Every attempt
     here is a silent output-limit truncation, so the two retreats are spent
     first -- ``max``, then ``high``, then ``low`` -- and from there the empty
-    truncations are ORDINARY refusals, retried at the ceiling effort until the
-    same-class ceiling (``max_decision_retries + 2``, four refusals) seals the
-    episode as ``model_failure``. So the worst case grows by the retreat
-    allowance plus the one added corrective prompt: 6 billed attempts on an
-    episode that was always going to fail -- and the verdict says so, because
-    ``attempts`` counts the billed calls rather than only the corrective ones
-    that exhausted the bound.
+    truncations are ORDINARY refusals, retried at the ceiling effort until
+    the flat ceiling (four refusals) seals the episode as ``model_failure``.
+    So the worst case grows by the retreat allowance plus the one added
+    corrective prompt: 6 billed attempts on an episode that was always going
+    to fail -- and the verdict says so, because ``attempts`` counts the
+    billed calls rather than only the corrective ones that exhausted the
+    bound.
     """
 
     adapter = FakeAdapter(tmp_path, episode_id)
@@ -1764,8 +1800,8 @@ async def test_a_truncation_that_carried_text_keeps_the_ordinary_rejection_path(
     carried text (a JSON batch cut mid-object, which is what ``task_002`` did
     two calls before it died). That reply is TRUNCATED, not silent: there is
     something to correct, so it takes the corrective re-prompt at the same
-    effort, and at the same-class ceiling the episode seals ``model_failure``
-    -- four refusals under the current bound. Retreating here would spend the
+    effort, and at the flat ceiling the episode seals ``model_failure`` --
+    four refusals under the current bound. Retreating here would spend the
     effort allowance on a defect the correction can fix, and would make a
     truncation indistinguishable from a model that cannot answer.
     """
@@ -1805,7 +1841,7 @@ async def test_a_client_that_cannot_retreat_degrades_to_the_corrective_path(
 
     A scripted or historic client has no effort to lower, and the episode must
     then behave as it does for any repeated defect: the silent truncations are
-    ordinary refusals, bounded by the same-class ceiling (here four of them).
+    ordinary refusals, bounded by the same flat ceiling (here four of them).
     The capability check is what keeps the runner usable against a client that
     models no effort at all, and this is the case that proves the runner does
     not assume it.
@@ -1917,6 +1953,36 @@ async def test_zero_decision_retries_restores_one_strike(tmp_path: Path, episode
     runner = EpisodeRunner(
         build_spec(episode_id),
         build_config(tmp_path, max_decision_retries=0),
+        selector=selector(tmp_path),
+        model=model,
+        launch=lambda _: adapter,
+        rescue=_rescue_ok,
+    )
+
+    outcome = await runner.run()
+
+    assert outcome.status == "failed"
+    assert outcome.score is not None and outcome.score.reason == "model_failure"
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_zero_max_rejection_streak_restores_one_strike(
+    tmp_path: Path, episode_id: str
+) -> None:
+    """``0`` on either knob is the one-strike sentinel.
+
+    ``max_decision_retries = 0`` has always meant fail-fast; the flat design
+    keeps that and gives ``max_rejection_streak`` the same meaning, so the
+    knob that names the ceiling can also decline every corrective call. The
+    first refused reply ends the episode with no second call.
+    """
+
+    adapter = FakeAdapter(tmp_path, episode_id)
+    model = ScriptedModel(["reject", "finish"])
+    runner = EpisodeRunner(
+        build_spec(episode_id),
+        build_config(tmp_path, max_rejection_streak=0),
         selector=selector(tmp_path),
         model=model,
         launch=lambda _: adapter,

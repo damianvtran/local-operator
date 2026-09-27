@@ -1119,6 +1119,37 @@ def test_the_decoder_carries_the_repeated_key_as_data_not_in_the_sentence() -> N
     assert raised_unquotable.value.repeated_key is None
 
 
+def test_a_repeated_key_behind_leading_framing_is_still_named() -> None:
+    """The residual closed: junk before the object does not lose the name.
+
+    A duplicate key at the head was named; the SAME reply behind a prose
+    preamble or a fence used to be refused as ``leading-delimiter``, because
+    the leading-object tolerance swallowed the decoder's typed fact. The
+    tolerance now re-raises it, so both shapes are refused with the
+    duplicate-key sentence, the same class and the repeated key named --
+    converging in one retry instead of two (measured in review round 1).
+    The unquotable half is pinned too: a name the whole-or-nothing guard
+    rejects is absent on this path exactly as on the head one.
+    """
+
+    current = observation()
+    duplicate = '{"actions": [{"kind": "click", "x": 1, "button": "left", "button": "left"}]}'
+    for prefix in ("Sure, here you go: ", "```json\n"):
+        reply = prefix + duplicate
+        with pytest.raises(DecisionParseError) as raised:
+            parse_decision(reply, current, route=_ROUTE)
+        assert str(raised.value) == "model reply must be one duplicate-free JSON object"
+        assert raised.value.repeated_key == "button"
+        refused = rejection_evidence(reply, raised.value, current, LEGACY_ACTION_SURFACE, None)
+        assert refused.class_key == "duplicate-key"
+        assert "'button'" in refused.hint
+
+    framed_unquotable = 'Sure, here you go: {"%s": 1, "%s": 2}' % ("k" * 50, "k" * 50)
+    with pytest.raises(DecisionParseError) as raised_unquotable:
+        parse_decision(framed_unquotable, current, route=_ROUTE)
+    assert raised_unquotable.value.repeated_key is None
+
+
 @pytest.mark.parametrize("phrase", _ENVELOPE_RENDERING_MARKERS)
 def test_a_live_payload_carrying_a_rendering_marker_still_cannot_move_the_class(
     phrase: str,

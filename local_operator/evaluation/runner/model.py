@@ -424,11 +424,12 @@ class EpisodeModelClient(Protocol):
     * Raising :class:`DecisionRejected` means the call was billed but the
       reply was unusable. The runner records the attempt (request, response,
       usage, and a retryable ``error`` event) and calls ``decide`` AGAIN with
-      the same observation and history, up to the rejection-streak ceilings --
-      ``EpisodeConfig.max_decision_retries`` for a streak that repeats one
-      class, the roomier ``max_rejection_streak`` for one that keeps changing;
-      only when the applicable ceiling is spent does the episode end, as a
-      MODEL failure. The implementation owns making the re-call corrective.
+      the same observation and history, up to one flat ceiling -- consecutive
+      refusals end the episode at
+      ``max(EpisodeConfig.max_decision_retries + 2, max_rejection_streak)``
+      refusals, four by default, whichever classes they landed on; only when
+      the ceiling is spent does the episode end, as a MODEL failure. The
+      implementation owns making the re-call corrective.
     * Raising anything else is the contract for an unrecoverable provider
       failure: the runner treats it as ``ErrorPayload(category="provider")``
       and finalizes the episode unscored on a still-live session. Internal
