@@ -66,6 +66,7 @@ from typing import Any
 
 from local_operator.classification.context import (
     Candidate,
+    CandidateLike,
     ResourceKind,
     candidate_line,
     select_candidates,
@@ -103,9 +104,11 @@ NONE_OPTION_TEXT = "None of these fits this request"
 #: a per-question accident instead of a per-shape decision.
 QUESTION_ID_PREFIX = "recommend_"
 
-#: Kinds in the order their questions are asked (skills first: they are the
-#: most specific kind, and a model reading top-down spends its attention there).
-QUESTION_KIND_ORDER: tuple[ResourceKind, ...] = ("skill", "guide", "mcp")
+#: Kinds in the order their questions are asked (skills first: they are the most
+#: specific kind, and a model reading top-down spends its attention there;
+#: projects last — the kind the state's ladder drops first, so the reading order
+#: and the budget order agree, see ``context.KIND_DROP_ORDER``).
+QUESTION_KIND_ORDER: tuple[ResourceKind, ...] = ("skill", "guide", "mcp", "project")
 
 _OPTION_ID_SAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
@@ -261,7 +264,12 @@ def build_questions(
             criteria[identifier] = candidate_line(candidate)
             kind_options[identifier] = candidate
         criteria[NONE_OPTION] = NONE_OPTION_TEXT
-        kind_label = {"skill": "skill", "guide": "guide", "mcp": "MCP server"}[kind]
+        kind_label = {
+            "skill": "skill",
+            "guide": "guide",
+            "mcp": "MCP server",
+            "project": "project",
+        }[kind]
         questions.append(
             Question(
                 id=question_id,
@@ -322,6 +330,26 @@ def _top_probability(answer: Answer) -> float:
     return max(answer.probabilities.values(), default=0.0)
 
 
+def _recommendation_line(candidate: CandidateLike) -> str:
+    """One body line of the advisory block.
+
+    Every kind but one renders as its URL: the URL is what the model reads
+    next, and the surfaces behind ``skill://``/``guide://``/``mcp://`` are all
+    readable. A project has no reader — ``project:<name>`` is a token for the
+    ``project`` tool, not a document — so its line also carries the row's own
+    status and description (composed into ``description`` by the wiring, §8),
+    which is the text that lets the model judge whether the project fits the
+    request at all.
+
+    ``session_factory._recommendation_line`` is a deliberate second copy: the
+    turn path must not import this package, and the two renderers' outputs are
+    pinned line-for-line by ``tests/unit/classification/test_block_parity.py``.
+    """
+    if candidate.kind == "project" and candidate.description:
+        return f"- {candidate.resource_url} — {candidate.description}"
+    return f"- {candidate.resource_url}"
+
+
 def render_block(resources: Sequence[Candidate]) -> str:
     """The advisory block, verbatim per §7, or ``""`` when there is nothing to say.
 
@@ -341,7 +369,7 @@ def render_block(resources: Sequence[Candidate]) -> str:
         "<resource_recommendations>",
         "These may help with this request — read the ones that actually fit, ignore the rest:",
     ]
-    lines.extend(f"- {candidate.resource_url}" for candidate in resources)
+    lines.extend(_recommendation_line(candidate) for candidate in resources)
     lines.append("</resource_recommendations>")
     return "\n".join(lines)
 

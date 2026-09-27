@@ -58,6 +58,38 @@ def test_a_single_resource_renders_identically_on_both_sides() -> None:
     ) == render_block(one)
 
 
+def test_a_project_row_agrees_on_both_sides_despite_its_longer_line() -> None:
+    """The one kind whose line is not just its URL (§8 of the projects design).
+
+    A project has no reader behind ``project:<name>``, so the roster composes
+    ``"<status> · <description>"`` into the row and both renderers append it to
+    the line — byte for byte, which is what catches the kind rule landing on one
+    side of the two copies only.
+    """
+    resources = (
+        candidate("minerva-deploy", resource_url="skill://minerva-deploy"),
+        candidate(
+            "payments-migration",
+            kind="project",
+            description="active · Payments migration across core + dashboard",
+            resource_url="project:payments-migration",
+        ),
+        candidate("hubspot", kind="mcp", resource_url="mcp://hubspot"),
+    )
+    assert session_factory._classification_block(
+        hooks(), Recommendation(resources=resources), picked=(), catalogue=""
+    ) == render_block(resources)
+
+
+def test_a_bare_project_with_no_description_agrees_too() -> None:
+    """The degenerate project row (no description) must agree as well: both
+    renderers fall back to the URL alone, or the divergence hides exactly there."""
+    one = (candidate("bare", kind="project", description="", resource_url="project:bare"),)
+    assert session_factory._classification_block(
+        hooks(), Recommendation(resources=one), picked=(), catalogue=""
+    ) == render_block(one)
+
+
 def test_the_three_block_literals_are_the_same_strings_in_both_modules() -> None:
     """The same comparison at the LITERAL level, so a failure names the line.
 
