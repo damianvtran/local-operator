@@ -373,9 +373,7 @@ class ProjectsView(Vertical):
             # page arithmetic says 94, and a 97-cell rung was shed that fits).
             footer_width = self._detail.size.width or width
             self._detail.update(
-                detail_footer(
-                    self._views[index], style_for=_style_resolver(), width=footer_width
-                )
+                detail_footer(self._views[index], style_for=_style_resolver(), width=footer_width)
             )
         else:
             tier = self._tier if self._view == "timeline" else None
