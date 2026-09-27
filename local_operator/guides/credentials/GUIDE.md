@@ -241,16 +241,18 @@ to the session's store, so the same value is masked wherever it appears next;
 what is gone is the *notice*, not the protection.
 
 **Silence is not a claim that the detector got smarter.** The shape rules are
-unchanged and they still fire on benign, credential-SHAPED text. Two I
-reproduced on the shipped table, both grading ESCALATED (which is the grade that
-used to file): reading a CI workflow YAML produced five hits and named no shape
-at all, and a value that appears twice — masked under a `token:`-style name once
-and readable elsewhere — escalates even when the value is an ordinary
-harness-generated id. What changed is only that those firings no longer surface
-as an incident: the false positives were **not reduced**, they stopped being
-reported (a ruling on the noise, verbatim: *"Remove the operator-facing
-information too, it's false positive so it would confuse users."*). So do not
-read a quiet session as evidence that no credential-shaped text was seen.
+unchanged and they still fire on benign, credential-SHAPED text. Two such
+firings were reproduced against the shipped table, both grading ESCALATED
+(which is the grade that used to file): a read of the agent-server CI workflow
+YAML produced five hits and named no shape at all, and a value appearing twice —
+masked once under a `token:`-style name, readable elsewhere — escalates even
+when the value is an ordinary harness-generated id. (That workflow is a rich
+fixture rather than a typical one, and its siblings draw far fewer hits.) What
+changed is only that those firings no longer surface as an incident: the false
+positives were **not reduced**, they stopped being reported (a ruling on the
+noise, verbatim: *"Remove the operator-facing information too, it's false
+positive so it would confuse users."*). So do not read a quiet session as
+evidence that no credential-shaped text was seen.
 
 The distinction below is what *you* act on, because you are the one who decides
 once you have actually seen a value — and a rotation is the user's work that a
