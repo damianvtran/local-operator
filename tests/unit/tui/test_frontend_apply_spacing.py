@@ -381,12 +381,13 @@ def test_the_spacing_is_bounded_by_its_floor_and_ceiling() -> None:
 async def test_the_band_shows_the_last_calls_measured_rate() -> None:
     """The frame→band read, which is the one line of the band feature no test drove.
 
-    Review round 1 on the segment: the widget's parameter, label and ladder rung are
-    covered, but the COMPUTATION that fills them was not — and its failure mode is
-    silent, because an empty string is both "no window was measured" and "the read
-    broke". So this drives the real ``_apply_frontend_state`` with a last_usage
-    carrying a materialised pair (exactly what ``_usage_with_decode_window`` puts on
-    the wire) and asserts the rendered band, plus the negative.
+    Review round 1 on the segment: the widget's parameter, glyph and ladder rung
+    are covered, but the COMPUTATION that fills them was not — and its failure
+    mode is silent, because an empty string is both "no window was measured"
+    and "the read broke". So this drives the real ``_apply_frontend_state``
+    with a last_usage carrying a materialised pair (exactly what
+    ``_usage_with_decode_window`` puts on the wire) and asserts the rendered
+    band, plus the negative.
     """
     viewer = _Viewer()
     app = await _booted(viewer)
@@ -409,7 +410,7 @@ async def test_the_band_shows_the_last_calls_measured_rate() -> None:
         await pilot.pause()
         status = app._status
         assert status is not None
-        assert "last 19.4k tok/s" in status.render_text(200).plain
+        assert f"{status_line_module.ICON_LAST_RATE} 19.4k tok/s" in status.render_text(200).plain
 
         # The negative: a call that measured no window leaves the segment OFF. It
         # is asserted on the GLYPH rather than on the substring `last`, because a

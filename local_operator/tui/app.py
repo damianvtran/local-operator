@@ -10903,6 +10903,11 @@ class OperatorApp(App[None]):
 
         self._status = StatusLine(self.query_one("#status-band", Static))
         self._status.update(model_label=MODEL_PENDING, cwd=os.getcwd())
+        # And the composer's visibility flags (``display.composer.*``) on the
+        # boot frame: a band or segment the user hid must never be painted and
+        # then removed. Straight after the band exists, before the first
+        # session is asked for.
+        self._apply_composer_settings()
         # Attached AFTER the first `update`, so the first STABLE title already
         # carries the working directory it falls back to while the conversation
         # is unnamed. Attaching first would leave a bare `lo ›` on screen for
@@ -32368,10 +32373,11 @@ class OperatorApp(App[None]):
         local = getattr(change, "source", "disk") == "local"
         if local:
             # Apply, do not announce. The only groups whose apply this process
-            # owns and has not already performed are the approval gate and the
-            # keymap: the theme and display caches are written by the same
-            # handlers that repainted, while `tool_approval_mode` reaches the
-            # gate through nothing but this listener.
+            # owns and has not already performed are the approval gate, the
+            # keymap and `display.composer.*`: the theme and display caches are
+            # written by the same handlers that repainted, while
+            # `tool_approval_mode` reaches the gate through nothing but this
+            # listener.
             if "tool_approval_mode" in changed:
                 self._follow_configured_approvals(change, announce=False)
             if any(key.startswith(_keymap.KEYMAP_PREFIX) for key in changed):
@@ -32387,6 +32393,12 @@ class OperatorApp(App[None]):
                 # documents at length, which is why the apply is on BOTH
                 # branches rather than only on the disk one.
                 self._apply_keymap(getattr(change, "values", {}), announce=False)
+            if any(key.startswith("display.composer.") for key in changed):
+                # The write facade already dropped the display cache
+                # (`settings_io._invalidate_caches`), so only the two widget
+                # `display` flags and the repaint are owed — the segments
+                # re-read themselves on it.
+                self._apply_composer_settings()
             return
         from local_operator import settings_io
 
@@ -32538,6 +32550,12 @@ class OperatorApp(App[None]):
                 settings_reload()
             except Exception:  # noqa: BLE001 — the cache drop is best-effort
                 logger.debug("display settings cache could not be dropped", exc_info=True)
+        if any(key.startswith("display.composer.") for key in changed):
+            # AFTER the reload above, deliberately: the segment keys are read
+            # from the reloaded cache during the repaint this call makes, so
+            # applying before it would repaint the OLD row. The `applied:`
+            # clause above has already told the user these keys moved.
+            self._apply_composer_settings()
         if any(key in changed for key in ("tui.sidebar_visible", "tui.sidebar_position")):
             self._apply_sidebar_settings()
         if "display.dock" in changed:
@@ -36765,6 +36783,39 @@ class OperatorApp(App[None]):
             logger.debug("display.dock live apply failed", exc_info=True)
             return
         self._refresh_band()
+
+    def _apply_composer_settings(self) -> None:
+        """Apply the ``display.composer.*`` widget-visibility flags.
+
+        Two keys take whole widgets out of the layout (``band``,
+        ``chevron``) and six hide band segments. Only the two widgets need
+        moving here: the segment keys are read on the paint path
+        (``status_line._composer_hidden_segments``), so the repaint this
+        method ends with is what makes them effective — without it an idle
+        band would keep the old row until the next incidental repaint.
+
+        Re-derived from the stored flags rather than toggled, the same
+        discipline :meth:`_sync_row_density_class` states: the boot call, the
+        /settings page's write and another process's edit all land here and
+        cannot disagree. Idempotent, so calling it when nothing moved costs
+        one repaint.
+
+        Called at boot (``on_mount``, once the band's ``StatusLine`` exists)
+        and from :meth:`_on_config_change` when any ``display.composer.*`` key
+        moved — on BOTH branches, because nothing else in the process touches
+        these widgets.
+        """
+        try:
+            self.query_one("#status-band", Static).display = bool(
+                settings_get("display.composer.band", True)
+            )
+            self.query_one("#prompt-chevron", Chrome).display = bool(
+                settings_get("display.composer.chevron", True)
+            )
+        except Exception:  # noqa: BLE001 — cosmetic; must never fail a boot
+            logger.debug("composer settings: widget display not applied", exc_info=True)
+        if self._status is not None:
+            self._status.refresh()
 
     def action_keymap_new_session(self) -> None:
         """The remappable "new session" hotkey — ``ctrl+n`` unless remapped.

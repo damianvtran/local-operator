@@ -1803,6 +1803,105 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("hidden", "hidden", "not shown"),
         ),
     ),
+    # -- the composer widget-visibility family (operator request, 2026-09-27) --
+    #
+    # One BOOL per composable piece of the composer: the status band and the
+    # prompt chevron as whole widgets, plus one key per band segment. All
+    # default True, which IS today's shape — the family exists to REMOVE
+    # pieces, so "unset" must mean "the band as shipped". LIVE like the rest of
+    # their section: the segment keys are read on the paint path
+    # (`tui/settings.py` -> `status_line._composer_hidden_segments`) and the
+    # two widget keys are applied by `OperatorApp._apply_composer_settings` off
+    # the config watcher, so an edit lands on a running TUI without a relaunch.
+    #
+    # Flat-dotted like every `display.*` key above (see the block comment at
+    # `display.shimmer`): the dot is part of a literal top-level key, so each
+    # `path` is the ONE-element tuple holding the whole key.
+    Setting(
+        key="display.composer.band",
+        path=("display.composer.band",),
+        section="appearance",
+        label="Status band",
+        kind=Kind.BOOL,
+        default=True,
+        # The disclosure leads, because the tail is the point (design review
+        # round 1, D1): hiding the band also hides its STANDING alerts — the
+        # disarmed-gate `!`, a parked connector, the MCP-failure lamp — and a
+        # help that lists the segments first clips that clause off first.
+        # Measured 67 cells, which paints whole at both 100 and 80 columns.
+        help="Also the standing alerts. Model, dir, context, cost, rate, elapsed.",
+        choices=_bool_choices("show the band", "hide it"),
+    ),
+    Setting(
+        key="display.composer.chevron",
+        path=("display.composer.chevron",),
+        section="appearance",
+        label="Prompt chevron",
+        kind=Kind.BOOL,
+        default=True,
+        help="The prompt mark at the left edge of the input row.",
+        choices=_bool_choices("show the mark", "hide it"),
+    ),
+    Setting(
+        key="display.composer.model",
+        path=("display.composer.model",),
+        section="appearance",
+        label="Band: model",
+        kind=Kind.BOOL,
+        default=True,
+        help="The model-label segment in the status band.",
+        choices=_bool_choices("show the model", "hide it"),
+    ),
+    Setting(
+        key="display.composer.cwd",
+        path=("display.composer.cwd",),
+        section="appearance",
+        label="Band: working dir",
+        kind=Kind.BOOL,
+        default=True,
+        help="The working-directory segment in the status band.",
+        choices=_bool_choices("show the directory", "hide it"),
+    ),
+    Setting(
+        key="display.composer.context",
+        path=("display.composer.context",),
+        section="appearance",
+        label="Band: context",
+        kind=Kind.BOOL,
+        default=True,
+        help="The context-usage segment in the status band.",
+        choices=_bool_choices("show context usage", "hide it"),
+    ),
+    Setting(
+        key="display.composer.rate",
+        path=("display.composer.rate",),
+        section="appearance",
+        label="Band: decode rate",
+        kind=Kind.BOOL,
+        default=True,
+        help="The tok/s segment — the last completed call's throughput.",
+        choices=_bool_choices("show the rate", "hide it"),
+    ),
+    Setting(
+        key="display.composer.cost",
+        path=("display.composer.cost",),
+        section="appearance",
+        label="Band: session cost",
+        kind=Kind.BOOL,
+        default=True,
+        help="The session-cost segment in the status band.",
+        choices=_bool_choices("show the cost", "hide it"),
+    ),
+    Setting(
+        key="display.composer.duration",
+        path=("display.composer.duration",),
+        section="appearance",
+        label="Band: elapsed",
+        kind=Kind.BOOL,
+        default=True,
+        help="The elapsed-time segment in the status band.",
+        choices=_bool_choices("show the elapsed time", "hide it"),
+    ),
     Setting(
         key="tui.sidebar_visible",
         path=("tui", "sidebar_visible"),
