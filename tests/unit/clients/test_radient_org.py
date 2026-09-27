@@ -140,6 +140,37 @@ def test_get_team_pulls_the_full_document_by_id(
     assert args[0] == f"{base_url}/teams/team-1"
 
 
+def test_org_calls_refuse_an_upstream_redirect(
+    radient_client: RadientClient, base_url: str
+) -> None:
+    """A 3xx is refused, never followed (security review round 1, S-2).
+
+    Followed, a same-host redirect re-sends the caller's bearer to wherever it
+    points; the desktop transport already refuses these, and every org-capable
+    call now does the same.
+    """
+    document = {"name": "Coder", "description": "Writes code.", "version": "1.0.0"}
+    calls = (
+        ("requests.get", lambda: radient_client.list_memberships()),
+        ("requests.get", lambda: radient_client.get_team("team-1")),
+        ("requests.post", lambda: radient_client.publish_agent_instruction_set(document)),
+        (
+            "requests.put",
+            lambda: radient_client.republish_agent_instruction_set("hub-1", document),
+        ),
+        ("requests.post", lambda: radient_client.publish_team_document(document, "org-a")),
+    )
+
+    for target, call in calls:
+        redirected = MagicMock()
+        redirected.status_code = 302
+        with patch(target, return_value=redirected) as mock_call:
+            with pytest.raises(APIError) as exc_info:
+                call()
+        assert "unexpected redirect" in str(exc_info.value)
+        assert mock_call.call_args.kwargs["allow_redirects"] is False
+
+
 def test_publish_team_document_posts_with_the_tenant_query(
     radient_client: RadientClient, base_url: str
 ) -> None:

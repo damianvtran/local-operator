@@ -615,6 +615,88 @@ def _upstream_refusal(status: int, **details: Any) -> HTTPException:
     )
 
 
+#: The organization operations (design §4.7): the closed set whose refusals
+#: carry the hub's own membership codes. Spelled beside the Literal's four
+#: entries on purpose -- this is the dispatch that decides which refusals get
+#: the code-preserving reading below -- and pinned by the request tests so the
+#: two lists cannot silently diverge.
+ORG_OPERATIONS = frozenset(
+    {"memberships.list", "org_agents.list", "org_teams.list", "org_team.get"}
+)
+
+#: The hub's frozen membership refusals (§4.4/§4.5), carried through verbatim:
+#: the renderer's next step differs per code -- ask an admin
+#: (`insufficient_role`, whose `details.required` names the rank), get invited
+#: (`not_a_member`), or activate the plan (`team_plan_required`) -- and none of
+#: them is fixed by signing in again, so folding them into
+#: `radient_credential_refused` would send the user to the wrong remedy
+#: (review round 1, major 2).
+_ORG_REFUSAL_CODES = frozenset({"not_a_member", "insufficient_role", "team_plan_required"})
+
+#: The sentence each carried code gets on THIS plane. The codes and their
+#: `details` travel as the hub sent them; only the prose is restated here, in
+#: the desktop vocabulary.
+_ORG_REFUSAL_MESSAGES = {
+    "not_a_member": "You are not a member of this organization",
+    "insufficient_role": "Your organization role does not allow this action",
+    "team_plan_required": "This organization needs an active team plan",
+}
+
+
+def _org_refusal_code(operation: str, envelope: Any) -> str | None:
+    """The frozen org code a designed envelope carries, or ``None`` to fall back."""
+    if operation not in ORG_OPERATIONS or not isinstance(envelope, dict):
+        return None
+    code = envelope.get("code")
+    return code if isinstance(code, str) and code in _ORG_REFUSAL_CODES else None
+
+
+async def _upstream_refusal_for(operation: str, response: Any, token: str | None) -> HTTPException:
+    """One upstream refusal, with the org family's codes preserved.
+
+    ``_upstream_refusal`` classes 401/403/429 as a credential refusal: the right
+    ACTION for an unrecognised 403, but the wrong WORD for the three frozen
+    membership refusals the org operations receive, which signing in again
+    cannot fix. For those operations the hub's designed envelope is read --
+    size-bounded, and masked with this call's bearer -- and its code/details
+    carried exactly as the local org routes carry them; every other answer, and
+    every operation outside the org family, keeps the one generic reading so
+    nothing else changes shape.
+    """
+    import json
+
+    import httpx
+
+    if operation not in ORG_OPERATIONS:
+        return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+
+    content = bytearray()
+    try:
+        async for chunk in response.aiter_bytes():
+            content.extend(chunk)
+            if len(content) > MAX_UPSTREAM_BYTES:
+                return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+    except httpx.HTTPError:
+        return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+
+    try:
+        envelope = json.loads(content) if content else {}
+    except ValueError:
+        envelope = None
+    code = _org_refusal_code(operation, envelope)
+    if code is None:
+        return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+
+    details = envelope.get("details") if isinstance(envelope, dict) else None
+    carried = public_data(details, [token] if token else []) if isinstance(details, dict) else {}
+    return _failure(
+        response.status_code,
+        code,
+        _ORG_REFUSAL_MESSAGES[code],
+        **{**carried, "upstream_status": response.status_code},
+    )
+
+
 def _upstream_failure(status: int, agent_id: str, relation: str) -> HTTPException:
     """The batch's answer for one upstream read that failed, mapped once.
 
@@ -1175,9 +1257,7 @@ async def radient(
                             upstream_status=response.status_code,
                         )
                     if response.status_code >= 400:
-                        raise _upstream_refusal(
-                            response.status_code, upstream_status=response.status_code
-                        )
+                        raise await _upstream_refusal_for(body.operation, response, token)
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)

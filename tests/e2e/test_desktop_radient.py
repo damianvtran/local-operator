@@ -59,6 +59,19 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if path.startswith("tenants/wrong/"):
             return JSONResponse({"error": "wrong tenant", "access_token": access}, status_code=403)
+        if path == "tenants/org-denied/agents":
+            # A frozen membership refusal in the designed envelope: the
+            # transport must carry `team_plan_required` through under its own
+            # code instead of flattening it to a credential refusal (review
+            # round 1, major 2).
+            return JSONResponse(
+                {
+                    "error": "this organization needs an active team plan",
+                    "code": "team_plan_required",
+                    "details": {"plan": "none"},
+                },
+                status_code=403,
+            )
         if path == "me/memberships":
             return {
                 "status": 200,
@@ -248,6 +261,16 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
                 route, json={"operation": "org_team.get", "team_id": "missing"}
             )
             assert missing_team.status_code == 404 and access not in missing_team.text
+            omitted_plan = await client.post(
+                route, json={"operation": "org_agents.list", "tenant_id": "org-denied"}
+            )
+            assert omitted_plan.status_code == 403
+            assert omitted_plan.json()["detail"]["code"] == "team_plan_required"
+            assert omitted_plan.json()["detail"]["details"] == {
+                "plan": "none",
+                "upstream_status": 403,
+            }
+            assert access not in omitted_plan.text
             redirect = await client.post(
                 route, json={"operation": "agents.get", "agent_id": "redirect"}
             )
@@ -305,7 +328,8 @@ async def test_radient_proxy_real_http(headless_tui_env, monkeypatch):
             print(
                 (
                     "Proxy failures: token401, Origin403, signed-out409, wrong tenant403,"
-                    " redirect502, invalid path/payload/query/unconfirmed mutation422; "
-                    "mutation retry replayed without upstream duplication"
+                    " org refusal403 (team_plan_required), redirect502, invalid "
+                    "path/payload/query/unconfirmed mutation422; mutation retry replayed "
+                    "without upstream duplication"
                 )
             )

@@ -180,6 +180,20 @@ async def capabilities():
                 # works — "update the backend" would be false there.
                 "mcp_catalog": 1,
                 "radient": 1,
+                # The organization surfaces on the Radient proxy (design §4.7):
+                # the four closed operations `memberships.list`, `org_agents.list`,
+                # `org_teams.list` and `org_team.get`, and the three frozen
+                # membership refusals they carry through under their own codes
+                # (`not_a_member`, `insufficient_role`, `team_plan_required`).
+                # Its OWN key rather than a bump of `radient`, by the rule
+                # `completion_ack_bulk` states above: a renderer that does not
+                # see it is talking to a backend that answers the unknown
+                # operations with a MASKED 422 ("The request has invalid
+                # fields."), indistinguishable from a malformed call -- so the
+                # org surface must say "update the backend" instead of
+                # attempting an operation whose failure it cannot classify,
+                # while everything else keeps working and is not gated on this.
+                "radient_org": 1,
                 # Session code memory: GET/POST/PATCH/DELETE on
                 # `/v1/desktop/sessions/{id}/variables`, reading and writing a
                 # session's LIVE eval-kernel namespace by session id. Its OWN key

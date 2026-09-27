@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pytest
 
 from local_operator.clients._http import APIError
-from local_operator.server.routes.agents import ORG_LOGIN_REMEDY
+from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
 from local_operator.teams import (
     TeamEditFields,
     TeamRegistry,
@@ -254,3 +254,132 @@ async def test_team_pull_reports_the_name_it_actually_stored(
     assert result["name"] == "Release-Crew-2"
     assert result["renamed_from"] == "Release Crew"
     assert result["invalid_name"] is True
+
+
+#: The token the conftest's org-credential fixture seeds. A reflecting upstream
+#: would echo exactly this value in any field of its answer; the assertions
+#: below are about the scrub, not about this spelling being a real credential.
+_REFLECTED = "org-access-token"
+
+
+@pytest.mark.parametrize("encoded", ["a%3Ftenant_id=org-9", "a%23frag"])
+@pytest.mark.asyncio
+async def test_team_pull_refuses_an_id_that_could_escape_its_segment(
+    test_app_client, fake_org_credential, encoded: str
+) -> None:
+    """A decoded `?`/`#` must not become query structure on the hub request.
+
+    Review round 1's MAJOR: ``get_team`` interpolates the id into the path, so
+    before validation ``a%3Ftenant_id=org-9`` reached the hub as
+    ``/teams/a?tenant_id=org-9`` -- a caller-chosen query on a request this
+    machine makes as the signed-in PERSON. The id is validated with the
+    registry's own reader before any bearer-carrying URL exists.
+    """
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        response = await test_app_client.get(f"/v1/teams/pull/{encoded}")
+
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"]
+    mock_client.assert_not_called()
+
+
+@pytest.mark.parametrize("encoded", ["a%2Fb", "..%2F..%2Fme%2Fmemberships", ".."])
+@pytest.mark.asyncio
+async def test_team_pull_refuses_multi_segment_escapes_before_the_handler(
+    test_app_client, fake_org_credential, encoded: str
+) -> None:
+    """Encoded slashes and dot-segments never become path structure either."""
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        response = await test_app_client.get(f"/v1/teams/pull/{encoded}")
+
+    assert response.status_code == 404
+    mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_team_pull_refuses_a_tenantless_document_when_a_tenant_is_declared(
+    test_app_client, temp_dir, fake_org_credential
+) -> None:
+    """A declared tenant must be checkable: no owner named -> 409, not stored."""
+    document = {"id": "team-9", "name": "release-crew", "members": []}
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.get_team.return_value = document
+        response = await test_app_client.get("/v1/teams/pull/team-9?tenant_id=org-1")
+
+    assert response.status_code == 409
+    assert "does not name an owning organization" in response.json()["detail"]
+    assert TeamRegistry(temp_dir).list_teams() == []
+
+
+@pytest.mark.asyncio
+async def test_team_pull_without_a_declared_tenant_imports_a_tenantless_document(
+    test_app_client, temp_dir, fake_org_credential
+) -> None:
+    """The by-id path stays usable when the caller asserts no tenant."""
+    document = {"id": "team-9", "name": "release-crew", "members": []}
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.get_team.return_value = document
+        response = await test_app_client.get("/v1/teams/pull/team-9")
+
+    assert response.status_code == 200, response.text
+    assert TeamRegistry(temp_dir).get_team_by_name("release-crew") is not None
+
+
+@pytest.mark.asyncio
+async def test_memberships_masks_a_reflected_credential(
+    test_app_client, fake_org_credential
+) -> None:
+    """The relay scrubs this call's credential out of ANY field (S-1)."""
+    memberships = [{"tenant_id": "org-1", "note": f"token={_REFLECTED}"}]
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.list_memberships.return_value = memberships
+        response = await test_app_client.get("/v1/memberships")
+
+    assert response.status_code == 200, response.text
+    assert _REFLECTED not in response.text
+    assert "[redacted]" in response.text
+
+
+@pytest.mark.asyncio
+async def test_team_publish_masks_a_reflected_credential(
+    test_app_client, temp_dir, fake_org_credential
+) -> None:
+    team = _new_team(temp_dir)
+    result = {"team": {"id": "team-9", "name": team.name, "echo": f"Bearer {_REFLECTED}"}}
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_team_document.return_value = result
+        response = await test_app_client.post(f"/v1/teams/{team.id}/publish?tenant_id=org-1")
+
+    assert response.status_code == 200, response.text
+    assert _REFLECTED not in response.text
+    assert "[redacted]" in response.text
+
+
+@pytest.mark.asyncio
+async def test_team_pull_masks_reflected_credentials_before_storing(
+    test_app_client, temp_dir, fake_org_credential
+) -> None:
+    """The scrub happens BEFORE import: a credential must not be STORED (S-1)."""
+    document = {
+        "id": "team-9",
+        "tenant_id": "org-1",
+        "name": "release-crew",
+        "members": [],
+        "instructions": f"You ship. Authorization: Bearer {_REFLECTED}",
+    }
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.get_team.return_value = document
+        response = await test_app_client.get("/v1/teams/pull/team-9")
+
+    assert response.status_code == 200, response.text
+    assert _REFLECTED not in response.text
+    assert "[redacted]" in response.json()["result"]["instructions"]
+    stored = TeamRegistry(temp_dir).get_team_by_name("release-crew")
+    assert stored is not None
+    assert _REFLECTED not in stored.instructions
+    assert "[redacted]" in stored.instructions
