@@ -124,9 +124,10 @@ def test_the_record_answers_only_the_device_it_names(
     }
     link_b = _link_for(server_b.identity.device_id)
 
-    # THE LEGITIMATE DIRECTION, first, so the gate cannot pass by refusing everything:
-    # the device the record names still reads its own commit out of it.
+    # THE LEGITIMATE DIRECTION first, so the gate is not a blanket refusal: the device
+    # the record names still reads its own commit out of it.
     answered = handler(link_b, dict(frame))
+    assert isinstance(answered, dict), answered
     assert answered["result"] == "tombstone", answered
     assert answered["tombstone"]["device_id"] == server_b.identity.device_id, answered
 
@@ -134,6 +135,7 @@ def test_the_record_answers_only_the_device_it_names(
     # describes. The answer stops being a commit for it.
     write_tombstone(SESSION, device_id=THIRD, device_name="peer-c", config_dir=server_a.root)
     refused = handler(link_b, dict(frame))
+    assert isinstance(refused, dict), refused
     assert refused["result"] == "refused", refused
     assert refused.get("tombstone") is None, "a record for another device is not this one's proof"
     assert "peer-c" in refused["message"], refused["message"]
@@ -141,6 +143,7 @@ def test_the_record_answers_only_the_device_it_names(
     # AND THE FRAME CANNOT PROMOTE ITSELF: ``to_device`` is what the asker writes, so a
     # frame claiming the id the record names is still refused on the LINK's identity.
     claimed = handler(link_b, {**frame, "to_device": THIRD})
+    assert isinstance(claimed, dict), claimed
     assert claimed["result"] == "refused", claimed
 
 
