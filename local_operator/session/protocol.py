@@ -866,9 +866,13 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     # --- the runtime on the other end -------------------------------------
     #: The BUILD the runtime is running, read off its discovery record at
-    #: dial. ``""`` on a facade that has never bound AND on one bound to a
-    #: runtime older than the field; hosts distinguish those by ``is_cold``,
-    #: not by this value.
+    #: dial. ``""`` on a facade that has never bound, on one bound to a runtime
+    #: older than the field, AND on one bound to a runtime on ANOTHER DEVICE:
+    #: a federated row carries no build, so that last case is UNOBSERVABLE here
+    #: rather than old, and hosts must scope a "predates the field" conclusion
+    #: to ``runtime_locality`` ``"this-machine"`` (``app.py::_check_build_skew``
+    #: does). ``is_cold`` separates the never-bound case from the other two, not
+    #: from all three, so it is not on its own a complete discriminator.
     runtime_version: str
     #: The source ref of that build, same lifecycle as ``runtime_version``.
     runtime_source_ref: str
