@@ -278,14 +278,36 @@ class EpisodeConfig:
     operator's own ``max_cycle_cost_micros`` can stop a bounded episode on
     cost (see :class:`CostRateGuard` for the measured reason a prorated
     per-step pace is not an acceptable substitute).
-    ``max_decision_retries`` is how many corrective re-prompts one observation
-    may take after a billed reply fails strict parsing (a ``frame_id`` the
-    observation does not carry, malformed JSON) before the episode ends as a
-    model failure. The default is 2 -- one re-prompt is the minimum for a
-    single defect, a second covers a reply that fixes it and introduces
-    another; beyond that the model is not converging and every further call
-    is money spent on a batch that can never execute. ``0`` restores the old
-    one-strike behaviour.
+    ``max_decision_retries`` and ``max_rejection_streak`` size ONE flat
+    corrective ceiling: consecutive refusals for one observation end the
+    episode as a model failure at
+    ``max(max_decision_retries + 2, max_rejection_streak)`` -- four refusals
+    under the shipped defaults -- and the ceiling deliberately does not
+    depend on the SHAPE of the streak. A shape-sensitive split (a repeating
+    class ending at ``max_decision_retries + 2``, a class-changing streak
+    getting the roomier ``max_rejection_streak``) was built and rejected: a
+    class-change trigger pays a model for VARYING its bad output rather than
+    correcting it, and it was measured reachable -- an alternating two-class
+    streak never repeats one class back-to-back and rode the roomier arm to
+    its full bound. Convergence is the refusals stopping, not how they
+    differ.
+
+    The base is 2: one re-prompt is the minimum for a single defect, and a
+    second covers a reply that fixes one and introduces another; the +2 puts
+    the kill one refusal past the old flat bound of three, which both
+    measured deaths ran into -- task_005 at step 64 (2026-09-27), three
+    consecutive ``duplicate-key`` refusals whose correction never named the
+    actual defect, and task_016 at step 10 (2026-09-26), three DIFFERENT
+    classes whose last reply was one missing field away from valid. Both
+    streaks died one call short of their repair, so the flat four gives each
+    that call while staying a hard bound: every attempt under it is still a
+    billed, evidence-recorded call.
+
+    ``max_rejection_streak`` is the same ceiling spelled explicitly, and the
+    larger of the two binds: it can raise the number above
+    ``max_decision_retries + 2`` but never below it, and ``0`` on EITHER knob
+    restores the old one-strike behaviour -- the first refused reply ends the
+    episode.
 
     ``observation_retry_attempts``/``observation_retry_delay`` bound recovery
     from a transient failure to READ the environment after a step's actions
@@ -352,6 +374,7 @@ class EpisodeConfig:
     max_cycle_cost_micros: int | None = None
     guards: tuple[EpisodeGuard, ...] | None = None
     max_decision_retries: int = 2
+    max_rejection_streak: int = 4
     observation_retry_attempts: int = 3
     observation_retry_delay: float = 5.0
     execution_overhead_seconds_per_action: float = 0.0
@@ -374,6 +397,16 @@ class EpisodeConfig:
         challenges = self.completion_challenges
         if isinstance(challenges, bool) or not isinstance(challenges, int) or challenges < 0:
             raise ValueError("completion_challenges must be a non-negative integer")
+        # Both rejection knobs are counts compared with ``>=`` against refused
+        # replies, so the same traps as above apply: a ``bool`` would read as a
+        # bound of 0/1, and a negative value would silently mean the one-strike
+        # sentinel instead of the nonsense it is.
+        retries = self.max_decision_retries
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            raise ValueError("max_decision_retries must be a non-negative integer")
+        streak = self.max_rejection_streak
+        if isinstance(streak, bool) or not isinstance(streak, int) or streak < 0:
+            raise ValueError("max_rejection_streak must be a non-negative integer")
 
 
 @dataclass(frozen=True)
@@ -422,8 +455,8 @@ class EpisodeOutcome:
 #: ``task_012`` each ended on three consecutive replies of
 #: ``output_tokens=16384 reasoning_tokens=16384 stop_reason=length
 #: tool_call_count=0`` -- every token went to thinking, nothing was emitted, and
-#: the SAME effort was re-prompted until ``max_decision_retries`` sealed the
-#: episode ``model_failure`` after 94/82/55 steps.
+#: the SAME effort was re-prompted until the decision-retry bound sealed
+#: the episode ``model_failure`` after 94/82/55 steps.
 #:
 #: Deliberately SEPARATE from ``EpisodeConfig.max_decision_retries``, and not a
 #: widening of it. That bound counts corrective re-prompts -- billed calls whose
@@ -433,6 +466,34 @@ class EpisodeOutcome:
 #: genuinely not converging: an episode that hits both still gets its full
 #: corrective budget after the retreat allowance is gone.
 MAX_EMPTY_TRUNCATION_RETRIES = 2
+
+
+def _rejection_streak_ceiling(config: EpisodeConfig) -> int:
+    """The single, flat ceiling on consecutive refusals for ONE observation.
+
+    The kill fires when this many consecutive refused replies for one
+    observation have accumulated, whichever classes they landed on: the bound
+    is deliberately FLAT. An earlier revision split it by the SHAPE of the
+    streak, on the theory that a changing streak is a model applying its
+    corrections -- and review measured the hole in that theory, an
+    alternating two-class streak never repeats one class back-to-back and so
+    spent the roomier arm's full bound. Varying a defect is not converging,
+    so both shapes end at the same refusal.
+
+    Returns ``max(config.max_decision_retries + 2,
+    config.max_rejection_streak)`` -- 4 under the shipped defaults: the
+    same-class arm's re-derived count (one refusal past the old flat three,
+    which both measured deaths ran into), now uniform. The ceiling can never
+    bind below the base allowance: a positive ``max_rejection_streak`` under
+    ``max_decision_retries + 2`` is raised to it. ``0`` on either knob means
+    one-strike -- the first refused reply ends the episode
+    (``max_decision_retries = 0`` keeps the documented meaning it has always
+    had; ``max_rejection_streak = 0`` joins it).
+    """
+
+    if config.max_decision_retries <= 0 or config.max_rejection_streak <= 0:
+        return 1
+    return max(config.max_decision_retries + 2, config.max_rejection_streak)
 
 
 class _Cancelled(Exception):
@@ -952,18 +1013,26 @@ class EpisodeRunner:
         retryable ``error`` event naming the defect, so a reader can see the
         correction happen rather than infer it from an extra triple.
 
-        TWO bounds, and they are deliberately different ones. ``rejection`` is
-        the ordinary corrective re-prompt and is counted against
-        ``config.max_decision_retries``. A reply that arrived as an EMPTY
-        ``length`` truncation -- ``length`` with no text and no tool calls, the
-        reasoning model that spent its ENTIRE output budget thinking -- is not
-        corrected but RETREATED: the same call is re-issued one effort rung
-        lower (``MAX_EMPTY_TRUNCATION_RETRIES``), because there is no reply to
-        correct and the rung that produced silence will produce silence again.
-        Spending the retreat allowance must not eat the corrective one, so the
-        two counters are separate; only when the retreats are gone does an
-        empty truncation count as an ordinary rejection, which is where the
-        ``model_failure`` verdict comes from.
+        THREE bounds, and they count deliberately different things. A reply
+        that arrived as an EMPTY ``length`` truncation -- ``length`` with no
+        text and no tool calls, the reasoning model that spent its ENTIRE
+        output budget thinking -- is not corrected but RETREATED: the same
+        call is re-issued one effort rung lower
+        (``MAX_EMPTY_TRUNCATION_RETRIES``), because there is no reply to
+        correct and the rung that produced silence will produce silence
+        again. Spending the retreat allowance must not eat the corrective
+        one, so the two counters are separate; only when the retreats are
+        gone does an empty truncation count as an ordinary refusal.
+
+        The corrective bound is ONE flat ceiling, the same for every streak
+        shape (see :func:`_rejection_streak_ceiling`): consecutive refusals
+        for the observation end it at ``max(max_decision_retries + 2,
+        max_rejection_streak)`` refusals -- four by default -- as a
+        ``model_failure``. A split that let a CHANGING streak run longer was
+        built and rejected: it paid a model for varying its defect rather
+        than correcting it, and a two-class oscillation spent its full bound
+        (measured). The flat four leaves each measured three-refusal death a
+        corrective call while keeping the worst case a hard, billed bound.
 
         Both bounds existing is the difference between this arm and the
         ordinary harness (``harness/loop.py``), and its absence here is what
@@ -994,7 +1063,12 @@ class EpisodeRunner:
                     empty_truncations += 1
                     continue
                 rejections += 1
-                if rejections > self._config.max_decision_retries:
+                # One flat ceiling, whatever classes the streak landed on: the
+                # refusal's class no longer selects the bound, because a
+                # shape-sensitive arm paid a model for varying its defect
+                # rather than correcting it (see
+                # ``_rejection_streak_ceiling``).
+                if rejections >= _rejection_streak_ceiling(self._config):
                     raise _ModelFailure(
                         f"model produced no usable decision after {attempts} attempt(s): "
                         f"{rejection.diagnostic}",
