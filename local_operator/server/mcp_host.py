@@ -372,7 +372,12 @@ class McpHost:
         except Exception as exc:  # noqa: BLE001 — a failed test is a result
             sanitize_exception(exc)
             unwrapped = _unwrap_auth_required(exc)
-            text = manager._auth_failure_text(name, unwrapped, manager._server_url(name))
+            text = manager._auth_failure_text(
+                name,
+                unwrapped,
+                manager._server_url(name),
+                store=manager._effective_auth_store(),
+            )
             if isinstance(unwrapped, (McpAuthRequiredError, McpAuthChallengeError)):
                 status = "needs_sign_in"
             else:

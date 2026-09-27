@@ -82,7 +82,16 @@ def test_the_owner_s_diagnostic_never_becomes_the_sentence_the_operator_reads(tm
 
 
 def test_an_unclassified_code_still_keeps_the_owner_s_own_words(tmp_path) -> None:
-    """The other arm, unchanged: a newer owner's unknown code must still say something."""
+    """The unclassified arm: a newer owner's reason survives — as the DETAIL.
+
+    REVIEW ROUND 1, R2. The first version of this cell asserted only that the owner's
+    words appeared somewhere in the sentence, which is true under BOTH
+    implementations: the old one returned the owner's message verbatim, the new one
+    interpolates it into ``messages._generic``'s parenthesis. That made it useless as
+    a regression test. The discriminating questions are whether THIS build's remedy is
+    present (the old arm produced none) and whether the owner's words are the WHOLE
+    sentence (the defect: a bare class name reaching an operator with no owner).
+    """
     client = _client(tmp_path)
 
     detail = client._detail_from_owner(  # noqa: SLF001
@@ -92,7 +101,33 @@ def test_an_unclassified_code_still_keeps_the_owner_s_own_words(tmp_path) -> Non
     )
 
     sentence = str(detail.get("message") or "")
+    assert sentence != "the account's weekly window is spent", sentence
     assert "the account's weekly window is spent" in sentence, sentence
+    assert "damian-mbp declined to lend 'zai'" in sentence, sentence
+    assert "Nothing was changed on either device" in sentence, sentence
+    assert "run 'lop login zai' here" in sentence, sentence
+
+
+def test_an_internal_diagnostic_never_becomes_the_whole_sentence(tmp_path) -> None:
+    """The exact shape R2 measured: a broker crash put a bare ``TimeoutError`` up.
+
+    ``owner._refuse``'s catch-all sends ``exc.__class__.__name__`` as the message, so
+    before the fix the operator read that class name alone — no owner, no remedy —
+    contradicting this module's own promise that a refusal always says what to do.
+    """
+    client = _client(tmp_path)
+
+    detail = client._detail_from_owner(  # noqa: SLF001
+        _reply("internal", "TimeoutError"), "zai", "zai"
+    )
+
+    sentence = str(detail.get("message") or "")
+    assert sentence != "TimeoutError", sentence
+    assert "damian-mbp declined to lend 'zai'" in sentence, sentence
+    assert "run 'lop login zai' here" in sentence, sentence
+    # The diagnostic is not thrown away — it is the parenthesis, where a diagnostic
+    # belongs, and the one surface that reads it is a person reading a log.
+    assert "TimeoutError" in sentence, sentence
 
 
 def test_an_older_owner_that_sends_no_message_still_gets_the_catalogue_sentence(tmp_path) -> None:

@@ -1459,6 +1459,12 @@ def _resolve_device(record: Any, name: str) -> str | None:
     wire, and an operator reading `lop network show` has both. Matching either here
     (and refusing an ambiguous tail) is what stops a share from silently landing on
     the wrong device — a mistargeted share spends the wrong machine's quota.
+
+    THE THREE VERBS THAT TAKE A DEVICE ALL COME THROUGH HERE: ``credential share
+    --with``, ``member grant|revoke`` and ``member rm`` (review round 1, R3 added the
+    last two). A verb that hands its raw argument to the row writer answers a valid
+    NAME with "is not an active member" — a false statement about the network, since
+    the device is one and only the SPELLING was wrong.
     """
     wanted = str(name or "").strip()
     if not wanted:
@@ -1527,11 +1533,34 @@ def _member_name(record: Any, device_id: str) -> str:
 
 def _cmd_member_rm(args: argparse.Namespace) -> int:
     """Revoke a member: tombstone, rotate, bump the epoch, fan out (R5)."""
+    # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME — the same rule
+    # ``member grant|revoke`` follows (audit round 2, review round 1 R3). A name is what
+    # ``lop network show`` prints, so an operator who copied it used to get
+    # "device-b is not a member of credlab" from a member that IS one: false, and it
+    # names the network instead of the argument. Resolved ONCE, before either path, so
+    # both the relay and the local writer are handed a device id.
+    record = _resolve(args.network)
+    from local_operator.network import store
+    from local_operator.network.types import MeshRefusal
+
+    device_id = _resolve_device(record, args.device)
+    if device_id is None:
+        # THE SECRET GATE COMES FIRST. Every member verb refuses the same way when this
+        # device cannot read its own network secret (``test_refusals``), so an
+        # unresolvable NAME must not pre-empt that shared refusal with a sentence about
+        # the member list: a device that has left the network has no member list to be
+        # corrected against. Safe here because ``require_secrets`` only reads.
+        store.require_secrets(record.network_id)
+        raise MeshRefusal(
+            "unknown_member",
+            f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
+            "for the member list (a name, a device id, or an unambiguous tail of one)",
+        )
     # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
     # epoch rotation and the queue write all happen here (below), and the payload
     # says the rotation is queued rather than fanning out.
     live = _relay_call(
-        "net_member_rm", network=args.network, device_id=args.device, allow_no_answer=True
+        "net_member_rm", network=args.network, device_id=device_id, allow_no_answer=True
     )
     if live is not None:
         return _emit(
@@ -1548,7 +1577,7 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
 
     record = _resolve(args.network)
     state = store.require_secrets(record.network_id)
-    outcome = imported.remove_member(record, state, device_id=args.device, by=record.self_device_id)
+    outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
             continue

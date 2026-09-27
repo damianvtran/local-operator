@@ -2260,7 +2260,7 @@ class McpManager:
                 # is the one thing they can do about it. A server that REFUSED
                 # us (McpAuthChallengeError) lands here too, so the opaque
                 # "Server returned an error response" never reaches the splash.
-                message = self._auth_failure_text(name, exc)
+                message = self._auth_failure_text(name, exc, store=self._effective_auth_store())
                 result.errors[name] = message
                 # An authorization shape is never a transport failure, so the
                 # flag stays clear: the reauth/login command this line names is
@@ -2293,7 +2293,9 @@ class McpManager:
                 # ``_transport_failure``) and without it a refused connect or a
                 # DNS failure could only render the hostless fallback.
                 url = self._server_url(name)
-                message = self._auth_failure_text(name, exc, url)
+                message = self._auth_failure_text(
+                    name, exc, url, store=self._effective_auth_store()
+                )
                 result.errors[name] = message
                 # The flag comes from the EXCEPTION, not from the rendered text:
                 # ``_auth_failure_text`` is also where a transport failure is
@@ -3342,7 +3344,12 @@ class McpManager:
             self._oauth_endpoints[url] = endpoints
 
     @staticmethod
-    def _auth_required_text(name: str, exc: "McpAuthRequiredError | McpAuthChallengeError") -> str:
+    def _auth_required_text(
+        name: str,
+        exc: "McpAuthRequiredError | McpAuthChallengeError",
+        *,
+        brokered_owner: str | None = None,
+    ) -> str:
         """The startup-toast wording for a server that needs an OAuth login.
 
         Leads with the COMMAND that fixes it rather than the diagnosis. The
@@ -3382,6 +3389,20 @@ class McpManager:
         falls back to a lookup.
         """
         has_stored_grant = getattr(exc, "has_stored_grant", None)
+        if brokered_owner:
+            # A BORROWING DEVICE IS A DIFFERENT CASE, and answering it with the local
+            # verbs is wrong twice over (review round 1, R1). ``/mcp login <name>`` here
+            # cannot work at all on a headless borrower, and on a borrower that CAN open
+            # a browser it creates a LOCAL grant that then wins over the borrow
+            # (``_brokered_mcp_auth``'s local-wins rule) — a silent account switch. The
+            # sign-in this failure is about lives on ``brokered_owner``, so the line names
+            # that device and puts the command there; the sentence itself is spelled in
+            # ``credentials/messages.py``, which is the one home for operator-facing copy.
+            from local_operator.network.credentials.messages import (
+                render_borrowed_signin,
+            )
+
+            return render_borrowed_signin(brokered_owner, name)
         if has_stored_grant is None:
             from local_operator.mcp.auth import server_has_stored_grant
 
@@ -3409,7 +3430,9 @@ class McpManager:
         return f"/mcp login {name} to authorize"
 
     @staticmethod
-    def _auth_challenge_text(name: str, exc: McpAuthChallengeError) -> str:
+    def _auth_challenge_text(
+        name: str, exc: McpAuthChallengeError, *, brokered_owner: str | None = None
+    ) -> str:
         """The wording for a server that REFUSED us with 401/403.
 
         Same constraints as :meth:`_auth_required_text`, which this deliberately
@@ -3442,10 +3465,54 @@ class McpManager:
                 f"{name} rejected our credentials ({exc.status_code}) — "
                 "set its API key or headers"
             )
-        return McpManager._auth_required_text(name, exc)
+        return McpManager._auth_required_text(name, exc, brokered_owner=brokered_owner)
+
+    @staticmethod
+    def _brokered_owner(store: Any, exc: BaseException) -> str | None:
+        """The device that owns the SIGN-IN for ``exc``'s server, when this device borrows it.
+
+        The question the composed auth-failure line has to answer before it can name a
+        command (review round 1, R1): a device with no local grant may still be a
+        BORROWER of somebody else's, and then the local verbs are the wrong advice.
+
+        The server comes off the EXCEPTION (both auth shapes carry ``server_url``)
+        rather than from a new argument, so no call site's existing ``url`` handling —
+        which decides how a transport failure renders — is disturbed by this change.
+
+        ``None`` is the ordinary answer — no store, no server URL, no mesh client, or a
+        server this device does not borrow — and it keeps every non-mesh render exactly
+        as it was. Best-effort by construction: this runs where a failure is being
+        described, so a store or placement that cannot be read must degrade to the old
+        text rather than replace one error with another.
+        """
+        url = getattr(exc, "server_url", None)
+        if store is None or not url:
+            return None
+        client = getattr(store, "mesh_client", None)
+        if client is None:
+            return None
+        try:
+            # Function-local, like the sibling import in ``_brokered_mcp_auth``: the MCP
+            # package stays importable where the network package's heavier siblings are
+            # not, and this branch is only reached on a device that brokers.
+            from local_operator.network.credentials.types import credential_key_for_mcp
+
+            if not client.should_borrow(credential_key_for_mcp(str(url))):
+                return None
+            return client.owner_label(credential_key_for_mcp(str(url))) or None
+        except Exception:  # noqa: BLE001 — a hint must never replace the error it explains
+            logger.debug("MCP brokered-owner lookup failed for %r", url, exc_info=True)
+            return None
 
     @classmethod
-    def _auth_failure_text(cls, name: str, exc: BaseException, url: str | None = None) -> str:
+    def _auth_failure_text(
+        cls,
+        name: str,
+        exc: BaseException,
+        url: str | None = None,
+        *,
+        store: Any = None,
+    ) -> str:
         """Actionable wording for EITHER auth failure shape.
 
         One dispatcher so the startup toast, the durable transcript notice, the
@@ -3467,11 +3534,19 @@ class McpManager:
         only a transport failure renders differently with it, and every auth
         shape ignores it. See :func:`_transport_failure` for why the endpoint
         cannot be read off the exception.
+
+        ``store`` is the caller's credential store, and it is optional for the same
+        reason ``url`` is: with it, a server this device BORROWS is rendered for what
+        it is — somebody else's sign-in, with the command on that device (review round
+        1, R1); without it, every shape renders exactly as it did before. Only callers
+        that hold the manager's own store pass it, so the display-side hint and the
+        unit tests keep their existing text.
         """
+        brokered_owner = cls._brokered_owner(store, exc)
         if isinstance(exc, McpAuthChallengeError):
-            return cls._auth_challenge_text(name, exc)
+            return cls._auth_challenge_text(name, exc, brokered_owner=brokered_owner)
         if isinstance(exc, McpAuthRequiredError):
-            return cls._auth_required_text(name, exc)
+            return cls._auth_required_text(name, exc, brokered_owner=brokered_owner)
         reason_code = getattr(exc, "reason_code", None)
         if reason_code is not None:
             return _REFRESH_REFUSAL_TEXT.get(reason_code, REFRESH_REFUSAL_UNKNOWN_TEXT)
@@ -3569,7 +3644,7 @@ class McpManager:
                 oauth_available=OAUTH_CHALLENGES.get(url, True),
                 has_stored_grant=server_has_stored_grant(url, store),
             )
-            return self._auth_failure_text(name, exc)
+            return self._auth_failure_text(name, exc, store=store)
         except Exception:  # noqa: BLE001 — a hint must never replace the error
             logger.debug("MCP auth recovery hint could not be derived", exc_info=True)
             return None
@@ -3592,7 +3667,10 @@ class McpManager:
         if sink is None:
             return
         try:
-            sink(name, self._auth_failure_text(name, exc))
+            sink(
+                name,
+                self._auth_failure_text(name, exc, store=self._effective_auth_store()),
+            )
             self._auth_toasted.add(name)
         except Exception:  # noqa: BLE001 — UI hooks must never break the manager
             logger.debug("on_auth_required sink raised", exc_info=True)
@@ -3762,7 +3840,11 @@ class McpManager:
                         # errors, never this payload.
                         sink(
                             name,
-                            self._auth_failure_text(name, auth_exc),
+                            self._auth_failure_text(
+                                name,
+                                auth_exc,
+                                store=self._effective_auth_store(),
+                            ),
                         )
                         # Arm the recovery notice. This line MUST stay INSIDE
                         # the ``if sink is not None`` branch and after a
@@ -3820,7 +3902,12 @@ class McpManager:
                 # so the same value carries both shapes unchanged.
                 self._note_startup_failure(
                     name,
-                    self._auth_failure_text(name, auth_exc, self._server_url(name)),
+                    self._auth_failure_text(
+                        name,
+                        auth_exc,
+                        self._server_url(name),
+                        store=self._effective_auth_store(),
+                    ),
                     # Classified from ``auth_exc`` — the SAME value the text is
                     # composed from — so a group that wraps both an auth
                     # requirement and a dead connection is never labelled by the
@@ -4711,7 +4798,7 @@ class McpManager:
                 try:
                     sink(
                         name,
-                        self._auth_failure_text(name, exc),
+                        self._auth_failure_text(name, exc, store=self._effective_auth_store()),
                     )
                     # Arm the recovery notice — INSIDE the ``if sink is not
                     # None`` branch, deliberately: the gate means "the MODEL
