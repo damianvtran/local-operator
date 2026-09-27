@@ -18,6 +18,7 @@ import pytest
 from local_operator.projects import ProjectEdit, ProjectRegistry
 from local_operator.tui.app import PROJECTS_LAYOUT_CLASS, OperatorApp
 from local_operator.tui.widgets.projects_view import ProjectsView
+from local_operator.tui.widgets.subagent_view import HintButton
 from local_operator.tui.widgets.transcript import UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -507,7 +508,11 @@ async def test_hint_row_has_no_leading_seam_when_scroll_sheds(tmp_path: Path) ->
         view = await _open(pilot, app)
         await pilot.pause()
         assert view._scroll_hint.display is False
-        painted = [hint.rendered() for hint in view._hints.children if hint.display]
+        painted = [
+            hint.rendered()
+            for hint in view._hints.children
+            if isinstance(hint, HintButton) and hint.display
+        ]
         assert painted, "the hint row painted nothing"
         assert painted[0].startswith("1")  # the seam belongs to the row, not the hint
         assert "·" not in painted[0][:2]
@@ -515,5 +520,9 @@ async def test_hint_row_has_no_leading_seam_when_scroll_sheds(tmp_path: Path) ->
         # with no seam in front of it.
         await pilot.resize_terminal(140, 40)
         await pilot.pause()
-        painted = [hint.rendered() for hint in view._hints.children if hint.display]
+        painted = [
+            hint.rendered()
+            for hint in view._hints.children
+            if isinstance(hint, HintButton) and hint.display
+        ]
         assert painted[0].startswith("↔↕")
