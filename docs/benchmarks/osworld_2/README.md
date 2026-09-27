@@ -1035,17 +1035,23 @@ Retries: a billed reply that fails strict decision parsing is a **model**
 error, not a provider outage. The client raises `DecisionRejected` carrying
 the call's full billing provenance and appends both the bad reply and a
 correction naming the observation and its valid frame ids, so the runner's
-re-call is corrective by construction. Two bounds apply, and they are split by
-the SHAPE of the streak: a streak that keeps REPEATING one refusal class -- a
-defect the harness named and the model reproduced -- ends the episode at
-`max_decision_retries + 2` (4) consecutive refusals, while a streak that keeps
-CHANGING class ends at `max_rejection_streak` (default 6), because variation is
-the model applying the corrections rather than ignoring them (`0` restores
-one-strike behaviour on either shape). Every attempt writes its own
+re-call is corrective by construction. One flat bound applies, the same for
+every streak shape: consecutive refusals for one observation end the episode
+at `max(max_decision_retries + 2, max_rejection_streak)` — 4 by default, one
+refusal past the flat three it replaces. Varying the defect earns no extra
+calls (a two-class oscillation rode the removed shape-split arm to its full
+leash), and `0` on either knob restores one-strike behaviour: the first
+refused reply ends the episode. Every attempt writes its own
 `model_request`/`model_response`/`usage_cost` triple and counts as a model
-cycle; a rejected attempt also writes a retryable `error`. Exhausting either
+cycle; a rejected attempt also writes a retryable `error`. Exhausting the
 bound seals as `model_failure` — distinct from `provider` (nothing was down)
-and `crash` (nothing broke).
+and `crash` (nothing broke). Two mechanics shape the worst case around it: an
+empty output-limit truncation is retreated one effort rung first (up to
+`MAX_EMPTY_TRUNCATION_RETRIES = 2`), so one observation's retreat-inclusive
+worst case is 6 billed calls; and the `model_cycles = max_steps * 2`
+reservation does not bound a single decision loop — `BudgetCapGuard` fires at
+step boundaries only, so within one `decide` loop the refusal ceiling is the
+only bound.
 
 Route identity is folded losslessly into the seal (`RouteIdentity` fields
 cannot carry `/`): `_`→`__`, `/`→`_s`, anything else outside

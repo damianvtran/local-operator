@@ -602,7 +602,20 @@ def _decode_leading_json(payload: str) -> tuple[Any, str, int]:
         # what keeps an object that broke inside (``incomplete-json``) and a
         # duplicate key at the head on the refusals they already had.
         if isinstance(error, json.JSONDecodeError) and "line 1 column 1 (char 0)" in str(error):
-            located = _locate_leading_object(payload, decoder)
+            try:
+                located = _locate_leading_object(payload, decoder)
+            except DuplicateJSONKeyError as duplicate:
+                # A candidate behind the framing named a key twice: the same
+                # sentence, class and typed key as a duplicate at the head,
+                # with the same whole-or-nothing re-guard the branch above
+                # applies, so no unvetted rendering can ride the exception.
+                repeated = duplicate.repeated_key
+                if repeated is not None and not is_quotable_key(repeated):
+                    repeated = None
+                raise DecisionParseError(
+                    "model reply must be one duplicate-free JSON object",
+                    repeated_key=repeated,
+                ) from duplicate
             if isinstance(located, _LeadingObjectDecline):
                 # Nothing could start a value at offset 0, and the leading-object
                 # tolerance could not read one behind the framing either. That
@@ -802,7 +815,11 @@ def _locate_leading_object(
     gates the reply-channel widening on "this payload states no decision" must
     not have to reconstruct that distinction from an offset. Only
     ``NOTHING_TO_READ`` states no decision; the other three state one that is
-    unreadable, not decision-shaped, or not the reply's last word.
+    unreadable, not decision-shaped, or not the reply's last word. A candidate
+    whose own keys are duplicated is no decline either: the hook's typed
+    :class:`DuplicateJSONKeyError` is re-raised so the caller refuses it with
+    the duplicate-key sentence and the repeated key, exactly as it would a
+    duplicate at the head.
 
     The exposure this rule answers is CONDITIONAL, and that belongs here because
     a bundle cannot show it: whether a misclassified reply changes a turn's
@@ -875,11 +892,19 @@ def _locate_leading_object(
         return _LeadingObjectDecline.NOTHING_TO_READ
     try:
         candidate, end = decoder.raw_decode(payload, start)
+    except DuplicateJSONKeyError:
+        # A candidate whose own keys are duplicated, which the hook refuses:
+        # re-raised rather than swallowed into ``BEGINS_NOTHING`` so the
+        # refusal that lands is the duplicate-key one, with the repeated key
+        # named -- exactly as if the same object had stood at the head (see
+        # ``_decode_leading_json``). Swallowing the typed fact here sent the
+        # reply to ``leading-delimiter`` with a correction that named nothing
+        # the model could act on (measured: such a reply converges in two
+        # retries where its head-duplicate twin needs one).
+        raise
     except (ValueError, RecursionError):
-        # RecursionError as well as ValueError (see ``_competing_batch_offset``),
-        # and a candidate whose own keys are duplicated, which the hook refuses:
-        # a reply carrying one is not read at all, the direction the
-        # duplicate-key rule already set.
+        # RecursionError as well as ValueError (see ``_competing_batch_offset``):
+        # a candidate that cannot be read at all is not read.
         return _LeadingObjectDecline.BEGINS_NOTHING
     if not _is_decision_shaped(candidate):
         return _LeadingObjectDecline.NOT_DECISION_SHAPED
