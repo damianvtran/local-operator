@@ -264,6 +264,7 @@ from local_operator.tui.narration import DEFAULT_NARRATION, is_intermediate_narr
 from local_operator.tui.network_cli import (
     LISTING_TIMEOUT_S,
     PEER_CALL_TIMEOUT_S,
+    PILOT_CALL_TIMEOUT_S,
     QUICK_TIMEOUT_S,
     NetworkRun,
     created_session_id,
@@ -41963,15 +41964,29 @@ class OperatorApp(App[None]):
             # in this family, so this arm decides only the argv and the budget.
             # The tail is passed through because the same verb lists
             # (`--peer`/`--all-peers`), creates (`--create`) and acts on
-            # (`--engage`/`--stop`) a session — one implementation, no second
-            # session-plane API in the TUI.
+            # (`--engage`/`--stop`) a session, and pilots one
+            # (`--send`/`--steer`/`--slash`) — one implementation, no second
+            # session-plane API in the TUI. The pilot flags take their words as the
+            # positional, so a composer line's remaining tokens are the text and
+            # arrive here unchanged (`network/cli.py`'s `_pilot_text`).
             mutating = any(token in {"--create", "--engage", "--stop"} for token in rest)
+            # A PILOT ACT IS NOT ONE ROUND TRIP (design §1.2's own producer for
+            # the Mesh tab): `--send` waits for a viewer to open and bind and then
+            # for the owner's TERMINAL turn outcome, so it gets the budget that
+            # covers what the verb promises rather than the peer-call one. A child
+            # cut short would report a timeout about a command that was still
+            # working (the failure `LISTING_TIMEOUT_S` documents).
+            pilot = any(token in {"--send", "--steer", "--slash"} for token in rest)
             self._dispatch_network_cli(
                 rest,
                 ["sessions", *rest],
                 notice,
                 verb="sessions",
-                timeout=PEER_CALL_TIMEOUT_S if mutating else LISTING_TIMEOUT_S,
+                timeout=(
+                    PILOT_CALL_TIMEOUT_S
+                    if pilot
+                    else PEER_CALL_TIMEOUT_S if mutating else LISTING_TIMEOUT_S
+                ),
             )
             return
         if verb == "new":

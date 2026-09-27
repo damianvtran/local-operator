@@ -34,7 +34,9 @@ THE TWO REFUSALS THAT ARE FEATURES, NOT FRUSTRATIONS:
 from __future__ import annotations
 
 import argparse
+import asyncio  # stdlib, so add_parser's import graph stays stdlib-only.
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -265,6 +267,69 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--force",
         action="store_true",
         help="with --stop: signal a target whose turn is in flight (as `lop stop --force`)",
+    )
+    # THE THREE PILOT ACTS. `--engage` warms a session elsewhere and `--stop`
+    # kills one, but nothing in this family could put a TURN to a conversation
+    # that already lives on another device: the viewer existed (a peer's row
+    # opened as an ordinary viewer, ``session/remote_open.py``) and only the TUI
+    # could reach it, so a shell — or an agent, which has no composer — had no way
+    # to prompt, correct or configure a session the mesh had just moved.
+    #
+    # THEY DRIVE THE SAME VIEWER the TUI's sidebar pick and `lop --resume <peer's
+    # id>` open, and that is deliberate: a second client that built its own frames
+    # would be a second front-end path for one conversation (the spine's rule, and
+    # the reason ``RemoteSessionClient`` overrides only ``connect``).
+    #
+    # THE TEXT IS A POSITIONAL BECAUSE THE FLAG'S VALUE IS TAKEN. `--prompt`
+    # already means "--create's first turn", and one flag with two meanings a
+    # caller cannot tell apart from the flag itself is how `--prompt X` comes to
+    # do two things depending on a token three words to the left. So the session
+    # id is the flag's value — the way `--engage`/`--stop` already spell "do this
+    # to that conversation" — and the words to deliver are the positional, with
+    # stdin for the shell case (`lop send`'s own rule).
+    net_sessions.add_argument(
+        "--send",
+        metavar="SESSION",
+        default="",
+        help="deliver a turn to that session on its device, and wait for the outcome",
+    )
+    net_sessions.add_argument(
+        "--steer",
+        metavar="SESSION",
+        default="",
+        help="inject into that session's turn, where it is already running",
+    )
+    net_sessions.add_argument(
+        "--slash",
+        metavar="SESSION",
+        default="",
+        help="run a slash command in that session on its device (e.g. '/rename new name')",
+    )
+    # REMAINDER, so the payload is what the user typed rather than what the
+    # parser makes of it: with ``nargs="*"`` every word matching a declared
+    # option was consumed as that option, wherever it appeared — `check the
+    # --name field` delivered `check the` and exited 0, and a prompt containing
+    # `--force` became a usage error instead of a turn (review round 1, MAJOR-1).
+    # What that buys has a BOUNDARY, and it is the parser's own: the payload runs
+    # from the first token that is not an option to the end of the line, so a
+    # token that IS one of this command's flags is still read as that flag —
+    # `--send <s> --json is the field` delivers `is the field` with JSON output
+    # on, and a create-only flag (`--model X …`) is swallowed whole (review round
+    # 2, MINOR-1). `--` is the escape for text that begins with a dash; a flag
+    # that only describes a NEW session is refused outright below rather than
+    # accepted and dropped.
+    net_sessions.add_argument(
+        "text",
+        nargs=argparse.REMAINDER,
+        default=[],
+        metavar="TEXT",
+        help=(
+            "with --send/--steer/--slash: the text to deliver, taken as-is from the first "
+            "word that is not one of this command's own flags, to the end of the line (so "
+            "a `--name` inside it stays text) — a LEADING flag-shaped word is read as that "
+            "flag, so put this command's flags BEFORE the session id, or separate the text "
+            "with `--`; omit to read it from stdin"
+        ),
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
@@ -2331,6 +2396,659 @@ _STOP_REMEDIES: dict[str, str] = {
 }
 
 
+#: How long a pilot act waits for the viewer to OPEN and BIND its owner. A warm
+#: peer answers in about a second (measured against a real pair), but the first
+#: act on a STORED session has to engage a runtime over there — a process launch
+#: plus that device's own registry work — so this is a spawn budget rather than a
+#: socket default. It is the same reason the TUI grants a peer call 260 s.
+PILOT_BIND_TIMEOUT_S = 120.0
+
+#: How long ``--send`` waits for the owner's TERMINAL outcome once the prompt is
+#: admitted. ADMISSION IS NOT COMPLETION (``AttachedSession.prompt_and_wait``
+#: says exactly that), and a turn is unbounded work on a machine nobody here
+#: supervises: a tool call can take minutes. So the bound is real, and its expiry
+#: is REPORTED as "still running" with the session named — never retried, and
+#: never rounded up into a success. It sits below the TUI's own child budget for
+#: these acts (``tui/network_cli.PILOT_CALL_TIMEOUT_S``) so the composer shows
+#: this verb's answer rather than a timeout about a call that was working.
+PILOT_TURN_TIMEOUT_S = 300.0
+
+#: How long a steer frame or a routed slash may take to come back. Both are
+#: request/reply against a runtime that is ALREADY running (the dial is made on
+#: the peer's side of an open stream), so this is a round trip, not a spawn.
+PILOT_REPLY_TIMEOUT_S = 60.0
+
+#: THE WORST CASE ONE PILOT ACT CAN OCCUPY, DERIVED from the three budgets above
+#: rather than restated beside them — because the one restatement drifted the
+#: first time it was written: the TUI's child budget claimed to sit above what
+#: this verb waits and did not, so a `/network sessions --send …` typed in a
+#: session reaped its child at 480 s under an act that was still working (review
+#: round 1, MAJOR-3). The terms are the act's own parts in order: the viewer is
+#: OPENED (one bind budget), BOUND (a second — the cold-to-working seam is where a
+#: stored session engages a runtime over there), and the act then waits for its
+#: reply, of which the longest rung is the turn. ``_cmd_pilot`` enforces this as
+#: ONE bound around the whole act, so the number is a promise rather than a
+#: restatement: it also covers the reads with no rung of their own (the row
+#: lookup, the teardown), which is why the rungs' sum is not by itself a bound.
+PILOT_ACT_TIMEOUT_S = 2 * PILOT_BIND_TIMEOUT_S + max(PILOT_TURN_TIMEOUT_S, PILOT_REPLY_TIMEOUT_S)
+
+#: The ``style`` values a ``SlashResult`` may carry (``session/frontend_state``:
+#: ``info``/``warning``/``error``, the three the owner's own renders use). A
+#: receipt outside this set is one this build cannot read an outcome from, which
+#: ``_pilot_slash`` reports as unreported rather than guessing (review round 1,
+#: NIT-6): the old test was ``style != "error"``, and a MISSING style is not
+#: ``error``, so an unreadable receipt read as success.
+_SLASH_STYLES = ("info", "warning", "error")
+
+
+def _pilot_text(args: argparse.Namespace) -> str:
+    """The words a pilot act delivers: the positional, else stdin.
+
+    stdin is the shell's route for text that is not one argv word — an embedded
+    newline, a heredoc, a paste — which is ``lop send``'s own rule. A TTY is NOT
+    read: at a terminal an empty positional is a caller mid-command, and a verb
+    that parked on EOF waiting for one would read as a hang. The TUI's child gets
+    ``/dev/null`` for stdin (``tui/network_cli``), so a composer line reaches
+    this function with its words on argv and never blocks here.
+
+    THE WORDS ARE THE USER'S FROM THE FIRST NON-OPTION TOKEN: the positional is an
+    argparse REMAINDER (see its declaration for the defect that bought and for the
+    boundary), so nothing after that first plain token is re-read as a flag. The one
+    token this function does look at is a LEADING ``--``, which is the separator
+    rather than payload — see :func:`_pilot_text_from_args`.
+    """
+    text = _pilot_text_from_args(args)
+    if text or sys.stdin.isatty():
+        return text
+    return sys.stdin.read().strip()
+
+
+def _pilot_text_from_args(args: argparse.Namespace) -> str:
+    """The payload's own words, with argparse's separator taken back off.
+
+    A LEADING ``--`` IS THE SEPARATOR, not the first word of the payload. argparse
+    does not consume it under a ``REMAINDER`` — measured through the real parser:
+    ``--send ID -- explain the --peer flag`` arrives with the token still in the
+    list — so the spelling every other CLI taught the user would otherwise prefix
+    their prompt with a literal ``--``. Only the FIRST one is dropped, so a
+    payload that genuinely begins with a dash keeps an escape (``-- -- …``), and a
+    ``--`` in the MIDDLE of the text is left alone: it is a word the user typed.
+
+    WHAT ARRIVES HERE IS ALREADY POST-BOUNDARY: a leading flag-shaped token that is
+    one of this command's own flags never reaches this function as text (the parser
+    read it as that flag), which is why ``--`` is the documented way to send one and
+    why ``_cmd_sessions`` refuses the create-only flags outright rather than letting
+    one swallow the words around it.
+    """
+    parts = [str(part) for part in (getattr(args, "text", None) or ())]
+    if parts[:1] == ["--"]:
+        parts = parts[1:]
+    return " ".join(parts).strip()
+
+
+def _pilot_last_reply(viewer: Any) -> str:
+    """The last assistant text the viewer holds, or "" — the turn's own output.
+
+    Read from the display window rather than from anywhere this module keeps: the
+    owner is the author of a reply, and a CLI that cached one would be a second
+    copy of a conversation it does not own.
+    """
+    try:
+        rows = list(viewer.display_history_window())
+    except Exception:  # noqa: BLE001 — a missing history is "no reply", not a crash
+        return ""
+    for row in reversed(rows):
+        if str(getattr(row, "role", "")) != "assistant":
+            continue
+        text = getattr(row, "text", "")
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
+
+
+def _pilot_peer_block(peer: str) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
+    """The named peer's own catalogue block, or the refusal that stopped the read.
+
+    Read through this device's relay, which is the only thing that knows whether a
+    peer is answering — and read on FAILURE paths only, so an act that works never
+    pays a second fan-out for a distinction it does not need. (What a SUCCESS
+    receipt names is not read here either: the device comes from the session's own
+    row, which the act has already read — see ``_pilot_act``.)
+    """
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        answer = _relay_answer("peer_session_rows", timeout=_listing_timeout())
+    except MeshRefusal as refusal:
+        # THIS DEVICE'S OWN RELAY is the component that failed, and its sentence
+        # already names it and the remedy.
+        return None, (refusal.code, refusal.sentence)
+    for device_id, entry in (answer.get("peers") or {}).items():
+        if device_id == peer or str(entry.get("name") or "") == peer:
+            return entry, None
+    return None, None
+
+
+def _pilot_unreachable_sentence(session_id: str, peer: str, block: dict[str, Any] | None) -> str:
+    """The one sentence for "this device cannot tell you about that peer".
+
+    Composed here rather than at each raise site because the two callers — an id
+    that resolved to nothing, and a dial that failed — must not describe one
+    situation two ways; that is the rule
+    ``remote_open.unreachable_peer_sentence`` already follows one layer down.
+    """
+    from local_operator.resume import peer_reason_words
+
+    if block is None:
+        return (
+            f"{peer} is not a device this network knows — `lop network peers` lists the "
+            "members this device can see"
+        )
+    reason = peer_reason_words(str(block.get("reason") or ""))
+    return (
+        f"{peer} is unreachable ({reason}), so nothing about {session_id} can be answered "
+        f"from here: `lop network doctor --peer {peer}` diagnoses the link"
+    )
+
+
+def _pilot_unresolved(session_id: str, peer: str) -> tuple[str, str]:
+    """The refusal an id that resolved to no peer row actually deserves.
+
+    THREE STATES WEAR ONE SYMPTOM, and a caller cannot act on any of them until it
+    knows which: no relay is running here (nothing on the mesh can be piloted at
+    all, and the remedy is `lop network start`), the named device did not answer
+    (the conversation may well be there — telling the user it is not would be a
+    claim this side cannot support), or the device answered and holds no such id (a
+    real "no", and a different next step).
+    """
+    block, refusal = _pilot_peer_block(peer)
+    if refusal is not None:
+        return refusal
+    if block is None or not block.get("reachable"):
+        return "peer_unreachable", _pilot_unreachable_sentence(session_id, peer, block)
+    return (
+        "session_unknown",
+        f"{peer} does not hold {session_id}: `lop network sessions --peer {peer}` lists "
+        "what it does hold",
+    )
+
+
+def _pilot_dial_refusal(
+    session_id: str, peer: str, message: str, config_dir: Path
+) -> tuple[str, str]:
+    """The refusal for a viewer whose dial produced NO SESSION.
+
+    ONE RULE FOR BOTH RUNGS — the open and the bind — and it is a correction this
+    PR made against itself twice. The first version asked the peer's catalogue
+    here; CI caught the same state answering two ways, because a cached row let the
+    dial fail a rung later than an uncached one. The read is not usable at this
+    moment anyway: A LINK THIS DEVICE'S RELAY STILL BELIEVES IN REPORTS THE PEER AS
+    REACHABLE for seconds after it died (measured in CI — the bind timed out while
+    the catalogue said `reachable`), and the fan-out a stopped peer needs can
+    itself time out, which leaves nothing to classify by.
+
+    So nothing is read but this device's own relay record (a local file read, no
+    dial). What the transport CAN say is that the dial produced no session, and
+    that one fact covers both sub-cases a person acts on — a device that is not
+    there, and a device whose runtime for that conversation is gone — whose first
+    step is the same one command. The code names the far end of the act (the
+    component in both), and the transport's own sentence rides along verbatim, so a
+    refused frame still reads as a refusal rather than as a link problem.
+    """
+    from local_operator.network import store
+
+    if store.find_own_relay(config_dir) is None:
+        return "relay_unavailable", _relay_unavailable_message()
+    return (
+        "peer_unreachable",
+        f"the dial to {peer} for {session_id} produced no session ({message}), so "
+        "nothing about that conversation is known from here: `lop network doctor "
+        f"--peer {peer}` tells a link that is down from a runtime that stopped, and "
+        "the session itself is untouched either way",
+    )
+
+
+def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
+    """``--send``/``--steer``/``--slash``: one act on a session that is not here.
+
+    WHY THIS DOES NOT GO THROUGH ``_relay_answer``. Every other verb in this file
+    is a request to THIS device's relay, and the session plane has a local op for
+    each of them. A turn is a different shape: what it needs is a PIPE — the owner
+    streams the turn's rows down it, and the answer is many frames rather than
+    one — and the client that speaks that pipe is the viewer (``stream_open`` plus
+    the viewer protocol, ``RemoteSessionClient``). So this opens the SAME viewer
+    the TUI's sidebar pick and ``lop --resume <a peer's id>`` open, and drives it.
+    A client that built its own frames here would be a second front-end path for
+    one conversation, which is what the spine forbids.
+
+    THE OWNER'S OWN WORDS ARE THE RECEIPT. Nothing here invents an outcome: the
+    admission sentence is the owner's, a slash receipt is the owner's own
+    ``SlashResult``, and "the turn ended" is the owner's terminal event. What this
+    side adds is the CONTRACT around them: ``ok`` answers one question — did the
+    peer run the act to its own terminal outcome — so a delivered-but-unfinished
+    act reports ``outcome: running``/``queued`` rather than an exit 0 that a
+    script would read as "it is done".
+    """
+    from local_operator.network.types import MeshRefusal
+
+    peer = str(getattr(args, "peer", "") or "")
+    if not peer:
+        raise MeshRefusal(
+            "peer_required",
+            f"--{verb} needs --peer: a conversation lives on one device, and only that "
+            "device's runtime can run a turn inside it",
+        )
+    text = _pilot_text(args)
+    if not text:
+        print(
+            f"--{verb} needs some text — pass it after the session id, or pipe it in",
+            file=sys.stderr,
+        )
+        return 2
+    if verb == "slash" and not text.lstrip("/").strip():
+        print(
+            "--slash needs a command, e.g. --slash <session> '/rename a better name'",
+            file=sys.stderr,
+        )
+        return 2
+
+    from local_operator.paths import config_dir
+
+    try:
+        payload, lines = asyncio.run(
+            asyncio.wait_for(
+                _pilot_act(
+                    verb=verb,
+                    session_id=session_id,
+                    peer=peer,
+                    text=text,
+                    config_dir=Path(config_dir()),
+                ),
+                # ONE bound around the whole act, at the number its parts add up
+                # to (``PILOT_ACT_TIMEOUT_S``) — the sum of the rungs alone is not
+                # a bound on the act, because the row lookup and the teardown have
+                # no rung of their own.
+                timeout=PILOT_ACT_TIMEOUT_S,
+            )
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not finish this act on {session_id} within "
+            f"{PILOT_ACT_TIMEOUT_S:.0f}s — the worst case this verb budgets for; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+    return _emit(args, payload, lines)
+
+
+async def _pilot_act(
+    *,
+    verb: str,
+    session_id: str,
+    peer: str,
+    text: str,
+    config_dir: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    """Open ``session_id`` on the peer as its viewer, perform ONE act, report it."""
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.remote_open import (
+        open_remote_viewer,
+        remote_row_for,
+        unreachable_peer_sentence,
+    )
+
+    # The reachability read is CACHE-FIRST and answers ``None`` with no dial when
+    # this device holds the id itself, so the local path pays nothing for it —
+    # the same property the TUI's guard and the shell's ``--resume`` rely on.
+    row = await asyncio.to_thread(remote_row_for, session_id, config_dir)
+    if row is None:
+        # WHICH refusal this is depends on facts this side has not read yet, and
+        # the three of them need three different next steps — see
+        # ``_pilot_unresolved``. Read on the failure path only.
+        code, sentence = await asyncio.to_thread(_pilot_unresolved, session_id, peer)
+        raise MeshRefusal(code, sentence)
+    if not row.reachable:
+        # The peer's name, the reason in words and the diagnosing command, all
+        # composed in the one place that owns "a peer row becomes a viewer".
+        raise MeshRefusal("peer_unreachable", unreachable_peer_sentence(session_id, row))
+
+    # THE DEVICE THE WORK HAPPENS ON, from the row and never from the string typed.
+    # ``--peer`` names where a conversation lives, but it is not what ROUTES this
+    # act — the session id is — so echoing it back as the receipt's answer made a
+    # wrong ``--peer`` invisible: `--peer no-such-device --send <id> hello` answered
+    # ``"peer": "no-such-device"`` with rc 0 while the turn ran on the real peer
+    # (QA round 1, Q1). The row this act has already read is the one place that
+    # answers it, so this costs no second fan-out — the same reason
+    # ``_pilot_peer_block``'s catalogue read stays on the failure paths.
+    #
+    # The typed string is judged by the exact-match rule that failure path already
+    # uses (device NAME or device ID, ``_pilot_peer_block``), and when it is neither
+    # it is REPORTED beside the device rather than dropped: a receipt that silently
+    # substituted the right name would hide the caller's mistake, and one that
+    # repeated the wrong name as the answer is the defect this replaced.
+    device_id = str(getattr(row, "owner_device", "") or "")
+    device = str(getattr(row, "owner_device_name", "") or device_id or peer)
+    named = "" if peer in (device, device_id) else peer
+
+    async def _never() -> Any:
+        # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
+        # so owner loss leaves this viewer cold rather than making this device a
+        # second writer (INV-1). The facade requires the factory, and it is
+        # unreachable — the same spelling the shell's ``--resume`` path uses.
+        raise RuntimeError("a viewer never takes over a session")
+
+    try:
+        viewer = await asyncio.wait_for(
+            open_remote_viewer(
+                session_id,
+                config_dir=config_dir,
+                takeover=_never,
+                # A ONE-SHOT SHELL VIEWER CONSUMES NO ACTION RECEIPT, and saying so
+                # is what makes /goal, /agent and /team work from here: the owner
+                # completes a receipt only when the client did NOT declare it
+                # (``runtime_must_complete``), so a viewer that claimed the attached
+                # vocabulary and rendered nothing left those three commands setting
+                # state and starting no turn — with a zero exit (review round 1,
+                # MAJOR-2). ``()`` is the honest declaration for a process that
+                # prints the owner's receipt and exits, and it is the reason this
+                # seam takes the list at all.
+                slash_consumers=(),
+            ),
+            timeout=PILOT_BIND_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "peer_unreachable",
+            f"{peer} did not open {session_id} within {PILOT_BIND_TIMEOUT_S:.0f}s; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+    except ConnectionError as exc:
+        # THE OPEN IS A DIAL TOO. An unhandled `ConnectionError` here would surface
+        # as a traceback, which is the one thing this family never does with a
+        # refusal; see ``_pilot_dial_refusal`` for how the component is decided.
+        code, sentence = await asyncio.to_thread(
+            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+        )
+        raise MeshRefusal(code, sentence) from exc
+    if viewer is None:
+        # Between the row read and here the id stopped being a peer's row (moved
+        # away, tombstoned). Refuse rather than let the id fall through to a local
+        # viewer for a conversation this device does not hold.
+        raise MeshRefusal("session_unknown", f"{session_id} is no longer a session held by {peer}")
+    try:
+        try:
+            # The cold-to-working seam: the first act that needs the runtime binds
+            # it, which is where a stored session on the peer ENGAGES a runtime.
+            await asyncio.wait_for(viewer.bind_runtime(), timeout=PILOT_BIND_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise MeshRefusal(
+                "session_unreachable",
+                f"{peer} did not answer for {session_id} within "
+                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                f"`lop network doctor --peer {peer}` diagnoses the link",
+            ) from exc
+        except ConnectionError as exc:
+            # A DIAL THAT PRODUCED NO STREAM IS THE DEVICE, whichever rung noticed:
+            # this is the one CI's stopped-peer case lands on (the viewer is cold
+            # until ``bind_runtime``, so the dial that produces no welcome frame
+            # fails HERE), and it must answer what the OPEN rung answers — one
+            # situation, one code, because the reachability read that catches most
+            # stopped peers answers ``peer_unreachable`` and a script branches on
+            # the code, not on which rung was unlucky (review round 1, MINOR-4,
+            # settled on the GUIDE side: its ``session_unreachable`` row says a
+            # bind that ran out of its BUDGET, which is the timeout rung above).
+            code, sentence = await asyncio.to_thread(
+                _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            )
+            raise MeshRefusal(code, sentence) from exc
+        if verb == "send":
+            payload, lines = await _pilot_send(viewer, session_id, device, text)
+        elif verb == "steer":
+            payload, lines = await _pilot_steer(viewer, session_id, device, text)
+        else:
+            payload, lines = await _pilot_slash(viewer, session_id, device, text)
+    finally:
+        # The viewer goes away and the PEER keeps its runtime: closing a viewer
+        # never stops the owner (the product's own rule, and the reason a moved
+        # session is still there next time).
+        #
+        # A FAILED TEARDOWN NEVER SPEAKS FOR THE ACT: this runs on the way out of
+        # both paths, so an exception here would replace the ``MeshRefusal``
+        # explaining what actually went wrong with a dispose error (review round
+        # 1, MINOR-5). Swallowed and logged, like the other teardown paths.
+        try:
+            await viewer.dispose()
+        except Exception:  # noqa: BLE001 — see above: the refusal outranks it
+            logging.getLogger(__name__).debug("disposing the pilot viewer failed", exc_info=True)
+
+    if named:
+        # The typed string was NOT this device. The receipt keeps the answer (who
+        # ran it) and carries the caller's own word beside it, in the payload and in
+        # the lines, so both a script and a person can see the disagreement.
+        payload["peer_named"] = named
+        lines.append(
+            f"you named {named}; {session_id} is held by {device}, which is where this ran"
+        )
+    return payload, lines
+
+
+async def _pilot_send(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Deliver a turn and wait for the owner's terminal outcome.
+
+    ``prompt_and_wait`` rather than ``prompt`` for exactly the reason its own
+    docstring gives: ``prompt`` returns on durable ADMISSION, which a shell
+    caller cannot tell from completion. It also routes the frame to the owner's
+    ``steer`` op when the peer is already streaming — the reconciliation the
+    composer makes, kept here rather than re-decided, so a message sent into a
+    live turn is delivered rather than refused for a race the client owns.
+    """
+    from local_operator.session.errors import RuntimeRetiring
+
+    payload: dict[str, Any] = {"session_id": session_id, "peer": peer, "verb": "send"}
+    try:
+        await asyncio.wait_for(viewer.prompt_and_wait(text), timeout=PILOT_TURN_TIMEOUT_S)
+    except TimeoutError:
+        payload.update(ok=False, outcome="running", code="turn_running")
+        return payload, [
+            f"{session_id} on {peer} took the turn and is still running it.",
+            "It was admitted there, so the work is happening — this command simply "
+            f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
+            f"`lop --resume {session_id}`",
+        ]
+    except RuntimeRetiring as exc:
+        payload.update(ok=False, outcome="queued", code="runtime_retiring", error=str(exc))
+        return payload, [
+            f"{peer} is retiring that session's runtime, so no turn ran here.",
+            str(exc),
+        ]
+    except RuntimeError as exc:
+        # The owner's own terminal outcome was an error — the peer's sentence is
+        # the receipt (``prompt_and_wait`` raises with ``outcome.error`` in it).
+        payload.update(ok=False, outcome="failed", code="turn_failed", error=str(exc))
+        return payload, [f"{session_id} on {peer} ran the turn and it failed:", str(exc)]
+    except ConnectionError as exc:
+        payload.update(ok=False, outcome="lost", code="session_unreachable", error=str(exc))
+        return payload, [
+            f"the connection to {peer} for {session_id} was lost during the turn:",
+            str(exc),
+            "The turn may still be running there — re-read the session before assuming "
+            "it stopped.",
+        ]
+    reply = _pilot_last_reply(viewer)
+    payload.update(ok=True, outcome="finished", reply=reply)
+    lines = [f"{session_id} on {peer}: the turn finished."]
+    if reply:
+        lines.append(reply)
+    return payload, lines
+
+
+async def _pilot_steer(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Inject into the turn that is running there — or say there is none.
+
+    A STEER IS NOT A PROMPT WITH ANOTHER NAME, and this gate is where the
+    difference becomes visible: the owner queues a steer against the turn it is
+    running, so a steer aimed at a session whose turn has ENDED has nothing to
+    correct. ``AttachedSession.prompt`` routes to a steer when the session is
+    streaming and to a prompt when it is not — right for a composer, where the
+    user does not choose, and wrong for this flag, whose whole meaning is "into
+    the turn already running": it would start a new turn instead. So the
+    streaming edge is read first, and an idle owner is refused BY NAME.
+
+    The read is the viewer's synced copy of the owner's own state (an owner that
+    stops clears it, ``_end_turn_locally``), not a guess from a timer. If it is
+    stale in the other direction the owner still QUEUES the steer for its next
+    turn and says so in its receipt, which this verb prints verbatim.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if not bool(getattr(viewer, "is_streaming", False)):
+        raise MeshRefusal(
+            "turn_not_running",
+            f"{session_id} on {peer} is not running a turn, so a steer has nothing to "
+            "correct: use --send to start one, or --slash to change the session",
+        )
+    try:
+        receipt = await asyncio.wait_for(viewer.prompt(text), timeout=PILOT_REPLY_TIMEOUT_S)
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not answer for the steer within {PILOT_REPLY_TIMEOUT_S:.0f}s; "
+            "the turn there is unaffected, and the steer may or may not have landed",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    because = str(receipt or "").strip() or "accepted"
+    return (
+        {
+            "ok": True,
+            "session_id": session_id,
+            "peer": peer,
+            "verb": "steer",
+            "outcome": "steered",
+            "receipt": because,
+        },
+        [
+            f"{session_id} on {peer}: {because}",
+            "A steer is delivered at the owner's "
+            "next tool boundary; it does not interrupt the step already running.",
+        ],
+    )
+
+
+async def _pilot_slash(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Run a routed slash command in the peer's session, and print its receipt.
+
+    ROUTED, not re-implemented: ``route_shared_slash`` carries the commands the
+    owner's capability list marks ``authoritative_session``, so the OWNER's state
+    is what moves (a rename lands in the peer's own session record, a model switch
+    in its own registry). The receipt is the owner's ``SlashResult`` — its ``text``
+    is the sentence, its ``style`` says whether it worked — so the exit code comes
+    from the peer rather than from this side's guess about what a command did.
+
+    ``peer`` is the device the command ran on, the same fact the other two acts
+    report: this receipt named NO device before (QA round 1, Q1's sibling on this
+    verb), and a slash that changes state on another machine has to say which one.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    command, _, arguments = text.lstrip("/").partition(" ")
+    command = command.strip()
+    try:
+        receipt = await asyncio.wait_for(
+            viewer.route_shared_slash(command, arguments.strip()),
+            timeout=PILOT_REPLY_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"the peer did not answer /{command} within {PILOT_REPLY_TIMEOUT_S:.0f}s",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "peer": peer,
+        "verb": "slash",
+        "command": command,
+        "receipt": receipt,
+    }
+    if not isinstance(receipt, dict):
+        # An owner that answers prose instead of a typed result: it is reported,
+        # never counted as success — this side has no field to read an outcome
+        # from, and an exit 0 here would be a guess dressed as the peer's word
+        # (review round 1, NIT-6). The family's own word for that is
+        # `slash_unreported` (``_reported``), because a receipt that does not
+        # carry the fact it is a receipt for is not a receipt.
+        raise MeshRefusal(
+            "slash_unreported",
+            f"{peer} answered /{command} with prose rather than a typed receipt, so "
+            f"whether it ran is unknown: {str(receipt)[:200]}",
+        )
+    # THE RECEIPT'S OWN FIELDS, and only them: ``SlashResult`` is
+    # ``kind``/``text``/``style``/``data`` (``session/frontend_state.py``), so a
+    # fallback to any other key would be this side inventing a field the owner
+    # never sends — and reading a mesh ``detail`` here is exactly the raw-token
+    # leak ``test_reason_surfaces`` exists to catch.
+    style = str(receipt.get("style") or "")
+    said = str(receipt.get("text") or "").strip()
+    if style not in _SLASH_STYLES:
+        # ``ok`` used to be ``style != "error"``, which is TRUE for a receipt with
+        # no style at all — a success claim about a field the owner never sent.
+        raise MeshRefusal(
+            "slash_unreported",
+            f"{peer}'s receipt for /{command} carried no style this build knows "
+            f"({style or 'none'}), so whether it ran is unknown: {said[:200]!r}",
+        )
+    payload.update(
+        ok=style != "error",
+        outcome="ran" if style != "error" else "refused",
+        text=said,
+        style=style,
+    )
+    return payload, [f"{session_id} on {peer}: /{command} — {said or 'no receipt'}"]
+
+
+#: The dests of the flags that only describe a session being CREATED (each one's
+#: own help opens with "with --create:"). With a pilot act they can neither apply
+#: nor be ignored silently: they are ACCEPTED and then dropped, and the words a user
+#: meant as their text are most of the reason one is on the line — `--send <s>
+#: --model X is the field` delivers "is the field" and never mentions the two tokens
+#: it ate (review round 2, MINOR-1).
+#:
+#: THREE OF THEM ARE THE PARENT PARSER'S, not this subcommand's — ``model``,
+#: ``hosting`` and ``run_in`` parse before OR after the subcommand (measured), and a
+#: launch flag is exactly as dropped with an act as a create-only one. They are here
+#: for that reason and despite the placement.
+#:
+#: The payload is taken from the first token that is not an option, so a flag-shaped
+#: first token cannot be told from a flag. Refusing the flag, and naming `--` in
+#: the sentence, is the one answer that does not also break a flag a caller
+#: passes deliberately.
+#: `--json` is deliberately NOT in this set — it is an option this verb really uses,
+#: so its meaning here is knowable, and the narrowed help text is what says a leading
+#: `--json` is read as the flag.
+_CREATE_ONLY_DESTS: tuple[str, ...] = (
+    "name",
+    "cwd",
+    "prompt",
+    "profile",
+    "team",
+    "effort",
+    "agent",
+    "agent_name",
+    "agent_id",
+    "model",
+    "hosting",
+    "run_in",
+)
+
+
 def _cmd_sessions(args: argparse.Namespace) -> int:
     """``lop network sessions`` — the session plane, across the mesh.
 
@@ -2363,6 +3081,57 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # a sentence naming a flag that does not exist (Q-R5-2).
         print("--force applies to --stop only", file=sys.stderr)
         return 2
+
+    # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
+    # the only verbs here that open a VIEWER, and a command line that asked for
+    # one of them AND an archive/stop would run one act while silently dropping
+    # the other — the class of untruth ``--force`` above is refused for.
+    pilot = [
+        (name, str(getattr(args, name, "") or ""))
+        for name in ("send", "steer", "slash")
+        if str(getattr(args, name, "") or "")
+    ]
+    if pilot:
+        if len(pilot) > 1:
+            print(
+                "name one of --send/--steer/--slash: each is one act on one session, and "
+                "they are not a pipeline",
+                file=sys.stderr,
+            )
+            return 2
+        verb, target = pilot[0]
+        clash = next(
+            (
+                name
+                for name in ("create", "engage", "stop", "archive", "unarchive", "delete")
+                if getattr(args, name, "")
+            ),
+            "",
+        )
+        if clash:
+            print(
+                f"--{verb} acts on the session you name; --{clash} would act on another, so "
+                "this command would do one of the two",
+                file=sys.stderr,
+            )
+            return 2
+        # A FLAG THAT ONLY DESCRIBES A NEW SESSION, WITH AN ACT, is the same untruth
+        # ``--force`` above is refused for and the reason `--create` is in the clash
+        # list: accepted and then dropped, with the user's own words the most likely
+        # thing it swallowed. See ``_CREATE_ONLY_DESTS``.
+        create_only = next(
+            (dest for dest in _CREATE_ONLY_DESTS if str(getattr(args, dest, "") or "")), ""
+        )
+        if create_only:
+            print(
+                f"--{create_only.replace('_', '-')} describes a session being CREATED, and "
+                f"--{verb} acts on one that already exists: it would be accepted and then "
+                "dropped. If you meant those words as text, separate the text with `--` "
+                f"(`--{verb} <session> -- <text>`)",
+                file=sys.stderr,
+            )
+            return 2
+        return _cmd_pilot(args, verb=verb, session_id=target)
 
     # ARCHIVE, RESTORE AND DELETE: routed to the OWNER, never replicated (§8.1).
     # The guards, the confirmation semantics and the retention interaction stay in
