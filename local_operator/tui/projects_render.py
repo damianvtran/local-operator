@@ -301,11 +301,25 @@ def auto_timeline_tier(
 
 
 def _list_row(
-    view: dict[str, Any], *, selected: bool, now: float | None, style_for: StyleFor
+    view: dict[str, Any],
+    *,
+    selected: bool,
+    associated: bool,
+    now: float | None,
+    style_for: StyleFor,
 ) -> Text:
     project = _row(view)
     row = Text(no_wrap=True)
-    row.append("▸ " if selected else "  ", style=style_for("cursor") if selected else Style())
+    if selected:
+        row.append("▸ ", style=style_for("cursor"))
+    elif associated:
+        # The calling session's own project (S3b): the `◆` marker rides in the
+        # cursor's own two-cell column, so every row keeps its width and only
+        # one glyph ever occupies the column — the cursor wins where both
+        # apply, because it is the one the reader put there.
+        row.append("◆ ", style=style_for("session"))
+    else:
+        row.append("  ", style=Style())
     row.append(str(project.get("name") or "(unnamed)"), style=style_for("name"))
     status = str(project.get("status") or "active")
     row.append(f" [{status}]", style=_status_style(style_for, status))
@@ -347,15 +361,31 @@ def render_project_list(
     views: list[dict[str, Any]],
     *,
     cursor: int | None = None,
+    associated: frozenset[str] | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
 ) -> RenderResult:
-    """One line per project; the selected row carries the cursor marker."""
+    """One line per project; the selected row carries the cursor marker.
+
+    ``cursor`` is the page's ONE selection (an index into ``views``), and
+    ``associated`` names the project ids the calling session is linked to,
+    whose rows carry the `◆` marker (S3b) — the same selection and the same
+    marker set the board and the timeline read.
+    """
     resolver = _styles(style_for)
+    mine = associated or frozenset()
     lines: list[Text] = []
     rendered = views[:PROJECTS_MAX]
     for index, view in enumerate(rendered):
-        lines.append(_list_row(view, selected=index == cursor, now=now, style_for=resolver))
+        lines.append(
+            _list_row(
+                view,
+                selected=index == cursor,
+                associated=str(_row(view).get("id") or "") in mine,
+                now=now,
+                style_for=resolver,
+            )
+        )
     if len(views) > PROJECTS_MAX:
         lines.append(
             Text(
@@ -377,10 +407,28 @@ def render_project_list(
 # ---------------------------------------------------------------------------
 
 
-def _card_lines(view: dict[str, Any], *, now: float | None, style_for: StyleFor) -> list[Text]:
-    """One board card: name / facts / freshness — three lines."""
+def _card_lines(
+    view: dict[str, Any],
+    *,
+    selected: bool,
+    associated: bool,
+    now: float | None,
+    style_for: StyleFor,
+) -> list[Text]:
+    """One board card: name / facts / freshness — three lines.
+
+    The name line carries the same two-cell marker column the list rows do
+    (``▸`` the selection, ``◆`` the calling session's own set), so which card
+    ``↵`` would open is legible in every view without shifting the card grid.
+    """
     project = _row(view)
     name = Text(no_wrap=True, style=style_for("name"))
+    if selected:
+        name.append("▸ ", style=style_for("cursor"))
+    elif associated:
+        name.append("◆ ", style=style_for("session"))
+    else:
+        name.append("  ")
     name.append(str(project.get("name") or "(unnamed)"))
     facts = Text(no_wrap=True)
     bits: list[str] = []
@@ -425,12 +473,24 @@ def _columns_of(views: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, A
 def render_project_board(
     views: list[dict[str, Any]],
     *,
+    cursor: int | None = None,
+    associated: frozenset[str] | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
 ) -> RenderResult:
-    """Status columns painted side by side; cards of three lines, fixed width."""
+    """Status columns painted side by side; cards of three lines, fixed width.
+
+    ``cursor`` selects the ONE card the page's selection points at (an index
+    into ``views``; the cards are grouped by status, so the index is resolved
+    to an id) and ``associated`` marks the calling session's own set — both
+    painted in the card's marker column (S3b), never shifting the grid.
+    """
     resolver = _styles(style_for)
+    mine = associated or frozenset()
     rendered = views[:PROJECTS_MAX]
+    selected_id: str | None = None
+    if cursor is not None and 0 <= cursor < len(rendered):
+        selected_id = str(_row(rendered[cursor]).get("id") or "")
     columns = _columns_of(rendered)
     blocks: list[list[Text]] = []
     for status, rows in columns:
@@ -440,8 +500,17 @@ def render_project_board(
         header.append(f" · {len(rows)}", style=resolver("dim"))
         block.append(header)
         for view in rows[:BOARD_CARDS_MAX]:
+            row_id = str(_row(view).get("id") or "")
             block.append(Text(""))
-            block.extend(_card_lines(view, now=now, style_for=resolver))
+            block.extend(
+                _card_lines(
+                    view,
+                    selected=selected_id is not None and row_id == selected_id,
+                    associated=row_id in mine,
+                    now=now,
+                    style_for=resolver,
+                )
+            )
         if len(rows) > BOARD_CARDS_MAX:
             block.append(Text(""))
             block.append(Text(f"… +{len(rows) - BOARD_CARDS_MAX} more", style=resolver("dim")))
@@ -490,12 +559,23 @@ def _timeline_row(
     axis_cells: int,
     tier: str,
     today: date,
+    selected: bool = False,
+    associated: bool = False,
     style_for: StyleFor,
 ) -> Text:
     project = _row(view)
     row = Text(no_wrap=True)
+    # The marker column rides INSIDE the fixed name field — two cells off the
+    # name, never a wider row — so the timeline's grid arithmetic (and every
+    # frame measured against it) does not move (S3b).
+    if selected:
+        row.append("▸ ", style=style_for("cursor"))
+    elif associated:
+        row.append("◆ ", style=style_for("session"))
+    else:
+        row.append("  ", style=style_for("dim"))
     name = Text(str(project.get("name") or "(unnamed)"), style=style_for("name"))
-    name.truncate(TIMELINE_NAME_WIDTH, overflow="ellipsis", pad=True)
+    name.truncate(TIMELINE_NAME_WIDTH - 2, overflow="ellipsis", pad=True)
     row.append_text(name)
     row.append(" ", style=style_for("dim"))
 
@@ -616,10 +696,36 @@ def _timeline_axis(
     return text
 
 
+def _split_dated(
+    views: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(dated, undated)`` — the renderer's own split, shared with the reveal.
+
+    A project is DATED when it carries a date of its own or a milestone target:
+    otherwise it lands in the trailing ``no dates`` tail rather than on a
+    fabricated schedule. The timeline canvas and :func:`timeline_position`
+    read this ONE split, so a reveal cannot land on a row the chart did not
+    paint.
+    """
+    dated: list[dict[str, Any]] = []
+    undated: list[dict[str, Any]] = []
+    for view in views:
+        project = _row(view)
+        if any(project.get(key) for key in ("start_date", "target_date", "completed_at")) or any(
+            isinstance(m, dict) and m.get("target_date") for m in project.get("milestones") or []
+        ):
+            dated.append(view)
+        else:
+            undated.append(view)
+    return dated, undated
+
+
 def render_project_timeline(
     views: list[dict[str, Any]],
     *,
     tier: str = "month",
+    cursor: int | None = None,
+    associated: frozenset[str] | None = None,
     today: date | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
@@ -628,24 +734,21 @@ def render_project_timeline(
 
     Projects with no dates are NOT silently dropped and not drawn on a
     fabricated schedule: they land in the trailing ``no dates`` section, which
-    is the honest degradation the design asks for.
+    is the honest degradation the design asks for. ``cursor`` marks the page's
+    selection in the name column and ``associated`` the calling session's own
+    rows (S3b), both inside the fixed name field.
     """
     resolver = _styles(style_for)
     moment = today or date.today()
     rendered = views[:PROJECTS_MAX]
     if tier not in TIMELINE_TIERS:
         tier = "month"
+    mine = associated or frozenset()
+    selected_id: str | None = None
+    if cursor is not None and 0 <= cursor < len(rendered):
+        selected_id = str(_row(rendered[cursor]).get("id") or "")
     span = timeline_span(rendered, today=moment)
-    dated: list[dict[str, Any]] = []
-    undated: list[dict[str, Any]] = []
-    for view in rendered:
-        project = _row(view)
-        if any(project.get(key) for key in ("start_date", "target_date", "completed_at")) or any(
-            isinstance(m, dict) and m.get("target_date") for m in project.get("milestones") or []
-        ):
-            dated.append(view)
-        else:
-            undated.append(view)
+    dated, undated = _split_dated(rendered)
 
     lines: list[Text] = []
     if span is not None and dated:
@@ -664,6 +767,9 @@ def render_project_timeline(
                     axis_cells=axis_cells,
                     tier=tier,
                     today=moment,
+                    selected=selected_id is not None
+                    and str(_row(view).get("id") or "") == selected_id,
+                    associated=str(_row(view).get("id") or "") in mine,
                     style_for=resolver,
                 )
             )
@@ -683,6 +789,59 @@ def render_project_timeline(
         lines.append(Text(project_empty_text(), style=resolver("dim")))
     width = max(cell_len(line.plain) for line in lines)
     return RenderResult(text=Text("\n").join(lines), width=width, height=len(lines))
+
+
+def board_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] | None:
+    """The board-canvas ``(x, y)`` of ``views[cursor]``'s card, or ``None``.
+
+    ``None`` means the card is NOT painted — past ``PROJECTS_MAX`` or its
+    column's ``BOARD_CARDS_MAX`` — which is what keeps the page's selection off
+    a cell no reader can see (design round 1, D2's rule, applied to the board).
+    The point is the card's NAME line, where the marker column lives, so a
+    reveal that lands there shows the selection itself and not just its card.
+    """
+    rendered = views[:PROJECTS_MAX]
+    if not (0 <= cursor < len(rendered)):
+        return None
+    target = str(_row(rendered[cursor]).get("id") or "")
+    x = 0
+    for _status, rows in _columns_of(rendered):
+        for index, view in enumerate(rows[:BOARD_CARDS_MAX]):
+            if str(_row(view).get("id") or "") == target:
+                # Each card is a blank line and three content lines under the
+                # column header: its name line sits at 2 + index * 4.
+                return (x * BOARD_COLUMN_WIDTH, 2 + index * 4)
+        x += 1
+    return None
+
+
+def timeline_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] | None:
+    """The timeline-canvas ``(x, y)`` of ``views[cursor]``'s row, or ``None``.
+
+    Dated projects are one row each under the axis; the undated tail is ONE
+    line naming them all, so an undated selection answers with THAT line's
+    ``y`` — its name is on it. ``None`` means the index is past
+    ``PROJECTS_MAX`` or its project has no painted line at all.
+    """
+    rendered = views[:PROJECTS_MAX]
+    if not (0 <= cursor < len(rendered)):
+        return None
+    target = str(_row(rendered[cursor]).get("id") or "")
+    dated, undated = _split_dated(rendered)
+    span = timeline_span(rendered)
+    y = 0
+    if span is not None and dated:
+        y = 1  # the axis line; the rows follow it one per dated project
+        for view in dated:
+            if str(_row(view).get("id") or "") == target:
+                return (0, y)
+            y += 1
+    if undated:
+        if y:
+            y += 1  # the blank line between the chart and the tail
+        if any(str(_row(view).get("id") or "") == target for view in undated):
+            return (0, y)
+    return None
 
 
 # ---------------------------------------------------------------------------

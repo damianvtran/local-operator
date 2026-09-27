@@ -170,9 +170,11 @@ def test_board_card_is_three_lines_with_absent_chips_omitted() -> None:
     )
     result = render_project_board([view], now=NOW)
     lines = result.text.plain.splitlines()
-    # header, blank, name, facts, freshness
+    # header, blank, name, facts, freshness. The name line opens with the
+    # two-cell marker column (S3b): `▸` the selection, `◆` the session's own,
+    # two spaces otherwise — the card grid does not move.
     assert lines[0].startswith("active · 1")
-    assert lines[2] == "solo"
+    assert lines[2] == "  solo"
     assert lines[3] == "est 9pt · M 0/1 · →2026-10-15"
     assert lines[4] == "reported 5m ago · 2 live"
 
@@ -282,7 +284,11 @@ def test_timeline_truncates_names_to_the_pinned_name_column() -> None:
     view = _view("n" * 60, start_date="2026-01-05", target_date="2026-02-05")
     result = render_project_timeline([view], tier="month", today=date(2026, 3, 1), now=NOW)
     body = result.text.plain.splitlines()[1]
-    assert body[: TIMELINE_NAME_WIDTH - 1] == "n" * (TIMELINE_NAME_WIDTH - 1)
+    # The name FIELD is unchanged in width; its first two cells are the marker
+    # column (S3b), so the name truncates two cells earlier and still pads.
+    assert body[:2] == "  "
+    assert body[2:TIMELINE_NAME_WIDTH] == "n" * (TIMELINE_NAME_WIDTH - 3) + "…"
+    assert body[TIMELINE_NAME_WIDTH] == " "
     assert body[TIMELINE_NAME_WIDTH - 1] == "…"
     assert body[TIMELINE_NAME_WIDTH] == " "  # the joint before the axis
 
@@ -572,3 +578,62 @@ def test_footer_keeps_the_status_chip_whole_when_the_name_overflows() -> None:
     assert "[p…" not in text
     assert cell_len(text) <= 56
     assert text.endswith("[paused]")  # the chip is the survivor, the name gives way
+
+
+# -- S3b: the marker column and the reveal's geometry -------------------------
+
+
+def test_every_canvas_marks_the_associated_set_and_the_selection() -> None:
+    """`◆` = the calling session's own; `▸` = the selection; cursor wins."""
+    dated_a = _view("alpha", start_date="2026-05-01", target_date="2026-09-01")
+    middle = _view("beta", start_date="2026-06-01", target_date="2026-10-01")
+    dated_c = _view("gamma", start_date="2026-07-01", target_date="2026-11-01")
+    views = [dated_a, middle, dated_c]
+    mine = frozenset({str(dated_a["project"]["id"]), str(dated_c["project"]["id"])})
+    listed = render_project_list(views, cursor=1, associated=mine).text.plain.splitlines()
+    assert listed[0].startswith("◆ alpha")
+    assert listed[1].startswith("▸ beta")  # the selection owns the column
+    assert listed[2].startswith("◆ gamma")
+    board = render_project_board(views, cursor=1, associated=mine).text.plain
+    assert "◆ alpha" in board and "◆ gamma" in board and "▸ beta" in board
+    timeline = render_project_timeline(views, cursor=0, associated=mine).text.plain
+    # cursor=0 is alpha: the selection owns the column there, and gamma — the
+    # other associated project — keeps its marker.
+    assert "▸ alpha" in timeline
+    assert "◆ gamma" in timeline
+    assert "  beta" in timeline
+
+
+def test_position_helpers_name_cells_the_canvases_actually_paint() -> None:
+    """The reveal's geometry is the painters' own, cross-checked against them."""
+    from local_operator.tui.projects_render import board_position, timeline_position
+
+    dated = _view("alpha", start_date="2026-05-01", target_date="2026-09-01")
+    undated = _view("beta")
+    views = [dated, undated]
+    # Board: `active` column, first card's name line, then the second card's.
+    assert board_position(views, 0) == (0, 2)
+    assert board_position(views, 1) == (0, 6)
+    # Timeline: alpha under the axis; beta on the no-dates tail line, after the
+    # blank the renderer inserts.
+    assert timeline_position(views, 0) == (0, 1)
+    assert timeline_position(views, 1) == (0, 3)
+    timeline_line = timeline_position(views, 0)
+    tail_line = timeline_position(views, 1)
+    board_line = board_position(views, 0)
+    assert timeline_line is not None and tail_line is not None and board_line is not None
+    lines = render_project_timeline(views).text.plain.splitlines()
+    assert "alpha" in lines[timeline_line[1]]
+    assert "beta" in lines[tail_line[1]]
+    assert "alpha" in render_project_board(views).text.plain.splitlines()[board_line[1]]
+
+
+def test_position_helpers_answer_none_for_rows_nothing_paints() -> None:
+    """Past the caps the answer is `None` — the page clamps instead of aiming."""
+    from local_operator.tui.projects_render import board_position, timeline_position
+
+    many = [_view(f"p{i:03d}") for i in range(PROJECTS_MAX + 2)]
+    assert board_position(many, PROJECTS_MAX + 1) is None
+    assert timeline_position(many, PROJECTS_MAX + 1) is None
+    assert board_position([], 0) is None
+    assert timeline_position([], 0) is None

@@ -179,11 +179,13 @@ from local_operator.slash_commands import (
     NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
     PROJECT_NAME_VERBS,
+    PROJECT_PAGE_VERBS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     network_subcommand_rows,
     primary_slash_name,
-    project_needs_name_text,
+    project_jump_already_text,
+    project_jump_no_live_text,
     project_show_refusal_text,
     project_store_unreadable_text,
     project_subcommand_rows,
@@ -368,6 +370,7 @@ from local_operator.tui.widgets.org_chart_view import (
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewDismissed,
+    ProjectsViewJumpRequested,
     ProjectsViewRefreshRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
@@ -18679,9 +18682,12 @@ class OperatorApp(App[None]):
     def _cmd_project(self, arg: str, notice: NoticeFn) -> None:
         """``/project`` — the operator's own verbs over THIS machine's store.
 
-        Slice 3's real handler. Bare / ``list`` prints the listing receipt;
-        ``show <name>`` opens the full-page :class:`ProjectsView` on that
-        project; ``new``/``delete``/``link``/``unlink`` mutate the store, with
+        Slice 3's real handler, extended by S3b. Bare / ``list`` prints the
+        listing receipt (with the page-entry footer); ``show <name>`` opens the
+        full-page :class:`ProjectsView` on that project, while NAMELESS
+        ``show`` opens the calling session's own set on the board and
+        ``board``/``timeline`` open the all-projects canvases;
+        ``new``/``delete``/``link``/``unlink`` mutate the store, with
         ``delete`` keeping ``/delete``'s typed-``yes`` two-step shape
         (``/project delete <name>`` rehearses, ``/project delete <name> yes``
         removes). Every other form — including the unknown-word refusal — is
@@ -18697,9 +18703,6 @@ class OperatorApp(App[None]):
         limitation the design states).
         """
         session = self._session
-        if session is None:
-            self._system_notice(*self._no_session_notice())
-            return
         registry = self._project_registry()
         if registry is None:
             self._system_notice(project_unavailable_text(), "warning")
@@ -18707,21 +18710,39 @@ class OperatorApp(App[None]):
         parts = arg.split(maxsplit=1)
         word = parts[0].casefold() if parts else ""
         rest = parts[1].strip() if len(parts) > 1 else ""
-        if word == "show":
-            name = rest.strip()
-            if not name:
-                notice(project_needs_name_text("show"), "warning")
-                return
+        if word in ("new", "link", "unlink") and session is None:
+            # The write verbs act ON the calling session (the auto-link, the
+            # link itself): with none there is nothing to act on, and the
+            # no-session notice is the honest answer. Every READ works without
+            # one — the board opens on a bare terminal (S3b).
+            self._system_notice(*self._no_session_notice())
+            return
+        if word in PROJECT_PAGE_VERBS:
+            # ONE unreadable-store rule for every page entry (Q4/Q5): re-read
+            # once, then refuse in the shared words rather than paint an empty
+            # canvas over a store that is merely broken.
             if getattr(registry, "load_error", None) is not None:
-                # The page reads the same store the receipt does: an unreadable
-                # one must refuse in the same words rather than resolve every
-                # name to "no project named" (QA round 1, Q4) — and the
-                # refusal must not be STICKY: this check runs before the read
-                # that would refresh the snapshot, so re-read once first
-                # (QA round 2, Q5).
                 refresh_project_store(registry)
             if getattr(registry, "load_error", None) is not None:
                 notice(project_store_unreadable_text(), "warning")
+                return
+        if word == "show":
+            name = rest.strip()
+            if not name:
+                # The NAMELESS form (S3b, operator refinement): the calling
+                # session's own set on the board — one link is also the
+                # highlight, several are the marked set, none is the plain
+                # all-projects board. Never the old name refusal.
+                session_id = str(getattr(session, "session_id", "") or "") if session else ""
+                associated = self._associated_project_ids(registry, session_id)
+                if len(associated) == 1:
+                    self._open_projects_view(
+                        view="board",
+                        associated=associated,
+                        highlight=next(iter(associated)),
+                    )
+                else:
+                    self._open_projects_view(view="board", associated=associated or None)
                 return
             try:
                 project = registry.get_project_by_name(name)
@@ -18734,6 +18755,11 @@ class OperatorApp(App[None]):
                 notice(project_show_refusal_text(name), "warning")
                 return
             self._open_projects_view(highlight=project.id)
+            return
+        if word in ("board", "timeline"):
+            # The all-projects canvases (S3b): no highlight, no marker set —
+            # the page opens on every project.
+            self._open_projects_view(view=word)
             return
         from local_operator.paths import config_dir
 
@@ -18753,18 +18779,44 @@ class OperatorApp(App[None]):
     def _project_registry(self) -> Any | None:
         """This machine's project registry, or ``None`` when there is none.
 
-        A READER's resolution, through the session facade: for an attached
-        session ``AttachedSession.project_registry`` builds the registry from
-        ITS OWN config dir, which is exactly the local-first rule this page
-        follows. The shape check (``list_projects``) mirrors the slice-1
-        handlers' guard, so a reduced facade degrades to the same sentence
-        rather than an AttributeError.
+        A READER's resolution: through the session facade when there is one
+        (``AttachedSession.project_registry`` builds the registry from ITS OWN
+        config dir, which is exactly the local-first rule this page follows),
+        and DIRECTLY off ``config_dir()`` when there is not — a bare terminal,
+        a viewer between attaches and a daemon-held front end all read the
+        SAME store this machine's sessions use, and reading a project must not
+        require a chat session (S3b, operator refinement). The shape check
+        (``list_projects``) mirrors the slice-1 handlers' guard, so a reduced
+        facade degrades to the same sentence rather than an AttributeError.
         """
         session = self._session
         registry = getattr(session, "project_registry", None) if session is not None else None
         if registry is None or not hasattr(registry, "list_projects"):
-            return None
+            from local_operator.paths import config_dir
+            from local_operator.projects import ProjectRegistry
+
+            try:
+                registry = ProjectRegistry(config_dir())
+            except Exception:  # noqa: BLE001 — no registry, one sentence
+                logger.debug("projects: could not open the local store", exc_info=True)
+                return None
         return registry
+
+    def _associated_project_ids(self, registry: Any, session_id: str) -> frozenset[str]:
+        """The projects THIS session is linked to, by id (S3b).
+
+        The nameless ``/project show`` resolves the caller's own set here so
+        the page can mark it (`◆`) and the title can name it. Empty when there
+        is no session, no links, or no readable store — the callers turn that
+        into the all-projects board, never a refusal.
+        """
+        if not session_id:
+            return frozenset()
+        try:
+            return frozenset(project.id for project in registry.projects_for_session(session_id))
+        except Exception:  # noqa: BLE001 — the page degrades, it does not crash
+            logger.debug("projects: associated set failed", exc_info=True)
+            return frozenset()
 
     def _projects_payload(self) -> list[Any]:
         """Compose every project's view ONCE — the page's whole data input.
@@ -31629,14 +31681,22 @@ class OperatorApp(App[None]):
         self._close_settings_view()
 
     # -- the projects page (``/project show``) ------------------------------
-    def _open_projects_view(self, *, highlight: str | None = None) -> None:
+    def _open_projects_view(
+        self,
+        *,
+        highlight: str | None = None,
+        view: str | None = None,
+        associated: frozenset[str] | None = None,
+    ) -> None:
         """Enter the full-page projects view, optionally on one project.
 
         A MODE of this screen, cloned from :meth:`_open_settings_view`: the
         transcript region is replaced by the page while the dock stays put and
         greyed (``Screen.projects``). Opening it again RETARGETS the cursor
         rather than remounting, so a second ``show`` leaves the reader where
-        they were.
+        they were; a second open that names a ``view`` or an ``associated``
+        set RE-TARGETS the page instead — fresh composition, requested canvas,
+        new marker set (S3b).
 
         The composed views are gathered HERE (registry + one runtime scan +
         per-session rollups) and handed to the widget; the widget re-renders on
@@ -31644,17 +31704,27 @@ class OperatorApp(App[None]):
         repaint costs no registry or filesystem I/O.
         """
         if self._projects_view is not None:
-            if highlight:
+            if view is not None or associated is not None:
+                import time as _time
+
+                self._projects_view.load(
+                    views=self._projects_payload(),
+                    highlight=highlight,
+                    view=view,
+                    associated=associated,
+                    updated_at=_time.time(),
+                )
+            elif highlight:
                 self._projects_view.focus_project(highlight)
             return
         payload = self._projects_payload()
         # Captured before anything is blurred: this is where Esc puts the user
         # back, almost always the composer.
         self._projects_focus_restore = self.focused
-        view = ProjectsView()
-        self._projects_view = view
+        page = ProjectsView()
+        self._projects_view = page
         self._transcript_view().display = False
-        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.mount(page, before=self.query_one("#input-dock"))
         self.screen.add_class(PROJECTS_LAYOUT_CLASS)
         # See ``_sync_boot_layout_class``: this mode replaces the transcript
         # region, so the boot layout's centred card and reserved rows have to
@@ -31667,7 +31737,13 @@ class OperatorApp(App[None]):
         # (the same seed-before-mount rule ``_open_org_chart_view`` records).
         import time as _time
 
-        view.load(views=payload, highlight=highlight, updated_at=_time.time())
+        page.load(
+            views=payload,
+            highlight=highlight,
+            view=view,
+            associated=associated,
+            updated_at=_time.time(),
+        )
 
     def _close_projects_view(self) -> bool:
         """Leave the projects mode and put the conversation back. True if open.
@@ -31709,6 +31785,32 @@ class OperatorApp(App[None]):
         """The page's ``esc`` hint was clicked — same exit as the key itself."""
         message.stop()
         self._close_projects_view()
+
+    def on_projects_view_jump_requested(self, message: ProjectsViewJumpRequested) -> None:
+        """``↵`` on the page: open the selected project's conversation (S3b).
+
+        A LIVE linked session is switched to through the SAME machinery
+        ``/resume`` and the sidebar's pick use (:meth:`_resume_session`: the
+        remote-owner guard, the local attach, the full reboot), so the page
+        adds no second way to change sessions. Anything else is answered
+        honestly — the states that exist, and the command that starts one —
+        never a silent no-op. The page closes first in both cases: the notice
+        lands in the transcript that the mode was hiding.
+        """
+        message.stop()
+        live = [session_id for session_id, state in message.sessions if state == "live"]
+        current = str(getattr(self._session, "session_id", "") or "") if self._session else ""
+        self._close_projects_view()
+        if live:
+            target = live[0]
+            if target == current:
+                self._system_notice(project_jump_already_text(message.project_name, target), "info")
+                return
+            self._resume_session(target, self._notice)
+            return
+        self._system_notice(
+            project_jump_no_live_text(message.project_name, message.sessions), "info"
+        )
 
     def on_projects_view_refresh_requested(self, message: ProjectsViewRefreshRequested) -> None:
         """``r`` on the page — recompose HERE and hand the widget fresh data.
