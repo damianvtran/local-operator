@@ -496,7 +496,30 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: while this branch was open: main's ceiling now sits 60 above main's head, and
 #: this change asks for +402 while costing +407, so five of those tokens net out.
 #: Still far inside the tighten band below, so the ratchet does not move.
-BUDGET_BILLED_TOKENS = 33_193
+#: RAISED 33,193 -> 33,330 for the ``project`` tool's milestone full-replace
+#: guard: ``op='update'`` with ``milestones`` is refused unless
+#: ``replace_milestones=true``, naming the count at risk and both safe paths
+#: (the surgical ``op='milestone'`` upsert, or the deliberate replace). The
+#: guard exists because the bare "FULL replace" phrasing in the field
+#: description read as "update my milestones" to an agent that then wiped
+#: every sibling. Measured by running THIS script on the SAME host from two
+#: trees, one after the other (the network entry's method):
+#:
+#:   baseline (origin/main 9f4e9d8b2)      92,124 chars = ~33,138 billed
+#:   head (this branch)                    92,476 chars = ~33,265 billed
+#:     = +352 chars = +127 billed: the ``replace_milestones`` boolean and its
+#:       description, plus the ``milestones`` description rewrite that drops
+#:       the bare "FULL replace" phrasing and names the refusal and the safe
+#:       path.
+#:
+#: The raised ceiling lands 65 above the head — the band the entries above
+#: keep (49, 51, 71; 37-62 where CI binds). The trim alternative was measured
+#: and does not fit: the flag plus one honest sentence about when to pass it
+#: is the discoverable half of a data-loss fix (an agent that cannot see the
+#: flag cannot deliberately replace), and the earlier ``memory_mb`` entry
+#: records that no other schema clause in the prefix is spare. The tighten
+#: band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 33_330
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
