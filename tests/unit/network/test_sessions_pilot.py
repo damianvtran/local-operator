@@ -323,6 +323,52 @@ def test_an_id_that_resolves_to_nothing_says_which_of_the_three_it_is(
     assert "doctor" in printed or "lists" in printed, printed
 
 
+def _patch_open_failure(monkeypatch: pytest.MonkeyPatch, viewer: Any, row: Any) -> None:
+    """A viewer whose OPEN fails, with the row lookup answering a peer row."""
+    import local_operator.session.remote_open as remote_open
+
+    async def _open(session_id: str, **kwargs: Any) -> Any:
+        raise ConnectionError("the remote owner did not send its state")
+
+    monkeypatch.setattr(remote_open, "open_remote_viewer", _open)
+    monkeypatch.setattr(remote_open, "remote_row_for", lambda sid, root: row)
+
+
+@pytest.mark.parametrize("relay_up", [True, False], ids=["relay-up", "no-relay-here"])
+def test_an_open_that_never_opened_names_the_side_that_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    relay_up: bool,
+) -> None:
+    """The state CI caught answering two ways: the same stopped peer reported
+    ``session_unreachable`` for a CACHED row and ``peer_unreachable`` for an
+    uncached one, because the first version classified by asking the peer's
+    catalogue a second time (a read that can itself time out).
+
+    The classification is BY CONSTRUCTION: an open that never produced a stream
+    never reached the session, so the far end of the link is the component — and
+    only this device's own relay record, a local file read, can change that.
+    """
+    import local_operator.network.store as store_mod
+
+    _patch_open_failure(monkeypatch, _FakeViewer(), _remote_row())
+    monkeypatch.setattr(
+        store_mod, "find_own_relay", lambda root=None: object() if relay_up else None
+    )
+
+    assert _run(["sessions", "--peer", PEER, "--send", SESSION, "hi", "--json"]) == 1
+    printed = capsys.readouterr().out
+    if relay_up:
+        assert '"code": "peer_unreachable"' in printed, printed
+        assert "doctor" in printed, printed
+        assert PEER in printed, printed
+    else:
+        # The local relay is the component, and the family's own sentence names
+        # the remedy rather than this verb inventing one.
+        assert '"code": "relay_unavailable"' in printed, printed
+        assert "lop network start" in printed, printed
+
+
 def test_an_unreachable_peer_gets_the_one_sentence_and_no_dial(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
