@@ -824,7 +824,12 @@ class TestStartIfStopped:
     def test_a_running_job_is_declined_without_a_kick(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A live pid means the build question owns this state, not this arm."""
+        """A live pid means the build question owns this state, not this arm.
+
+        The gate is passed FAIL-LOUD (review round 1, finding 3): a running job
+        must never pay for the policy question, so consulting it here raises
+        this cell's own failure instead of passing quietly.
+        """
         self._layout(tmp_path, monkeypatch)
         calls: list[tuple[str, ...]] = []
 
@@ -838,6 +843,7 @@ class TestStartIfStopped:
             path=self._own_path(),
             recovery="lop tunnel install",
             run=runner,
+            may_start=lambda: pytest.fail("the gate was consulted for a running job"),
         )
 
         assert outcome is None
