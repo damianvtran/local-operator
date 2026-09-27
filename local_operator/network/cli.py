@@ -1692,12 +1692,21 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             "it is single use and is not printed: read that file, or run this with a TTY "
             "and --print",
             f"then, on the other device: lop network join @{path}"
-            + (f" --host {payload['hosts'][0]}" if payload.get("hosts") else ""),
+            + (
+                f" --host {payload['hosts'][0]}"
+                if payload.get("hosts")
+                # NOTHING IN THIS STATE NAMES AN ENDPOINT, so the guidance names the
+                # flag the join will ask for instead of a command that cannot work
+                # (QA round 1, Q2: this line silently dropped the one flag the
+                # operator had to pass, and the join refused ``no_host``).
+                else " --host <this device's address:port>"
+            ),
         ],
     )
 
 
 def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[str, Any], str]:
+    from local_operator.network import relay as relay_mod
     from local_operator.network import store
     from local_operator.network.invite import mint as mint_invite
 
@@ -1708,7 +1717,13 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         state.secret,
         role=args.role,
         ttl_s=float(args.expires),
-        hosts=hosts or None,
+        # SAME RULE AS THE RELAY PATH (QA round 1, Q2): an explicit ``--host`` wins,
+        # and otherwise the token carries what this device advertises rather than the
+        # record's config-derived list, which is empty whenever a relay listens on a
+        # port the record never learned.
+        hosts=hosts
+        or relay_mod.advertise_endpoints(relay_mod.NetworkSettings.from_config())
+        or None,
         device_id=args.device,
     )
     record.invites.append(minted.record)

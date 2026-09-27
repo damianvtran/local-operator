@@ -418,6 +418,18 @@ class NetworkSettings:
     max_links: int = DEFAULT_MAX_LINKS
     max_handshakes: int = DEFAULT_MAX_HANDSHAKES
     autostart: bool = DEFAULT_AUTOSTART
+    #: WHICH STORE THESE VALUES CAME FROM, when a reader knows. ``from_config``
+    #: always sets it (the argument, or the ambient config dir); a hand-built
+    #: ``NetworkSettings(...)`` leaves it ``None``, which means "these values are
+    #: not attached to a store" — and :func:`advertise_endpoints` then makes no
+    #: claim about a RUNNING relay, because a record it found in some other
+    #: install's root is not where THIS device is listening. Measured as a real
+    #: defect in the other direction on 2026-09-26: consulting the ambient root
+    #: from a settings object built for another device advertised THAT device's
+    #: endpoint in this device's hello, so the two ends recorded each other's
+    #: addresses and every dial landed on the wrong device (29 cells of
+    #: ``tests/unit/network`` went red on ``handshake_refused``/``unreachable``).
+    root: Path | None = None
 
     @classmethod
     def from_config(cls, root: Path | None = None) -> NetworkSettings:
@@ -428,9 +440,17 @@ class NetworkSettings:
         """
         from functools import partial
 
+        from local_operator.paths import config_dir
+
+        # THE EFFECTIVE ROOT, recorded rather than only used: ``root=None`` means
+        # "the ambient config dir" for every other reader in this package, and a
+        # settings object that forgot which store it read is one that cannot
+        # answer "where is OUR relay" (see the field's note).
+        resolved = Path(root) if root is not None else Path(config_dir())
         read = partial(store.read_config, root=root)
         hosts = read(("network", "advertise_hosts"), list(DEFAULT_ADVERTISE_HOSTS))
         return cls(
+            root=resolved,
             listen_address=str(read(("network", "listen_address"), DEFAULT_LISTEN_ADDRESS)),
             port=int(read(("network", "port"), DEFAULT_PORT)),
             advertise_hosts=tuple(str(host) for host in (hosts or [])),
@@ -1194,6 +1214,36 @@ def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, lis
     return changed, added
 
 
+def _own_relay_listen(root: Path | None) -> dict[str, Any]:
+    """The live relay listen block for ``root``, or ``{}``.
+
+    THE ONE ANSWER TO "WHERE AM I LISTENING" for a process that is not the relay.
+    ``NetworkSettings`` carries the CONFIG, and a relay started with ``serve
+    --port`` (or by an installer that passed a port the config never learned)
+    listens somewhere the config does not know about; the record the relay
+    publishes under ``run/peers`` carries its own resolved
+    ``{address, port, advertised}`` block.
+
+    ``root`` is REQUIRED TO BE KNOWN: ``None`` means "these settings were not read
+    from a store", and consulting the ambient one instead is how a settings object
+    built for one device advertised another device's endpoint in this device's
+    hello — see :attr:`NetworkSettings.root` for that measurement. Every failure
+    answers ``{}``: a probe that cannot tell must degrade to the config rather than
+    break a pairing.
+    """
+    if root is None:
+        return {}
+    try:
+        from local_operator.network import store
+
+        record = store.find_own_relay(root)
+    except Exception:  # noqa: BLE001 — a probe must never break a pairing
+        return {}
+    if record is None:
+        return {}
+    return record.listen if isinstance(record.listen, dict) else {}
+
+
 def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = ()) -> list[str]:
     """Where peers should TRY to reach a device, in preference order.
 
@@ -1211,6 +1261,19 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
     ``_ensure_link`` tries them in order, so a stale first entry costs one failed
     dial rather than a lost peer.
 
+    THE RUNNING RELAY'S OWN BLOCK IS READ — a third source, not a restatement of
+    the second. Measured on 2026-09-26 (session-mobility audit): a device whose
+    relay ran `serve --port 41902` over a config that never learned that port — the
+    SHIPPED default config carries no ``network`` section at all — advertised
+    NOTHING here, because the config's ``0.0.0.0:4097`` produced no non-loopback
+    address. The inviter's admission then recorded the joiner's ephemeral CLIENT
+    source port as that member's only endpoint, ``lop network peers`` reported
+    ``connect_failed:ConnectionRefusedError`` forever, and every `lop sessions
+    move <id> --to <that device>` answered ``unreachable``: the peer was
+    permanently undialable, and no session could be handed to it. The running relay
+    is the one component that knows the truthful answer, so it is asked here, and
+    the config-derived entries are computed from ITS port when it answered.
+
     Module-level rather than a ``Relay`` method because ``init`` and ``join`` need
     the same answer in the CLI process, where no relay exists — and a second
     implementation of "what do we advertise" is how the row and the peer record
@@ -1225,10 +1288,21 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
 
     for host in (*declared, *settings.advertise_hosts):
         add(host)
-    if settings.listen_address == "127.0.0.1":
+    live = _own_relay_listen(settings.root)
+    for endpoint in live.get("advertised") or []:
+        add(endpoint)
+    # The live port wins when it exists; the config is the fallback. A detected
+    # address published with the CONFIG's port is a claim about a listener that is
+    # not there — the same failure one layer down.
+    listen_address = str(live.get("address") or settings.listen_address or "")
+    try:
+        port = int(live.get("port") or 0) or settings.port
+    except (TypeError, ValueError):
+        port = settings.port
+    if listen_address == "127.0.0.1":
         # DIAL-ONLY: loopback is the honest answer, and it says "you cannot reach
         # me from another machine" rather than naming an address that only fails.
-        add(f"127.0.0.1:{settings.port}")
+        add(f"127.0.0.1:{port}")
     else:
         try:
             for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
@@ -1238,7 +1312,7 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
                 # narrowing, not a coercion.
                 address = str(info[4][0])
                 if not address.startswith("127."):
-                    add(f"{address}:{settings.port}")
+                    add(f"{address}:{port}")
         except OSError:
             pass
     # Bounded by the number a RECEIVER keeps, so nothing published here is dropped
@@ -7207,12 +7281,24 @@ class RelayServer:
                     capabilities=sorted(_invite_capabilities(record, invite_id)),
                     added_by=record.self_device_id,
                     added_via="invite",
-                    # What the JOINER declared about itself in its hello, falling back
-                    # to the observed source address only when it declared nothing.
-                    # The observed address is an ephemeral port, so it is a last
-                    # resort: it is why every paired peer used to be unreachable the
-                    # moment the pairing link closed (QA round 1, F-2).
-                    endpoints=list(handshake.peer_endpoints) or [peer_addr],
+                    # ONLY WHAT THE JOINER DECLARED. The observed source address
+                    # was the fallback here, and it is a LIE: its port is a
+                    # client-side ephemeral, closed by the time anything dials it.
+                    # It made the member permanently undialable while `lop network
+                    # peers`/`doctor` reported a concrete endpoint and a
+                    # `connect_failed:ConnectionRefusedError` against it, so the
+                    # real state — "nothing was ever declared", the documented
+                    # `no_endpoint` — was unreadable from every surface. Measured
+                    # 2026-09-26 in the mobility audit: a device whose relay
+                    # listened on 127.0.0.1:41902 had 127.0.0.1:60214 on the other
+                    # device's row, and `lop sessions move` to it answered
+                    # `unreachable`. ``_note_peer_endpoints`` already states the
+                    # rule this line now follows ("a peer that declares NOTHING
+                    # leaves the row alone … writing that would be a worse lie
+                    # than an honest empty list"); this is the same decision at
+                    # the ADMISSION seam, and a later handshake that does declare
+                    # endpoints repairs the row.
+                    endpoints=list(handshake.peer_endpoints),
                     root=self.root,
                 )
                 consume(record, invite_id, outcome="admitted")
@@ -7916,7 +8002,19 @@ class RelayServer:
                 state.secret,
                 role=str(frame.get("role") or "read"),
                 ttl_s=float(frame.get("ttl_s") or 600.0),
-                hosts=[str(host) for host in frame.get("hosts") or []] or None,
+                # AN EXPLICIT HOST WINS, and otherwise the invite carries WHAT THIS
+                # DEVICE ACTUALLY ADVERTISES rather than the record's own list. The
+                # record's ``listen.advertised`` is written by the process that ran
+                # ``init``/``join`` from ITS config, so a relay started with ``serve
+                # --port`` on an address the record never learned left the default
+                # EMPTY — and a token that tells the joiner nothing about where to dial
+                # is the one step a pairing flow must not have (QA round 1, Q2: the
+                # mint produced ``"hosts": []``, ``join @file`` then refused
+                # ``no_host``, and the operator had to pass ``--host`` by hand with
+                # nothing on screen saying so).
+                hosts=[str(host) for host in frame.get("hosts") or []]
+                or self.advertised_endpoints()
+                or None,
                 device_id=str(frame.get("device_id") or ""),
             )
             record.invites.append(minted.record)

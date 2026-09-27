@@ -300,6 +300,7 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         "already_local",  # --to local for a session that is already here
         "third_device",  # a move asked for by a device that is neither end
         "no_replica",  # --from-replica with nothing synced
+        "unconfirmed",  # committed here, never confirmed at the destination (QA R1 Q1)
         # This slice's fourth, and it is a data-integrity refusal rather than a
         # protocol one: the source holds an entry the copy set does not carry, so
         # moving it would delete that entry with nothing to copy it from (B-M2).
@@ -510,6 +511,78 @@ def _tombstone(root: Path, session_id: str) -> dict[str, Any]:
     return read_tombstones(root).get(session_id) or {}
 
 
+def _asking_device(link: Any, frame: dict[str, Any]) -> str:
+    """Which device a move frame is FROM: the link's identity first, then the frame's.
+
+    The link's device id is the identity the mesh ADMITTED (``PeerLink.device_id``, set
+    where the handshake resolved the peer), so it is preferred over ``to_device``, a
+    field the asker writes itself: a frame that claims to be the device a record names
+    must not be believed by the reader of that record. The frame is the fallback for a
+    caller with no admitted link — the handler driven directly, which is how a unit
+    test reaches it.
+    """
+    return str(getattr(link, "device_id", "") or "") or str(frame.get("to_device") or "")
+
+
+def _tombstone_names_this_device(server: "RelayServer", tombstone: dict[str, Any]) -> bool:
+    """Whether the owner's record says the id went to THIS device and no other.
+
+    THE PROMOTION PROOF IS AN IDENTITY, NOT AN EXISTENCE (review round 2, MAJOR). A
+    tombstone is written by the device that handed the id away and names the ONE device
+    that may adopt it (``projection.write_tombstone``); its presence on its own proves
+    only that the id left its owner. A receiver whose handoff was rolled back KEEPS its
+    verified bytes — deliberately, ``_reconcile_destination``'s rollback branch says so,
+    and ``ready.json`` exempts them from the staging sweep for as long as they exist —
+    so the owner can hand the same id to a different device later, and the older copy is
+    then the copy of a handoff that no longer describes it. Promoting it would mint a
+    SECOND OWNER for one id, the invariant this slice exists to enforce, with the OLDER
+    copy winning.
+
+    A record whose ``device_id`` is empty names nobody and is therefore not this device:
+    a record that carries no destination cannot prove that any device may adopt.
+    """
+    return str(tombstone.get("device_id") or "") == server.identity.device_id
+
+
+def _adopt_elsewhere_refusal(
+    server: "RelayServer", session_id: str, tombstone: dict[str, Any]
+) -> SessionMoveRefusal:
+    """The refusal for a staged copy whose owner's record names ANOTHER device.
+
+    It names the CONDITION rather than only the outcome, because the user's remedy is
+    not "retry": the record would have to name this device for the bytes here to be
+    adoptable, and the verb that adopts them has to run on the device it does name —
+    the same rule Q1c applied to the refusals that used to say "run this from the
+    device that holds it" and name a device that holds nothing.
+
+    ``changed`` stays False and the phase stays None on purpose: nothing on this device
+    moved, and the staged copy is left exactly where it is (it is the only copy here).
+    """
+    device_id = str(tombstone.get("device_id") or "")
+    if not device_id:
+        # A RECORD WITH NO TAKER, which today's writers cannot produce
+        # (``projection.write_tombstone`` always writes the destination, and
+        # ``_complete_handoff`` takes it from the journal) and a hand-edited or
+        # truncated file can: it cannot be adopted anywhere, so naming a device or a
+        # verb here would invent both. The sentence says only what is true.
+        return _move_refusal(
+            session_id,
+            "third_device",
+            f"{session_id} was handed away and its record names no device, so it does not "
+            "name this one: the copy staged here is not this device's to adopt and "
+            "nothing was changed",
+        )
+    name = str(tombstone.get("device_name") or "") or server._member_name(device_id)  # noqa: SLF001
+    who = name or device_id
+    return _move_refusal(
+        session_id,
+        "third_device",
+        f"{session_id} was handed to {who}, not to this device: its record names {who}, "
+        "so the copy staged here is not this device's to adopt and nothing was changed; "
+        f"`lop sessions move {session_id} --to local` on {who} adopts it there",
+    )
+
+
 def _audit(server: "RelayServer", event: str, session_id: str, peer: str, **detail: Any) -> None:
     """One handoff record. Never raises: an audit loss cannot undo a move."""
     try:
@@ -624,7 +697,86 @@ def _retire_local_runtime(
             }
         return {"result": "retired", "sentence": ""}
     sentence = answer[len("kept:") :].strip() if answer.startswith("kept:") else answer
-    return {"result": "busy" if sentence else "retired", "sentence": sentence}
+    return {"result": "busy" if sentence else "retired", "sentence": _busy_sentence(sentence)}
+
+
+def _wait_seconds(value: Any) -> float:
+    """A peer's ``wait_s`` as a number this side can hold, or ``0.0``.
+
+    EVERY OTHER FIELD IN THE INVITE is read with ``or <default>`` on a type the
+    reader can absorb; this one arrived as ``float(frame.get("wait_s") or 0.0)``, so
+    a malformed value (``"soon"``, a list) raised out of the handler and turned a
+    move into an exception instead of a refusal (review round 1, NIT). ``0.0`` is
+    the honest reading of a wait that cannot be understood — it is the frame's own
+    default — and the clamp is the same cap the CLI applies, so a peer cannot ask
+    this side to re-probe for a week.
+    """
+    if isinstance(value, bool):
+        # ``True`` is not a duration, and ``float(True) == 1.0`` would read as one.
+        return 0.0
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+        # NaN fails its own equality and infinities pass the clamp below only by
+        # accident of comparison; neither is a duration anybody asked for.
+        return 0.0
+    return min(max(0.0, seconds), MOVE_MAX_WAIT_S)
+
+
+def _handoff_age(entry: dict[str, Any]) -> str:
+    """The ``started Ns ago`` clause for a journal entry, or an honest unknown.
+
+    ``float(existing.get("at") or 0.0)`` rendered ~1.79e9 seconds for an entry with
+    no ``at`` — a number about the epoch rather than about the handoff. Every writer
+    on this head stamps the field, so this is the defensive branch (review round 1,
+    NIT), but a sentence whose whole job is legibility may not invent a number: the
+    clause says what it does not know.
+    """
+    raw = entry.get("at")
+    # ``isinstance`` RATHER THAN A BARE ``float()`` IN A ``try``: pyright reads
+    # ``entry.get(...)`` as ``Any | None`` and rejects the call, and the narrowed
+    # form is also the honest one — a bool is an ``int``, and ``True`` is not a
+    # timestamp (type-check, 2026-09-27: this was the branch's only pyright error).
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return "started at an unknown time"
+    at = float(raw)
+    if at <= 0:
+        return "started at an unknown time"
+    return f"started {int(max(0.0, time.time() - at))}s ago"
+
+
+def _busy_sentence(answer: str) -> str:
+    """The owner's own words for a refused retire, or a sentence when it gave a TOKEN.
+
+    THIS IS WHAT REACHES A PERSON. ``_source_prepare`` returns this string as the
+    refusal's ``message``, and the design's contract for the mesh surface is that
+    every refusal names its cause (``MOVE_REFUSAL_CODES``: "the source has a turn in
+    flight; message is its idle reason verbatim"). Verbatim is right for a reason
+    that is a sentence, and it is what the runtime's ``kept: <why>`` answers
+    normally carry.
+
+    Measured on the two-device rig 2026-09-26: the runtime's ``retire_now`` answered
+    the bare token ``busy`` for a session parked in a turn (the reason word
+    ``may_refresh`` returns for its own notice), and ``lop sessions move`` therefore
+    printed ``{"code": "busy", "message": "busy"}`` — a machine word in the one
+    field a person reads, with no cause and no remedy, beside every sibling refusal
+    that is a full sentence. A token is now rendered into the sentence it stands
+    for; anything that already reads as prose passes through untouched, so this can
+    never overwrite a runtime's own explanation.
+    """
+    reason = answer.strip()
+    if not reason:
+        return ""
+    if " " in reason or reason[-1] in ".!?:;":
+        return reason
+    if reason in {"busy", "working"}:
+        return (
+            "this session is working right now, so nothing was moved; try again when the "
+            "turn finishes, or pass --wait <seconds> to re-check"
+        )
+    return f"this session is not idle ({reason}), so nothing was moved"
 
 
 _EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
@@ -880,6 +1032,14 @@ def _destination_move(
                 return None, _move_refusal(session_id, "unreachable", refusal.message), ""
             return None, _move_refusal(session_id, refusal.code, refusal.message), ""
         if str(status.get("result") or "") == "tombstone":
+            tombstone = status.get("tombstone") or {}
+            if not _tombstone_names_this_device(server, tombstone):
+                # THE RECORD NAMES ANOTHER DEVICE (review round 2, MAJOR), so there is
+                # nothing here to finish: the collapse of "a record exists" into "the
+                # record is mine" is how a stale staged copy becomes a second owner.
+                # Checked on THIS side rather than trusted from the peer's answer,
+                # because the promote below is the irreversible act.
+                return None, _adopt_elsewhere_refusal(server, session_id, tombstone), ""
             # THE CRASH WINDOW THIS EXISTS FOR (§6.5 row 5): the owner already
             # committed and we may hold a verified staging directory. Ask for what
             # we have and finish; there is no `prepare` to make, the id is gone.
@@ -896,6 +1056,10 @@ def _destination_move(
                 "",
             )
         pending = status.get("pending") or {}
+        # WHETHER THE OWNER HAS IT ARCHIVED, asked for once here and carried to the
+        # promote in ``ready.json`` (see that file's ``archived`` field). Default
+        # False so a peer too old to send the field behaves exactly as before.
+        archived = bool(status.get("archived"))
         if pending and str(pending.get("to_device") or "") != me:
             return (
                 None,
@@ -1037,6 +1201,16 @@ def _destination_move(
         "mode": "keep" if keep else "move",
         "owner_device": owner_device,
         "source_session_id": session_id,
+        # WHETHER THE CONVERSATION WAS HIDDEN WHERE IT CAME FROM, and why it rides
+        # here rather than being asked for again at the promote: this file is the
+        # ONE thing that survives a crash between the copy and the adopt (§6.5 row
+        # 5 adopts from it with the owner possibly gone), so a bit carried only in
+        # memory would be lost in exactly the case the file exists for. The archive
+        # index is device-scoped (``session/archived.py``), which is why nothing
+        # carried it before: a session archived on A arrived unarchived on B.
+        # ``--keep`` DELIBERATELY DOES NOT INHERIT IT: a fork mints a NEW id, and a
+        # copy the user just asked for must not arrive hidden from every listing.
+        "archived": bool(archived) and not keep,
         "promoted": False,
         "at": time.time(),
     }
@@ -1186,6 +1360,13 @@ def _finish_from_tombstone(
     ``committed`` and died, or its answer never reached us, and the ONE fact that
     settles it is that the id is now tombstoned to THIS device. Nothing else is
     asked of the owner — which is also why this works when the owner is gone.
+
+    WHO ESTABLISHES "TO THIS DEVICE" IS THE CALLER, and every caller compares before it
+    gets here (review round 2, MAJOR): ``_tombstone_names_this_device`` in
+    ``_destination_move`` and ``_reconcile_destination``, where a peer's answer is the
+    input, and ``_recall``'s own comparison of this device's local record. This function
+    cannot make that comparison for itself — the record is the OWNER's file, so the only
+    thing it could read here is the answer somebody else wrote.
     """
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
@@ -1289,8 +1470,60 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
         return False
     # ``ready.json`` is the move's own boot marker, not session content: it exists
     # so a crash before the promote can be settled, and inside the session it would
-    # be a file every future reader has to learn to ignore.
-    (target / "ready.json").unlink(missing_ok=True)
+    # be a file every future reader has to learn to ignore. IT IS READ FIRST, and
+    # for a second reason: it is the only carrier of whether the conversation was
+    # ARCHIVED where it came from (the ``archived`` field), and the archive index is
+    # device-scoped — so the bit cannot be re-derived here, and a session archived on
+    # one device arrived unarchived on the other until this read existed.
+    ready_path = target / "ready.json"
+    try:
+        ready_doc = json.loads(ready_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Absent (a replica promote never wrote one) or unreadable: not-archived is
+        # the same answer a store that never archived anything gives, and a promote
+        # must never fail because bookkeeping could not be read.
+        ready_doc = {}
+    ready_path.unlink(missing_ok=True)
+    # THE STORE MARKER, which is what makes this directory REMOVABLE later.
+    # ``remove_session_dir`` refuses a store that carries no marker, and the marker
+    # is written where a session is CREATED (``session_factory`` calls
+    # ``cleanup.mark_store``); a destination that has never created one — a freshly
+    # paired second machine, which is the case mobility exists for — therefore had
+    # no marker, and the copy it adopted could never be deleted. Measured
+    # 2026-09-26 on the two-device rig: device B adopted a session, then handed it
+    # back on a recall; the source-side commit wrote its tombstone, called
+    # ``remove_session_dir`` and logged ``cleanup="pending"`` (the refusal is
+    # logged at WARNING), so B KEPT the directory — the same id on two devices,
+    # both listing it as a local conversation, which is exactly INV-1. Marking the
+    # store is the honest statement that this device now IS a session store: it
+    # holds one.
+    from local_operator.session.cleanup import mark_store
+
+    mark_store(target.parent)
+    # AND THE ID IS THIS DEVICE'S AGAIN, so any tombstone naming somewhere else is
+    # now a lie about a session this device holds. Measured 2026-09-26 (session-
+    # mobility audit, probe 8): A handed `bc371569005d` to B, recalled it, and A
+    # held the directory with `mesh.json home_device: A` WHILE its tombstone index
+    # still said the id had moved to B — the state the audit's wedged session was
+    # found in, where three verb paths disagreed about where it lived (a local
+    # `--resume` routed the user to the peer, `move --to peer` answered
+    # "already lives on this device", and `--to local` answered "already_local").
+    # A tombstone and a directory for one id are never both true, and the promote
+    # is the instant the directory becomes true.
+    from local_operator.network.projection import forget_tombstone
+
+    forget_tombstone(target_id, config_dir=server.root)
+    # AND THE ARCHIVE STATE COMES BACK WITH IT. The operator's requirement: a
+    # session archived on the device it left must still be archived on the device it
+    # arrives on — otherwise a conversation the user deliberately hid reappears in
+    # the default listing of the machine they moved it to. The index is
+    # device-scoped (``session/archived.py``), and the source's own entry is pruned
+    # at read once its directory is gone, so this is the whole hand-off: one write
+    # here, no coordination with the source afterwards.
+    if bool(ready_doc.get("archived")):
+        from local_operator.session.archived import set_archived
+
+        set_archived(server.root, target_id, True)
     return True
 
 
@@ -1433,7 +1666,23 @@ def _source_status(
     Answers the tombstone for an id this device handed away, which is what makes
     §6.5's recovery table work: a destination that crashed after the commit asks
     here, and the answer — "not mine any more, and it is yours" — is the commit.
+
+    AND IT IS THE COMMIT ONLY FOR THE DEVICE IT NAMES (review round 2, MAJOR). The
+    record carries its taker (``tombstone["device_id"]``), so the same answer is not
+    true for a device the handoff was not made to: one that still holds a verified
+    copy of an earlier, rolled-back attempt would read "yours" as permission to promote
+    it, and two devices would each hold a promoted copy of one id. The asker is the
+    link's admitted identity (:func:`_asking_device`) — never a field the asker writes
+    — and a mismatch is a refusal that says where the id went instead.
+
+    THE REACHABILITY OF A MISMATCH IS NOT WHAT MAKES THIS WORTH DOING: a peer frame
+    for an id this device no longer owns is already scoped by ``authorizer._move_scope``
+    to the device the record names, so the ask is normally refused a layer earlier. The
+    handler is gated anyway, because the two-layer agreement is exactly what a future
+    change to one of them breaks, and this is the layer that produces the answer.
     """
+    from local_operator.session.archived import archived_ids
+
     session_id = str(frame["session_id"])
     if _owned_here(server, session_id):
         from local_operator.mobile.attach_client import find_runtime_record
@@ -1449,15 +1698,36 @@ def _source_status(
             "result": "state",
             "owner": True,
             "busy": record is not None,
+            # THE ARCHIVE BIT TRAVELS WITH THE STATE ANSWER. It is device-scoped
+            # (``session/archived.py`` writes this device's own index), so the only
+            # place a destination can learn it is from the device that has it — and
+            # the operator named archiving as a thing that must hold on the remote
+            # session (review round 1, MINOR 1).
+            "archived": session_id in archived_ids(server.root),
             "pending": entry,
             "session_id": session_id,
         }
     tombstone = _tombstone(server.root, session_id)
     if tombstone:
+        if str(tombstone.get("device_id") or "") == _asking_device(link, frame):
+            return {
+                "result": "tombstone",
+                "owner": False,
+                "tombstone": tombstone,
+                "session_id": session_id,
+            }
+        # A RECORD FOR SOMEBODY ELSE IS NOT A REFUSAL TO ANSWER (review round 2,
+        # MAJOR): it says where the id went, and the asker may be holding the only
+        # bytes of an older attempt under the same id. The sentence is the module's
+        # own for that state (``_tombstone_recovery_clause``) rather than a second
+        # wording of it, and it names the device the record names.
         return {
-            "result": "tombstone",
-            "owner": False,
-            "tombstone": tombstone,
+            "result": "refused",
+            "code": "not_owner",
+            "message": (
+                f"this device does not hold {session_id} any more"
+                + _tombstone_recovery_clause(server, session_id)
+            ),
             "session_id": session_id,
         }
     return {
@@ -1508,12 +1778,42 @@ def _source_prepare(
         except Exception:  # noqa: BLE001
             existing = None
         if existing:
+            # A HALF-MOVED SESSION HAS TO BE LEGIBLE FROM THE REFUSAL ALONE. The entry
+            # this device is holding may be a handoff that is genuinely under way, or
+            # one whose destination died — and until it is settled, every route to
+            # this conversation answers the same sentence. Measured on the two-device
+            # rig 2026-09-26 (probe 9): the destination's relay was killed mid-copy,
+            # A answered ``deadline_exceeded`` with "Nothing was deleted: this device
+            # still holds the conversation", and SEVEN retries over ten minutes then
+            # read "a handoff ... is already in progress on this device" with no way
+            # to tell what was wrong or what to do; the same move landed the moment
+            # A's relay restarted. The phase and the age are the two facts that make
+            # the state legible (``prepared`` = no bytes were committed anywhere;
+            # ``handing-off`` = monotone, the destination owns the outcome), so they
+            # are NAMED here rather than left for the user to infer from a JSON
+            # journal. The recovery the design's §6.5 table would apply to a stale
+            # entry written by a DEAD relay is deliberately not applied here — this
+            # entry's writer is alive — and that gap is recorded, not guessed at.
+            phase = str(existing.get("phase") or "")
+            age = _handoff_age(existing)
+            # THE ESCAPE IS NAMED, because it is not derivable from the state. An
+            # entry written by this device's LIVE relay is skipped by every reconcile
+            # (the instance rule that stops a merely slow peer losing an in-flight
+            # handoff), so no amount of retrying clears it and no other verb does
+            # either: what clears it is making the writer instance stale, after which
+            # the next attempt reconciles it at ``prepared`` and rolls it back
+            # (measured 2026-09-26: seven retries over ten minutes read this sentence;
+            # the same move landed the moment the source's relay restarted). Review
+            # round 1's ruling is a user-facing abandon verb, and this clause is its
+            # prerequisite: a person can act on the state they can read.
             return {
                 "result": "refused",
                 "code": "in_progress",
                 "message": (
-                    "a handoff of that conversation is already in progress on this device, "
-                    "so nothing was changed"
+                    "a handoff of that conversation is already in progress on this "
+                    f"device (phase: {phase or 'unknown'}, {age}), so nothing was "
+                    "changed; if the other device has stopped answering, restart this "
+                    "device's relay (`lop network restart`) and try the move again"
                 ),
                 "session_id": session_id,
             }
@@ -1663,6 +1963,46 @@ def _source_prepare(
     }
 
 
+def _remove_handed_away(root: Path, session_id: str, to_device: str) -> bool:
+    """Remove a session this device has handed to another, by the ONE rm path.
+
+    THE STORE MARKER IS WHY THIS IS A FUNCTION rather than three call sites. A
+    destination that has never CREATED a session carries no
+    ``.local-operator-store`` marker in its ``sessions/`` — ``session_factory``
+    writes it at creation — and ``remove_session_dir`` refuses an unmarked store,
+    correctly: that guard is what stops cleanup from walking into a directory that
+    is not a session store. But a store holding a session ADOPTED BY A MOVE *is* a
+    session store, and this device knows that better than any scanner: it adopted
+    the directory, stamped it with ``mesh.json``, and on a later hand-back is the
+    one handing it away. Measured 2026-09-26 on the two-device loopback rig:
+    without this, the recall's commit wrote its tombstone, called
+    ``remove_session_dir``, logged ``cleanup="pending"``, and LEFT THE DIRECTORY
+    BEHIND — the same id then live on two devices, each listing it as a local
+    conversation, which is exactly INV-1.
+
+    ``mark_store`` is idempotent and best-effort, and it is called from here rather
+    than from ``remove_session_dir`` for the reason that function's own note gives
+    ("the policy must not be able to authorise its own target"): this is the
+    product path that decided the session lives here, which is the same authority
+    ``session_factory`` exercises when it marks a store it just created.
+    """
+    from local_operator.session.cleanup import (
+        MESH_MOVE_POLICY,
+        mark_store,
+        remove_session_dir,
+    )
+
+    directory = Path(root) / "sessions" / session_id
+    mark_store(directory.parent)
+    return remove_session_dir(
+        directory,
+        config_dir=root,
+        policy=MESH_MOVE_POLICY,
+        reason=f"mesh-move: handed to {to_device}",
+        actor=f"mesh:{to_device}",
+    )
+
+
 def _source_commit(
     server: "RelayServer", link: "PeerLink", frame: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1673,7 +2013,6 @@ def _source_commit(
     makes the destination's retry safe against a commit whose reply was lost.
     """
     from local_operator.network import sync as sync_mod
-    from local_operator.session.cleanup import MESH_MOVE_POLICY, remove_session_dir
     from local_operator.session.placement import (
         HANDOFF_PHASE_HANDING_OFF,
         clear_handoff_entry,
@@ -1809,13 +2148,7 @@ def _source_commit(
         config_dir=server.root,
     )
     directory = Path(server.root) / "sessions" / session_id
-    removed = remove_session_dir(
-        directory,
-        config_dir=server.root,
-        policy=MESH_MOVE_POLICY,
-        reason=f"mesh-move: handed to {to_device}",
-        actor=f"mesh:{to_device}",
-    )
+    removed = _remove_handed_away(Path(server.root), session_id, to_device)
     if removed:
         clear_handoff_entry(server.root, session_id)
     else:
@@ -1868,6 +2201,18 @@ def _destination_invite(
 
     session_id = str(frame["session_id"])
     keep = bool(frame.get("keep"))
+    # THE ``--wait`` THAT WAS DROPPED HERE. The destination's own flow re-probes a
+    # busy owner every ``MOVE_WAIT_POLL_S`` for as long as it is given (the loop in
+    # ``_destination_move``), and this handler passed ``wait_s=0.0`` unconditionally —
+    # so an OFFLOAD never re-probed, whatever ``lop sessions move --to <peer> --wait
+    # N`` the user typed, while the recall route (which passes ``wait_s`` through)
+    # did. Measured on the two-device rig 2026-09-26: a session whose mock runtime
+    # was parked in a 45 s ``sleep`` answered ``--wait 120`` with ``busy`` in 5.09 s,
+    # the turn still running, against the guide's "re-checks ... every five seconds,
+    # up to the design's thirty minutes". The term is the OWNER's (it is the side
+    # that refuses), so it travels with the invite, bounded by the same cap the CLI
+    # applies.
+    wait_s = _wait_seconds(frame.get("wait_s"))
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -1901,7 +2246,7 @@ def _destination_invite(
                 session_id,
                 transport=transport,
                 keep=keep,
-                wait_s=0.0,
+                wait_s=wait_s,
                 owner_device=owner_device,
                 owner_name=owner_name,
                 asked=True,
@@ -2095,6 +2440,106 @@ def resolve_remote_owner(server: "RelayServer", session_id: str) -> tuple[str, s
     )
 
 
+def _tombstone_recovery_clause(server: "RelayServer", session_id: str) -> str:
+    """What to add to a "not this device's to move" refusal when we handed it on.
+
+    The unconditional sentence those refusals used to carry — "run this from the
+    device that holds it" — names a device that can hold NOTHING: a destination that
+    committed the handoff here and then died before its promote holds the only copy in
+    ``network/staging/<id>`` and has no session to show for it. This device is the one
+    that tombstoned the id, so it is the one that knows where the id went; the clause
+    says that, and says what to run THERE (QA round 1, Q1).
+    """
+    tombstone = _tombstone(server.root, session_id)
+    if not tombstone:
+        return ""
+    device_id = str(tombstone.get("device_id") or "")
+    if not device_id:
+        return ""
+    name = str(tombstone.get("device_name") or "") or server._member_name(device_id)  # noqa: SLF001
+    return (
+        f". This device handed {session_id} to {name or device_id}; if it is not there "
+        f"yet, its verified copy is in that device's `network/staging/{session_id}`, and "
+        f"`lop sessions move {session_id} --to local` THERE adopts it"
+    )
+
+
+def adopt_staged_if_mine(
+    server: "RelayServer", session_id: str
+) -> SessionMoveResult | SessionMoveRefusal | None:
+    """§6.5 row 5, asked for BY THE USER on the device that holds the staged copy.
+
+    THE GAP THIS CLOSES, measured on the two-device rig 2026-09-27 (QA round 1, Q1):
+    with the owner tombstoned and a verified ``network/staging/<id>/ready.json`` here,
+    a relay restart adopted nothing and ``move <id> --to local`` answered "no device
+    in this network holds <id>" — so the only copy of the conversation was on no
+    device's listing and no verb could reach it. The destination's own journal entry
+    is written by THIS device's live relay, and ``reconcile`` skips an entry its own
+    live instance wrote (the guard that keeps a genuinely in-flight handoff safe from
+    a reconcile racing it). That guard is right for a move nobody is driving; when the
+    owner has already tombstoned the id there is no move in flight on either side, and
+    a user asking this device for that id is the one moment the destination can act.
+
+    The proof is unchanged and is not re-derived here: ``_reconcile_destination`` asks
+    the owner named in ``ready.json`` for the id's fate and promotes ONLY on a
+    tombstone that names this device.
+
+    THAT CLAUSE IS ENFORCED, AND IT IS WHY THIS FUNCTION CAN RETURN A REFUSAL (review
+    round 2, MAJOR): the record's own ``device_id`` is read on this side before anything
+    is promoted, and a record naming another device comes back as
+    ``action: not_mine`` — answered with the refusal its detail names rather than
+    swallowed into the generic "no device in this network holds <id>" the caller would
+    otherwise fall back to, which told a user holding the only verified copy of a
+    conversation that no device had it.
+    """
+    from local_operator.network import sync as sync_mod
+
+    staging = sync_mod.staging_dir(server.root, session_id)
+    try:
+        ready = json.loads((staging / "ready.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    owner = str(ready.get("owner_device") or "")
+    if not owner:
+        return None
+    entry = {"role": "destination", "phase": "handing_off", "from_device": owner}
+    try:
+        report = _reconcile_destination(server.root, session_id, entry, server=server)
+    except Moved:
+        return None
+    if str(report.get("action") or "") == "not_mine" and isinstance(report.get("refusal"), dict):
+        # THE RECORD NAMED SOMEBODY ELSE, and this refusal travels OUT of here: the user
+        # asked THIS device for the id, and the fact they need is that the copy here is
+        # not this device's to adopt — logged only, it reached them as "no device in
+        # this network holds <id>" (review round 2, MAJOR).
+        return cast(SessionMoveRefusal, report["refusal"])
+    if str(report.get("action") or "") != "promoted":
+        # LOGGED, not swallowed: this refusal is the difference between "there is nothing
+        # to adopt here" and "there is a verified copy here and this device would not
+        # take it", and only the report says which (QA round 2, R1: the rig answered the
+        # generic `unreachable` while the copy sat in staging).
+        logger.info("mobility: staged copy of %s not adopted: %s", session_id, report)
+        return None
+    return cast(
+        SessionMoveResult,
+        {
+            "ok": True,
+            "session_id": session_id,
+            "new_session_id": session_id,
+            "mode": "move",
+            "from_device": _device_block(server, owner),
+            "to_device": _own_block(server),
+            "phase": "committed",
+            "phases": [
+                {"phase": "prepared", "at": time.time()},
+                {"phase": "handing_off", "at": time.time()},
+                {"phase": "committed", "at": time.time()},
+            ],
+            "recovered": True,
+        },
+    )
+
+
 def _link_for_move(server: "RelayServer", device_id: str, name: str) -> "PeerLink":
     link = server._ensure_link(device_id)  # noqa: SLF001 — the one dial seam
     if link is None:
@@ -2216,7 +2661,6 @@ def _reconcile_source(
     root: Path, session_id: str, entry: dict[str, Any], *, server: "RelayServer | None"
 ) -> dict[str, Any]:
     """The source's half of the table: roll back at ``prepared``, complete after."""
-    from local_operator.session.cleanup import MESH_MOVE_POLICY, remove_session_dir
     from local_operator.session.placement import clear_handoff_entry
 
     to_device = str(entry.get("to_device") or "")
@@ -2236,13 +2680,7 @@ def _reconcile_source(
         return _complete_handoff(root, session_id, entry)
 
     if directory.is_dir():
-        removed = remove_session_dir(
-            directory,
-            config_dir=root,
-            policy=MESH_MOVE_POLICY,
-            reason=f"mesh-move: handed to {to_device}",
-            actor=f"mesh:{to_device}",
-        )
+        removed = _remove_handed_away(root, session_id, to_device)
         if not removed:
             return {"session_id": session_id, "action": "cleanup_pending", "phase": "committed"}
         clear_handoff_entry(root, session_id)
@@ -2254,7 +2692,6 @@ def _reconcile_source(
 def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dict[str, Any]:
     """Finish a commit the relay died in the middle of (§6.5 row 3)."""
     from local_operator.network.projection import write_tombstone
-    from local_operator.session.cleanup import MESH_MOVE_POLICY, remove_session_dir
     from local_operator.session.placement import (
         HANDOFF_PHASE_HANDING_OFF,
         clear_handoff_entry,
@@ -2273,14 +2710,7 @@ def _complete_handoff(root: Path, session_id: str, entry: dict[str, Any]) -> dic
         network_id=str(entry.get("network_id") or ""),
         config_dir=root,
     )
-    directory = Path(root) / "sessions" / session_id
-    removed = remove_session_dir(
-        directory,
-        config_dir=root,
-        policy=MESH_MOVE_POLICY,
-        reason=f"mesh-move: handed to {to_device}",
-        actor=f"mesh:{to_device}",
-    )
+    removed = _remove_handed_away(root, session_id, to_device)
     if removed:
         clear_handoff_entry(root, session_id)
     return {
@@ -2307,6 +2737,14 @@ def _reconcile_destination(
     holding the id means it rolled back, so this device drops the entry and keeps
     the bytes (a retry resumes them); no answer at all means wait, because both a
     promote and a rollback would be guesses about another device's disk.
+
+    AND A FOURTH, WHICH IS A REFUSAL (review round 2, MAJOR): a record that names
+    ANOTHER device is not this device's commit. It is the same answer as "no answer"
+    in one respect — nothing here may be promoted — and the opposite in another: the
+    fate is decided, so the report says so (``action: not_mine``) and carries the
+    refusal the user's verb returns, rather than dropping the entry in silence and
+    leaving the caller to answer "no device holds <id>" about bytes this device is
+    holding (see ``_tombstone_names_this_device``).
     """
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
@@ -2352,6 +2790,25 @@ def _reconcile_destination(
         # instead of copying a transcript again.
         clear_handoff_entry(root, session_id)
         return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
+    tombstone = status.get("tombstone") or {}
+    if not _tombstone_names_this_device(server, tombstone):
+        # THE RECORD NAMES ANOTHER DEVICE (review round 2, MAJOR). This device holds
+        # verified bytes of a handoff that no longer describes it — the owner has
+        # handed the same id on — and promoting them would give one id two owners,
+        # the older copy winning. Measured on this head 2026-09-27: with the record
+        # naming a third device, `move <id> --to local` on the old receiver refuses and
+        # leaves the copy in place; and a peer that answers the existence-only way —
+        # what this handler did before the fix, and what any build without the check
+        # still does — is refused HERE, by this branch (cell 2 of
+        # tests/unit/network/test_mobility_promotion_identity.py promotes on the
+        # pre-fix code and refuses here).
+        clear_handoff_entry(root, session_id)
+        return {
+            "session_id": session_id,
+            "action": "not_mine",
+            "phase": "prepared",
+            "refusal": _adopt_elsewhere_refusal(server, session_id, tombstone),
+        }
     result, refusal, _target = _finish_from_tombstone(server, session_id, owner_device=owner)
     if result is None:
         return {
@@ -2536,6 +2993,11 @@ def _recall(
                 "already_local",
                 f"{session_id} is already on this device, so nothing was moved",
             )
+        # BEFORE ANY TALK OF REPLICAS OR OF GIVING UP: this device may hold the ONLY
+        # copy — the destination of a handoff whose promote never ran (QA round 1, Q1).
+        adopted = adopt_staged_if_mine(server, session_id)
+        if adopted is not None:
+            return adopted
         # NOTHING SYNCED AND THE OWNER IS GONE: offer the replica (§1.6's last row).
         replica = sync_mod.replica_summary(server.root, session_id)
         if replica:
@@ -2678,13 +3140,14 @@ def _offload(
                 session_id,
                 "not_owner",
                 f"{session_id} is not this device's to move; run this from the device that "
-                "holds it",
+                "holds it" + _tombstone_recovery_clause(server, session_id),
             )
         return _move_refusal(
             session_id,
             "third_device",
             f"{session_id} does not live on this device, so it cannot be moved FROM here; "
-            "run this from the device that holds it",
+            "run this from the device that holds it"
+            + _tombstone_recovery_clause(server, session_id),
         )
     try:
         target_device, target_name = _resolve_typed_peer(server, to)
@@ -2719,6 +3182,10 @@ def _offload(
                 "phase": "invite",
                 "session_id": session_id,
                 "keep": keep,
+                # THE OWNER'S WAIT TRAVELS WITH THE INVITE: the re-probe happens
+                # where the busy answer is produced (the destination's loop), so
+                # a ``--wait`` that stops at this device is a promise nobody keeps.
+                "wait_s": wait_s,
                 "to_device": target_device,
             }
         )
@@ -2726,10 +3193,8 @@ def _offload(
         return _move_refusal(session_id, refusal.code or "unreachable", refusal.message)
     new_id = str(accepted.get("new_session_id") or "")
     budget = move_bound_s(wait_s, keep=keep)
-    committed, refusal = _await_own_progress(
-        server, session_id, budget=budget, invited=target_device
-    )
-    if committed:
+    outcome, refusal = _await_own_progress(server, session_id, budget=budget, invited=target_device)
+    if outcome == "done":
         phases = _move_phases(server, session_id)
         if not phases:
             phases = [{"phase": "prepared", "at": time.time()}]
@@ -2758,6 +3223,42 @@ def _offload(
     except Exception:  # noqa: BLE001 — an unreadable journal refuses elsewhere
         entry = None
     del entry
+    if outcome == "committed":
+        # THE COMMIT HAPPENED HERE AND THE HANDOFF DID NOT FINISH (QA round 1, Q1).
+        # This device retired its copy on the destination's ``ready`` — the copy was
+        # verified, which is what the commit means — and the destination then never
+        # confirmed the promote. What the user needs is not a success line but the
+        # facts only this device has: the id left here, and the two states a missing
+        # confirmation can be, with the one check that tells them apart. The answer is
+        # a REFUSAL with ``changed: true`` on purpose: from here the move is unfinished,
+        # and a front end that branched on ``ok`` would open a session that may not be
+        # on the other device yet.
+        #
+        # BOTH STATES ARE NAMED, BECAUSE THIS SIDE CANNOT TELL THEM APART (QA round 2,
+        # Q1). No ``done`` frame means EITHER that the destination promoted and the frame
+        # was lost, OR that it died before promoting and its verified bytes are still in
+        # staging. The sentence used to assert the second — "its verified copy is in that
+        # device's ``network/staging/<id>``" — in both, which names a directory that is
+        # EMPTY after a promote: measured 2026-09-27 on the two-device rig with the
+        # promote rename frozen so the frame is lost, staging was 0 bytes, the
+        # destination listed the conversation with its transcript, and the verb the
+        # sentence named answered ``already_local``. So the reader is handed the check
+        # that decides the state — the destination's own listing — and the verb is named
+        # only INSIDE the branch it can act on: on the promoted side it is a no-op by the
+        # time it can run (the destination adopts the copy on restart and answers
+        # ``already_local``).
+        return _move_refusal(
+            session_id,
+            "unconfirmed",
+            f"{session_id} was handed to {target_name or target_device} and this device "
+            "has retired its copy, but that device never confirmed it as a conversation; "
+            f"check that device's listing first. If {session_id} is there, the move "
+            "finished and only its confirmation was lost. If it is not there, its "
+            f"verified copy is in that device's `network/staging/{session_id}`, and "
+            f"`lop sessions move {session_id} --to local` THERE adopts it",
+            phase_reached=reached,
+            changed=True,
+        )
     if refusal is not None:
         # THE DESTINATION REFUSED, so this is a DEFINITE outcome and not a deadline:
         # the sentence is the refusing device's own (this side never saw the guard
@@ -2801,35 +3302,66 @@ def _offload(
 
 def _await_own_progress(
     server: "RelayServer", session_id: str, *, budget: float, invited: str = ""
-) -> tuple[bool, tuple[str, str] | None]:
-    """Wait for this device's own side of an invited move to reach ``committed``.
+) -> tuple[str, tuple[str, str] | None]:
+    """Wait for this device's own side of an invited move to reach ``done``.
 
     Watches the DURABLE facts (the journal and the tombstone) rather than asking
     anybody: the invite's whole design is that the destination drives, so the only
     thing the source can honestly report is what its own files say.
 
+    THREE OUTCOMES, AND THE MIDDLE ONE IS WHY THIS RETURNS A WORD (QA round 1, Q1).
+    ``"done"`` is the destination's frame that says it PROMOTED, which is the only
+    answer that means the conversation is openable there. ``"committed"`` is this
+    device having retired its copy and tombstoned the id to a peer that never
+    confirmed: the bytes are in that peer's staging and the move is unfinished.
+    ``"none"`` is nothing happened here. Answering the second as if it were the first
+    is how a receipt came to claim a finished move for a conversation the destination
+    never opened — measured on the two-device rig 2026-09-27: with the receiver
+    SIGKILLed after its ``ready`` (so the owner commits) the answer was ``phase: done``
+    for an id that was then on NO device's listing, with its only copy in staging.
+
+    THE TOMBSTONE NO LONGER ENDS THE WAIT BY ITSELF — it starts the confirmation
+    window the bound already carries: ``move_bound_s`` is ``wait_s +
+    OFFLOAD_CONFIRM_WAIT_S``, so the last ``OFFLOAD_CONFIRM_WAIT_S`` of the budget IS
+    the window for the destination's ``done``, and a wait that returned at the
+    tombstone never spent it. A ``done`` frame that is merely LOST therefore costs the
+    window rather than the budget, and the healthy path is unchanged: the frame
+    arrives in milliseconds and ends the wait immediately.
+
     THE ONE THING DISK CANNOT SAY is that the destination REFUSED — a refusal writes
     nothing here, so a wait that only watched files sat out its whole budget and then
     reported an unknown outcome for a move that never started (QA round 1, Q4a:
-    60 s spent on a refusal that arrived in 3 ms). The refusing device reports it over
-    the link (``_source_refused``), and the second half of this return value is that
+    60 s spent on a refusal that arrived in 3 ms). That device reports it over the
+    link (``_source_refused``), and the second half of this return value is that
     answer, noticed within one poll (0.2 s).
 
     ``invited`` names the device this move was invited to, so a refusal can only end
-    the wait it belongs to; the committed check comes FIRST, because a handoff that
-    committed has an answer that a late refusal must not overwrite.
+    the wait it belongs to. A refusal is consulted ONLY while nothing has committed
+    here, because a handoff that committed has an answer a late refusal must not
+    overwrite.
     """
     deadline = time.monotonic() + max(0.0, budget)
     progress = progress_for(server)
-    while time.monotonic() < deadline:
-        if _tombstone(server.root, session_id):
-            return True, None
-        if progress.wait_for(session_id, "done", 0.2):
-            return True, None
-        refusal = progress.refusal(session_id, from_device=invited)
-        if refusal is not None:
-            return False, refusal
-    return bool(_tombstone(server.root, session_id)), None
+    committed_at: float | None = None
+    while True:
+        if progress.wait_for(session_id, "done", 0.05 if committed_at else 0.2):
+            return "done", None
+        now = time.monotonic()
+        if committed_at is None:
+            if _tombstone(server.root, session_id):
+                committed_at = now
+            else:
+                refusal = progress.refusal(session_id, from_device=invited)
+                if refusal is not None:
+                    return "none", refusal
+                if now >= deadline:
+                    return "none", None
+                continue
+        # Committed, now or earlier: hold the confirmation window, then answer.
+        if now >= min(deadline, committed_at + OFFLOAD_CONFIRM_WAIT_S):
+            return "committed", None
+        if now >= deadline:
+            return "committed", None
 
 
 def _recover_from_replica(
