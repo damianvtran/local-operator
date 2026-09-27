@@ -323,35 +323,54 @@ def test_an_id_that_resolves_to_nothing_says_which_of_the_three_it_is(
     assert "doctor" in printed or "lists" in printed, printed
 
 
-def _patch_open_failure(monkeypatch: pytest.MonkeyPatch, viewer: Any, row: Any) -> None:
-    """A viewer whose OPEN fails, with the row lookup answering a peer row."""
-    import local_operator.session.remote_open as remote_open
+class _BlindViewer(_FakeViewer):
+    """A viewer whose DIAL fails — at the rung the caller names.
 
-    async def _open(session_id: str, **kwargs: Any) -> Any:
-        raise ConnectionError("the remote owner did not send its state")
+    ``open`` is the cold-to-working seam (the viewer is cold until
+    ``bind_runtime``), so a dial that never produced a session can fail at either
+    rung depending on whether a row was cached; both are the same situation to the
+    person reading it, and both must answer the same way.
+    """
 
-    monkeypatch.setattr(remote_open, "open_remote_viewer", _open)
-    monkeypatch.setattr(remote_open, "remote_row_for", lambda sid, root: row)
+    def __init__(self, rung: str) -> None:
+        super().__init__()
+        self.rung = rung
+
+    async def bind_runtime(self) -> None:
+        if self.rung == "bind":
+            raise ConnectionError("the remote owner did not send its state")
+        self.bound = True
 
 
+async def _blind_open(_session_id: str, **_kwargs: Any) -> Any:
+    raise ConnectionError("the remote owner did not send its state")
+
+
+@pytest.mark.parametrize("rung", ["open", "bind"])
 @pytest.mark.parametrize("relay_up", [True, False], ids=["relay-up", "no-relay-here"])
-def test_an_open_that_never_opened_names_the_side_that_failed(
+def test_a_dial_that_produced_no_session_names_the_far_end(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    rung: str,
     relay_up: bool,
 ) -> None:
-    """The state CI caught answering two ways: the same stopped peer reported
-    ``session_unreachable`` for a CACHED row and ``peer_unreachable`` for an
-    uncached one, because the first version classified by asking the peer's
-    catalogue a second time (a read that can itself time out).
+    """The state CI caught answering two ways, pinned at BOTH rungs.
 
-    The classification is BY CONSTRUCTION: an open that never produced a stream
-    never reached the session, so the far end of the link is the component — and
-    only this device's own relay record, a local file read, can change that.
+    One stopped peer reported ``session_unreachable`` for a cached row (the dial
+    failed inside the viewer) and ``peer_unreachable`` for an uncached one (it was
+    refused before the dial), because the first version classified by asking the
+    peer's catalogue a second time — a read that is not usable at that moment: a
+    link this device's relay still believes in reports the peer as reachable for
+    seconds after it died. The classification is now by construction, and only this
+    device's own relay record — a local file read — can change it.
     """
     import local_operator.network.store as store_mod
 
-    _patch_open_failure(monkeypatch, _FakeViewer(), _remote_row())
+    import local_operator.session.remote_open as remote_open
+
+    _patch(monkeypatch, _BlindViewer(rung), _remote_row())
+    if rung == "open":
+        monkeypatch.setattr(remote_open, "open_remote_viewer", _blind_open)
     monkeypatch.setattr(
         store_mod, "find_own_relay", lambda root=None: object() if relay_up else None
     )
