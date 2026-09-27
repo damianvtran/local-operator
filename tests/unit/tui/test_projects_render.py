@@ -597,9 +597,10 @@ def test_every_canvas_marks_the_associated_set_and_the_selection() -> None:
     board = render_project_board(views, cursor=1, associated=mine).text.plain
     assert "◆ alpha" in board and "◆ gamma" in board and "▸ beta" in board
     timeline = render_project_timeline(views, cursor=0, associated=mine).text.plain
-    # cursor=0 is alpha: the selection owns the column there, and gamma — the
-    # other associated project — keeps its marker.
-    assert "▸ alpha" in timeline
+    # cursor=0 is alpha AND alpha is associated: it carries BOTH markers
+    # (design round 1, D3 — the cursor must not hide the diamond), and gamma
+    # keeps its own.
+    assert "▸◆alpha" in timeline
     assert "◆ gamma" in timeline
     assert "  beta" in timeline
 
@@ -637,3 +638,58 @@ def test_position_helpers_answer_none_for_rows_nothing_paints() -> None:
     assert timeline_position(many, PROJECTS_MAX + 1) is None
     assert board_position([], 0) is None
     assert timeline_position([], 0) is None
+
+
+# -- round 1 remediation: both markers, the tail, the cap ---------------------
+
+
+def test_a_selected_associated_row_carries_both_markers() -> None:
+    """D3: the cursor must not hide the `◆` — the count matches the diamonds."""
+    view = _view("alpha", start_date="2026-05-01", target_date="2026-09-01")
+    mine = frozenset({str(view["project"]["id"])})
+    listed = render_project_list([view], cursor=0, associated=mine).text.plain
+    assert listed.startswith("▸◆alpha")
+    board = render_project_board([view], cursor=0, associated=mine).text.plain
+    assert "▸◆alpha" in board
+    timeline = render_project_timeline(
+        [view], cursor=0, associated=mine, today=date(2026, 3, 1)
+    ).text.plain
+    assert "▸◆alpha" in timeline
+
+
+def test_timeline_tail_marks_the_selection_and_the_set() -> None:
+    """Agent review r1 F1: an undated project is markable on the tail line."""
+    dated = _view("ship", start_date="2026-01-05", target_date="2026-01-30")
+    other = _view("someday")
+    mine = frozenset({str(other["project"]["id"])})
+    result = render_project_timeline(
+        [dated, other], cursor=1, associated=mine, today=date(2026, 3, 1)
+    )
+    assert result.text.plain.splitlines()[-1] == "no dates (1): ▸◆someday"
+    # Unmarked names stay bare — the tail has no fixed column to align.
+    plain = render_project_timeline([dated, other], today=date(2026, 3, 1))
+    assert plain.text.plain.splitlines()[-1] == "no dates (1): someday"
+
+
+def test_past_the_board_cap_the_selected_card_is_still_painted() -> None:
+    """UX r1 U3: no silent clamp — the `↵` object stays visible, the count honest."""
+    from local_operator.tui.projects_render import board_position
+
+    views = [_view(f"p{index:02d}") for index in range(BOARD_CARDS_MAX + 3)]
+    selected_index = BOARD_CARDS_MAX + 1
+    mine = frozenset(
+        {
+            str(views[selected_index]["project"]["id"]),
+            str(views[selected_index + 1]["project"]["id"]),
+        }
+    )
+    result = render_project_board(views, cursor=selected_index, associated=mine)
+    canvas = result.text.plain
+    # 15 cards, cap 12: the selected one is painted, the note counts the rest
+    # (including how many of them are the session's own).
+    assert "… +2 more (1 yours)" in canvas
+    assert f"▸◆p{selected_index:02d}" in canvas
+    position = board_position(views, selected_index)
+    assert position is not None
+    lines = canvas.splitlines()
+    assert f"p{selected_index:02d}" in lines[position[1]]

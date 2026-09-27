@@ -382,7 +382,10 @@ def project_jump_no_live_text(name: str, sessions: Sequence[tuple[str, str]]) ->
 
     Never a bare refusal: a linked-but-stopped session is named with its state
     and ``/resume <id>`` is the command that starts one, and a project with no
-    links at all is told how to get one.
+    links at all is told how to get one. With exactly ONE linked session the
+    spelling is the concrete command — ``/resume cd34ef56ab12 starts it`` — the
+    same shape the redial verdict uses (UX round 1, U4); the placeholder stays
+    for the multi-id case, where no single command is right.
     """
     if not sessions:
         return (
@@ -391,10 +394,20 @@ def project_jump_no_live_text(name: str, sessions: Sequence[tuple[str, str]]) ->
         )
     listed = ", ".join(f"{session_id} [{state}]" for session_id, state in sessions[:3])
     more = f" (+{len(sessions) - 3} more)" if len(sessions) > 3 else ""
+    if len(sessions) == 1:
+        return (
+            f"no live session to open for {name!r} — linked: {listed}{more}. "
+            f"/resume {sessions[0][0]} starts it."
+        )
     return (
         f"no live session to open for {name!r} — linked: {listed}{more}. "
         "/resume <id> starts one."
     )
+
+
+def project_unexpected_argument_text(word: str) -> str:
+    """``/project board extra`` — the page entries take no argument (review r1, NIT 4)."""
+    return f"/project {word} takes no argument — it opens every project." ""
 
 
 def project_jump_already_text(name: str, session_id: str) -> str:
@@ -656,8 +669,12 @@ def run_project_slash_op(
                 now=now,
             )
         if word in ("board", "timeline"):
-            # The all-projects entries, whose TUI form is the page itself; a
-            # caller with no page gets the overview and the hint names the
+            # The all-projects entries take NO argument: silently ignoring a
+            # trailing word made `/project board alpha` open everything with
+            # no acknowledgement (review round 1, NIT 4 / UX round 1, U5).
+            if rest:
+                return (project_unexpected_argument_text(word), "warning")
+            # A caller with no page gets the overview and the hint names the
             # page verb they asked for.
             return project_overview_receipt(
                 registry,

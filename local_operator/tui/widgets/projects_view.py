@@ -165,8 +165,10 @@ class ProjectsView(Vertical):
     # Arrows CLAMP — this is the full-page mode AGENTS.md names as the second
     # member of the clamp exception (`/settings` is the first): its list is
     # several times its viewport, so the bottom is a destination, not a place
-    # to wrap away from. In the list view up/down move the CURSOR (clamped);
-    # in the board/timeline views they scroll the canvas. `←→` are NOT
+    # to wrap away from. In EVERY view up/down move the CURSOR (clamped, with
+    # the canvas following through the reveal — UX round 1, U2 made board and
+    # timeline selectable, not just pannable); ←/→ pan, and the page keys page
+    # the canvas. `←→` are NOT
     # view-switch keys — they belong to the canvas scroll, because a page that
     # scrolls horizontally must keep its pan axis (the settings PANE-cycle
     # convention does not transfer). Shift+arrows page horizontally and
@@ -186,6 +188,9 @@ class ProjectsView(Vertical):
         Binding("down", "down", "Down", show=False),
         Binding("left", "scroll_left", "Scroll left", show=False),
         Binding("right", "scroll_right", "Scroll right", show=False),
+        # The page keys still PAGE the canvas in board/timeline: with ↑/↓ on the
+        # selection, a reader who wants to read further without moving `↵`'s
+        # target reaches for these.
         Binding("pageup", "page_up", "Page up", show=False),
         Binding("pagedown", "page_down", "Page down", show=False),
         Binding("shift+left", "page_left", "Page left", show=False),
@@ -238,6 +243,11 @@ class ProjectsView(Vertical):
         # and disappeared would move the body on every view switch).
         self._detail = Static(classes="projects-view-detail")
         self._scroll_hint = HintButton("↔↕", self._focus_canvas)
+        # `↵` opens the selected project's conversation (S3b). The rung is a
+        # PURE ADDITION to the ladder (10 cells; design round 1, D1) — the
+        # headline action of the page must be on screen, and it sheds before
+        # `r refresh` on a 60-column terminal.
+        self._open_hint = HintButton("↵ open", lambda: self.action_jump())
         self._list_hint = HintButton("1", lambda: self.action_show_list())
         self._board_hint = HintButton("2", lambda: self.action_show_board())
         self._timeline_hint = HintButton("3", lambda: self.action_show_timeline())
@@ -286,6 +296,18 @@ class ProjectsView(Vertical):
                 # means being able to see it, so it lands on the list. A
                 # requested `view` (the board/timeline entries) outranks that.
                 self._view = "list"
+        if self._associated:
+            # Seed the selection onto the caller's own set (UX round 1, U1):
+            # the nameless entry's one action (`↵`) must aim at a MEMBER, and
+            # with several links the cursor otherwise stayed on row 0 — a
+            # project the reader has no link to. A reader already inside their
+            # set keeps their row (the kept-cursor rule).
+            if self.current_project_id() not in self._associated:
+                for index, view_row in enumerate(self._views):
+                    project = view_row.get("project") if isinstance(view_row, dict) else None
+                    if isinstance(project, dict) and str(project.get("id")) in self._associated:
+                        self._cursor = index
+                        break
         self._cursor = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
         if self._view == "timeline":
             # A recomposition can change the dated span (a new target date),
@@ -404,25 +426,39 @@ class ProjectsView(Vertical):
     def _paint_chrome(self) -> None:
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
-        title = Text(no_wrap=True, overflow="ellipsis")
-        title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
-        title.append(f" · {self._view}", style=muted)
-        if self._associated:
-            # The nameless entry's set (S3b): whose projects the `◆` markers
-            # are, and how many. Absent on the all-projects entries, where no
-            # marker is painted.
-            title.append(f" · this session ({len(self._associated)})", style=muted)
-        tracked = len(self._views)
-        title.append(f" · {tracked} tracked", style=dim)
-        if self._view == "timeline":
-            # The tier is always stated so an auto-chosen axis explains itself
-            # (the org chart's tier-title rule).
-            title.append(f" · zoom: {self._tier}", style=dim)
-        if self._updated_at is not None:
-            import time as _time
+        # The nameless entry's set (S3b): whose projects the `◆` markers are,
+        # and how many. It SHEDS FIRST when the title cannot hold the whole
+        # line (design round 1, D2): the title Static clips silently — Rich's
+        # `overflow="ellipsis"` is inert on it — so the newest, longest clause
+        # yields rather than letting `updated` be cut with no `…`.
+        set_clause = f" · this session ({len(self._associated)})" if self._associated else None
 
-            stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
-            title.append(f" · updated {stamp}", style=dim)
+        def build_title(*, with_set: bool) -> Text:
+            title = Text(no_wrap=True, overflow="ellipsis")
+            title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+            title.append(f" · {self._view}", style=muted)
+            if with_set and set_clause:
+                title.append(set_clause, style=muted)
+            tracked = len(self._views)
+            title.append(f" · {tracked} tracked", style=dim)
+            if self._view == "timeline":
+                # The tier is always stated so an auto-chosen axis explains
+                # itself (the org chart's tier-title rule).
+                title.append(f" · zoom: {self._tier}", style=dim)
+            if self._updated_at is not None:
+                import time as _time
+
+                stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
+                title.append(f" · updated {stamp}", style=dim)
+            return title
+
+        title = build_title(with_set=True)
+        if set_clause is not None:
+            from rich.cells import cell_len
+
+            available = self._title.content_size.width or self._title.size.width
+            if available and cell_len(title.plain) > available:
+                title = build_title(with_set=False)
         self._title.update(title)
 
         width = max(self.size.width - 2, 1)
@@ -475,6 +511,7 @@ class ProjectsView(Vertical):
         board_hint = (self._board_hint, " board", True)
         timeline_hint = (self._timeline_hint, " timeline", True)
         refresh = (self._refresh_hint, " refresh", True)
+        open_hint = (self._open_hint, " open", True)
         nxt = (self._next_hint, " next", True)
         # `+/-` is TIME zoom: it acts only on the timeline, and a hinted key
         # that changes nothing is worse than an absent one (the org chart's own
@@ -499,11 +536,22 @@ class ProjectsView(Vertical):
                 )
             ]
 
-        all_leads = leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, zoom)
+        all_leads = leads_of(
+            scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint, zoom
+        )
         rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = [
             rung(all_leads, "back to conversation", state=True),
             rung(all_leads, "back to conversation", state=False),
             rung(all_leads, "back", state=False),
+            rung(
+                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint),
+                "back",
+                state=False,
+            ),
+            # `↵ open` sheds HERE, before `r refresh`: at 60 columns the page
+            # keeps its refresher and loses the action hint (the dock still
+            # says `Read-only · esc back`, and the guide states the key) — the
+            # one-rung decision design round 1 asked for.
             rung(
                 leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh),
                 "back",
@@ -545,6 +593,7 @@ class ProjectsView(Vertical):
             self._timeline_hint,
             self._next_hint,
             self._refresh_hint,
+            self._open_hint,
             self._zoom_hint,
             self._exit_hint,
             self._state_hint,
@@ -576,6 +625,7 @@ class ProjectsView(Vertical):
             yield self._timeline_hint
             yield self._next_hint
             yield self._refresh_hint
+            yield self._open_hint
             yield self._zoom_hint
             yield self._exit_hint
             yield self._state_hint
@@ -609,6 +659,9 @@ class ProjectsView(Vertical):
         finding 8: the hint lit on hover on a canvas that could not scroll).
         """
         self._scroll_hint.set_actionable(self._body.max_scroll_x > 0 or self._body.max_scroll_y > 0)
+        # `↵ open` needs an object: on an empty store there is nothing to open
+        # and the hint stops offering itself (the same rule as the arrows).
+        self._open_hint.set_actionable(bool(self._views))
 
     # -- geometry probes (for tests / visual validation) --------------------
     @property
@@ -672,10 +725,14 @@ class ProjectsView(Vertical):
         # rather than at a scroll offset computed for the previous canvas —
         # then reveal the SELECTION, so the canvas opens on the card/row `↵`
         # would act on (S3b; with the default cursor at row 0 both land on the
-        # origin, as before).
+        # origin, as before). The reveal runs NOW and again once the new
+        # layout lands: the limits read on the first call still belong to the
+        # canvas being left, and nothing re-ran it before (QA round 1, Q1 — a
+        # switch left the selection off-screen at every size).
         self._body.scroll_to(x=0, y=0, animate=False)
         self._repaint()
         self._scroll_cursor_into_view()
+        self.call_after_refresh(self._scroll_cursor_into_view)
 
     def action_show_list(self) -> None:
         self._set_view("list")
@@ -712,18 +769,17 @@ class ProjectsView(Vertical):
             session_id = str(session_row.get("session_id") or "")
             if not session_id:
                 continue
-            runtime_value = session_row.get("runtime")
-            runtime = runtime_value if isinstance(runtime_value, dict) else {}
-            # The RUNTIME state is what the host decides on; a link whose
-            # directory is gone answers `missing` only when there is no
-            # runtime record either (a live process with a vanished directory
-            # is still the process the operator asked for — the resume will
-            # say honestly if it cannot find it).
-            state = str(runtime.get("state") or "")
-            if session_row.get("exists") is False and not state:
+            if session_row.get("exists") is False:
+                # The RECEIPT's word, deliberately: a link whose directory is
+                # gone reads `missing` on every surface, so `↵` must not say
+                # `[stopped]` about the same link (QA round 1, Q2 — the
+                # composed row carries state `stopped` for a record-less link,
+                # which made the old branch unreachable).
                 sessions.append((session_id, "missing"))
                 continue
-            sessions.append((session_id, state or "stopped"))
+            runtime_value = session_row.get("runtime")
+            runtime = runtime_value if isinstance(runtime_value, dict) else {}
+            sessions.append((session_id, str(runtime.get("state") or "stopped")))
         self.post_message(
             ProjectsViewJumpRequested(
                 project_id=str(project.get("id") or ""),
@@ -774,16 +830,26 @@ class ProjectsView(Vertical):
 
     # -- movement and scrolling (all CLAMP; no wrap on a canvas) ------------
     def action_up(self) -> None:
-        if self._view == "list":
-            self._move(-1)
-            return
-        self._body.scroll_up()
+        # ↑/↓ move the ONE selection in every canvas (UX round 1, U2): a rung
+        # that says `↵ open` needs an object the reader can choose, and before
+        # this the board/timeline arrows only panned — `↵` stayed aimed at
+        # whatever the list cursor happened to be, on a card often off-screen.
+        # The canvas follows the selection through the reveal; ←/→ and the
+        # page keys still pan.
+        self._move(-1)
 
     def action_down(self) -> None:
-        if self._view == "list":
-            self._move(1)
-            return
-        self._body.scroll_down()
+        self._move(1)
+
+    def current_project_id(self) -> str | None:
+        """The selected project's id, or ``None`` (the host seeds from it)."""
+        if not (0 <= self._cursor < len(self._views)):
+            return None
+        view_row = self._views[self._cursor]
+        project = view_row.get("project") if isinstance(view_row, dict) else None
+        if not isinstance(project, dict):
+            return None
+        return str(project.get("id") or "") or None
 
     def _move(self, delta: int) -> None:
         """Move the list cursor, CLAMPED, then reveal it (reveal-then-act)."""
@@ -859,11 +925,18 @@ class ProjectsView(Vertical):
         else:
             position = self._position_for(self._cursor)
             if position is None:
+                clamped = False
                 for candidate in range(self._cursor - 1, -1, -1):
                     if self._position_for(candidate) is not None:
                         self._cursor = candidate
+                        clamped = True
                         position = self._position_for(candidate)
                         break
+                if clamped:
+                    # The clamp MOVED the reader's selection: repaint, or the
+                    # clamped card/row shows no `▸` until something else
+                    # repaints (agent review round 1, MINOR 3).
+                    self._repaint()
             if position is None:
                 return
             x, y = position

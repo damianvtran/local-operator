@@ -190,6 +190,7 @@ from local_operator.slash_commands import (
     project_store_unreadable_text,
     project_subcommand_rows,
     project_unavailable_text,
+    project_unexpected_argument_text,
     refresh_project_store,
     run_project_slash_op,
     slash_command_for,
@@ -18730,19 +18731,13 @@ class OperatorApp(App[None]):
             name = rest.strip()
             if not name:
                 # The NAMELESS form (S3b, operator refinement): the calling
-                # session's own set on the board — one link is also the
-                # highlight, several are the marked set, none is the plain
+                # session's own set on the board. The WIDGET seeds the cursor
+                # onto the set (a member, or the kept cursor when the reader is
+                # already inside it — UX round 1, U1); no links is the plain
                 # all-projects board. Never the old name refusal.
                 session_id = str(getattr(session, "session_id", "") or "") if session else ""
                 associated = self._associated_project_ids(registry, session_id)
-                if len(associated) == 1:
-                    self._open_projects_view(
-                        view="board",
-                        associated=associated,
-                        highlight=next(iter(associated)),
-                    )
-                else:
-                    self._open_projects_view(view="board", associated=associated or None)
+                self._open_projects_view(view="board", associated=associated)
                 return
             try:
                 project = registry.get_project_by_name(name)
@@ -18758,7 +18753,12 @@ class OperatorApp(App[None]):
             return
         if word in ("board", "timeline"):
             # The all-projects canvases (S3b): no highlight, no marker set —
-            # the page opens on every project.
+            # the page opens on every project. A trailing word is REFUSED
+            # rather than silently dropped (review r1 NIT 4 / UX r1 U5), the
+            # same sentence the routed mirror answers.
+            if rest:
+                notice(project_unexpected_argument_text(word), "warning")
+                return
             self._open_projects_view(view=word)
             return
         from local_operator.paths import config_dir
@@ -31707,11 +31707,15 @@ class OperatorApp(App[None]):
             if view is not None or associated is not None:
                 import time as _time
 
+                # Every open SPECIFIES its own marker set: an entry that names
+                # none clears the previous one instead of leaving the old `◆`
+                # rows and the `this session (N)` title under an all-projects
+                # entry (agent review r1 MINOR 2 / QA r1 Q3).
                 self._projects_view.load(
                     views=self._projects_payload(),
                     highlight=highlight,
                     view=view,
-                    associated=associated,
+                    associated=associated if associated is not None else frozenset(),
                     updated_at=_time.time(),
                 )
             elif highlight:
@@ -31741,7 +31745,7 @@ class OperatorApp(App[None]):
             views=payload,
             highlight=highlight,
             view=view,
-            associated=associated,
+            associated=associated if associated is not None else frozenset(),
             updated_at=_time.time(),
         )
 
@@ -31802,11 +31806,16 @@ class OperatorApp(App[None]):
         current = str(getattr(self._session, "session_id", "") or "") if self._session else ""
         self._close_projects_view()
         if live:
-            target = live[0]
-            if target == current:
-                self._system_notice(project_jump_already_text(message.project_name, target), "info")
+            # The terminal's OWN session is checked FIRST (review r1 NIT 6):
+            # when it is one of several live links, whether `↵` says "already
+            # in" or switches to a sibling must not depend on the store's link
+            # order.
+            if current and current in live:
+                self._system_notice(
+                    project_jump_already_text(message.project_name, current), "info"
+                )
                 return
-            self._resume_session(target, self._notice)
+            self._resume_session(live[0], self._notice)
             return
         self._system_notice(
             project_jump_no_live_text(message.project_name, message.sessions), "info"

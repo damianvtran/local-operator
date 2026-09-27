@@ -669,11 +669,13 @@ async def test_nameless_show_opens_the_sessions_board(tmp_path: Path) -> None:
         assert "this session" in view.rendered_rows()[0]
         assert view._last is not None
         canvas = view._last.text.plain
-        # TWO links: the set is marked, and the selection (cursor 0) stays on
-        # the first row — the cursor column wins where both apply.
-        assert "▸ alpha" in canvas
+        # TWO links: the cursor SEEDS onto the set's first member (UX r1,
+        # U1 — it used to sit on row 0, a stranger, while `↵` aimed there),
+        # and a selected associated row carries BOTH markers (D3).
+        assert "▸◆alpha" in canvas
         assert "◆ beta" in canvas
         assert "  gamma" in canvas
+        assert view._cursor == 0  # alpha is the set's first member
 
         await pilot.press("escape")
         await pilot.pause()
@@ -808,3 +810,86 @@ def test_nameless_show_receipts_are_the_page_s_mirror(tmp_path: Path) -> None:
             entry, "", registry=registry, config_dir=tmp_path, session_id=None
         )
         assert "- alpha" in text and text.endswith(project_listing_hint_text())
+
+
+# -- round 1 remediation: refusals, copy, the `↵` rung ------------------------
+
+
+@pytest.mark.asyncio
+async def test_board_and_timeline_refuse_a_trailing_word(tmp_path: Path) -> None:
+    """Review r1 NIT 4 / UX r1 U5: the page entries take no argument."""
+    from local_operator.slash_commands import (
+        project_unexpected_argument_text,
+        run_project_slash_op,
+    )
+
+    session = _ProjectSession()
+    registry = _registry(tmp_path, "alpha")
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project board extra")
+        await pilot.pause()
+        assert _notices(app)[-1] == project_unexpected_argument_text("board")
+        assert app._projects_view is None, "a refused entry must not open the page"
+    text, style = run_project_slash_op(
+        "timeline", "extra", registry=registry, config_dir=tmp_path, session_id=None
+    )
+    assert (text, style) == (project_unexpected_argument_text("timeline"), "warning")
+
+
+def test_no_live_notice_spells_the_single_id() -> None:
+    """UX r1 U4: one link spells the concrete command; several keep the placeholder."""
+    from local_operator.slash_commands import project_jump_no_live_text
+
+    one = project_jump_no_live_text("beta", (("cd34ef56ab12", "stopped"),))
+    assert one.endswith("/resume cd34ef56ab12 starts it.")
+    many = project_jump_no_live_text(
+        "beta", (("111111111111", "stopped"), ("222222222222", "stopped"))
+    )
+    assert many.endswith("/resume <id> starts one.")
+
+
+@pytest.mark.asyncio
+async def test_the_open_hint_joins_the_ladder_and_sheds_at_60(tmp_path: Path) -> None:
+    """Design r1 D1: `↵ open` is visible at 100 columns and sheds at 60."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    for size, expected in (((100, 30), True), ((60, 20), False)):
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=size) as pilot:
+            await _boot(pilot, app)
+            app._run_slash_command("/project board")
+            await pilot.pause()
+            await pilot.pause()
+            view = app._projects_view
+            assert view is not None
+            assert view._open_hint.display is expected, size
+
+
+@pytest.mark.asyncio
+async def test_an_in_page_retarget_clears_the_stale_set(tmp_path: Path) -> None:
+    """Review r1 MINOR 2 / QA r1 Q3: the all-projects entry clears the markers."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="beta"), sessions=[SESSION_ID])
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._associated
+        # Retarget WITHOUT leaving the page.
+        app._run_slash_command("/project board")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None
+        assert not view._associated
+        assert "this session" not in view.rendered_rows()[0]
+        assert "◆" not in view._last.text.plain

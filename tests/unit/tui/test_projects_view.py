@@ -576,11 +576,10 @@ async def test_enter_asks_the_host_to_open_the_selected_project(
     assert len(seen) == 1
     message = seen[0]
     assert message.project_name == "alpha"
-    # The state travels as the RUNTIME scan classified it: the app publishes a
-    # discovery record for its own session while it runs (the same record
-    # `lop sessions` reads), so the fixture's link is genuinely `live` here.
-    # The message carries STATES, not a guess.
-    assert message.sessions == ((SESSION_ID, "live"),)
+    # The link's directory does not exist in this fixture and the receipt says
+    # `missing` for exactly that state — the message carries the RECEIPT's word
+    # (QA round 1, Q2), not the composed row's default `stopped`.
+    assert message.sessions == ((SESSION_ID, "missing"),)
 
 
 @pytest.mark.asyncio
@@ -604,7 +603,8 @@ async def test_jump_with_no_live_session_names_what_exists(tmp_path: Path) -> No
         notice = _notices(app)[-1]
         assert "no live session to open for 'alpha'" in notice
         assert f"{SESSION_ID} [stopped]" in notice
-        assert "/resume <id> starts one." in notice
+        # ONE linked session: the notice spells the concrete command (UX r1, U4).
+        assert f"/resume {SESSION_ID} starts it." in notice
 
 
 @pytest.mark.asyncio
@@ -655,3 +655,89 @@ async def test_jump_on_the_current_session_says_so(tmp_path: Path) -> None:
         await pilot.pause()
         assert "already in 'alpha'" in _notices(app)[-1]
         assert app._projects_view is None
+
+
+# -- round 1 remediation: seeding, reveal-on-switch, clamp repaint, hint -----
+
+
+@pytest.mark.asyncio
+async def test_nameless_show_seeds_the_cursor_onto_the_set(tmp_path: Path) -> None:
+    """UX r1 U1: with links on p01/p02 the cursor must NOT stay on row 0."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="p00"))
+    registry.create_project(ProjectEdit(name="p01"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="p02"), sessions=[SESSION_ID])
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._view == "board"
+        found = registry.get_project_by_name("p01")
+        assert found is not None
+        assert view.current_project_id() == str(found.id)
+        canvas = view._last.text.plain
+        assert "▸◆p01" in canvas and "◆ p02" in canvas and "  p00" in canvas
+
+
+@pytest.mark.asyncio
+async def test_switching_to_board_reveals_the_selection(tmp_path: Path) -> None:
+    """QA r1 Q1: the reveal re-runs once the new canvas's layout has landed."""
+    from local_operator.tui.projects_render import board_position
+
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    for index in range(20):
+        registry.create_project(ProjectEdit(name=f"p{index:02d}"))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "p14")
+        await pilot.press("2")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None
+        position = board_position(view._views, view._cursor)
+        assert position is not None
+        offset = view._body.scroll_offset.y
+        assert offset <= position[1] <= offset + max(view._usable_height() - 1, 0), (
+            offset,
+            position,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_clamp_repaints_the_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review r1 MINOR 3: clamping the cursor to a painted cell repaints."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta", "gamma")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "gamma")
+        # Force the clamp: the position helper answers None for the cursor and a
+        # real cell for index 1 (the shape a truncated canvas produces).
+        from local_operator.tui.projects_render import board_position
+
+        real = board_position
+
+        def fake_position(index):  # noqa: ANN001 - test seam
+            if index == view._cursor:
+                return None
+            return real(view._views, index)
+
+        monkeypatch.setattr(view, "_position_for", fake_position)
+        view._view = "board"
+        view._cursor = 2
+        view._scroll_cursor_into_view()
+        assert view._cursor == 1  # clamped to the last painted project
+        canvas = view._last.text.plain if view._last else ""
+        assert "▸" in canvas, "the clamp must repaint the moved selection"
