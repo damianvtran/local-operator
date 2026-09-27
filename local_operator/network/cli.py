@@ -1795,6 +1795,19 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     if args.print_token:
         print(Path(path).read_text(encoding="utf-8").strip())
         return 0
+    # THE COMMAND THE RECEIPT PRINTS IS THE ONE THAT WORKS, so it does not re-type an
+    # endpoint the token already carries. ``--host`` is an OVERRIDE, and the printed
+    # value was ``hosts[0]`` — an entry a joiner is not obliged to be able to dial: the
+    # list leads with the record's own snapshot (``init``'s write, plus any
+    # ``--advertise-host`` declaration), which can name a port the listener does not
+    # hold. Pinning the flag to it turned a working ``join @token`` — which walks the
+    # whole list — into ``ConnectionRefusedError`` and rc=1 when the operator followed
+    # the advice verbatim (QA round 2, Q-3). The placeholder stays for the one state
+    # where the token names no endpoint at all, because there the flag is exactly what
+    # the join asks for (QA round 1, Q2).
+    command = f"then, on the other device: lop network join @{path}"
+    if not payload.get("hosts"):
+        command += " --host <this device's address:port>"
     return _emit(
         args,
         payload,
@@ -1804,16 +1817,7 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             f"token written to {path}",
             "it is single use and is not printed: read that file, or run this with a TTY "
             "and --print",
-            f"then, on the other device: lop network join @{path}"
-            + (
-                f" --host {payload['hosts'][0]}"
-                if payload.get("hosts")
-                # NOTHING IN THIS STATE NAMES AN ENDPOINT, so the guidance names the
-                # flag the join will ask for instead of a command that cannot work
-                # (QA round 1, Q2: this line silently dropped the one flag the
-                # operator had to pass, and the join refused ``no_host``).
-                else " --host <this device's address:port>"
-            ),
+            command,
         ],
     )
 

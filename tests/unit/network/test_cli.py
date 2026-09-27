@@ -1089,3 +1089,44 @@ def test_join_accepts_the_advertise_host_the_config_route_used_to_own() -> None:
     )
     assert both.advertise_hosts == ["tunnel.example.com:4100", "203.0.113.7:4097"]
     assert _parser().parse_args(["network", "join", "tok"]).advertise_hosts == []
+
+
+def test_the_printed_join_command_does_not_pin_an_endpoint_the_token_carries(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The receipt must print a command that WORKS when it is followed verbatim.
+
+    It used to print ``join @token --host {hosts[0]}``, and ``hosts[0]`` is the record's
+    own snapshot — the entry kept ahead of the live ones by design, which can name a port
+    the listener does not hold. Following the advice therefore dialled the dead entry with
+    a pin, while the plain ``join @token`` (which walks the whole list) succeeded: the
+    product instructed the operator to run a failing command (QA round 2, Q-3).
+    ``--host`` is an override, so the receipt no longer re-types an endpoint the token
+    already carries; the placeholder stays for the state where the token names none,
+    because there the flag is exactly what the join asks for.
+    """
+    token = tmp_path / "inv1.invite"
+    token.write_text("TOKEN", encoding="utf-8")
+    payload = {
+        "invite_id": "inv1",
+        "path": str(token),
+        "role": "read",
+        "expires_in_s": 600.0,
+        "hosts": ["127.0.0.1:4197", "192.168.0.155:47800"],
+    }
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: dict(payload))
+
+    args = Namespace(
+        network="", role="read", expires=600.0, hosts="", device="", print_token=False, json=False
+    )
+    assert net_cli._cmd_invite(args) == 0  # noqa: SLF001
+    printed = capsys.readouterr().out
+    assert f"lop network join @{token}" in printed, printed
+    assert "--host 127.0.0.1:4197" not in printed, printed
+    assert "--host" not in printed, printed
+
+    # NOTHING NAMES AN ENDPOINT: the flag is what the join will ask for, so it is named.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: {**payload, "hosts": []})
+    assert net_cli._cmd_invite(args) == 0  # noqa: SLF001
+    empty = capsys.readouterr().out
+    assert "--host <this device's address:port>" in empty, empty
