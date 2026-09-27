@@ -92,16 +92,17 @@ NERD_TOOL_ICONS: dict[str, str] = {
     # its right edge for "succeeded", so a todo row opened and closed with a
     # check and a colourless frame could not tell the two apart.
     "todo": "\uf0ae",
-    # nf-fa-columns. The project board's columns — the kanban motif the
-    # desktop UI mirrors as its lucide folder-kanban. Deliberately not a
-    # folder: `glob`'s folder is a location on disk, and a project is the
-    # workstream its sessions belong to.
+    # nf-fa-columns. The project board's columns — the board mark the desktop
+    # UI mirrors as its lucide `Columns3` (`damianvtran/local-operator-ui`,
+    # branch `fix/trace-tool-labels` / PR #578, whose comment cites this branch
+    # in turn). Deliberately not a folder: `glob`'s folder is a location on
+    # disk, and a project is the workstream its sessions belong to.
     "project": "\uf0db",
     # nf-fa-trash_o. The pair's destructive sibling gets its own glyph rather
     # than the board's: an irreversible removal (project_tool.py) must not wear
     # the quiet mark of a call that only reads or updates a row. The FA block
     # carries no board-minus, and the trash is removal's one glyph that needs
-    # no legend.
+    # no legend — the desktop mirrors it as its lucide `Trash2`.
     "project_delete": "\uf014",
     "wake": "\uf017",  # nf-fa-clock_o
     "list_variables": "\uf0ca",  # nf-fa-list_ul
