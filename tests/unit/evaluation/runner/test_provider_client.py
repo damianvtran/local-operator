@@ -2711,6 +2711,20 @@ def _defective_reply(case: str, current: Observation) -> str:
         # The other half: the decode STARTED and the object broke inside. Verbatim
         # the shape of a sealed MiniMax reply whose action was cut mid-object.
         return '{"actions": [{"kind": "type", "text": "hello"'
+    if case == "duplicate-key":
+        # Verbatim the shape of the arm's task_005 death (2026-09-27): a complete
+        # batch whose second click restates ``button`` at the end of the object.
+        # ``json.loads`` resolves it last-wins, which is why the harness refuses
+        # it (two readers could disagree about the value) and why the old
+        # residual hint -- "cut off or double-escaped" -- named nothing this
+        # reply matches; the refusal now names the repeated key itself.
+        return (
+            '{"actions": [{"kind": "click", "observation_id": "%s", '
+            '"frame_id": "screen", "x": 583, "y": 361}, {"button": "left", '
+            '"kind": "click", "observation_id": "%s", "frame_id": "screen", '
+            '"x": 583, "y": 405, "button": "left"}], "public_observations": ""}'
+            % (observation_id, observation_id)
+        )
     if case == "empty-actions":
         # The one batch-shape refusal left: an ``action_batch`` that carries no
         # usable actions array, so there is no decision in it. The version key
@@ -2861,6 +2875,11 @@ _REJECTION_HINT_CASES = [
         "incomplete-json",
         "incomplete-json",
         ['"actions"', '"public_observations"', "incomplete"],
+    ),
+    (
+        "duplicate-key",
+        "duplicate-key",
+        ["'button'", "appears more than once", "write each field exactly once", '"actions"'],
     ),
     ("extra-action-key", "extra-action-key", ['"pause_until"', '"wait"', '"duration_ms"']),
     (

@@ -499,7 +499,10 @@ async def test_duplicate_keys_in_a_foreign_named_call_still_refuse() -> None:
     # decoder UNREPAIRED on both channels, so the same text fails identically
     # whether it arrived as prose or as a call. A re-serialized object would have
     # deduplicated these keys on the channel and this reply would have executed.
-    assert on_channel.value.class_key == in_prose.value.class_key == "incomplete-json"
+    # The class is ``duplicate-key`` -- its own class since the refusal learned to
+    # name the repeated key (the ``incomplete-json`` residual used to swallow it
+    # and hand back a truncation hint nothing in this reply matches).
+    assert on_channel.value.class_key == in_prose.value.class_key == "duplicate-key"
 
 
 @pytest.mark.asyncio
@@ -879,7 +882,11 @@ async def test_a_refused_prose_decision_withholds_the_widening() -> None:
             current, _turns(current)
         )
 
-    assert raised.value.class_key == "incomplete-json"
+    # The class is ``duplicate-key`` since the refusal learned to name the
+    # repeated key; the GATE is unchanged -- both sub-classes still read as "a
+    # decision is present but refused", which is why the widening stays
+    # withheld for either.
+    assert raised.value.class_key == "duplicate-key"
     assert raised.value.channel_read is False
 
 
