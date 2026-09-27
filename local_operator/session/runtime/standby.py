@@ -305,6 +305,18 @@ CONTRACT_KEYS = (
     "LOP_MOBILE_CHILD_EFFORT",
     "LOP_MODEL_SELECTION_OVERRIDE",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The engage claim (``types.ENGAGED_ENV``, spelled out here because this
+    # module deliberately imports nothing from ``local_operator`` at module
+    # level): a spawn fact the runtime reads into its record at boot
+    # (``engaged_at``). It belongs here for the POOL side of the contract, which
+    # is what this tuple is: a spare is spawned with these keys POPPED
+    # (``_spawn_standby``), so a spare born inside an engaged session's tree does
+    # not come up claiming an engage nobody made. The ADOPTION side does not
+    # travel through this list — ``_apply_environment`` replaces the child's
+    # whole environment with the requester's, so a warm requester's claim arrives
+    # by that replacement and a non-warm requester's silence about it deletes the
+    # key (review round 1, nit).
+    "LOP_SESSION_ENGAGED",
 )
 
 #: The modules warmed beyond the runtime's own top-level imports and

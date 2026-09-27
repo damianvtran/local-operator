@@ -95,11 +95,13 @@ from local_operator.session.runtime.types import (
     ATTACH_MAX_CLIENTS,
     DESKTOP_WATCH_CAPABILITY,
     DESKTOP_WATCH_LEASE_S,
+    ENGAGED_ENV,
     EVENT_MUTE_CAPABILITY,
     EVENT_MUTE_DROP_TYPES,
     EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
     OPERATOR_SIGNATURE_CAPABILITY,
+    RUNTIME_RECORD_KIND,
     ClientKind,
     ClientLocality,
     SessionRecord,
@@ -1631,6 +1633,34 @@ class RuntimeServer:
             conversation_name=seed.conversation_name,
             cwd=seed.cwd,
             model_label=seed.model_label,
+            # A RUNTIME SOMEBODY ASKED FOR, as opposed to one handed work: read
+            # from the spawn, because that is the only place the fact exists — by
+            # the time this server runs, the engage that caused it has already
+            # returned (``launch._spawn_runtime`` writes the variable and scrubs
+            # it from every other spawn, so an ordinary child reads None here).
+            #
+            # IT IS THE RESIDENCY POLICY'S SECOND CLAIM (see the field, and
+            # ``process._drain_window_s``): without it a warmed runtime has no
+            # viewer to hold it, takes the ordinary 3 s drain, and exits before
+            # the attach it was warmed for — which is the bug this field exists
+            # to remove. Set once here and never rewritten: it states how this
+            # process came to exist, which does not stop being true.
+            #
+            # A RECORD HOLDS IT ONLY IF IT IS A RUNTIME ITSELF. The variable is
+            # inherited by every descendant of a warm child, while two
+            # registrants build a record straight from ``os.environ`` —
+            # ``exec_control``'s ``lop exec`` and the TUI's own row — and neither
+            # one's residency is the reaper's to decide. Their claim would not
+            # change their own residency, but ``process._keep_alive_candidates``
+            # charges every published record holding one, so a stray claim spends
+            # a slot of the LRU cap and can preempt a genuine warm. The gate is
+            # the kind the runtime itself boots with, which is the population the
+            # window exists for (review round 1, N1).
+            engaged_at=(
+                time.time()
+                if kind == RUNTIME_RECORD_KIND and os.environ.get(ENGAGED_ENV, "") == "1"
+                else None
+            ),
             # THE ONE-SHOT "an update applied" FACT, and this is the only writer
             # that can publish it: the marker the outgoing runtime left was
             # consumed at boot (``process._consume_update_marker``) BEFORE this
