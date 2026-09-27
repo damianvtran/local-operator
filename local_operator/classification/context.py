@@ -20,7 +20,7 @@ serialized state fits ``values.classification.maxStateChars``:
 
 1. drop ``context`` entirely;
 2. trim each candidate line to 120 chars, then to 60;
-3. drop the lowest-priority candidate kind (``mcp`` → ``guide`` → ``skill``);
+3. drop the lowest-priority candidate kind (``project`` → ``mcp`` → ``guide`` → ``skill``);
 4. truncate ``request`` to the remaining budget, appending a truncation marker.
 
 The order is the contract and it is also the right order: the context line is
@@ -74,7 +74,7 @@ from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from local_operator.classification.cascade import classification_section
 
-ResourceKind = Literal["skill", "guide", "mcp"]
+ResourceKind = Literal["skill", "guide", "mcp", "project"]
 
 
 @runtime_checkable
@@ -120,8 +120,11 @@ TRUNCATION_MARKER = " …[truncated]"
 #: Rung 2's two line limits, in the order they are tried.
 CANDIDATE_LINE_LIMITS: tuple[int, ...] = (120, 60)
 
-#: Rung 3's drop order — lowest priority first.
-KIND_DROP_ORDER: tuple[ResourceKind, ...] = ("mcp", "guide", "skill")
+#: Rung 3's drop order — lowest priority first. Projects drop first: a
+#: missing project line is the least costly absence — the request itself
+#: still names the work being done, and the roster rebuilds the row the
+#: moment the store changes.
+KIND_DROP_ORDER: tuple[ResourceKind, ...] = ("project", "mcp", "guide", "skill")
 
 #: How each kind is keyed on the wire. The plural/`mcp_servers` spelling is the
 #: contract's (§5), matched rather than "improved": the model's rubric comes
@@ -130,6 +133,7 @@ KIND_TO_STATE_KEY: dict[ResourceKind, str] = {
     "skill": "skills",
     "guide": "guides",
     "mcp": "mcp_servers",
+    "project": "projects",
 }
 
 #: The inverse, for filtering a cached roster by dropped kind.
@@ -144,10 +148,13 @@ class Candidate:
 
     ``description`` must be HARNESS-OWNED text (§6): the skill/guide description
     as discovered from the local filesystem, or an MCP server's own name plus
-    harness-written capability hints. Config-authored or remote-authored prose
-    in here re-opens the prompt-injection surface that ``mcp/resources.py``
-    deliberately excludes — the option text is the one part of the request the
-    model treats as a rubric rather than as data.
+    harness-written capability hints. A ``project`` row is the third accepted
+    case: the operator's OWN stored project metadata, routed back to the
+    operator's own model — the same class as a user skill's description, never
+    remote-authored. Config-authored or remote-authored prose in here re-opens
+    the prompt-injection surface that ``mcp/resources.py`` deliberately excludes
+    — the option text is the one part of the request the model treats as a
+    rubric rather than as data.
     """
 
     kind: ResourceKind
