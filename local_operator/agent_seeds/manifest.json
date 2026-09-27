@@ -53,12 +53,30 @@
       "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/coder.md"
     },
     {
+      "name": "copy-reviewer",
+      "description": "Review of written copy before it ships: user-visible product copy and prose for a general reader, on comprehension, tone, claim support and AI-isms; reports C-prefixed findings.",
+      "when_to_use": "Reviewing written copy before it ships: user-visible product copy (UI strings, emails, notifications, help/docs), and prose content for a general reader (blog essays, LinkedIn and X posts). Reader experience, comprehension, tone, plain language, claim support, and stripping AI-isms. Use on user-visible text, never on engineering prose or code comments.",
+      "version": "1.0.0",
+      "instructions_sha256": "957ac82b7e7594321bff4d29da3b4f073d7d76a942f66a5eb7c6f573a249be8f",
+      "instructions_chars": 3085,
+      "tools": null,
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/copy-reviewer.md"
+    },
+    {
       "name": "designer",
       "description": "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings.",
       "when_to_use": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
-      "version": "1.0.0",
-      "instructions_sha256": "fc49cf44d9395658904f8e15636059ab0957cec192c4a12b46ec97820569d948",
-      "instructions_chars": 1614,
+      "version": "1.1.0",
+      "instructions_sha256": "6a7d4505d24fd1133d14e3c3dbcc215f8c18fda54573cc551528de3e9640a4f1",
+      "instructions_chars": 3190,
       "tools": null,
       "effort": null,
       "delegate": false,
@@ -156,6 +174,42 @@
         "role"
       ],
       "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/scout.md"
+    },
+    {
+      "name": "tui-designer",
+      "description": "Designing and reviewing terminal interfaces: keyboard-first flows, density in small fixed viewports, colour and unicode fallbacks, measured geometry; reports T-prefixed findings.",
+      "when_to_use": "Designing or reviewing terminal user interfaces: keyboard-first flows, layout and information density in small/fixed terminals, colour and unicode compatibility, progressive disclosure, and the UX of installers, daemons, and status dashboards for a CLI client.",
+      "version": "1.0.0",
+      "instructions_sha256": "e357f49bc28753ed22c48805dbce19a39ec3d08598471db1f8598129d9f37ddc",
+      "instructions_chars": 1445,
+      "tools": null,
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/tui-designer.md"
+    },
+    {
+      "name": "ux-reviewer",
+      "description": "Walks a change's real flow end to end: discoverability, feedback, error recovery, keyboard paths and copy; reports U-prefixed findings.",
+      "when_to_use": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+      "version": "1.0.0",
+      "instructions_sha256": "4a364377817af9a035c0372945cd40f16d0048bf80066f99678209134710acee",
+      "instructions_chars": 2252,
+      "tools": null,
+      "effort": null,
+      "delegate": false,
+      "tags": [
+        "role"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/ux-reviewer.md"
     }
   ]
 }

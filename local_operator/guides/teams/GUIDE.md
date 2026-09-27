@@ -27,7 +27,7 @@ Work with them. Do not invent a roster silently. Ask, using the `ask` tool when 
 
 - the team **name** (letters, digits, dot, underscore, hyphen; no spaces — it is a `/team` argument)
 - the **manager** and what they are responsible for (default: install the `manager` starter)
-- each **member**: a packaged role (`coder`, `reviewer`, `architect`, `designer`, `scout`) or a specialist the user wants authored, and how many of each
+- each **member**: a packaged role (`coder`, `reviewer`, `architect`, `designer`, `scout`, `manager`, `ux-reviewer`, `tui-designer`, `copy-reviewer`) or a specialist the user wants authored, and how many of each
 - **collaboration**: how they work together
 - **project**: only if this instance owns a product or domain
 

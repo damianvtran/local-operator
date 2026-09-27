@@ -771,12 +771,15 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
                 "architect",
                 "auditor",
                 "coder",
+                "copy-reviewer",
                 "dashboard-sme",
                 "designer",
                 "hollow-role",
                 "manager",
                 "reviewer",
                 "scout",
+                "tui-designer",
+                "ux-reviewer",
             }
         )
 

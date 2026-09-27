@@ -240,6 +240,17 @@ class AgentParams(BaseModel):
 #: as 22 physical lines with no indent to mark where one ended.
 _ROW_CAP = 160
 
+#: Cap on a STARTER's row in the ``list`` body: one line at 80 columns. The
+#: packaged set is a discovery list, not the reader's working set, and it grows
+#: with the product (six seeds became nine when the design-review family
+#: landed), so it is the section whose length must not scale at the installed
+#: two-line density: nine starters at ``_ROW_CAP`` spend 18 of a 24-row
+#: terminal on roles nobody has installed yet. Name, tool surface and the
+#: opening of the purpose survive the cut; ``show`` and ``search`` carry the
+#: rest. Installed and search rows keep the two-line budget — they are the
+#: reader's own set, and a smaller one.
+_STARTER_ROW_CAP = 80
+
 #: Hybrid score at or above which a search result is worded as a match rather
 #: than as a nearest neighbour. Not a cut: everything is still returned, ranked.
 #: Measured true-positive floor 0.118, false-positive ceiling ~0.106.
@@ -261,8 +272,13 @@ def _name_taken_message(name: str, *, installing: bool = False) -> str:
     return f"{lead} Rename that agent, or use a different name for the role."
 
 
-def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
-    """One scannable row: name, where it came from, and what it is for."""
+def _profile_line(profile: AgentProfile, *, installed: bool, compact: bool = False) -> str:
+    """One scannable row: name, where it came from, and what it is for.
+
+    ``compact`` caps the row at one 80-column line and is used for the
+    starters section (see ``_STARTER_ROW_CAP``); installed roles and search
+    rows keep the two-line budget.
+    """
 
     marks: list[str] = [] if installed else ["starter"]
     # ALWAYS say something about the tool surface. Emitting `[7 tools]` only
@@ -297,7 +313,8 @@ def _profile_line(profile: AgentProfile, *, installed: bool) -> str:
     row = f"- {profile.name}{suffix}: {summary}"
     # Ellipsis when the cut fires: a bare slice ends mid-word, and the reader
     # cannot tell an author's fragment from text we dropped.
-    return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
+    cap = _STARTER_ROW_CAP if compact else _ROW_CAP
+    return row if len(row) <= cap else row[: cap - 1].rstrip() + "…"
 
 
 def _format_field(value: Any, *, absent: str = "(unset)") -> str:
@@ -524,7 +541,7 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
             body += "\n\n"
         body += (
             "installable starters (packaged, not yet in your registry — op='install'):\n"
-        ) + "\n".join(_profile_line(profile, installed=False) for profile in starters)
+        ) + "\n".join(_profile_line(profile, installed=False, compact=True) for profile in starters)
     if not body:
         body = "no roles registered and no starters packaged."
     text, spill = spill_truncate(body, "agent", context)
