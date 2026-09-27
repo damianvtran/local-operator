@@ -94,6 +94,18 @@ the team from this directory (`setup.sh`), and then runs:
 
     lop exec --hosting radient --model auto --team helpdesk --tools <bound> "<prompt>"
 
+The engagement's helpdesk surface — this directory's `prompts/`, `teams/`,
+`agents/` and `setup.sh` — always comes from the **default branch**: the
+review job replaces the PR checkout's copy wholesale with `main`'s before
+anything reads it. A `refs/pull/<n>/merge` checkout can be stale — a PR
+branched before a helpdesk change carries the old prompts and none of the new
+ones (a verdict engagement once crashed on a missing `prompts/pr-verdict.md`)
+— and without the overlay a PR could steer its own review by editing
+`.github/helpdesk/**`. Behaviour is therefore defined by `main`: the same copy
+the sweep decides with, and the same copy the workflow file itself runs from.
+The PR checkout still provides the code under review; the model's diffs come
+from the API.
+
 The session attaches the `helpdesk` team: a manager (the run itself) plus
 `architect`, `scout`, `reviewer`, `qa-tester`, `designer`, `ux-reviewer`. The
 manager delegates what the change warrants and posts one consolidated comment.

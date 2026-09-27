@@ -736,6 +736,121 @@ check "workflow guard: every RADIENT_API_KEY-reading step has the secret in scop
   "OK" "$(workflow_key_scope "$workflow_file")"
 
 # ---------------------------------------------------------------------------
+# The workflow guard, part 2: the engagement's helpdesk surface comes from the
+# default branch — the overlay step must exist and sit between the PR checkout
+# and the team install.
+# ---------------------------------------------------------------------------
+# WHY: the engagement job checks out `refs/pull/<n>/merge` and reads its
+# surface (prompts, team, roles, setup.sh) from that checkout. A merge ref
+# computed before a helpdesk change carries the old surface and none of the
+# new files — on 2026-09-27 a verdict engagement crashed on exactly that
+# (`cat: .github/helpdesk/prompts/pr-verdict.md: No such file or directory`,
+# lo run 36329557453), and a review engagement would silently run pre-change
+# prompts and team. The overlay step is the fix; this scan is the guard that
+# it exists, runs after the PR checkout, runs before `setup.sh` installs the
+# surface, and still replaces the checkout's copy with the default branch's.
+#
+# CONTRACT: in the `review` job of the workflow, a step named `Overlay the
+# helpdesk surface from the default branch` appears exactly once, its line
+# sits after `Check out the pull request` and before `Install the helpdesk
+# team and roles into the runner's lop config`, and its body carries the
+# fetch, the wholesale removal, and the restore commands. Prints `OK`, or one
+# `FAIL: …` line per problem; no network, no `gh`.
+#
+# HELPDESK_WORKFLOW=<path> overrides the scanned file (same as part 1 above).
+#
+# LIMITS: textual, like part 1 — it reads the `review` job block by indentation
+# and step order from line numbers; it does not parse YAML, resolve `if:`
+# expressions, or notice anything about a step whose name it does not match,
+# and a reformat (re-indent, rename, folded/one-line step bodies) must teach
+# the scan the new shape. A file where the step is missing is reported as a
+# FAIL, never a vacuous OK.
+cat > "$tmp/workflow-surface-scope.awk" <<'AWK'
+BEGIN { in_job = 0; in_overlay_body = 0; ovn = 0 }
+{
+  body = $0; ind = 0
+  while (substr(body, 1, 1) == " ") { ind++; body = substr(body, 2) }
+
+  # Job keys sit at indent 2 (`review:` etc.); only the review job is scanned.
+  if (ind == 2 && body ~ /^[A-Za-z0-9_.-]+:[ \t]*$/) {
+    job = body; sub(/:.*/, "", job)
+    in_job = (job == "review")
+    in_overlay_body = 0
+    next
+  }
+  if (!in_job) next
+
+  # A step starts at indent 6 with `- `; the next step ends an open body.
+  if (ind == 6 && substr(body, 1, 2) == "- ") {
+    in_overlay_body = 0
+    rest = substr(body, 3)
+    name = ""
+    if (rest ~ /^name:[ \t]*/) { name = rest; sub(/^name:[ \t]*/, "", name) }
+    if (name == "Check out the pull request") checkout = NR
+    else if (name == "Overlay the helpdesk surface from the default branch") {
+      ovn++; overlay = NR; in_overlay_body = 1
+    }
+    else if (name == "Install the helpdesk team and roles into the runner's lop config") setup = NR
+    next
+  }
+
+  # The overlay step's body — its `run:` block — until the next step above.
+  if (in_overlay_body && ind >= 8) obody = obody body "\n"
+}
+END {
+  prob = 0
+  if (ovn == 0) {
+    print "FAIL: no `Overlay the helpdesk surface from the default branch` step in the review job"
+    prob++
+  } else if (ovn > 1) {
+    print "FAIL: the overlay step appears " ovn " times in the review job"
+    prob++
+  }
+  if (ovn == 1) {
+    if (!checkout) {
+      print "FAIL: no `Check out the pull request` step in the review job — cannot order the overlay against it"
+      prob++
+    } else if (!(checkout < overlay)) {
+      print "FAIL: the overlay step does not sit after `Check out the pull request`"
+      prob++
+    }
+    if (!setup) {
+      print "FAIL: no `Install the helpdesk team and roles into the runner's lop config` step in the review job — cannot order the overlay against it"
+      prob++
+    } else if (!(overlay < setup)) {
+      print "FAIL: the overlay step does not sit before the team install"
+      prob++
+    }
+    if (index(obody, "git fetch --depth=1 origin main") == 0) {
+      print "FAIL: the overlay step does not fetch the default branch (`git fetch --depth=1 origin main`)"
+      prob++
+    }
+    if (index(obody, "rm -rf .github/helpdesk") == 0) {
+      print "FAIL: the overlay step does not replace the surface wholesale (`rm -rf .github/helpdesk`)"
+      prob++
+    }
+    if (index(obody, "git checkout FETCH_HEAD -- .github/helpdesk") == 0) {
+      print "FAIL: the overlay step does not restore from the default branch (`git checkout FETCH_HEAD -- .github/helpdesk`)"
+      prob++
+    }
+  }
+  if (prob == 0) print "OK"
+}
+AWK
+
+workflow_surface_scope() { # <workflow-file>: prints OK, or FAIL: … lines.
+  local file="$1"
+  if [ ! -f "$file" ]; then
+    printf 'FAIL: workflow file not found: %s\n' "$file"
+    return 0
+  fi
+  awk -f "$tmp/workflow-surface-scope.awk" "$file"
+}
+
+check "workflow guard: the helpdesk surface overlay exists, sits between the PR checkout and the team install, and restores from the default branch" \
+  "OK" "$(workflow_surface_scope "$workflow_file")"
+
+# ---------------------------------------------------------------------------
 
 echo
 if [ "$fails" -eq 0 ]; then
