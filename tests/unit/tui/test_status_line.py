@@ -2444,6 +2444,28 @@ def test_a_hidden_model_leaves_the_irreducible_row_too(monkeypatch, tmp_path) ->
     assert ICON_MODEL not in hidden.render_text(20).plain
 
 
+@pytest.mark.parametrize("width", (10, 12, 14, 16, 18))
+def test_a_hidden_segment_reads_hidden_off_the_tail_row(width, monkeypatch, tmp_path) -> None:
+    """The irreducible row is a shipped row too (review round 1, MINOR).
+
+    A parked session (remote access off) at 10-18 columns overflows every
+    ladder rung — the alarm cannot be shed — so ``refresh()`` paints the TAIL
+    row. ``_dropped`` is recorded when a row ships, and this path used to
+    record nothing, so ``is_showing`` answered from the constructor's seed: a
+    hidden ``model`` reported SHOWN off a row that painted the park alarm and
+    nothing else. The forced set is now unioned in on that path; the mirror
+    case (a label the tail RE-admits while ``_dropped`` still reports it
+    dropped) stays as the pre-existing class the round left alone.
+    """
+    _set_composer_flags(monkeypatch, tmp_path, model=False)
+    status = StatusLine(_dock(width), clock=FakeClock())
+    status.update(model_label="test/model", cwd="/tmp", tunnel_parked=True)
+    painted = status.render_text(width).plain
+    assert ICON_TUNNEL in painted, painted
+    assert ICON_MODEL not in painted, painted
+    assert status.is_showing("model") is False
+
+
 # --------------------------------------------------------------------------
 # The liveness row (tui/liveness.py): present IFF the reader is not LIVE.
 # --------------------------------------------------------------------------

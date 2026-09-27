@@ -1976,6 +1976,16 @@ class StatusLine:
         # width takes off it, the ellipsis at the end of this method takes off the
         # TAIL of it, the same way the model label is truncated here. It yields
         # only to the spinner, which is one cell of "a turn is live".
+        #
+        # The tail is a shipped row too, so the frame's forced set is recorded
+        # here exactly as the ladder path records it: `_dropped` used to be
+        # written only when a ladder row shipped, and this path then answered
+        # `is_showing` from the constructor's seed — a hidden ``model`` reported
+        # SHOWN off a row that painted the park alarm and nothing else (review
+        # round 1, MINOR). The union deliberately leaves this path's own
+        # pre-existing staleness alone: a label the tail RE-admits is still
+        # reported dropped until the next ladder row ships.
+        self._dropped = self._dropped | hidden
         tail = Text()
         if self._streaming:
             from local_operator.tui.shimmer import shimmer_enabled
