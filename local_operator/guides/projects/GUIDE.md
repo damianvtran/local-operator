@@ -21,14 +21,16 @@ Do **not** make one for a one-turn task, for anything already fully described by
 
 ## The `project` tool, op by op
 
-- `op='list'` — one compact row per project (status, estimate, target, milestone count, session count, progress age, description). Start here.
-- `op='create' name='…'` — creates the project and **links the calling session automatically**; say so when you report it. Optional on create: `description`, `status`, `tags` (each `[a-z0-9][a-z0-9_-]{0,23}`), `start_date`/`target_date` (ISO `YYYY-MM-DD`), `estimate` (+ `estimate_unit`: `points`|`days`), `milestones`.
-- `op='update' name='…'` — merges only the fields you pass; anything omitted is left alone. Fields: `description`, `status` (`active`|`paused`|`done`|`archived`), `progress`, `tags` (replace-set), dates, `estimate`/`estimate_unit`, `milestones` (full-list replace).
+- `op='list'` — one compact row per project (status, owner/team when set, estimate, target, milestone count, session count, progress age, description). Start here.
+- `op='create' name='…'` — creates the project and **links the calling session automatically**; say so when you report it. Optional on create: `description` (markdown — see below), `title` (human display name; falls back to the key), `owner`/`team` (who owns / which team manages the stream), `status`, `tags` (each `[a-z0-9][a-z0-9_-]{0,23}`), `start_date`/`target_date` (ISO `YYYY-MM-DD`), `estimate` (+ `estimate_unit`: `points`|`days`), `milestones`.
+- `op='update' name='…'` — merges only the fields you pass; anything omitted is left alone. Fields: `description`, `title`, `owner`/`team`, `status` (`active`|`paused`|`done`|`archived`), `progress`, `tags` (replace-set), dates, `estimate`/`estimate_unit`, `milestones` (full-list replace).
 - `op='link'` / `op='unlink' name='…' [session_id=…]` — attach or detach a session; without `session_id` they act on the calling session. The link lives only in the project row (cap 64; `link` refuses past it and names `unlink`).
 - `op='milestone' name='…' milestone='beta cut'` — add-or-update by name: `milestone_target_date='2026-10-01'` sets a date, `milestone_completed=true|false` marks or clears completion, `remove=true` deletes the entry (renaming is remove + add). Milestone names are unique per project, case-insensitively.
 - `project_delete name='…'` — permanent removal, and it asks for write approval. Deleting a project never touches session directories.
 
-Set `status='done'` and `completed_at` is stamped to today unless you pass one; pass `completed_at=''` to clear it, and moving a status away from `done` leaves the date untouched. `target_date` before `start_date` is refused when both are set.
+Set `status='done'` and `completed_at` is stamped to today unless you pass one; pass `completed_at=''` to clear it, and moving a status away from `done` leaves the date untouched. `target_date` before `start_date` is refused when both are set. `owner` and `team` are short free-text labels (trimmed, at most 80 characters); pass `''` to clear one back to unknown — absent means **unknown**, never a placeholder.
+
+`title` is the human-readable display name: listings and headers show it first, with the key `name` as secondary (recoverable in the detail), and every surface falls back to `name` when it is absent. `name` remains THE key — addressing (`/project show <name>`, `@project:<name>`, file names) never changes. `description` is **markdown** (multiple paragraphs, headings, lists and code are allowed) and is rendered, not dumped raw; `title` and `description` are the agent-editable fields for scope and change updates.
 
 ## Writing progress honestly
 
@@ -38,6 +40,8 @@ Set `status='done'` and `completed_at` is stamped to today unless you pass one; 
 - Never claim progress you have not verified from a primary source. If you cannot tell, say what you did and leave the record alone.
 - Re-sending the **identical** line on a stale record is meaningful: it refreshes the timestamp without changing the text ("still true, re-dated"). On a fresh record the same call is a no-op and writes nothing — so there is no reason to send it every turn.
 - Emptying `progress` (`progress=''`) records "no progress recorded" and clears the freshness pair with it.
+- Every NEW line is also appended to the project's **history** (`updates`, newest last): an append-only, timestamped log bounded at 500 entries (oldest drop first). The latest line is what surfaces as the summary. Re-sending an identical line or clearing appends nothing — only a new line writes history.
+- Attach files to a new line (`attach=['frame.png', 'out.log']`): **screenshots for visual progress, evidence for everything else** (test output, measured numbers, data tables) — so readers can see how things are actually going. Files are copied into the project store (≤ 10 per update, ≤ 5 MB each; never referenced from their original location, so the evidence survives a reaped scratch dir), and `show` lists each with its stored path.
 
 ## The `@project:<name>` reference
 
@@ -51,13 +55,13 @@ Today the row is read through the `project` tool, the terminal's `/project` list
 
 What is **stored** versus **derived** matters when you report:
 
-- **Stored:** `status`, `progress` + its freshness pair, `start_date`/`target_date`/`completed_at`, `estimate` + unit, tags, the milestone list with each milestone's dates, the linked session ids.
-- **Derived at render:** milestone status (`completed` when `completed_at` is set, else `overdue` when its target date has passed, else `upcoming`); overdue-ness itself; progress staleness; each linked session's runtime state. Nothing derived is stored, so a derived badge can never drift from the date it contradicts.
+- **Stored:** `status`, `title`, `progress` + its freshness pair, `start_date`/`target_date`/`completed_at`, `estimate` + unit, tags, `owner`/`team`, the append-only `updates` history (per entry: text, timestamp, reporter, attachment metadata), the milestone list with each milestone's dates, the linked session ids.
+- **Derived at render:** milestone status (`completed` when `completed_at` is set, else `overdue` when its target date has passed, else `upcoming`); overdue-ness itself; progress staleness (read only for `active` projects — settled `paused`/`done`/`archived` records never read stale); each linked session's runtime state. Nothing derived is stored, so a derived badge can never drift from the date it contradicts.
 - `null` means **unknown**, never zero: a session with no subagent roster file and no persisted todo snapshot reports `null` for those, not `0`.
 
 ## The completion check
 
-Once a session is linked to a project, the harness watches for a specific failure: work moving while the record stays stale. When a turn **has done work** (at least one tool call) and yields while a linked, `active` project's progress is older than 30 minutes (or missing), the harness injects one reminder naming the stale projects. It is injected, not shown to the user.
+Once a session is linked to a project, the harness watches for a specific failure: work moving while the record stays stale. When a turn **has done work** (at least one tool call) and yields while a linked, `active` project's progress is older than four hours (or missing), the harness injects one reminder naming the stale projects. It is injected, not shown to the user.
 
 It fires at most once per turn, only after a worked turn, only for stale records, and never for `paused`/`done`/`archived` projects. The exits it offers are the honest ones: update the record, change the status, re-send the line to refresh it, or `unlink` the session if it no longer belongs to the project. A reminder that repeats after you have acted is a bug, not a hint.
 
@@ -70,7 +74,7 @@ It fires at most once per turn, only after a worked turn, only for stale records
 
 ## Surfaces
 
-- Agents write through the `project` tool; its `list`/`show` results are the reading surface.
+- Agents write through the `project` tool; its `list`/`show` results are the reading surface (`show` prints the latest five history entries by default — `history=<n>` prints more, `0` omits the section).
 - The operator's `/project` runs every reserved verb: bare/`list` prints the listing, `show <name>` opens the full-page view, `new <name>` creates and auto-links this session, `delete <name>` rehearses and `delete <name> yes` removes, and `link`/`unlink <name>` move the session link. The desktop **Projects** tab lands in a later slice; the routed runtime answers the same receipts as the terminal (one shared runner).
 - Milestone editing is tool/API/UI work, not a slash verb: the reserved vocabulary stays `list | show | new | delete | link | unlink`, and `/v1/desktop/projects` is the API a renderer grows into.
 - The desktop gates on the `projects` capability (`"projects": 1`), so an older backend hides the tab once it ships.

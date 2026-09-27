@@ -496,7 +496,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: while this branch was open: main's ceiling now sits 60 above main's head, and
 #: this change asks for +402 while costing +407, so five of those tokens net out.
 #: Still far inside the tighten band below, so the ratchet does not move.
-BUDGET_BILLED_TOKENS = 33_193
+#:
+#: RAISED 33,193 -> 33,533 for the S6d PROJECT DATA slice (the ``project``
+#: tool's ``owner`` / ``team`` / ``title`` fields, the bounded history tail,
+#: and ``attach``'s copy-in files — the fields every project surface reads).
+#: Stated with the arithmetic and only after the trim this block's ``secret``
+#: entry demands was taken: the first writing cost +396 billed, and moving the
+#: rationale into ``guide://projects`` (title's fallback phrasing, attach's
+#: "screenshots/evidence" note, the tool description's parenthetical) cut it to
+#: +340. Measured by running THIS script on the same host from two trees, one
+#: after the other:
+#:
+#:   baseline (origin/main fc7ec229a)      92,124 chars = ~33,138 billed
+#:   head (this branch)                    93,069 chars = ~33,478 billed
+#:     = +945 chars = +340 billed: five optional fields on ONE tool
+#:       (owner, team, title, attach, history) — a display name, the two
+#:       attribution labels and the two write/read handles the desktop detail
+#:       page consumes; the alternative was a second tool or surfaces that
+#:       cannot be addressed.
+#:
+#: The raise lands the ceiling at head + 55 — the headroom band the entries
+#: above keep — so the next addition finds the ratchet as tight as this one
+#: did, and the tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 33_533
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
