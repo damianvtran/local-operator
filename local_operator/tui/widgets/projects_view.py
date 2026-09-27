@@ -334,8 +334,12 @@ class ProjectsView(Vertical):
         self._canvas.styles.width = result.width
         self._canvas.styles.height = result.height
         self._paint_chrome()
-        # The hint's actionability depends on geometry only the layout knows;
-        # one deferred pass keeps it honest after the first frame (finding 8).
+        # Two deferred passes: the first paint runs before (or mid-) layout,
+        # when the footer's own box may not carry its final width yet
+        # (measured: a 96-cell box was painted as if it were 30, shedding a
+        # clause the space holds), and the hint's actionability reads the final
+        # scroll geometry. Both are idempotent and neither re-schedules.
+        self.call_after_refresh(self._paint_chrome)
         self.call_after_refresh(self._sync_scroll_hint)
 
     def _paint_chrome(self) -> None:
@@ -362,10 +366,16 @@ class ProjectsView(Vertical):
 
         if self._view == "list" and self._views:
             index = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
-            # The width: the footer sheds whole clauses to fit it instead of
-            # hard-clipping mid-word (UX round 1, U1).
+            # The footer fits the DETAIL box's own measured width, not the
+            # page's minus its padding: the two differ by the box's position in
+            # the layout, and fitting to the smaller number skipped a rung the
+            # space could hold (measured: at 100x30 the box is 96 cells, the
+            # page arithmetic says 94, and a 97-cell rung was shed that fits).
+            footer_width = self._detail.size.width or width
             self._detail.update(
-                detail_footer(self._views[index], style_for=_style_resolver(), width=width)
+                detail_footer(
+                    self._views[index], style_for=_style_resolver(), width=footer_width
+                )
             )
         else:
             tier = self._tier if self._view == "timeline" else None
