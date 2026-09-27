@@ -35,15 +35,20 @@ from local_operator.server.utils.desktop_sessions import DesktopSessions
 LOGGER = "local_operator.server.utils.desktop_sessions"
 
 
-async def _opened_sub(bridge: Any) -> tuple[Any, Any]:
+async def _opened_sub(bridge: Any, *, after_seq: int = 0) -> tuple[Any, Any]:
     """A subscriber whose OPEN handshake is complete (open + snapshot consumed).
 
     ``sub.opened`` flips at the end of the handshake, and the fold only exists
     past it — before the handshake the queue's policy is eviction (D1), and
     folding there is forbidden by the same contract that makes eviction safe.
+
+    ``after_seq`` defaults to 0, the cold cursor every fold test starts from.
+    A later phase of a test that already published passes the bridge's CURRENT
+    sequence instead, so the handshake has no replay frames in front of its
+    snapshot and the same open/snapshot reads hold.
     """
     sub = bridge.subscribe()
-    stream = bridge.events(sub, epoch=bridge.epoch, after_seq=0)
+    stream = bridge.events(sub, epoch=bridge.epoch, after_seq=after_seq)
     assert (await asyncio.wait_for(anext(stream), timeout=5))["type"] == "open"
     assert (await asyncio.wait_for(anext(stream), timeout=5))["type"] == "snapshot"
     return sub, stream
@@ -215,11 +220,12 @@ async def test_a_fold_collapses_each_run_without_crossing_families(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_tool_execution_update_run_keeps_the_newest_snapshot(tmp_path):
-    """``tool_execution_update`` is a snapshot family: newest frame replaces the run.
+    """``tool_execution_update`` is a self-replacing family: the newest frame wins.
 
-    Each frame carries the tool's full streamed output, so folding a run keeps
-    only its newest frame — never concatenation. 512 chunks must arrive as two
-    frames: the snapshot the fold kept (510) and the tail (511).
+    A frame re-sends the tool's current live view (a bounded tail for ``bash``,
+    a bounded display for ``eval`` — never the whole transcript), so folding a
+    run keeps only its newest frame, never a concatenation. 512 chunks must
+    arrive as two frames: the view the fold kept (510) and the tail (511).
     """
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
@@ -244,8 +250,84 @@ async def test_a_tool_execution_update_run_keeps_the_newest_snapshot(tmp_path):
         assert texts == [
             "x" * 100 + "510",
             "x" * 100 + "511",
-        ], "keep-newest keeps a single frame's full output, not a concatenation"
+        ], "keep-newest keeps a single frame's live view, not a concatenation"
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_publish_to_subscription_folds_before_its_valve_and_never_merges_asides(tmp_path):
+    """The aside path's fold: rescue a private frame, never merge two asides.
+
+    ``publish_to_subscription`` is the aside sink's only delivery path, and its
+    pressure branch folds FIRST, exactly as ``publish`` does, and only for an
+    opened subscriber. An ``aside_delta`` frame carries no ``payload.type``, so
+    it is not itself foldable — the fold helps only by reclaiming a sibling
+    delta run that shares the queue. Two aside fragments must stay two frames:
+    the aside's stream identity is the POST's request id on the route's side,
+    so nothing in this fold may join them.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    async with pool.session(sid) as bridge:
+        sub, stream = await _opened_sub(bridge)
+        fragments = [f"[{n}]" for n in range(256)]
+        for fragment in fragments:
+            bridge.publish(
+                "event", {"type": "reasoning_delta", "message_id": "m-a", "delta": fragment}
+            )
+        assert sub.queue.full() and not sub.overflow, "the run alone fills the count arm"
+
+        first = {"aside_id": "req-1", "delta": "a[0]"}
+        assert bridge.publish_to_subscription("aside_delta", first, subscription_id=sub.id) is True
+        assert not sub.overflow, "the fold made room for the private frame"
+
+        second = {"aside_id": "req-1", "delta": "a[1]"}
+        assert bridge.publish_to_subscription("aside_delta", second, subscription_id=sub.id) is True
+
+        items = _peek_queue(sub)
+        assert len(items) == 3, "the folded run, then each aside as its own frame"
+        (merged, merged_size), (aside_one, one_size), (aside_two, two_size) = items
+        assert merged["payload"]["delta"] == "".join(fragments), "the run folded in order"
+        assert (
+            aside_one["payload"] == first and aside_two["payload"] == second
+        ), "two aside fragments never merge with each other"
+        assert merged["seq"] < aside_one["seq"] < aside_two["seq"] == bridge.sequence
+        for frame, size in items:
+            assert size == _exact_size(frame), "stored sizes stay exact on the put path"
+        assert sub.queued_bytes == merged_size + one_size + two_size
+
+        delivered = await _drain(sub, stream)
+        assert [frame["payload"] for frame in delivered] == [
+            merged["payload"],
+            first,
+            second,
+        ], "delivery order and content are exactly the queued order"
+        assert all(
+            frame["payload"].get("aside_id") is None for frame, _ in bridge.replay
+        ), "the aside path is live-only: nothing it published entered the replay"
+        await stream.aclose()
+
+        # THE VALVE ARM: a queue of asides only has nothing the fold can
+        # reclaim, so the same call still cuts. (A cold cursor would front this
+        # handshake with replay frames; ``after_seq=bridge.sequence`` opens past
+        # them.)
+        sub2, stream2 = await _opened_sub(bridge, after_seq=bridge.sequence)
+        for n in range(module.REPLAY_COUNT):
+            assert bridge.publish_to_subscription(
+                "aside_delta",
+                {"aside_id": f"req-{n}", "delta": f"[{n}]"},
+                subscription_id=sub2.id,
+            )
+        assert sub2.queue.full() and not sub2.overflow
+
+        assert (
+            bridge.publish_to_subscription("aside_delta", first, subscription_id=sub2.id) is False
+        ), "nothing foldable in the queue: the valve must fire"
+        assert sub2.overflow is True
+        assert (await asyncio.wait_for(anext(stream2), timeout=5))["type"] == "gap"
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream2)
+        assert sub2.id not in bridge.subscribers
 
 
 @pytest.mark.asyncio
