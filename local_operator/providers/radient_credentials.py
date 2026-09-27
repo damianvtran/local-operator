@@ -82,6 +82,40 @@ def canonical_radient_destination(base_url: str) -> bool:
 #: :func:`org_oauth_destination_allowed`. OFF by default; nothing infers it.
 ORG_ALLOW_NONCANONICAL_ENV = "RADIENT_ORG_ALLOW_NONCANONICAL_BASE"
 
+#: The remedy for an org call with no signed-in account. ONE copy: the CLI
+#: prints it behind its own ``Error:`` prefix and the local server answers a
+#: 401 with it verbatim, so the two surfaces cannot drift apart (agent review
+#: round 1, MINOR-2 -- each side used to pin only its own copy).
+ORG_LOGIN_REMEDY = (
+    "organization operations need a signed-in Radient account. Run `lop login radient`."
+)
+
+#: The configuration remedy for an org call at a hub the account's bearer must
+#: not be sent to, with two placeholders: the canonical host is quoted at
+#: runtime from ``env.DEFAULT_RADIENT_API_BASE_URL`` (a URL-shaped literal in
+#: cli.py or the server routes would break the single-reader invariant
+#: ``test_radient_hub_base_resolution`` pins) and the opt-in is quoted from
+#: :data:`ORG_ALLOW_NONCANONICAL_ENV`. See :func:`org_destination_refused_sentence`.
+ORG_DESTINATION_REFUSED_TEMPLATE = (
+    "organization operations are refused because the configured Radient hub is not the "
+    "Radient cloud API ({base_url}), and the signed-in account's bearer is not sent "
+    "to other hosts. Point `radient_base_url` at {default_url}, or set "
+    "{opt_in}=1 if this hub is local or staging."
+)
+
+
+def org_destination_refused_sentence(base_url: str, default_url: str) -> str:
+    """The rendered configuration remedy for a hub at ``base_url``.
+
+    ONE renderer for both consumers (the CLI's ``_resolve_org_client`` and the
+    local server's ``_org_radient_credentials``): the sentence the user reads is
+    the same one whichever surface refused.
+    """
+    return ORG_DESTINATION_REFUSED_TEMPLATE.format(
+        base_url=base_url, default_url=default_url, opt_in=ORG_ALLOW_NONCANONICAL_ENV
+    )
+
+
 #: The accepted spellings of a truthy environment switch.
 _TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
 

@@ -17,6 +17,14 @@ from pydantic import SecretStr
 from local_operator.agents import AgentEditFields, AgentRegistry, instruction_set_fields
 from local_operator.clients._http import REDACTION_MARKER, APIError
 from local_operator.clients.radient import INSTRUCTION_SET_FIELDS
+from local_operator.env import (
+    DEFAULT_RADIENT_API_BASE_URL,
+    resolve_radient_api_base_url,
+)
+from local_operator.providers.radient_credentials import (
+    ORG_LOGIN_REMEDY,
+    org_destination_refused_sentence,
+)
 from local_operator.server.routes.agents import (
     PUBLICATION_STATUS_BY_CODE,
     AgentPublicationRequest,
@@ -652,6 +660,7 @@ async def test_a_hub_rate_limit_is_not_reported_as_a_refused_credential(
 #: A code added to the table without a case here still fails -- see the test below.
 STATUS_FALLBACK_CASES: Tuple[Tuple[str, int], ...] = (
     ("invalid_instruction_set", 422),
+    ("invalid_team_document", 422),
     ("moderation_rejected", 422),
     ("payload_too_large", 413),
     ("name_taken", 409),
@@ -659,7 +668,13 @@ STATUS_FALLBACK_CASES: Tuple[Tuple[str, int], ...] = (
     ("name_reserved_builtin", 409),
     ("not_owner", 403),
     ("agent_not_found", 404),
+    ("team_not_found", 404),
     ("moderation_unavailable", 503),
+    # Organization sharing's frozen membership refusals (§2.2): known codes,
+    # so they keep their 403 instead of falling to the credential arm.
+    ("not_a_member", 403),
+    ("insufficient_role", 403),
+    ("team_plan_required", 403),
 )
 
 
@@ -900,3 +915,272 @@ def test_publication_request_requires_hub_id_within_the_name_bound() -> None:
     assert AgentPublicationRequest(hub_agent_id="hub-1").hub_agent_id == "hub-1"
     with pytest.raises(Exception):
         AgentPublicationRequest(hub_agent_id="x" * 129)
+
+
+# --- Organization targets (design §4.4/§4.7) ----------------------------------
+#
+# The org target is a SCOPE, not a document field: it rides on query params, the
+# server resolves the signed-in account's OAuth token to spend (never the
+# machine's API key), and the hub's frozen membership refusals reach the caller
+# with their codes intact -- a member refusal is not a credential refusal.
+
+
+@pytest.mark.asyncio
+async def test_publish_org_target_sends_the_query_pair_and_spends_the_oauth_row(
+    test_app_client,
+    dummy_registry: AgentRegistry,
+    fake_org_credential,
+    fake_radient_credential,
+) -> None:
+    """`visibility=org` tags the target onto the query and rides the person's bearer.
+
+    The client the route builds is the one whose ``api_key`` is the stored OAuth
+    access token: the org path must never fall back to the machine's key (§2.2),
+    so the key resolver is asserted untouched.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+    result = {"agent_id": "hub-9", "name": "coder", "version": "1.0.0"}
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.return_value = result
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1", json={}
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["result"] == result
+    call = mock_client.return_value.publish_agent_instruction_set.call_args
+    assert call.kwargs == {"visibility": "org", "tenant_id": "org-1"}
+    spending = mock_client.call_args.kwargs
+    assert spending["api_key"].get_secret_value() == "org-access-token"
+    assert spending["base_url"] == resolve_radient_api_base_url()
+    fake_org_credential.assert_awaited_once()
+    fake_radient_credential.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_org_target_without_a_login_shows_the_re_login_remedy(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential
+) -> None:
+    """No OAuth row: 401 with the CLI's one-line remedy, before any hub call."""
+    fake_org_credential.return_value = None
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1", json={}
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == ORG_LOGIN_REMEDY
+    mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_org_target_at_a_refused_hub_names_the_configuration_remedy(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential, monkeypatch
+) -> None:
+    """A non-canonical hub is refused with its own sentence, not the login one."""
+    fake_org_credential.return_value = None
+    monkeypatch.delenv("RADIENT_ORG_ALLOW_NONCANONICAL_BASE", raising=False)
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+
+    with patch(
+        "local_operator.providers.radient_credentials.configured_radient_base_url",
+        return_value="http://127.0.0.1:4999/v1",
+    ):
+        with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+            response = await test_app_client.post(
+                f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1", json={}
+            )
+
+    assert response.status_code == 400
+    # Byte-equal to the ONE shared sentence the CLI prints too (agent review
+    # round 1, MINOR-2): the two surfaces render the same object.
+    assert response.json()["detail"] == org_destination_refused_sentence(
+        "http://127.0.0.1:4999/v1", DEFAULT_RADIENT_API_BASE_URL
+    )
+    mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_org_target_honours_the_noncanonical_opt_in(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential, monkeypatch
+) -> None:
+    """With the explicit opt-in the local hub is addressed, exactly as the CLI does."""
+    monkeypatch.setenv("RADIENT_ORG_ALLOW_NONCANONICAL_BASE", "1")
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch(
+        "local_operator.providers.radient_credentials.configured_radient_base_url",
+        return_value="http://127.0.0.1:4999/v1",
+    ):
+        with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+            mock_client.return_value.publish_agent_instruction_set.return_value = {
+                "agent_id": "hub-9"
+            }
+            response = await test_app_client.post(
+                f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1", json={}
+            )
+
+    assert response.status_code == 200, response.text
+    fake_org_credential.assert_awaited_once()
+    assert mock_client.call_args.kwargs["base_url"] == "http://127.0.0.1:4999/v1"
+
+
+@pytest.mark.parametrize(
+    ("visibility", "tenant_id", "message"),
+    [
+        ("org", None, "tenant_id is required when visibility=org"),
+        ("public", "org-1", "tenant_id is only valid together with visibility=org"),
+        ("weird", None, 'visibility must be "public" or "org"'),
+    ],
+)
+@pytest.mark.asyncio
+async def test_publish_org_target_refuses_a_malformed_pair_before_any_credential(
+    test_app_client,
+    dummy_registry: AgentRegistry,
+    fake_org_credential,
+    visibility: Any,
+    tenant_id: Any,
+    message: str,
+) -> None:
+    """The hub's own 400 rule, refused locally -- and before a token is resolved."""
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    params: Dict[str, Any] = {"visibility": visibility}
+    if tenant_id is not None:
+        params["tenant_id"] = tenant_id
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish", params=params, json={}
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == message
+    mock_client.assert_not_called()
+    fake_org_credential.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_publish_without_a_target_stays_the_public_call(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential
+) -> None:
+    """No org params: no org kwargs, and only the API key is resolved."""
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.return_value = {"agent_id": "hub-9"}
+        response = await test_app_client.post(f"/v1/agents/{agent.id}/publish", json={})
+
+    assert response.status_code == 200, response.text
+    call = mock_client.return_value.publish_agent_instruction_set.call_args
+    assert call.kwargs == {}
+    assert mock_client.call_args.kwargs["api_key"].get_secret_value() == "test-key"
+    fake_org_credential.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("code", "details"),
+    [
+        ("not_a_member", {}),
+        ("insufficient_role", {"required": "admin"}),
+        ("team_plan_required", {}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_publish_org_refusals_keep_the_frozen_membership_codes(
+    test_app_client,
+    dummy_registry: AgentRegistry,
+    fake_org_credential,
+    code: str,
+    details: Dict[str, Any],
+) -> None:
+    """A membership refusal is not a credential refusal: code and details survive."""
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.side_effect = APIError(
+            "The hub refused this publication.", status_code=403, code=code, details=details
+        )
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1", json={}
+        )
+
+    assert response.status_code == 403
+    detail = response.json()["detail"]
+    assert detail["code"] == code
+    assert detail["details"] == details
+
+
+@pytest.mark.asyncio
+async def test_republish_org_target_sends_the_query_pair_to_the_listing(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential
+) -> None:
+    """A republish's org target goes out on the same query pair, against the listing."""
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+    result = {"agent_id": "hub-9", "name": "coder", "version": "1.1.0"}
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.republish_agent_instruction_set.return_value = result
+        response = await test_app_client.put(
+            f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1",
+            json={"hub_agent_id": "hub-9"},
+        )
+
+    assert response.status_code == 200, response.text
+    call = mock_client.return_value.republish_agent_instruction_set.call_args
+    assert call.args[0] == "hub-9"
+    assert call.kwargs == {"visibility": "org", "tenant_id": "org-1"}
+    assert mock_client.call_args.kwargs["api_key"].get_secret_value() == "org-access-token"
+
+
+@pytest.mark.asyncio
+async def test_republish_org_target_without_a_login_shows_the_re_login_remedy(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential
+) -> None:
+    fake_org_credential.return_value = None
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        response = await test_app_client.put(
+            f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1",
+            json={"hub_agent_id": "hub-9"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == ORG_LOGIN_REMEDY
+    mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publish_org_masks_a_reflected_credential(
+    test_app_client, dummy_registry: AgentRegistry, fake_org_credential
+) -> None:
+    """The relayed result is scrubbed of this call's credential (S-1).
+
+    An upstream is free to reflect the request it received -- the bearer
+    included -- into its answer; the relay must not carry it back to the
+    renderer.
+    """
+    agent = _new_agent(dummy_registry, name="coder", description="Writes code.")
+    dummy_registry.set_agent_system_prompt(agent.id, "You write code.")
+    result = {
+        "agent_id": "hub-9",
+        "moderation": {"echo": "Bearer org-access-token"},
+    }
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.publish_agent_instruction_set.return_value = result
+        response = await test_app_client.post(
+            f"/v1/agents/{agent.id}/publish?visibility=org&tenant_id=org-1", json={}
+        )
+
+    assert response.status_code == 200, response.text
+    assert "org-access-token" not in response.text
+    assert "[redacted]" in response.text

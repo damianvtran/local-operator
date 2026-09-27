@@ -531,6 +531,16 @@ def test_org_calls_refuse_a_non_canonical_hub_by_default(
     assert DEFAULT_RADIENT_API_BASE_URL in out
     assert "RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1" in out
     assert constructed == []
+    # And byte-equal to the server's rendered sentence: one definition, two
+    # surfaces (agent review round 1, MINOR-2).
+    from local_operator.providers.radient_credentials import (
+        org_destination_refused_sentence,
+    )
+
+    assert (
+        org_destination_refused_sentence("http://127.0.0.1:9/v1", DEFAULT_RADIENT_API_BASE_URL)
+        in out
+    )
 
     # The explicit opt-in (local/QA hubs) lets the same command reach it.
     monkeypatch.setenv("RADIENT_ORG_ALLOW_NONCANONICAL_BASE", "1")
@@ -560,7 +570,24 @@ def test_org_commands_need_a_signed_in_account(
     assert main() == 1
 
     out = capsys.readouterr().out
-    assert "lop login radient" in out
+    # The printed sentence is the ONE object both surfaces render (agent review
+    # round 1, MINOR-2): a copy on either side breaks this.
+    from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
+
+    assert ORG_LOGIN_REMEDY in out
+
+
+def test_the_local_server_does_not_restate_the_remedy_sentences() -> None:
+    """One definition, two surfaces: the server imports its remedy (MINOR-2).
+
+    The route module used to hold its own ``ORG_LOGIN_REMEDY`` /
+    ``ORG_DESTINATION_REFUSED`` bodies pinned only against themselves; this
+    catches a second copy growing back.
+    """
+    from local_operator.server.routes import agents as agents_module
+
+    assert "ORG_LOGIN_REMEDY" not in vars(agents_module)
+    assert "ORG_DESTINATION_REFUSED" not in vars(agents_module)
 
 
 def test_agents_push_without_org_never_runs_the_org_resolver(
