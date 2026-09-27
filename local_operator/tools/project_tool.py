@@ -73,7 +73,7 @@ class ProjectParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     op: Literal["list", "show", "create", "update", "link", "unlink", "milestone"] = Field(
-        description="The verb to run. project_delete removes irreversibly."
+        description="The verb to run."
     )
     name: str | None = Field(default=None, description="Project name (all ops but list).")
     description: str | None = Field(
