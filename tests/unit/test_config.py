@@ -844,7 +844,12 @@ def test_a_non_string_top_level_key_cannot_take_the_store_down(
     reported = [r.getMessage() for r in caplog.records if "top-level" in r.getMessage()]
     assert len(reported) == 1, reported
     assert "network" in reported[0]
-    assert "2024" not in reported[0], reported[0]
+    assert "values.network" in reported[0]
+    # The unnameable key is REPORTED but never given a `values.` home: naming one would
+    # send the operator to a path that cannot exist (review round 1, optional nit).
+    assert "2024" in reported[0]
+    assert "values.2024" not in reported[0], reported[0]
+    assert "not addressable as a settings path" in reported[0]
 
     # AND THE VERB THAT DIED NOW ROUND-TRIPS, with both keys still in the file.
     manager._write_config(vars(manager.config))
@@ -852,3 +857,31 @@ def test_a_non_string_top_level_key_cannot_take_the_store_down(
     document = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))
     assert document["network"]["advertise_hosts"] == ["203.0.113.7:4097"]
     assert 2024 in document, sorted(map(repr, document))
+
+
+def test_a_file_whose_only_stray_keys_are_unnameable_is_still_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """Every unmodelled key non-string is not the same as nothing to say.
+
+    The silence decision covers keys this store cannot SPELL — but a file whose ONLY stray
+    keys are those still has keys nobody reads, and reporting nothing there is the
+    original bug in miniature: the operator sees no sign at all (review round 1, optional
+    nit). They are named by ``repr`` with the advice that applies (delete, or re-spell as
+    a string), because there is no ``values.`` path to offer.
+    """
+    (tmp_path / "config.yml").write_text(
+        "version: 0.1.0\n"
+        "metadata:\n  created_at: x\n  last_modified: x\n  description: d\n"
+        "values:\n  conversation_length: 100\n"
+        "2024:\n  archived: true\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ConfigManager(tmp_path)
+
+    reported = [r.getMessage() for r in caplog.records if "top-level" in r.getMessage()]
+    assert len(reported) == 1, reported
+    assert "2024" in reported[0]
+    assert "cannot be addressed as a settings path" in reported[0]

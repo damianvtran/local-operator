@@ -114,7 +114,9 @@ _MODELLED_TOP_LEVEL = ("version", "metadata", "values")
 #: noise where one is information. The file's own ``stat`` is deliberately NOT part
 #: of the key: an unrelated rewrite must not re-report a key the operator has not
 #: touched yet, and once they move or delete it the warning stops on its own.
-_UNMODELLED_WARNED: set[tuple[str, tuple[str, ...]]] = set()
+#: The key set is ``(path, string keys, unnameable keys)``: the third element is the
+#: non-string keys this store cannot address, reported beside the others.
+_UNMODELLED_WARNED: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
 
 #: One parsed ``config.yml`` per path, keyed by what ``fstat`` said about the
 #: bytes it was parsed from. See :func:`_parse_config_stream`.
@@ -248,14 +250,40 @@ def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> Non
     unmodelled = sorted(
         key for key in config_dict if isinstance(key, str) and key not in _MODELLED_TOP_LEVEL
     )
-    if not unmodelled:
+    # A key this store cannot SPELL — no `values.` path exists to move it to — is still a
+    # key somebody wrote, so a file where EVERY unmodelled key is one of those is not
+    # silence: the keys are reported by `repr` with the one advice that applies. They are
+    # kept OUT of the sentence that names `values.` homes (naming a non-string as a
+    # settings path sends the operator to a home that cannot exist), and they are
+    # reported beside it in the mixed case too, in their own clause (review round 1,
+    # optional nit).
+    unnameable = sorted((key for key in config_dict if not isinstance(key, str)), key=repr)
+    if not unmodelled and not unnameable:
         return
-    seen = (str(path), tuple(unmodelled))
+    seen = (str(path), tuple(unmodelled), tuple(repr(key) for key in unnameable))
     if seen in _UNMODELLED_WARNED:
         return
     _UNMODELLED_WARNED.add(seen)
+    if not unmodelled:
+        logger.warning(
+            "%s has top-level %s, which this store does not read: every setting lives "
+            "under `values:`, and a key that is not a string cannot be addressed as a "
+            "settings path at all — delete it, or re-spell it as a string if it was "
+            "meant to be one.",
+            path,
+            (
+                f"key {unnameable[0]!r}"
+                if len(unnameable) == 1
+                else "keys " + ", ".join(repr(key) for key in unnameable)
+            ),
+        )
+        return
     homes = ", ".join(f"values.{key}" for key in unmodelled)
     named = f"key {unmodelled[0]}" if len(unmodelled) == 1 else "keys " + ", ".join(unmodelled)
+    if unnameable:
+        named += "; also present, and not addressable as a settings path: " + ", ".join(
+            repr(key) for key in unnameable
+        )
     logger.warning(
         "%s has top-level %s, which this store does not read: every setting lives "
         "under `values:`, so the key does nothing. It is left in place rather than "

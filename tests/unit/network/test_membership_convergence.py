@@ -1016,6 +1016,21 @@ def test_a_member_that_declares_nothing_gets_no_endpoint_not_the_observed_one(
     # AND THE HONEST SENTENCE. "Nothing to dial" must read as nothing declared rather
     # than as a failed dial: the dial's refusal is a claim about the peer, and the peer
     # here has said nothing about itself at all.
+    #
+    # THE CEREMONY'S LINK IS CLOSED FIRST, and that is the fix for a race this assertion
+    # used to lose: the join has just paired over a real socket, so this device's link to
+    # the joiner is still ALIVE — `_ensure_link_with_reason` answers the link cache before
+    # it dials anything, and `_link_for` counts any link whose `_closed` is unset — and
+    # whether its reader had noticed the close yet was a coin flip. CI shard 0 caught it
+    # (`assert <PeerLink> is None`); 25 local runs did not. Closing HERE, synchronously,
+    # makes the subject the product's answer for a member with no live link — the state
+    # `no_endpoint` is vocabulary for — instead of the teardown's timing. The alternative,
+    # branching on "the link may still be alive", would assert two different claims and
+    # pass either way, which is the shape this file has already been burned by.
+    found = hub.server._link_for(silent.identity.device_id)  # noqa: SLF001
+    if found is not None:
+        found.close("test-closed")
+    assert hub.server._link_for(silent.identity.device_id) is None, "the link must be gone"
     link, reason = hub.server._ensure_link_with_reason(  # noqa: SLF001 — the surface's reader
         silent.identity.device_id
     )
