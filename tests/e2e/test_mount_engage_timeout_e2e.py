@@ -121,6 +121,7 @@ def slow_runtime_child(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen
     """
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.session.runtime import launch
+    from local_operator.session.runtime.types import ENGAGED_ENV
 
     spawned: list[subprocess.Popen[bytes]] = []
 
@@ -129,6 +130,7 @@ def slow_runtime_child(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen
         cwd: str,
         *,
         defer_materialise: bool,
+        warm: bool = False,
         initial_model: Any = None,
         model_selection_override: bool = False,
     ) -> subprocess.Popen[bytes]:
@@ -145,6 +147,16 @@ def slow_runtime_child(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen
             env["LOP_RUNTIME_DEFER_MATERIALISE"] = "1"
         else:
             env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+        # AND THE ENGAGE CLAIM, which rides the ERRAND rather than the deferral
+        # above (``launch._spawn_runtime``'s ``warm``). This fixture promises
+        # "the same process, born late", so the child it starts has to arrive in
+        # the state production's would: the mount warm this cell drives IS a
+        # ``WarmErrand``, and a child spawned without the claim would take the
+        # ordinary drain instead of the keep-alive window.
+        if warm:
+            env[ENGAGED_ENV] = "1"
+        else:
+            env.pop(ENGAGED_ENV, None)
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             [
                 sys.executable,
