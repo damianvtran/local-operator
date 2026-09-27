@@ -25,56 +25,6 @@ from __future__ import annotations
 
 from local_operator.network.credentials.types import BrokerError
 
-#: Every code this module writes a sentence of its own for. It exists so the
-#: REQUESTER can tell "the catalogue has a sentence for this" from "this is a code
-#: this build cannot classify" — the second case is the only one that may keep the
-#: owner's own words (``_generic`` interpolates them).
-#:
-#: THE RULE THIS SET ENFORCES, measured on the two-device rig (audit round 2): an
-#: owner that puts its own sentence on the wire used to have that sentence shown to
-#: the operator IN PREFERENCE to the catalogue's, because ``client._render`` filled
-#: in a sentence only when the message was empty. After a ``credential revoke`` the
-#: operator therefore read the owner's internal shorthand —
-#: "damians-MacBook-Pro does not share 'zai' with d_1d2a4f5aae0d880affc36653e3659260"
-#: — instead of §4.6's sentence, which names no device id and carries the remedy.
-#: The design is explicit ("Sentences come from one place") and ``owner._refuse``'s
-#: own comment agrees ("the SENTENCE the operator reads is rendered where the
-#: operator is"); the wire message is a DIAGNOSTIC, and this set is what stops it
-#: from becoming user-facing copy again.
-#:
-#: It must stay in step with the chain in :func:`render_broker_error`; the test that
-#: pins it (``tests/unit/network/test_credentials_refusal_copy.py``) renders every
-#: member and fails if any of them falls through to :func:`_generic`.
-SENTENCED_CODES: frozenset[str] = frozenset(
-    {
-        "owner_offline",
-        "not_a_holder",
-        "not_owner",
-        "revoked",
-        "grant_invalid",
-        "device_bound",
-        "quota_blocked",
-        "interactive_required",
-        "epoch_stale",
-        "refresh_failed",
-        "rate_limited",
-        "not_authorised",
-        "identity_mismatch",
-        "unsupported",
-        "no_local_credential",
-        "not_implemented",
-    }
-)
-
-
-def has_catalogue_sentence(code: str) -> bool:
-    """Whether :func:`render_broker_error` writes a sentence for ``code``.
-
-    ``False`` means the code is unknown to THIS build — an owner that is newer than
-    the requester — and the owner's own words are then the best text available.
-    """
-    return code in SENTENCED_CODES
-
 
 def _owner_name(error: BrokerError, fallback: str) -> str:
     return error.owner_device_name or error.owner_device or fallback
@@ -224,6 +174,25 @@ def _generic(error: BrokerError, *, label: str, owner: str, login: str) -> str:
     )
 
 
+def render_borrowed_signin(owner: str, name: str) -> str:
+    """The borrower's line when an MCP server refuses a BROKERED sign-in.
+
+    WHY THIS EXISTS (review round 1, R1 — audit round 2's F5). ``_auth_required_text``
+    answered every 401-without-a-local-grant with ``/mcp login <name> to authorize``,
+    and on a BORROWING device that command is wrong twice over: a headless borrower
+    cannot open a browser at all, and a borrower with one creates a LOCAL grant that
+    wins over the borrow (``manager._brokered_mcp_auth``'s local-wins rule) — a silent
+    account switch. The sign-in this failure is about lives on ``owner``, so the line
+    names the owning device and puts the command THERE.
+
+    Short on purpose: this string is the tail of the toast's ``failed: <name> — …``
+    and is clamped near 58 cells (design review D1/D4), so the owning device and the
+    command have to survive the first screenful — measured for the canonical case
+    (an 18-cell device name and a 6-cell server) at 54 cells, with no second ``—``.
+    """
+    return f"sign-in on {owner}: /mcp login {name} there"
+
+
 def render_success(provider: str, owner_name: str, *, cached: bool = False) -> str:
     """What `lop network credential ... --json`-less output says about a live borrow."""
     verb = "using the borrowed" if cached else "borrowed"
@@ -233,8 +202,27 @@ def render_success(provider: str, owner_name: str, *, cached: bool = False) -> s
     )
 
 
-#: The owner-side toast when a peer needs an interactive sign-in the operator must
-#: perform. One line, because it is raised beside whatever they were doing.
+#: The WIRE DIAGNOSTIC an owner sends with an ``interactive_required`` refusal.
+#:
+#: WHAT IT IS NOT: the sentence the borrower's operator reads. Since review round 1
+#: (audit round 2, F1) the requester renders EVERY code from this module, so an
+#: owner's own words reach a person only through :func:`_generic`'s parenthetical,
+#: where they are the detail of a code this build cannot classify. This string's
+#: reader is therefore a human reading a wire capture or the owner's logs, not a
+#: session's operator.
+#:
+#: The "owner-side toast" a first draft of this docstring described does not exist:
+#: the design's §4.7 row asks for a ``credential_repair`` op that raises a durable
+#: notice on the owning device, and NO SUCH OP IS BUILT (grep ``credential_repair``:
+#: nothing outside that design row). What the owner has today is the
+#: ``credential.report`` audit record written beside this refusal, and what the
+#: borrower has is the ``interactive_required`` sentence in
+#: :func:`render_broker_error` — which names the owner and the command to run there,
+#: and is the reason the composed MCP failure line can be truthful without a repair
+#: op.
+#:
+#: ``key`` is the placement key (``mcp:<url>`` or a provider name); the quoting is
+#: deliberate, because the operator pastes the command.
 def render_repair_notice(peer_name: str, key: str) -> str:
     is_mcp = key.startswith("mcp:")
     verb = f"/mcp login {key[4:]}" if is_mcp else f"/login {key}"

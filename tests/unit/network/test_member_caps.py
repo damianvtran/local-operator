@@ -283,6 +283,55 @@ def test_the_member_verb_takes_the_name_every_other_surface_prints(
     assert "is not a device in home-net" in captured.err
 
 
+def test_member_rm_takes_the_same_name_spelling(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """REVIEW ROUND 1, R3: ``member rm`` was the third verb with a raw-id argument.
+
+    ``member grant|revoke`` were fixed in round 1 of the audit; ``rm`` kept handing
+    ``args.device`` to the row writer, so the SAME valid name answered
+    "laptop is not a member of home-net" (``relay.remove_member``'s refusal) — a false
+    statement about a member that is one. One resolver, and the refusal names the
+    member list rather than denying the device exists.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    server = _server(root)
+    try:
+        record = _with_peer(server)  # the peer's name is "laptop"
+        server.bind_control()
+        server.start()
+        args = Namespace(
+            network_command="member",
+            member_command="rm",
+            network=record.name,
+            device="laptop",
+            capabilities=[],
+            json=True,
+        )
+        assert net_cli.main(args) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["removed"] == PEER, payload
+        # The tombstone is the observable side effect: the member is gone from the
+        # active set on this device, and the removal is recorded.
+        removed = store.load(record.network_id, root).member(PEER)
+        assert removed is not None and not removed.active, removed
+
+        args = Namespace(
+            network_command="member",
+            member_command="rm",
+            network=record.name,
+            device="not-a-device",
+            capabilities=[],
+            json=True,
+        )
+        assert net_cli.main(args) == 1
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["code"] == "unknown_member"
+        assert "is not a device in home-net" in captured.err
+    finally:
+        server.stop()
+
+
 def test_the_parser_takes_grant_and_revoke_and_the_bare_group_names_all_verbs(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
