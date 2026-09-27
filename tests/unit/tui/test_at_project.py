@@ -280,9 +280,41 @@ async def test_the_overflow_row_counts_the_directory_not_the_shortcut(workspace,
 
         text = picker.render_text(80).plain
         if hidden_files > 0:
-            assert f"… {hidden_files} more" in text
+            label = "more entry" if hidden_files == 1 else "more entries"
+            assert f"… {hidden_files} {label}" in text
         else:
             assert "more" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_scrolled_window_says_what_it_hides_above(workspace, store) -> None:
+    """D1: with eight project rows leading a bare `@`, F7's seed opens the
+    window at ``[1, 9)`` and the FIRST project row falls off the top — and the
+    top edge used to say nothing at all (design round 1, D1's repro).
+
+    The top marker names the kinds it hides (``… 1 project above`` here); the
+    bottom marker names its scope in the same pass (D2: a mixed list cannot
+    honestly say "more of everything"). The fix has to be discoverable at both
+    UI sizes, so the marker is asserted at 100x30 AND 150x40 — the row budget
+    is eight at both.
+    """
+    for index in range(8):
+        store.create_project(ProjectEdit(name=f"sigma-{index:02d}"))
+
+    for size in ((100, 30), (150, 40)):
+        app = OperatorApp(lambda: _factory(FakeSession()))
+        async with app.run_test(size=size) as pilot:
+            editor = await _draft(app, pilot, "@")
+            picker = editor.picker
+            start, end, total = picker.visible_window()
+            assert start == 1, "premise: the seed scrolled the first project off"
+
+            lines = picker.render_text(size[0]).plain.split("\n")
+            assert "… 1 project above" in lines[0], lines[0]
+            # The hidden row is nowhere on screen — which is why the marker,
+            # not the row, is what has to say it exists.
+            assert "sigma-00" not in "\n".join(lines)
+            assert any("more entr" in line for line in lines), lines
 
 
 @pytest.mark.asyncio
