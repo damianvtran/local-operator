@@ -2501,7 +2501,9 @@ def _pilot_peer_block(peer: str) -> tuple[dict[str, Any] | None, tuple[str, str]
 
     Read through this device's relay, which is the only thing that knows whether a
     peer is answering — and read on FAILURE paths only, so an act that works never
-    pays a second fan-out for a distinction it does not need.
+    pays a second fan-out for a distinction it does not need. (What a SUCCESS
+    receipt names is not read here either: the device comes from the session's own
+    row, which the act has already read — see ``_pilot_act``.)
     """
     from local_operator.network.types import MeshRefusal
 
@@ -2700,6 +2702,24 @@ async def _pilot_act(
         # composed in the one place that owns "a peer row becomes a viewer".
         raise MeshRefusal("peer_unreachable", unreachable_peer_sentence(session_id, row))
 
+    # THE DEVICE THE WORK HAPPENS ON, from the row and never from the string typed.
+    # ``--peer`` names where a conversation lives, but it is not what ROUTES this
+    # act — the session id is — so echoing it back as the receipt's answer made a
+    # wrong ``--peer`` invisible: `--peer no-such-device --send <id> hello` answered
+    # ``"peer": "no-such-device"`` with rc 0 while the turn ran on the real peer
+    # (QA round 1, Q1). The row this act has already read is the one place that
+    # answers it, so this costs no second fan-out — the same reason
+    # ``_pilot_peer_block``'s catalogue read stays on the failure paths.
+    #
+    # The typed string is judged by the exact-match rule that failure path already
+    # uses (device NAME or device ID, ``_pilot_peer_block``), and when it is neither
+    # it is REPORTED beside the device rather than dropped: a receipt that silently
+    # substituted the right name would hide the caller's mistake, and one that
+    # repeated the wrong name as the answer is the defect this replaced.
+    device_id = str(getattr(row, "owner_device", "") or "")
+    device = str(getattr(row, "owner_device_name", "") or device_id or peer)
+    named = "" if peer in (device, device_id) else peer
+
     async def _never() -> Any:
         # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
         # so owner loss leaves this viewer cold rather than making this device a
@@ -2772,10 +2792,11 @@ async def _pilot_act(
             )
             raise MeshRefusal(code, sentence) from exc
         if verb == "send":
-            return await _pilot_send(viewer, session_id, peer, text)
-        if verb == "steer":
-            return await _pilot_steer(viewer, session_id, peer, text)
-        return await _pilot_slash(viewer, session_id, text)
+            payload, lines = await _pilot_send(viewer, session_id, device, text)
+        elif verb == "steer":
+            payload, lines = await _pilot_steer(viewer, session_id, device, text)
+        else:
+            payload, lines = await _pilot_slash(viewer, session_id, device, text)
     finally:
         # The viewer goes away and the PEER keeps its runtime: closing a viewer
         # never stops the owner (the product's own rule, and the reason a moved
@@ -2789,6 +2810,16 @@ async def _pilot_act(
             await viewer.dispose()
         except Exception:  # noqa: BLE001 — see above: the refusal outranks it
             logging.getLogger(__name__).debug("disposing the pilot viewer failed", exc_info=True)
+
+    if named:
+        # The typed string was NOT this device. The receipt keeps the answer (who
+        # ran it) and carries the caller's own word beside it, in the payload and in
+        # the lines, so both a script and a person can see the disagreement.
+        payload["peer_named"] = named
+        lines.append(
+            f"you named {named}; {session_id} is held by {device}, which is where this ran"
+        )
+    return payload, lines
 
 
 async def _pilot_send(
@@ -2898,7 +2929,9 @@ async def _pilot_steer(
     )
 
 
-async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[str, Any], list[str]]:
+async def _pilot_slash(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
     """Run a routed slash command in the peer's session, and print its receipt.
 
     ROUTED, not re-implemented: ``route_shared_slash`` carries the commands the
@@ -2907,6 +2940,10 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
     in its own registry). The receipt is the owner's ``SlashResult`` — its ``text``
     is the sentence, its ``style`` says whether it worked — so the exit code comes
     from the peer rather than from this side's guess about what a command did.
+
+    ``peer`` is the device the command ran on, the same fact the other two acts
+    report: this receipt named NO device before (QA round 1, Q1's sibling on this
+    verb), and a slash that changes state on another machine has to say which one.
     """
     from local_operator.network.types import MeshRefusal
 
@@ -2926,6 +2963,7 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
         raise MeshRefusal("session_unreachable", str(exc)) from exc
     payload: dict[str, Any] = {
         "session_id": session_id,
+        "peer": peer,
         "verb": "slash",
         "command": command,
         "receipt": receipt,
@@ -2939,7 +2977,7 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
         # carry the fact it is a receipt for is not a receipt.
         raise MeshRefusal(
             "slash_unreported",
-            f"the peer answered /{command} with prose rather than a typed receipt, so "
+            f"{peer} answered /{command} with prose rather than a typed receipt, so "
             f"whether it ran is unknown: {str(receipt)[:200]}",
         )
     # THE RECEIPT'S OWN FIELDS, and only them: ``SlashResult`` is
@@ -2954,7 +2992,7 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
         # no style at all — a success claim about a field the owner never sent.
         raise MeshRefusal(
             "slash_unreported",
-            f"the peer's receipt for /{command} carried no style this build knows "
+            f"{peer}'s receipt for /{command} carried no style this build knows "
             f"({style or 'none'}), so whether it ran is unknown: {said[:200]!r}",
         )
     payload.update(
@@ -2963,7 +3001,7 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
         text=said,
         style=style,
     )
-    return payload, [f"/{command} on {session_id}: {said or 'no receipt'}"]
+    return payload, [f"{session_id} on {peer}: /{command} — {said or 'no receipt'}"]
 
 
 def _cmd_sessions(args: argparse.Namespace) -> int:
