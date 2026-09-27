@@ -76,7 +76,7 @@ from local_operator.harness.approval import (
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import detached_popen_kwargs
-from local_operator.session.runtime.types import RUNTIME_MODULE
+from local_operator.session.runtime.types import ENGAGED_ENV, RUNTIME_MODULE
 
 logger = logging.getLogger(__name__)
 
@@ -359,6 +359,12 @@ def _spawn_runtime(
     carry that level. Applying it afterwards over the model RPC would leave the
     child briefly on the model's own default and would lose the level
     altogether if the owner was already running.
+
+    ONE VALUE HERE IS NOT ROUTING DATA: the engage claim
+    (``types.ENGAGED_ENV``). It has to travel in the environment because it is a
+    fact about the SPAWN — a warm engage delivers no frame by design (see
+    ``engage_runtime``'s ``WarmErrand`` arm), so there is no socket it could
+    arrive on, and the child's reaper needs it before the first dial.
     """
     env = dict(os.environ)
     env["LOP_MOBILE_CHILD_CWD"] = cwd
@@ -385,10 +391,24 @@ def _spawn_runtime(
         env["LOP_MODEL_SELECTION_OVERRIDE"] = "1"
     if defer_materialise:
         env["LOP_RUNTIME_DEFER_MATERIALISE"] = "1"
+        # THE SAME SPAWN, THE SAME FACT, and the one place the runtime can still
+        # hear it: ``defer`` IS ``isinstance(work, WarmErrand)`` (see
+        # ``engage_runtime``), so a deferred-materialisation child is the
+        # speculative engage itself — a runtime started for somebody who has not
+        # arrived. Without this the child's own reaper has no way to know that,
+        # treats it as a runtime nobody is involved with, and retires it on the
+        # ordinary 3 s drain — measured on a two-device rig: the peer's
+        # ``--engage`` answered ``runtime joining`` and the runtime was gone ~3 s
+        # later, so the wait that warm existed to remove was paid in full AND the
+        # answer named a runtime that had already left. The claim it sets is
+        # bounded and capped like the viewer one it joins (``process``'s
+        # ``DEFAULT_KEEP_ALIVE_SECONDS`` / ``_keep_alive_victim``).
+        env[ENGAGED_ENV] = "1"
     else:
-        # A parent that set this for an earlier speculative engage must not
-        # leak it into a runtime that has real work to do.
+        # A parent that set these for an earlier speculative engage must not
+        # leak them into a runtime that has real work to do.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+        env.pop(ENGAGED_ENV, None)
     # 0600 at CREATION, via mkstemp. `Path.open("wb")` takes the process umask
     # (measured 0o644 here), leaving the child's entire stdout+stderr --
     # tracebacks, provider error bodies, config echoes -- world-readable in a

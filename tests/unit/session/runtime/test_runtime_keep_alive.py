@@ -9,11 +9,15 @@ what a user does constantly.
 
 **What is asserted here, in the order the mechanism runs.**
 
-1. The policy: ``_drain_window_s`` gives a runtime a viewer has LEFT the
-   keep-alive window, and only that population. A runtime nobody has looked at
-   (an ``exec``, a wake delivery, a phone-only session) keeps the ordinary
-   drain, which is the whole reason the window is keyed on the RECORD's
-   ``detached_at`` rather than on "is this runtime idle".
+1. The policy: ``_drain_window_s`` gives the keep-alive window to a runtime that
+   holds a CLAIM on it, and to no other population — a claim being a viewer that
+   has LEFT (``detached_at``) or a runtime somebody ENGAGED (``engaged_at``, set
+      at boot from the spawn). The engaged half is the cell this change exists for:
+   a warm engage spawns a runtime for a person who has not arrived yet, so
+   before it the warmed runtime had nobody to hold it and took the drain beneath
+   it. A runtime nobody is involved with (an ``exec``, a wake delivery, a
+   phone-only session) keeps the ordinary drain, which is the whole reason the
+   window is keyed on the RECORD's claims rather than on "is this runtime idle".
 2. Both keys are read through the registry's own path, at the moment a window
    is drawn — the ``#576`` failure (a key written nested and read flat) is
    invisible from every angle except this one.
@@ -106,11 +110,16 @@ class FakeRuntime:
         *,
         pid: int = 4242,
         detached_at: float | None = None,
+        engaged_at: float | None = None,
         attaches: int = 0,
         boot: Any = None,
     ) -> None:
         self._record = _record(pid=pid, detached=detached_at is not None)
         self._record.detached_at = detached_at
+        # THE OTHER CLAIM, on its own axis: ``detached_at`` says a viewer LEFT,
+        # this says a viewer was ASKED FOR (the spawn carried
+        # ``types.ENGAGED_ENV``). A runtime can hold either, both or neither.
+        self._record.engaged_at = engaged_at
         self._attaches = attaches
         # ATTACHMENT beside visibility, as the production record carries both:
         # ``detached`` is what a picker paints a row from, ``watching`` is what
@@ -178,6 +187,64 @@ def test_a_viewed_runtime_gets_the_keep_alive_window(keep_alive: None) -> None:
     window_s, cap = _drain_window_s(DEFAULT_GRACE_S, FakeRuntime(detached_at=1.0))
     assert window_s == float(DEFAULT_KEEP_ALIVE_SECONDS)
     assert cap == DEFAULT_KEEP_ALIVE_MAX
+
+
+def test_an_engaged_runtime_gets_the_keep_alive_window(keep_alive: None) -> None:
+    """A runtime somebody ASKED for is held exactly like one somebody looked at.
+
+    The second way a runtime acquires the window, and the reason it needs one: a
+    warm engage (``net_session_engage`` over the mesh, a draft's first keystroke
+    locally — both ``launch.WarmErrand``) spawns this process for a person who
+    has not arrived yet. No viewer is attached and none has left, so before this
+    claim the ordinary 3 s drain retired the runtime before the attach the warm
+    existed to serve could land: measured on a two-device rig, the peer's
+    ``--engage`` answered ``runtime joining`` and the runtime was gone about 3 s
+    later, so the caller was promised a runtime that had already left and the
+    next attach paid the cold start in full.
+    """
+    window_s, cap = _drain_window_s(DEFAULT_GRACE_S, FakeRuntime(engaged_at=1.0))
+    assert window_s == float(DEFAULT_KEEP_ALIVE_SECONDS)
+    assert cap == DEFAULT_KEEP_ALIVE_MAX
+
+
+def test_an_engaged_runtime_a_viewer_left_is_read_from_the_later_claim(
+    keep_alive: None,
+) -> None:
+    """One claim, two ways to acquire it, and the window runs from the newer.
+
+    The two are the same fact stated at different moments — a person is involved
+    with this runtime — so a runtime with both is held from the LATER statement
+    (a viewer who left at 25 s is fresher news than an engage at 10 s), and the
+    LRU orders the fleet on the same number. Nothing about the field is a "was
+    it ever" flag, which is what makes it usable as an ordering.
+    """
+    runtime = FakeRuntime(engaged_at=10.0, detached_at=25.0)
+    assert child_mod._claim_stamp(runtime._record) == 25.0
+    runtime._record.detached_at = None  # the same runtime, engaged and never watched
+    assert child_mod._claim_stamp(runtime._record) == 10.0
+    runtime._record.engaged_at = 40.0  # a later engage outranks an older departure
+    runtime._record.detached_at = 25.0
+    assert child_mod._claim_stamp(runtime._record) == 40.0
+    window_s, _cap = _drain_window_s(DEFAULT_GRACE_S, runtime)
+    assert window_s == float(DEFAULT_KEEP_ALIVE_SECONDS)
+
+
+def test_an_engage_claim_of_a_foreign_type_is_ignored(keep_alive: None) -> None:
+    """``_claim_stamp``'s tolerance, on the field this change added.
+
+    A record written by a build that spelled the field differently (or a test
+    double) must not reach the arithmetic: the broken-record cell above pins the
+    same rule for ``detached_at``, and a claim is only a claim if it is a number.
+    """
+
+    class Rotten:
+        detached_at = None
+        engaged_at = "this morning"
+
+    class Runtime:
+        _record = Rotten()
+
+    assert _drain_window_s(0.5, Runtime()) == (0.5, 0)
 
 
 def test_the_keep_alive_never_shortens_an_operators_drain(keep_alive: None) -> None:
@@ -350,6 +417,55 @@ async def test_the_keep_alive_window_is_honoured_and_the_build_check_still_fires
 
     await asyncio.sleep(GRACE * 2)  # twice the base grace: it would be gone by now
     assert not stop.is_set(), "the runtime left on the base grace, not the window"
+    assert not handle.disposed
+
+    await asyncio.wait_for(stop.wait(), 5.0)
+    assert 0.5 * WINDOW <= time.monotonic() - started < 5.0, "not the keep-alive window"
+    assert handle.disposed and runtime.closed
+    assert await task is True
+
+
+@pytest.mark.asyncio
+async def test_a_warmed_runtime_outlives_the_drain_it_used_to_die_on(
+    monkeypatch: pytest.MonkeyPatch, keep_alive: None
+) -> None:
+    """THE CELL THIS CHANGE EXISTS FOR: a warmed runtime is still attachable
+    after the grace it used to leave on.
+
+    Same harness and same real seconds as the viewed-runtime cell above, with the
+    ONE difference that was the defect: nothing has ever attached to this runtime
+    and nothing has left it. That is precisely the state a warm engage creates —
+    it exists so the attach that follows lands on a live process — so a runtime
+    that passes ``GRACE * 2`` here is a warm that was not wasted, and one that
+    leaves on the window after it proves the fix is a window rather than a leak.
+
+    Before the change this cell failed at the first assertion: the runtime took
+    the ordinary drain (3 s in production, ``GRACE`` here) because the reaper had
+    no way to know it had been asked for.
+    """
+    GRACE = 0.4
+    WINDOW = 1.6
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", str(GRACE))
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
+    monkeypatch.setattr(child_mod, "_keep_alive_seconds", lambda: WINDOW)
+    runtime = FakeRuntime(engaged_at=time.time())
+    monkeypatch.setattr(
+        child_mod, "_keep_alive_candidates", lambda: [(time.time(), runtime._record.pid)]
+    )
+    handle = FakeHandle()
+    stop = asyncio.Event()
+    started = time.monotonic()
+    task = asyncio.ensure_future(_reaper(handle, runtime, stop))
+
+    await asyncio.sleep(GRACE * 2)
+    assert not stop.is_set(), (
+        "a warmed runtime left on the base grace: nothing attached to it, and the "
+        "reaper did not know it had been asked for"
+    )
+    # The claim it holds is the engage's alone — this is not the viewed case in
+    # disguise (a ``detached_at`` set here would pass the assertion above for the
+    # wrong reason).
+    assert runtime._record.detached_at is None and runtime._record.engaged_at is not None
     assert not handle.disposed
 
     await asyncio.wait_for(stop.wait(), 5.0)
@@ -1105,6 +1221,38 @@ def test_candidates_are_idle_clientless_live_records_only(
     assert _keep_alive_candidates() == [(111.0, 9001)]
 
 
+def test_an_engaged_record_holds_a_cap_slot_and_lists_as_a_live_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engage claim reaches the LRU through the FILE, and the row a peer
+    reads while it holds is a LIVE one.
+
+    Two halves of one story, both about the record rather than the process.
+
+    CHARGED: the cap sees only what a scan of the run directory shows it, so an
+    engaged runtime that was not charged would hold a window the LRU cannot
+    count — and the population a warm engage can create in bulk (one per peer
+    engage) is exactly the one the bound exists to hold down. The stamp is read
+    off the published file, which is also the round trip that proves the field
+    is serialized at all.
+
+    LIVE: the same record, read the way a peer's ``net_catalog`` reads it, is a
+    ``live`` row with a pid — not a ``stored`` one. A surface that shows a
+    warmed session as cold while the process is up is showing the operator a
+    state that would make them pay the cold start the warm already paid for.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(registry, "pid_alive", lambda pid, *, check_zombie=False: pid == 9201)
+    record = _record(pid=9201, detached=True)
+    record.engaged_at = 777.0
+    registry.publish(record, tmp_path)
+
+    assert _keep_alive_candidates() == [(777.0, 9201)]
+
+    rows = [(row.session_id, state, row.pid) for row, state in registry.scan(tmp_path, reap=False)]
+    assert rows == [("keepalive01", "live", 9201)]
+
+
 # -- 6. the record field, end to end ----------------------------------------------
 
 
@@ -1129,6 +1277,18 @@ def test_an_older_reader_drops_the_stamp_rather_than_refusing_the_record() -> No
     older = SessionRecord.from_json(without)
     assert older.detached_at is None
     assert older.detached is False
+
+    # THE SAME CLAIM FOR THE ENGAGE FIELD, because a mixed fleet is the point of
+    # both: a record from a build that knows nothing about a warm engage must
+    # read as "nobody asked" rather than as a broken record, and reading it must
+    # not throw the field's ABSENCE away if a newer one wrote it.
+    engaged = _record(pid=7).to_json()
+    engaged["engaged_at"] = 999.5
+    assert SessionRecord.from_json(engaged).engaged_at == 999.5
+
+    no_claim = _record(pid=7).to_json()
+    no_claim.pop("engaged_at")
+    assert SessionRecord.from_json(no_claim).engaged_at is None
 
 
 @pytest.mark.asyncio
@@ -1194,3 +1354,122 @@ async def test_the_server_stamps_on_the_departure_and_clears_it_on_a_return(
         assert on_disk().detached_at is None
     finally:
         await session.dispose()
+
+
+# -- 7. the claim's route, from the spawn to the record ---------------------------
+#
+# The one hop neither of the sections above can see. Everything so far drives the
+# policy and the record; the claim ORIGINATES in the parent, at the spawn, and a
+# claim that never leaves the parent would leave every cell above passing while
+# production kept the ordinary drain. So the two ends are pinned separately: the
+# spawn's environment (with ``Popen`` captured, so no process is created) and the
+# boot's reading of it (through the production server).
+
+
+class _FakeChild:
+    """Enough of a ``Popen`` for ``_spawn_runtime``: it only reads the pid back."""
+
+    pid = 4321
+    returncode = None
+
+    def poll(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        return None
+
+
+def test_a_warm_spawn_carries_the_engage_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engagement's half of the spawn contract, on the production spawn.
+
+    A warm engage delivers no frame BY DESIGN — ``launch``'s ``WarmErrand`` arm
+    completes when a live runtime is reached — so the environment is the only
+    channel this fact can travel on. Both directions are asserted: a warm spawn
+    carries the claim, and an ordinary spawn SCRUBS it, because a parent that
+    engaged something earlier must not hand its claim to a runtime that has real
+    work to do (the same rule the deferred-materialisation variable beside it
+    follows, and the reason both are written in one branch).
+    """
+    from local_operator.session.runtime import launch as launch_module
+    from local_operator.session.runtime.types import ENGAGED_ENV
+
+    seen: list[dict[str, str]] = []
+
+    def fake_popen(argv: list[str], **kwargs: Any) -> _FakeChild:
+        seen.append(dict(kwargs.get("env") or {}))
+        return _FakeChild()
+
+    monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+    # A claim left over in THIS process, which an ordinary spawn must not pass on.
+    monkeypatch.setenv(ENGAGED_ENV, "1")
+
+    warm = launch_module._spawn_runtime("sess-warm01", str(tmp_path), defer_materialise=True)
+    ordinary = launch_module._spawn_runtime("sess-cold01", str(tmp_path), defer_materialise=False)
+    for process in (warm, ordinary):
+        capture = getattr(process, "lop_capture_path", None)
+        if capture is not None:
+            capture.unlink(missing_ok=True)
+
+    assert len(seen) == 2, "both spawns must reach Popen"
+    assert seen[0][ENGAGED_ENV] == "1", "a warm spawn did not carry the claim"
+    assert seen[0]["LOP_RUNTIME_DEFER_MATERIALISE"] == "1"
+    assert ENGAGED_ENV not in seen[1], "an ordinary spawn inherited a stale claim"
+    assert "LOP_RUNTIME_DEFER_MATERIALISE" not in seen[1]
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_reads_the_claim_at_boot_and_publishes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other end of the hop: the spawn's word reaches the record on disk.
+
+    Through the production server, exactly as the departure stamp is asserted
+    above, because the record is what the reaper of ANOTHER process reads (the
+    LRU) and what a peer's catalogue turns into a row. Both states are driven on
+    the same environment variable, so the cell cannot pass by reading it
+    always-on or always-off: engaged at boot, and not engaged.
+    """
+    from local_operator.session.runtime.registry import RecordPublisher
+    from local_operator.session.runtime.server import RuntimeServer
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.session.runtime.types import ENGAGED_ENV
+    from tests.e2e.harness import ScriptedStream, build_session, text_turn
+
+    async def boot(kind: str, *, engaged: bool) -> SessionRecord:
+        if engaged:
+            monkeypatch.setenv(ENGAGED_ENV, "1")
+        else:
+            monkeypatch.delenv(ENGAGED_ENV, raising=False)
+        directory = tmp_path / kind / "keepalive"
+        directory.mkdir(parents=True, exist_ok=True)
+        session = build_session(directory, ScriptedStream([text_turn("ok")]))
+        handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+        server = RuntimeServer(handle, kind="daemon")
+        try:
+            server._config_root = tmp_path
+            server._publisher = RecordPublisher(server._record, tmp_path)
+            surfaces: set[str] = {"terminal"}
+            monkeypatch.setattr(server, "_visible_attach_surfaces", lambda: set(surfaces))
+            server._republish_detached()  # a change, so the record reaches the file
+            assert server._publisher is not None
+            found = [
+                record
+                for record, _state in registry.scan(tmp_path, reap=False)
+                if record.pid == server._record.pid
+            ]
+            assert found, "the server's record was not published"
+            return found[0]
+        finally:
+            await session.dispose()
+
+    claimed = await boot("warm", engaged=True)
+    assert claimed.engaged_at is not None and claimed.engaged_at > 0
+    # The claim is the engage's alone: nothing has ever attached to this runtime,
+    # so a ``detached_at`` here would mean the window was bought by the wrong fact.
+    assert claimed.detached_at is None
+
+    ordinary = await boot("cold", engaged=False)
+    assert ordinary.engaged_at is None
+    assert ordinary.detached_at is None
