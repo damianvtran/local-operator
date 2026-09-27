@@ -4388,8 +4388,13 @@ class AttachedSession:
 
         # The runtime's build, captured from the record BEFORE the socket is
         # opened: a runtime's version cannot change while it lives, so one
-        # read at dial is complete. ``""`` means the owner predates the field,
-        # which by construction makes it older than this terminal. The TUI
+        # read at dial is complete. ``""`` means the owner predates the field
+        # FOR A RUNTIME ON THIS MACHINE, which by construction makes it older
+        # than this terminal. On a facade whose owner is a runtime on ANOTHER
+        # device the record carries no build at all (``RemoteSessionFacts`` is
+        # never filled from a federated row), so ``""`` there means
+        # UNOBSERVABLE rather than old — and ``app.py::_check_build_skew`` scopes
+        # its absent-version notice to the local case accordingly. The TUI
         # compares these with its own build and names the skew (see
         # ``app.py::_check_build_skew``); nothing here decides anything, so a
         # missing stamp degrades to "unknown", never to a refused attach.

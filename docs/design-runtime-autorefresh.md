@@ -482,7 +482,12 @@ viewer never waits on a runtime that is "about to" leave.
   `“<name>” is running 0.49.8@46a4e9b (this window is 0.49.9@f4a70b9) — it
   will move to the new version when its current work finishes.` Absent
   version: `“<name>” is running an older version than this window — it will
-  move to the new version when its current work finishes.` Kind: `"info"`
+  move to the new version when its current work finishes.` **Scope (PR #1640):
+  the absent-version limb ships for a runtime ON THIS MACHINE only.** A runtime
+  on another device publishes no build here (a federated row carries none), so
+  an absent stamp there is UNOBSERVABLE rather than old and the limb is
+  suppressed for it — see `design-build-skew.md` §4.3's peer scope. Kind:
+  `"info"`
   not `"warning"` — nothing is wrong and nothing is asked of the user. The
   `/stop` sentence is gone from every notice. (`design-build-skew.md` §4.3's
   old-runtime `noop team_mutate` degradation notice at `app.py:14629` keeps
