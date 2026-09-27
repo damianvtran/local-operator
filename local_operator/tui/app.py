@@ -28771,12 +28771,14 @@ class OperatorApp(App[None]):
                     )
                     attach_send.failed()
                 else:
-                    # THROUGH the same helper the `agent_end` path uses. This
-                    # branch printed a bare `str(error)` while the event path
-                    # appended a recovery hint, so one failure got instructions
-                    # and the other did not purely by route — and this is the
-                    # route the reported incident took, because an MCP auth
-                    # failure is what makes `prompt()` raise.
+                    # THROUGH the same recovery pipeline the `agent_end` path
+                    # uses — the AWAITED twin, because this runs as a worker and
+                    # a cold Radient probe must yield rather than freeze the app
+                    # (review R1). This branch printed a bare `str(error)` while
+                    # the event path appended a recovery hint, so one failure got
+                    # instructions and the other did not purely by route — and
+                    # this is the route the reported incident took, because an
+                    # MCP auth failure is what makes `prompt()` raise.
                     #
                     # THE ONE CLASS THAT IS NOT PROVABLY NOT-DELIVERED: a
                     # generic transport error on an attached session may have
@@ -28785,7 +28787,7 @@ class OperatorApp(App[None]):
                     # design OQ2) and its row survives `edit` as the message's
                     # fate statement.
                     unknown_delivery = self._send_failure_unknown_delivery(session, error)
-                    sentence = self._with_recovery_hint(str(error))
+                    sentence = await self._with_recovery_hint_async(str(error))
                     if unknown_delivery:
                         # THE RISK THE RESEND CARRIES, stated (UX round 1, U3):
                         # for the one class where a copy may already have
@@ -38185,14 +38187,19 @@ class OperatorApp(App[None]):
                     await self._prompt_loop_turn(session, LOOP_PROMPT, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
                     loop_error = str(error)
-                    # THROUGH the same helper the composer's turn uses. A loop
+                    # Same pipeline, same reason as the composer's turn — the
+                    # awaited twin, so the unattended loop worker never freezes
+                    # the app on a cold probe. A loop
                     # runs UNATTENDED by definition — `/loop 20` overnight — so
                     # this is the surface where a remedy is worth most and the
                     # one where the user is least able to ask for it: they come
                     # back to a naked 401 with no way to tell what to run
                     # (review U6). Same asymmetry U2 was raised about, one
                     # surface over.
-                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
+                    notice(
+                        f"loop stopped: {await self._with_recovery_hint_async(str(error))}",
+                        "error",
+                    )
                     # Same stale-entry hazard as `_start_turn`: a failed
                     # prompt never announces, so take the entry back out.
                     self._discard_user_echo_for(source, echo)
@@ -38578,10 +38585,15 @@ class OperatorApp(App[None]):
                 except Exception as error:  # surface and stop; never spin
                     if self._is_current(source):
                         self._retire_turn_band(session)
-                    # Same helper, same reason as the numeric worker: a held
+                    # Same pipeline, same reason as the numeric worker — the
+                    # awaited twin keeps this worker from freezing the app on a
+                    # cold probe: a held
                     # goal loop is the MOST unattended surface in the app, and
                     # it was printing a bare `str(error)` (review U6).
-                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
+                    notice(
+                        f"loop stopped: {await self._with_recovery_hint_async(str(error))}",
+                        "error",
+                    )
                     # A failed prompt never announces, so take the stale echo
                     # entry back out (same hazard as numeric mode / `_start_turn`).
                     self._discard_user_echo_for(source, echo)
@@ -46279,6 +46291,11 @@ class OperatorApp(App[None]):
             # the same mechanism the aborted branch already used.
             self._own_interrupt_notice = notice
             self._own_interrupt_kind = "error"
+            # The Radient usage-limit sentence is completed OFF the loop when
+            # only a probe could add it (review round 1, R1): `_with_recovery_hint`
+            # may not block this handler, so it renders what is already known and
+            # the worker extends the notice when the probe lands.
+            self._schedule_recovery_notice(notice, message.error)
         # NOT `elif`: `_finalize_turn` owns the "interrupted" notice now, so
         # this handler's chain ends at the error notice.
         self._finalize_turn(
@@ -46360,17 +46377,17 @@ class OperatorApp(App[None]):
             outcome_known=message.outcome_known,
         )
 
-    def _with_recovery_hint(self, error: str) -> str:
-        """``error`` plus the local remedy for it, when there is one to name.
+    def _provider_recovery_hints(self, error: str) -> tuple[str, str]:
+        """The two SYNC remedies for ``error``, and the provider they resolved.
 
-        ONE helper because there are TWO surfaces that print a turn's error —
-        `on_turn_ended` for a turn that reported one, and the turn worker's
-        `except` for a `prompt()` that raised — and the user cannot tell them
-        apart. They had drifted: only the event path appended a hint, so the
-        IDENTICAL failure came with instructions or without depending on which
-        internal route it took. The motivating incident took the bare route,
-        because an MCP auth failure is what makes `prompt()` raise in the first
-        place.
+        The shared front of the recovery twins below — ONE pipeline because
+        there are TWO surfaces that print a turn's error, `on_turn_ended` for a
+        turn that reported one and the turn worker's `except` for a `prompt()`
+        that raised — and the user cannot tell them apart. They had drifted:
+        only the event path appended a hint, so the IDENTICAL failure came with
+        instructions or without depending on which internal route it took. The
+        motivating incident took the bare route, because an MCP auth failure is
+        what makes `prompt()` raise in the first place.
 
         MCP IS ASKED FIRST, and the order is the point rather than an
         optimisation. Both hints answer "which credential do I fix?", and for an
@@ -46381,6 +46398,11 @@ class OperatorApp(App[None]):
         `ProviderError` form, which no MCP failure produces), so this is a
         tie-break that should never fire — stated explicitly because a silent
         dependence on that would be one refactor from breaking.
+
+        Returns ``(text, provider)``. When the MCP hint fires it already IS the
+        final remedy for this error, so the provider comes back blank and the
+        usage arm (whose gate requires a provider) stays off — the same
+        early-return semantics the single helper had.
 
         Best-effort throughout: a hint is an ADDITION to an error the user is
         already being shown, so anything that raises while deriving one leaves
@@ -46411,14 +46433,11 @@ class OperatorApp(App[None]):
             remedy = derive(error) if callable(derive) else None
             hint = mcp_auth_recovery_hint(error, remedy if isinstance(remedy, str) else None)
             if hint:
-                return f"{error}\n{hint}"
+                return f"{error}\n{hint}", ""
         except Exception:  # noqa: BLE001 — a hint must never replace the error
             logger.debug("MCP recovery hint could not be derived", exc_info=True)
         try:
             from local_operator.providers.failover import append_auth_recovery
-            from local_operator.providers.radient_recovery import (
-                append_usage_limit_recovery,
-            )
 
             # The provider is the first segment of the model label, the same
             # convention /model uses.
@@ -46430,14 +46449,110 @@ class OperatorApp(App[None]):
             # (whose own gate leaves a quota error alone — a login cannot fix
             # it) and the Radient usage-limit remedy (whose gate leaves every
             # other kind and provider alone). The kinds are disjoint, so
-            # neither can double-fire the other's sentence. The Radient probe
-            # is bounded and swallowing, and the module's short-TTL cache
-            # keeps its cost off a retry; it never raises.
-            hinted = append_auth_recovery(error, provider or None)
-            return append_usage_limit_recovery(hinted, provider or None)
+            # neither can double-fire the other's sentence.
+            return append_auth_recovery(error, provider or None), provider
         except Exception:  # noqa: BLE001 — same contract as above
             logger.debug("provider recovery hint could not be derived", exc_info=True)
-        return error
+        return error, ""
+
+    def _with_recovery_hint(self, error: str) -> str:
+        """``error`` plus every remedy already knowable, probing nothing.
+
+        THE SYNC TWIN, signature frozen because its one caller — the
+        `on_turn_ended` message handler — is a plain sync method that existing
+        tests invoke directly. It must therefore also be NON-BLOCKING: review
+        round 1 (R1) measured its previous shape running the Radient probe
+        inline, freezing input/repaint for 5.04s on a blackholed connect and
+        heading toward ~10s in the worst case. The usage arm now renders from
+        the module's cache-only entry point, and when only a probe could add
+        its sentence the caller completes the notice through
+        `_schedule_recovery_notice`. Every site that can await uses the
+        awaited twin below instead.
+        """
+        hinted, provider = self._provider_recovery_hints(error)
+        from local_operator.providers.radient_recovery import (
+            append_usage_limit_recovery_cached,
+        )
+
+        return append_usage_limit_recovery_cached(hinted, provider or None)
+
+    async def _with_recovery_hint_async(self, error: str) -> str:
+        """``error`` plus every remedy, probing a cold cache while yielding.
+
+        THE AWAITED TWIN, for the three call sites that run as async workers
+        (the send-failure path in `run_prompt` and both `/loop` noticers): the
+        probe is awaited rather than blocking, so its bounded wait always
+        yields to the app instead of freezing it. That difference in access
+        pattern is the ONLY difference from the sync twin, which is why both
+        are thin shells over `_provider_recovery_hints`.
+        """
+        hinted, provider = self._provider_recovery_hints(error)
+        from local_operator.providers.radient_recovery import (
+            append_usage_limit_recovery_async,
+        )
+
+        return await append_usage_limit_recovery_async(hinted, provider or None)
+
+    def _schedule_recovery_notice(self, notice: NoticeBlock, error: str) -> None:
+        """Complete ``notice`` with the account sentence, off the event loop.
+
+        WHY THIS EXISTS (review round 1, R1): the sync arm may not probe — it
+        runs on the app's event loop, where a cold probe would freeze input
+        and repaint for up to the probe envelope. So the notice is rendered
+        with what the process already knows, and when only a probe could add
+        the Radient sentence, one runs as an app worker and the notice is
+        EXTENDED in place (`NoticeBlock.restate`) the moment it lands. A miss
+        leaves the notice exactly as rendered; nothing here raises, and a bare
+        harness without a running worker degrades to the unextended notice.
+        """
+        try:
+            from local_operator.providers.radient_recovery import (
+                usage_limit_recovery_pending,
+            )
+
+            provider = ""
+            if self._session is not None:
+                provider = (self._session.model_label or "").partition("/")[0]
+            if not usage_limit_recovery_pending(error, provider or None):
+                return
+        except Exception:  # noqa: BLE001 — a hint must never replace the notice
+            logger.debug("Radient recovery notice could not be scheduled", exc_info=True)
+            return
+        rendered = notice.text()
+        try:
+            self.run_worker(
+                self._finish_recovery_notice(notice, rendered),
+                thread=False,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 — a bare harness (no running app) keeps the base text
+            logger.debug("Radient recovery notice worker could not start", exc_info=True)
+
+    async def _finish_recovery_notice(self, notice: NoticeBlock, rendered: str) -> None:
+        """The worker half of `_schedule_recovery_notice`: probe, then extend.
+
+        ``rendered`` is the text the notice was created with, held by the
+        closure rather than read back off the widget: the update is monotonic
+        (that text plus ONE line), and the module's append guard keeps a
+        retried render from stacking even if something else touched the row.
+        """
+        try:
+            from local_operator.providers.radient_recovery import (
+                append_recovery_line_once,
+                usage_limit_recovery_line,
+            )
+
+            line = await usage_limit_recovery_line()
+        except Exception:  # noqa: BLE001 — the module's contract, kept local
+            logger.debug("Radient recovery line could not be derived", exc_info=True)
+            return
+        updated = append_recovery_line_once(rendered, line)
+        if updated == rendered:
+            return
+        try:
+            notice.restate(updated, "error")
+        except Exception:  # noqa: BLE001 — a settled notice must survive this
+            logger.debug("Radient recovery notice could not be restated", exc_info=True)
 
     def _finalize_turn(
         self,

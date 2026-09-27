@@ -134,3 +134,29 @@ async def test_the_line_is_not_duplicated_when_the_text_already_carries_it(
     delivered = first + "\n" + rr.recovery_line(rr.RecoveryFacts(signed_in=True))
 
     assert rr.append_recovery_line_once(delivered, rr._GENERIC_LINE) == delivered
+
+
+@pytest.mark.asyncio
+async def test_a_failing_remedy_never_replaces_the_incident(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The never-raise contract is LOCAL to ``journal_incident`` (review R4).
+
+    Anything failing while deriving the remedy — the import, the gate, the
+    awaited line — must leave the incident's own text intact rather than take
+    the write with it. The gate is crashed here because it sits inside the
+    same guarded block as the import and the await, so one raise exercises
+    the whole property.
+    """
+    _arm(monkeypatch, tmp_path)
+
+    def boom(*args: Any, **kwargs: Any) -> bool:
+        raise RuntimeError("gate exploded")
+
+    monkeypatch.setattr(rr, "usage_limit_recovery_applies", boom)
+
+    text = await _journal(tmp_path, RENDERED_QUOTA)
+
+    assert text.startswith("[session incident (radient/")
+    assert "rate limit or quota exceeded (HTTP 402)" in text
+    assert "check your email" not in text

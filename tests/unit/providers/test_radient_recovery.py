@@ -363,6 +363,140 @@ def test_append_recovery_line_once_handles_empty_inputs() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The cached arm and the pending predicate — the sync, never-blocking read
+# ---------------------------------------------------------------------------
+
+
+def test_the_cached_line_is_none_when_only_a_probe_could_decide(tmp_path, monkeypatch) -> None:
+    """Cold cache plus a stored credential: nothing knowable, nothing probed."""
+    store = _oauth_store(tmp_path)
+    calls: list[str] = []
+
+    async def probe_async(token: str):
+        calls.append(f"async:{token}")
+        return _verification(grant_amount=5)
+
+    def probe_sync(token: str):
+        calls.append(f"sync:{token}")
+        return _verification(grant_amount=5)
+
+    monkeypatch.setattr(rr, "_probe_verification_async", probe_async)
+    monkeypatch.setattr(rr, "_probe_verification_sync", probe_sync)
+
+    assert rr.usage_limit_recovery_line_cached(store=store) is None
+    assert calls == [], "the cached arm must never probe, either twin"
+    assert rr.usage_limit_recovery_pending(RENDERED_QUOTA, "radient", store=store) is True
+    assert rr.append_usage_limit_recovery_cached(RENDERED_QUOTA, "radient", store=store) == (
+        RENDERED_QUOTA
+    )
+
+
+def test_the_cached_line_answers_locally_without_a_credential(tmp_path, monkeypatch) -> None:
+    """The network-free read is still an answer: the sign-in remedy, no probe."""
+    calls: list[str] = []
+
+    def probe_sync(token: str):
+        calls.append(token)
+        return None
+
+    monkeypatch.setattr(rr, "_probe_verification_sync", probe_sync)
+    empty = AuthStore(tmp_path / "empty.db")
+
+    line = rr.usage_limit_recovery_line_cached(store=empty)
+
+    assert line is not None and "No Radient account is signed in" in line
+    assert calls == []
+    assert rr.usage_limit_recovery_pending(RENDERED_QUOTA, "radient", store=empty) is False
+    out = rr.append_usage_limit_recovery_cached(RENDERED_QUOTA, "radient", store=empty)
+    assert "No Radient account is signed in" in out
+
+
+def test_the_cached_line_degrades_to_the_generic_line_on_a_store_failure(monkeypatch) -> None:
+    """An unreadable store is still a definite answer, so pending stays false."""
+    import local_operator.providers.auth_store as auth_store
+
+    def broken():
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(auth_store, "shared_auth_store", broken)
+
+    assert rr.usage_limit_recovery_line_cached() == rr._GENERIC_LINE
+    assert rr.usage_limit_recovery_pending(RENDERED_QUOTA, "radient") is False
+
+
+@pytest.mark.asyncio
+async def test_the_cached_line_serves_a_warm_cache(tmp_path, monkeypatch) -> None:
+    store = _oauth_store(tmp_path)
+
+    async def probe(token: str):
+        return _verification(grant_amount=5)
+
+    monkeypatch.setattr(rr, "_probe_verification_async", probe)
+    await rr.get_recovery_facts(store=store)
+
+    line = rr.usage_limit_recovery_line_cached(store=store)
+    assert line is not None and "check your email" in line
+    assert rr.usage_limit_recovery_pending(RENDERED_QUOTA, "radient", store=store) is False
+
+
+def test_pending_is_false_for_every_off_trigger(tmp_path) -> None:
+    store = _oauth_store(tmp_path)
+    assert rr.usage_limit_recovery_pending(RENDERED_QUOTA, "openai", store=store) is False
+    assert rr.usage_limit_recovery_pending(RENDERED_QUOTA, None, store=store) is False
+    assert (
+        rr.usage_limit_recovery_pending("authentication failed (HTTP 401)", "radient", store=store)
+        is False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Family dedupe — keyed on OUR sentence, never on a payload-supplied URL
+# ---------------------------------------------------------------------------
+
+
+def test_the_family_dedupe_is_independent_of_the_claim_url() -> None:
+    """Review round 1, R2's repro: a non-console ``claim_url`` must not open a
+    hole in the family guard — a branch flip between retries (pending, then
+    expired) previously appended a second remedy under the first."""
+    custom = "https://elsewhere/x"
+    pending_line = rr.recovery_line(
+        _facts(verification=_verification(signup_grant="pending", grant_amount=5, claim_url=custom))
+    )
+    expired_line = rr.recovery_line(
+        _facts(verification=_verification(signup_grant="expired", claim_url=custom))
+    )
+    text = f"{RENDERED_QUOTA}\n{pending_line}"
+
+    assert pending_line.startswith("Radient: ") and custom in pending_line
+    assert expired_line.startswith("Radient: ")
+    assert rr.append_recovery_line_once(text, expired_line) == text
+
+
+@pytest.mark.asyncio
+async def test_a_custom_claim_url_line_also_skips_the_probe(tmp_path, monkeypatch) -> None:
+    """The marker check runs BEFORE the fetch, so a re-render costs no request."""
+    store = _oauth_store(tmp_path)
+    calls: list[str] = []
+
+    async def probe(token: str):
+        calls.append(token)
+        return _verification(grant_amount=5)
+
+    monkeypatch.setattr(rr, "_probe_verification_async", probe)
+    pending_line = rr.recovery_line(
+        _facts(
+            verification=_verification(
+                signup_grant="pending", grant_amount=5, claim_url="https://elsewhere/x"
+            )
+        )
+    )
+    text = f"{RENDERED_QUOTA}\n{pending_line}"
+
+    assert await rr.append_usage_limit_recovery_async(text, "radient", store=store) == text
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # The wire shape — read through a mock transport, exactly like usage.py tests
 # ---------------------------------------------------------------------------
 

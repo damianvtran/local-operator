@@ -25,14 +25,34 @@ must tolerate that: absence degrades to the generic console line, never an
 error and never a blank.
 
 HOW THE PROBE IS BOUNDED, and why it is shaped this way. A short-TTL process
-cache fronts one bounded GET (``_FETCH_TIMEOUT_S``, failures swallowed — a
-non-200, an unparseable body and a missing object all collapse to ``None``). A
-miss costs at most one bounded request, and only on a path that is ALREADY a
-failed turn — the user is looking at an error, so the worst case is that
-sentence arriving a few hundred milliseconds later; a hit costs nothing. The
-token is the STORED one, deliberately not refreshed: a refresh is a network
-write (and a rotation) triggered by a turn that just failed, while a stale
-token merely fails the probe and degrades to the generic line.
+cache fronts one bounded GET (failures swallowed — a non-200, an unparseable
+body and a missing object all collapse to ``None``). A miss costs at most one
+bounded request, and only on a path that is ALREADY a failed turn — the user is
+looking at an error, so the worst case is that sentence arriving a few hundred
+milliseconds later; a hit costs nothing. The bound is an explicit envelope
+(``_CONNECT_TIMEOUT_S`` / ``_READ_TIMEOUT_S``) rather than a single number,
+because httpx applies its timeout PER PHASE: the single ``5.0`` this replaces
+was ~10s in the pathological case (blackholed connect, then a stalled body)
+and review round 1 measured 5.04s on the connect phase alone. The token is the
+STORED one, deliberately not refreshed: a refresh is a network write (and a
+rotation) triggered by a turn that just failed, while a stale token merely
+fails the probe and degrades to the generic line.
+
+THREE ACCESS PATTERNS, and the caller each one serves. THE AWAITED ARM
+(:func:`append_usage_limit_recovery_async`) probes on a cache miss while
+yielding the event loop — every site that can await uses it (the session's
+incident journal, and the TUI's async sites through the app's awaited twin).
+THE CACHED ARM (:func:`append_usage_limit_recovery_cached`) NEVER touches the
+network: it answers from the cache or from the network-free "no stored
+credential" read, and returns the text unchanged when only a probe could
+decide. The TUI's sync handler renders through it — a sync handler runs on the
+app's event loop, where a cold probe would freeze input and repaint (review
+round 1, R1) — and the app completes the notice from an off-loop worker, so
+the sentence still lands. THE BOUNDED SYNC ARM
+(:func:`append_usage_limit_recovery`) blocks its caller for up to the probe
+envelope and exists for exactly one surface: the headless renderer, whose
+one-shot process exits with the line, so a cache-only answer there would
+render the generic fallback forever. Loop-side callers must not use it.
 
 NOTHING HERE RAISES. Every branch returns a string: a recovery sentence is an
 ADDITION to an error the user is already being shown, so a store read, a parse
@@ -87,16 +107,30 @@ CONSOLE_URL = "https://console.radienthq.com"
 #: a freshly claimed grant is reflected while the user is still retrying.
 _TTL_S = 180.0
 
-#: The per-request bound, matching the caller-visible promise ("5s bound").
-_FETCH_TIMEOUT_S = 5.0
+#: The probe's wall envelope, spelled PER PHASE because that is how httpx
+#: applies a timeout: connect may burn its full share on a blackholed host and
+#: read its own on a stalled body, so the pathological total is ~connect +
+#: read (~5.5s). The single ``5.0`` this replaces was two full phases (~10s),
+#: and review round 1 measured 5.04s on the connect phase alone. A healthy API
+#: answers in tens of milliseconds and never notices the difference.
+_CONNECT_TIMEOUT_S = 3.0
+_READ_TIMEOUT_S = 2.5
+_PROBE_TIMEOUT = httpx.Timeout(
+    connect=_CONNECT_TIMEOUT_S,
+    read=_READ_TIMEOUT_S,
+    write=_READ_TIMEOUT_S,
+    pool=_READ_TIMEOUT_S,
+)
 
-#: Substrings that identify a line THIS module already appended. The first is
-#: the console every claim/generic line points at; the second is the
-#: no-sign-in remedy's own opening words. A retried render carrying a
-#: DIFFERENT branch's line (the grant expired between two attempts) must not
-#: stack a second remedy under the first, which exact-line matching alone
-#: would miss.
-_FAMILY_MARKERS = ("console.radienthq.com", "No Radient account is signed in")
+#: Stable PREFIXES carried by every sentence this module appends: each quota
+#: branch line opens with ``Radient: `` and the no-sign-in remedy opens with
+#: its own words. Deliberately NOT the console URL: the payload's ``claim_url``
+#: may be any URL the backend supplies, so a URL-based marker silently stopped
+#: matching a line built from a non-console URL — and a branch flip between
+#: retries then stacked a second remedy (review round 1, R2). A retried render
+#: carrying a DIFFERENT branch's line must not stack under the first, which
+#: exact-line matching alone would miss.
+_FAMILY_MARKERS = ("Radient: ", "No Radient account is signed in")
 
 _GENERIC_LINE = f"Radient: check your account and credit balance at {CONSOLE_URL}."
 
@@ -278,7 +312,7 @@ async def fetch_me_verification(
         response = await client.get(
             RADIENT_API_URL + "/me",
             headers=_bearer(access_token),
-            timeout=_FETCH_TIMEOUT_S,
+            timeout=_PROBE_TIMEOUT,
             follow_redirects=False,
         )
         if response.status_code != 200:
@@ -300,7 +334,7 @@ def fetch_me_verification_sync(client: httpx.Client, access_token: str) -> Verif
         response = client.get(
             RADIENT_API_URL + "/me",
             headers=_bearer(access_token),
-            timeout=_FETCH_TIMEOUT_S,
+            timeout=_PROBE_TIMEOUT,
             follow_redirects=False,
         )
         if response.status_code != 200:
@@ -316,13 +350,13 @@ def fetch_me_verification_sync(client: httpx.Client, access_token: str) -> Verif
 
 async def _probe_verification_async(token: str) -> VerificationFacts | None:
     """One bounded probe, over a client this module owns. The network seam tests arm."""
-    async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT_S, follow_redirects=False) as client:
+    async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT, follow_redirects=False) as client:
         return await fetch_me_verification(client, token)
 
 
 def _probe_verification_sync(token: str) -> VerificationFacts | None:
     """One bounded probe, over a client this module owns. The network seam tests arm."""
-    with httpx.Client(timeout=_FETCH_TIMEOUT_S, follow_redirects=False) as client:
+    with httpx.Client(timeout=_PROBE_TIMEOUT, follow_redirects=False) as client:
         return fetch_me_verification_sync(client, token)
 
 
@@ -359,7 +393,13 @@ async def get_recovery_facts(*, store: AuthStore | None = None) -> RecoveryFacts
 
 
 def get_recovery_facts_sync(*, store: AuthStore | None = None) -> RecoveryFacts:
-    """The synchronous twin of :func:`get_recovery_facts` (headless path)."""
+    """The bounded synchronous twin — the HEADLESS-ONLY arm.
+
+    See the module docstring's access patterns: this is the one entry point
+    that blocks on a cold cache. It is kept for the one-shot headless
+    renderer; the TUI must use :func:`get_recovery_facts` (awaited) or
+    :func:`usage_limit_recovery_line_cached` (never blocks).
+    """
     now = time.monotonic()
     cached = _cached_facts(now)
     if cached is not None:
@@ -391,8 +431,56 @@ async def usage_limit_recovery_line(*, store: AuthStore | None = None) -> str:
 
 
 def usage_limit_recovery_line_sync(*, store: AuthStore | None = None) -> str:
-    """The synchronous twin of :func:`usage_limit_recovery_line`."""
+    """The BLOCKING twin of :func:`usage_limit_recovery_line` (see the docs)."""
     return recovery_line(get_recovery_facts_sync(store=store))
+
+
+def usage_limit_recovery_line_cached(*, store: AuthStore | None = None) -> str | None:
+    """The sentence when this process ALREADY knows it, else ``None``.
+
+    Cache-only by construction: it never probes and never blocks. The answers
+    knowable without the wire are still computed — a warm cache, and the
+    network-free "no stored credential" read (a store that cannot be read
+    degrades to the generic line, the same answer :func:`get_recovery_facts`
+    gives it). ``None`` means exactly one thing: only a probe could decide, so
+    a caller that can kick one off the event loop should (see
+    :func:`usage_limit_recovery_pending`), and a caller that cannot renders
+    the text unextended.
+    """
+    now = time.monotonic()
+    cached = _cached_facts(now)
+    if cached is not None:
+        return recovery_line(cached)
+    try:
+        if store is None:
+            from local_operator.providers.auth_store import shared_auth_store
+
+            store = shared_auth_store()
+        token = _resolve_token(store)
+    except Exception:  # noqa: BLE001 — a hint must never raise; see the module docstring
+        logger.debug("Radient recovery: credential read failed", exc_info=True)
+        return recovery_line(RecoveryFacts(signed_in=None))
+    if token is None:
+        return recovery_line(RecoveryFacts(signed_in=False))
+    return None
+
+
+def usage_limit_recovery_pending(
+    rendered_error: str, provider: str | None, *, store: AuthStore | None = None
+) -> bool:
+    """True when a probe could still add a sentence to ``rendered_error``.
+
+    The TUI's sync handler asks this to decide whether the off-loop worker is
+    worth scheduling: the trigger must apply (quota-labelled text, Radient
+    provider), no family line may already be present, and the process must not
+    already know the answer — a warm cache or a missing credential is
+    knowable locally and renders through the cached arm instead.
+    """
+    if not usage_limit_recovery_applies(rendered_error, provider):
+        return False
+    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+        return False
+    return usage_limit_recovery_line_cached(store=store) is None
 
 
 def usage_limit_recovery_applies(rendered_error: str, provider: str | None) -> bool:
@@ -448,16 +536,37 @@ async def append_usage_limit_recovery_async(
     return append_recovery_line_once(rendered_error, line)
 
 
+def append_usage_limit_recovery_cached(
+    rendered_error: str, provider: str | None, *, store: AuthStore | None = None
+) -> str:
+    """``rendered_error`` plus the Radient remedy when it is ALREADY known.
+
+    The non-blocking twin, for sync callers that run on an event loop and may
+    not block it (the TUI's handler; review round 1, R1). Cold and
+    probe-decided: the text is returned unchanged, and a caller that can
+    schedule one runs :func:`usage_limit_recovery_line` off-loop to complete
+    the render — see ``OperatorApp._schedule_recovery_notice``.
+    """
+    if not usage_limit_recovery_applies(rendered_error, provider):
+        return rendered_error
+    if any(marker in rendered_error for marker in _FAMILY_MARKERS):
+        return rendered_error
+    line = usage_limit_recovery_line_cached(store=store)
+    return append_recovery_line_once(rendered_error, line or "")
+
+
 def append_usage_limit_recovery(
     rendered_error: str, provider: str | None, *, store: AuthStore | None = None
 ) -> str:
-    """The synchronous twin, for display sites that cannot await.
+    """The BOUNDED blocking twin, for the one surface that cannot await.
 
-    Used by the TUI's recovery helper (whose one caller in a sync message
-    handler forecloses an async signature) and the headless renderer. Bounded
-    like every path here: the worst case is one ≤5s probe, and only when a
-    Radient quota error is actually being rendered — the process cache keeps
-    every repeat free of it.
+    That surface is the headless renderer: its one-shot process exits with
+    the line it prints, so a cache-only answer would render the generic
+    fallback forever, and it cannot await. Everything loop-side must use the
+    awaited or cached variants instead (see the module docstring's access
+    patterns). Bounded like every path here: the worst case is one probe
+    within the ~5.5s envelope, and only when a Radient quota error is actually
+    being rendered — the process cache keeps every repeat free of it.
     """
     if not usage_limit_recovery_applies(rendered_error, provider):
         return rendered_error
