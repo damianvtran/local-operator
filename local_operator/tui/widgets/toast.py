@@ -211,6 +211,31 @@ def _network_group_line(names: list[str], max_cells: int) -> str:
     return truncate_cells(counted, max(1, max_cells))
 
 
+def _borrowed_signin_command(text: str) -> str | None:
+    """The command inside a BORROWED-SIGN-IN line, or ``None`` for any other text.
+
+    The shape is ``"<owner>: /mcp login <name>"`` — a device name, a colon, then a
+    command that is only valid ON that device
+    (``network.credentials.messages.render_borrowed_signin``).
+
+    WHY A SHAPE TEST AND NOT A FLAG (review round 2, M1): the composer is called with
+    ``(name, text, budget)`` and nothing else, and the family is the only text that
+    puts a command after a colon-prefixed head. The recognition is deliberately TIGHT
+    (exactly one space-free token, ``": "``, then the command lead) so no existing row
+    can be re-shaped by accident: every other family either starts with the command
+    (rungs 2/3 own those), starts with the ``network: `` marker, or carries no
+    ``/mcp `` at all — and a text that merely MENTIONS a command later is left to the
+    backstop, which is what it had before this rung existed.
+    """
+    lead = text.find(_COMMAND_LEAD)
+    if lead <= 0:
+        return None
+    prefix = text[:lead]
+    if not prefix.endswith(": ") or " " in prefix[:-2]:
+        return None
+    return text[lead:]
+
+
 def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
     """``failed: <name> — <text>``, composed against the card's real budget.
 
@@ -262,6 +287,14 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
       not fit (a 51-cell terminal has a 43-cell card, exactly the width of
       ``failed: minerva-qa — /mcp reauth minerva-qa``). Without this rung the
       clamp cut the name's last character — the same D11 defect, one cell over.
+    * **The borrowed-sign-in rung** — the same command-first preserving rule as
+      rung 2, for the one family whose command does NOT lead its text:
+      ``"<owner>: /mcp login <name>"`` (``render_borrowed_signin``, review round 2
+      M1). The head is shed instead, because the head is the owner and the tail is
+      the command, and a command that errors if followed is the defect D9 warns
+      about. Composed at the widest card: 55 cells for a 19-cell owner and a 6-cell
+      server — rung 1, both halves visible — and ``failed: launchdarkly — /mcp login
+      launchdarkly…`` at 12 cells, where the owner no longer fits beside it.
     * **Backstop** — the clamp, for a text that is not a command-with-reason
       (every plain diagnostic, the D10 challenge line, a 200-cell error) and for
       a name so long that not even the command fits on the row. Never worse than
@@ -291,6 +324,19 @@ def _fit_failure_line(name: str, text: str, max_cells: int) -> str:
     if text.startswith(_COMMAND_LEAD) and _FAILURE_REASON_SEP in text:
         command = text.split(_FAILURE_REASON_SEP, 1)[0]
         for shed in (f"{label}{command}…", f"{label}{command}"):
+            if cell_len(shed) <= max_cells:
+                return shed
+    borrowed = _borrowed_signin_command(text)
+    if borrowed is not None:
+        # THE BORROWED-SIGN-IN RUNG, and it sheds the OPPOSITE end from rung 2: the
+        # owner is the head here and the command trails it, so the clamp would eat the
+        # command — ``failed: linear — damians-MacBook-Pro: /mcp l…``, a command that
+        # errors if followed, which is exactly what D9/D11 exist against (review round
+        # 2, M1: the first version composed to 72 cells and did precisely that). The
+        # command is kept whole and the owner is shed with rung 2's ``…`` mark; ``/mcp``
+        # and the durable transcript notice carry the sentence whole, so the reader is
+        # never left without the owning device, only without it on this one row.
+        for shed in (f"{label}{borrowed}…", f"{label}{borrowed}"):
             if cell_len(shed) <= max_cells:
                 return shed
     return truncate_cells(full, max_cells)

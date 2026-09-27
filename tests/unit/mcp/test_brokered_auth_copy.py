@@ -73,8 +73,7 @@ def test_a_borrowed_server_names_the_owning_device(tmp_path: Path) -> None:
     """The R1 arm: the line says WHERE the sign-in is, not "log in here"."""
     _, text = _borrowing(tmp_path)
 
-    assert OWNER in text, text
-    assert "/mcp login linear there" in text, text
+    assert text == f"{OWNER}: /mcp login linear", text
     assert "to authorize" not in text, text
 
 
@@ -91,18 +90,76 @@ def test_a_borrowed_server_never_recommends_a_local_grant(tmp_path: Path) -> Non
     required = manager._auth_failure_text("linear", McpAuthRequiredError(URL), store=store)
 
     for text in (challenge, required):
-        assert OWNER in text, text
-        assert "/mcp login linear there" in text, text
+        assert text == f"{OWNER}: /mcp login linear", text
         assert "/mcp reauth" not in text, text
 
 
-def test_the_borrowed_line_survives_the_toast_clamp() -> None:
-    """Design constraint D1/D4: the toast clamps the TAIL, and one ``—`` only."""
-    from local_operator.network.credentials.messages import render_borrowed_signin
+def test_a_device_that_holds_its_own_grant_keeps_the_local_verb(tmp_path: Path) -> None:
+    """M2: the local grant wins, so the local verb is the honest advice.
 
+    ``_brokered_mcp_auth`` asks ``should_borrow`` **and** ``server_has_stored_grant``
+    before it brokers anything, and the second half is reachable in exactly the state
+    R1's rationale creates: running the local login is how a borrower gets a row of its
+    own, and that row survives. Answering with the peer's device name there points the
+    operator at a command on somebody else's machine for a failure that is here.
+    """
+    store: Any = _Store(_Client())
+    manager = McpManager(str(tmp_path), auth_store=store)
+    exc = McpAuthChallengeError(URL, status_code=401, oauth_available=True, has_stored_grant=True)
+
+    text = manager._auth_failure_text("linear", exc, store=store)
+
+    assert OWNER not in text, text
+    assert "/mcp reauth linear" in text, text
+
+
+def test_the_legacy_shape_looks_the_grant_up_before_answering(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """M2 for the shape that carries no ``has_stored_grant`` — the lookup decides."""
+    store: Any = _Store(_Client())
+    manager = McpManager(str(tmp_path), auth_store=store)
+    monkeypatch.setattr(
+        "local_operator.mcp.auth.server_has_stored_grant", lambda *args, **kwargs: True
+    )
+
+    text = manager._auth_failure_text("linear", McpAuthRequiredError(URL), store=store)
+
+    assert OWNER not in text, text
+    assert "/mcp reauth linear" in text, text
+
+
+def test_the_composed_row_fits_the_toast_budget() -> None:
+    """M1's guard: the subject is the ROW that ships, not the bare sentence.
+
+    The round-1 version measured the string against 58 — a threshold higher than the
+    budget it stood in for — and never called the composer, so a sentence that passed
+    was still shed on the row. The composer is called here exactly as the toast calls
+    it, with the detail row's own glyph already paid for.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.network.credentials.messages import render_borrowed_signin
+    from local_operator.tui.widgets.toast import (
+        TOAST_MAX_WIDTH,
+        TOAST_PADDING_CELLS,
+        _fit_failure_line,
+    )
+
+    budget = TOAST_MAX_WIDTH - TOAST_PADDING_CELLS - 2
     text = render_borrowed_signin(OWNER, "linear")
-    assert len(text) <= 58, (len(text), text)
-    assert "—" not in text, text
+
+    assert cell_len(text) == 38, text
+    row = _fit_failure_line("linear", text, budget)
+    assert row == f"failed: linear — {text}", row
+    assert cell_len(row) <= budget, row
+
+    # A server name too long for both halves keeps the COMMAND whole and sheds the
+    # owner with the mark — the rung `toast._borrowed_signin_command` exists for.
+    long_row = _fit_failure_line(
+        "launchdarkly", render_borrowed_signin(OWNER, "launchdarkly"), budget
+    )
+    assert long_row == "failed: launchdarkly — /mcp login launchdarkly…", long_row
 
 
 def test_a_non_borrowing_server_keeps_the_local_command(tmp_path: Path) -> None:

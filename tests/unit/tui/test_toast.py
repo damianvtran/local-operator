@@ -560,6 +560,40 @@ def test_a_command_with_a_reason_sheds_the_reason_before_the_command() -> None:
     assert _failure_row("minerva-qa", line, 45) == "failed: minerva-qa — /mcp reauth minerva-qa"
 
 
+def test_a_borrowed_signin_keeps_its_command_and_sheds_the_owner() -> None:
+    """Review round 2, M1 — the one family whose command does NOT lead its text.
+
+    ``render_borrowed_signin`` names the owning device FIRST, because the command is
+    only meaningful on that device — so the ordinary clamp ate the command's tail
+    (``failed: linear — damians-MacBook-Pro: /mcp l…``), and a shown command that
+    errors when followed is the defect D9/D11 exist against. The rung below the clamp
+    keeps the command whole and sheds the HEAD with the same ``…`` mark rung 2 uses for
+    a shed reason; ``/mcp`` and the durable notice carry the sentence whole.
+    """
+    from local_operator.network.credentials.messages import render_borrowed_signin
+    from local_operator.tui.widgets.toast import truncate_cells
+
+    widest = TOAST_MAX_WIDTH - TOAST_PADDING_CELLS
+    # Both halves fit at the widest card for the canonical pair (38-cell text, 55-cell
+    # row against the detail row's 56) — which is the point of naming the owner at all.
+    assert (
+        _failure_row("linear", render_borrowed_signin("damians-MacBook-Pro", "linear"), widest)
+        == "failed: linear — damians-MacBook-Pro: /mcp login linear"
+    )
+    # A longer server name cannot hold both, and there the COMMAND is what survives.
+    assert (
+        _failure_row(
+            "launchdarkly", render_borrowed_signin("damians-MacBook-Pro", "launchdarkly"), widest
+        )
+        == "failed: launchdarkly — /mcp login launchdarkly…"
+    )
+    # NEGATIVE CONTROL: a text that merely MENTIONS a command later is left exactly as
+    # it was — the recognition is a shape (one space-free token, then ``: ``), not a
+    # substring search for ``/mcp ``.
+    text = "the endpoint /mcp login x is not configured" + "y" * 30
+    assert _failure_row("srv", text, widest) == truncate_cells(f"failed: srv — {text}", widest - 2)
+
+
 def test_a_diagnostic_with_a_dash_is_still_clamped_exactly_as_before() -> None:
     """The shed is keyed on a LEADING command, never on the dash.
 

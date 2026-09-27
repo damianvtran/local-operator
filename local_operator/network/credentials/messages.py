@@ -111,9 +111,13 @@ def render_broker_error(
             "usual failover to another of your own logins is already running."
         )
     if error.code == "interactive_required":
+        # "can run", not "has been asked to": nothing asks the owner (review round 2, M3 —
+        # the design's §4.7 ``credential_repair`` op is not built, which is what the
+        # amended row records). A sentence promising a request nobody sent is the same
+        # class of drift the amendment exists to remove.
         return (
             f"'{label}' needs an interactive sign-in on {owner} before it can be lent out; "
-            f"the operator there has been asked to run '{login}'."
+            f"the operator there can run '{login}'."
         )
     if error.code == "epoch_stale":
         return (
@@ -185,12 +189,23 @@ def render_borrowed_signin(owner: str, name: str) -> str:
     account switch. The sign-in this failure is about lives on ``owner``, so the line
     names the owning device and puts the command THERE.
 
-    Short on purpose: this string is the tail of the toast's ``failed: <name> — …``
-    and is clamped near 58 cells (design review D1/D4), so the owning device and the
-    command have to survive the first screenful — measured for the canonical case
-    (an 18-cell device name and a 6-cell server) at 54 cells, with no second ``—``.
+    Short on purpose: this string is the tail of the toast's ``failed: <name> — …``,
+    whose budget has already paid for the label — measured at the widest card as 56
+    cells (``TOAST_MAX_WIDTH 60 - TOAST_PADDING_CELLS 2`` minus the detail row's own
+    2), of which the label spends 17 for ``linear`` (review round 2, M1: the first
+    version of this sentence was 55 cells and composed into a 72-cell row, so the
+    command the operator was told to run was cut to ``/mcp l…``).
+
+    The COMPOSED row is the contract, not this string: 38 cells here and 55 composed
+    for the canonical pair (19-cell device name ``damians-MacBook-Pro``, 6-cell
+    server ``linear``), which fits. Longer names do not, and then
+    ``toast._fit_failure_line`` keeps the COMMAND whole and sheds the owner with the
+    ``…`` mark — a shown command that errors if followed is the defect D9/D11 exist
+    against, while the shed owner is carried whole by ``/mcp`` and the durable notice.
+    The owner still leads whenever both fit, because the command is only meaningful on
+    that device: a reader who cannot see WHERE it runs may run it here.
     """
-    return f"sign-in on {owner}: /mcp login {name} there"
+    return f"{owner}: /mcp login {name}"
 
 
 def render_success(provider: str, owner_name: str, *, cached: bool = False) -> str:
