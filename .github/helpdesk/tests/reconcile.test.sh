@@ -634,6 +634,24 @@ runs "$(run_obj 'Sir Knight Lop the Second — review PR #900 (sweep)' completed
 check "sweep: attempts older than the rolling 24h do not count" \
   "review 210" "$(DAILY_ENGAGEMENT_CAP=1 bash "$reconcile" sweep)"
 
+# Fail-open: a run list that gh serves with rc 0 but jq cannot parse must not
+# abort the sweep — the attempt lookup and the daily-cap lookup mask their
+# failures, the jq error stays a stderr note, and the due dispatch still goes
+# out. (The run-list twin of the push-timeline failure case above.)
+reset
+pr_add "$(pr_obj 175 alice false false MERGEABLE 2700 300)"
+comments 175
+timeline 175
+printf '{not json' > "$FIX/runs.json"
+err="$tmp/err-malformed-runs.txt"
+rc=0
+out="$(bash "$reconcile" sweep 2>"$err")" || rc=$?
+check "sweep: a malformed run list does not abort the sweep (rc 0)" "0" "$rc"
+check "sweep: the due review still dispatches despite the malformed run list" \
+  "review 175" "$out"
+contains "sweep: the run-list lookup failure stays a stderr note" \
+  "$(cat "$err")" "jq:"
+
 # ---------------------------------------------------------------------------
 # Sweep-level skips.
 # ---------------------------------------------------------------------------

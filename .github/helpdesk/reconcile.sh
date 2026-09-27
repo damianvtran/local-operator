@@ -41,10 +41,11 @@
 #
 #   Two dispatch bounds keep a busy window's spend finite without a human:
 #   one sweep emits at most SWEEP_MAX_DISPATCH engagements (the OLDEST by
-#   updatedAt; the rest ride the next sweep), and a repository dispatches at
-#   most DAILY_ENGAGEMENT_CAP per rolling 24h — launch-day backfill dispatched
-#   4-7 engagements in a single sweep. Both constants are env-overridable in
-#   the config block below; raise them when a window genuinely needs more.
+#   updatedAt; the rest ride the next sweep), and a repository's sweeps
+#   dispatch at most DAILY_ENGAGEMENT_CAP per rolling 24h (mention and manual
+#   runs are not budgeted) — launch-day backfill dispatched 4-7 engagements in
+#   a single sweep. Both constants are env-overridable in the config block
+#   below; raise them when a window genuinely needs more.
 #
 # THE MARKER CONTRACT — keep these spellings stable; the README documents them
 # as a contract and every consumer greps exactly these:
@@ -415,8 +416,10 @@ run_sweep() {
       # One attempt per family state: a still-running or successful attempt
       # newer than the latest family comment already judged this state, and
       # posting nothing is a legitimate outcome — do not re-fire every sweep.
-      # A young failed attempt backs off first (attempt_skip_reason).
-      skip_reason="$(attempt_skip_reason "$num" "verdict" "$FAMILY_LAST_TIME")"
+      # A young failed attempt backs off first (attempt_skip_reason). The
+      # mask keeps the documented fail-open: a jq error on an rc-0 run list
+      # must not abort the sweep under `set -e`.
+      skip_reason="$(attempt_skip_reason "$num" "verdict" "$FAMILY_LAST_TIME" || true)"
       if [ -n "$skip_reason" ]; then
         record_skip "$num" "$skip_reason"
         continue
@@ -456,7 +459,9 @@ run_sweep() {
     # so any attempt for the PR counts), and a young failure backs off first.
     # This is what keeps a second sweep from re-dispatching a review while the
     # first run is still going, or re-firing a review that posted nothing.
-    skip_reason="$(attempt_skip_reason "$num" "review" "")"
+    # Masked like the verdict path: the lookup must fail open (a jq error on
+    # an rc-0 run list would otherwise abort the sweep under `set -e`).
+    skip_reason="$(attempt_skip_reason "$num" "review" "" || true)"
     if [ -n "$skip_reason" ]; then
       record_skip "$num" "$skip_reason"
       continue
@@ -472,7 +477,9 @@ run_sweep() {
   more_due_note=""
   daily_cap_note=""
   if [ "${#actions[@]}" -gt 0 ]; then
-    dispatched_today="$(sweep_dispatched_24h)"
+    # Masked to the documented count-0 fallback: a lookup failure counts 0 —
+    # the cap must bound a burst, not become a second outage.
+    dispatched_today="$(sweep_dispatched_24h || echo 0)"
     if [ "$dispatched_today" -ge "$DAILY_ENGAGEMENT_CAP" ]; then
       daily_cap_note="daily engagement budget reached (${dispatched_today}/${DAILY_ENGAGEMENT_CAP}); due engagements resume after the window rolls"
       printf '%s\n' "$daily_cap_note" >&2
