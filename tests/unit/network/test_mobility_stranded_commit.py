@@ -20,7 +20,9 @@ Cells, one per half of the repair:
    confirmation window the bound already carried;
 2. the receipt for an unconfirmed commit is a refusal that names the route home;
 3. the device holding the staged copy can adopt it when the user asks it for the id;
-4. an invite names the endpoint the relay actually listens on (Q2).
+4. an invite names the endpoint the relay actually listens on (Q2);
+5. the same receipt is TRUE in the other state a missing confirmation can mean — the
+   receiver promoted and the frame was lost (QA round 2, Q1).
 """
 
 from __future__ import annotations
@@ -122,6 +124,62 @@ def test_an_unconfirmed_commit_is_refused_with_the_route_home(
     staged = sync.staging_dir(server_b.root, SESSION)
     assert (staged / "ready.json").is_file(), "the receiver's verified copy must survive"
     assert not (server_b.root / "sessions" / SESSION).is_dir()
+
+
+def test_the_receipt_is_true_when_the_receiver_DID_promote(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2, Q1: the same receipt, in the state it used to misdescribe.
+
+    A missing ``done`` frame has two causes, and this is the other one: the receiver ran
+    its promote (one ``os.replace``) and the frame was lost. The sentence that asserted
+    "its verified copy is in that device's ``network/staging/<id>``" then named an EMPTY
+    directory while the conversation sat on the destination, listed, with the verb it
+    named answering ``already_local`` — measured on the two-device rig by freezing the
+    promote rename. What is pinned here is the STATE and the sentence's SHAPE: the check
+    that decides between the two states comes before the staging path.
+    """
+    both: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = both
+    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    monkeypatch.setattr(mobility, "OFFLOAD_CONFIRM_WAIT_S", 0.5)
+    original_ask = mobility.LinkTransport.ask
+
+    def _lose_the_done_frame(
+        self: Any, frame: dict[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        if frame.get("phase") == "done":
+            # DROPPED HERE RATHER THAN IN THE HANDLER, so the promote and everything
+            # before it run for real: the destination is told its acknowledgement
+            # landed, and this device's own wait never learns about it.
+            return {"result": "done", "session_id": SESSION}
+        return original_ask(self, frame, timeout=timeout)
+
+    monkeypatch.setattr(mobility.LinkTransport, "ask", _lose_the_done_frame)
+    result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False, result
+    assert result["code"] == "unconfirmed", result
+    assert result["changed"] is True, result
+    assert result["phase_reached"] == "committed", result["phase_reached"]
+
+    # AND THE STATE IS THE ONE THE OLD SENTENCE GOT WRONG: the conversation is ON the
+    # destination, with its transcript, and no staging directory is left at all.
+    assert (server_b.root / "sessions" / SESSION / "transcript.jsonl").is_file()
+    assert not sync.staging_dir(server_b.root, SESSION).exists(), (
+        "the promote consumes the staging directory, which is what makes the old "
+        "sentence name a path that does not exist in this state"
+    )
+
+    # THE SENTENCE IS TRUE HERE: it hands over the check that decides the state — the
+    # destination's own listing — BEFORE the staging path, which is empty in this one.
+    # Both halves matter, and each is a way a wrong wording fails: one that names
+    # neither fails the first assertion, and one that names the staging path first
+    # fails the second.
+    message = str(result["message"])
+    assert "listing" in message, message
+    assert message.index("listing") < message.index(f"network/staging/{SESSION}"), message
 
 
 def test_the_device_holding_the_staged_copy_can_adopt_it(

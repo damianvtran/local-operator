@@ -18,9 +18,13 @@ Three cells, one per layer the answer passes through:
 3. the state the review describes, driven end to end on the wire, which refuses and
    leaves the only copy where it is.
 
-Cells 1 and 2 are red on the pre-fix code; cell 3 is a state assertion (the wire's
-own gate, ``authorizer._move_scope``, refuses a third device a layer earlier — see
-the cell's own note). The legitimate direction is pinned by
+And a fourth, added by review round 3 (MINOR 1): the SECOND consumer of a peer's answer,
+``_destination_move``, has its own cell — its check could be reverted with the whole
+network suite still green, which is an evidence gap rather than a code one.
+
+Cells 1, 2 and 4 are red on the pre-fix code; cell 3 is a state assertion (the wire's
+own gate, ``authorizer._move_scope``, refuses a third device a layer earlier — see the
+cell's own note). The legitimate direction is pinned by
 ``test_mobility_stranded_commit.py::test_the_device_holding_the_staged_copy_can_adopt_it``
 and by cell 1's first half here.
 """
@@ -30,7 +34,7 @@ from __future__ import annotations
 import json
 import shutil
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -225,3 +229,59 @@ def test_the_wire_refuses_a_third_device_and_leaves_the_copy(
     # AND THE COPY IS STILL THE PRODUCT'S OWN VERIFIED ONE, not a directory the refusal
     # half-emptied: the promote is the only thing that consumes a staging directory.
     assert (staged / "ready.json").is_file()
+
+
+def test_the_pull_route_reads_the_record_before_it_promotes(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cell 4: the OTHER consumer — `_destination_move` — with its own discriminating cell.
+
+    The check there could be reverted with the whole 858-test network suite still green
+    (review round 3, MINOR 1): every other cell reaches a promote through
+    ``_reconcile_destination``, which is the ``--to local`` route, so nothing exercised
+    the branch that decides in the PULL route. Here the peer's answer is handed to that
+    function directly, the way the invite path hands it one.
+    """
+    both: Devices = request.getfixturevalue("pair")
+    server_a, server_b, _host, _port = both
+    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    staged = _staged_copy_of_the_receivers_move(server_a, server_b, monkeypatch)
+    assert not (server_b.root / "sessions" / SESSION).is_dir()
+
+    class _AnswersTheRecordOnly:
+        """A peer answering the existence-only way — what the owner did before this fix."""
+
+        link = None
+
+        def ask(self, frame: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+            assert frame.get("phase") == "status", frame
+            return {
+                "result": "tombstone",
+                "owner": False,
+                "tombstone": {
+                    "device_id": THIRD,
+                    "device_name": "peer-c",
+                    "moved_at": time.time(),
+                },
+                "session_id": SESSION,
+            }
+
+    result, refusal, _target = mobility._destination_move(  # noqa: SLF001 — the pull route
+        server_b,
+        SESSION,
+        transport=cast(Any, _AnswersTheRecordOnly()),
+        keep=False,
+        wait_s=0.0,
+        owner_device=server_a.identity.device_id,
+        owner_name="device-a",
+    )
+
+    assert result is None, result
+    assert refusal is not None, refusal
+    assert refusal["code"] == "third_device", refusal
+    assert "peer-c" in refusal["message"], refusal
+    assert not (
+        server_b.root / "sessions" / SESSION
+    ).is_dir(), "the pull route promoted a copy the record does not name"
+    assert staged.is_dir(), "the refusal must leave the only copy of the conversation alone"

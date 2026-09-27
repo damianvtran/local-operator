@@ -559,8 +559,21 @@ def _adopt_elsewhere_refusal(
     moved, and the staged copy is left exactly where it is (it is the only copy here).
     """
     device_id = str(tombstone.get("device_id") or "")
+    if not device_id:
+        # A RECORD WITH NO TAKER, which today's writers cannot produce
+        # (``projection.write_tombstone`` always writes the destination, and
+        # ``_complete_handoff`` takes it from the journal) and a hand-edited or
+        # truncated file can: it cannot be adopted anywhere, so naming a device or a
+        # verb here would invent both. The sentence says only what is true.
+        return _move_refusal(
+            session_id,
+            "third_device",
+            f"{session_id} was handed away and its record names no device, so it does not "
+            "name this one: the copy staged here is not this device's to adopt and "
+            "nothing was changed",
+        )
     name = str(tombstone.get("device_name") or "") or server._member_name(device_id)  # noqa: SLF001
-    who = name or device_id or "another device"
+    who = name or device_id
     return _move_refusal(
         session_id,
         "third_device",
@@ -3215,18 +3228,34 @@ def _offload(
         # This device retired its copy on the destination's ``ready`` — the copy was
         # verified, which is what the commit means — and the destination then never
         # confirmed the promote. What the user needs is not a success line but the
-        # three facts only this device has: the id left here, where the bytes are, and
-        # the one verb that adopts them. The answer is a REFUSAL with ``changed: true``
-        # on purpose: the move is unfinished (the conversation is on no device's
-        # listing), and a front end that branched on ``ok`` would otherwise open a
-        # session that is not there.
+        # facts only this device has: the id left here, and the two states a missing
+        # confirmation can be, with the one check that tells them apart. The answer is
+        # a REFUSAL with ``changed: true`` on purpose: from here the move is unfinished,
+        # and a front end that branched on ``ok`` would open a session that may not be
+        # on the other device yet.
+        #
+        # BOTH STATES ARE NAMED, BECAUSE THIS SIDE CANNOT TELL THEM APART (QA round 2,
+        # Q1). No ``done`` frame means EITHER that the destination promoted and the frame
+        # was lost, OR that it died before promoting and its verified bytes are still in
+        # staging. The sentence used to assert the second — "its verified copy is in that
+        # device's ``network/staging/<id>``" — in both, which names a directory that is
+        # EMPTY after a promote: measured 2026-09-27 on the two-device rig with the
+        # promote rename frozen so the frame is lost, staging was 0 bytes, the
+        # destination listed the conversation with its transcript, and the verb the
+        # sentence named answered ``already_local``. So the reader is handed the check
+        # that decides the state — the destination's own listing — and the verb is named
+        # only INSIDE the branch it can act on: on the promoted side it is a no-op by the
+        # time it can run (the destination adopts the copy on restart and answers
+        # ``already_local``).
         return _move_refusal(
             session_id,
             "unconfirmed",
             f"{session_id} was handed to {target_name or target_device} and this device "
             "has retired its copy, but that device never confirmed it as a conversation; "
-            f"its verified copy is in that device's `network/staging/{session_id}`, so run "
-            f"`lop sessions move {session_id} --to local` THERE to adopt it",
+            f"check that device's listing first. If {session_id} is there, the move "
+            "finished and only its confirmation was lost. If it is not there, its "
+            f"verified copy is in that device's `network/staging/{session_id}`, and "
+            f"`lop sessions move {session_id} --to local` THERE adopts it",
             phase_reached=reached,
             changed=True,
         )
