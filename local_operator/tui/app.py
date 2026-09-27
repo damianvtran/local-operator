@@ -32992,8 +32992,40 @@ class OperatorApp(App[None]):
         # report every cold session as a prehistoric runtime.
         if bool(getattr(session, "is_cold", False)):
             return
+        # AN EMPTY STAMP ON A RUNTIME ON ANOTHER DEVICE IS UNOBSERVABLE, NOT OLD.
+        # ``runtime_version`` is read off the RUNTIME'S OWN discovery record on
+        # THIS device (``attached.py``, from ``find_runtime_record``), and a peer's
+        # runtime publishes no such record here: the federated row never carried a
+        # build, so ``RemoteSessionFacts.version`` stays empty for every remote
+        # owner. The ``owner is None`` branch below turns that absence into a
+        # CLAIM OF AGE — measured on the two-device loopback rig (QA-3, both
+        # devices on 0.63.2 from one worktree):
+        #
+        #   "“qa3-live” is running an older version than this window — it will
+        #    switch to the new version when it is next idle."
+        #
+        # Both halves of that are wrong for a peer: it is not older, and the
+        # switch it promises is THIS install's generation reaper, which has no
+        # jurisdiction over another device's runtime. Silence is the honest
+        # answer while the fact is unobtainable.
+        #
+        # THE GUARD KEYS ON THE LOCALITY **WITH** AN EMPTY STAMP, not on the
+        # locality alone, so the day a peer's build does cross the mesh the
+        # comparison runs again and this branch needs no change HERE. What that
+        # day still owes, and where: ``RemoteSessionFacts.version``/``source_ref``
+        # exist and ``record()`` forwards them, but nothing FILLS them —
+        # ``from_row`` never copies one off ``PeerRow`` (which has no build field
+        # at all) and ``_refresh_facts`` never adds one to its ``replace``
+        # (``network/projection.py``). And the REMEDY half would still be anchored
+        # here: ``on_disk`` is ``update.disk_build()``, the build a fresh ``lop``
+        # loads on THIS machine, while a peer's runtime reaps against its own
+        # disk — so a stamp-carrying change also has to decide what "switch to the
+        # new version" means when the two installs are separate (§4.4's peer
+        # column).
         runtime_version = str(getattr(session, "runtime_version", "") or "")
         runtime_ref = str(getattr(session, "runtime_source_ref", "") or "")
+        if getattr(session, "runtime_locality", "") == "another-machine" and not runtime_version:
+            return
         # The subject of an owner notice is the SESSION, so the debounce is
         # keyed by it: "once per session per process", which is what design
         # §6.7 and this method's own contract say. Keyed on the session id
@@ -33098,10 +33130,13 @@ class OperatorApp(App[None]):
             shorter still, so D1's fix holds a fortiori.
             """
             if owner is None:
-                # A runtime older than the field itself. It cannot tell us what
-                # it is running, but the absence is informative: the field ships
-                # in this build, so anything without it is older than this
-                # window.
+                # A runtime older than the field itself. REACHED ONLY FOR A
+                # RUNTIME ON THIS MACHINE: for one on another device an absent
+                # stamp means the fact is unobservable here, and
+                # ``_check_build_skew`` returns before this point for it (see the
+                # peer guard above). For a local runtime the absence is
+                # informative: the field ships in this build, so anything without
+                # it is older than this window.
                 announce(
                     "runtime-unknown",
                     "",
