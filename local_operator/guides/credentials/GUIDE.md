@@ -241,13 +241,16 @@ to the session's store, so the same value is masked wherever it appears next;
 what is gone is the *notice*, not the protection.
 
 **Silence is not a claim that the detector got smarter.** The shape rules are
-unchanged and they still fire on benign, credential-SHAPED text — a CI workflow
-YAML being read, a usage counter, or a `docker -p 27019` published port have all
-tripped it. What changed is only that those firings no longer surface as an
-incident: the false positives were **not reduced**, they stopped being reported
-(a ruling on the noise, verbatim: *"Remove the operator-facing information too,
-it's false positive so it would confuse users."*). So do not read a quiet session
-as evidence that no credential-shaped text was seen.
+unchanged and they still fire on benign, credential-SHAPED text. Two I
+reproduced on the shipped table, both grading ESCALATED (which is the grade that
+used to file): reading a CI workflow YAML produced five hits and named no shape
+at all, and a value that appears twice — masked under a `token:`-style name once
+and readable elsewhere — escalates even when the value is an ordinary
+harness-generated id. What changed is only that those firings no longer surface
+as an incident: the false positives were **not reduced**, they stopped being
+reported (a ruling on the noise, verbatim: *"Remove the operator-facing
+information too, it's false positive so it would confuse users."*). So do not
+read a quiet session as evidence that no credential-shaped text was seen.
 
 The distinction below is what *you* act on, because you are the one who decides
 once you have actually seen a value — and a rotation is the user's work that a
@@ -263,7 +266,7 @@ false alarm spends:
 - **A value that reached `bash` is not compromised.** A command's `argv`, a
   child's environment, a pipeline, an output pipe: the value was *used*, not
   *read*, and the model never saw it. **Do not ask for a rotation for this** —
-  the harness masks it, and the only thing it owes is cleanup (above).
+  the harness masks it, and the only thing it owes is cleanup (below).
 - **A value in this process's memory is not compromised.** Same reason.
 - **A plaintext file on disk is not compromised either** — but it is the one
   case with work in it: delete the copy without reading it (`rm -f`), then
