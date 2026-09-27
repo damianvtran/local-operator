@@ -227,8 +227,8 @@ async def test_an_output_only_credential_files_nothing_when_it_is_masked_whole(
     The pipe is therefore the only layer that can report such a hit — and this
     value is masked WHOLE, so it reports nothing: no row, no live notice. What the
     test still pins is that the mask HAPPENED, because an absence assertion that
-    cannot tell "silent" from "never ran" is no evidence at all. The opposite
-    direction is the next test.
+    cannot tell "silent" from "never ran" is no evidence at all. The escalated
+    direction is the next test, and it is also silent now (2026-09-27).
 
     The command therefore carries a FILENAME and nothing else; the credential is
     read out of the file by the child, which is the position the real incident was
@@ -269,20 +269,22 @@ async def test_an_output_only_credential_files_nothing_when_it_is_masked_whole(
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_an_output_only_EXPOSURE_still_files_its_incident(
+async def test_an_output_only_EXPOSURE_files_nothing_on_any_surface(
     headless_tui_env: Path, workspace: Path
 ) -> None:
-    """The other direction, and the one a too-eager gate would eat.
+    """INVERTED (2026-09-27): an output-only EXPOSURE files nothing, anywhere.
 
-    A DSN whose username IS its password is the documented escalating shape: the
-    DSN rule keeps the userinfo username readable by design, so the value's own
-    characters end up in the text the model reads. Fed in as OUTPUT ONLY — the
-    credential is in the file the child reads, never in the command — through the
-    same pipe, so this exercises the pipe's own report on a real subprocess.
+    Same real path as the test above — a DSN whose username IS its password, fed
+    in as OUTPUT ONLY through the pipe to a real subprocess — and the same
+    escalating shape. The difference is what the operator asked for: BOTH
+    directions now file nothing. This test used to be the counterweight to the
+    contained one ("a gate that swallowed every output-only hit would look exactly
+    like a working one from the test above") and is now the pin for the OTHER half
+    of the ruling — the ESCALATED hit is silenced too, not just the contained one.
 
-    The incident this feature was written for is this one. A gate that swallowed
-    every output-only hit would look exactly like a working one from the test
-    above, which is why both directions are pinned.
+    The masking half is asserted in the same breath, which is what keeps this an
+    absence test rather than a no-op: the value is absent from the text the
+    provider was handed, so the run is live and the pass really ran.
     """
     directory = headless_tui_env / "sessions" / "output-only-exposed"
     payload = "amqp://guest:guest@rabbit.invalid:5672/"
@@ -308,23 +310,22 @@ async def test_an_output_only_EXPOSURE_still_files_its_incident(
         await dispose_quietly(session)
 
     body = (directory / "transcript.jsonl").read_text()
+    assert REDACTION_MARKER in body, "the mask did not happen at all"
     rows = [line for line in body.splitlines() if "session_credential_redaction" in line]
-    assert rows, "an output-only exposure filed no notice row"
+    assert not rows, "an output-only exposure filed a notice row"
     notices = [event for event in events if isinstance(event, NoticeEvent)]
-    assert notices, "an output-only exposure produced no live notice"
-    assert notices[0].kind == "warning"
-    assert "rotate" in notices[0].text, notices[0].text
+    assert not notices, "an output-only exposure produced a live notice"
 
-    # THE MODEL MUST NOT SEE IT, and this is the real-command half of the
-    # operator's instruction: the notice is the OPERATOR's ticket, and the value
-    # it names was masked out of the text the model reads on the next turn. The
-    # request the provider was handed is the strongest reading of "model-visible"
-    # (after the production converter), so a notice surviving in the next turn's
-    # context shows up here. Measured before this change: 1,493 unnamed notices
-    # across 1,080 sessions rode exactly this path into the model's context.
+    # The masking half, on the request the provider was actually handed — the
+    # strongest reading of "model-visible", and the proof this test's absences
+    # are a live session that ran the pass rather than one that never started.
+    # Measured before this change: 1,493 unnamed notices across 1,080 sessions
+    # rode exactly this path, so the value's absence here is the same evidence
+    # with the notice removed rather than the pass.
     seen = _provider_saw(stream)
-    assert "[credential redaction]" not in seen, "the notice reached the model"
-    assert "rotate it" not in seen, "the notice reached the model"
+    assert SENTINEL_PW not in seen, "the output-only credential reached the model"
+    assert "[credential redaction]" not in seen, "the retired notice reached the model"
+    assert "rotate it" not in seen, "the retired notice reached the model"
 
 
 @pytest.mark.e2e
