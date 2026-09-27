@@ -1976,6 +1976,17 @@ def config_edit_command(args: argparse.Namespace) -> int:
     try:
         # Parse the value to the appropriate type
         value = args.value
+        if setting.empty_unsets and not str(value).strip():
+            # An empty argument UNSETS, which is the page's clear-to-unset gesture and
+            # the server's `PATCH /v1/settings` branch of the same name. Without it the
+            # empty string reached the LIST parse, which turns it into `[]` and STORED
+            # that: the key stayed present carrying an explicit "none", so
+            # `settings_get` reported a deliberate choice where the user had asked for
+            # the automatic one — the state `reset_setting` exists to avoid, and the
+            # reason the flag is on the rows that carry it (review round 1, M4).
+            settings_io.reset_setting(config_manager, setting)
+            print(f"Cleared {args.key}: it reads as its default again")
+            return 0
         # An ENUM's displayed LABEL is not always its stored VALUE (D11).
         # `model_effort auto` means the stored ``""``, and the guessed parse
         # below would hand the literal string ``auto`` to ``validate`` and have

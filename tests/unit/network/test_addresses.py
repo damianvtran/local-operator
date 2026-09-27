@@ -177,11 +177,13 @@ def test_the_real_enumeration_offers_routable_addresses_and_never_loopback() -> 
 
     # The binding itself must work here, not merely return []: an empty answer from
     # a table that could not be READ would pass every assertion above while leaving
-    # the reported bug in place. When the table is readable and holds a non-loopback
-    # address, the answer cannot be empty.
+    # the reported bug in place. ``[]`` however IS a real answer — a device whose only
+    # IPv4 address is loopback — so what is checked is the PAIR (a table that read, and
+    # holds something dialable), never the table being non-empty for its own sake:
+    # ``assert table`` outright contradicted ``_interface_ipv4s``'s own contract
+    # (review round 1, N2).
     table = addresses._interface_ipv4s()
-    if table is not None:
-        assert table, "getifaddrs must read this host's own table"
+    if table:
         non_loopback = [row for row in table if (row[1] & _LOOPBACK) == 0]
         if non_loopback:
             assert offered, f"a readable table with {non_loopback} offered nothing"
@@ -340,3 +342,41 @@ def test_the_dial_only_listener_still_answers_its_own_loopback() -> None:
     settings = relay.NetworkSettings(port=4097, listen_address="127.0.0.1")
 
     assert relay.advertise_endpoints(settings) == ["127.0.0.1:4097"]
+
+
+def test_the_sockaddr_family_is_read_in_each_layout_and_each_byte_order() -> None:
+    """Both platform layouts, on whichever platform CI runs, and both byte orders.
+
+    ``_family_of`` had two holes that only a differently-shaped machine could show. The
+    Darwin/BSD branch (``sa_family`` in the byte after ``sa_len``) never executed in CI at
+    all, because it was selected from the machine the suite ran on — correct here, unrun
+    there (review round 1, M5). The glibc branch read the family with a fixed
+    little-endian shift, so a big-endian Linux (s390x, ppc64) read ``0x0002`` as 512 and
+    skipped every interface as "not AF_INET", while its own comment claimed that class was
+    closed (M3).
+
+    So the two things are separated: the LAYOUT is driven by the ``bsd`` argument and the
+    BYTE ORDER by ``_glibc_family``, which is why the rule can be asserted here rather
+    than only on the hardware that would have caught it.
+    """
+    import ctypes
+    import sys
+
+    size = addresses._SOCKADDR_SIZE
+    bsd_raw = bytes([size, socket.AF_INET]) + bytes(size - 2)
+    bsd = ctypes.create_string_buffer(bsd_raw, size)
+    assert addresses._family_of(ctypes.addressof(bsd), bsd=True) == socket.AF_INET
+    # The same bytes read as glibc's layout are the ``uint16`` 0x1002 — not AF_INET —
+    # which is what makes the two branches distinguishable rather than interchangeable.
+    assert addresses._family_of(ctypes.addressof(bsd), bsd=False) != socket.AF_INET
+
+    glibc_raw = int.to_bytes(socket.AF_INET, 2, sys.byteorder) + bytes(size - 2)
+    glibc = ctypes.create_string_buffer(glibc_raw, size)
+    assert addresses._family_of(ctypes.addressof(glibc), bsd=False) == socket.AF_INET
+
+    # The byte-order rule itself, both ways: native order decodes, the other order does
+    # not — which is exactly what the fixed shift got wrong on one of the two hosts.
+    for order in ("little", "big"):
+        first, second = (2, 0) if order == "little" else (0, 2)
+        assert addresses._glibc_family(first, second, order) == socket.AF_INET
+        assert addresses._glibc_family(second, first, order) == 2 << 8

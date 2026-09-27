@@ -34,7 +34,7 @@ from typing import Any
 
 import pytest
 
-from local_operator.network import relay, store, types
+from local_operator.network import addresses, relay, store, types
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — fixtures and ceremony
     _pair,
     devices,
@@ -143,6 +143,10 @@ def test_a_detected_address_is_published_with_the_live_port(
 
     The config's port beside a detected LAN address is a claim about a socket that
     is not there — the same "nothing can dial it" outcome one layer down.
+
+    The detection seam is ``network/addresses.py``: what used to be a
+    ``getaddrinfo(gethostname())`` lookup is now the interface table, so patching the
+    resolver faked nothing and the runner's REAL addresses leaked into the answer.
     """
     root = tmp_path / "device"
     root.mkdir()
@@ -151,11 +155,7 @@ def test_a_detected_address_is_published_with_the_live_port(
         root,
         {"address": "0.0.0.0", "port": 41902, "advertised": []},
     )
-    monkeypatch.setattr(
-        socket,
-        "getaddrinfo",
-        lambda *args, **kwargs: [(socket.AF_INET, None, None, "", ("10.1.2.3", 0))],
-    )
+    monkeypatch.setattr(addresses, "local_ipv4_addresses", lambda: ["10.1.2.3"])
 
     settings = relay.NetworkSettings.from_config()
     assert relay.advertise_endpoints(settings) == ["10.1.2.3:41902"]
