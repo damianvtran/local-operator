@@ -1330,6 +1330,12 @@ async def execute_eval(
         except BaseException:
             _ACTIVE_KERNELS.discard(key)
             _CLOSE_ON_RETURN.discard(key)
+            if receipt is not None:
+                # Same contract as the OSError branch above: an abort or
+                # cancellation landing during spawn also means this call never
+                # ran, so the notice it consumed is still owed to the next one
+                # (review round 1, R1-3).
+                _record_reset(key, receipt)
             raise
         if session_dir is not None:
             _SERVED_KERNEL_KEYS.add(key)
