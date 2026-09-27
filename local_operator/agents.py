@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import importlib
 import inspect
 import json
@@ -12,14 +13,22 @@ import unicodedata
 import uuid
 import zipfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from local_operator.agent_profiles import (
+    SEED_ORIGIN_PREFIX,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
+    is_sha256_hex,
+    marker_value,
+)
 from local_operator.jsonl import read_jsonl, write_jsonl
 from local_operator.optional import missing_extra_error
 from local_operator.paths import default_agent_cwd
@@ -450,6 +459,121 @@ def agents_store_present(config_root: Path) -> bool:
     registered roles instead of being reported as "no declaration".
     """
     return (config_root / "agents").exists() or (config_root / "agents.json").exists()
+
+
+# -- hub provenance ----------------------------------------------------------
+#
+# A row pulled from the Radient Agent Hub used to be an orphan: ``import_agent``
+# deliberately mints a FRESH local uuid and stores no marketplace id, so "pull
+# the latest of what I have" had nothing to key on (design §9.1). These two
+# tags are that key, written by :meth:`AgentRegistry.download_agent_from_radient`
+# at pull time and read by :func:`sync_hub_agents`.
+
+#: Tag prefix recording the marketplace agent id a row was pulled FROM, e.g.
+#: ``hub:9f2c…``. Unlike the seed ``seed:`` marker, the value cannot be
+#: cross-checked against the row (a marketplace id is not the row's name), so
+#: it is validated for SHAPE only and always treated as a re-fetch SUGGESTION,
+#: never as authority to write: the tags array is writable through the desktop
+#: routes, agent import and the tool itself, and applying an update still goes
+#: through the same divergence policy as seeds.
+HUB_ORIGIN_PREFIX = "hub:"
+
+#: Tag prefix recording the sha256 fingerprint of the pulled instruction text
+#: and description as they were AT PULL TIME, e.g. ``hub_sha256:9f2c…`` (see
+#: :func:`hub_fingerprint`). This is what makes "locally edited since the pull"
+#: decidable — without it, a fetched text that differs from the row could be an
+#: upstream change or a local edit, and the two are the whole difference
+#: between an update and a refusal.
+HUB_SHA256_PREFIX = "hub_sha256:"
+
+#: The marketplace id grammar (design §9.2): conservative on purpose, because
+#: the value is echoed into a URL path by ``download_agent_from_marketplace``.
+_HUB_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+#: Every tag prefix that records where a row came FROM rather than what it
+#: SAYS: the seed markers (installed from a packaged starter) and the hub
+#: markers (pulled from a marketplace listing). ONE list, shared by the import
+#: choke point that strips them and the publish filter that must not ship them
+#: — a second spelling is how one surface would keep a leak the other closed.
+PROVENANCE_TAG_PREFIXES: tuple[str, ...] = (
+    SEED_ORIGIN_PREFIX,
+    SEED_VERSION_PREFIX,
+    SEED_SHA256_PREFIX,
+    HUB_ORIGIN_PREFIX,
+    HUB_SHA256_PREFIX,
+)
+
+
+def strip_provenance_tags(tags: Any) -> Any:
+    """``tags`` with every provenance marker removed; anything else untouched.
+
+    THE import gate (agent review round 1, B1). An archive is untrusted input,
+    and these markers are the trust anchors ``sync``/``reset`` key on: ``hub:``
+    decides which listing a re-fetch reads, and ``*_sha256:`` is taken as proof
+    that the copy is unedited — so persisting an archive's copy of either let a
+    published file plant a baseline and have the next no-force sync overwrite
+    the row with text of its author's choosing. Provenance is EARNED at install
+    or pull, never imported: the trusted writers re-stamp their own markers
+    after import (``install_seed``, :meth:`AgentRegistry._stamp_hub_provenance`).
+
+    A non-list value is passed through to ``AgentData``'s own validation rather
+    than coerced here: a malformed ``tags:`` should be refused, not silently
+    emptied.
+    """
+
+    if not isinstance(tags, list):
+        return tags
+    return [
+        str(tag) for tag in tags if not str(tag).strip().lower().startswith(PROVENANCE_TAG_PREFIXES)
+    ]
+
+
+#: The one sentence every credential-less hub verdict carries. The sync run
+#: never fails for absence of a Radient credential — it reports this per row
+#: and keeps the seed arm working (design §9.2).
+NO_HUB_CREDENTIAL_REASON = (
+    "no Radient credential is available (set RADIENT_API_KEY or sign in with `lop login`)"
+)
+
+
+def hub_origin(agent: "AgentData") -> str | None:
+    """The marketplace agent id a row was pulled FROM, or None when unrecorded.
+
+    The FIRST tag carrying the prefix decides, like :func:`agent_profiles.seed_origin`:
+    a malformed marker is reported (the row still shows up as "not recorded",
+    which is the safe answer) rather than skipped so that a later tag could
+    claim the row. Marker resolution itself is shared with the seed side
+    (:func:`agent_profiles.marker_value`; review round 1, n2).
+    """
+
+    hub_id = marker_value(agent, HUB_ORIGIN_PREFIX)
+    if hub_id is None:
+        return None
+    if _HUB_ID_RE.match(hub_id):
+        return hub_id
+    logging.warning(
+        "ignoring hub provenance tag %r on agent %r: not a marketplace id",
+        f"{HUB_ORIGIN_PREFIX}{hub_id}",
+        getattr(agent, "name", None),
+    )
+    return None
+
+
+def hub_fingerprint(instructions: str, description: str) -> str:
+    """The sha256 of the pulled ``(instructions, description)`` — the sync baseline.
+
+    Deterministic by construction (``json.dumps`` of a fixed-order list of
+    strings, non-ASCII kept literal, separators pinned), and computed through
+    the SAME canonicalization :func:`sync_hub_agents` compares with, so the
+    baseline and the comparison cannot drift apart on whitespace.
+    """
+
+    payload = json.dumps(
+        [str(instructions or "").strip(), str(description or "").strip()],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class AgentRegistry:
@@ -2030,6 +2154,15 @@ class AgentRegistry:
                 if not isinstance(agent_data, dict):
                     raise ValueError("Invalid agent metadata in agent.yml")
 
+                # Provenance is EARNED, never imported (see
+                # ``strip_provenance_tags``): dropped before validation, so no
+                # marker the archive controlled can reach the stored row. The
+                # pull path re-stamps its own afterwards. Only touched when the
+                # archive HAS tags — writing None here would turn an absent key
+                # into a validation error the archive did not deserve.
+                if agent_data.get("tags") is not None:
+                    agent_data["tags"] = strip_provenance_tags(agent_data["tags"])
+
                 # An archive describes a profile, not a destination on this host.
                 # Ignore its identity even when it looks like a valid local UUID:
                 # preserving one would allow a normal import to destroy an agent.
@@ -2184,6 +2317,12 @@ class AgentRegistry:
         """
         Download an agent from the Radient Agent Hub and import it.
 
+        The returned row is stamped with the marketplace id and a fingerprint
+        of what was pulled (see :func:`hub_origin`), so the pull can later be
+        RE-FETCHED — without that provenance a pulled row carries a fresh
+        local uuid and nothing that names where it came from, which is why
+        "pull the latest" had nothing to key on (design §9.1).
+
         Args:
             radient_client: An instance of RadientClient.
             agent_id (str): The agent ID to download.
@@ -2200,7 +2339,69 @@ class AgentRegistry:
             temp_dir_path = Path(temp_dir)
             zip_path = temp_dir_path / f"{agent_id}.zip"
             radient_client.download_agent_from_marketplace(agent_id, zip_path)
-            return self.import_agent(zip_path)
+            imported, renamed_from = self.import_agent(zip_path)
+        return self._stamp_hub_provenance(imported, agent_id), renamed_from
+
+    def _stamp_hub_provenance(self, agent: AgentData, hub_id: str) -> AgentData:
+        """Record where a pulled row came from, on the row itself.
+
+        Written AFTER import, against the row as it was actually stored: the
+        fingerprint must describe the bytes a later re-fetch will be compared
+        against, not the ones the archive held before import renamed the row
+        or normalized its fields.
+
+        Any pre-existing ``hub:``/``hub_sha256:`` tags are dropped first.
+        Those can only have come from the archive (a publisher's own pull
+        provenance), and leaving them would let a published archive point this
+        row's future re-fetches at an agent its author chose rather than the
+        one the user pulled. Every other tag is preserved: they are the
+        profile (``role``, ``tools:``, the author's categories).
+
+        A non-conforming id is DROPPED with a warning rather than sanitized:
+        there is nothing truthful to record for it, and an unusable marker is
+        worse than none (a later sync would re-fetch the wrong listing).
+        """
+
+        hub_id = str(hub_id or "").strip()
+        if not _HUB_ID_RE.match(hub_id):
+            logging.warning(
+                "not stamping hub provenance for agent %r: %r is not a marketplace id",
+                agent.name,
+                hub_id,
+            )
+            return agent
+        tags = [
+            str(tag).strip()
+            for tag in (agent.tags or [])
+            if not str(tag).strip().lower().startswith(HUB_ORIGIN_PREFIX)
+            and not str(tag).strip().lower().startswith(HUB_SHA256_PREFIX)
+        ]
+        tags.append(f"{HUB_ORIGIN_PREFIX}{hub_id}")
+        fingerprint = hub_fingerprint(self.get_agent_system_prompt(agent.id), agent.description)
+        tags.append(f"{HUB_SHA256_PREFIX}{fingerprint}")
+        # Every other field is explicitly None (the module's own convention for
+        # a partial edit): ``update_agent`` skips None values, so this writes
+        # the tags and nothing else.
+        fields = AgentEditFields(
+            name=None,
+            description=None,
+            tags=tags,
+            categories=None,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+        return self.update_agent(agent.id, fields)
 
     #: Files that carry conversation, execution, or pickled runtime state.
     #: They never belong in a published archive: a Radient hub listing is a
@@ -2593,3 +2794,276 @@ class AgentRegistry:
         del context[key]
         self.save_agent_context(agent_id, context)
         return context
+
+
+# -- hub update checks -------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HubSyncVerdict:
+    """The outcome of checking ONE hub-pulled row against its marketplace listing.
+
+    ``applied`` is the field a renderer must not infer from ``verdict``: a
+    ``diverged`` row is written only when the caller passed ``force``, and a
+    receipt that said "updated" for a refused apply would be exactly the
+    over-claiming this repo has had to fix elsewhere.
+
+    ``unavailable`` covers BOTH degradations — no Radient credential on this
+    surface, and a listing that could not be re-fetched — because in both cases
+    the honest answer is "not checked, and here is why" rather than a failure
+    of the whole run: one bad listing must never stop the seed updates beside
+    it (design §9.2).
+    """
+
+    name: str
+    hub_id: str
+    verdict: Literal["up-to-date", "updated", "diverged", "unavailable"]
+    applied: bool = False
+    #: The texts REPLACED by an applied update, kept verbatim so the overwrite
+    #: stays recoverable by copy-paste — the same echo ``op='reset'`` makes.
+    replaced_instructions: str | None = None
+    replaced_description: str | None = None
+    reason: str = ""
+    detail: str = ""
+
+
+def _hub_installed_fingerprint(agent: "AgentData") -> str | None:
+    """The recorded pull fingerprint, or None when missing/malformed."""
+
+    value = marker_value(agent, HUB_SHA256_PREFIX)
+    if value is None or not is_sha256_hex(value):
+        return None
+    return value.lower()
+
+
+def _read_hub_profile_from_zip(zip_path: Path) -> Tuple[str, str]:
+    """Read ``(instructions, description)`` out of a downloaded agent archive.
+
+    Reads the two members straight out of the ZIP and writes NOTHING to disk,
+    so there is no extraction step to zip-slip: the archive is untrusted input
+    and the only thing a re-fetch needs is the published text. ``agent.yml`` is
+    required (import refuses an archive without one, and a comparison against a
+    metadata-less archive would be meaningless); the prompt file is optional —
+    an agent with no instructions compares as empty text, which is a real
+    answer rather than an error.
+    """
+
+    instructions = ""
+    description = ""
+    found_prompt = False
+    found_meta = False
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            if member.is_dir():
+                continue
+            # Basename matching mirrors ``import_agent``'s ``os.walk``: the two
+            # files can sit at any depth in the archive.
+            base = member.filename.replace("\\", "/").rsplit("/", 1)[-1]
+            if base == "system_prompt.md" and not found_prompt:
+                instructions = archive.read(member).decode("utf-8", errors="replace")
+                found_prompt = True
+            elif base == "agent.yml" and not found_meta:
+                try:
+                    meta = yaml.safe_load(archive.read(member).decode("utf-8", errors="replace"))
+                except Exception:  # noqa: BLE001 - a malformed listing is refused below
+                    meta = None
+                if isinstance(meta, dict):
+                    description = str(meta.get("description") or "")
+                found_meta = True
+            if found_prompt and found_meta:
+                break
+    if not found_meta:
+        raise ValueError("Missing agent.yml in ZIP file")
+    return instructions, description
+
+
+def _fetch_hub_profile(radient_client: Any, hub_id: str) -> Tuple[str, str]:
+    """Download a marketplace listing into a temp file and read its text.
+
+    ``hub_id`` is the validated marker value (``_HUB_ID_RE``), so it is safe as
+    a file name and as a URL path segment. The download itself is the public
+    endpoint the existing pull path uses; the caller decides whether a
+    credential is present at all (see :func:`sync_hub_agents`).
+    """
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        zip_path = Path(temp_dir) / f"{hub_id}.zip"
+        radient_client.download_agent_from_marketplace(hub_id, zip_path)
+        return _read_hub_profile_from_zip(zip_path)
+
+
+def _apply_hub_update(
+    registry: AgentRegistry,
+    agent: "AgentData",
+    hub_id: str,
+    instructions: str,
+    description: str,
+) -> "AgentData":
+    """Write a fetched listing over a row, refreshing its pull fingerprint.
+
+    The description is mirrored even when empty: the fingerprint covers it, so
+    a description the publisher cleared is a change like any other, and leaving
+    the stale local text in place would make the next sync report the same
+    change forever.
+    """
+
+    registry.set_agent_system_prompt(agent.id, instructions)
+    tags = [
+        str(tag).strip()
+        for tag in (agent.tags or [])
+        if not str(tag).strip().lower().startswith(HUB_ORIGIN_PREFIX)
+        and not str(tag).strip().lower().startswith(HUB_SHA256_PREFIX)
+    ]
+    tags.append(f"{HUB_ORIGIN_PREFIX}{hub_id}")
+    tags.append(f"{HUB_SHA256_PREFIX}{hub_fingerprint(instructions, description)}")
+    return registry.update_agent(
+        agent.id,
+        AgentEditFields(
+            name=None,
+            description=description,
+            tags=tags,
+            categories=None,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        ),
+    )
+
+
+def sync_hub_agents(
+    registry: AgentRegistry,
+    *,
+    radient_client: Any | None = None,
+    names: Sequence[str] | None = None,
+    force: bool = False,
+) -> List[HubSyncVerdict]:
+    """Check hub-pulled rows against their marketplace listings; update them.
+
+    The hub half of "built-in and hub-pulled agents have a way to pull the
+    latest". Rows are found by the ``hub:<id>`` marker stamped at pull time;
+    for each, the listing is re-downloaded and its published text compared
+    against the row, with the same policy as the seed arm
+    (:func:`agent_profiles.sync_installed_seeds`):
+
+    * identical text → ``up-to-date``;
+    * changed, and the row still holds exactly what was pulled (fingerprint
+      match) → ``updated``, applied immediately and echoing the replaced text;
+    * changed, and the row was edited since the pull → ``diverged``, applied
+      only with ``force=True`` (again echoing what it replaced);
+    * ``radient_client=None`` — the caller had no credential — and any failed
+      re-fetch degrade to ``unavailable`` with the reason, per row. The run
+      never raises for either: a hub listing is optional enrichment, and a
+      failure to reach it must not stop the seed updates beside it.
+
+    NOT called on boot. This function performs network I/O, so every caller
+    invokes it because a user or agent asked for a sync.
+    """
+
+    requested: list[str] | None = None
+    if names is not None:
+        requested = []
+        for raw in names:
+            key = str(raw).strip().lower()
+            if key and key not in requested:
+                requested.append(key)
+
+    targets: List[AgentData] = []
+    for agent in registry.list_agents():
+        if hub_origin(agent) is None:
+            continue
+        if requested is not None and str(agent.name or "").strip().lower() not in requested:
+            continue
+        targets.append(agent)
+    targets.sort(key=lambda row: str(row.name or "").lower())
+    if not targets:
+        return []
+
+    if radient_client is None:
+        return [
+            HubSyncVerdict(
+                name=str(agent.name or ""),
+                hub_id=hub_origin(agent) or "",
+                verdict="unavailable",
+                reason=NO_HUB_CREDENTIAL_REASON,
+            )
+            for agent in targets
+        ]
+
+    verdicts: List[HubSyncVerdict] = []
+    for agent in targets:
+        name = str(agent.name or "")
+        hub_id = hub_origin(agent) or ""
+        try:
+            fetched_text, fetched_description = _fetch_hub_profile(radient_client, hub_id)
+        except Exception as error:  # noqa: BLE001 - one row's failure never ends the run
+            verdicts.append(
+                HubSyncVerdict(
+                    name=name,
+                    hub_id=hub_id,
+                    verdict="unavailable",
+                    reason=f"could not re-fetch agent {hub_id!r}: {error}",
+                )
+            )
+            continue
+
+        current_text = registry.get_agent_system_prompt(agent.id)
+        current_description = str(agent.description or "")
+        if (
+            fetched_text.strip() == current_text.strip()
+            and fetched_description.strip() == current_description.strip()
+        ):
+            verdicts.append(
+                HubSyncVerdict(
+                    name=name,
+                    hub_id=hub_id,
+                    verdict="up-to-date",
+                    detail="matches the marketplace listing",
+                )
+            )
+            continue
+
+        baseline = _hub_installed_fingerprint(agent)
+        clean = baseline is not None and (
+            hub_fingerprint(current_text, current_description) == baseline
+        )
+        if not clean and not force:
+            verdicts.append(
+                HubSyncVerdict(
+                    name=name,
+                    hub_id=hub_id,
+                    verdict="diverged",
+                    detail=(
+                        "the marketplace listing changed and this copy has local "
+                        "edits; re-run with force to replace it"
+                    ),
+                )
+            )
+            continue
+
+        _apply_hub_update(registry, agent, hub_id, fetched_text, fetched_description)
+        verdicts.append(
+            HubSyncVerdict(
+                name=name,
+                hub_id=hub_id,
+                verdict="updated",
+                applied=True,
+                replaced_instructions=current_text,
+                replaced_description=current_description,
+                detail=(
+                    "updated from the marketplace listing"
+                    if clean
+                    else "updated from the marketplace listing (forced over local edits)"
+                ),
+            )
+        )
+    return verdicts

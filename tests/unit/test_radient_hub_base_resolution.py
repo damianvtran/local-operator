@@ -151,19 +151,31 @@ def test_the_desktop_hub_transport_resolves_the_same_root() -> None:
     assert desktop_radient.base_url() == DEFAULT_RADIENT_API_BASE_URL
 
 
-def test_the_cli_resolves_the_hub_base_in_exactly_one_place() -> None:
+def test_the_hub_base_is_read_in_exactly_one_place() -> None:
     """No call site may answer "which host?" for itself again.
 
     The three literals this replaced were not a reviewing oversight: each site
     was written where it was needed. What makes that safe is that the answer
     lives in one module and is quoted from there, so this asserts the shape
     rather than any single value.
+
+    Since the sync coordinator joined the hub consumers (agent review round 1,
+    n2) there is exactly ONE reader of ``config.yml``'s key —
+    ``providers.radient_credentials.configured_radient_base_url`` — and the CLI
+    and ``agent_sync`` both delegate to it. The CLI having ZERO reads is the
+    stronger form of the old invariant: a fourth site cannot silently grow a
+    fourth reading here.
     """
-    source = Path(cli.__file__).read_text()
+    from local_operator import agent_sync
+    from local_operator.providers import radient_credentials
+
+    cli_source = Path(cli.__file__).read_text()
     # Any URL-shaped Radient host rather than two remembered spellings: the
     # failure mode is a fourth call site naming a host nobody had listed, which
     # a literal-by-literal assertion cannot see.
-    assert not re.search(r"https?://[^\"']*radient", source)
-    # One READ of the key, whichever accessor spells it — ``get_value``,
-    # ``get_nested_value`` or a fresh ``get_config_value`` call all count.
-    assert source.count('"radient_base_url"') == 1
+    assert not re.search(r"https?://[^\"']*radient", cli_source)
+    # The key is read in exactly one place, and neither delegating surface
+    # spells it for itself.
+    assert '"radient_base_url"' not in cli_source
+    assert '"radient_base_url"' not in Path(agent_sync.__file__).read_text()
+    assert Path(radient_credentials.__file__).read_text().count('"radient_base_url"') == 1

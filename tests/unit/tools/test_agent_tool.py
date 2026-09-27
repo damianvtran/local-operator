@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+import shutil
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -922,7 +925,7 @@ async def test_reset_refuses_a_self_authored_role_under_a_packaged_name(context,
 
 
 @pytest.mark.asyncio
-async def test_an_edit_does_not_strip_a_role_of_its_provenance(context, registry) -> None:
+async def test_an_edit_does_not_strip_a_role_of_its_provenance(context) -> None:
     """The provenance marker is rebuilt by `_op_write`, which encodes a PROFILE's
     fields and knows nothing about origin. Losing the marker on edit would make
     `reset` refuse exactly the roles it exists for: an edited install."""
@@ -934,6 +937,30 @@ async def test_an_edit_does_not_strip_a_role_of_its_provenance(context, registry
     assert "reset role 'reviewer'" in body, "an edited install must still be resettable"
     profile = resolve_profile("reviewer", registry=registry)
     assert profile is not None and "MIGRATIONS" not in profile.instructions
+
+
+@pytest.mark.asyncio
+async def test_an_edit_keeps_the_sync_baseline(context, registry) -> None:
+    """The sync stamps survive an edit, so `sync` keeps telling "the starter has
+    not moved" from "there is an update you edited over".
+
+    Dropping them on edit would make an UNMOVED starter read as an update
+    needing force (divergence plus no install record) — the refusal would fire
+    where there is nothing to refuse, and the message would send the user to
+    overwrite their own work for no reason.
+    """
+    await call(context, op="install", name="reviewer")
+    before = registry.get_agent_by_name("reviewer")
+    stamps = [tag for tag in before.tags if tag.startswith(("seed_version:", "seed_sha256:"))]
+    assert len(stamps) == 2
+
+    await call(context, op="update", name="reviewer", instructions="ONLY CHECK THE MIGRATIONS.")
+
+    after = registry.get_agent_by_name("reviewer")
+    assert all(tag in after.tags for tag in stamps)
+    body = await call(context, op="sync", name="reviewer")
+    assert "no update to pull" in body
+    assert "force" not in body
 
 
 @pytest.mark.asyncio
@@ -1364,3 +1391,98 @@ async def test_show_still_diffs_a_row_that_reset_can_restore(context) -> None:
     body = await call(context, op="show", name="reviewer")
 
     assert "as a diff against yours" in body
+
+
+# -- op='sync': checking an installed copy against the packaged starter --------
+#
+# These drive the TOOL surface, not the shared function: what a caller reads
+# back is the report the tool renders, and the refusal wording ("re-run with
+# force") is the part an agent acts on. The package is moved by rewriting a
+# scratch copy of the catalogue, so the verdicts come from a genuine
+# before/after diff rather than hand-stamped rows.
+
+
+@pytest.fixture()
+def scratch_seeds(tmp_path, monkeypatch) -> Path:
+    """A writable copy of the packaged seeds, so a test can move the package."""
+
+    import local_operator.agent_profiles as agent_profiles
+
+    destination = tmp_path / "agent_seeds"
+    shutil.copytree(Path(agent_profiles.SEEDS_DIR), destination)
+    monkeypatch.setattr(agent_profiles, "SEEDS_DIR", destination)
+    return destination
+
+
+def move_seed(seeds_dir: Path, name: str, *, version: str, body: str) -> None:
+    """Rewrite one packaged seed: a new version and new body text."""
+
+    path = seeds_dir / f"{name}.md"
+    text = path.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    parts[1] = re.sub(r"^version:.*$", f"version: {version}", parts[1], flags=re.M)
+    parts[2] = f"\n\n{body}\n"
+    path.write_text("---".join(parts), encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_sync_updates_an_untouched_starter_and_echoes_the_replaced_text(
+    context, registry, scratch_seeds
+) -> None:
+    await call(context, op="install", name="reviewer")
+    row = registry.get_agent_by_name("reviewer")
+    move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    body = await call(context, op="sync", name="reviewer")
+
+    assert "reviewer: updated to the packaged starter (1.0.0 -> 2.0.0)" in body
+    # The echo, indented under the line and copy-pasteable — recoverability is
+    # why the clean arm may overwrite without an approval prompt.
+    assert "your instructions were:" in body
+    assert "You are an INDEPENDENT reviewer" in body
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+@pytest.mark.asyncio
+async def test_sync_refuses_an_edited_starter_until_force(context, registry, scratch_seeds) -> None:
+    await call(context, op="install", name="reviewer")
+    row = registry.get_agent_by_name("reviewer")
+    registry.set_agent_system_prompt(row.id, "MY EDITED PROMPT")
+    move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    refused = await call(context, op="sync", name="reviewer")
+
+    assert "reviewer: differs from the packaged starter in instructions" in refused
+    assert "force" in refused
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
+    forced = await call(context, op="sync", name="reviewer", force=True)
+
+    assert "reviewer: updated (forced over local edits) — replaced instructions" in forced
+    assert "MY EDITED PROMPT" in forced  # the echo of what was overwritten
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+@pytest.mark.asyncio
+async def test_sync_by_name_answers_every_requested_name(context, registry) -> None:
+    body = await call(context, op="sync", name="reviewer")
+
+    assert "reviewer: not installed" in body
+    assert "op='install'" in body
+
+
+@pytest.mark.asyncio
+async def test_sync_degrades_the_hub_arm_without_a_credential(
+    context, registry, monkeypatch
+) -> None:
+    """The hub arm never fails the run: no credential is a per-row verdict."""
+
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    registry.create_agent(
+        _edit_fields(name="hunter", description="d", tags=["role", "hub:abc-123"])
+    )
+
+    body = await call(context, op="sync")
+
+    assert "hunter: hub unavailable" in body
+    assert "no Radient credential" in body
