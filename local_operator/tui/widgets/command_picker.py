@@ -2230,6 +2230,9 @@ class CommandPicker(Static):
         if not self._matches:
             return self._notice_row(width) if self._notice else Text()
         rows = self.render_rows(width)
+        above = self._above_row(width)
+        if above is not None:
+            rows.insert(0, above)
         overflow = self._overflow_row(width)
         if overflow is not None:
             rows.append(overflow)
@@ -2255,8 +2258,9 @@ class CommandPicker(Static):
             self.update(self._notice_row(width))
             return
         rows = self.render_rows(width)
+        above = self._above_row(width)
         overflow = self._overflow_row(width)
-        row_count = len(rows) + (0 if overflow is None else 1)
+        row_count = len(rows) + (0 if above is None else 1) + (0 if overflow is None else 1)
         # Pin the height: `auto` would measure content before layout knows the
         # real width and settle one row too tall per suggestion, exactly the
         # trap ToolCard documents.
@@ -2540,6 +2544,51 @@ class CommandPicker(Static):
         row.append(clipped, style=name_style)
         return cell_len(clipped)
 
+    def _above_row(self, width: int) -> Text | None:
+        """The TOP-edge marker: what the window has scrolled past (design D1).
+
+        :meth:`_overflow_row` says what is below the window; a window that
+        starts past 0 hid its first rows with NOTHING on screen saying so. With
+        the project shortcut leading a bare ``@`` that is exactly where the
+        FIRST project row goes: eight projects fill the budget, F7's seed puts
+        the highlight on the first file row, the window opens at ``[1, 9)`` and
+        the leading project row falls off the top in silence (design round 1,
+        D1 — reproduced at 100x30 and 150x40; the budget is 8 at both).
+
+        The row names the KINDS it hides, because a mixed list cannot honestly
+        say "more of everything" — the same reason the bottom marker now names
+        its scope (D2). The shortcut's rows are the leading matches, so how
+        many of the hidden rows are projects is an interval computation, and
+        the rest are directory entries.
+
+        Same treatment as the bottom marker and the notice row, on purpose: a
+        dim line on the surface, text starting at the name column — a fact
+        about the list, in the voice facts about the list are said in.
+        """
+        if self._window_start <= 0:
+            return None
+        hidden = self._window_start
+        projects = min(hidden, self._prepended_rows)
+        entries = hidden - projects
+        parts: list[str] = []
+        if projects:
+            parts.append(f"{projects} project" if projects == 1 else f"{projects} projects")
+        if entries:
+            parts.append(f"{entries} entry" if entries == 1 else f"{entries} entries")
+        dim = Style(
+            color=theme_mod.semantic_color("dim"),
+            bgcolor=theme_mod.semantic_color("surface"),
+        )
+        row = Text()
+        row.append(" " * _GUTTER_CELLS, style=dim)
+        row.append(
+            truncate_cells(
+                f"… {' + '.join(parts)} above", max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
+            ),
+            style=dim,
+        )
+        return _pad_to(row, width, dim)
+
     def _overflow_row(self, width: int) -> Text | None:
         start, end, total = self.visible_window()
         # The PROJECT SHORTCUT is not part of the DIRECTORY, so neither it nor
@@ -2566,6 +2615,15 @@ class CommandPicker(Static):
         hidden += self._unlisted
         if hidden <= 0:
             return None
+        # NAME THE SCOPE in a mixed list (design round 1, D2): ``… 4 more``
+        # read as "more of everything" once project rows shared the list, while
+        # the count has been the directory's alone since F11. The pure
+        # directory list keeps its original wording — nothing there is
+        # ambiguous, and its copy is pinned by its own tests.
+        if self._prepended_rows > 0:
+            label = "more entry" if hidden == 1 else "more entries"
+        else:
+            label = "more"
         dim = Style(
             color=theme_mod.semantic_color("dim"),
             bgcolor=theme_mod.semantic_color("surface"),
@@ -2573,7 +2631,7 @@ class CommandPicker(Static):
         row = Text()
         row.append(" " * _GUTTER_CELLS, style=dim)
         row.append(
-            truncate_cells(f"… {hidden} more", max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)),
+            truncate_cells(f"… {hidden} {label}", max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)),
             style=dim,
         )
         return _pad_to(row, width, dim)
@@ -2691,13 +2749,19 @@ class CommandPicker(Static):
     def _index_at(self, y: int) -> int | None:
         """Suggestion index at content row ``y``, or ``None``.
 
-        Returns ``None`` for the overflow marker row and for the informational row
-        of an empty list: both are facts about the list, not choices in it, and
-        clicking a fact must not run a command. The informational case falls out of
-        the window being empty — there is no index for any ``y``.
+        Returns ``None`` for the TOP- and bottom-edge marker rows and for the
+        informational row of an empty list: all are facts about the list, not
+        choices in it, and clicking a fact must not run a command. The top
+        marker exists exactly when ``window_start > 0`` (design D1), and it
+        shifts every row below it down by one, so the offset is derived rather
+        than assumed — a mouse on the first VISIBLE row must still map to
+        ``window_start`` and not to a marker above it.
         """
         start, end, _total = self.visible_window()
-        index = self._window_start + y
+        offset = 1 if self._window_start > 0 else 0
+        if y < offset:
+            return None
+        index = self._window_start + y - offset
         if not start <= index < end:
             return None
         return index
