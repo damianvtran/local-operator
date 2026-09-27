@@ -45,11 +45,9 @@ import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import Field, ValidationError
+from pydantic import ValidationError
 
 from local_operator.projects import (
-    DESCRIPTION_MAX,
-    PROGRESS_MAX,
     MilestoneEdit,
     Project,
     ProjectEdit,
@@ -57,16 +55,21 @@ from local_operator.projects import (
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
-    ProjectStatus,
     build_project_view,
     readable_error,
     scan_runtime_states,
 )
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_projects import (
+    STATUS_RANK,
+    LinkMutation,
+    MilestoneMutation,
+    ProjectCreate,
+    ProjectDelete,
     ProjectDeleted,
     ProjectDetail,
     ProjectList,
+    ProjectPatch,
     ProjectSummary,
     ProjectView,
     linked_session_view,
@@ -74,69 +77,9 @@ from local_operator.server.models.desktop_projects import (
     project_view,
 )
 from local_operator.server.models.schemas import CRUDResponse
-from local_operator.server.routes.desktop_sessions import Input, errors, reply
+from local_operator.server.routes.desktop_sessions import errors, reply
 
 router = APIRouter(tags=["Desktop projects"], dependencies=[Depends(require_desktop)])
-
-#: The fixed board order, and therefore the listing's sort: ``archived`` last,
-#: a status the board only draws when non-empty. An unknown status (a row from a
-#: newer build) sorts after them all rather than crashing the sort.
-_STATUS_RANK = {"active": 0, "paused": 1, "done": 2, "archived": 3}
-
-
-class ProjectCreate(Input):
-    """``POST`` body — the design's frozen create contract (§4.1).
-
-    Dates, the estimate and milestones are set afterwards via ``PATCH`` and the
-    milestone routes; the tool's ``create`` accepts them in one call because it
-    is a different surface with a different budget.
-    """
-
-    name: str = Field(min_length=1, max_length=64)
-    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
-    status: ProjectStatus | None = None
-    tags: list[str] | None = None
-
-
-class ProjectPatch(Input):
-    """``PATCH`` body — every field optional; omitted fields are untouched.
-
-    ``""`` CLEARS a date (or the progress snippet); omitting the key leaves it
-    alone. That tri-state is why the route forwards only the keys the caller
-    actually sent (``model_fields_set``) into :class:`ProjectEdit`.
-    """
-
-    name: str | None = Field(default=None, min_length=1, max_length=64)
-    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
-    status: ProjectStatus | None = None
-    progress: str | None = Field(default=None, max_length=PROGRESS_MAX)
-    tags: list[str] | None = None
-    start_date: str | None = None
-    target_date: str | None = None
-    completed_at: str | None = None
-    estimate: float | None = None
-    estimate_unit: str | None = None
-
-
-class ProjectDelete(Input):
-    """``DELETE`` body — the project's NAME, typed, is the confirmation.
-
-    A mismatch is a 422 rather than a silent success: the body is the whole
-    request, and a client that sends the wrong name is not asking for this
-    deletion (the same ladder ``ConfirmDeletion`` climbs for sessions).
-    """
-
-    confirm: str = Field(min_length=1, max_length=64)
-
-
-class LinkMutation(Input):
-    session_id: str = Field(min_length=1, max_length=64)
-
-
-class MilestoneMutation(Input):
-    name: str = Field(min_length=1, max_length=80)
-    target_date: str | None = None
-    completed: bool | None = None
 
 
 def _registry(request: Request) -> ProjectRegistry:
@@ -229,7 +172,7 @@ async def projects(request: Request) -> CRUDResponse[Any]:
                 project_summary(project, live_sessions=live.get(project.id, 0))
                 for project in listed
             ]
-            rows.sort(key=lambda row: (_STATUS_RANK.get(row.status, 99), -row.updated_at))
+            rows.sort(key=lambda row: (STATUS_RANK.get(row.status, 99), -row.updated_at))
             return ProjectList(projects=rows)
 
         return reply(await asyncio.to_thread(read))

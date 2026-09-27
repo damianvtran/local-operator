@@ -27,7 +27,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from local_operator.projects import Project, milestone_status, progress_is_stale
+from local_operator.projects import (
+    DESCRIPTION_MAX,
+    PROGRESS_MAX,
+    Project,
+    ProjectStatus,
+    milestone_status,
+    progress_is_stale,
+)
 
 
 class ProjectMilestoneView(BaseModel):
@@ -136,6 +143,86 @@ class ProjectDeleted(BaseModel):
     """``DELETE /v1/desktop/projects/{key}``."""
 
     deleted: bool = True
+
+
+#: The fixed board order, and therefore both listings' sort: ``archived`` last,
+#: a status the board only draws when non-empty. An unknown status (a row from a
+#: newer build) sorts after them all rather than crashing the sort. ONE copy:
+#: the desktop routes and the mobile daemon both import it from here, and the
+#: phone's compile-time section order mirrors it (``STATUS_ORDER`` in
+#: ``mobile/web/src/components/projects-sheet.tsx``, which cannot import
+#: Python).
+STATUS_RANK = {"active": 0, "paused": 1, "done": 2, "archived": 3}
+
+
+class _Request(BaseModel):
+    """Base for the write bodies, mirroring the desktop routes' ``Input``.
+
+    ``Input`` itself lives in ``routes/desktop_sessions.py`` and cannot be
+    imported here — this module stays importable without the server's HTTP
+    stack, and the mobile daemon reads it — so the one rule it carries,
+    ``extra="forbid"``, is restated. Request models live in THIS module rather
+    than beside their handlers so both surfaces can derive their accepted keys
+    from one source: the mobile daemon validates its flat bodies against
+    ``tuple(Model.model_fields)`` (round-1 review, [m]3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ProjectCreate(_Request):
+    """``POST`` body — the design's frozen create contract (§4.1).
+
+    Dates, the estimate and milestones are set afterwards via ``PATCH`` and the
+    milestone routes; the tool's ``create`` accepts them in one call because it
+    is a different surface with a different budget.
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
+    status: ProjectStatus | None = None
+    tags: list[str] | None = None
+
+
+class ProjectPatch(_Request):
+    """``PATCH`` body — every field optional; omitted fields are untouched.
+
+    ``""`` CLEARS a date (or the progress snippet); omitting the key leaves it
+    alone. That tri-state is why the route forwards only the keys the caller
+    actually sent (``model_fields_set``) into :class:`ProjectEdit`.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
+    status: ProjectStatus | None = None
+    progress: str | None = Field(default=None, max_length=PROGRESS_MAX)
+    tags: list[str] | None = None
+    start_date: str | None = None
+    target_date: str | None = None
+    completed_at: str | None = None
+    estimate: float | None = None
+    estimate_unit: str | None = None
+
+
+class ProjectDelete(_Request):
+    """``DELETE`` body — the project's NAME, typed, is the confirmation.
+
+    A mismatch is a 422 rather than a silent success: the body is the whole
+    request, and a client that sends the wrong name is not asking for this
+    deletion (the same ladder ``ConfirmDeletion`` climbs for sessions).
+    """
+
+    confirm: str = Field(min_length=1, max_length=64)
+
+
+class LinkMutation(_Request):
+    session_id: str = Field(min_length=1, max_length=64)
+
+
+class MilestoneMutation(_Request):
+    name: str = Field(min_length=1, max_length=80)
+    target_date: str | None = None
+    completed: bool | None = None
 
 
 def project_view(project: Project) -> ProjectView:
