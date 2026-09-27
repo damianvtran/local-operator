@@ -159,6 +159,15 @@ jobs:
       # below still fires on failure().
       - name: Check the provider key (skip with a warning when unset)
         id: key
+        # Step-scoped, not job-scoped: of the sweep's steps only this check
+        # reads the key, so the mapping lives here — the checkout, sweep and
+        # dispatch steps never hold the spend credential (the review/triage
+        # jobs map it job-wide because their `lop exec` step needs it).
+        # Load-bearing: without a mapping in scope the check always saw an
+        # unset key and every scheduled sweep took the disabled path —
+        # reconcile.test.sh guards that regression.
+        env:
+          RADIENT_API_KEY: ${{ secrets.RADIENT_API_KEY }}
         run: |
           if [ -z "${RADIENT_API_KEY:-}" ]; then
             echo "enabled=false" >> "$GITHUB_OUTPUT"
