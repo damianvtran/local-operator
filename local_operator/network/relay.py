@@ -2345,9 +2345,17 @@ def set_trust(
 ) -> None:
     """Move a network between ``active`` and ``untrusted`` (or ``disconnected``).
 
-    ``untrusted`` refuses every link for that network — the handshake checks it as
-    step 3 and dispatch checks it again — so recovery is explicit and local
-    (``lop network trust <net> --active``).
+    ``untrusted`` refuses a link for that network at the handshake's own step 3 AND at
+    every later admission (``RelayServer._refusal_reason``, read under the lock its
+    insert takes). What closes a link that ALREADY exists is the panic paths: they
+    write this state and snapshot the table in one critical section, so a link is
+    either in the snapshot or refused at admission. A plain ``lop network trust
+    --untrusted`` closes nothing — an established link outlives it until it ends on its
+    own — and the ``Authorizer`` has no trust term, so the sentence that used to claim
+    one ("the handshake checks it as step 3 and dispatch checks it again") is the one
+    that made a served survivor read as impossible.
+
+    The recovery is explicit and local (``lop network trust <net> --active``).
     """
     # ``types.trust_state`` is the package's one reader for this string; going
     # through it keeps the refusal code and sentence single-sourced, and the
@@ -3672,7 +3680,7 @@ class RelayServer:
 
         WHY A BARRIER AND NOT A RE-SNAPSHOT LOOP. Every admission into ``links``
         happens in ONE critical section of ``_links_lock`` that also reads ``_stop``
-        (:meth:`_register_or_refuse`), and this method sets ``_stop`` before it takes
+        (:meth:`_refusal_reason`), and this method sets ``_stop`` before it takes
         that same lock for the snapshot below. So an admission that succeeded is
         visible to the snapshot, and one that has not yet taken the lock finds
         ``_stop`` set and is refused: there is no third outcome. Repeating
@@ -4358,15 +4366,19 @@ class RelayServer:
             _close_quietly(sock)
             return
 
-        # STOPPED WHILE THIS HANDSHAKE WAS IN FLIGHT: the peer authenticated, and
-        # this relay must not answer it. Checked HERE — after the handshake, before
-        # the welcome — because the welcome is the first thing a peer can read as
-        # "we are talking", and everything past it (a link, an admission, a pair
-        # ceremony) is work a stopped relay must not start. A connection the kernel
-        # accepted before the listener closed is still held by this thread, so
-        # closing the listener in :meth:`stop` cannot release it; this is the check
-        # that does. Silently, like every other refusal on this transport.
-        if self._stop.is_set():
+        # NOTHING IS ANSWERED BY A RELAY THAT WOULD NOT ADMIT THIS LINK: either it is
+        # stopping or it holds this network untrusted, and both are refused HERE —
+        # after the handshake, before the welcome — because the welcome is the first
+        # thing a peer can read as "we are talking". A connection the kernel accepted
+        # before the listener closed is still held by this thread, so closing the
+        # listener in :meth:`stop` cannot release it; this is the check that does, and
+        # for an untrusted network it is what stops the relay answering at all rather
+        # than answering and then closing. Silently, like every other refusal here.
+        #
+        # THE DECISION BELOW IS STILL THE AUTHORITATIVE ONE (:meth:`_admit_link`, under
+        # ``_links_lock``): this read is a hint taken earlier, and a link admitted
+        # between the two is refused there instead.
+        if self._refusal_reason(network_id):
             _close_quietly(sock)
             return
         record = store.load(network_id, self.root) if network_id else None
@@ -4494,31 +4506,67 @@ class RelayServer:
             )
         )
 
-    def _register_or_refuse(self, link: PeerLink) -> bool:
-        """Take ``link`` into the table and start it, or close it and report False.
+    def _refusal_reason(self, network_id: str) -> str:
+        """Why a link for ``network_id`` may not be admitted, or ``""`` to admit it.
 
-        THE ONE WAY INTO ``links``, and why it is one way: the read of ``_stop`` and
-        the insert have to happen in the SAME critical section, or the read proves
-        nothing. A thread that checked ``_stop`` outside this lock could read it a
-        microsecond before :meth:`stop` set it and then insert into the table anyway
-        — which is exactly how a stopped relay kept answering a peer (see
-        :meth:`stop`). ``link.start()`` is inside the section too, so a link can
-        never be in the table unstarted while ``stop`` is closing what it found.
+        THE TWO TERMS ARE THE TWO THINGS THAT MAKE A LINK WRONG TO SERVE. ``_stop`` is
+        the shutdown; ``untrusted`` is an incident — this device decided, or was told,
+        that the network is compromised, and a link for it would be ANSWERED, because
+        the authoriser has no trust term: the handshake's check at the challenge is the
+        only other gate and it is already behind us here (see :meth:`_ctl_panic` and
+        :meth:`_op_panic`).
+
+        THE READ IS THE SAME READ whether or not the caller holds ``_links_lock``; what
+        the lock buys is that the ANSWER still holds when the insert happens. So the
+        authoritative caller is :meth:`_admit_link`, which reads this inside the
+        section, and a caller outside it is taking a hint.
+
+        AN ABSENT RECORD IS NOT ``untrusted``: a network this device does not know has
+        no trust to read, and the handshake refuses those at the challenge. Treating a
+        missing file as a compromise would turn a store read into a link nobody can
+        explain.
+        """
+        if self._stop.is_set():
+            return "stopping"
+        record = self.store_view.network(network_id)
+        if record is not None and record.trust != "active":
+            return "untrusted"
+        return ""
+
+    def _admit_link(self, link: PeerLink) -> str:
+        """Put ``link`` in the table and start it; return ``""``, or why it was refused.
+
+        THE ONE WAY INTO ``links``, and why it is one way: the refusal (see
+        :meth:`_refusal_reason`) and the insert have to happen in the SAME critical
+        section, or the read proves nothing. A thread that checked outside this lock
+        could check a microsecond before :meth:`stop` set ``_stop`` — or before a panic
+        wrote ``untrusted`` under it — and then insert into the table anyway, which is
+        how a stopped relay kept answering a peer and how a panicked one kept serving
+        the survivor of a handshake that was in flight when the alarm landed.
+
+        ``link.start()`` is inside the section so that a link can never be in the table
+        unstarted while ``stop`` is closing what it found, and the insert is ROLLED BACK
+        if starting it raises, so that stays a fact about the table rather than a
+        sentence about what usually happens.
 
         REFUSED MEANS CLOSED, with no frame on the wire: the peer gets EOF, the same
         answer every other refusal on this transport gives — an open port that
         explains itself is an oracle — and the record of why is this device's own.
         """
         with self._links_lock:
-            if self._stop.is_set():
-                refused = True
-            else:
+            refusal = self._refusal_reason(link.network_id)
+            if not refusal:
                 self.links[link.link_id] = link
-                link.start()
-                refused = False
-        if refused:
+                try:
+                    link.start()
+                except BaseException:
+                    # A LINK IN THE TABLE IS A LINK THAT IS RUNNING, and the caller is
+                    # about to unwind: leave neither half of that behind.
+                    del self.links[link.link_id]
+                    raise
+        if refusal:
             _close_quietly(link.sock)
-        return not refused
+        return refusal
 
     def register_link(
         self,
@@ -4536,13 +4584,17 @@ class RelayServer:
         is what keeps a peer that speaks immediately after its handshake from
         having that frame decrypted out of sequence.
 
-        ``None`` means :meth:`stop` happened while this handshake was in flight: the
-        socket is already closed and the caller has nothing to clean up. The barrier
-        is placed BEFORE the duplicate fence and not at the insert below, because
-        ``identity_use.observe`` registers this link's id as a live use of the peer's
-        identity — refusing after it would leave that use outstanding for a link that
-        never existed, so the fence has to be skipped entirely rather than run and
-        unwound.
+        ``None`` means this relay would not admit the link: :meth:`stop` happened while
+        the handshake was in flight, or the network is marked untrusted. The socket is
+        already closed and the caller has nothing to clean up.
+
+        THE FENCE RUNS BEFORE THE DECISION, which is where it ran before this slice and
+        where it has to run: a fence that acts after the newcomer is in the table leaves
+        one device with two live links until the old one is closed, and it reads
+        ``last_frame_at`` off a claim the newcomer's own frames have already refreshed,
+        so an honest restart reads as a duplicate. The refusal is still decided UNDER
+        THE LOCK in :meth:`_admit_link`; the reads above it only save the fence from
+        working on a link that is about to be closed.
         """
         link = PeerLink(
             server=self,
@@ -4553,7 +4605,12 @@ class RelayServer:
             reader=reader,
         )
         link.peer_addr = peer_addr
-        if not self._register_or_refuse(link):
+        # A REFUSAL HERE IS A HINT, NOT THE DECISION (see :meth:`_refusal_reason`): it
+        # saves the fence below from evicting a live link and writing audit rows for a
+        # link that is about to be closed. The decision is made under the lock, where
+        # the rare case of the two disagreeing is handled.
+        if self._refusal_reason(link.network_id):
+            _close_quietly(link.sock)
             return None
         verdict = self.identity_use.observe(
             result.peer_device_id,
@@ -4586,12 +4643,19 @@ class RelayServer:
                     },
                 )
             )
-        # NOT STARTED HERE: ``_register_or_refuse`` owns both the insert and
-        # ``start()``, and it does them in one critical section so ``stop`` can never
-        # meet a link that is in the table but not yet running. A second ``start()``
-        # here would put TWO reader threads on the same socket — each owning half a
-        # frame stream through its own ``FrameReader``, with the record they split
-        # between them lost — which is what a duplicate of this line did.
+        # NOT STARTED HERE: ``_admit_link`` owns the insert AND ``start()``, in one
+        # critical section, so ``stop`` can never meet a link that is in the table but
+        # not yet running. A second ``start()`` — here or anywhere else — would put TWO
+        # reader threads on one socket, each owning half a frame stream through its own
+        # ``FrameReader``, and the record they split between them is lost.
+        refusal = self._admit_link(link)
+        if refusal:
+            # THE STATE CHANGED WHILE THE FENCE RAN. ``observe`` has just made a claim
+            # for a link that will never exist, and a claim describes a link in the
+            # table: leaving it there would make the next honest handshake from this
+            # device read as a duplicate of a link this relay never had.
+            self.identity_use.released(result.peer_device_id, result.link_id)
+            return None
         # Learn where the peer can be dialled back. This is a DIFFERENT direction
         # from the endpoints we just declared in our own welcome: the hello the
         # peer sent carries ITS endpoints, and this device is the only one that
@@ -5588,16 +5652,33 @@ class RelayServer:
         # A panic rewrites trust, and an admin sender's panic rotates the epoch and
         # the secret: the read is inside the lock so the alarm is not written back
         # over a record that moved underneath it.
-        with store.mutate(link.network_id, self.root) as record:
-            epoch_before = record.epoch
-            outcome = apply_panic(
-                record,
-                state,
-                frame,
-                sender_device_id=link.device_id,
-                root=self.root,
-            )
-            epoch_after = record.epoch
+        # THE STATE AND THE TABLE ARE SET IN ONE CRITICAL SECTION, and it spans the
+        # WHOLE ``mutate``: ``apply_panic`` writes this record's file, an admission
+        # reads that trust back out of the file, and a lock released before the write
+        # orders nothing. This runs on the link's OWN READER THREAD, so the section
+        # also has to stay short — no sends, no closes, no reply — which is why only
+        # the write and the snapshot are inside it. Without it, a handshake that was
+        # past the challenge when the alarm landed inserts after the snapshot, is
+        # missed by it, and goes on being SERVED: the authoriser has no trust term,
+        # and the fan-out does not dial, so nothing else refuses that peer or tells
+        # it.
+        with self._links_lock:
+            with store.mutate(link.network_id, self.root) as record:
+                epoch_before = record.epoch
+                outcome = apply_panic(
+                    record,
+                    state,
+                    frame,
+                    sender_device_id=link.device_id,
+                    root=self.root,
+                )
+                epoch_after = record.epoch
+            # The snapshot is taken HERE, inside the section that wrote the state.
+            victims = [
+                other
+                for other in list(self.links.values())
+                if other.network_id == record.network_id
+            ]
         self.audit.record(
             AuditEvent(
                 event="panic_received",
@@ -5646,13 +5727,12 @@ class RelayServer:
                 },
             }
         )
-        # Every link for this network closes, and a connection that arrives
-        # afterwards is refused at handshake step 3 — "refuse all further peer
+        # Every link for this network closes, and a connection that arrives afterwards
+        # is refused at the challenge AND at admission — "refuse all further peer
         # traffic" is a state, not a one-off action.
-        for other in list(self.links.values()):
-            if other.network_id == record.network_id:
-                other.send({"op": "net_bye", "reason": "untrusted"})
-                other.close("we-closed")
+        for other in victims:
+            other.send({"op": "net_bye", "reason": "untrusted"})
+            other.close("we-closed")
         # ``None`` rather than the frame above: the dispatcher's own ack would be a
         # second reply with the same ``req``, queued after the link is closed so it
         # can never be written, and a duplicate reply on the wire is the shape the
@@ -7469,12 +7549,13 @@ class RelayServer:
                 reader=reader,
             )
             link.peer_addr = peer_addr
-            if not self._register_or_refuse(link):
+            if self._admit_link(link):
                 # The relay stopped while the two people were confirming. The member
                 # row this ceremony just wrote STANDS — the admission is durable and
-                # the joiner holds it — but the link does not: a stopped relay serves
-                # nobody, and the joiner learns that on its next dial rather than
-                # being handed a connection this device would not answer on.
+                # the joiner holds it — but the link does not: a relay that has stopped,
+                # or that holds this network untrusted, serves nobody, and the joiner
+                # learns that on its next dial rather than being handed a connection
+                # this device would not answer on.
                 return
             # THE ADMITTING DEVICE OWES THE REST OF THE NETWORK THIS NEWS. The
             # joiner was handed the full member list in its admission frame; the
@@ -7745,8 +7826,9 @@ class RelayServer:
                 reader=reader,
             )
             link.peer_addr = host
-            if not self._register_or_refuse(link):
-                return None, "stopping"
+            refusal = self._admit_link(link)
+            if refusal:
+                return None, refusal
             # The listener's endpoints arrive in its ``welcome``; they are how this
             # device will re-open the link without being told the address again.
             # ``record`` was read before this handshake and is only an id source now:
@@ -7949,6 +8031,15 @@ class RelayServer:
                     if reader.eof:
                         break
                     continue
+                if self._stop.is_set():
+                    # THE RE-CHECK AFTER THE BLOCKING READ, the same rule the accept
+                    # loops follow and for the same reason: the condition above was
+                    # last true when ``read_frame`` BEGAN, and it blocks for up to an
+                    # hour, so a request that arrived after the stop would otherwise be
+                    # served — and answered — by a relay that has already returned from
+                    # ``stop()``. The close is this method's ``finally``, so this
+                    # returns rather than closing here; the client reads EOF.
+                    return
                 if stream is not None:
                     # A LOCAL CLOSE IS NOT A SESSION FRAME. Once this connection has
                     # become a stream every line is forwarded verbatim, so the §2.5
@@ -8510,60 +8601,72 @@ class RelayServer:
         # stays outside, because a socket send is not part of the record's state.
         resolved = self._require_network(str(frame.get("network") or ""))
         state = store.require_secrets(resolved.network_id, self.root)
-        with store.mutate(resolved.network_id, self.root) as record:
-            member = record.self_member()
-            is_admin = bool(member and "admin" in member.capabilities)
-            outbound = panic(
-                record,
-                state,
-                by=record.self_device_id,
-                is_admin=is_admin,
-                reason=str(frame.get("reason") or "operator_panic"),
-                root=self.root,
-            )
-            # THE LOCAL STATE CHANGE COMES FIRST AND IS NEVER CONDITIONAL ON THE
-            # BROADCAST (incident design §1.5/§2.1: "panic latches first"). It used to
-            # be a second ``mutate`` AFTER the fan-out, which left the device `active`
-            # at the new epoch for as long as the peers took to answer and would have
-            # left it there for good had the process died mid-broadcast.
-            set_trust(
-                record,
-                trust="untrusted",
-                reason="this device raised a panic",
-                root=self.root,
-            )
-            self.audit.record(
-                AuditEvent(
-                    event="panic_raised",
-                    actor=record.self_device_id,
-                    subject=record.network_id,
-                    network_id=record.network_id,
-                    epoch=record.epoch,
-                    detail={
-                        "epoch_before": record.epoch - (1 if is_admin else 0),
-                        "epoch_after": record.epoch,
-                        "reachable_peers": sum(
-                            1
-                            for link in list(self.links.values())
-                            if link.network_id == record.network_id and link.alive
-                        ),
-                    },
+        # THE STATE AND THE TABLE ARE SET IN ONE CRITICAL SECTION, and the section
+        # has to span the WHOLE ``mutate``: ``set_trust`` writes the record's file
+        # when the body calls ``save``, and an admission reads that trust back out of
+        # the file, so a lock released before the write orders nothing. With the
+        # section spanning both, an admission is either in the snapshot below or
+        # refused by ``_admit_link`` — there is no third outcome. Without it, a
+        # handshake that was past the challenge when the write landed inserts between
+        # the write and the snapshot, is missed by it, and goes on being SERVED: the
+        # authoriser has no trust term, and the fan-out does not dial, so nothing
+        # else refuses that peer or tells it.
+        with self._links_lock:
+            with store.mutate(resolved.network_id, self.root) as record:
+                member = record.self_member()
+                is_admin = bool(member and "admin" in member.capabilities)
+                outbound = panic(
+                    record,
+                    state,
+                    by=record.self_device_id,
+                    is_admin=is_admin,
+                    reason=str(frame.get("reason") or "operator_panic"),
+                    root=self.root,
                 )
-            )
+                # THE LOCAL STATE CHANGE COMES FIRST AND IS NEVER CONDITIONAL ON THE
+                # BROADCAST (incident design §1.5/§2.1: "panic latches first"). It used to
+                # be a second ``mutate`` AFTER the fan-out, which left the device `active`
+                # at the new epoch for as long as the peers took to answer and would have
+                # left it there for good had the process died mid-broadcast.
+                set_trust(
+                    record,
+                    trust="untrusted",
+                    reason="this device raised a panic",
+                    root=self.root,
+                )
+                self.audit.record(
+                    AuditEvent(
+                        event="panic_raised",
+                        actor=record.self_device_id,
+                        subject=record.network_id,
+                        network_id=record.network_id,
+                        epoch=record.epoch,
+                        detail={
+                            "epoch_before": record.epoch - (1 if is_admin else 0),
+                            "epoch_after": record.epoch,
+                            "reachable_peers": sum(
+                                1
+                                for link in list(self.links.values())
+                                if link.network_id == record.network_id and link.alive
+                            ),
+                        },
+                    )
+                )
+            # The snapshot is taken HERE, inside the section that wrote the state.
+            victims = [
+                link for link in list(self.links.values()) if link.network_id == resolved.network_id
+            ]
         # PANIC KEEPS ITS BROADCAST BEHAVIOUR: the frame carries the new secret to
         # every reachable peer, once each, and what comes back is what the receipt
         # reports. The frame is built per link by the fan-out (each needs its own
         # ``req`` so its reply can be matched), and the links close after the answers
         # rather than before them — a peer cannot report on a link this side has
         # already torn down.
-        links = [
-            link for link in list(self.links.values()) if link.network_id == resolved.network_id
-        ]
         reports = self._incident_fan_out(
             resolved.network_id, op="net_panic", fields=self._incident_fields(outbound)
         )
         self._audit_incident_delivery("panic", reports)
-        for link in links:
+        for link in victims:
             link.close("we-closed")
         tally = self._incident_tally(reports)
         return {
