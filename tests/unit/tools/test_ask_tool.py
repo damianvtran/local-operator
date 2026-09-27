@@ -493,15 +493,52 @@ async def test_an_announce_hook_failure_does_not_fail_the_ask() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_declined_secret_question_is_the_same_as_answering_nothing() -> None:
-    """Escaping a secret question is a refusal, not a stored blank. The
-    existing unanswered path already tells the model not to ask again."""
+async def test_a_declined_secret_question_reports_the_decline_not_the_generic_text() -> None:
+    """Escaping a secret question is a refusal, not a stored blank — and it is
+    not the generic "decide yourself … carry on" either: a secret question has
+    no recommended option to fall back on, and carrying on is exactly what must
+    not happen when the credential a privileged command was waiting for never
+    arrived (UX round 1, U3)."""
     hook, _seen = await _answer_with(None)
     from local_operator.variables import VariableStore
 
     store = VariableStore(cwd="/tmp", env={})
     context = ToolContext(cwd=".", session_id="s", has_ui=True, ask_user=hook, variables=store)
     result = await _call(context, {"questions": [_secret_question()]})
+
     assert result.is_error is False
-    assert "nothing was chosen" in result.text
+    assert result.text == builtin.ASK_SECRET_UNANSWERED_TEXT
+    assert "did not hand over the credential" in result.text
+    assert "decide yourself" not in result.text
     assert store.credential_names() == []
+
+
+@pytest.mark.asyncio
+async def test_a_closed_mixed_batch_still_reports_the_secret_decline() -> None:
+    """One secret question in a closed batch makes the whole report the
+    secret-aware decline: the generic text would send the model to its own
+    recommendation for work the missing credential was needed for (U3)."""
+    hook, _seen = await _answer_with(None)
+    result = await _call(_context(hook), {"questions": [*_questions(), _secret_question()]})
+
+    assert result.is_error is False
+    assert result.text == builtin.ASK_SECRET_UNANSWERED_TEXT
+
+
+@pytest.mark.asyncio
+async def test_a_partially_answered_batch_reports_the_secret_as_not_provided() -> None:
+    """A batch whose option question was answered and whose secret one was not
+    keeps the normal path — the model gets the answer it has and sees the
+    credential marked ``<not provided>``, which is the honest partial report
+    (U3's "mixed batches sensible")."""
+    from local_operator.variables import VariableStore
+
+    hook, _seen = await _answer_with({"stale": ["Drop them"]})
+    store = VariableStore(cwd="/tmp", env={})
+    context = ToolContext(cwd=".", session_id="s", has_ui=True, ask_user=hook, variables=store)
+    result = await _call(context, {"questions": [*_questions(), _secret_question()]})
+
+    assert result.is_error is False
+    assert result.text != builtin.ASK_SECRET_UNANSWERED_TEXT
+    assert "Drop them" in result.text
+    assert builtin.ASK_SECRET_NOT_PROVIDED in result.text

@@ -80,6 +80,18 @@ def test_both_true_is_refused_rather_than_rendered() -> None:
         render_template("system.md", {"has_console": True, "no_console": True})
 
 
+def test_the_has_console_note_teaches_the_ask_handover() -> None:
+    """The note is the always-on behavioural trigger for the admin flow: a
+    model that reads it must know to collect the password with an `ask` secret
+    question and relay it by `secret_ref` — and must NOT be told to hand the
+    job back to the user. Mutation-verified: reverting the note to the old
+    prohibition fails this cell on both halves (review round 1, M2)."""
+    note = " ".join(render_template("system.md", {"has_console": True}).split())
+    assert "ask for the password as a secret question" in note
+    assert "then relay it with `input secret_ref=<key>`" in note
+    assert "never attempt a password yourself" not in note
+
+
 def test_the_console_note_never_asks_the_model_to_set_one_up(host_without_console: None) -> None:
     """A three-line prohibition, not a setup playbook.
 

@@ -760,9 +760,182 @@ async def test_an_unresolvable_secret_ref_is_refused_without_dialling(
     )
     assert result.is_error is True
     assert "could not resolve secret_ref" in result.text
-    # The remedy is named, and it is not "put the value in text".
+    # The remedy names all three routes — the ask handover first, since it is
+    # the one the streamlined flow uses — and none of them is "paste the value".
+    assert "`ask` secret question" in result.text
+    assert "`secret` tool" in result.text
+    assert "type it into the surface" in result.text
     assert "do not put the value itself in `text`" in result.text
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_closes_the_stores_own_sentence_with_one_period(
+    monkeypatch: pytest.MonkeyPatch, live_app: None, stored_secret: None
+) -> None:
+    """The store's own not-found text already ends in a period and the refusal
+    template appends its own, so the first wording printed `...in this store..
+    Get the value...` (QA round 1, Q2). The detail is normalised so the model
+    reads exactly one closing period."""
+    from local_operator.secrets import access
+    from local_operator.secrets.errors import SecretNotFound
+
+    def boom(name: str, base: Path | None = None) -> bytes:
+        raise SecretNotFound(f"No secret named {name!r} in this store.")
+
+    monkeypatch.setattr(access, "retrieve_secret", boom)
+    client = _install(monkeypatch, _FakeClient())
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "NOPE"},
+        _context(variables=_store()),
+    )
+    assert result.is_error is True
+    assert "in this store. Get the value" in result.text
+    assert ".." not in result.text
+    assert client.calls == []
+
+
+# --- the ask handover: session credentials ----------------------------------
+#
+# The streamlined sudo flow: the user answers an `ask` secret question (their
+# entry is the consent) and the agent relays the value by ref. These cells pin
+# the two claims the flow rests on — the relay works off the SESSION store, and
+# that store beats a same-named value in the long-term store.
+
+
+@pytest.mark.asyncio
+async def test_a_session_credential_reaches_the_pty_without_touching_the_store(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    """The `ask` handover, plus session-first asserted as behaviour.
+
+    The long-term path is a raising stub, so this cell discriminates: a resolver
+    that consulted `retrieve_secret` before (or instead of) the session store
+    would fail here, and the recorder proves the store was never asked.
+    """
+    store = _store()
+    stored = store.store_credential("SUDO_PASSWORD", "hunter2", "ask")
+    assert stored.ok and stored.credential is not None
+
+    from local_operator.secrets import access
+
+    consulted: list[str] = []
+
+    def boom(name: str, base: Path | None = None) -> bytes:
+        consulted.append(name)
+        raise KeyError(name)
+
+    monkeypatch.setattr(access, "retrieve_secret", boom)
+    client = _install(monkeypatch, _FakeClient({"accepted": True, "bytes": 7}))
+    args = {"method": "input", "surface": "con:1:a", "secret_ref": "SUDO_PASSWORD"}
+    result = await _call(args, _context(variables=store))
+
+    assert result.is_error is False, result.text
+    method, params = client.calls[0]
+    assert method == "console_input"
+    assert params["text"] == "hunter2"
+    # The model's views stay clean and the session's redaction seam contains it.
+    assert "hunter2" not in result.text
+    assert "hunter2" not in repr(result.details)
+    assert "hunter2" not in repr(args)
+    # Membership, not equality: the value lives once in `_credentials` and once in
+    # the §6 registration the relay makes, and `redaction_values()` unions both.
+    assert "hunter2" in store.redaction_values()
+    assert store.redact("echo hunter2") == "echo [redacted]"
+    assert consulted == []
+
+
+@pytest.mark.asyncio
+async def test_a_session_credential_beats_a_same_named_stored_secret(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    """Precedence, pinned: the fresh handover is what the user acted on.
+
+    Both sources hold a value under the same key, and the one that reaches the
+    pty must be the session's — a same-named value in the long-term store is the
+    older decision.
+    """
+    store = _store()
+    store.store_credential("SUDO_PASSWORD", "fresh", "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"stale")
+    client = _install(monkeypatch, _FakeClient({"accepted": True, "bytes": 5}))
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "SUDO_PASSWORD"},
+        _context(variables=store),
+    )
+    assert result.is_error is False, result.text
+    assert client.calls[0][1]["text"] == "fresh"
+    # The fresh value is what got registered; the stored one was never used.
+    assert "fresh" in store.redaction_values()
+    assert "stale" not in store.redaction_values()
+
+
+@pytest.mark.asyncio
+async def test_a_loosely_spelled_session_key_still_resolves(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    """`secret_ref` is model-authored text, so the read applies the same
+    normalize-on-write the store applied: `sudo-password` finds `SUDO_PASSWORD`."""
+    store = _store()
+    store.store_credential("sudo password", "hunter2", "ask")
+    from local_operator.secrets import access
+
+    monkeypatch.setattr(access, "retrieve_secret", lambda name, base=None: b"nope")
+    client = _install(monkeypatch, _FakeClient({"accepted": True, "bytes": 7}))
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "sudo-password"},
+        _context(variables=store),
+    )
+    assert result.is_error is False, result.text
+    assert client.calls[0][1]["text"] == "hunter2"
+
+
+@pytest.mark.asyncio
+async def test_a_raising_session_store_falls_through_to_the_encrypted_store(
+    monkeypatch: pytest.MonkeyPatch, live_app: None, stored_secret: None
+) -> None:
+    """A duck-typed store's accessor can raise; the resolver then degrades to
+    "no session value" and lets the encrypted store answer. The alternative —
+    letting the exception escape — would kill `execute_console` with an
+    unhandled traceback instead of the typed `_error` its contract promises
+    (M1, review round 1)."""
+    from local_operator.variables import VariableStore
+
+    class Hostile(VariableStore):
+        def credential_env(self) -> dict[str, str]:
+            raise RuntimeError("store exploded")
+
+    client = _install(monkeypatch, _FakeClient({"accepted": True, "bytes": len(SECRET)}))
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "SUDO_PASSWORD"},
+        _context(variables=Hostile(cwd=".")),
+    )
+    assert result.is_error is False, result.text
+    assert client.calls[0][1]["text"] == SECRET
+
+
+@pytest.mark.asyncio
+async def test_a_non_dict_session_store_read_falls_through_too(
+    monkeypatch: pytest.MonkeyPatch, live_app: None, stored_secret: None
+) -> None:
+    """The shape guard, separately: a store whose accessor returns something
+    that is not a mapping is treated as "no session value" rather than being
+    subscripted, and the encrypted store still answers."""
+    from local_operator.variables import VariableStore
+
+    class Shapeless(VariableStore):
+        def credential_env(self) -> Any:
+            return ["not", "a", "mapping"]
+
+    client = _install(monkeypatch, _FakeClient({"accepted": True, "bytes": len(SECRET)}))
+    result = await _call(
+        {"method": "input", "surface": "con:1:a", "secret_ref": "SUDO_PASSWORD"},
+        _context(variables=Shapeless(cwd=".")),
+    )
+    assert result.is_error is False, result.text
+    assert client.calls[0][1]["text"] == SECRET
 
 
 # --- the approval prompt ----------------------------------------------------

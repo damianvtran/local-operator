@@ -1380,6 +1380,32 @@ async def test_a_secret_question_still_draws_one_row() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_secret_questions_copy_hands_over_and_declines() -> None:
+    """The secret field's own words must not argue with the semantics: "store"
+    reads as saved (the value is session memory, off disk by default), and
+    "skip" understates Escape, which DECLINES the handover the privileged
+    command was waiting for (U2, UX round 1)."""
+    question = AskQuestion(
+        id="SUDO_PASSWORD",
+        question="Paste the login password.",
+        options=[],
+        secret=True,
+    )
+    for size in ((100, 30), (80, 24)):
+        app = _AskHost([question])
+        async with app.run_test(size=size) as pilot:
+            card = await app.open_picker()
+            await pilot.pause()
+            lines = "\n".join(card.render_lines_for_test())
+            assert "hidden as you type — enter hands it over, esc declines" in lines, (size, lines)
+            footer = _painted_footer(app)
+            assert "enter hand over" in footer, (size, footer)
+            assert "esc decline" in footer, (size, footer)
+            assert "enter store" not in footer, (size, footer)
+            assert "esc skip" not in footer, (size, footer)
+
+
+@pytest.mark.asyncio
 async def test_a_recommended_row_keeps_its_prose_when_the_first_word_is_unbreakable() -> None:
     """Review finding (MAJOR): the recommended row drew `· recommended` and NO
     prose at all when its description opened with a word too long to sit beside

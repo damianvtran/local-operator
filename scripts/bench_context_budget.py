@@ -423,7 +423,27 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: createIf-gated on a store being attached, so a session without one carries
 #: neither schema; on a healthy host it is paid on every request, which is why
 #: it was trimmed before the ceiling moved.
-BUDGET_BILLED_TOKENS = 32_737
+#: RAISED 32,737 -> 32,791 for the streamlined-sudo handover (PR #1657), stated
+#: with the arithmetic and only after the trims this block's ``secret`` entry
+#: demands were taken. The pair: the ``has_console`` note now teaches the
+#: ask->relay loop in place of the old "never attempt a password yourself", and
+#: the ``secret_ref`` field description names the session credential source.
+#: As first written that cost +103 chars (note +42, field +61) against the 15
+#: billed tokens of headroom the tree carried, so both strings were trimmed
+#: before the ceiling moved — "type it into the console" became "relay it", and
+#: the field's rationale took the design doc's own phrasing — which is the
+#: remedy the ``secret`` entry records, applied again. Measured by running THIS
+#: script on the same tree:
+#:
+#:   base (d4da37298)   90,966 chars = ~32,722 billed
+#:   head (trimmed)     91,030 chars = ~32,745 billed
+#:     = +64 chars = +23 billed: the has_console note (+24) and the secret_ref
+#:       description (+40), the two strings the flow needs.
+#:
+#: The raise is 54 tokens and lands the ceiling at head + 46 — the headroom band
+#: the entry above keeps — so the next addition finds the ratchet as tight as
+#: this one did, and the tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 32_791
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
