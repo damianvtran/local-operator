@@ -511,6 +511,65 @@ def _tombstone(root: Path, session_id: str) -> dict[str, Any]:
     return read_tombstones(root).get(session_id) or {}
 
 
+def _asking_device(link: Any, frame: dict[str, Any]) -> str:
+    """Which device a move frame is FROM: the link's identity first, then the frame's.
+
+    The link's device id is the identity the mesh ADMITTED (``PeerLink.device_id``, set
+    where the handshake resolved the peer), so it is preferred over ``to_device``, a
+    field the asker writes itself: a frame that claims to be the device a record names
+    must not be believed by the reader of that record. The frame is the fallback for a
+    caller with no admitted link — the handler driven directly, which is how a unit
+    test reaches it.
+    """
+    return str(getattr(link, "device_id", "") or "") or str(frame.get("to_device") or "")
+
+
+def _tombstone_names_this_device(server: "RelayServer", tombstone: dict[str, Any]) -> bool:
+    """Whether the owner's record says the id went to THIS device and no other.
+
+    THE PROMOTION PROOF IS AN IDENTITY, NOT AN EXISTENCE (review round 2, MAJOR). A
+    tombstone is written by the device that handed the id away and names the ONE device
+    that may adopt it (``projection.write_tombstone``); its presence on its own proves
+    only that the id left its owner. A receiver whose handoff was rolled back KEEPS its
+    verified bytes — deliberately, ``_reconcile_destination``'s rollback branch says so,
+    and ``ready.json`` exempts them from the staging sweep for as long as they exist —
+    so the owner can hand the same id to a different device later, and the older copy is
+    then the copy of a handoff that no longer describes it. Promoting it would mint a
+    SECOND OWNER for one id, the invariant this slice exists to enforce, with the OLDER
+    copy winning.
+
+    A record whose ``device_id`` is empty names nobody and is therefore not this device:
+    a record that carries no destination cannot prove that any device may adopt.
+    """
+    return str(tombstone.get("device_id") or "") == server.identity.device_id
+
+
+def _adopt_elsewhere_refusal(
+    server: "RelayServer", session_id: str, tombstone: dict[str, Any]
+) -> SessionMoveRefusal:
+    """The refusal for a staged copy whose owner's record names ANOTHER device.
+
+    It names the CONDITION rather than only the outcome, because the user's remedy is
+    not "retry": the record would have to name this device for the bytes here to be
+    adoptable, and the verb that adopts them has to run on the device it does name —
+    the same rule Q1c applied to the refusals that used to say "run this from the
+    device that holds it" and name a device that holds nothing.
+
+    ``changed`` stays False and the phase stays None on purpose: nothing on this device
+    moved, and the staged copy is left exactly where it is (it is the only copy here).
+    """
+    device_id = str(tombstone.get("device_id") or "")
+    name = str(tombstone.get("device_name") or "") or server._member_name(device_id)  # noqa: SLF001
+    who = name or device_id or "another device"
+    return _move_refusal(
+        session_id,
+        "third_device",
+        f"{session_id} was handed to {who}, not to this device: its record names {who}, "
+        "so the copy staged here is not this device's to adopt and nothing was changed; "
+        f"`lop sessions move {session_id} --to local` on {who} adopts it there",
+    )
+
+
 def _audit(server: "RelayServer", event: str, session_id: str, peer: str, **detail: Any) -> None:
     """One handoff record. Never raises: an audit loss cannot undo a move."""
     try:
@@ -960,6 +1019,14 @@ def _destination_move(
                 return None, _move_refusal(session_id, "unreachable", refusal.message), ""
             return None, _move_refusal(session_id, refusal.code, refusal.message), ""
         if str(status.get("result") or "") == "tombstone":
+            tombstone = status.get("tombstone") or {}
+            if not _tombstone_names_this_device(server, tombstone):
+                # THE RECORD NAMES ANOTHER DEVICE (review round 2, MAJOR), so there is
+                # nothing here to finish: the collapse of "a record exists" into "the
+                # record is mine" is how a stale staged copy becomes a second owner.
+                # Checked on THIS side rather than trusted from the peer's answer,
+                # because the promote below is the irreversible act.
+                return None, _adopt_elsewhere_refusal(server, session_id, tombstone), ""
             # THE CRASH WINDOW THIS EXISTS FOR (§6.5 row 5): the owner already
             # committed and we may hold a verified staging directory. Ask for what
             # we have and finish; there is no `prepare` to make, the id is gone.
@@ -1280,6 +1347,13 @@ def _finish_from_tombstone(
     ``committed`` and died, or its answer never reached us, and the ONE fact that
     settles it is that the id is now tombstoned to THIS device. Nothing else is
     asked of the owner — which is also why this works when the owner is gone.
+
+    WHO ESTABLISHES "TO THIS DEVICE" IS THE CALLER, and every caller compares before it
+    gets here (review round 2, MAJOR): ``_tombstone_names_this_device`` in
+    ``_destination_move`` and ``_reconcile_destination``, where a peer's answer is the
+    input, and ``_recall``'s own comparison of this device's local record. This function
+    cannot make that comparison for itself — the record is the OWNER's file, so the only
+    thing it could read here is the answer somebody else wrote.
     """
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
@@ -1579,6 +1653,20 @@ def _source_status(
     Answers the tombstone for an id this device handed away, which is what makes
     §6.5's recovery table work: a destination that crashed after the commit asks
     here, and the answer — "not mine any more, and it is yours" — is the commit.
+
+    AND IT IS THE COMMIT ONLY FOR THE DEVICE IT NAMES (review round 2, MAJOR). The
+    record carries its taker (``tombstone["device_id"]``), so the same answer is not
+    true for a device the handoff was not made to: one that still holds a verified
+    copy of an earlier, rolled-back attempt would read "yours" as permission to promote
+    it, and two devices would each hold a promoted copy of one id. The asker is the
+    link's admitted identity (:func:`_asking_device`) — never a field the asker writes
+    — and a mismatch is a refusal that says where the id went instead.
+
+    THE REACHABILITY OF A MISMATCH IS NOT WHAT MAKES THIS WORTH DOING: a peer frame
+    for an id this device no longer owns is already scoped by ``authorizer._move_scope``
+    to the device the record names, so the ask is normally refused a layer earlier. The
+    handler is gated anyway, because the two-layer agreement is exactly what a future
+    change to one of them breaks, and this is the layer that produces the answer.
     """
     from local_operator.session.archived import archived_ids
 
@@ -1608,10 +1696,25 @@ def _source_status(
         }
     tombstone = _tombstone(server.root, session_id)
     if tombstone:
+        if str(tombstone.get("device_id") or "") == _asking_device(link, frame):
+            return {
+                "result": "tombstone",
+                "owner": False,
+                "tombstone": tombstone,
+                "session_id": session_id,
+            }
+        # A RECORD FOR SOMEBODY ELSE IS NOT A REFUSAL TO ANSWER (review round 2,
+        # MAJOR): it says where the id went, and the asker may be holding the only
+        # bytes of an older attempt under the same id. The sentence is the module's
+        # own for that state (``_tombstone_recovery_clause``) rather than a second
+        # wording of it, and it names the device the record names.
         return {
-            "result": "tombstone",
-            "owner": False,
-            "tombstone": tombstone,
+            "result": "refused",
+            "code": "not_owner",
+            "message": (
+                f"this device does not hold {session_id} any more"
+                + _tombstone_recovery_clause(server, session_id)
+            ),
             "session_id": session_id,
         }
     return {
@@ -2348,7 +2451,9 @@ def _tombstone_recovery_clause(server: "RelayServer", session_id: str) -> str:
     )
 
 
-def adopt_staged_if_mine(server: "RelayServer", session_id: str) -> SessionMoveResult | None:
+def adopt_staged_if_mine(
+    server: "RelayServer", session_id: str
+) -> SessionMoveResult | SessionMoveRefusal | None:
     """§6.5 row 5, asked for BY THE USER on the device that holds the staged copy.
 
     THE GAP THIS CLOSES, measured on the two-device rig 2026-09-27 (QA round 1, Q1):
@@ -2365,6 +2470,14 @@ def adopt_staged_if_mine(server: "RelayServer", session_id: str) -> SessionMoveR
     The proof is unchanged and is not re-derived here: ``_reconcile_destination`` asks
     the owner named in ``ready.json`` for the id's fate and promotes ONLY on a
     tombstone that names this device.
+
+    THAT CLAUSE IS ENFORCED, AND IT IS WHY THIS FUNCTION CAN RETURN A REFUSAL (review
+    round 2, MAJOR): the record's own ``device_id`` is read on this side before anything
+    is promoted, and a record naming another device comes back as
+    ``action: not_mine`` — answered with the refusal its detail names rather than
+    swallowed into the generic "no device in this network holds <id>" the caller would
+    otherwise fall back to, which told a user holding the only verified copy of a
+    conversation that no device had it.
     """
     from local_operator.network import sync as sync_mod
 
@@ -2381,6 +2494,12 @@ def adopt_staged_if_mine(server: "RelayServer", session_id: str) -> SessionMoveR
         report = _reconcile_destination(server.root, session_id, entry, server=server)
     except Moved:
         return None
+    if str(report.get("action") or "") == "not_mine" and isinstance(report.get("refusal"), dict):
+        # THE RECORD NAMED SOMEBODY ELSE, and this refusal travels OUT of here: the user
+        # asked THIS device for the id, and the fact they need is that the copy here is
+        # not this device's to adopt — logged only, it reached them as "no device in
+        # this network holds <id>" (review round 2, MAJOR).
+        return cast(SessionMoveRefusal, report["refusal"])
     if str(report.get("action") or "") != "promoted":
         # LOGGED, not swallowed: this refusal is the difference between "there is nothing
         # to adopt here" and "there is a verified copy here and this device would not
@@ -2605,6 +2724,14 @@ def _reconcile_destination(
     holding the id means it rolled back, so this device drops the entry and keeps
     the bytes (a retry resumes them); no answer at all means wait, because both a
     promote and a rollback would be guesses about another device's disk.
+
+    AND A FOURTH, WHICH IS A REFUSAL (review round 2, MAJOR): a record that names
+    ANOTHER device is not this device's commit. It is the same answer as "no answer"
+    in one respect — nothing here may be promoted — and the opposite in another: the
+    fate is decided, so the report says so (``action: not_mine``) and carries the
+    refusal the user's verb returns, rather than dropping the entry in silence and
+    leaving the caller to answer "no device holds <id>" about bytes this device is
+    holding (see ``_tombstone_names_this_device``).
     """
     from local_operator.network import sync as sync_mod
     from local_operator.session.placement import clear_handoff_entry
@@ -2650,6 +2777,25 @@ def _reconcile_destination(
         # instead of copying a transcript again.
         clear_handoff_entry(root, session_id)
         return {"session_id": session_id, "action": "rolled_back", "phase": "prepared"}
+    tombstone = status.get("tombstone") or {}
+    if not _tombstone_names_this_device(server, tombstone):
+        # THE RECORD NAMES ANOTHER DEVICE (review round 2, MAJOR). This device holds
+        # verified bytes of a handoff that no longer describes it — the owner has
+        # handed the same id on — and promoting them would give one id two owners,
+        # the older copy winning. Measured on this head 2026-09-27: with the record
+        # naming a third device, `move <id> --to local` on the old receiver refuses and
+        # leaves the copy in place; and a peer that answers the existence-only way —
+        # what this handler did before the fix, and what any build without the check
+        # still does — is refused HERE, by this branch (cell 2 of
+        # tests/unit/network/test_mobility_promotion_identity.py promotes on the
+        # pre-fix code and refuses here).
+        clear_handoff_entry(root, session_id)
+        return {
+            "session_id": session_id,
+            "action": "not_mine",
+            "phase": "prepared",
+            "refusal": _adopt_elsewhere_refusal(server, session_id, tombstone),
+        }
     result, refusal, _target = _finish_from_tombstone(server, session_id, owner_device=owner)
     if result is None:
         return {
