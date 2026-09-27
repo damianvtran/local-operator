@@ -214,6 +214,7 @@ async def test_refresh_recomposes_and_keeps_the_reader_where_they_were(tmp_path:
         await pilot.pause()
         await pilot.pause()
         assert view.tracked == 3
+        assert view._last is not None
         assert "gamma" in view._last.text.plain
         assert view.canvas_size[1] > before[1]
         # A refresh must not move the reader off the row they were reading.
@@ -231,11 +232,15 @@ async def test_canvas_geometry_matches_the_pinned_static(tmp_path: Path) -> None
         view = await _open(pilot, app, "p00")
 
         canvas_w, canvas_h = view.canvas_size
+        assert view._last is not None
         assert (canvas_w, canvas_h) == (view._last.width, view._last.height)
         # The Static is pinned to the canvas, so the container's virtual size
         # equals it (scrollbars appear exactly when over).
-        assert view._canvas.styles.width.value == canvas_w
-        assert view._canvas.styles.height.value == canvas_h
+        width_scalar = view._canvas.styles.width
+        height_scalar = view._canvas.styles.height
+        assert width_scalar is not None and height_scalar is not None
+        assert width_scalar.value == canvas_w
+        assert height_scalar.value == canvas_h
         # The LIST canvas overflows vertically on a small terminal ...
         assert canvas_h > view._body.size.height
         assert view._body.virtual_size.height == canvas_h
@@ -308,4 +313,5 @@ async def test_reopening_retargets_without_duplicates(tmp_path: Path) -> None:
         app._run_slash_command("/project show beta")
         await pilot.pause()
         assert len(app.query(ProjectsView)) == 1
+        assert app._projects_view is not None
         assert app._projects_view.cursor == 1

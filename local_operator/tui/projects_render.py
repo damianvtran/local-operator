@@ -720,7 +720,8 @@ def detail_footer(
                 f" · {milestone.get('name')} [{state}]",
                 style=resolver("stale") if state == "overdue" else resolver("dim"),
             )
-    rows = view.get("sessions") if isinstance(view.get("sessions"), list) else []
+    rows_value = view.get("sessions")
+    rows: list[Any] = rows_value if isinstance(rows_value, list) else []
     text.append("  ·  ", style=resolver("dim"))
     if not rows:
         text.append("no linked sessions", style=resolver("dim"))
@@ -730,16 +731,20 @@ def detail_footer(
         for row in rows[:4]:
             if not isinstance(row, dict):
                 continue
-            runtime = row.get("runtime") if isinstance(row.get("runtime"), dict) else {}
+            session_row: dict[str, Any] = row
+            runtime_value = session_row.get("runtime")
+            runtime: dict[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
             state = str(runtime.get("state") or "stopped")
             busy = ", busy" if runtime.get("busy") else ""
-            bit = f"{row.get('session_id')} [{state}{busy}]"
-            subagents = row.get("subagents")
-            if isinstance(subagents, dict):
+            bit = f"{session_row.get('session_id')} [{state}{busy}]"
+            subagents_value = session_row.get("subagents")
+            subagents: dict[str, Any] = subagents_value if isinstance(subagents_value, dict) else {}
+            if subagents:
                 running = int(subagents.get("running") or 0)
                 settled = int(subagents.get("settled") or 0)
                 bit += f" {running} running/{settled} settled"
-            todos = row.get("todos")
+            todos_value = session_row.get("todos")
+            todos: dict[str, Any] = todos_value if isinstance(todos_value, dict) else {}
             if isinstance(todos, dict):
                 bit += f" · todos {todos.get('open')}/{todos.get('total')}"
             bits.append(bit)

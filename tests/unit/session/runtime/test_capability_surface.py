@@ -526,7 +526,9 @@ def test_project_slash_runs_the_verbs_with_the_shared_receipts(
     assert created.text == (
         "created project 'alpha' [active] and linked this session (4e92693767fa)."
     )
-    assert registry.get_project_by_name("alpha").sessions == ["4e92693767fa"]
+    stored = registry.get_project_by_name("alpha")
+    assert stored is not None
+    assert stored.sessions == ["4e92693767fa"]
 
     # A duplicate name is refused by name, with the way in named.
     duplicate = handle._project_slash(session, "new alpha", SlashResult)

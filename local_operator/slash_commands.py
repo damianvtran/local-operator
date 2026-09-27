@@ -357,7 +357,8 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     — so the two surfaces cannot disagree about a session's state; ``null``
     counts are omitted, never rendered as zeroes.
     """
-    project = view.get("project") if isinstance(view.get("project"), dict) else {}
+    raw_project = view.get("project")
+    project: Mapping[str, Any] = raw_project if isinstance(raw_project, dict) else {}
     name = project.get("name") or "(unnamed)"
     lines = [f"{name} [{project.get('status') or 'active'}]"]
     lines.append(f"description: {project.get('description') or '(unstated)'}")
@@ -370,20 +371,21 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
         f"dates: start {project.get('start_date') or '—'} · target "
         f"{project.get('target_date') or '—'} · completed {project.get('completed_at') or '—'}"
     )
-    from local_operator.projects import progress_is_stale
-
     age = _project_age_text(
         project.get("progress_updated_at") if project.get("progress") else None, now=now
     )
     if age is None:
         freshness = "none recorded"
     else:
-        stale = ", stale" if progress_is_stale(_ProjectLike(project), now=now) else ""
+        # The staleness flag comes from the COMPOSITION (one threshold, one
+        # place), never a second derivation here.
+        stale = ", stale" if view.get("progress_stale") else ""
         freshness = f"reported {age} ago{stale}"
     reporter = project.get("progress_reported_by") or ""
     by = f" by {reporter}" if reporter else ""
     lines.append(f"progress ({freshness}{by}): {project.get('progress') or '—'}")
-    milestones = project.get("milestones") or []
+    milestones_value = project.get("milestones")
+    milestones: list[Any] = milestones_value if isinstance(milestones_value, list) else []
     if milestones:
         from local_operator.projects import ProjectMilestone, milestone_status
 
@@ -396,7 +398,8 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
             )
     else:
         lines.append("milestones: (none)")
-    rows = view.get("sessions") if isinstance(view.get("sessions"), list) else []
+    rows_value = view.get("sessions")
+    rows: list[Any] = rows_value if isinstance(rows_value, list) else []
     if not rows:
         lines.append("linked sessions: (none)")
     else:
@@ -404,40 +407,33 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
         for row in rows[:8]:
             if not isinstance(row, dict):
                 continue
-            session_id = row.get("session_id")
-            runtime = row.get("runtime") if isinstance(row.get("runtime"), dict) else {}
+            session_row: Mapping[str, Any] = row
+            session_id = session_row.get("session_id")
+            runtime_value = session_row.get("runtime")
+            runtime: Mapping[str, Any] = runtime_value if isinstance(runtime_value, dict) else {}
             state = str(runtime.get("state") or "stopped")
             busy = ", busy" if runtime.get("busy") else ""
             bits = [state + busy]
-            subagents = row.get("subagents")
-            if isinstance(subagents, dict):
+            subagents_value = session_row.get("subagents")
+            subagents: Mapping[str, Any] = (
+                subagents_value if isinstance(subagents_value, dict) else {}
+            )
+            if subagents:
                 bits.append(
                     f"{int(subagents.get('running') or 0)} running · "
                     f"{int(subagents.get('settled') or 0)} settled subagents"
                 )
-            todos = row.get("todos")
-            if isinstance(todos, dict):
+            todos_value = session_row.get("todos")
+            todos: Mapping[str, Any] = todos_value if isinstance(todos_value, dict) else {}
+            if todos:
                 bits.append(f"todos {todos.get('open')}/{todos.get('total')}")
-            if row.get("archived"):
+            if session_row.get("archived"):
                 bits.append("archived")
-            title = row.get("title") or "(untitled)"
+            title = session_row.get("title") or "(untitled)"
             lines.append(f"  - {session_id} [{' · '.join(bits)}] {title}")
         if len(rows) > 8:
             lines.append(f"  … +{len(rows) - 8} more")
     return "\n".join(lines)
-
-
-class _ProjectLike:
-    """A read-only shim so ``progress_is_stale`` can read a JSON row.
-
-    ``progress_is_stale`` takes the pydantic row; the receipt only holds its
-    dump. The shim exposes the two attributes the predicate reads instead of
-    re-deriving the staleness rule a second time (one rule, one threshold).
-    """
-
-    def __init__(self, row: Mapping[str, Any]) -> None:
-        self.progress = row.get("progress") or ""
-        self.progress_updated_at = row.get("progress_updated_at")
 
 
 def project_unknown_word_text(word: str) -> str:
