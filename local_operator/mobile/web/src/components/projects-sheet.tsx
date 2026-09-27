@@ -538,19 +538,19 @@ export function ProjectsSheet({
 									<p className="text-body-sm text-ink-dim">no progress reported yet</p>
 								)}
 								{/* The age line belongs to a REPORT: with no snippet it could only
-									   restate the line above in the negative (round-1 UX, U3). The
-										  reporter comes before the stale marker, because "stale"
-										  modifies the report, not the person who filed it (U2). */}
-											{detail.project.progress ? (
-											<p
-											className={cn(
+								    restate the line above in the negative (round-1 UX, U3). The
+								    reporter comes before the stale marker, because "stale"
+								    modifies the report, not the person who filed it (U2). */}
+								{detail.project.progress ? (
+									<p
+										className={cn(
 											"mt-1 text-meta",
 											detail.project.progress_stale &&
 												detail.project.progress_updated_at !== null
 												? "text-warning"
 												: "text-ink-muted",
-											)}
-										>
+										)}
+									>
 										{detail.project.progress_updated_at !== null
 											? `reported ${formatRelative(detail.project.progress_updated_at)}` +
 												(detail.project.progress_reported_by
