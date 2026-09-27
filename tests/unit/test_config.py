@@ -1,7 +1,9 @@
 import logging
 import tempfile
 from argparse import Namespace
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -646,7 +648,7 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
 # ---------------------------------------------------------------------------
 
 
-def _write_config_with_extra(config_dir: Path, extra: dict[str, object]) -> Path:
+def _write_config_with_extra(config_dir: Path, extra: Mapping[str, Any]) -> Path:
     """``config.yml`` with ``extra`` at the TOP LEVEL, beside ``values``.
 
     This is the spelling a person writes for a setting the docs name in dots
