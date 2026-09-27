@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import asyncio  # stdlib, so add_parser's import graph stays stdlib-only.
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -304,12 +305,27 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         default="",
         help="run a slash command in that session on its device (e.g. '/rename new name')",
     )
+    # REMAINDER, so the payload is what the user typed rather than what the
+    # parser makes of it: with ``nargs="*"`` every word matching a declared
+    # option was consumed as that option, wherever it appeared — `check the
+    # --name field` delivered `check the` and exited 0, and a prompt containing
+    # `--force` became a usage error instead of a turn (review round 1, MAJOR-1).
+    # The rule this buys is that everything from here to the end of the command
+    # line is TEXT, and the cost is that this command's own flags must come
+    # before the session id (a trailing `--json` is text, like everything else).
+    # `--` still separates the text explicitly, which is argparse's own reading
+    # of it and the form the guide shows for text that begins with a dash.
     net_sessions.add_argument(
         "text",
-        nargs="*",
+        nargs=argparse.REMAINDER,
         default=[],
         metavar="TEXT",
-        help="with --send/--steer/--slash: the text to deliver; omit to read it from stdin",
+        help=(
+            "with --send/--steer/--slash: the text to deliver, taken AS-IS to the end of "
+            "the command line (so a `--name` in it stays text) — put this command's "
+            "flags BEFORE the session id, or separate the text with `--`; omit to read "
+            "it from stdin"
+        ),
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
@@ -2398,6 +2414,28 @@ PILOT_TURN_TIMEOUT_S = 300.0
 #: the peer's side of an open stream), so this is a round trip, not a spawn.
 PILOT_REPLY_TIMEOUT_S = 60.0
 
+#: THE WORST CASE ONE PILOT ACT CAN OCCUPY, DERIVED from the three budgets above
+#: rather than restated beside them — because the one restatement drifted the
+#: first time it was written: the TUI's child budget claimed to sit above what
+#: this verb waits and did not, so a `/network sessions --send …` typed in a
+#: session reaped its child at 480 s under an act that was still working (review
+#: round 1, MAJOR-3). The terms are the act's own parts in order: the viewer is
+#: OPENED (one bind budget), BOUND (a second — the cold-to-working seam is where a
+#: stored session engages a runtime over there), and the act then waits for its
+#: reply, of which the longest rung is the turn. ``_cmd_pilot`` enforces this as
+#: ONE bound around the whole act, so the number is a promise rather than a
+#: restatement: it also covers the reads with no rung of their own (the row
+#: lookup, the teardown), which is why the rungs' sum is not by itself a bound.
+PILOT_ACT_TIMEOUT_S = 2 * PILOT_BIND_TIMEOUT_S + max(PILOT_TURN_TIMEOUT_S, PILOT_REPLY_TIMEOUT_S)
+
+#: The ``style`` values a ``SlashResult`` may carry (``session/frontend_state``:
+#: ``info``/``warning``/``error``, the three the owner's own renders use). A
+#: receipt outside this set is one this build cannot read an outcome from, which
+#: ``_pilot_slash`` reports as unreported rather than guessing (review round 1,
+#: NIT-6): the old test was ``style != "error"``, and a MISSING style is not
+#: ``error``, so an unreadable receipt read as success.
+_SLASH_STYLES = ("info", "warning", "error")
+
 
 def _pilot_text(args: argparse.Namespace) -> str:
     """The words a pilot act delivers: the positional, else stdin.
@@ -2408,11 +2446,34 @@ def _pilot_text(args: argparse.Namespace) -> str:
     that parked on EOF waiting for one would read as a hang. The TUI's child gets
     ``/dev/null`` for stdin (``tui/network_cli``), so a composer line reaches
     this function with its words on argv and never blocks here.
+
+    THE WORDS ARE THE USER'S, VERBATIM: the positional is an argparse REMAINDER
+    (see its declaration for the defect that bought), so nothing between the
+    session id and the end of the line is re-read as a flag. The one token this
+    function does look at is a LEADING ``--``, which is the separator rather than
+    payload — see :func:`_pilot_text_from_args`.
     """
-    text = " ".join(str(part) for part in (getattr(args, "text", None) or ())).strip()
+    text = _pilot_text_from_args(args)
     if text or sys.stdin.isatty():
         return text
     return sys.stdin.read().strip()
+
+
+def _pilot_text_from_args(args: argparse.Namespace) -> str:
+    """The payload's own words, with argparse's separator taken back off.
+
+    A LEADING ``--`` IS THE SEPARATOR, not the first word of the payload. argparse
+    does not consume it under a ``REMAINDER`` — measured through the real parser:
+    ``--send ID -- explain the --peer flag`` arrives with the token still in the
+    list — so the spelling every other CLI taught the user would otherwise prefix
+    their prompt with a literal ``--``. Only the FIRST one is dropped, so a
+    payload that genuinely begins with a dash keeps an escape (``-- -- …``), and a
+    ``--`` in the MIDDLE of the text is left alone: it is a word the user typed.
+    """
+    parts = [str(part) for part in (getattr(args, "text", None) or ())]
+    if parts[:1] == ["--"]:
+        parts = parts[1:]
+    return " ".join(parts).strip()
 
 
 def _pilot_last_reply(viewer: Any) -> str:
@@ -2581,15 +2642,30 @@ def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
 
     from local_operator.paths import config_dir
 
-    payload, lines = asyncio.run(
-        _pilot_act(
-            verb=verb,
-            session_id=session_id,
-            peer=peer,
-            text=text,
-            config_dir=Path(config_dir()),
+    try:
+        payload, lines = asyncio.run(
+            asyncio.wait_for(
+                _pilot_act(
+                    verb=verb,
+                    session_id=session_id,
+                    peer=peer,
+                    text=text,
+                    config_dir=Path(config_dir()),
+                ),
+                # ONE bound around the whole act, at the number its parts add up
+                # to (``PILOT_ACT_TIMEOUT_S``) — the sum of the rungs alone is not
+                # a bound on the act, because the row lookup and the teardown have
+                # no rung of their own.
+                timeout=PILOT_ACT_TIMEOUT_S,
+            )
         )
-    )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not finish this act on {session_id} within "
+            f"{PILOT_ACT_TIMEOUT_S:.0f}s — the worst case this verb budgets for; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
     return _emit(args, payload, lines)
 
 
@@ -2633,7 +2709,21 @@ async def _pilot_act(
 
     try:
         viewer = await asyncio.wait_for(
-            open_remote_viewer(session_id, config_dir=config_dir, takeover=_never),
+            open_remote_viewer(
+                session_id,
+                config_dir=config_dir,
+                takeover=_never,
+                # A ONE-SHOT SHELL VIEWER CONSUMES NO ACTION RECEIPT, and saying so
+                # is what makes /goal, /agent and /team work from here: the owner
+                # completes a receipt only when the client did NOT declare it
+                # (``runtime_must_complete``), so a viewer that claimed the attached
+                # vocabulary and rendered nothing left those three commands setting
+                # state and starting no turn — with a zero exit (review round 1,
+                # MAJOR-2). ``()`` is the honest declaration for a process that
+                # prints the owner's receipt and exits, and it is the reason this
+                # seam takes the list at all.
+                slash_consumers=(),
+            ),
             timeout=PILOT_BIND_TIMEOUT_S,
         )
     except TimeoutError as exc:
@@ -2645,7 +2735,7 @@ async def _pilot_act(
     except ConnectionError as exc:
         # THE OPEN IS A DIAL TOO. An unhandled `ConnectionError` here would surface
         # as a traceback, which is the one thing this family never does with a
-        # refusal; see ``_pilot_open_refusal`` for how the component is decided.
+        # refusal; see ``_pilot_dial_refusal`` for how the component is decided.
         code, sentence = await asyncio.to_thread(
             _pilot_dial_refusal, session_id, peer, str(exc), config_dir
         )
@@ -2668,15 +2758,27 @@ async def _pilot_act(
                 f"`lop network doctor --peer {peer}` diagnoses the link",
             ) from exc
         except ConnectionError as exc:
-            # THE SAME RULE AS THE OPEN, and this is the rung CI's stopped-peer case
-            # actually lands on: the viewer is cold until ``bind_runtime``, so the
-            # dial that produces no welcome frame — "the remote owner did not send
-            # its state" — fails HERE, not at the open. One rule, one code, whether
-            # the failure arrives a rung earlier or later.
-            code, sentence = await asyncio.to_thread(
-                _pilot_dial_refusal, session_id, peer, str(exc), config_dir
-            )
-            raise MeshRefusal(code, sentence) from exc
+            # THE SAME SITUATION AS THE TIMEOUT ABOVE, so the same code: the dial
+            # reached the peer's relay and died producing no session, which is the
+            # owner's runtime rather than this device's link. ``peer_unreachable``
+            # would tell a reader to ask again when it is back (the code's own
+            # meaning) about a peer whose relay had just answered, and it made one
+            # situation carry two codes depending on which rung it died on — while
+            # the GUIDE's own row already calls this ``session_unreachable``
+            # (review round 1, MINOR-4). This is also the rung CI's stopped-peer
+            # case lands on: the viewer is cold until ``bind_runtime``, so the dial
+            # that produces no welcome frame fails HERE, not at the open.
+            #
+            # The transport's own words are carried verbatim because this side
+            # cannot see further than they do, and the one command that separates
+            # "the link is down" from "that runtime is stopped" is named.
+            raise MeshRefusal(
+                "session_unreachable",
+                f"{peer} opened the stream for {session_id} but its runtime never "
+                f"answered ({exc}) — a runtime that is stopped and a link that is "
+                f"down look the same from here; `lop network doctor --peer {peer}` "
+                f"tells them apart, and the conversation is untouched",
+            ) from exc
         if verb == "send":
             return await _pilot_send(viewer, session_id, peer, text)
         if verb == "steer":
@@ -2686,7 +2788,15 @@ async def _pilot_act(
         # The viewer goes away and the PEER keeps its runtime: closing a viewer
         # never stops the owner (the product's own rule, and the reason a moved
         # session is still there next time).
-        await viewer.dispose()
+        #
+        # A FAILED TEARDOWN NEVER SPEAKS FOR THE ACT: this runs on the way out of
+        # both paths, so an exception here would replace the ``MeshRefusal``
+        # explaining what actually went wrong with a dispose error (review round
+        # 1, MINOR-5). Swallowed and logged, like the other teardown paths.
+        try:
+            await viewer.dispose()
+        except Exception:  # noqa: BLE001 — see above: the refusal outranks it
+            logging.getLogger(__name__).debug("disposing the pilot viewer failed", exc_info=True)
 
 
 async def _pilot_send(
@@ -2829,10 +2939,17 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
         "receipt": receipt,
     }
     if not isinstance(receipt, dict):
-        # An owner that answers prose instead of a typed result: report what it
-        # said rather than dressing it up as one.
-        payload.update(ok=True, outcome="answered", text=str(receipt))
-        return payload, [f"/{command} on {session_id}: {receipt}"]
+        # An owner that answers prose instead of a typed result: it is reported,
+        # never counted as success — this side has no field to read an outcome
+        # from, and an exit 0 here would be a guess dressed as the peer's word
+        # (review round 1, NIT-6). The family's own word for that is
+        # `slash_unreported` (``_reported``), because a receipt that does not
+        # carry the fact it is a receipt for is not a receipt.
+        raise MeshRefusal(
+            "slash_unreported",
+            f"the peer answered /{command} with prose rather than a typed receipt, so "
+            f"whether it ran is unknown: {str(receipt)[:200]}",
+        )
     # THE RECEIPT'S OWN FIELDS, and only them: ``SlashResult`` is
     # ``kind``/``text``/``style``/``data`` (``session/frontend_state.py``), so a
     # fallback to any other key would be this side inventing a field the owner
@@ -2840,6 +2957,14 @@ async def _pilot_slash(viewer: Any, session_id: str, text: str) -> tuple[dict[st
     # leak ``test_reason_surfaces`` exists to catch.
     style = str(receipt.get("style") or "")
     said = str(receipt.get("text") or "").strip()
+    if style not in _SLASH_STYLES:
+        # ``ok`` used to be ``style != "error"``, which is TRUE for a receipt with
+        # no style at all — a success claim about a field the owner never sent.
+        raise MeshRefusal(
+            "slash_unreported",
+            f"the peer's receipt for /{command} carried no style this build knows "
+            f"({style or 'none'}), so whether it ran is unknown: {said[:200]!r}",
+        )
     payload.update(
         ok=style != "error",
         outcome="ran" if style != "error" else "refused",

@@ -992,6 +992,7 @@ class AttachedSession:
         surface: str = "terminal",
         owner: "SessionOwner | None" = None,
         seed: "SessionSeed | None" = None,
+        slash_consumers: Sequence[str] | None = ATTACHED_SLASH_CONSUMERS,
     ) -> None:
         self._config_dir = config_dir
         self._session_id = session_id
@@ -1008,6 +1009,18 @@ class AttachedSession:
         #: an empty title. ``None`` (every local caller) means "read the store",
         #: which is what ``cold()`` has always done.
         self._seed = seed
+        #: WHAT THIS VIEWER RENDERS ITSELF, and therefore what the OWNER must not
+        #: run a second time (``session/runtime/types.py::runtime_must_complete``
+        #: is the rule). The default is the attached vocabulary — the full-TUI
+        #: viewer has a composer and ``_render_authoritative_slash`` submits a
+        #: receipt's ``request`` — and ``()`` is what a ONE-SHOT viewer declares,
+        #: because it prints the receipt and exits, so the owner must run the
+        #: turn itself. A viewer that claims these types and renders nothing is
+        #: the defect this parameter exists for: ``/goal``, ``/agent`` and
+        #: ``/team`` set state, started no turn, and exited 0 (review round 1,
+        #: MAJOR-2). ``None`` declares nothing at all, which the owner reads the
+        #: same way ``()`` reads (undeclared), for a client built before the field.
+        self._slash_consumers: Sequence[str] | None = slash_consumers
         self._birth_model: ModelSpec | None = None
         self._model_selection_override = False
         self._takeover_factory = takeover_factory
@@ -1675,6 +1688,7 @@ class AttachedSession:
         model_selection_override: bool = False,
         owner: "SessionOwner | None" = None,
         seed: "SessionSeed | None" = None,
+        slash_consumers: Sequence[str] | None = ATTACHED_SLASH_CONSUMERS,
     ) -> "AttachedSession":
         """A viewer bound to NOTHING: durable history and a spool, no runtime.
 
@@ -1699,6 +1713,7 @@ class AttachedSession:
             surface=surface,
             owner=owner,
             seed=seed,
+            slash_consumers=slash_consumers,
         )
         # A remote viewer passes the row's own cwd (or none) — it has no local
         # transcript to take one from, and §3.4's seed is what keeps its first
@@ -4443,8 +4458,12 @@ class AttachedSession:
             # command twice. A viewer that omitted this (every build before
             # the field) is exactly the case the runtime completes for.
             # THE declaration, read from the one constant both sides use — see
-            # ``ATTACHED_SLASH_CONSUMERS`` for why it is not inlined here.
-            slash_consumers=list(ATTACHED_SLASH_CONSUMERS),
+            # ``ATTACHED_SLASH_CONSUMERS`` for why it is not inlined here, and
+            # ``slash_consumers`` on the constructor for the viewer kinds that
+            # must declare a SUBSET (a one-shot pilot declares none).
+            slash_consumers=(
+                list(self._slash_consumers) if self._slash_consumers is not None else None
+            ),
             on_frontend_sync=once_adopted(self._on_frontend_sync),
             on_frontend_update=once_adopted(self._on_frontend_update),
             on_retiring=once_adopted(self._on_retiring_frame),

@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 from local_operator.interpreter import python_argv
+from local_operator.network.cli import PILOT_ACT_TIMEOUT_S
 
 #: How long a listing may take before this surface gives up on it. The CLI's own
 #: client budget for a listing is the relay's probe budget plus its slack
@@ -52,15 +53,20 @@ QUICK_TIMEOUT_S = 20.0
 PEER_CALL_TIMEOUT_S = 260.0
 
 #: Verbs that DRIVE a session on a peer — ``/network sessions --send`` and its
-#: two siblings. They are not one round trip: the CLI waits for the OPEN and BIND
-#: of a viewer (120 s, which is where a stored session engages a runtime over
-#: there) and then, for ``--send``, for the owner's TERMINAL turn outcome (300 s
-#: more). A child bound at the budget above would cut the call part-way through
-#: a wait the verb itself promises, and the composer would show a timeout about a
-#: command that was still working — the failure ``LISTING_TIMEOUT_S``'s own
-#: comment exists to prevent, one level down. So this sits ABOVE what the CLI
-#: promises to wait, and the CLI's numbers are the terms it holds up.
-PILOT_CALL_TIMEOUT_S = 480.0
+#: two siblings. They are not one round trip: the CLI opens a viewer on the peer
+#: and binds it, then waits for the act's own reply, and the whole act is bounded
+#: by ``network/cli.PILOT_ACT_TIMEOUT_S``. DERIVED FROM THAT CONSTANT, not
+#: restated: this number was written by hand once, as 480, under a comment that
+#: said it sat above what the CLI waits — and it did not (2 x 120 s of dial plus
+#: 300 s of turn is 540 s), so a `/network sessions --send …` typed in a session
+#: reaped its child mid-act and the composer showed a timeout about a command
+#: that was still working (review round 1, MAJOR-3). Importing the term is what
+#: makes that impossible to repeat when one of the three budgets moves.
+#:
+#: The slack on top is for what the constant does not cover: this child is a
+#: fresh interpreter that imports the whole application before its first frame,
+#: and it tears a viewer down on the way out.
+PILOT_CALL_TIMEOUT_S = PILOT_ACT_TIMEOUT_S + 60.0
 
 #: The refusal sentences ``network/cli.py`` prints are ANSI-coloured for a human
 #: watching a terminal. A notice is the wrong place for an escape sequence — a
