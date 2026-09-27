@@ -11,7 +11,10 @@
 #   run, log and timeout. `pull_request` is no longer a trigger at all: a
 #   push, a reopen or a draft flip never starts the model; the sweep is the
 #   only automatic path, and it waits 30 minutes (a PR's own rounds should
-#   appear first) with `reconcile.sh` as the single decision point.
+#   appear first) with `reconcile.sh` as the single decision point — it also
+#   defers a verdict whose rounds predate the current head and dedupes
+#   attempts per family state (this file's `run-name:` is what makes an
+#   attempt recognizable).
 # * Review mode is the concise guidelines-compliance pass for a PR with no
 #   contributor rounds yet; verdict mode is the terminal ✅/❌ compliance
 #   verdict once the contributor's own rounds have settled and read terminal —
@@ -55,6 +58,19 @@
 #   environment — and delegated children inherit both the bound and the
 #   approval (harness/subagent.py copies both to child sessions).
 name: Sir Knight Lop the Second
+
+# Run titles ARE the attempt dedupe's input: the sweep recognizes an
+# engagement by its title (`… — <mode> PR #<n>`, ` (sweep)` appended on sweep
+# dispatches) — see `verdict_attempt_recorded` in reconcile.sh; keep the two
+# in step. The expression covers every event that runs this workflow: the
+# sweep itself, issue triage, PR mentions, and dispatches.
+run-name: >-
+  ${{ (github.event_name == 'schedule' && 'Sir Knight Lop the Second — sweep')
+      || ((inputs.issue != '' || github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request))
+          && format('Sir Knight Lop the Second — triage issue #{0}', inputs.issue || github.event.issue.number))
+      || ((inputs.pr != '' || github.event.pull_request.number || github.event.issue.number)
+          && format('Sir Knight Lop the Second — {0} PR #{1}{2}', inputs.mode || 'review', inputs.pr || github.event.pull_request.number || github.event.issue.number, inputs.source == 'sweep' && ' (sweep)' || ''))
+      || 'Sir Knight Lop the Second — dispatch' }}
 
 on:
   schedule:
@@ -288,6 +304,15 @@ jobs:
         if: steps.key.outputs.enabled == 'true'
         id: guard
         run: |
+          # The PR number arrives from a dispatch: validate it before it
+          # reaches an API path, so a typo fails with a clear error instead
+          # of a 404.
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              echo "::error::PR_NUMBER must be a positive integer, got '${PR_NUMBER}' (pass -f pr=<number>)."
+              exit 1
+              ;;
+          esac
           # `|| true`: an empty API response makes `read` return 1 at EOF, and
           # under `bash -e` that aborts the step with no message — the checks
           # below must be what name the cause. A conflicted PR (`mergeable` is
@@ -317,7 +342,10 @@ jobs:
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && inputs.source == 'sweep'
         run: |
           gh api "repos/${GITHUB_REPOSITORY}/contents/.github/helpdesk/reconcile.sh?ref=${GITHUB_SHA}" --jq '.content' | tr -d '\n' | base64 -d > "$RUNNER_TEMP/reconcile.sh"
-          result="$(bash "$RUNNER_TEMP/reconcile.sh" check --pr "$PR_NUMBER" --mode "$MODE")"
+          if ! result="$(bash "$RUNNER_TEMP/reconcile.sh" check --pr "$PR_NUMBER" --mode "$MODE" 2>&1)"; then
+            echo "::error::reconcile.sh check failed for PR #${PR_NUMBER} (${MODE}): ${result}"
+            exit 1
+          fi
           echo "${result}"
           case "$result" in
             skip*)

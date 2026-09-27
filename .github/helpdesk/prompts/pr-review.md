@@ -73,10 +73,11 @@ this section and review.
    ```
    ### Sir Knight Lop the Second — review
    **Reviewed head:** <full head SHA>
+   **Re-review scope:** <old>..<new> | full pass   (re-reviews only — omit on a first pass)
    **Verdict:** ✅ all requirements met | ❌ additional requirements needed | ⚠️ notes — one sentence
    **Checklist:**
    - Testing evidence — ✅/❌/➖ <one line>
-   - Visual evidence — ✅/❌/➖ <one line>
+   - Visual evidence — ✅/N/A/❌ <one line>
    - Review rounds — ✅/❌ <one line, round refs + head>
    - Security — ✅ no concerns | ⚠️ <concern with evidence>
    **Notes:** ≤3 bullets, only actionable gaps or risks (file/section refs where relevant).
@@ -89,11 +90,16 @@ this section and review.
    - **Visual evidence** — for any user-visible/visual change, rendered
      frames/screenshots the reviewer can look at; in this repository, per
      `AGENTS.md`'s visual-validation section (a real render, before/after for a
-     changed surface). `➖` when the change has no visual surface — say so.
+     changed surface — evidence goes on the PR, never into the repository).
+     Three states, explicit: ✅ the rendered evidence is provided, ❌ it is
+     required but missing, or `N/A` when the change has no visual surface —
+     say which.
    - **Review rounds** — the contributor's own rounds (Agent review / QA /
      Design / UX) exist, are answered, and read terminal on the current head.
-     When they are absent, say exactly what is missing and that internal
-     contributors run these rounds.
+     When they are absent — the normal state for this auto pass — the row is
+     ❌ additional requirements needed and the Verdict line says the
+     contribution bar is not met; say exactly what is missing and that
+     internal contributors run these rounds.
    - **Security** — scan the diff for malicious/unsafe content: exfiltration,
      obfuscated code, credential handling, unexpected network calls,
      workflow/permission changes, new unpinned dependencies, shell/command
@@ -103,8 +109,9 @@ this section and review.
 5. Re-review semantics (a mention asked for a pass on a new head): scope to
    what changed since the head your earlier comment names
    (`gh api repos/{owner}/{repo}/compare/<old>...<new>`) and answer each earlier
-   finding — remediated / declined / deferred. Do not re-open accepted
-   decisions or re-litigate them.
+   finding — remediated / declined / deferred. State the scope in the comment:
+   `**Re-review scope:** <old>..<new>` for the delta, or `full pass` when you
+   re-read everything. Do not re-open accepted decisions or re-litigate them.
 6. **Length discipline:** no padding, no restating the diff, no style-only
    nits. A clean pass should read in under ~15 lines; when there is nothing
    actionable, say that briefly and stop.

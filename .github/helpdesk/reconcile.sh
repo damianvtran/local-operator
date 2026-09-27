@@ -10,16 +10,29 @@
 #                   bot review comment yet: the concise guidelines-compliance
 #                   review.
 #     * `verdict` — review-family activity exists, has settled for
-#                   VERDICT_SETTLE_MINUTES, and the latest family comment is a
+#                   VERDICT_SETTLE_MINUTES, the latest family comment is a
 #                   round (not a remediation reply) carrying a terminal-ish
-#                   signal: the terminal compliance verdict. One verdict per
-#                   head (a moved head can earn a new verdict).
+#                   signal, and the head has not moved after that comment
+#                   (a push newer than the latest family comment means the
+#                   rounds predate the head — the verdict waits for the new
+#                   head's rounds): the terminal compliance verdict. One
+#                   verdict per head (a moved head can earn a new verdict).
 #
 #   `sweep` decides per open PR and prints `review <n>` / `verdict <n>` per
 #   action; the workflow dispatches helpdesk.yml once per line, so every
 #   engagement keeps ONE execution path (the review job) with its own run, log
 #   and timeout. `check` is the already-engaged gate a sweep-dispatched run
 #   re-runs before spending provider tokens.
+#
+#   The sweep also dedupes ATTEMPTS per family state: before emitting a
+#   `verdict` it looks for a dispatch run of helpdesk.yml for this PR created
+#   after FAMILY_LAST_TIME. A still-running or completed-successfully attempt
+#   means this exact state was already judged (the verdict prompt may have
+#   posted nothing on purpose), so the sweep does not re-fire every 15
+#   minutes; a completed-unsuccessful attempt does not block — the retry
+#   path. The workflow's `run-name:` is what makes an attempt visible
+#   (`Sir Knight Lop the Second — {mode} PR #<n> (sweep)`), so this file and
+#   the workflow's run-name move together.
 #
 # THE MARKER CONTRACT — keep these spellings stable; the README documents them
 # as a contract and every consumer greps exactly these:
@@ -44,7 +57,8 @@
 #
 #   The terminal-ish prefilter is deliberately LOOSE — the VERDICT PROMPT makes
 #   the real terminality call, so a false positive costs one small engagement
-#   and a false negative recovers via a mention or a manual dispatch.
+#   (deduped per family state, so one state pays at most once) and a false
+#   negative recovers via a mention or a manual dispatch.
 #
 # Pure read-only (QA relies on it): only reads through `gh` and prints. The
 # workflow's dispatch step is the one that writes (workflow_dispatch), not this.
@@ -118,6 +132,34 @@ pr_head_sha() {
   gh api "repos/${GH_REPO}/pulls/$1" --jq '.head.sha'
 }
 
+# The last write to the head branch, per the timeline: the newest `committed`
+# or `head_ref_force_pushed` event. `committed` events carry no top-level
+# timestamp (measured against the live API), so the commit's `committer.date`
+# is the fallback. Empty output means "cannot judge" — callers must not block
+# on it: a missing or failed lookup must never wedge the verdict path behind
+# a gate whose input does not exist.
+pr_last_push_time() {
+  gh api "repos/${GH_REPO}/issues/$1/timeline" --paginate \
+    | jq -sr 'add // [] | [ .[] | select(.event == "committed" or .event == "head_ref_force_pushed") | (.created_at // .committer.date // .author.date) ] | map(select(. != null)) | max // empty'
+}
+
+# The per-state attempt dedupe: helpdesk.yml names every run through its
+# `run-name:` (`… — {mode} PR #{n}`, with ` (sweep)` on sweep dispatches), so
+# an attempt is visible from a run list. An attempt created AFTER the latest
+# family comment that is still running, or completed successfully, already
+# judged this exact state — do not re-dispatch it. A completed-unsuccessful
+# attempt does not block (the retry path), and a lookup failure does not
+# block either. Prints "true"/"false".
+verdict_attempt_recorded() { # <pr>
+  local pr="$1" runs
+  runs="$(gh run list -R "$GH_REPO" --workflow helpdesk.yml --event workflow_dispatch \
+    --limit 50 --json displayTitle,status,conclusion,createdAt)" || { echo false; return 0; }
+  jq -r --arg pr "$pr" --arg family "$FAMILY_LAST_TIME" '
+    [ .[] | select(.displayTitle | test("— verdict PR #" + $pr + "( |$)"))
+          | select(.status != "completed" or .conclusion == "success")
+          | select((.createdAt | fromdateiso8601) > ($family | fromdateiso8601)) ] | length > 0' <<<"$runs"
+}
+
 # Classify one PR's comments into the scan globals. One PR is in flight at a
 # time, so plain globals keep this bash-3.2-safe (no namerefs/associative
 # arrays) while still keeping the contract in one place:
@@ -185,6 +227,19 @@ write_summary() {
   {
     echo "## Helpdesk sweep"
     echo
+    # Lead with what was dispatched (actionable first): the per-PR table
+    # below stays in PR order, so without this line a due engagement is
+    # buried among the skips.
+    if [ "${#actions[@]}" -gt 0 ]; then
+      printf 'Dispatched:'
+      for a in "${actions[@]}"; do
+        printf ' %s #%s;' "${a%% *}" "${a#* }"
+      done
+      echo
+    else
+      echo "Dispatched: nothing — no engagement is due."
+    fi
+    echo
     echo "Thresholds: review after ${REVIEW_DELAY_MINUTES}m, verdict after ${VERDICT_SETTLE_MINUTES}m settle, window ${WINDOW_DAYS}d (reconcile.sh constants; env-overridable)."
     echo
     echo "| PR | Decision | Reason |"
@@ -198,9 +253,9 @@ write_summary() {
 }
 
 run_sweep() {
-  local prs count i num draft login author_type owner name mergeable created updated
+  local prs count i num draft login author_bot owner name mergeable created updated
   local repo_owner repo_name head_label
-  local created_epoch updated_epoch start ready start_epoch head settle_epoch now
+  local created_epoch updated_epoch start ready start_epoch head settle_epoch now latest_push
   local -a actions rows
 
   [ -n "${GH_REPO:-}" ] || die "GH_REPO is not set (owner/name)"
@@ -212,14 +267,17 @@ run_sweep() {
   repo_owner="${GH_REPO%%/*}"
   repo_name="${GH_REPO#*/}"
 
-  prs="$(gh pr list --state open --limit 100 --json number,title,isDraft,createdAt,updatedAt,author,headRepositoryOwner,headRepository,mergeable)"
+  prs="$(gh pr list --state open --limit 200 --json number,title,isDraft,createdAt,updatedAt,author,headRepositoryOwner,headRepository,mergeable)"
   count="$(jq 'length' <<<"$prs")"
 
   for ((i = 0; i < count; i++)); do
     num="$(jq -r --argjson i "$i" '.[$i].number' <<<"$prs")"
     draft="$(jq -r --argjson i "$i" '.[$i].isDraft' <<<"$prs")"
     login="$(jq -r --argjson i "$i" '.[$i].author.login // ""' <<<"$prs")"
-    author_type="$(jq -r --argjson i "$i" '.[$i].author.type // ""' <<<"$prs")"
+    # Bot authors: `gh pr list` reports `author.is_bot` (its real shape — the
+    # old `.author.type` read was dead); the `[bot]` login suffix arm below is
+    # belt-and-braces.
+    author_bot="$(jq -r --argjson i "$i" '.[$i].author.is_bot // false' <<<"$prs")"
     owner="$(jq -r --argjson i "$i" '.[$i].headRepositoryOwner.login // ""' <<<"$prs")"
     name="$(jq -r --argjson i "$i" '.[$i].headRepository.name // ""' <<<"$prs")"
     mergeable="$(jq -r --argjson i "$i" '.[$i].mergeable // "UNKNOWN"' <<<"$prs")"
@@ -232,7 +290,7 @@ run_sweep() {
       record_skip "$num" "draft"
       continue
     fi
-    if [ "$author_type" = "Bot" ] || [[ "$login" == *"[bot]" ]]; then
+    if [ "$author_bot" = "true" ] || [[ "$login" == *"[bot]" ]]; then
       record_skip "$num" "bot author (${login})"
       continue
     fi
@@ -276,6 +334,23 @@ run_sweep() {
           continue
           ;;
       esac
+      # Rounds fresh on the head: a push after the latest family comment
+      # means those rounds judge an older head, and a clean round on an older
+      # head is not terminal — engaging would only spend a verdict run that
+      # must post nothing. Unresolvable push data does not block.
+      latest_push="$(pr_last_push_time "$num" || true)"
+      if [ -n "$latest_push" ] \
+        && [ "$(epoch_of "$latest_push")" -gt "$(epoch_of "$FAMILY_LAST_TIME")" ]; then
+        record_skip "$num" "rounds predate the head (a push landed after the latest review-family comment)"
+        continue
+      fi
+      # One attempt per family state: a still-running or successful attempt
+      # newer than the latest family comment already judged this state, and
+      # posting nothing is a legitimate outcome — do not re-fire every sweep.
+      if [ "$(verdict_attempt_recorded "$num")" = "true" ]; then
+        record_skip "$num" "a verdict attempt for this exact state is already on record"
+        continue
+      fi
       record_action "$num" "verdict" "rounds settled and terminal-ish; no verdict for this head yet"
       continue
     fi
@@ -320,8 +395,15 @@ run_sweep() {
 # ---- check ----------------------------------------------------------------
 
 run_check() {
-  local pr="$1" mode="$2" head
+  local pr="$1" mode="$2" head latest_push
   [ -n "${GH_REPO:-}" ] || die "GH_REPO is not set (owner/name)"
+
+  # The PR number arrives from a workflow dispatch: a typo must fail clearly
+  # HERE — a 404 from `gh api .../pulls/abc` reads like a missing PR.
+  case "$pr" in
+    ''|*[!0-9]*) die "check --pr must be a positive integer, got '${pr}'" ;;
+  esac
+  [ "$pr" -ge 1 ] || die "check --pr must be a positive integer, got '${pr}'"
 
   scan_comments "$pr"
 
@@ -343,7 +425,17 @@ run_check() {
             echo "skip a verdict already exists for the current head"
             ;;
           *)
-            echo "engage"
+            # A push after the latest family comment means the rounds judge
+            # an older head — a clean round on an older head is not terminal,
+            # so the verdict must not fire. Unresolvable push data does not
+            # block.
+            latest_push="$(pr_last_push_time "$pr" || true)"
+            if [ -n "$latest_push" ] \
+              && [ "$(epoch_of "$latest_push")" -gt "$(epoch_of "$FAMILY_LAST_TIME")" ]; then
+              echo "skip rounds predate the head (a push landed after the latest review-family comment)"
+            else
+              echo "engage"
+            fi
             ;;
         esac
       fi

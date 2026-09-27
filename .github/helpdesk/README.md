@@ -13,13 +13,13 @@ two agent roles that are not packaged with the harness.
 
 ## How it runs
 
-`.github/workflows/helpdesk.yml` triggers on:
+`.github/workflows/helpdesk.yml` — how it engages:
 
-| Event | Effect |
+| Engagement | Effect |
 | --- | --- |
 | Sweep — `schedule`, every 15 minutes | Reconciles every open PR and dispatches an engagement for each one that is due: `review`, or `verdict` once the contributor's rounds have settled |
-| PR becomes due (`review`) | One concise guidelines-compliance review on the PR's current head |
-| PR's rounds settle (`verdict`) | The terminal ✅/❌ compliance verdict — one per head |
+| PR becomes due (`review`, sweep-dispatched) | One concise guidelines-compliance review on the PR's current head |
+| PR's rounds settle (`verdict`, sweep-dispatched) | The terminal ✅/❌ compliance verdict — one per head |
 | Issue opened | One triage comment — immediately; issues do not wait |
 | A comment containing `@sir-knight-lop-the-second` on a PR or issue (write-access users) | A review pass (PR) or a triage pass (issue) in a fresh run, regardless of the sweep's gates |
 | `workflow_dispatch` with a `pr` (and optional `mode=verdict`) or `issue` input | Operator-requested run, e.g. `gh workflow run helpdesk.yml -f pr=1234`; bypasses the already-engaged gate |
@@ -41,10 +41,11 @@ engagement is one run.
 - **Verdict** — when the contributor's own rounds exist (see the marker
   contract below), have settled for `VERDICT_SETTLE_MINUTES` (15), and the
   latest family comment is a round (not a remediation reply) carrying a
-  terminal-ish signal, the sweep dispatches the terminal **✅/❌ compliance
-  verdict**. Per head: a moved head can earn a new verdict once its rounds go
-  terminal, and a thread that is not terminal gets no comment at all (the run
-  log carries the reasoning).
+  terminal-ish signal — and the head has not moved since that round — the
+  sweep dispatches the terminal **✅/❌ compliance verdict**. Per head: a
+  moved head can earn a new verdict once its own rounds go terminal, and a
+  thread that is not terminal gets no comment at all (the run log carries the
+  reasoning).
 
 The sweep is idempotent and re-decides every 15 minutes; each due engagement is
 dispatched as its own run of this workflow
@@ -52,14 +53,20 @@ dispatched as its own run of this workflow
 one execution path with its own run, log and timeout. A sweep-dispatched run
 re-checks that the engagement is still due (`reconcile.sh check`) before
 checking anything out — between the decision and the run, a bot review or a
-round can appear and make the run moot. The `source` input is what marks a run
-as sweep-dispatched; a manual dispatch passes an empty `source` and bypasses
-that gate.
+round can appear and make the run moot. The sweep also waits for the thread to
+move: a verdict whose rounds predate the current head (a push landed after the
+latest round) is deferred to the new head's rounds, and an engagement whose
+exact family state a recent attempt already covered is not re-dispatched while
+that attempt is pending or was successful (a failed attempt retries). Runs are
+named to make this visible: `Sir Knight Lop the Second — <mode> PR #<n>`, with
+` (sweep)` on sweep dispatches. The `source` input is what marks a run as
+sweep-dispatched; a manual dispatch passes an empty `source` and bypasses that
+gate.
 
 Drafts are skipped on every path — mark a draft ready (which starts the
 30-minute wait) or mention the bot once it is ready. A conflicted PR
 (`mergeable: false`) is skipped as well — there is no merge ref to check out;
-resolve the conflict and the next sweep re-engages it, or mention the bot for a
+resolve the conflict first; then the sweep re-engages it, or a mention gets a
 pass right away. Fork PRs are excluded on
 every path (see the security model). A comment or dispatch on a closed PR or
 issue is skipped — skipped runs stay silent on the thread (the run log carries
@@ -75,6 +82,11 @@ wait's granularity (a PR fires after the delay plus at most one sweep interval
 of slack). The reconciler is pure read-only and its decisions are tested in
 `.github/helpdesk/tests/reconcile.test.sh` (stubbed `gh`, no network; run it
 with `bash .github/helpdesk/tests/reconcile.test.sh`).
+
+The sweep enumerates the 200 newest open PRs (`gh pr list --limit 200`) and
+skips anything not updated within the window; the sweep itself is a cheap
+read-only `gh` pass, and the only thing that spends provider tokens is a due
+engagement — one workflow run each.
 
 Each run is a fresh GitHub-hosted runner that installs the pinned
 [local-operator](https://pypi.org/project/local-operator/) harness, installs
@@ -217,6 +229,10 @@ one place in `.github/helpdesk/reconcile.sh`):
   the legacy alias); `gh workflow run helpdesk.yml -f pr=<n> -f mode=verdict`
   runs a verdict pass (the run still posts nothing if the thread is not
   terminal); `gh workflow run helpdesk.yml -f issue=<n>` triages an issue.
+- **Run names are load-bearing**: the sweep's attempt dedupe recognizes an
+  engagement by its run title (`Sir Knight Lop the Second — <mode> PR #<n>`,
+  ` (sweep)` for sweeps). Changing the workflow's `run-name:` changes what
+  `reconcile.sh` can see — update both together.
 - **Team and roles**: `teams/helpdesk/` and `agents/*/` are committed copies —
   `qa-tester` and `ux-reviewer` are not shipped in the harness's packaged
   starters, so the CI runner installs them from here. Keep them in sync with
