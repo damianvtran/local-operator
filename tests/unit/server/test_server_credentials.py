@@ -194,3 +194,32 @@ async def test_update_credential_error(test_app_client, mock_credential_manager)
     assert response.status_code == 500
     data = response.json()
     assert "Error updating credential" in data.get("detail", "")
+
+
+@pytest.mark.asyncio
+async def test_update_credential_accepts_the_web_search_provider_keys(
+    test_app_client, mock_credential_manager
+):
+    """The four keys the search-setup step offers are ordinary provider rows.
+
+    The write route funnels every key through ``store_provider_key`` with no
+    name allowlist; this test is the lock-in that keeps it that way. A future
+    validation refusing one of these names would break the onboarding step
+    that offers it while every other test stayed green — and the read path
+    (``stored_provider_env_keys``) only reports rows the writer accepted.
+    """
+    from local_operator.providers.registry import stored_provider_env_keys
+
+    keys = ["BRAVE_API_KEY", "EXA_API_KEY", "PARALLEL_API_KEY", "PERPLEXITY_API_KEY"]
+    for key in keys:
+        response = await test_app_client.patch(
+            "/v1/credentials", json={"key": key, "value": "test-value"}
+        )
+        assert response.status_code == 200, (key, response.text)
+
+    listed = await test_app_client.get("/v1/credentials")
+    assert listed.status_code == 200
+    stored = set(listed.json()["result"]["keys"])
+    assert set(keys) <= stored
+    # The same rows the search providers resolve must be the ones written.
+    assert set(keys) <= stored_provider_env_keys(mock_credential_manager.config_dir)

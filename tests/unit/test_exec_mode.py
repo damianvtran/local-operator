@@ -782,6 +782,63 @@ def test_renderer_tracks_failure() -> None:
     assert renderer3.failed is False
 
 
+def test_an_agent_end_error_carries_the_radient_quota_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The headless display site applies the same remedy as the TUI's helper.
+
+    A Radient quota failure is the one error whose remedy lives in the
+    ACCOUNT (an unclaimed signup grant) rather than the request, and this line
+    is the only place an exec-mode user is told about it. The probe seam and a
+    private store are injected so the test touches neither the network nor the
+    operator's credentials.
+    """
+    import local_operator.providers.auth_store as auth_store_module
+    from local_operator.providers import radient_recovery as rr
+    from local_operator.providers.auth_store import AuthStore
+
+    monkeypatch.delenv("RADIENT_API_KEY", raising=False)
+    store = AuthStore(tmp_path / "auth.db")
+    store.upsert_credential("radient", {"type": "oauth", "access": "tok-1", "refresh": "r"})
+    monkeypatch.setattr(auth_store_module, "shared_auth_store", lambda *args, **kwargs: store)
+    monkeypatch.setattr(
+        rr,
+        "_probe_verification_sync",
+        lambda token: rr.parse_verification({"signup_grant": "pending", "grant_amount": 5}),
+    )
+    rr.reset_recovery_cache()
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, highlight=False, width=200)
+    renderer = PrintRenderer(json_mode=False, console=console)
+    renderer._session = MagicMock(model_label="radient/auto")
+
+    renderer.handle(
+        AgentEndEvent(error="rate limit or quota exceeded (HTTP 402): insufficient credits")
+    )
+
+    out = buffer.getvalue()
+    assert "Error: rate limit or quota exceeded (HTTP 402): insufficient credits" in out
+    assert "check your email" in out and "$5.00" in out
+    rr.reset_recovery_cache()
+
+
+def test_a_non_radient_error_renders_bare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is real at the display site: every other failure is untouched."""
+    buffer = io.StringIO()
+    console = Console(file=buffer, no_color=True, highlight=False, width=200)
+    renderer = PrintRenderer(json_mode=False, console=console)
+    renderer._session = MagicMock(model_label="openai/gpt-5")
+
+    renderer.handle(
+        AgentEndEvent(error="rate limit or quota exceeded (HTTP 402): insufficient credits")
+    )
+
+    out = buffer.getvalue()
+    assert "console.radienthq.com" not in out
+    assert "check your email" not in out
+
+
 @pytest.mark.asyncio
 async def test_run_print_mode_prompts_sequentially(capsys) -> None:
     session = FakeSession([_success_script("one"), _success_script("two")])
