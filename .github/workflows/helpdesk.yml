@@ -371,6 +371,30 @@ jobs:
           # (`gh pr diff`, `gh api compare`); a full fetch of this repo's ~1 GB
           # history is minutes of runner time for nothing.
           fetch-depth: 1
+      # The engagement's helpdesk surface — this directory: prompts, team,
+      # roles, setup.sh — always comes from the DEFAULT BRANCH, never from the
+      # PR checkout above. Why, in order:
+      #   (a) the checkout is `refs/pull/<n>/merge`, which can be stale: a PR
+      #       whose merge ref predates a helpdesk change carries the old
+      #       prompts and none of the new ones (a verdict run crashed on a
+      #       missing `prompts/pr-verdict.md` — `cat: .github/helpdesk/prompts/
+      #       pr-verdict.md: No such file or directory`, lo run 36329557453);
+      #   (b) the reviewed PR must not steer its own review by editing
+      #       `.github/helpdesk/**` (prompts, team, setup.sh) in its merge ref;
+      #   (c) behaviour is then defined by main — the same copy the sweep
+      #       decides with, and the same copy this workflow file runs from.
+      # `rm -rf` first, so the surface is EXACTLY main's: the plain checkout
+      # would only add or overwrite main's paths, and setup.sh installs
+      # whatever sits in `agents/*` and `teams/*` — a PR-added file or
+      # directory must not survive. The fetch authenticates with the
+      # credentials actions/checkout persists. The PR checkout still provides
+      # the code under review; the model's diffs come from the API anyway.
+      - name: Overlay the helpdesk surface from the default branch
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
+        run: |
+          git fetch --depth=1 origin main
+          rm -rf .github/helpdesk
+          git checkout FETCH_HEAD -- .github/helpdesk
       - name: Set up Python
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         uses: actions/setup-python@v7
