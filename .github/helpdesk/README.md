@@ -104,7 +104,7 @@ The sweep itself is model-free (~30 s of runner time); only a dispatch spends.
 | Knob (top of `reconcile.sh`; env-overridable) | Default | Effect |
 | --- | --- | --- |
 | `SWEEP_MAX_DISPATCH` | 5 | One sweep dispatches at most this many engagements — the OLDEST by `updatedAt` first; the rest ride the next sweep |
-| `DAILY_ENGAGEMENT_CAP` | 50 | Rolling 24h, per repository; at/over the cap nothing dispatches until the window rolls |
+| `DAILY_ENGAGEMENT_CAP` | 50 | Rolling 24h, per repository, counting sweep dispatches only; at/over the cap no sweep dispatch until the window rolls (mention and manual runs are not budgeted) |
 | `FAILED_ATTEMPT_BACKOFF_MINUTES` | 30 | A failed attempt must age this long before the retry (a mention or a manual dispatch is the immediate recovery) |
 
 **Reading the spend line.** After the engagement, the review job reports what
