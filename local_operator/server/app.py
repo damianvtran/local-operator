@@ -465,12 +465,20 @@ app = FastAPI(
 #: ``test_managed_gate_covers_every_control_surface_route`` walks the ROUTERS
 #: rather than the prefixes and fails when a route like this appears without an
 #: entry here.
+#:
+#: ``/v1/memberships`` joined for the same class of reason as
+#: ``/v1/agent-name-availability``: it is EGRESS this machine performs on the
+#: caller's behalf — the hub is asked, with the operator's stored OAuth access
+#: token, which organizations the signed-in account belongs to — and the path
+#: spells no prefix family. The team surfaces are gated wholesale by their own
+#: prefix below, because both of them spend that same token.
 _LEGACY_CONTROL_PATHS = frozenset(
     {
         "/v1/agent-name-availability",
         "/v1/config",
         "/v1/config/system-prompt",
         "/v1/credentials",
+        "/v1/memberships",
         "/v1/models",
         "/v1/tools/speech",
         "/v1/transcriptions",
@@ -492,7 +500,13 @@ _LEGACY_CONTROL_PATHS = frozenset(
 #: unauthenticated cross-origin caller reaching either one is arbitrary code
 #: execution on a delay, not a defaced field, so this family cannot sit at a
 #: weaker posture than the agent inventory it schedules work against.
-_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules")
+#:
+#: ``/v1/teams`` is the organization-sharing family's (team publish and pull):
+#: both routes are EGRESS this machine makes with the operator's stored Radient
+#: OAuth access token — they read and publish organization content through the
+#: hub as the signed-in PERSON — so they cannot sit at a weaker posture than the
+#: agent routes that spend the same credential.
+_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams")
 
 #: The ONLY routes under :data:`_LEGACY_GATED_PREFIXES` left open in managed
 #: mode, each with the reason it is safe. Keyed ``"METHOD /path/template"`` using

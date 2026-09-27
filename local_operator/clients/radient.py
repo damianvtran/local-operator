@@ -788,18 +788,34 @@ class RadientClient:
         return self._publication_result(response, action="publish the agent")
 
     def republish_agent_instruction_set(
-        self, agent_id: str, document: Mapping[str, Any]
+        self,
+        agent_id: str,
+        document: Mapping[str, Any],
+        *,
+        visibility: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Update an already-published agent with a new instruction-set document.
 
         Only the account that published the listing may: the hub answers
         ``403 not_owner`` for anyone else, with that code carrying the reason.
 
+        Organization sharing (§4.4): ``visibility="org"`` with the target
+        ``tenant_id`` updates a listing in an organization's private workspace,
+        with the same rules the publish path applies. The target rides on QUERY
+        PARAMS and the document shape is unchanged — the hub's strict schema
+        keeps refusing unknown fields, so a scope cannot be smuggled inside it —
+        and without either param the call is today's public republish exactly.
+
         Args:
             agent_id: The id of the HUB listing to update (not a local agent id;
                 the local registry keeps no link to the listing a row was
                 published as, so the caller names it).
             document: The instruction-set document to send.
+            visibility: ``"org"`` to update inside an organization workspace;
+                omit (or ``"public"``) for the public hub.
+            tenant_id: The organization whose workspace to update in; required
+                with ``visibility="org"`` and invalid without it.
 
         Returns:
             The hub's publication result for the updated listing.
@@ -808,11 +824,14 @@ class RadientClient:
             APIError: As :meth:`publish_agent_instruction_set`, plus
                 ``not_owner`` (403) and ``agent_not_found`` (404).
             RuntimeError: When no API key is configured for this client.
+            ValueError: When ``visibility``/``tenant_id`` do not form a valid
+                target (§4.4's rule, refused before the request is sent).
         """
         url = f"{self.base_url}/agents/{agent_id}/publish"
         headers = self._get_headers(content_type="application/json")
+        params = _org_target_params(visibility, tenant_id)
         try:
-            response = requests.put(url, headers=headers, json=dict(document))
+            response = requests.put(url, headers=headers, json=dict(document), params=params)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
             raise api_error_from_response(
