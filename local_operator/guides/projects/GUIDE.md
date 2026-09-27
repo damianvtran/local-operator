@@ -47,7 +47,7 @@ Two consequences worth knowing: the block is a **snapshot**, so it is as fresh a
 
 ## Views and the record
 
-Today the row is read through the `project` tool and the terminal's `/project` listing; the desktop **Projects** tab (list / board / timeline, plus a detail page with milestones and linked sessions) lands in a later UI slice. All of them render from one composition of "what is each linked session doing" — runtime state, subagent counts, todo counts.
+Today the row is read through the `project` tool, the terminal's `/project` listing, and the terminal's full-page `/project show <name>` view (list / board / timeline, with the highlighted project's milestones and linked sessions in the pinned footer); the desktop **Projects** tab (the same three views, plus a detail page with milestones and linked sessions) lands in a later UI slice. All of them render from one composition of "what is each linked session doing" — runtime state, subagent counts, todo counts.
 
 What is **stored** versus **derived** matters when you report:
 
@@ -71,6 +71,6 @@ It fires at most once per turn, only after a worked turn, only for stale records
 ## Surfaces
 
 - Agents write through the `project` tool; its `list`/`show` results are the reading surface.
-- The operator's `/project` lists today; the other reserved verbs (`new`/`delete`/`link`/`unlink`) answer "not in this build yet — use /project list, the agent's project tool, or the desktop Projects tab", and the desktop **Projects** tab itself lands in a later slice.
+- The operator's `/project` runs every reserved verb: bare/`list` prints the listing, `show <name>` opens the full-page view, `new <name>` creates and auto-links this session, `delete <name>` rehearses and `delete <name> yes` removes, and `link`/`unlink <name>` move the session link. The desktop **Projects** tab lands in a later slice; the routed runtime answers the same receipts as the terminal (one shared runner).
 - Milestone editing is tool/API/UI work, not a slash verb: the reserved vocabulary stays `list | show | new | delete | link | unlink`, and `/v1/desktop/projects` is the API a renderer grows into.
 - The desktop gates on the `projects` capability (`"projects": 1`), so an older backend hides the tab once it ships.

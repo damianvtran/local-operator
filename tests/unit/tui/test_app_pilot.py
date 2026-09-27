@@ -401,6 +401,10 @@ class FakeSession:
         #: Optional team registry for ``/team``. Tests that exercise teams
         #: assign a real ``TeamRegistry``; everyone else pays nothing.
         self.team_registry: Any | None = None
+        #: Optional project registry for ``/project``. Same opt-in shape as
+        #: ``team_registry``: tests that exercise projects assign a real
+        #: ``ProjectRegistry``; everyone else pays nothing.
+        self.project_registry: Any | None = None
         self.attached_teams: list[Any] = []
         #: Optional agent registry for ``/agent``, same opt-in shape as
         #: ``team_registry``: tests that exercise profiles assign a real

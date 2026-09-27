@@ -1010,6 +1010,20 @@ _FRONTEND_LOCAL_SLASHES = {
     # dispatches it. A runtime-side `/network` would act on another machine's
     # mesh, which is why it is not there.
     "network",
+    # The projects page and its store are THIS machine's: `config_dir()/projects`
+    # is the row store, `config_dir()/sessions/` is what the page's linked
+    # sessions resolve against, and the run records its runtime state reads are
+    # this machine's too — the same argument `/settings` and `/delete` make
+    # about config.yml and the session store. Routed to a runtime it would show
+    # a viewer a page about the runtime's sessions while the receipt and the
+    # composer it is typed into belong to this terminal.
+    #
+    # KNOWN LIMITATION, stated in the design and kept: on a remote-attached
+    # session the completion check still runs in the session's OWN process (its
+    # machine's store), so a follower's page reads a store its session does not
+    # write. v2 is single-machine; serving the owner's project view over the
+    # control protocol is a follow-up.
+    "project",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the

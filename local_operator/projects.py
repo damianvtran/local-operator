@@ -333,14 +333,39 @@ def milestone_status(
 
     ``today`` exists for tests; left ``None`` the basis is :func:`_utc_today`
     — the SAME date ``completed_at`` is stamped from — so "overdue" and "done
-    today" cannot disagree about which day it is.
+    today" cannot disagree about which day it is. The rule itself lives in
+    :func:`milestone_state`, shared with the JSON-row readers.
     """
-    if milestone.completed_at:
-        return "completed"
     moment = today or _utc_today()
-    if milestone.target_date and date.fromisoformat(milestone.target_date) < moment:
-        return "overdue"
-    return "upcoming"
+    return milestone_state(milestone.completed_at, milestone.target_date, today=moment.isoformat())
+
+
+def milestone_state(
+    completed_at: str | None,
+    target_date: str | None,
+    *,
+    today: str | None = None,
+) -> Literal["completed", "overdue", "upcoming"]:
+    """The derived milestone status from its two raw fields — model OR JSON row.
+
+    One rule, two shapes: :func:`milestone_status` passes a model's fields and
+    the terminal renderers pass a composed row's, so the status the tool
+    reports and the colour a footer or timeline paints cannot disagree about
+    one milestone. Malformed dates compare as text rather than raising: the
+    store tolerates a bad row, so a reader of that row must too (a receipt is
+    a keystroke path and a canvas is a frame — neither may crash).
+    """
+    if completed_at:
+        return "completed"
+    target = str(target_date or "")
+    if not target:
+        return "upcoming"
+    moment = today or _today_iso()
+    try:
+        overdue = date.fromisoformat(target) < date.fromisoformat(moment)
+    except ValueError:
+        overdue = target < moment
+    return "overdue" if overdue else "upcoming"
 
 
 class Project(BaseModel):
@@ -570,6 +595,36 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     return (moment - project.progress_updated_at) > PROJECT_PROGRESS_STALE_S
 
 
+def age_text(updated_at: float | None, *, now: float | None = None) -> str | None:
+    """``3s``/``5m``/``2h``/``1d`` age of a raw stamp, or ``None``.
+
+    The 90 s / 90 min / 48 h cut points live HERE — the one copy — and every
+    surface imports this: :func:`reported_age` layers the ``progress`` guard on
+    top for model callers, while the terminal renderers (which hold composed
+    JSON rows, not ``Project`` objects) call it directly, and the row cap below
+    travels with it (agent review round 1, F3/F4: the cut points and the caps
+    had three copies whose comments each claimed canonicity).
+    """
+    if updated_at is None:
+        return None
+    moment = time.time() if now is None else now
+    age = max(0.0, moment - updated_at)
+    if age < 90:
+        return f"{int(age)}s"
+    if age < 5400:
+        return f"{int(age // 60)}m"
+    if age < 172800:
+        return f"{int(age // 3600)}h"
+    return f"{age / 86400:.0f}d"
+
+
+#: One listing/receipt row stays scannable in a transcript. THE number, one
+#: copy: the operator's listing (``slash_commands.project_listing_rows``) and
+#: the model's listing (``tools/project_tool``) both import it, so the two
+#: surfaces cannot truncate the same row at two different widths.
+PROJECT_ROW_CAP = 160
+
+
 def reported_age(project: Project, *, now: float | None = None) -> str | None:
     """``2h``-style age of the progress snippet, or ``None`` when none is stored.
 
@@ -580,18 +635,46 @@ def reported_age(project: Project, *, now: float | None = None) -> str | None:
     ``tools/project_tool.py`` until the completion check gained a fourth
     sentence to compose; it moved here with ``progress_is_stale`` for the same
     reason — the tool layer imports this module, never the other way round.
+    The 90 s / 90 min / 48 h cut points themselves are :func:`age_text`'s,
+    one copy for this and the JSON-row readers.
     """
     if not project.progress or project.progress_updated_at is None:
         return None
-    moment = time.time() if now is None else now
-    age = max(0.0, moment - project.progress_updated_at)
-    if age < 90:
-        return f"{int(age)}s"
-    if age < 5400:
-        return f"{int(age // 60)}m"
-    if age < 172800:
-        return f"{int(age // 3600)}h"
-    return f"{age / 86400:.0f}d"
+    return age_text(project.progress_updated_at, now=now)
+
+
+def truncate_row(row: str, *, cap: int = PROJECT_ROW_CAP) -> str:
+    """Truncate a listing row to ``cap`` CELLS (not characters) with ``…``.
+
+    Cells, not ``len``: the cap exists to bound what the reader SEES, and a
+    CJK description measured 272 cells in a 160-character row — the row wrapped
+    to three visual lines on the surface whose constant was supposed to bound
+    it (agent review round 1, F4).
+    """
+    from rich.cells import cell_len
+
+    if cell_len(row) <= cap:
+        return row
+    clipped = ""
+    for char in row:
+        if cell_len(clipped + char) > cap - 1:
+            break
+        clipped += char
+    return clipped.rstrip() + "…"
+
+
+def store_error_text(exc: Exception) -> str:
+    """A path-free one-line detail for a store failure.
+
+    An ``OSError`` stringifies with the absolute path it touched
+    (``[Errno 13] Permission denied: '/home/…/.lock'``); a user-facing receipt
+    must not carry a filesystem path, so only the errno sentence survives.
+    Unknown exceptions fall back to their own text (they carry no path).
+    """
+    if isinstance(exc, OSError):
+        detail = exc.strerror or f"errno {exc.errno}"
+        return detail[0].lower() + detail[1:] if detail else "i/o error"
+    return str(exc)
 
 
 def stale_projects_for_session(
@@ -746,14 +829,37 @@ class ProjectRegistry:
         # refresh stays bounded (ONE stat per read) and a fresh row is visible
         # without waiting out the interval.
         self._dir_mtime_ns: int | None = None
+        #: The ``OSError`` that made the last snapshot empty, or ``None``.
+        #: Kept so a surface can tell "nothing is stored" from "nothing could
+        #: be read": the store deliberately degrades to EMPTY on an unreadable
+        #: directory (a reader must not lose its page to a permission blip),
+        #: and answering the empty-store sentence to a broken store is exactly
+        #: the misleading receipt the QA round flagged (Q4).
+        self._load_error: OSError | None = None
         self._load()
+
+    @property
+    def load_error(self) -> OSError | None:
+        """The error that emptied the last load, or ``None`` when it was read.
+
+        Refreshed with every :meth:`_load`, so a store that becomes readable
+        again clears itself without old state (a peer surface re-reads this on
+        each verb).
+        """
+        return self._load_error
 
     def _load(self) -> None:
         """Replace the snapshot with every valid row currently on disk."""
         loaded: dict[str, Project] = {}
         try:
             children = sorted(self.projects_dir.iterdir(), key=lambda path: path.name)
-        except OSError:
+        except OSError as exc:
+            # A store that has never been written is EMPTY, not unreadable:
+            # `projects/` is created on first write, so its absence is the
+            # normal initial state and the empty-store sentence is the right
+            # answer there. Anything else — permissions, I/O — is a failure a
+            # surface must not paper over as "nothing stored".
+            self._load_error = None if isinstance(exc, FileNotFoundError) else exc
             self._projects = {}
             self._dir_mtime_ns = self._dir_mtime()
             self._last_refresh_time = time.time()
@@ -802,6 +908,9 @@ class ProjectRegistry:
         self._projects = loaded
         self._dir_mtime_ns = self._dir_mtime()
         self._last_refresh_time = time.time()
+        # A readable store clears the flag (see ``load_error``). Set LAST so a
+        # partial load never reports itself readable mid-scan.
+        self._load_error = None
 
     def _dir_mtime(self) -> int | None:
         try:
@@ -816,6 +925,20 @@ class ProjectRegistry:
             stale = True
         if stale:
             self._load()
+
+    def refresh(self) -> None:
+        """Force one bounded re-read, ignoring the snapshot interval.
+
+        The refusal surfaces read :attr:`load_error` BEFORE any read reaches
+        the store, and a read is what refreshes the snapshot — so a store
+        repaired since the flag was set kept refusing on the live surface
+        (QA round 2, Q5: eight receipts over eleven seconds after a `chmod`
+        back, every one stale). The snapshot's own staleness test cannot see
+        a permission repair either: `chmod` moves the inode's ctime, not the
+        directory's mtime, and the interval may not have elapsed. One stat +
+        one listing per refusal is the bounded cost of telling the truth.
+        """
+        self._load()
 
     def list_projects(self) -> list[Project]:
         """Every project, metadata only, sorted by name (case-insensitive)."""

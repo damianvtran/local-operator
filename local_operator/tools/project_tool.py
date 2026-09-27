@@ -51,6 +51,7 @@ from local_operator.projects import (
     progress_is_stale,
     readable_error,
     reported_age,
+    truncate_row,
 )
 from local_operator.tools.builtin import (
     _error,
@@ -62,9 +63,6 @@ from local_operator.tools.builtin import (
 
 logger = logging.getLogger(__name__)
 
-#: One listing row stays scannable in a transcript; the same discipline as the
-#: team tool's row cap.
-_ROW_CAP = 160
 
 _STATUS_WORDS = ("active", "paused", "done", "archived")
 
@@ -169,7 +167,7 @@ def _estimate_text(project: Project) -> str:
 
 
 def _row(project: Project, *, now: float | None = None) -> str:
-    """One scannable listing line, ``_ROW_CAP``-bounded."""
+    """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS)."""
     parts = [
         f"- {project.name} [{project.status}]",
         _estimate_text(project),
@@ -192,7 +190,7 @@ def _row(project: Project, *, now: float | None = None) -> str:
         # QUOTED: an unquoted tail read as if it were the progress text (the
         # first cut of this row shipped exactly that ambiguity).
         row += f' · "{summary}"'
-    return row if len(row) <= _ROW_CAP else row[: _ROW_CAP - 1].rstrip() + "…"
+    return truncate_row(row)
 
 
 def _field_lines(project: Project) -> list[str]:
