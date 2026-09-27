@@ -122,7 +122,21 @@ def _agent_with_everything_private(registry: AgentRegistry) -> None:
         model=PRIVATE_MARKERS[8],
         description="An agent with private state.",
         last_message=PRIVATE_MARKERS[10],
-        tags=["role", "tools:read,grep", "delegate:yes", "seed:reviewer", "osint"],
+        # The tags a person wrote ("osint"), the profile-encoding keys, and one
+        # of EVERY provenance prefix: publishing must strip all of them, and a
+        # leaked `hub:<id>` is the sharpest case — it would point a consumer's
+        # future sync at another listing (agent review round 1, m2).
+        tags=[
+            "role",
+            "tools:read,grep",
+            "delegate:yes",
+            "seed:reviewer",
+            "seed_version:1.0.0",
+            f"seed_sha256:{'c' * 64}",
+            "hub:abc-123",
+            f"hub_sha256:{'d' * 64}",
+            "osint",
+        ],
         categories=["specialist"],
         current_working_directory=PRIVATE_MARKERS[7],
     )
@@ -209,7 +223,8 @@ async def test_publish_body_carries_the_instruction_set_and_nothing_else(
     assert body["document_type"] == "radient.agent-instruction-set"
     assert body["document_version"] == 1
     # `specialist` is a local category; the hub's `kind` carries it instead, and
-    # the local profile-encoding tags stay local.
+    # the local profile-encoding AND provenance tags stay local — the seeded
+    # fixture above carries every prefix, so this one assertion covers them.
     assert body["kind"] == "specialist"
     assert body["tags"] == ["osint"]
     assert body["tools"] == ["read", "grep"]
