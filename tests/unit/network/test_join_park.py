@@ -12,13 +12,18 @@ rests on:
 * the confirmation is checked against THIS device's own derivation, and a mistyped
   digit leaves the ceremony open rather than spending the invite;
 * the invocation that answers is a different process from the one that dialled, which
-  is the whole shape — and the tool that shells both carries only the value the caller
-  supplied for the second one.
+  is the whole shape — and the AGENT TOOL has no way to be that invocation: it parks a
+  ceremony and verifies the result, but the second phase is the person's own command
+  (agent review round 1, semantic finding 1; the operator's ruling was to remove the
+  field rather than guard it, because the code the tool prints IS the code the
+  comparison expects).
 
 The humans are supplied by the test, which is what a test is allowed to do: the
 inviter's person is the real parked question answered through the relay's own control
-op, and the joiner's person is a second invocation of the CLI exactly as an agent would
-make it.
+op, and the joiner's person is a second invocation of the CLI — the command the guide
+hands the user, run here by the test because a test cannot be a person. What that
+invocation SO RECORDS is asserted: a machine-supplied code is written as ``harness``,
+not dressed up as a human answer (semantic finding 3).
 """
 
 from __future__ import annotations
@@ -286,15 +291,19 @@ def test_the_cli_parses_the_two_phases_as_written(
     assert answer.token == ""
 
 
-def test_the_tool_parks_a_pairing_and_confirms_it_only_with_the_users_code(
+def test_the_tool_parks_and_the_person_runs_phase_two(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The agent path end to end, through the tool, with the REAL CLI as a subprocess.
+    """The agent path end to end: the tool PARKS, the person's own command finishes it.
 
-    This is the transcript the brief asks for: a tool call starts the pairing and hands
-    back the code, nothing is joined, and a SECOND tool call carrying the code the user
-    read back finishes it. The pin is in the middle of it — the park's own result is
-    not a confirmation, and there is no field through which it could become one.
+    This is the transcript the brief asks for, in the shape agent review round 1 and
+    the operator's ruling settled. The first tool call starts the pairing and hands back
+    the code; nothing is joined. Phase two is then the PERSON's command — the CLI's own
+    ``lop network join --confirm <code>``, which is exactly what the guide hands over —
+    and the tool is used again only to VERIFY the membership it can no longer create.
+    That is still "fully handle the connection once approved": the approval IS the
+    human's confirmation.
     """
     server_a, server_b, host, port = devices
     record, minted = _minted(server_a)
@@ -327,32 +336,54 @@ def test_the_tool_parks_a_pairing_and_confirms_it_only_with_the_users_code(
     assert row.pid != os.getpid()
     assert net_cli._process_alive(row.pid)  # noqa: SLF001
 
+    # THE TOOL CANNOT ANSWER IT. Not "will not": there is no field, so the second
+    # phase is a command only a person can run, and an agent that wanted to skip it
+    # would have nothing to call.
+    assert "confirm" not in net_tool.NetworkParams.model_fields
+
     answered: dict[str, Any] = {}
+    recorded: list[Any] = []
+    real_save = store.save_join_answer
+
+    def _capture(answer: Any) -> Any:
+        recorded.append(answer)
+        return real_save(answer)
+
+    monkeypatch.setattr(store, "save_join_answer", _capture)
+
     answer_thread = threading.Thread(
         target=lambda: answered.update(_answer_confirmation(server_a) or {}), daemon=True
     )
     answer_thread.start()
     try:
-        finished = _call({"action": "join", "confirm": row.sas})
+        # THE PERSON'S STEP, run where they run it: the CLI's own phase two, with the
+        # code the user read off the other device's screen.
+        receipt = net_cli._cmd_join(_confirm_args(row.sas))  # noqa: SLF001 — the CLI's own
     finally:
         answer_thread.join(20)
 
-    assert not finished.is_error, _digest(finished)
+    assert receipt == 0
     assert answered, "the inviter's person never saw the parked question"
-    assert finished.details is not None
-    assert "joined" in _digest(finished) and record.network_id in _digest(finished)
+    # WHO ANSWERED, in the record's own words. The code arrived from a machine here (a
+    # test cannot be a person: no TTY), so that is what the record says — the field is
+    # for "did a person read this back?", and a machine-supplied value is no longer
+    # written as a human one (semantic finding 3).
+    assert [item.answered_by for item in recorded] == ["harness"], recorded
+
     # The record goes with the ceremony, and that is the whole of what is asserted about
     # its END here. The parked process's EXIT is deliberately not: the parker is our own
     # child, and once its stdout pipe is gone it can sit as a zombie until we reap it,
     # where a liveness probe SUCCEEDS for a corpse — so an "it is gone" assertion is a
     # statement about this process's reaping, not about the product, and it measured the
-    # difference on CI (passed on macOS, failed on Linux for exactly that reason). The
-    # two directions that ARE product properties are asserted above, where the holder is
-    # alive while parked (L172) and a second park is refused as `pairing_already_parked`
-    # (L187).
+    # difference on CI (passed on macOS, failed on Linux for exactly that reason). What
+    # IS asserted is the set of product properties around it: the holder is alive while
+    # parked (above), a second park is refused as `pairing_already_parked` (in
+    # `test_a_parked_pairing_joins_only_after_the_code_arrives`), and the record and the
+    # network agree once the person has answered.
     assert store.pending_joins(server_b.root) == []
     assert [item.network_id for item in store.list_networks(server_b.root)] == [record.network_id]
-    # Which is what the agent's own verification step then reports.
+    # Which is what the agent's own verification step then reports: the tool cannot
+    # create the pairing, and it CAN check it.
     verified = _call({"action": "ls"})
     assert not verified.is_error
     assert record.name in _digest(verified)

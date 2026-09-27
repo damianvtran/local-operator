@@ -241,6 +241,30 @@ def test_join_without_a_person_is_refused(
     assert "--park" in excinfo.value.sentence and "--confirm" in excinfo.value.sentence
 
 
+def test_who_answered_is_claimed_only_where_a_person_could_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``answered_by`` is a CLAIM about a person, so it is made only where one could be.
+
+    Agent review round 1 (semantic finding 3) found this field writing ``human`` for a
+    machine-supplied code: the rule was "not ``--sas-stdin``, therefore human", and the
+    tool's phase two passed no seam, so a script's answer was recorded as a person's —
+    into the parked record, the relay frame and the audit, where the question it answers
+    is exactly "did a person read this back?". The rule is now the MECHANISM rather than
+    the absence of a flag: the explicit pipe seam is the harness, a piped invocation
+    that did not announce itself is the harness too (no person can be behind a pipe),
+    and only a terminal makes the answer a person's.
+    """
+    args = Namespace(sas_stdin=False)
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    assert net_cli._answered_by(args) == "human"  # noqa: SLF001 — the predicate under test
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: False)
+    assert net_cli._answered_by(args) == "harness"  # noqa: SLF001
+    args.sas_stdin = True
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    assert net_cli._answered_by(args) == "harness"  # noqa: SLF001
+
+
 def test_verify_makes_the_fingerprint_the_compared_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
