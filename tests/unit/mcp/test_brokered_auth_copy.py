@@ -154,12 +154,17 @@ def test_the_composed_row_fits_the_toast_budget() -> None:
     assert row == f"failed: linear — {text}", row
     assert cell_len(row) <= budget, row
 
-    # A server name too long for both halves keeps the COMMAND whole and sheds the
-    # owner with the mark — the rung `toast._borrowed_signin_command` exists for.
+    # A server name too long for both halves keeps the OWNER and the command's head,
+    # shedding the server name the command repeats from the row's own label — the
+    # rung `toast._borrowed_signin_parts` exists for, and the property design round 1
+    # (D1) rests on: the row that cannot hold the pair must still say WHERE the
+    # sign-in is, or it reads as the local instruction this family replaces.
     long_row = _fit_failure_line(
         "launchdarkly", render_borrowed_signin(OWNER, "launchdarkly"), budget
     )
-    assert long_row == "failed: launchdarkly — /mcp login launchdarkly…", long_row
+    assert long_row == "failed: launchdarkly — damians-MacBook-Pro: /mcp login …", long_row
+    assert OWNER in long_row, long_row
+    assert cell_len(long_row) <= budget, long_row
 
 
 def test_a_non_borrowing_server_keeps_the_local_command(tmp_path: Path) -> None:
