@@ -83,6 +83,10 @@ from local_operator.operator.trust import (
 )
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
+
+# The merge taxonomy the queue fold below shares with the desktop bridge's
+# subscriber fold; it lives in a zero-import leaf so neither side re-spells it.
+from local_operator.session.delta_merge import mergeable_frame_key
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
 from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.publication import PublicationGate
@@ -278,67 +282,6 @@ def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
     # real value back including its own quotes.
     return _frame_line_bytes(probe) - 2
-
-
-def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
-    """The in-flight stream one queued frame carries a fragment of, or ``None``.
-
-    Compaction folds ADJACENT frames of the same stream into one, and the only
-    thing that decides "same stream" is this key. Two families are delta-grade
-    and mergeable:
-
-    * ``message_update`` — the assistant's visible text, keyed by the message it
-      accumulates into;
-    * ``reasoning_delta`` — the model's private reasoning, keyed by the message
-      it belongs to (the field is ``message_id``, not a whole ``message``: a
-      reasoning frame carries no message, which is also why it is cheap to
-      merge).
-
-    The FAMILY is part of the key, so a text fragment and a reasoning fragment
-    can never fold together — merging the model's thinking into the answer
-    being painted would corrupt the transcript on the viewer's screen, and the
-    two arrive interleaved.
-
-    Everything else returns ``None`` and is left alone: a frame that must not
-    merge is never compared to its neighbour at all. That includes the ``op``
-    around the payload — the aside's ``aside_delta`` frame is mergeable too, but
-    its stream identity lives on the FRAME (its ``req``), so it is
-    :func:`_mergeable_frame_key` that answers for it.
-    """
-    kind = payload.get("type")
-    if kind == "message_update":
-        return f"message_update:{(payload.get('message') or {}).get('id') or ''}"
-    if kind == "reasoning_delta":
-        return f"reasoning_delta:{payload.get('message_id') or ''}"
-    return None
-
-
-def _mergeable_frame_key(frame: Mapping[str, Any]) -> str | None:
-    """The in-flight stream a queued FRAME carries a fragment of, or ``None``.
-
-    :func:`_mergeable_delta_key` reads an event's payload; this reads the frame
-    around it, because the aside's stream identity is not in its payload. An
-    ``aside_delta`` frame is ``{op, req, data: {delta}}`` — the request that
-    asked for the aside IS the stream, and the id of the aside panel (which the
-    desktop renderer knows as ``aside_id``) never crosses this wire. Two
-    fragments fold only when the same ``req`` produced them, so two concurrent
-    asides on one connection cannot merge into one answer.
-
-    Keyed in the same namespace as :func:`_mergeable_delta_key` (the family is
-    part of the key), so an aside fragment can never fold into a
-    ``message_update`` or ``reasoning_delta`` beside it: those are the
-    conversation the viewer is reading, and this is a private question about it.
-    """
-    op = frame.get("op")
-    if op == "aside_delta":
-        req = frame.get("req")
-        # A frame with no ``req`` is not a stream this method can identify, so it
-        # is left alone rather than keyed as one nameless stream all such frames
-        # would share.
-        return None if req is None else f"aside_delta:{req}"
-    if op == "event":
-        return _mergeable_delta_key(frame.get("data") or {})
-    return None
 
 
 def _merged_frame_head(frame: Mapping[str, Any], data: dict[str, Any]) -> dict[str, Any]:
@@ -6977,8 +6920,8 @@ class RuntimeServer:
         Merges runs of same-stream ``message_update``, ``reasoning_delta`` and
         ``aside_delta`` frames, and keeps only the NEWEST ``tool_call_compose``
         per ``tool_call_id``. Which frames belong to one stream is
-        :func:`_mergeable_frame_key`'s rule (it delegates to
-        :func:`_mergeable_delta_key` for the event families), and it is the only
+        :func:`mergeable_frame_key`'s rule (it delegates to
+        :func:`mergeable_delta_key` for the event families), and it is the only
         family-specific thing here apart from the head it rebuilds: the size
         accounting below is delta-sized and therefore family-agnostic.
 
@@ -6991,7 +6934,7 @@ class RuntimeServer:
         ``event queue overflow`` instead of being compacted. The fold itself
         needs no special case for it: the same ``delta`` is concatenated, in
         arrival order, and only frames from the SAME request fold together (the
-        request id is the stream — see :func:`_mergeable_frame_key`).
+        request id is the stream — see :func:`mergeable_frame_key`).
 
         All three are lossless by construction. For ``message_update`` the later
         event's ``message`` already contains the earlier one's text, and
@@ -7140,16 +7083,16 @@ class RuntimeServer:
                     # id, so the pop misses and the slot stays live.
                     compose_slot.clear()
             # A frame that must not merge is never compared to its neighbour:
-            # :func:`_mergeable_frame_key` answers only for the families whose
+            # :func:`mergeable_frame_key` answers only for the families whose
             # fragments are losslessly concatenable, and the FAMILY is part of
             # the key, so an aside fragment can never fold into a
             # ``message_update`` or ``reasoning_delta`` beside it.
             previous = compacted[-1] if compacted else None
-            merge_key = _mergeable_frame_key(frame)
+            merge_key = mergeable_frame_key(frame)
             if (
                 previous is not None
                 and merge_key is not None
-                and merge_key == _mergeable_frame_key(previous)
+                and merge_key == mergeable_frame_key(previous)
             ):
                 data = frame.get("data") or {}
                 prior = previous.get("data") or {}
