@@ -310,21 +310,25 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     # option was consumed as that option, wherever it appeared — `check the
     # --name field` delivered `check the` and exited 0, and a prompt containing
     # `--force` became a usage error instead of a turn (review round 1, MAJOR-1).
-    # The rule this buys is that everything from here to the end of the command
-    # line is TEXT, and the cost is that this command's own flags must come
-    # before the session id (a trailing `--json` is text, like everything else).
-    # `--` still separates the text explicitly, which is argparse's own reading
-    # of it and the form the guide shows for text that begins with a dash.
+    # What that buys has a BOUNDARY, and it is the parser's own: the payload runs
+    # from the first token that is not an option to the end of the line, so a
+    # token that IS one of this command's flags is still read as that flag —
+    # `--send <s> --json is the field` delivers `is the field` with JSON output
+    # on, and a create-only flag (`--model X …`) is swallowed whole (review round
+    # 2, MINOR-1). `--` is the escape for text that begins with a dash; a flag
+    # that only describes a NEW session is refused outright below rather than
+    # accepted and dropped.
     net_sessions.add_argument(
         "text",
         nargs=argparse.REMAINDER,
         default=[],
         metavar="TEXT",
         help=(
-            "with --send/--steer/--slash: the text to deliver, taken AS-IS to the end of "
-            "the command line (so a `--name` in it stays text) — put this command's "
-            "flags BEFORE the session id, or separate the text with `--`; omit to read "
-            "it from stdin"
+            "with --send/--steer/--slash: the text to deliver, taken as-is from the first "
+            "word that is not one of this command's own flags, to the end of the line (so "
+            "a `--name` inside it stays text) — a LEADING flag-shaped word is read as that "
+            "flag, so put this command's flags BEFORE the session id, or separate the text "
+            "with `--`; omit to read it from stdin"
         ),
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
@@ -2447,11 +2451,11 @@ def _pilot_text(args: argparse.Namespace) -> str:
     ``/dev/null`` for stdin (``tui/network_cli``), so a composer line reaches
     this function with its words on argv and never blocks here.
 
-    THE WORDS ARE THE USER'S, VERBATIM: the positional is an argparse REMAINDER
-    (see its declaration for the defect that bought), so nothing between the
-    session id and the end of the line is re-read as a flag. The one token this
-    function does look at is a LEADING ``--``, which is the separator rather than
-    payload — see :func:`_pilot_text_from_args`.
+    THE WORDS ARE THE USER'S FROM THE FIRST NON-OPTION TOKEN: the positional is an
+    argparse REMAINDER (see its declaration for the defect that bought and for the
+    boundary), so nothing after that first plain token is re-read as a flag. The one
+    token this function does look at is a LEADING ``--``, which is the separator
+    rather than payload — see :func:`_pilot_text_from_args`.
     """
     text = _pilot_text_from_args(args)
     if text or sys.stdin.isatty():
@@ -2469,6 +2473,12 @@ def _pilot_text_from_args(args: argparse.Namespace) -> str:
     their prompt with a literal ``--``. Only the FIRST one is dropped, so a
     payload that genuinely begins with a dash keeps an escape (``-- -- …``), and a
     ``--`` in the MIDDLE of the text is left alone: it is a word the user typed.
+
+    WHAT ARRIVES HERE IS ALREADY POST-BOUNDARY: a leading flag-shaped token that is
+    one of this command's own flags never reaches this function as text (the parser
+    read it as that flag), which is why ``--`` is the documented way to send one and
+    why ``_cmd_sessions`` refuses the create-only flags outright rather than letting
+    one swallow the words around it.
     """
     parts = [str(part) for part in (getattr(args, "text", None) or ())]
     if parts[:1] == ["--"]:
@@ -3004,6 +3014,41 @@ async def _pilot_slash(
     return payload, [f"{session_id} on {peer}: /{command} — {said or 'no receipt'}"]
 
 
+#: The dests of the flags that only describe a session being CREATED (each one's
+#: own help opens with "with --create:"). With a pilot act they can neither apply
+#: nor be ignored silently: they are ACCEPTED and then dropped, and the words a user
+#: meant as their text are most of the reason one is on the line — `--send <s>
+#: --model X is the field` delivers "is the field" and never mentions the two tokens
+#: it ate (review round 2, MINOR-1).
+#:
+#: THREE OF THEM ARE THE PARENT PARSER'S, not this subcommand's — ``model``,
+#: ``hosting`` and ``run_in`` parse before OR after the subcommand (measured), and a
+#: launch flag is exactly as dropped with an act as a create-only one. They are here
+#: for that reason and despite the placement.
+#:
+#: The payload is taken from the first token that is not an option, so a flag-shaped
+#: first token cannot be told from a flag. Refusing the flag, and naming `--` in
+#: the sentence, is the one answer that does not also break a flag a caller
+#: passes deliberately.
+#: `--json` is deliberately NOT in this set — it is an option this verb really uses,
+#: so its meaning here is knowable, and the narrowed help text is what says a leading
+#: `--json` is read as the flag.
+_CREATE_ONLY_DESTS: tuple[str, ...] = (
+    "name",
+    "cwd",
+    "prompt",
+    "profile",
+    "team",
+    "effort",
+    "agent",
+    "agent_name",
+    "agent_id",
+    "model",
+    "hosting",
+    "run_in",
+)
+
+
 def _cmd_sessions(args: argparse.Namespace) -> int:
     """``lop network sessions`` — the session plane, across the mesh.
 
@@ -3067,6 +3112,22 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             print(
                 f"--{verb} acts on the session you name; --{clash} would act on another, so "
                 "this command would do one of the two",
+                file=sys.stderr,
+            )
+            return 2
+        # A FLAG THAT ONLY DESCRIBES A NEW SESSION, WITH AN ACT, is the same untruth
+        # ``--force`` above is refused for and the reason `--create` is in the clash
+        # list: accepted and then dropped, with the user's own words the most likely
+        # thing it swallowed. See ``_CREATE_ONLY_DESTS``.
+        create_only = next(
+            (dest for dest in _CREATE_ONLY_DESTS if str(getattr(args, dest, "") or "")), ""
+        )
+        if create_only:
+            print(
+                f"--{create_only.replace('_', '-')} describes a session being CREATED, and "
+                f"--{verb} acts on one that already exists: it would be accepted and then "
+                "dropped. If you meant those words as text, separate the text with `--` "
+                f"(`--{verb} <session> -- <text>`)",
                 file=sys.stderr,
             )
             return 2

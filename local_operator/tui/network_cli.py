@@ -155,6 +155,26 @@ def created_session_id(lines: Iterable[str]) -> str:
     return ""
 
 
+def _argv_for(args: list[str], *, json_output: bool) -> list[str]:
+    """The child's argv, with ``--json`` placed where nothing can read it as text.
+
+    THE PLACEMENT IS THE POINT, not the flag. ``network sessions --send`` and its
+    two siblings take their payload as an argparse REMAINDER — everything from the
+    session id to the end of the command line is text — so a flag appended at the
+    END of a tail that carries an act is delivered as part of the prompt and the
+    payload channel comes back empty. Directly after the subcommand is where every
+    ``network`` subcommand declares ``--json`` and where the parser still sees it
+    as an option.
+
+    Suffix-independent by construction: this inserts into the NETWORK arguments
+    before they are prefixed, so it cannot depend on ``python_argv``'s shape.
+    """
+    network_args = list(args)
+    if json_output:
+        network_args.insert(1 if network_args else 0, "--json")
+    return python_argv("-m", "local_operator.cli", "network", *network_args)
+
+
 def run_network(
     args: list[str],
     *,
@@ -168,10 +188,14 @@ def run_network(
     ``json_output`` appends ``--json`` so the payload is parseable; the flag is
     added here rather than at each call site so no caller can forget it and then
     wonder why :meth:`NetworkRun.payload` is empty.
+
+    WHERE that flag lands is load-bearing and is why this goes through
+    :func:`_argv_for`: the pilot verbs take their text as an argparse REMAINDER,
+    so every token after the session id is PAYLOAD — an appended flag would be
+    delivered as part of the prompt (`--send <s> hi --json` would send the words
+    "hi --json" and leave the payload channel empty).
     """
-    argv = python_argv("-m", "local_operator.cli", "network", *args)
-    if json_output:
-        argv.append("--json")
+    argv = _argv_for(args, json_output=json_output)
     env = dict(os.environ)
     # A CHILD OF THE TUI IS NOT A TERMINAL. Inheriting the parent's stdout pipe
     # would make ``invite --print``'s TTY check answer for a surface nobody is
