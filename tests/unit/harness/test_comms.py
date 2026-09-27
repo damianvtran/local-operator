@@ -2908,6 +2908,11 @@ async def test_the_credential_redaction_row_peeks_with_a_human_heading(tmp_path)
     Driven through a REAL transcript row (append, then render the steps the peek
     builds from the entries) rather than a hand-built payload dict, so a drift
     in ``encode_message_payload`` or in the entry shape fails here too.
+
+    Still load-bearing after the notice was retired (2026-09-27): ``hub peek``
+    serves STORED transcripts, and every one written before that date carries
+    these rows, so removing the branch would show a parent the raw wire type in an
+    old child where it used to read a phrase.
     """
     from local_operator.harness.comms import _render_transcript_steps
 
