@@ -1545,11 +1545,13 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
 
     device_id = _resolve_device(record, args.device)
     if device_id is None:
-        # THE SECRET GATE COMES FIRST. Every member verb refuses the same way when this
-        # device cannot read its own network secret (``test_refusals``), so an
-        # unresolvable NAME must not pre-empt that shared refusal with a sentence about
-        # the member list: a device that has left the network has no member list to be
-        # corrected against. Safe here because ``require_secrets`` only reads.
+        # THE SECRET GATE COMES FIRST, and it is the shared refusal every member verb
+        # already gives (``test_refusals``): it names the precondition that blocks the
+        # write for ANY spelling, so correcting the argument first would send the operator
+        # after a member list they still could not act on. (``lop network show`` CAN answer
+        # from a running relay without the secret, so this sequence is not the only one
+        # that could inform them — it is the one that matches what the write needs.)
+        # Safe here because ``require_secrets`` only reads.
         store.require_secrets(record.network_id)
         raise MeshRefusal(
             "unknown_member",
@@ -1573,9 +1575,9 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             ],
         )
     imported = _import_relay()
-    from local_operator.network import store
-
-    record = _resolve(args.network)
+    # No second ``_resolve`` and no second ``store`` import: ``record`` came off the top
+    # of this command and the local write needs nothing the resolution did not already
+    # read (review round 2, NIT-2).
     state = store.require_secrets(record.network_id)
     outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():

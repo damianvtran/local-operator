@@ -3475,15 +3475,20 @@ class McpManager:
         command (review round 1, R1): a device with no local grant may still be a
         BORROWER of somebody else's, and then the local verbs are the wrong advice.
 
+        It answers that question with the SAME TWO TESTS the borrow path applies
+        (``_brokered_mcp_auth``): this device must be a holder that does not own the
+        credential, AND it must not hold a local grant for the server — the local grant
+        wins there, so the local verb is the honest advice (review round 2, M2).
+
         The server comes off the EXCEPTION (both auth shapes carry ``server_url``)
         rather than from a new argument, so no call site's existing ``url`` handling —
         which decides how a transport failure renders — is disturbed by this change.
 
-        ``None`` is the ordinary answer — no store, no server URL, no mesh client, or a
-        server this device does not borrow — and it keeps every non-mesh render exactly
-        as it was. Best-effort by construction: this runs where a failure is being
-        described, so a store or placement that cannot be read must degrade to the old
-        text rather than replace one error with another.
+        ``None`` is the ordinary answer — no store, no server URL, no mesh client, a
+        server this device does not borrow, or one it holds its own grant for — and it
+        keeps every non-mesh render exactly as it was. Best-effort by construction: this
+        runs where a failure is being described, so a store or placement that cannot be
+        read must degrade to the old text rather than replace one error with another.
         """
         url = getattr(exc, "server_url", None)
         if store is None or not url:
@@ -3497,9 +3502,29 @@ class McpManager:
             # not, and this branch is only reached on a device that brokers.
             from local_operator.network.credentials.types import credential_key_for_mcp
 
-            if not client.should_borrow(credential_key_for_mcp(str(url))):
+            key = credential_key_for_mcp(str(url))
+            if not client.should_borrow(key):
                 return None
-            return client.owner_label(credential_key_for_mcp(str(url))) or None
+            # THE LOCAL GRANT WINS — the other half of the borrow decision (review round
+            # 2, M2). ``_brokered_mcp_auth`` returns ``None``, i.e. no brokered auth at
+            # all, when this device holds its OWN row for the server
+            # (``server_has_stored_grant``), so the failure being described is the LOCAL
+            # credential's and the local verb (``reauth``) is the right advice. Asking
+            # only ``should_borrow`` pointed a device that holds its own grant at somebody
+            # else's sign-in — reachable precisely BECAUSE running the local login is how
+            # a borrower creates that row (R1's own rationale), and it survives.
+            #
+            # A challenge carries the answer already resolved against the manager's own
+            # (possibly injected) store, exactly as ``_auth_required_text`` reads it; only
+            # the legacy shape needs the lookup.
+            stored = getattr(exc, "has_stored_grant", None)
+            if stored is None:
+                from local_operator.mcp.auth import server_has_stored_grant
+
+                stored = server_has_stored_grant(str(url), store)
+            if stored:
+                return None
+            return client.owner_label(key) or None
         except Exception:  # noqa: BLE001 — a hint must never replace the error it explains
             logger.debug("MCP brokered-owner lookup failed for %r", url, exc_info=True)
             return None

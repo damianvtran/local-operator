@@ -135,6 +135,30 @@ def test_an_expired_mcp_token_is_refused_with_the_repair_sentence(owner: Any) ->
     assert "owner-laptop" in outcome.message or OWNER in outcome.message
 
 
+def test_the_requester_s_sentence_does_not_promise_an_unmade_request(owner: Any) -> None:
+    """Review round 2, M3 — the sentence a BORROWER reads about this refusal.
+
+    The ``interactive_required`` arm promised "the operator there has been asked to
+    run …", while the design's §4.7 repair op that would ask them is not built (the
+    amended row records that). The owner-side message asserted above is the WIRE
+    diagnostic; the sentence below is the one rendered at the requester from the code.
+    """
+    from local_operator.network.credentials.messages import render_broker_error
+
+    error = BrokerError(
+        code="interactive_required",
+        key=owner.key,
+        owner_device=OWNER,
+        owner_device_name="owner-laptop",
+    )
+
+    sentence = render_broker_error(error, key=owner.key, owner_name="owner-laptop")
+
+    assert "can run" in sentence, sentence
+    assert "has been asked" not in sentence, sentence
+    assert "/mcp login" in sentence, sentence
+
+
 def test_the_refusal_is_audited_as_the_owner_s_own_report(owner: Any) -> None:
     """The owner's log must show WHY nothing was lent — that is the forensic trail."""
     _resolve(owner)
