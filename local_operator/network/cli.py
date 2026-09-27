@@ -2500,25 +2500,37 @@ def _pilot_unresolved(session_id: str, peer: str) -> tuple[str, str]:
     )
 
 
-def _pilot_dial_failure(session_id: str, peer: str, message: str) -> tuple[str, str]:
-    """Which component actually failed when a dial or a bind went wrong.
+def _pilot_open_refusal(
+    session_id: str, peer: str, message: str, config_dir: Path
+) -> tuple[str, str]:
+    """Which component failed when the STREAM could not be opened.
 
-    THE TRANSPORT CANNOT TELL THESE APART, and it says so in one sentence: a peer
-    that is not there at all and a peer whose session refused both arrive as "the
-    remote owner did not send its state". They want different next steps — `lop
-    network doctor` for the first, that device's own words for the second — so the
-    peer's reachability is READ rather than assumed, and the code follows what the
-    catalogue says. A reachable peer keeps the transport's sentence verbatim: it is
-    the honest report of a runtime that stopped answering.
+    BY CONSTRUCTION, NOT BY A SECOND READ — and that is a correction this PR made
+    against itself, because the first version asked the peer's catalogue here and CI
+    caught it answering two ways for one state: a cached row let the dialog fail
+    inside the viewer (one code), an uncached one was refused before it (another),
+    and the catalogue read is not reliable at this moment either — the fan-out a
+    stopped peer needs can itself time out, which leaves nothing to classify by.
+
+    So the two facts that ARE deterministic decide it: whether this device's relay
+    record exists (a local file read, no dial — the same fact the viewer's own dial
+    depends on), and WHERE the failure happened. An open that never produced a
+    stream never reached the session, so the far end of the link is the component
+    and the doctor command is the next step. A name that does not answer covers a
+    stopped peer and a peer whose relay is wedged; the transport's own sentence
+    rides along verbatim, so a refused frame (a capability, a protocol error) is
+    still readable as what it is rather than as a link problem.
     """
-    block, refusal = _pilot_peer_block(peer)
-    if refusal is not None:
-        # The relay could not be asked a second time; the FIRST failure is still
-        # the caller's answer, so the transport's sentence is kept.
-        return "session_unreachable", message
-    if block is None or not block.get("reachable"):
-        return "peer_unreachable", _pilot_unreachable_sentence(session_id, peer, block)
-    return "session_unreachable", message
+    from local_operator.network import store
+
+    if store.find_own_relay(config_dir) is None:
+        return "relay_unavailable", _relay_unavailable_message()
+    return (
+        "peer_unreachable",
+        f"{peer} did not serve {session_id} ({message}), so nothing about that "
+        f"conversation is known here: `lop network doctor --peer {peer}` diagnoses "
+        "the link, and the session itself is untouched either way",
+    )
 
 
 def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
@@ -2629,11 +2641,12 @@ async def _pilot_act(
             f"`lop network doctor --peer {peer}` diagnoses the link",
         ) from exc
     except ConnectionError as exc:
-        # THE OPEN IS A DIAL TOO, and it fails for the same two reasons the bind
-        # below does — a peer that is gone, or a peer whose runtime refused. An
-        # unhandled `ConnectionError` here would surface as a traceback, which is
-        # the one thing this family never does with a refusal.
-        code, sentence = await asyncio.to_thread(_pilot_dial_failure, session_id, peer, str(exc))
+        # THE OPEN IS A DIAL TOO. An unhandled `ConnectionError` here would surface
+        # as a traceback, which is the one thing this family never does with a
+        # refusal; see ``_pilot_open_refusal`` for how the component is decided.
+        code, sentence = await asyncio.to_thread(
+            _pilot_open_refusal, session_id, peer, str(exc), config_dir
+        )
         raise MeshRefusal(code, sentence) from exc
     if viewer is None:
         # Between the row read and here the id stopped being a peer's row (moved
@@ -2653,13 +2666,13 @@ async def _pilot_act(
                 f"`lop network doctor --peer {peer}` diagnoses the link",
             ) from exc
         except ConnectionError as exc:
-            # The owner's own refusal or a transport that stopped answering — and
-            # WHICH device that was is a fact to read, not to assume; see
-            # ``_pilot_dial_failure``.
-            code, sentence = await asyncio.to_thread(
-                _pilot_dial_failure, session_id, peer, str(exc)
-            )
-            raise MeshRefusal(code, sentence) from exc
+            # THE STREAM OPENED, SO THE OWNER'S RUNTIME IS THE COMPONENT: the dial
+            # reached the peer (``_pilot_open_refusal`` would have answered
+            # otherwise), so what did not answer is the runtime that side is
+            # responsible for — a stopped session, one that could not start, or a
+            # capability this device does not hold. The owner's own words are the
+            # sentence, verbatim.
+            raise MeshRefusal("session_unreachable", str(exc)) from exc
         if verb == "send":
             return await _pilot_send(viewer, session_id, peer, text)
         if verb == "steer":
