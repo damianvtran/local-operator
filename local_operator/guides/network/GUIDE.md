@@ -71,13 +71,53 @@ rendering is not a contract.
    codes, and answering it records the person's decision for the waiting pairing
    loop. It refuses without a TTY — a foreground `lop network serve` is the
    alternative on that side.
-   **You cannot do this step.** There is deliberately no flag that completes a
-   pairing, and the code is read at the joining device's own prompt — that is
-   what makes the interlock real rather than a round trip. Hand over the file and
-   the command, and let the user run it. The one non-interactive spelling,
-   `--sas-stdin`, is refused unless `LOP_NETWORK_TEST_MODE=1` is set: it is the
-   e2e harness's seam, and setting that variable to finish a real pairing would
-   turn the human check into a formality. Never set it.
+
+   THE TWO-PHASE PAIR, which is how you do this step WITHOUT a terminal. When the
+   person is not sitting at the joining device's keyboard, start the ceremony and
+   park it:
+
+   ```bash
+   lop network join @<token-file> --park --json
+   # → {"status":"awaiting_confirmation","sas":"481926","shown":"481 926",
+   #    "fingerprint":…,"expires_at":…,"seconds_left":…,"sentence":…}   exit code 0
+   ```
+
+   (`sas` is the compact spelling, `shown` and the `sentence` carry the spaced one —
+   the same six digits either way. A ceremony nobody answers exits `3`
+   (`pairing_unanswered`), having sent nothing.)
+
+   The first call prints this device's code and then WAITS (up to the same window the
+   prompt does). Show the user the code and the `sentence` it carries, and ask them to
+   read the code off the OTHER device's screen. The ceremony's socket belongs to the
+   parked process, so leave it running: do not kill it, and do not start a second park
+   for the same invite.
+
+   **You cannot do this step.** The second phase is the user's, run at their own
+   terminal:
+
+   ```bash
+   lop network join --confirm <code> --json      # the code THEY read, never one you chose
+   # → {"ok":true,"status":"joined","network_id":…,"epoch":…}
+   ```
+
+   Hand them that command and the code, and let them run it. There is deliberately no
+   flag on the `network` tool that completes a pairing: the digits both devices derive
+   are the SAME ones, so an agent able to answer with the code it just printed would
+   satisfy the very comparison that exists to catch a substitution — the interlock is
+   real only because the second phase is not the agent's to run. If the user cannot
+   read the code, that is the interlock working, not a problem to route around. A wrong
+   code is refused with `sas_mismatch` and leaves the ceremony open (the invite is not
+   spent).
+   The one non-interactive spelling of the PROMPT, `--sas-stdin`, is refused unless
+   `LOP_NETWORK_TEST_MODE=1` is set: it is the e2e harness's seam, and setting that
+   variable to finish a real pairing would turn the human check into a formality.
+   Never set it.
+
+   The `network` tool PARKS a pairing (`action="join"` with `token`) and reports the
+   code, the sentence and the window for the user; it has no `confirm` field, so no
+   argument combination lets an agent answer a park. The inviter's half
+   (`lop network confirm`) is deliberately NOT in that tool either: a full pairing
+   always needs one person, and that is the side where their comparison decides.
 5. Verify from both sides: `lop network peers --json` must show the other device
    with `reachable: true`, and `lop network ls --json` must agree on the epoch
    and member count. `peers` exits 1 and returns
@@ -490,8 +530,9 @@ lop network identity rotate --json    # for a suspected key compromise
 - Do not edit anything under the network directory by hand (identity, network
   records, secrets, outbox) — one writer owns each file, and a hand edit is a
   state no code path expects.
-- Do not run the join step for the user, and never type a code you did not see
-  on the other device.
+- Do not run the join step for the user, and never type a code you did not see on
+  the other device. `--confirm` takes the value the USER read back from the other
+  screen: never the code this device printed, never a value you derived.
 - Do not print an invite token, or read the token file into a result: it is a
   single-use bearer credential, and a tool result is the most-copied text in the
   system.
@@ -509,10 +550,10 @@ lop network identity rotate --json    # for a suspected key compromise
 that answered and did not act, such as a stop whose `outcome` is `skipped` — with
 the sentence on stderr, which is the sentence to show the user (read `outcome`, not
 the code alone: a receipt is not a success); `2` a usage error, including `--print`
-together with `--json` and `--force` without `--stop`. The design reserves `3` for
-a "human decision is required"; this build never emits it — the one human step
-(`join`) is a prompt on the joining device rather than a two-phase command, so
-there is no `--confirm` flag to reach for.
+together with `--json` and `--force` without `--stop`; `3` a human decision is
+required and did not arrive — a parked pair (`join --park`) whose window closed with
+nobody answering, reported as `pairing_unanswered`. Nothing is joined in that case,
+the invite is untouched, and the ceremony is not resumed: park a new one.
 
 **Commands.**
 
@@ -530,7 +571,9 @@ lop network init <name> --json
 lop network rename <network> <name> --json
 lop network rm <network> --json
 lop network invite --role drive --json
-lop network join @<token-file>
+lop network join @<token-file>      # a terminal: prompts for the code, then joins
+lop network join @<token-file> --park --json   # no terminal: park and print the code
+lop network join --confirm <code> --json       # answer the parked ceremony
 lop network confirm --list          # a pairing parked on THIS device, with both codes
 lop network confirm <invite-id>     # answer it (--decline refuses; needs a TTY)
 lop network member rm <network> <device> --json

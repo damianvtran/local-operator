@@ -13,8 +13,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import stat
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +45,34 @@ _ALL_ACTIONS = (
     "panic",
     "log",
     "doctor",
+    "sessions",
+    "trust",
+    "credentials",
+    "definitions_state",
 )
+
+#: One plausible call per action, in the order the enum declares them. Defined once
+#: because TWO properties are asserted over every action — that it reaches a real CLI
+#: verb, and that it can never spell a confirmation flag — and a second table would be
+#: the place one of them quietly stopped covering an action.
+_SAMPLES: dict[str, dict[str, Any]] = {
+    "status": {},
+    "init": {"network": "devmesh"},
+    "invite": {"role": "drive"},
+    "join": {"token": "@token.invite"},
+    "ls": {},
+    "show": {"network": "devmesh"},
+    "peers": {},
+    "member_rm": {"network": "devmesh", "device": "d_" + "a" * 32},
+    "disconnect": {"network": "devmesh"},
+    "panic": {"network": "devmesh"},
+    "log": {"since": "15m"},
+    "doctor": {},
+    "sessions": {"peer": "device-b"},
+    "trust": {"network": "devmesh"},
+    "credentials": {},
+    "definitions_state": {},
+}
 
 
 @pytest.fixture()
@@ -129,6 +159,25 @@ def test_reads_never_prompt_and_every_mutating_action_does() -> None:
     assert tool.concurrency == "exclusive"
 
 
+def test_the_sessions_action_is_tiered_by_what_it_does_not_by_its_name() -> None:
+    """One action, both sides of the gate: a listing is silent, a stop is not.
+
+    Sabotage check for why ``call_approval_tier`` takes the arguments: a tier decided by
+    the action name alone would have to either prompt for every listing or stay silent
+    for a stop that ends somebody's session on another device.
+    """
+    tool = TOOL_BUILDERS["network"](ToolContext(cwd="."))
+    assert tool is not None and tool.call_approval_tier is not None
+    tier = tool.call_approval_tier
+    assert tier({"action": "sessions", "peer": "device-b"}) == "read"
+    assert tier({"action": "sessions", "all_peers": True}) == "read"
+    for verb in ("create", "engage", "stop", "delete"):
+        assert tier({"action": "sessions", "peer": "device-b", verb: "s1"}) == "write", verb
+    # A model that sends the boolean as text is not a read either.
+    assert tier({"action": "sessions", "peer": "device-b", "create": "true"}) == "write"
+    assert tier({"action": "sessions", "peer": "device-b", "create": "false"}) == "read"
+
+
 # ---------------------------------------------------------------------------
 # Argv discipline — the flags this tool cannot pass
 # ---------------------------------------------------------------------------
@@ -139,20 +188,7 @@ def test_every_action_maps_to_a_real_cli_verb() -> None:
     # Keyed by the tool's own action vocabulary (``NetworkParams.action``'s alias)
     # rather than by ``str``: the mapping is asserted against ``_ALL_ACTIONS`` below,
     # and typing it as ``str`` is what let a typo pass the checker and fail the model.
-    samples: dict[net_tool.NetworkAction, dict[str, Any]] = {
-        "status": {},
-        "ls": {},
-        "show": {"network": "devmesh"},
-        "peers": {},
-        "doctor": {},
-        "log": {"since": "15m"},
-        "init": {"network": "devmesh"},
-        "invite": {"role": "drive"},
-        "join": {"token": "@token.invite"},
-        "member_rm": {"network": "devmesh", "device": "d_" + "a" * 32},
-        "disconnect": {"network": "devmesh"},
-        "panic": {"network": "devmesh"},
-    }
+    samples: dict[net_tool.NetworkAction, dict[str, Any]] = dict(_SAMPLES)  # type: ignore[arg-type]
     assert set(samples) == set(_ALL_ACTIONS)
     for action, fields in samples.items():
         argv, problem = net_tool._argv_for(NetworkParams(action=action, **fields))
@@ -172,11 +208,277 @@ def test_the_argv_carries_no_confirmation_and_no_token_printing_flag() -> None:
         NetworkParams(action="disconnect", network="devmesh"),
         NetworkParams(action="panic", network="devmesh"),
         NetworkParams(action="init", network="devmesh"),
+        # The four verbs that COULD spell one if the tool were allowed to: a
+        # delete is a dry run because ``--yes`` is absent, and a stop never
+        # escalates because ``--force`` is.
+        NetworkParams(action="sessions", peer="device-b", delete="s1"),
+        NetworkParams(action="sessions", peer="device-b", stop="s1"),
+        NetworkParams(action="sessions", peer="device-b", create=True, prompt="hi"),
+        NetworkParams(action="trust", network="devmesh", trust_state="untrusted"),
     ]
     for params in samples:
         argv, problem = net_tool._argv_for(params)
         assert problem == ""
         assert not (set(argv) & forbidden), argv
+
+
+def test_the_tool_exposes_no_way_to_answer_a_park() -> None:
+    """R3's pin: the tool may START a pairing and has no way to FINISH one.
+
+    The property is not "the code is only accepted from a field the caller filled in".
+    That was the earlier revision, and agent review round 1 (semantic finding 1) showed
+    what it is worth: a park PRINTS this device's own derivation, both devices derive
+    the SAME digits, so a model holding the code it just printed can echo it back and
+    satisfy the very comparison that exists to catch a substitution. The operator's
+    ruling was to remove the field rather than guard it, so the pin is now structural —
+    no field, no alias, no argv.
+
+    SABOTAGE CHECK, and it is the shape that discriminates: adding a ``confirm`` field
+    to ``NetworkParams`` plus a branch spelling ``--confirm`` from it FAILS the sweep
+    below. A test written against the old sentence ("the tool never invents the value")
+    passes such a sabotage, which is why this one is written against the model's own
+    field set and the argv table.
+    """
+    assert "confirm" not in NetworkParams.model_fields
+    assert not any("confirm" in (spec.alias or "") for spec in NetworkParams.model_fields.values())
+    for action in _ALL_ACTIONS:
+        argv, problem = net_tool._argv_for(NetworkParams(action=action, **_SAMPLES[action]))
+        assert problem == "", (action, problem)
+        assert "--confirm" not in argv, (action, argv)
+    # A caller reaching for any of the names a code could arrive under is refused by the
+    # MODEL rather than quietly routed: ``extra="forbid"`` is part of the pin.
+    for name in ("confirm", "sas", "code", "confirmation", "typed"):
+        # ``dict[str, Any]`` because this is a RAW payload — what a caller (or the
+        # harness's tier callback) hands over before validation — and not a
+        # ``NetworkParams`` the checker can hold to its field types.
+        loose: dict[str, Any] = {"action": "join", "token": "tok", name: "481926"}
+        with pytest.raises(Exception):
+            NetworkParams(**loose)
+    # The parked spelling is the ONLY spelling: a code in any other field changes
+    # nothing, because no other field reaches the CLI's argv.
+    argv, problem = net_tool._argv_for(NetworkParams(action="join", token="tok"))
+    assert problem == ""
+    assert argv == ["network", "join", "tok", "--park", "--json"], argv
+
+
+def test_all_peers_beside_a_mutating_verb_is_refused_not_dropped() -> None:
+    """MINOR 5: the CLI reads ``--all-peers`` only on its two listing paths, so beside
+    a mutating verb it accepted the flag and dropped it — the class the CLI's own
+    ``--force`` guard names. Both halves are asserted, because a refusal that also
+    refused the honest listing would be a different bug."""
+    argv, problem = net_tool._argv_for(NetworkParams(action="sessions", all_peers=True))
+    assert problem == "" and "--all-peers" in argv, (argv, problem)
+    argv, problem = net_tool._argv_for(
+        NetworkParams(action="sessions", peer="d1", stop="s1", all_peers=True)
+    )
+    assert argv == [] and "all_peers" in problem, (argv, problem)
+
+
+def test_the_tier_and_the_argv_read_the_same_verb_set() -> None:
+    """MINOR 4, as a regression: ``{"stop": "0"}`` was tiered ``read`` while argv still
+    spelled ``--stop 0``, so a mutation rode a call that raised no approval. The two
+    readers now share one predicate, and every falsy spelling is asserted on BOTH —
+    tier and argv — so a divergence fails here rather than in the audit."""
+    for value in ("0", "false", "no", "none", "null", "", "  "):
+        for verb in ("stop", "delete", "engage"):
+            raw: dict[str, Any] = {"action": "sessions", "peer": "d1", verb: value}
+            assert net_tool._approval_tier(raw) == "read", (verb, value)
+            argv, problem = net_tool._argv_for(NetworkParams(**raw))
+            assert problem == "", (verb, value, problem)
+            assert f"--{verb}" not in argv, (verb, value, argv)
+    # A real operand raises the tier AND reaches argv.
+    args: dict[str, Any] = {"action": "sessions", "peer": "d1", "stop": "s_1"}
+    assert net_tool._approval_tier(args) == "write"
+    argv, problem = net_tool._argv_for(NetworkParams(**args))
+    assert problem == "" and argv[argv.index("--stop") + 1] == "s_1", argv
+    # 'create' answers to the same rule in both spellings a model may send.
+    assert (
+        net_tool._approval_tier({"action": "sessions", "peer": "d1", "create": "false"}) == "read"
+    )
+    assert net_tool._approval_tier({"action": "sessions", "peer": "d1", "create": True}) == "write"
+    bad: dict[str, Any] = {"action": "sessions", "peer": "d1", "create": "false"}
+    argv, problem = net_tool._argv_for(NetworkParams(**bad))
+    assert problem == "" and "--create" not in argv, argv
+
+
+def test_the_description_teaches_the_two_phase_pair_and_drops_the_old_claim() -> None:
+    """The description is the FIRST thing an agent reads, so it is the place a
+    capability that does not exist costs the most: it used to say sessions on other
+    devices were not reachable, which the ``sessions`` action now contradicts.
+
+    It must also not promise a guarantee this tool does not enforce. The second phase is
+    not a field here (``test_the_tool_exposes_no_way_to_answer_a_park``), so the
+    description has to say whose step it is — an agent that read "pairing needs a human"
+    and then found no way to hand the step over would be told nothing useful.
+    """
+    tool = TOOL_BUILDERS["network"](ToolContext(cwd="."))
+    assert tool is not None
+    text = tool.description
+    assert "Read and drive a lop mesh network from this device" in text
+    assert "creating a session on a peer" in text
+    assert "not reachable" not in text
+    assert "Pairing and incident controls need a human" in text
+    # The two clauses that make the guarantee true as written: the tool parks and
+    # returns the code, and ANSWERING it is the person's.
+    assert "returns the code for the user to read out" in text
+    assert "answering it is theirs to run" in text
+    assert "reports what the CLI refused and why" in text
+
+
+def test_the_invite_action_carries_the_options_the_guide_teaches() -> None:
+    """Guide and tool must not disagree about what is possible.
+
+    The guide tells an agent to reach for ``--expires`` and ``--device``; before this,
+    the tool had no field for either, so an instruction the guide gives resolved to a
+    call that could not carry it.
+    """
+    argv, problem = net_tool._argv_for(
+        NetworkParams(action="invite", role="drive", expires="30m", device="d_abc")
+    )
+    assert problem == ""
+    assert "--expires" in argv and argv[argv.index("--expires") + 1] == "30m"
+    assert "--device" in argv and argv[argv.index("--device") + 1] == "d_abc"
+
+
+def test_the_new_actions_render_what_the_cli_actually_emits() -> None:
+    """The digests for ``sessions``/``trust``/``credentials``/``definitions_state``.
+
+    These payloads are the CLI's own ``--json`` shapes, so a render that reads a key
+    nobody sends (or prints a raw wire token where the family has a gloss) would only
+    show up against a live peer — which is exactly what a unit test of the renderer is
+    for. The glossing is asserted, not assumed: ``connect_failed`` is the relay's
+    word, and a person reads the sentence.
+    """
+    listing = {
+        "ok": True,
+        "sessions": [
+            {
+                "session_id": "s_1",
+                "state": "stored",
+                "conversation_name": "Field notes",
+                "peer": {"device_id": "d_1", "name": "mbp"},
+            }
+        ],
+        "peers": {
+            "d_1": {"name": "mbp", "reachable": True},
+            "d_2": {"name": "old-box", "reachable": False, "reason": "connect_failed"},
+        },
+    }
+    lines = net_tool._render("sessions", listing)  # noqa: SLF001 — the renderer under test
+    assert any("s_1" in line and "Field notes" in line and "on mbp" in line for line in lines)
+    assert any(line.startswith("old-box: did not answer") for line in lines), lines
+    assert not any("connect_failed" in line for line in lines), lines
+
+    empty = net_tool._render("sessions", {"ok": True, "sessions": [], "peers": {}})  # noqa: SLF001
+    assert empty == ["no sessions are held by other devices right now"]
+
+    # A MUTATION's receipt is the owner's own sentence, never a re-rendering of it.
+    assert net_tool._render(
+        "sessions", {"ok": True, "detail": "runtime joining"}
+    ) == [  # noqa: SLF001
+        "runtime joining"
+    ]
+
+    assert net_tool._render(  # noqa: SLF001
+        "trust",
+        {"ok": True, "network_id": "n_1", "trust": "active", "applied_locally": True},
+    ) == ["n_1 is now active", "the relay is not running on this device: applied locally"]
+
+    # THROUGH ``_scrub``, in the order the real path uses it (``execute_network``
+    # scrubs the payload, then renders it). Passing the raw dict here is what let this
+    # test pin a contract production could not satisfy: the row's name field was spelled
+    # ``key``, the scrubber's markers ate it, and the digest rendered ``None`` where the
+    # credential's name belongs (agent review round 1, code findings 4 and 5).
+    credentials = {
+        "ok": True,
+        "networks": [
+            {
+                "network": "home-net",
+                "credentials": [
+                    {
+                        "credential_name": "OPENAI_API_KEY",
+                        "kind": "api_key",
+                        "owned_here": True,
+                        "owner_device": "d_1",
+                        "owner_device_name": "mbp",
+                    }
+                ],
+            }
+        ],
+    }
+    scrubbed = net_tool._scrub(credentials)
+    assert "OPENAI_API_KEY" in json.dumps(scrubbed), scrubbed
+    assert net_tool._render("credentials", scrubbed) == [  # noqa: SLF001
+        "home-net:",
+        "  OPENAI_API_KEY  api_key  owner: this device",
+    ]
+    assert net_tool._render("credentials", {"ok": True, "networks": []}) == [  # noqa: SLF001
+        "nothing is shared with or by this device"
+    ]
+
+    assert net_tool._render(  # noqa: SLF001
+        "definitions_state",
+        {
+            "ok": True,
+            "agents": {"scout": {}},
+            "teams": {"pod": {}},
+            "mirrored": {"agents": {"scout": "d_1"}, "teams": {}},
+        },
+    ) == ["agent: scout (mirrored from d_1)", "team: pod (yours)"]
+
+
+def test_a_detached_ceremony_is_reaped_by_a_waiter_of_its_own() -> None:
+    """The zombie agent review round 1 caught, as a regression.
+
+    A parked ceremony outlives the tool call that starts it, and that call's loop dies
+    with the call — so asyncio's child watcher is gone long before the ceremony ends and
+    nothing waits for it. What that looked like in the field: ``state=Z`` for 300
+    consecutive polls, with a liveness probe answering "alive" for a process that had
+    finished. ``_reap_when_it_exits`` is the waiter that outlives the call.
+
+    THE COUNTERFACTUAL IS IN THE TEST, because a test that only asserts "the pid
+    disappears" would pass with the helper deleted: two children are spawned, ONE is
+    handed to the helper and the other is left alone, and the process table is read for
+    both. The unreaped one is the control — it must still be a zombie while the reaped
+    one is gone, which is what makes this a measurement of the helper rather than of
+    ``Popen``'s own cleanup.
+    """
+    if not hasattr(os, "waitpid"):
+        pytest.skip("no zombies off POSIX — and none to reap")
+    from local_operator import procstate
+
+    script = "import sys; sys.exit(0)"
+    reaped = subprocess.Popen([sys.executable, "-c", script])
+    control = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        net_tool._reap_when_it_exits(reaped.pid)  # noqa: SLF001 — the helper under test
+        deadline = time.time() + 15.0
+        gone = False
+        corpse = False
+        while time.time() < deadline:
+            # ``pid_liveness`` answers False only when NOTHING holds the pid, and the
+            # control's ``is_zombie`` is the counterfactual — a corpse this helper never
+            # touched. Both come from the repo's own probes rather than from ``ps``,
+            # which this module's PATH-narrowing fixture would not even find.
+            gone = procstate.pid_liveness(reaped.pid) is False
+            corpse = procstate.is_zombie(control.pid)
+            if gone and corpse:
+                break
+            time.sleep(0.05)
+        assert gone, (
+            "the detached ceremony is still holding its pid, so the waiter reaped "
+            f"nothing: liveness={procstate.pid_liveness(reaped.pid)!r}"
+        )
+        assert corpse, (
+            "the control child is not a zombie, so this test is not measuring a zombie "
+            "at all and its other assertion would prove nothing"
+        )
+    finally:
+        try:
+            control.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:  # pragma: no cover — defensive
+            control.kill()
+            control.wait(timeout=10.0)
 
 
 def test_a_missing_argument_is_refused_with_a_sentence_not_a_call() -> None:
@@ -217,22 +519,47 @@ def test_a_pasted_token_goes_to_a_private_file_and_does_not_survive_the_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``ps`` reads argv. The CLI accepts ``@path``, so a token handed to the
-    tool as TEXT never becomes an argv entry, and the file is gone afterwards."""
+    tool as TEXT never becomes an argv entry, and the file is gone afterwards.
+
+    The parked pair is the path a token join now takes, so THIS is the spawn it is
+    sent through: stubbing ``_run_cli`` alone left the real CLI dialling with the
+    fake token, which is how this test noticed the change (an ``invite_invalid`` from
+    the wire, not an assertion about argv).
+    """
     seen: dict[str, Any] = {}
 
-    async def fake_run(argv: list[str], timeout: float) -> tuple[int, str, str]:
+    async def fake_park(argv: list[str]) -> tuple[int, str, str]:
         token_arg = argv[2]
         path = Path(token_arg[1:])
+        seen["path"] = path
         seen["mode"] = stat.S_IMODE(path.stat().st_mode)
         seen["content"] = path.read_text(encoding="utf-8")
-        return 0, json.dumps({"ok": True, "name": "devmesh", "network_id": "n_1"}), ""
+        return (
+            0,
+            json.dumps(
+                {
+                    "ok": True,
+                    "status": "awaiting_confirmation",
+                    "sas": "481926",
+                    "fingerprint": "K7QM-3XPD-4B1N-9T2B",
+                    "name": "devmesh",
+                    "network_id": "n_1",
+                    "seconds_left": 180.0,
+                    "sentence": "Ask the user to read back the code 481 926.",
+                }
+            ),
+            "",
+        )
 
-    monkeypatch.setattr(net_tool, "_run_cli", fake_run)
+    monkeypatch.setattr(net_tool, "_start_parked_join", fake_park)
     result = _call("join", token="T0KEN-material")
 
     assert not result.is_error
     assert seen["mode"] == 0o600
     assert seen["content"] == "T0KEN-material"
+    # The token file is the tool's OWN temporary: it must not outlive the call, or the
+    # credential sits in a private directory until something else cleans it up.
+    assert not Path(str(seen["path"])).exists()
     assert "T0KEN-material" not in _text(result)
     assert "T0KEN-material" not in json.dumps(result.details or {}, default=str)
 
@@ -301,9 +628,15 @@ def test_the_invite_result_carries_the_path_and_never_the_token() -> None:
     assert "hand that FILE to the other device" in _text(invited)
 
 
-def test_join_cannot_be_completed_by_the_tool_and_says_why() -> None:
-    """The CLI has no ``--confirm``: the code is read at the joining device's own
-    prompt. So the tool reports the refusal and hands the step to the user."""
+def test_a_join_from_the_tool_parks_and_never_supplies_the_code() -> None:
+    """The tool STARTS a pairing; it does not finish one — and cannot.
+
+    Before the two-phase pair this asserted the opposite shape (a refusal telling the
+    agent to hand the step to a terminal). The two-phase pair made the tool park, and
+    review round 1 then removed the field that answered a park, so the hint now states
+    the property R3 asks for in its final form: the second phase is the person's, and
+    this tool has no way to answer a pairing at all.
+    """
     _call("init", network="devmesh")
     invited = _call("invite", role="drive")
     token_path = Path(_payload(invited)["path"])
@@ -317,10 +650,10 @@ def test_join_cannot_be_completed_by_the_tool_and_says_why() -> None:
     # ("nothing was listening at …"). Asserting only the first made this test pass on
     # the author's machine and fail on CI, where `init` advertised the runner's own
     # address — so both the local refusal and the dial refusal are accepted here, and
-    # the teeth are the two sentences below, which are the same either way.
+    # the teeth are the sentences below, which are the same either way.
     assert "no endpoint" in text or "nothing was listening at" in text, text
-    assert "needs a person at a terminal" in text
-    assert "No flag completes this for them" in text
+    assert "Pairing needs a person" in text
+    assert "This tool has no way to answer a pairing" in text
 
 
 def test_a_refusal_from_the_cli_is_a_sentence_not_a_traceback() -> None:

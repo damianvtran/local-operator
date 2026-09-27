@@ -364,9 +364,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: raise is not paid. Two things make that the right trade anyway, and both are
 #: stated rather than implied: the tool is the only way the operator's R19 brief
 #: ("an agent can set a network up from a verbal request") is satisfiable on a
-#: fresh machine, and its schema is already the trimmed one — a twelve-value
+#: fresh machine, and its schema is the trimmed one — a sixteen-value
 #: ``action`` enum with one field per flag the CLI takes, which is one schema
-#: where twelve tools would be twelve.
+#: where sixteen tools would be sixteen. The four values added since (``sessions``,
+#: ``trust``, ``credentials``, ``definitions_state``) are the same trade at a
+#: smaller size: they close surfaces the tool could already SEE (a peer and
+#: nothing it held), and every one of them is a flag the CLI already takes.
 #:
 #: A reader comparing this number to a real session's start context should know
 #: the one place the mesh's "nothing changes on a device with no network" claim
@@ -443,7 +446,57 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise is 54 tokens and lands the ceiling at head + 46 — the headroom band
 #: the entry above keeps — so the next addition finds the ratchet as tight as
 #: this one did, and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 32_791
+#: RAISED 32,737 -> 33,193 for the ``network`` SESSION PLANE (the agent tool's
+#: session verbs and the two-phase pair). Measured by running THIS script on the
+#: SAME host from two trees, one after the other, so the difference is this
+#: change and nothing else:
+#:
+#:   baseline (origin/main a937895ce)      90,883 chars = ~32,692 billed
+#:   head (this branch, rebased on it)     92,014 chars = ~33,099 billed
+#:     = +1,131 chars = +407 billed: the four added ``action`` values
+#:       (sessions / trust / credentials / definitions_state), the fields that
+#:       drive them (peer, create, prompt, engage, stop, delete, all_peers,
+#:       trust_state, role, device, expires) — one schema where sixteen tools
+#:       would be sixteen, the trade this tool's entry further up records.
+#:
+#: ``confirm`` IS NOT IN THAT FIGURE, and its absence is the point: the field
+#: this branch first shipped was REMOVED in the same PR's remediation round on the
+#: operator's ruling (a tool able to echo the code it printed satisfies a
+#: comparison both devices derive from — see the tool's own docstring), so a
+#: saving sits inside the figure rather than a cost.
+#:
+#: The raise RESTORES the headroom rather than loosening it, the same way the
+#: projects entry does: the tree carried 45 tokens before this change
+#: (32,737 - 32,692) and carries 94 after (33,193 - 33,099) — the 49-token
+#: difference is exactly the removed field, banked rather than spent, and the
+#: ceiling stays where this change put it because a later round can only put a
+#: field back by arguing for it. The tighten band below (1,200) is not in play.
+#:
+#: What was NOT paid for out of the budget: the tool DESCRIPTION. It replaced a
+#: sentence claiming sessions on other devices were unreachable — a capability
+#: the relay has served for rounds — so that half is a correction, not a cost.
+#:
+#: RE-MEASURED AT THE FOLD onto origin/main 7737441e, the tree this branch now
+#: merges at: the figures in the entry above were taken against the branch's
+#: original base (a937895ce), and this file's header is explicit that a ceiling
+#: is only a guard if the number under it is the one the MERGED tree produces, so
+#: they are re-taken here by the same method — one host, two trees, one after the
+#: other:
+#:
+#:   baseline (origin/main 7737441e)       90,993 chars = ~32,731 billed
+#:   head (this branch, folded)            92,124 chars = ~33,138 billed
+#:     = +1,131 chars = +407 billed — the SAME delta the entry above records, so
+#:       the fold changed nothing about what this change costs; what moved is the
+#:       baseline, by 39 billed tokens of ``main``'s own incoming surface (the
+#:       streamlined-sudo handover above and the remote-interaction wiring).
+#:
+#: The ceiling stays where this change put it, and on the merged head it carries
+#: 55 tokens of headroom (33,193 - 33,138) rather than the 94 the pre-fold pair
+#: above produces, because ``main`` raised its OWN ceiling from 32,737 to 32,791
+#: while this branch was open: main's ceiling now sits 60 above main's head, and
+#: this change asks for +402 while costing +407, so five of those tokens net out.
+#: Still far inside the tighten band below, so the ratchet does not move.
+BUDGET_BILLED_TOKENS = 33_193
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
