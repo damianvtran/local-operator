@@ -17,6 +17,7 @@ import math
 import re
 from typing import Any, NotRequired, TypedDict, cast
 
+import pytest
 from rich.cells import cell_len
 from rich.style import Style
 from textual.widgets import Static
@@ -2259,16 +2260,19 @@ def test_weight_tracks_attention_across_every_red_in_the_band() -> None:
     )
 
 
-def test_the_last_rate_segment_is_labelled_and_sheds_before_cost() -> None:
-    """The band's rate is the SECOND non-live reading, and it says so in words.
+def test_the_last_rate_segment_is_bare_and_sheds_before_cost() -> None:
+    """The band's rate is the SECOND non-live reading, and it reads unlabelled.
 
-    Design round (status-band rate): a bare ``41 tok/s`` beside a live context
-    reading reads as this turn's speed, and this figure is the last COMPLETED
-    call's — so the segment carries the word ``last``. It sheds immediately before
-    ``cost``: both are figures that are not live readings of this turn, and between
-    them the rate is strictly more re-derivable (one scalar about a call that has
-    ended, also on ``/analytics`` and ``/session``; cost is cumulative money that
-    exists only here). It must never cost ``context`` a cell.
+    The segment carried the word ``last`` because a bare ``41 tok/s`` beside a
+    live context reading reads as this turn's speed, and this figure is the last
+    COMPLETED call's. The operator asked for the label gone (2026-09-27) for
+    compactness — the distinction did not stop mattering, it stopped being worth
+    four cells of a fixed one-row band — so the glyph is the retrospective mark
+    now. It sheds immediately before ``cost``: both are figures that are not live
+    readings of this turn, and between them the rate is strictly more
+    re-derivable (one scalar about a call that has ended, also on ``/analytics``
+    and ``/session``; cost is cumulative money that exists only here). It must
+    never cost ``context`` a cell.
     """
     for ladder in (
         _DROP_LADDER,
@@ -2280,11 +2284,14 @@ def test_the_last_rate_segment_is_labelled_and_sheds_before_cost() -> None:
         assert ladder.index("name") < ladder.index("last-rate") < ladder.index("cost")
         assert ladder.index("last-rate") < ladder.index("context")
 
-    # Present when the last call measured a window, and LABELLED.
+    # Present when the last call measured a window, and BARE: the reading keeps
+    # its glyph and loses every cell of the word the old label spent.
     clock = FakeClock()
     line = StatusLine(_dock(200), clock=clock)
     line.update(model_label="test/model", cwd="/tmp", last_rate="41 tok/s")
-    assert "last 41 tok/s" in line.render_text(200).plain
+    rendered = line.render_text(200).plain
+    assert f"{ICON_LAST_RATE} 41 tok/s" in rendered
+    assert "last" not in rendered
 
     # ABSENT, not ``—``, when nothing was measured: the band's own precedent for
     # an inapplicable reading (an unpriced cost, a zero elapsed duration), and a
@@ -2296,6 +2303,167 @@ def test_the_last_rate_segment_is_labelled_and_sheds_before_cost() -> None:
     # contain the word `last`, which would make a substring check pass for the
     # wrong reason (review round 1).
     assert ICON_LAST_RATE not in rendered and "—" not in rendered
+
+
+# -- composer widget visibility (``display.composer.*``) ---------------------
+
+
+#: config suffix -> ``(ladder id, the segment's ink on a populated band, glyph)``.
+#: The ladder ids are the LADDER's names, not the keys': ``rate`` reads
+#: ``last-rate`` (which names the reading, not the label the segment lost).
+_COMPOSER_SEGMENTS: tuple[tuple[str, str, str, str], ...] = (
+    ("model", "model", "kimi-k2-thinking", ICON_MODEL),
+    ("cwd", "cwd", "/Users/tester/work/local-operator", ICON_CWD),
+    ("context", "context", "49.6%/1M", ICON_CONTEXT),
+    ("rate", "last-rate", "41 tok/s", ICON_LAST_RATE),
+    ("cost", "cost", "$12.40", ICON_COST),
+    ("duration", "duration", "41m1s", ICON_DURATION),
+)
+
+
+def _populated_band() -> StatusLine:
+    """The shared fixture with a rate, so every composer segment has its ink."""
+    status, _clock = _full_band()
+    status.update(last_rate="41 tok/s")
+    return status
+
+
+def _set_composer_flags(monkeypatch, tmp_path, **flags: bool) -> None:
+    """Write ``display.composer.*`` through the real facade, as the page does.
+
+    The facade is the point: it drops the display cache, which is what lets a
+    band built right after the write read the new value.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    for name, value in flags.items():
+        settings_io.write_setting(manager, settings_io.BY_KEY[f"display.composer.{name}"], value)
+
+
+@pytest.mark.parametrize(
+    ("name", "ladder_id", "marker", "glyph"),
+    _COMPOSER_SEGMENTS,
+    ids=[row[0] for row in _COMPOSER_SEGMENTS],
+)
+def test_a_hidden_composer_segment_is_absent_while_siblings_stay(
+    name, ladder_id, marker, glyph, monkeypatch, tmp_path
+) -> None:
+    """``display.composer.<name> = false`` on a spare-width band (2026-09-27).
+
+    ABSENT means absent: neither the segment's ink nor its glyph appears (no
+    blank, no ``—``), every sibling keeps both, ``is_showing`` reports the
+    hidden segment off — the receipt ``action_cycle_effort`` and friends read —
+    and the row is still exactly the one row the band's box allows.
+    """
+    _set_composer_flags(monkeypatch, tmp_path, **{name: False})
+    status = _populated_band()
+    row = status.render_text(200)
+    plain = row.plain
+
+    assert marker not in plain, "hidden means absent, not blank"
+    assert glyph not in plain, "the glyph goes with the segment it marks"
+
+    for other_name, other_id, other_marker, other_glyph in _COMPOSER_SEGMENTS:
+        if other_name == name:
+            continue
+        assert other_marker in plain, other_marker
+        assert other_glyph in plain, other_glyph
+        assert status.is_showing(other_id) is True, other_id
+
+    assert status.is_showing(ladder_id) is False
+    assert cell_len(plain) == 200, "the band is still exactly its one row"
+
+
+@pytest.mark.parametrize(
+    ("name", "ladder_id", "marker", "glyph"),
+    _COMPOSER_SEGMENTS,
+    ids=[row[0] for row in _COMPOSER_SEGMENTS],
+)
+def test_a_hidden_composer_segment_never_paints_at_any_width(
+    name, ladder_id, marker, glyph, monkeypatch, tmp_path
+) -> None:
+    """The gate rides the walk, not one width's arithmetic.
+
+    Swept from the irreducible tail up to a wide band, with a turn streaming
+    (the state that repaints the band at 12.5 Hz): a hidden segment's glyph
+    never appears on any resulting row. This is the sweep the per-width
+    arithmetic cannot fail silently — e.g. the tail path, which re-admits the
+    model label after every ladder rung has shed it.
+    """
+    _set_composer_flags(monkeypatch, tmp_path, **{name: False})
+    for width in (8, 12, 16, 20, 30, 47, 60, 80, 120, 200):
+        status = _populated_band()
+        status.update(streaming=True)
+        painted = status.render_text(width).plain
+        assert glyph not in painted, (width, painted)
+
+
+def test_a_hidden_segment_frees_its_cells_for_a_shed_sibling(monkeypatch, tmp_path) -> None:
+    """The forced drop spends no width in the FIT — proven by a sibling.
+
+    Measured at 65-70 columns on the populated fixture: the fit sheds the rate
+    first among the numbers, so at 65 columns with every key at its default the
+    row carries ``cost`` and not the rate. Hiding ``cost`` frees its cells and
+    the SAME 65 columns now carry the rate. If the hidden set ever stopped
+    being unioned into the walk's starting ``dropped`` — say, by hiding the
+    segment only at the paint site — the cost would still vanish and nothing
+    would come back, which is the defect this pins.
+    """
+    _set_composer_flags(monkeypatch, tmp_path)
+    base = _populated_band()
+    base.render_text(65)
+    assert base.is_showing("cost") is True
+    assert base.is_showing("last-rate") is False
+
+    _set_composer_flags(monkeypatch, tmp_path, cost=False)
+    hidden = _populated_band()
+    row = hidden.render_text(65)
+    assert "$12.40" not in row.plain
+    assert hidden.is_showing("cost") is False
+    assert "41 tok/s" in row.plain, "the freed cells hand the rate back"
+    assert hidden.is_showing("last-rate") is True
+
+
+def test_a_hidden_model_leaves_the_irreducible_row_too(monkeypatch, tmp_path) -> None:
+    """The last-resort row below every ladder rung is not a loophole.
+
+    At 20 columns a populated band overflows every rung and falls to the
+    irreducible row, which re-admits the model label by design (D7). A hidden
+    ``display.composer.model`` must leave that row too, or the flag's meaning
+    would change under the user when they narrow their terminal.
+    """
+    _set_composer_flags(monkeypatch, tmp_path)
+    shown, _clock = _full_band()
+    assert ICON_MODEL in shown.render_text(20).plain
+
+    _set_composer_flags(monkeypatch, tmp_path, model=False)
+    hidden, _clock = _full_band()
+    assert ICON_MODEL not in hidden.render_text(20).plain
+
+
+@pytest.mark.parametrize("width", (10, 12, 14, 16, 18))
+def test_a_hidden_segment_reads_hidden_off_the_tail_row(width, monkeypatch, tmp_path) -> None:
+    """The irreducible row is a shipped row too (review round 1, MINOR).
+
+    A parked session (remote access off) at 10-18 columns overflows every
+    ladder rung — the alarm cannot be shed — so ``refresh()`` paints the TAIL
+    row. ``_dropped`` is recorded when a row ships, and this path used to
+    record nothing, so ``is_showing`` answered from the constructor's seed: a
+    hidden ``model`` reported SHOWN off a row that painted the park alarm and
+    nothing else. The forced set is now unioned in on that path; the mirror
+    case (a label the tail RE-admits while ``_dropped`` still reports it
+    dropped) stays as the pre-existing class the round left alone.
+    """
+    _set_composer_flags(monkeypatch, tmp_path, model=False)
+    status = StatusLine(_dock(width), clock=FakeClock())
+    status.update(model_label="test/model", cwd="/tmp", tunnel_parked=True)
+    painted = status.render_text(width).plain
+    assert ICON_TUNNEL in painted, painted
+    assert ICON_MODEL not in painted, painted
+    assert status.is_showing("model") is False
 
 
 # --------------------------------------------------------------------------
