@@ -17367,9 +17367,10 @@ class ConsoleParams(BaseModel):
     )
     secret_ref: str = Field(
         default="",
-        description="'input': the NAME of a stored secret to type instead of 'text' (e.g. "
-        "'SUDO_PASSWORD'). Resolved from the encrypted store; never shown in the result, a "
-        "trace or a log, and registered for redaction.",
+        description="'input': the NAME of a secret to type instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'). Resolved from the session's credentials (the `ask` secret "
+        "answer, /credential) or the encrypted store; never shown in the result, a trace "
+        "or a log, and registered for redaction.",
     )
     paste: bool = Field(
         default=False,
@@ -17928,17 +17929,28 @@ def _console_input_params(
 ) -> ToolResult | None:
     """Resolve a `secret_ref` into the wire payload, or explain why it could not be.
 
-    The value is resolved HERE, in the session, from the same encrypted store the
-    `secret` tool writes (`§11.3`), and it is put on the wire in this one call's
-    params — the app is the only process that can write to a pty. Two things happen
-    around it, and both are the reason the ref exists at all:
+    The value is resolved HERE, in the session, and it is put on the wire in this
+    one call's params — the app is the only process that can write to a pty. Two
+    things happen around it, and both are the reason the ref exists at all:
 
     * **The model's argument is the ref, not the value**, so the tool call in the
       transcript says `secret_ref: "SUDO_PASSWORD"`;
     * **the value is registered with the session's redaction sink**
-      (:meth:`VariableStore.register_redaction`) BEFORE the call is made, so any
-      later appearance of it — in a rendered trace, a tool result, or a transcript
-      write — comes back as `[redacted]` (`§11.3`, `redaction_shapes.py`).
+      (:meth:`VariableStore.register_redaction`) BEFORE the call is made, for
+      BOTH sources below, so any later appearance of it — in a rendered trace, a
+      tool result, or a transcript write — comes back as `[redacted]` (`§11.3`,
+      `redaction_shapes.py`).
+
+    **Two sources, and the SESSION store is checked FIRST — a pinned precedence.**
+    (1) The session credential store: the value the user typed into an `ask`
+    `secret: true` question (or handed over with `/credential`). It wins because it
+    is what the user just handed over, for this task — their entry into the
+    question is the consent to use it for the command it was asked against — and
+    because session scope keeps it off disk: a relayed `sudo` password does not
+    become a stored artifact just because one command needed it. (2) The encrypted
+    long-term store (`retrieve_secret`, the same store the `secret` tool writes):
+    the fallback, for a value the user chose to persist, reached only when the
+    session store has no such key.
 
     Returns `None` when the wire payload is ready, and the error result to hand back
     when it is not. The error path names the secret and the failure, never a byte of
@@ -17984,18 +17996,44 @@ def _console_input_params(
             "app records no keystrokes), or use `bash` with $(lop secret get "
             f"{ref}) which announces the value to the session before it is used.",
         )
-    try:
-        from local_operator.secrets.access import retrieve_secret
+    # Session credentials FIRST, deliberately (the docstring carries why): the
+    # value the user just handed over through `ask` beats a same-named value in
+    # the long-term store. `credential_env` is fetched with `getattr`, the same
+    # shape the bash injector uses, and cast because `getattr` yields `object`
+    # once `callable` narrows it — and the name is the store's own public surface
+    # (`VariableStore.credential_env`), so a Callable annotation is the honest
+    # description.
+    credential_env = cast(
+        Callable[[], dict[str, str]] | None,
+        getattr(store, "credential_env", None),
+    )
+    value: str | None = None
+    if callable(credential_env):
+        session_values = credential_env()
+        value = session_values.get(ref)
+        if value is None:
+            # The ask result reports the normalized key, but `secret_ref` is
+            # model-authored text: apply the same collapse the store applied on
+            # write, so `sudo-password` finds `SUDO_PASSWORD` too.
+            from local_operator.variables import normalize_credential_key
 
-        value = retrieve_secret(ref).decode("utf-8", errors="surrogateescape")
-    except Exception as exc:  # noqa: BLE001 - every failure here is reportable, none fatal
-        return _error(
-            tool_call_id,
-            "console",
-            f"could not resolve secret_ref {ref!r}: {exc}. Store the value with the `secret` "
-            "tool (or have the user type it into the surface) and retry — do not put the "
-            "value itself in `text`.",
-        )
+            normalized = normalize_credential_key(ref)
+            if normalized is not None:
+                value = session_values.get(normalized)
+    if value is None:
+        try:
+            from local_operator.secrets.access import retrieve_secret
+
+            value = retrieve_secret(ref).decode("utf-8", errors="surrogateescape")
+        except Exception as exc:  # noqa: BLE001 - every failure here is reportable, none fatal
+            return _error(
+                tool_call_id,
+                "console",
+                f"could not resolve secret_ref {ref!r}: {exc}. Get the value from the user "
+                "with an `ask` secret question (their entry into it is the approval), store "
+                "it with the `secret` tool, or have the user type it into the surface, then "
+                "retry — do not put the value itself in `text`.",
+            )
     register(value)
     wire["text"] = value
     return None
