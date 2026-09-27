@@ -173,6 +173,17 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The engage claim (``session/runtime/types.ENGAGED_ENV``), written by
+    # ``launch._spawn_runtime`` for a warm and read at boot by
+    # ``RuntimeServer``, which stamps ``SessionRecord.engaged_at`` from it. This
+    # is the escape-hatch class the list exists for, and an inherited value would
+    # be QUIET about it: every runtime a test constructs would arrive carrying a
+    # keep-alive claim, so the cells that assert the ORDINARY drain — and the
+    # LRU's population, which is read off other records — would take the
+    # keep-alive path while looking like they tested the population the drain was
+    # written for. A cell that wants a warmed runtime sets it through the
+    # production spawn instead (``test_runtime_keep_alive`` does).
+    "LOP_SESSION_ENGAGED",
     # The e2e stage's fake install prefix for the runtime self-refresh: a
     # runtime that inherited it would compare its boot stamp against a
     # directory the test owns rather than its real install, and could

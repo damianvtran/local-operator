@@ -71,7 +71,7 @@ from local_operator.mobile.types import (
 from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.types import reported_subagent_count
+from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
@@ -2822,6 +2822,14 @@ class MobileDaemon:
         # A deliberate Start is not speculative prewarming inherited from an
         # enclosing process. The child's existing adopt path mints this exact ID.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+        # …AND NEITHER IS IT AN ENGAGE, which the sibling above does not cover.
+        # The claim is set in a WARM child's environment, so a daemon started
+        # from inside a session inherits it and — without this line — hands every
+        # session it starts a record claiming an engage that never happened, i.e.
+        # the 300 s keep-alive window bought by the wrong fact. This is the one
+        # runtime spawn outside ``launch._spawn_runtime``, so it does not get
+        # that function's scrub (review round 1, M1).
+        env.pop(ENGAGED_ENV, None)
         # BOTH name axes, exactly as the viewer's own spawn in
         # ``session/runtime/launch.py`` does — this is the PHONE-started runtime,
         # and until now it was the one session start with no branding at all, so
