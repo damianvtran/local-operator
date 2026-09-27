@@ -139,7 +139,20 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     init.add_argument("name")
     init.add_argument("--listen-address", default="", help="Bind address (127.0.0.1 = dial-only)")
     init.add_argument("--port", type=int, default=0)
-    init.add_argument("--advertise-host", action="append", default=[], dest="advertise_hosts")
+    # THE TWIN OF `join --advertise-host`, and the one that decides what an INVITE
+    # carries: the declared entries LEAD the list the record publishes, so on a device
+    # behind a tunnel this is how every invite it mints names an address a joiner can
+    # dial. The help string was missing while its twin had one (review round 1, N1).
+    init.add_argument(
+        "--advertise-host",
+        action="append",
+        default=[],
+        dest="advertise_hosts",
+        help=(
+            "host:port peers should use to reach THIS device (repeatable), in "
+            "preference order; add a tunnel or public address here"
+        ),
+    )
     init.add_argument("--no-start", action="store_true", help="Do not start the relay")
     init.add_argument("--json", action="store_true")
 

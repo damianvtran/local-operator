@@ -2235,8 +2235,11 @@ its `_consumer_defaults()` entry (`AGENTS.md`, "Adding a configuration key").
 Audit retention keys are `mesh-incident-response.md`'s. Nothing here is a secret,
 so every key is `--json`-safe. **The registry half is a SECTION-WIDE GAP, and this
 table must not be read as "all of these are in `/settings`":** the keys in the
-registry today are `network.max_handshakes` (added by the round that introduced it)
-and the audit retention keys; the transport and link keys above are read out of
+registry today are `network.max_handshakes` (added by the round that introduced it),
+the three of §10.4's own "where can peers reach us" set — `network.listen_address`,
+`network.port`, `network.advertise_hosts`, registered with the rows that made that
+section's sanctioned remedy reachable from a surface — and the audit retention keys.
+The rest of the transport and link keys above are read out of
 `config.yml` by `NetworkSettings.from_config`, which is a different mechanism from
 the registry and does not appear on the page. Recorded here rather than papered
 over, because a table whose closing line claims visibility is how an operator

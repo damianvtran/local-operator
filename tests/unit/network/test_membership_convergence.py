@@ -1021,3 +1021,67 @@ def test_a_member_that_declares_nothing_gets_no_endpoint_not_the_observed_one(
     )
     assert link is None
     assert reason == "no_endpoint", reason
+
+
+def test_an_invite_names_the_live_listener_not_only_the_records_stale_port(
+    devices: Any,
+) -> None:
+    """An invite's hosts are where a joiner DIALS, so the LIVE listener must be among them.
+
+    ``record.listen["advertised"]`` is written once, by ``init``, from the config as it
+    stood then. A listener bound to a port the record does not name used to mint invites
+    naming that dead port ALONE — the QA rig saw the invite read ``47774`` while ``lsof``
+    showed the listener on ``47778``, and a joiner following it dialed nothing (review
+    round 1, Q-1). The relay answers from what it actually bound
+    (``_own_relay_listen``/``advertised_endpoints``), and the record's own entries are
+    KEPT ahead of it because that list is also where a deliberate ``--advertise-host``
+    declaration lives — so the property is that the live port is always named, not that
+    the record is ignored.
+    """
+    hub = _make(devices, "hub")
+    record = _init_network(hub.server)
+    live_port = int(record.listen["port"])
+    stale_port = live_port + 17
+    # The stale half: what a record written by an earlier launch would carry.
+    record.listen["port"] = stale_port
+    record.listen["advertised"] = [f"127.0.0.1:{stale_port}"]
+    store.save(record, hub.root)
+    assert hub.server.settings.port == live_port, "the fixture's bind is the live port"
+
+    minted = hub.server._ctl_invite(
+        {  # noqa: SLF001 — the CLI's own control op
+            "network": record.name,
+            "role": "read",
+            "ttl_s": 600.0,
+        }
+    )
+
+    assert f"127.0.0.1:{live_port}" in minted["hosts"], minted["hosts"]
+    assert set(minted["hosts"]) != {f"127.0.0.1:{stale_port}"}, minted["hosts"]
+
+
+def test_an_invite_falls_back_to_the_record_when_nothing_is_detected(devices: Any) -> None:
+    """The fallback is load-bearing: a device that detects nothing still hands out its row.
+
+    The silent rig answers ``[]`` for every path that publishes an endpoint, so the live
+    half of ``_invite_hosts`` is empty BY CONSTRUCTION — the same shape as a real device
+    behind a NAT that holds nothing dialable. The record is then what a joiner gets, and
+    without it such a device would mint ``hosts: []`` and send the joiner to
+    ``--host host:port``, which is the state this change exists to remove.
+    """
+    quiet = _make(devices, "silent-joiner", mode=SILENT)
+    record = _init_network(quiet.server)
+    recorded = int(record.listen["port"])
+    record.listen["advertised"] = [f"127.0.0.1:{recorded}"]
+    store.save(record, quiet.root)
+    assert relay.advertise_endpoints(quiet.server.settings) == [], "the rig must detect nothing"
+
+    minted = quiet.server._ctl_invite(
+        {  # noqa: SLF001
+            "network": record.name,
+            "role": "read",
+            "ttl_s": 600.0,
+        }
+    )
+
+    assert minted["hosts"] == [f"127.0.0.1:{recorded}"], minted["hosts"]

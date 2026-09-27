@@ -117,12 +117,34 @@ def _libc() -> Any:
     raise OSError("no libc available for getifaddrs")
 
 
-def _family_of(address: int) -> int:
-    """The ``sa_family`` of the ``sockaddr`` at ``address``, per the platform layout."""
+def _family_of(address: int, *, bsd: bool | None = None) -> int:
+    """The ``sa_family`` of the ``sockaddr`` at ``address``, per the platform layout.
+
+    The two layouts differ in WHERE the family sits: BSD leads with ``sa_len`` and puts
+    the family in the first byte, glibc stores it as a ``uint16`` in host order.
+    ``bsd`` is a parameter rather than a read of ``_BSD_SOCKADDR`` so a test can drive
+    BOTH layouts on whichever platform CI runs — the Darwin branch had no test that
+    executes in CI for as long as it was inferred from the machine (review round 1, M5).
+    """
     raw = ctypes.string_at(address, _SOCKADDR_SIZE)
-    if _BSD_SOCKADDR:
+    if _BSD_SOCKADDR if bsd is None else bsd:
         return raw[1]
-    return raw[0] | (raw[1] << 8)
+    return _glibc_family(raw[0], raw[1], sys.byteorder)
+
+
+def _glibc_family(first: int, second: int, byteorder: str) -> int:
+    """The ``uint16`` glibc stores in the first two bytes, read in HOST order.
+
+    Split out so the RULE can be tested on any host. The read is native-order, and only
+    a big-endian machine would catch the fixed little-endian shift it replaces (s390x and
+    ppc64 read a family 256x the real one — `0x0002` as 512 — and then skip every
+    interface as "not AF_INET"); a CI runner here is little-endian, so the test drives
+    both orders through this function rather than pretending one host is both (review
+    round 1, M3).
+    """
+    if byteorder == "little":
+        return first | (second << 8)
+    return (first << 8) | second
 
 
 def _interface_ipv4s() -> list[tuple[str, int, str]] | None:
