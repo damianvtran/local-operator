@@ -28509,12 +28509,6 @@ class OperatorApp(App[None]):
                     # classification is explicit (`_send_failure_unknown_delivery`,
                     # design OQ2) and its row survives `edit` as the message's
                     # fate statement.
-                    # THE ONE CLASS THAT IS NOT PROVABLY NOT-DELIVERED: a
-                    # generic transport error on an attached session may have
-                    # reached the owner before the failure was observed, so the
-                    # classification is explicit (`_send_failure_unknown_delivery`,
-                    # design OQ2) and its row survives `edit` as the message's
-                    # fate statement.
                     unknown_delivery = self._send_failure_unknown_delivery(session, error)
                     sentence = self._with_recovery_hint(str(error))
                     if unknown_delivery:

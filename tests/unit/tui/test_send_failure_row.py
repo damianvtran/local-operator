@@ -22,9 +22,9 @@ the ``FAILED_SEND_BOUND`` park moves the oldest payload back through the edit
 funnel; the two long class sentences do not restate the control the label
 wears. The CARRIAGE cells — a failure that lands while another conversation is
 in front projects into its OWN view on return, never the one in front — live in
-``test_resume_connect_retry.py`` (S2's cross-view arms; this file's docstring
-used to list that cell among its own, which is the claim agent review round 1
-the NIT flagged).
+``test_resume_connect_retry.py`` (S2's cross-view arms; agent review round 1
+flagged an earlier version of this docstring for listing that cell among its
+own — it lives there, not here).
 """
 
 from __future__ import annotations
