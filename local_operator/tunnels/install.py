@@ -316,7 +316,7 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
             # `LEASE_PENDING`), and the remedy then lives on a surface the reader has
             # no reason to open. This says what to expect and nothing more — 79
             # columns, so it is still one row at 80.
-            return launchd.restart_if_build_moved(
+            moved = launchd.restart_if_build_moved(
                 name=name,
                 label=LABEL,
                 path=path,
@@ -324,6 +324,37 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
                 run=_launchctl,
                 consequence="expect a brief remote-access blip",
             )
+            if moved.kind != "current":
+                return moved
+            # THE ARM THE BUILD QUESTION CANNOT BE (the 2026-09-27 incident, ~12
+            # hours down): a connector that exited cleanly is loaded-but-stopped,
+            # has no pid for the build question to compare, and launchd will not
+            # retry it (`KeepAlive{SuccessfulExit: false}` is deliberate — a park
+            # must not be retried). Every refresh therefore walked past it in
+            # silence, five upgrades in a row, until someone ran `lop tunnel
+            # install` by hand. `start_if_stopped` is that missing arm; the two
+            # policies a background repair must never overrule live in
+            # `_revive_allowed`.
+            #
+            # ONE EXTRA READ WHEN THE CONNECTOR IS RUNNING, and it is the price of
+            # the separation: `moved` declines with the same `current` for "not
+            # running" and for "running and already current", its reading does not
+            # come back out of that function, and the two states want different
+            # questions.
+            revived = launchd.start_if_stopped(
+                name=name,
+                label=LABEL,
+                path=path,
+                recovery="lop tunnel install",
+                run=_launchctl,
+                # The same discipline the build-move restart carries above (D5): say
+                # what to expect, never that everything is well — a connector can
+                # come back into LOGIN_REQUIRED / REFUSED / LEASE_PENDING and park
+                # again, and the park is where that story is told.
+                consequence="remote access should return",
+                may_start=_revive_allowed,
+            )
+            return revived if revived is not None else moved
         if outcome.kind != "repaired":
             return outcome
         # bootout + bootstrap through the shared helper, NOT kickstart -k: a
@@ -465,6 +496,37 @@ def _rearm_allowed() -> bool:
     """
     value = os.environ.get("LOP_TUNNEL_NO_REARM", "").strip().lower()
     return value not in {"1", "true", "yes", "on"}
+
+
+def _revive_allowed() -> bool:
+    """Whether the upgrade refresh may START a stopped connector, or a person owns it.
+
+    TWO STATES ARE SOMEBODY ELSE'S DECISION, and a background repair must not
+    overrule either. (The 2026-09-27 incident is the other side of the same
+    coin: a stop NOBODY decided must not stay undecided for twelve hours.)
+
+    * A PARK — `state.parked()` carries the reason the connector ended itself
+      (its Radient login, most often): `rearm_if_parked` starts it again at the
+      moment that is fixed, and kicking it before then only parks it again,
+      noisily, in the log this exists to keep quiet.
+    * A DELIBERATE STOP — `config.stopped` is set by `lop tunnel stop`,
+      `revoke` and `uninstall`: starting it would restore remote access
+      against the operator's own decision, which is the one thing an automatic
+      repair must never do. They were not using the tunnel; the phone link
+      returning by itself would be alarming, not helpful.
+
+    AN UNREADABLE CONFIGURATION ANSWERS ``False`` — the same direction, for the
+    same reason, as `rearm_if_parked`'s own `except ValueError: return ""`: if
+    ``stopped`` cannot be verified, the conservative answer is the one that
+    cannot undo a decision the operator may have made by deleting the file.
+    Never raises: every failure mode here reads as "leave it stopped".
+    """
+    if state.parked() is not None:
+        return False
+    try:
+        return not config.load().get("stopped")
+    except (OSError, ValueError):
+        return False
 
 
 def install() -> None:
