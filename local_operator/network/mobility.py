@@ -627,6 +627,53 @@ def _retire_local_runtime(
     return {"result": "busy" if sentence else "retired", "sentence": _busy_sentence(sentence)}
 
 
+def _wait_seconds(value: Any) -> float:
+    """A peer's ``wait_s`` as a number this side can hold, or ``0.0``.
+
+    EVERY OTHER FIELD IN THE INVITE is read with ``or <default>`` on a type the
+    reader can absorb; this one arrived as ``float(frame.get("wait_s") or 0.0)``, so
+    a malformed value (``"soon"``, a list) raised out of the handler and turned a
+    move into an exception instead of a refusal (review round 1, NIT). ``0.0`` is
+    the honest reading of a wait that cannot be understood — it is the frame's own
+    default — and the clamp is the same cap the CLI applies, so a peer cannot ask
+    this side to re-probe for a week.
+    """
+    if isinstance(value, bool):
+        # ``True`` is not a duration, and ``float(True) == 1.0`` would read as one.
+        return 0.0
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+        # NaN fails its own equality and infinities pass the clamp below only by
+        # accident of comparison; neither is a duration anybody asked for.
+        return 0.0
+    return min(max(0.0, seconds), MOVE_MAX_WAIT_S)
+
+
+def _handoff_age(entry: dict[str, Any]) -> str:
+    """The ``started Ns ago`` clause for a journal entry, or an honest unknown.
+
+    ``float(existing.get("at") or 0.0)`` rendered ~1.79e9 seconds for an entry with
+    no ``at`` — a number about the epoch rather than about the handoff. Every writer
+    on this head stamps the field, so this is the defensive branch (review round 1,
+    NIT), but a sentence whose whole job is legibility may not invent a number: the
+    clause says what it does not know.
+    """
+    raw = entry.get("at")
+    # ``isinstance`` RATHER THAN A BARE ``float()`` IN A ``try``: pyright reads
+    # ``entry.get(...)`` as ``Any | None`` and rejects the call, and the narrowed
+    # form is also the honest one — a bool is an ``int``, and ``True`` is not a
+    # timestamp (type-check, 2026-09-27: this was the branch's only pyright error).
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return "started at an unknown time"
+    at = float(raw)
+    if at <= 0:
+        return "started at an unknown time"
+    return f"started {int(max(0.0, time.time() - at))}s ago"
+
+
 def _busy_sentence(answer: str) -> str:
     """The owner's own words for a refused retire, or a sentence when it gave a TOKEN.
 
@@ -928,6 +975,10 @@ def _destination_move(
                 "",
             )
         pending = status.get("pending") or {}
+        # WHETHER THE OWNER HAS IT ARCHIVED, asked for once here and carried to the
+        # promote in ``ready.json`` (see that file's ``archived`` field). Default
+        # False so a peer too old to send the field behaves exactly as before.
+        archived = bool(status.get("archived"))
         if pending and str(pending.get("to_device") or "") != me:
             return (
                 None,
@@ -1069,6 +1120,16 @@ def _destination_move(
         "mode": "keep" if keep else "move",
         "owner_device": owner_device,
         "source_session_id": session_id,
+        # WHETHER THE CONVERSATION WAS HIDDEN WHERE IT CAME FROM, and why it rides
+        # here rather than being asked for again at the promote: this file is the
+        # ONE thing that survives a crash between the copy and the adopt (§6.5 row
+        # 5 adopts from it with the owner possibly gone), so a bit carried only in
+        # memory would be lost in exactly the case the file exists for. The archive
+        # index is device-scoped (``session/archived.py``), which is why nothing
+        # carried it before: a session archived on A arrived unarchived on B.
+        # ``--keep`` DELIBERATELY DOES NOT INHERIT IT: a fork mints a NEW id, and a
+        # copy the user just asked for must not arrive hidden from every listing.
+        "archived": bool(archived) and not keep,
         "promoted": False,
         "at": time.time(),
     }
@@ -1321,8 +1382,20 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
         return False
     # ``ready.json`` is the move's own boot marker, not session content: it exists
     # so a crash before the promote can be settled, and inside the session it would
-    # be a file every future reader has to learn to ignore.
-    (target / "ready.json").unlink(missing_ok=True)
+    # be a file every future reader has to learn to ignore. IT IS READ FIRST, and
+    # for a second reason: it is the only carrier of whether the conversation was
+    # ARCHIVED where it came from (the ``archived`` field), and the archive index is
+    # device-scoped — so the bit cannot be re-derived here, and a session archived on
+    # one device arrived unarchived on the other until this read existed.
+    ready_path = target / "ready.json"
+    try:
+        ready_doc = json.loads(ready_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Absent (a replica promote never wrote one) or unreadable: not-archived is
+        # the same answer a store that never archived anything gives, and a promote
+        # must never fail because bookkeeping could not be read.
+        ready_doc = {}
+    ready_path.unlink(missing_ok=True)
     # THE STORE MARKER, which is what makes this directory REMOVABLE later.
     # ``remove_session_dir`` refuses a store that carries no marker, and the marker
     # is written where a session is CREATED (``session_factory`` calls
@@ -1352,6 +1425,17 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
     from local_operator.network.projection import forget_tombstone
 
     forget_tombstone(target_id, config_dir=server.root)
+    # AND THE ARCHIVE STATE COMES BACK WITH IT. The operator's requirement: a
+    # session archived on the device it left must still be archived on the device it
+    # arrives on — otherwise a conversation the user deliberately hid reappears in
+    # the default listing of the machine they moved it to. The index is
+    # device-scoped (``session/archived.py``), and the source's own entry is pruned
+    # at read once its directory is gone, so this is the whole hand-off: one write
+    # here, no coordination with the source afterwards.
+    if bool(ready_doc.get("archived")):
+        from local_operator.session.archived import set_archived
+
+        set_archived(server.root, target_id, True)
     return True
 
 
@@ -1495,6 +1579,8 @@ def _source_status(
     §6.5's recovery table work: a destination that crashed after the commit asks
     here, and the answer — "not mine any more, and it is yours" — is the commit.
     """
+    from local_operator.session.archived import archived_ids
+
     session_id = str(frame["session_id"])
     if _owned_here(server, session_id):
         from local_operator.mobile.attach_client import find_runtime_record
@@ -1510,6 +1596,12 @@ def _source_status(
             "result": "state",
             "owner": True,
             "busy": record is not None,
+            # THE ARCHIVE BIT TRAVELS WITH THE STATE ANSWER. It is device-scoped
+            # (``session/archived.py`` writes this device's own index), so the only
+            # place a destination can learn it is from the device that has it — and
+            # the operator named archiving as a thing that must hold on the remote
+            # session (review round 1, MINOR 1).
+            "archived": session_id in archived_ids(server.root),
             "pending": entry,
             "session_id": session_id,
         }
@@ -1586,14 +1678,25 @@ def _source_prepare(
             # entry written by a DEAD relay is deliberately not applied here — this
             # entry's writer is alive — and that gap is recorded, not guessed at.
             phase = str(existing.get("phase") or "")
-            age = max(0.0, time.time() - float(existing.get("at") or 0.0))
+            age = _handoff_age(existing)
+            # THE ESCAPE IS NAMED, because it is not derivable from the state. An
+            # entry written by this device's LIVE relay is skipped by every reconcile
+            # (the instance rule that stops a merely slow peer losing an in-flight
+            # handoff), so no amount of retrying clears it and no other verb does
+            # either: what clears it is making the writer instance stale, after which
+            # the next attempt reconciles it at ``prepared`` and rolls it back
+            # (measured 2026-09-26: seven retries over ten minutes read this sentence;
+            # the same move landed the moment the source's relay restarted). Review
+            # round 1's ruling is a user-facing abandon verb, and this clause is its
+            # prerequisite: a person can act on the state they can read.
             return {
                 "result": "refused",
                 "code": "in_progress",
                 "message": (
                     "a handoff of that conversation is already in progress on this "
-                    f"device (phase: {phase or 'unknown'}, started {int(age)}s ago), so "
-                    "nothing was changed"
+                    f"device (phase: {phase or 'unknown'}, {age}), so nothing was "
+                    "changed; if the other device has stopped answering, restart this "
+                    "device's relay (`lop network restart`) and try the move again"
                 ),
                 "session_id": session_id,
             }
@@ -1992,7 +2095,7 @@ def _destination_invite(
     # up to the design's thirty minutes". The term is the OWNER's (it is the side
     # that refuses), so it travels with the invite, bounded by the same cap the CLI
     # applies.
-    wait_s = min(max(0.0, float(frame.get("wait_s") or 0.0)), MOVE_MAX_WAIT_S)
+    wait_s = _wait_seconds(frame.get("wait_s"))
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
