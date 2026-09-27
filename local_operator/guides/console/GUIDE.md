@@ -47,7 +47,7 @@ handle from `list`/`create`.
 | `status` | `running`, `exit_code`, grid, `live`, whether the log was `truncated`, `secure`, `retain`, and how long since the last output. |
 | `read` | The text. `mode='viewport'` (default) is the visible screen — what a person looking at the pane sees; `mode='scrollback'` is a history window positioned by `start`/`count`. |
 | `screenshot` | A PNG of the surface, written to a file whose path comes back in the result. |
-| `input` | Type `text` into the surface, or a stored secret via `secret_ref`. `paste=true` asks for a bracketed paste. |
+| `input` | Type `text` into the surface, or a secret via `secret_ref` (a session credential or the encrypted store). `paste=true` asks for a bracketed paste. |
 | `keys` | Named keys, e.g. `['ctrl+c']`, `['up']`, `['ctrl+a', 'd']`. Common synonyms are accepted. |
 | `resize` | Change the grid (`cols`/`rows`). |
 | `secure` | The USER's do-not-capture switch: while it is on, the app refuses to read or capture that surface. |
@@ -124,28 +124,64 @@ which mode is active, and the result echoes what was encoded.
 
 Three ways a value can reach a terminal, and only two are allowed:
 
-1. **The human types it** — recommended, and the app records no keystrokes, so a
-   password typed at an echo-off prompt never enters the byte log, the record,
-   `read`, `status` or a screenshot.
+1. **The user's entry** — recommended. They type it into the surface (the app
+   records no keystrokes, so an echo-off prompt's input never enters the byte
+   log, the record, `read`, `status` or a screenshot), or they hand it to the
+   session through an `ask` secret question and you relay it by `secret_ref`
+   (the admin recipe below). Either way the value is theirs to give, and you
+   never need to know it.
 2. **The agent types a literal credential** — forbidden by policy. Never put a
    password, a token or a key in `text`. The store exists so you never have to
    know the value: `secret_ref` names it instead.
-3. **`secret_ref`** — the value is resolved from the encrypted store (the same
-   store the `secret` tool uses) and written to the surface. It is not returned,
-   not echoed, and after the call it is registered with the session's redaction
+3. **`secret_ref`** — the value is resolved from the session's credential store
+   (the answer the user typed into an `ask` secret question, or `/credential`)
+   or, when it holds no such key, the encrypted store (the same store the
+   `secret` tool uses), and written to the surface. It is not returned, not
+   echoed, and after the call it is registered with the session's redaction
    sink so later appearances in a trace, a result or the transcript read
    `[redacted]`. The tool call itself records the NAME (`secret_ref:
    "SUDO_PASSWORD"`), never the value.
 
-**Administrator commands need the user's consent, not just the tool's.** Before
-running anything that needs root (`sudo`, an installer, a system change), use
-`ask` with the exact command and what it will change. Do not attempt a password
-yourself, and do not treat an approved tool call as approval for the command the
-user is about to be prompted for — the harness gate authorises the call, `ask`
-authorises the change to their machine.
+**Administrator commands: ask first, then relay the password by `secret_ref`.**
+Do not treat an approved tool call as approval for the command — the harness
+gate authorises the call, while the user is authorising a change to their
+machine. The streamlined handover, step by step:
 
-There is no "run as root" surface: a surface starts as the user's own shell so
-`sudo`'s prompt arrives where the user can answer it.
+1. **`ask` first**, carrying the exact command(s) and what they will change —
+   and ask for the password in the same call: a secret question (`secret: true`)
+   whose id is the credential key, e.g. `SUDO_PASSWORD`. **The card shows the
+   question's first line (~one card row) and cuts the rest; `^e` expands it, but
+   nothing the user must read to approve may sit after that line.** Lead with
+   the decision itself — "Enter your login password to approve the two `sudo`
+   commands I described — esc declines." — put the commands and their
+   consequences immediately after, and restate them in the message you wrote
+   before the question. Leave `persist` off unless the user asks you to
+   remember it — their login password does not go to disk by default.
+2. **If no key comes back** (declined, closed, blank), do NOT run the command.
+   Report what is left undone; a declined secret is an answer, not an obstacle.
+3. **Run the command in a surface.** Create one if you need to (`reveal` stays
+   `none` unless the user wants to watch; the pane can stay closed while it
+   works) and read until the password challenge appears on the screen.
+4. **Type the relayed value**: `input secret_ref=<the key the ask reported>`,
+   then `keys ['enter']`, and read to the end. The value never passes through
+   your context — the ref is not the password. It stays usable for later admin
+   commands while the credential is stored, but each new command still gets its
+   own `ask` for consent; only the password entry is reused. Close the surface
+   if you opened it.
+5. **If the challenge returns** (a rejected value, a second prompt), stop and
+   report — no blind retries; a password prompt that does not accept the
+   credential is a fact for the user, not a loop to grind.
+
+**If this session cannot ask** (a delegated child has no ask hook), the routes
+that work are: the parent runs the privileged step itself; the user types the
+password into THIS session's surface; or — only with the user's explicit
+consent, because it writes to disk — the value is collected once with `persist`
+so your `secret_ref` resolves it from the encrypted store. Do not ask the
+parent to collect it into the parent's session: that store is not yours.
+
+There is no "run as root" surface: a surface starts as the user's own shell, so
+`sudo`'s prompt arrives where the relay above (or the user's own typing) can
+answer it.
 
 **Honest limits, stated rather than implied:**
 
@@ -171,8 +207,8 @@ per-platform commands, and the verify step. This page is the console half:
 create the surface, read it, and answer the installer's mechanical prompts with
 `keys` or `input` (a bucket choice, an output path). Everything that is a
 consent is the user's, never yours: an agreement or licence prompt, `sudo`'s
-password (or a stored credential by `secret_ref`), and a UAC or developer-tools
-dialog are theirs to answer.
+password (asked for through the `ask` secret question above, then relayed by
+`secret_ref`), and a UAC or developer-tools dialog are theirs to answer.
 
 ## When a call is refused
 

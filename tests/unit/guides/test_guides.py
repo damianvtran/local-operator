@@ -200,9 +200,8 @@ def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
     so it has to send the model to that rule rather than paraphrase it into a
     subtly weaker one of its own.
     """
-    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})(
-        "guide://system-tools"
-    )
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://system-tools")
 
     assert body is not None
     assert "console guide already carries that rule" in body
@@ -211,6 +210,15 @@ def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
     # rather than paper over: the surface cannot answer a UAC dialog.
     assert "surface cannot" in body and "answer it" in body
     assert "UAC" in body
+    # The sudo half of the same rule, pinned on both sides: the install guide
+    # names the handover (the user's `ask` secret question, relayed by
+    # `secret_ref`) and defers to the console guide, which must carry the
+    # step-by-step recipe it points to.
+    assert "secret question" in body
+    assert "secret_ref" in body
+    console = resolver("guide://console")
+    assert console is not None
+    assert "ask first, then relay the password by `secret_ref`" in console
 
 
 def test_installing_a_missing_tool_is_reachable_from_the_console_surfaces() -> None:
