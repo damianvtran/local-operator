@@ -41,11 +41,18 @@ time string. The engine arms each as an `aida-extra-N` one-shot, subject to:
 
 - `aida.cadence.max_extra_per_day` (default 2; `0` disables escalation),
 - `aida.cadence.min_gap_minutes` (default 90 — minimum spacing from another
-  Aida wake),
-- the generic wake bounds (60 s floor, 16 schedules per session).
+  Aida wake, measured across every request armed in the same drain),
+- the generic 16-schedules-per-session cap. NOTE: the 60 s wake floor is NOT
+  among them — it bounds a recurring interval (`every_ms`) and a one-shot
+  `{"in": "1s"}` arms about a second out; only the cap, the budget and the
+  spacing floor apply to extras (review round 1, n1).
 
-Requests beyond a bound are dropped with a note in her transcript, so the bound
-is observable rather than silent.
+Requests beyond a bound are dropped with a note, so the bound is observable
+rather than silent. WHERE the note lands depends on the writer: the in-session
+reconcile journals it to her transcript (the requesting turn can read it
+there); the external drain — a runtime-less `resume`, or boot recovery for a
+tray left by a process that died mid-turn — has no transcript writer and logs
+it instead (`logger.info`, module `local_operator.aida.proactive`).
 
 ## Pausing
 
@@ -53,7 +60,12 @@ is observable rather than silent.
 
 - her `aida-*` wake rows are cancelled through whichever writer owns them,
 - `held_at` is stamped on her wake-index entry, so the wake supervisor skips
-  her entirely while paused (no runtime is even started),
+  her entirely while paused (no runtime is even started) — when the entry
+  survives the cancel; with only her rows the entry is pruned and the
+  supervisor skips by its absence all the same,
+- an unfired one-time greeting is un-stamped by the cancel, so the resume
+  arms it again instead of losing it (the paused greet receipt promises
+  exactly that),
 - a session opened while paused does not arm her rows at all, and a row that
   somehow comes due while paused is dropped instead of delivered.
 

@@ -14,6 +14,8 @@ Two things this file exists for, both learned the hard way:
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from local_operator.tui.widgets.editor import Editor
@@ -130,11 +132,16 @@ async def test_the_pause_resume_status_receipts(tmp_path, monkeypatch) -> None:
             return _transcript_text(app)
 
         body = await run("/aida status")
-        assert "Aida: active" in body, body
+        # The identity mark rides every receipt she mints (design round 1, D1)
+        # and the budget reads as prose, not "0/2" jargon (D3).
+        assert "\u21c8 Aida: active" in body, body
         assert "next check-in" in body, body
+        # The pair rides non-breaking spaces so a narrow column cannot split
+        # "0 of" from its ceiling (D3's copy, measured in the rendered frame).
+        assert "extra check-ins used today: 0\u00a0of\u00a02" in body, body
 
         body = await run("/aida pause")
-        assert "Aida paused" in body, body
+        assert "\u21c8 Aida: paused" in body, body
         # ``get_nested_value``, not ``get_config_value``: the settings registry
         # stores this under the nested path (("aida","cadence","paused")), and
         # the dotted string is a verbatim top-level key that nothing writes —
@@ -150,7 +157,7 @@ async def test_the_pause_resume_status_receipts(tmp_path, monkeypatch) -> None:
         assert [row["id"] for row in held.get("schedules") or []] == [], held
 
         body = await run("/aida resume")
-        assert "Aida is active again" in body, body
+        assert "\u21c8 Aida: active again" in body, body
         again = wake_store.read_entry(tmp_path, her_id) or {}
         assert "held_at" not in again, again
         assert [row["id"] for row in again.get("schedules") or []] == ["aida-cadence"], again
@@ -160,7 +167,7 @@ async def test_the_pause_resume_status_receipts(tmp_path, monkeypatch) -> None:
         )
 
         body = await run("/aida =pause now")  # the escape sends her the WORD
-        assert "Aida paused" not in body, "the `=` escape must not be parsed as the verb"
+        assert "\u21c8 Aida: paused" not in body, "the `=` escape must not be parsed as the verb"
 
 
 @pytest.mark.asyncio
@@ -228,3 +235,191 @@ async def test_a_request_rides_the_adoption_onto_her_conversation(tmp_path, monk
         assert boots == [her_id], f"the factory must be asked for HER conversation: {boots}"
         assert built[0].prompts == ["summarise everything in flight"], built[0].prompts
         assert app._conversation_id() == her_id
+
+
+def _viewer_for(her_id: str):
+    """A faked AttachedSession: FakeSession with HER id, recording prompts."""
+    from tests.unit.tui.test_app_pilot import FakeSession
+
+    class HerViewer(FakeSession):
+        @property
+        def session_id(self) -> str:  # type: ignore[override]
+            return her_id
+
+    return HerViewer()
+
+
+@pytest.mark.asyncio
+async def test_her_request_survives_an_attach_onto_a_live_owner(tmp_path, monkeypatch) -> None:
+    """U1: the BLOCKER's success half — `/aida hello` lands on a live her.
+
+    The attach path (`_resume_session` → `_attach_or_refuse` →
+    `_adopt_built_viewer`) spends neither prompt seam, so a request typed
+    against an already-running Aida switched the conversation and dropped the
+    words: no transcript row, no notice, nothing on disk. This drives that
+    exact seam and asserts the session RECORDS the prompt.
+    """
+    from local_operator import aida as aida_pkg
+    from local_operator.session.attached import AttachedSession
+    from tests.unit.tui.test_resume_connect_retry import _app, _record, _running
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    viewer = _viewer_for(her_id)
+    record = _record(90909, "her conversation")
+
+    async def cold(*_args, **_kwargs):
+        raise ConnectionError("no cold paint on this fake")
+
+    async def connect(*_args, **_kwargs):
+        return viewer
+
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.cold", cold)
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+    assert AttachedSession is not None  # imported for the patch targets' sake
+
+    app = _app(monkeypatch, tmp_path)
+
+    async with _running(app):
+        # INSIDE the running app, because booting it adopts a session of its
+        # own — and every adoption spends-or-drops the stash. A user types
+        # `/aida hello` long after boot; setting it before `_running` measured
+        # the boot instead of the attach (this test's first cut did exactly
+        # that and passed the wrong way).
+        app._pending_aida_prompt = (her_id, "hello", None)
+        await app._attach_or_refuse(tmp_path, her_id)
+        for _ in range(60):
+            if viewer.prompts:
+                break
+            await asyncio.sleep(0)
+
+        assert app._pending_aida_prompt is None, "the stash must be spent, not stranded"
+        assert viewer.prompts == ["hello"], "the request must reach HER session"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_attach_drops_the_request_with_a_notice(tmp_path, monkeypatch) -> None:
+    """U1's other ending: when the transition cannot happen, say so.
+
+    A request that outlives a failed transition would fire on some LATER
+    adoption — words typed minutes ago delivered into a fresh conversation.
+    It is dropped, and the drop is narrated rather than silent.
+    """
+    from local_operator import aida as aida_pkg
+    from tests.unit.tui.test_resume_connect_retry import (
+        _app,
+        _notices,
+        _record,
+        _running,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    record = _record(90909, "her conversation")
+
+    async def cold(*_args, **_kwargs):
+        raise ConnectionError("no cold paint on this fake")
+
+    async def connect(*_args, **_kwargs):
+        raise ConnectionError("the runtime is not responding")
+
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.cold", cold)
+    monkeypatch.setattr("local_operator.session.attached.AttachedSession.connect", connect)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record",
+        lambda _root, _concrete: (record, 90909),
+    )
+
+    app = _app(monkeypatch, tmp_path)
+
+    async with _running(app):
+        # After boot, for the reason the success test documents.
+        app._pending_aida_prompt = (her_id, "hello", None)
+        await app._attach_or_refuse(tmp_path, her_id)
+
+        assert app._pending_aida_prompt is None, "a stale stash must not fire later"
+        assert any("Request not sent" in text for text in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_word_counts_only_as_the_whole_argument(tmp_path, monkeypatch) -> None:
+    """The cross-host grammar (UI review round 1, MINOR-3): word, or message.
+
+    ``/aida pause and think`` used to split on the first space and run the
+    control word, silently DROPPING "and think" — a typed request, gone, under
+    a receipt about pausing. The word ALONE is the control; anything longer is
+    a message for her, verbatim; ``=`` still escapes the word itself (the
+    ``/team =chart`` precedent).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from local_operator import aida as aida_pkg
+    from local_operator.config import ConfigManager
+
+    await aida_pkg.ensure_session(tmp_path)
+
+    built: list[FakeSession] = []
+
+    class HerSession(FakeSession):
+        def __init__(self, sid: str) -> None:
+            super().__init__()
+            self._sid = sid
+
+        @property
+        def session_id(self) -> str:  # type: ignore[override]
+            return self._sid
+
+    async def resume_factory(session_id):
+        session = HerSession(session_id or "")
+        built.append(session)
+        return session
+
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
+
+    def paused() -> bool:
+        got = ConfigManager(config_dir=tmp_path).get_nested_value(("aida", "cadence", "paused"))
+        return got is True
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+
+        async def send(command: str, *, wait_for_prompt: bool) -> None:
+            editor.focus()
+            editor.text = command
+            editor.move_cursor(editor._end_of_buffer())
+            await pilot.pause()
+            await pilot.press("enter")
+            for _ in range(120):
+                await pilot.pause()
+                if not wait_for_prompt or (built and built[-1].prompts):
+                    break
+
+        # Words with more in them are a MESSAGE — never the control, and never
+        # silently truncated.
+        await send("/aida pause and think", wait_for_prompt=True)
+        assert paused() is False, "a message must not run the control word"
+        assert built[-1].prompts == ["pause and think"], built[-1].prompts
+
+        # The word ALONE is the control.
+        await send("/aida pause", wait_for_prompt=False)
+        assert paused() is True
+
+        # `=` sends the literal word as a message (escape sigil consumed, like
+        # `/team =chart`); the control stays untriggered.
+        await send("/aida =pause", wait_for_prompt=True)
+        assert paused() is True, "the escape must not run the control"
+        assert built[-1].prompts == ["pause and think", "pause"], built[-1].prompts

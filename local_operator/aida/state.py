@@ -43,6 +43,7 @@ import logging
 import os
 import tempfile
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -280,6 +281,44 @@ def consume_escalations(config_dir: Path | str) -> list[Any]:
     if not isinstance(wakes, list):
         return []
     return list(wakes)
+
+
+def restore_escalations(config_dir: Path | str, requests: Sequence[Any]) -> None:
+    """Put UNARMED requests back in ``escalate.json``, ahead of anything new.
+
+    The counterpart of :func:`consume_escalations` for a drain that stopped
+    early (review round 1, M1a): an owner that appears mid-drain refuses the
+    arm with a 503, and the requests the sweep had already taken out of the
+    tray must not evaporate — the owner's own reconcile reads the FILE, so
+    "leave the rest for that owner" is only implementable by writing them back.
+
+    MERGED rather than overwritten: a turn running in the owner process may
+    have appended to the tray between the consume and this write, and its
+    request is newer than the ones being restored — so the remainder goes
+    FIRST and the file's current content follows it. Tolerant like its
+    sibling: an unreadable current tray is treated as empty (it was going to
+    be dropped by the next consume anyway), and a failed write is logged
+    rather than raised, because the alternative is failing the /aida resume
+    this drain serves.
+    """
+    path = escalate_path(config_dir)
+    existing: list[Any] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        current = data.get("wakes") if isinstance(data, dict) else None
+        if isinstance(current, list):
+            existing = list(current)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        logger.warning("aida: unreadable escalate.json at %s; replacing it", path, exc_info=True)
+    try:
+        write_json(path, {"wakes": [*requests, *existing]})
+    except OSError:
+        logger.warning(
+            "aida: could not restore %d escalation request(s)", len(requests), exc_info=True
+        )
 
 
 def _unlink_quietly(path: Path) -> None:

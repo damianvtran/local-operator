@@ -60,7 +60,15 @@ GREETING_MESSAGE = (
 
 
 def greeted_at(config_dir: Path | str) -> int | None:
-    """When the greeting was delivered, or ``None`` while it is still owed."""
+    """When the greeting was armed and not cancelled undelivered, else ``None``.
+
+    ``None`` means owed: never armed, refused (no provider / paused / owner),
+    or armed and then dropped by a pause before it could fire — the clear in
+    :func:`clear_greeted`. The distinction matters because "owed" is what
+    re-arms it (``proactive.resume``, and the engine's reconcile for a live
+    owner), so a stamp that survived a cancelled row would be a greeting lost
+    for good with the ledger claiming it was delivered (review round 1, m1).
+    """
     data = state.read_json(state.onboarding_path(config_dir), what="onboarding")
     if data is None:
         return None
@@ -68,10 +76,39 @@ def greeted_at(config_dir: Path | str) -> int | None:
     return int(stamp) if isinstance(stamp, int) else None
 
 
-def _mark_greeted(config_dir: Path | str, now_ms: int) -> None:
+def mark_greeted(config_dir: Path | str, now_ms: int) -> None:
+    """Stamp the greeting as armed-and-owed (the ledger the receipts read).
+
+    Public because the engine's own live-owner ensure arms the same row from
+    :func:`proactive.reconcile` and owes the ledger the same fact: without the
+    stamp that path would find no row on a later reconcile and arm a SECOND
+    greeting (review round 1, m1). The clear that undoes it when a row is
+    cancelled undelivered is :func:`clear_greeted`.
+    """
     data = state.read_json(state.onboarding_path(config_dir), what="onboarding") or {}
     data["greeted_at"] = now_ms
     state.write_json(state.onboarding_path(config_dir), data)
+
+
+def clear_greeted(config_dir: Path | str) -> None:
+    """Un-stamp the greeting: it was armed and will never be delivered.
+
+    Called by the two places that can drop the ``aida-greeting`` row before it
+    fires — ``proactive.pause`` for the external cancel, and the engine's
+    paused branch for a live owner's own reconcile — so the next resume arms
+    it again instead of the ledger reporting a greeting the user never saw.
+    Best-effort like its sibling: an unreadable file is left as the reader's
+    ``None`` already treats it.
+    """
+    path = state.onboarding_path(config_dir)
+    data = state.read_json(path, what="onboarding")
+    if data is None or "greeted_at" not in data:
+        return
+    data["greeted_at"] = None
+    try:
+        state.write_json(path, data)
+    except OSError:
+        logger.warning("aida: could not clear greeted_at", exc_info=True)
 
 
 def provider_configured(config_dir: Path | str) -> bool:
@@ -139,13 +176,13 @@ async def greet(config_dir: Path | str, session_id: str, *, now_ms: int | None =
             # establish. 503 = a live owner; leave it unstamped so the caller
             # can retry after the owner reconciles.
             if exc.status == 409:
-                _mark_greeted(root, now)
+                mark_greeted(root, now)
                 return "greeted"
             if exc.status == 503:
                 return "owner"
             logger.warning("aida: greeting arm refused: %s", exc)
             return "failed"
-        _mark_greeted(root, now)
+        mark_greeted(root, now)
         return "greeted"
     except Exception:  # noqa: BLE001 — a greeting must never fail its caller
         logger.warning("aida: greet failed", exc_info=True)

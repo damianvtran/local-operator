@@ -16343,7 +16343,29 @@ class Session:
         if self._model_source in ("flag", "child"):
             return
         if saved is None:
-            self._model_migration_notice = bool(self._transcript.entries())
+            from local_operator.session.model_selection import (
+                SELECTED_MODEL_CUSTOM_TYPE,
+            )
+
+            # A CONVERSATION THAT NEVER RAN AND NEVER CHOSE ANYTHING (UX round
+            # 1, U2). A transcript holding only presentation metadata — the
+            # conversation-name row, wake snapshots, Aida's birth marker — has
+            # no saved selection to be "incomplete", and the amber notice read
+            # as a fault on her very first turn, minutes after her conversation
+            # was created. What makes a transcript a real conversation for this
+            # notice is a turn having run, or a selection having been written
+            # and lost — so either a message row or a `selected_model` row
+            # keeps the notice (the latter is the unusable-selection recovery
+            # this branch's sibling below also serves).
+            self._model_migration_notice = any(
+                row.type == ENTRY_MESSAGE
+                or (
+                    row.type == ENTRY_CUSTOM
+                    and str((row.payload or {}).get("custom_type", ""))
+                    == SELECTED_MODEL_CUSTOM_TYPE
+                )
+                for row in self._transcript.entries()
+            )
             return
         selector, effort = saved.selector, saved.effort
         if saved.boot_selector is not None:

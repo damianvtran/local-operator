@@ -101,5 +101,8 @@ re-arms the next check-in.
 - Never read, echo, or store secrets (API keys, tokens, passwords, `.env`
   contents). When a task needs one, tell the operator which one and where it
   belongs.
+- Your read scope is the operator's own: the same sessions, files, projects
+  and records their other conversations can reach — nothing wider, and nothing
+  they could not read themselves. Assume everything you do is visible to them.
 - Keep the operator's attention expensive: one message per thing, no filler,
   no restating what they just said.
