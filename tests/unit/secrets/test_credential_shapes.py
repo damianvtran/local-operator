@@ -7418,3 +7418,49 @@ def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
     scrubbed, hits = scrub_shapes_with_hits(line)
     assert value not in scrubbed, f"{line!r} left {value!r} readable"
     assert hits, f"{line!r} produced no hit at all"
+
+
+#: The values this refusal RELEASES: masked AND contained on `origin/main`, read in
+#: the clear on this head. Declared rather than discovered, and frozen here so the
+#: trade cannot widen quietly — a later widening or narrowing must come through this
+#: table, the way `_PARTIAL_MASK_RESIDUAL` works for the mask ratchet.
+#:
+#: The trade is deliberate (agent review round 2, R2-2, and the operator's ruling on
+#: it): the thing being fixed is a value masked in a FILE READ and transcribed back
+#: as the marker, and any value still masked there is a value an agent can still copy
+#: back. So it is masking low-confidence words and corrupting files, or releasing them
+#: and leaving them readable; the operator chose the second, consistent with the
+#: standing instruction to keep "automatic redactions of high confidence credential
+#: shapes". Every high-confidence shape is untouched.
+#:
+#: MEASURED on both trees, and only values whose behaviour CHANGED are listed.
+#: `correct_horse_battery_staple` and `hunter2` are absent on purpose: they sit below
+#: the assignment rule's own eight-character value floor, so `origin/main` did not
+#: mask them either and this change is not why they read in the clear. The round-2
+#: finding listed them among the released; the differential says otherwise, and the
+#: narrower class is the honest one.
+_RELEASED_WORD_SHAPED = (
+    "prod_db_pass_01",
+    "user_1_pass",
+    "sec1_ret",
+)
+
+
+@pytest.mark.parametrize("value", _RELEASED_WORD_SHAPED)
+def test_the_released_word_shaped_class_is_declared(value: str) -> None:
+    """The cost of the fix, frozen.
+
+    These are not oversights to be fixed later — they are the declared price of
+    refusing a word-shaped value under a weak name. This test does not ask for them
+    to be masked; it asks that the set never move without someone deciding to, and it
+    is what makes R2-2's differential reproducible instead of a surprise.
+    """
+    line = "KEY=" + value
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert value in scrubbed, (
+        f"{value!r} is masked again — if that is deliberate, remove it from "
+        "_RELEASED_WORD_SHAPED and say why in the PR"
+    )
+    assert not _promotes(
+        line, value
+    ), f"{value!r} is contained again — same: change the declared set deliberately"

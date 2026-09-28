@@ -1583,6 +1583,23 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # ``…_token``) must keep masking any opaque value, which is the split ``strong``
     # already encodes and the reason the corpus positives — ``PASSWORD=swordfish``,
     # ``token=abcdefghijklmnop`` — stay caught.
+    #
+    # THE TRADE THIS MAKES, stated because it is a posture and not an accident
+    # (agent review round 2, R2-2, and the operator's ruling on it). A word-shaped
+    # VALUE under a weak name is no longer masked AT ALL — not in place, not by
+    # containment — so values in the released class (``prod_db_pass_01``,
+    # ``correct_horse_battery_staple``, a bare ``hunter2``) that the table used to
+    # hide now appear in the clear. That class is FROZEN in
+    # ``_RELEASED_WORD_SHAPED`` so it can never widen unnoticed.
+    #
+    # Nothing in this table can have both. The damage being fixed is a value that
+    # was masked in a FILE READ and transcribed back as the marker; any value still
+    # masked there is a value an agent can still copy back. So the choice is between
+    # masking low-confidence words (and corrupting files) and releasing them (and
+    # leaving them readable), and the operator ruled for the second, which is
+    # consistent with the standing instruction to keep "automatic redactions of HIGH
+    # CONFIDENCE credential shapes". Every high-confidence shape is untouched: hex
+    # and base64 keys, prefixed tokens, DSNs, strong-named assignments.
     if (
         not strong
         and len(value) <= _WORD_SHAPED_MAX_LEN
