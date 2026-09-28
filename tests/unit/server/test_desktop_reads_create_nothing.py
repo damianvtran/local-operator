@@ -15,6 +15,7 @@ because the answer ``has_any_network`` gives is the thing the desktop acts on.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -32,6 +33,16 @@ NETWORK = "n_0123456789abcdef01234567"
 SELF_DEVICE = "d_" + "a" * 32
 PEER_DEVICE = "d_" + "b" * 32
 PEER_NAME = "devon"
+
+
+async def _settle_boot_task(task: asyncio.Task[None]) -> None:
+    """Await the app's own background startup task — ON ITS OWN LOOP.
+
+    A plain ``task.result()`` from the test thread would raise (a Task belongs
+    to the loop that owns it), so the wait goes through the TestClient's own
+    blocking portal, which IS that loop.
+    """
+    await task
 
 
 def _isolate(tmp_path: Path, monkeypatch) -> Path:
@@ -135,6 +146,20 @@ def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monk
     )
 
     with TestClient(app) as client:
+        # THE BOOT'S OWN WORK SETTLES BEFORE THE DELTAS. The lifespan schedules
+        # the built-in assistant's first-run ensure as a background task — a
+        # session build (and the wake-supervisor install behind it) must not
+        # hold the daemon's readiness, see `local_operator/server/app.py` — so
+        # without this wait its writes can land between a route's before/after
+        # snapshots and read as "this READ created a session" when the write
+        # came from the boot. The wait is on the TASK itself, not a clock; a
+        # bootstrap that cannot run is a log line in production, and here the
+        # absence of the task (older layouts) is fine too.
+        task = getattr(app.state, "aida_boot_task", None)
+        if task is not None:
+            portal = client.portal
+            assert portal is not None
+            portal.call(_settle_boot_task, task)
         for route in routes:
             before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
             client.get(route, headers=HEADERS)

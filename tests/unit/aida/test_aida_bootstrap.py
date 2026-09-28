@@ -1,0 +1,96 @@
+"""``aida.bootstrap.ensure_session`` — creation, idempotence, zero footprint.
+
+The R17/R18 promise is pinned here by SNAPSHOT, not by a return value: a
+disabled install must gain no file of any kind, and the test compares the whole
+root tree before and after rather than trusting ``ensure_session`` to say so.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+
+from local_operator import aida
+from local_operator.aida import state
+from tests.unit.aida.conftest import tree, write_config
+
+
+@pytest.mark.asyncio
+async def test_ensure_creates_her_session_once_and_returns_the_same_id(isolated_root: Path) -> None:
+    first = await aida.ensure_session(isolated_root)
+    second = await aida.ensure_session(isolated_root)
+
+    assert first and second == first
+    directory = isolated_root / "sessions" / first
+    assert directory.is_dir()
+    # The directory is REAL: a transcript with her title and birth entry, the
+    # role attachment the load path restores, and the created-at sidecar.
+    transcript = (directory / "transcript.jsonl").read_text(encoding="utf-8")
+    assert '"conversation_name"' in transcript and '"aida_session"' in transcript
+    assert json.loads((directory / "attachment.json").read_text())["agent"] == "aida"
+    title = json.loads((directory / "title.json").read_text())
+    assert title["text"] == "Aida" and title["user_set"] is True
+    # State names her, the pin store carries her, and the cadence is armed.
+    assert state.session_id_of(isolated_root) == first
+    assert first in json.loads((isolated_root / "sidebar-pins.json").read_text())
+    entry = json.loads((isolated_root / "wakes" / f"{first}.json").read_text())
+    ids = [row["id"] for row in entry["schedules"]]
+    assert ids == ["aida-cadence"]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_invocations_mint_one_session(isolated_root: Path) -> None:
+    """Two callers racing the create converge on ONE conversation.
+
+    The ensure lock is what makes this true; without it both would find no
+    state, mint an id, and one would clobber the other's state file while both
+    directories survived.
+    """
+    results = await asyncio.gather(
+        aida.ensure_session(isolated_root),
+        aida.ensure_session(isolated_root),
+    )
+    alive = [session_id for session_id in results if session_id]
+    assert alive, "at least one caller must get an id"
+    assert len(set(alive)) == 1
+    assert len(list((isolated_root / "sessions").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_disabled_env_leaves_zero_footprint(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``LOCAL_OPERATOR_NO_AIDA=1`` writes nothing at all (R17)."""
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
+    before = tree(isolated_root)
+
+    assert await aida.ensure_session(isolated_root) is None
+
+    assert tree(isolated_root) == before
+    assert not (isolated_root / "aida").exists()
+
+
+@pytest.mark.asyncio
+async def test_disabled_config_key_leaves_zero_footprint(isolated_root: Path) -> None:
+    """``aida.enabled = false`` is the same promise via the config key (R18)."""
+    write_config(isolated_root, {"aida": {"enabled": False}})
+    before = tree(isolated_root)
+
+    assert await aida.ensure_session(isolated_root) is None
+
+    assert tree(isolated_root) == before
+
+
+@pytest.mark.asyncio
+async def test_env_switch_truthiness_matches_the_house_convention(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for falsy in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", falsy)
+        assert state.env_disabled() is False
+    for truthy in ("1", "true", "yes", "on"):
+        monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", truthy)
+        assert state.env_disabled() is True

@@ -605,6 +605,21 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: watch move. Its live read is covered where it lives:
 #: ``tests/unit/test_memory_guard.py`` (the budget resolution and the kill) and the
 #: settings path-pin test in ``tests/unit/test_settings_io.py``.
+#:
+#: ``aida`` is host-owned in the same shape, for two reasons that are both about
+#: WHERE the live half lives rather than about whether it exists. (1) Nothing here
+#: is read off a session ATTRIBUTE: ``paused``/``enabled`` are enforced by the
+#: engine's delivery guard and load filter reading config at the moment of use,
+#: and the cadence's schedule state belongs to her session's engine — so a probe
+#: over this file's ``make_session`` could watch nothing move even if it had the
+#: right session, and it does not: the harness session's directory is not hers, so
+#: ``_aida_duty`` is False by construction. (2) The live halves ARE proven, where
+#: they live: ``tests/unit/aida/test_aida_session_hooks.py`` drives a config write
+#: from another ``ConfigManager`` into a real watcher subscribed to HER session
+#: and asserts her rows drop (and the fire-time guard drops a held occurrence),
+#: and ``tests/unit/aida/test_aida_supervisor_hold.py`` pins the supervisor skip.
+#: The per-key scope caveat — pause acts at once, the rest are read when she next
+#: acts — is stated in the section description the page renders.
 HOST_OWNED_LIVE_SECTIONS = {
     "appearance",
     "runtime",
@@ -612,6 +627,7 @@ HOST_OWNED_LIVE_SECTIONS = {
     "keymap",
     "desktop",
     "memory_guard",
+    "aida",
 }
 
 

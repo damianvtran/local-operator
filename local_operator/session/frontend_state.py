@@ -1024,6 +1024,19 @@ _FRONTEND_LOCAL_SLASHES = {
     # write. v2 is single-machine; serving the owner's project view over the
     # control protocol is a follow-up.
     "project",
+    # HER WHOLE FAMILY IS LOCAL, for the `/resume` and `/settings` reasons at
+    # once. Opening her conversation is a transition THIS frontend performs
+    # (the `/new`/`/resume` argument: the session it lands on is opened on this
+    # machine, and a viewer's own conversation is not something a runtime can
+    # switch), and pause/resume/status read and write THIS machine's
+    # config.yml and wake index — the very files `/settings` argues about,
+    # read by the engine the command steers. The desktop has its own
+    # destination for the same word (`desktop_destination="aida.open"`,
+    # answered by `server/routes/desktop_aida.py`), which is the shape this set
+    # describes: each frontend answers `/aida` against its own root. This is
+    # also what keeps it out of `serving.py::_slash_result`, exactly as the
+    # `/notifications` clause above states the rule.
+    "aida",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the

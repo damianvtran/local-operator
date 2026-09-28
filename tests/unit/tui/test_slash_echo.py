@@ -137,6 +137,11 @@ ECHO_POLICY = {
     # The listing or the masked paste is the receipt; the argument is a key
     # name, never the secret, so a user row would only restate the notice.
     "credential": False,
+    # Same shape as `/team` one registry row below: opening her (or a
+    # `pause`/`resume`/`status` receipt) is printed by the handler, and a
+    # request is sent by `_submit_command_prompt`, which writes the user row
+    # the request text reaches the model as.
+    "aida": False,
     # The listing is the receipt; a named request is sent as a real user
     # turn by `_submit_prompt`, which already writes the row.
     "team": False,
@@ -232,6 +237,9 @@ PROMPT_POLICY = {
     "credential": False,
     # The request after the name is a prompt the manager / persona is given.
     "team": True,
+    # The request after the word is a prompt SHE is given (the reserved
+    # words are handled before this question is asked).
+    "aida": True,
     "agent": True,
     # An ACTION word (`read`), not a message: an inline engage splices-and-runs
     # like `/usage` rather than reassembling to the front and handing the model
@@ -768,6 +776,11 @@ async def test_session_adoption_catches_up_agent_picker_without_geometry_change(
         assert editor.picker.highlighted_name() == "auditor"
         assert editor._name_choices == frozenset(
             {
+                # ``aida`` is new here and is CORRECT: her packaged seed is an
+                # agent profile like any other (design §2.1), so `/agent aida`
+                # attaches her instructions to a session — the completion
+                # vocabulary is the registry, and she is in it.
+                "aida",
                 "architect",
                 "auditor",
                 "coder",
