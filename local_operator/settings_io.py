@@ -548,6 +548,14 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "How the built-in tools execute.",
     ),
+    # LIVE: ``hook_forwarding.forwarding_enabled`` reads both keys through a
+    # fresh ``ConfigManager(config_dir())`` on every finished tool call.
+    Section(
+        "hooks",
+        "Forwarded hooks",
+        Scope.LIVE,
+        "Run Claude Code / Codex PostToolUse hooks in lop sessions.",
+    ),
     # LIVE, and its own section, for the reason ``tools`` is LIVE: ``execute_bash``
     # reads these through a fresh ``ConfigManager(config_dir())`` per call, so an
     # edit lands on the next command. Deliberately NOT in ``shell_environment``,
@@ -2895,6 +2903,26 @@ SETTINGS: tuple[Setting, ...] = (
     # together by ``test_bash_shell_row_shares_the_consumer_path`` rather than
     # imported, because this module must stay cheap for the CLI and
     # ``tools.builtin`` is not (see the module docstring on Textual).
+    # -- hooks ------------------------------------------------------------
+    # ``path`` mirrors ``hook_forwarding.FORWARD_*_PATH``.
+    Setting(
+        key="hooks.forward_claude",
+        path=("hooks", "forward_claude"),
+        section="hooks",
+        label="Forward Claude Code hooks",
+        kind=Kind.BOOL,
+        default=False,
+        help="Run ~/.claude + plugin PostToolUse hooks after each tool call.",
+    ),
+    Setting(
+        key="hooks.forward_codex",
+        path=("hooks", "forward_codex"),
+        section="hooks",
+        label="Forward Codex hooks",
+        kind=Kind.BOOL,
+        default=False,
+        help="Run ~/.codex/hooks.json PostToolUse hooks after each tool call.",
+    ),
     Setting(
         key="bash.shell",
         path=("bash", "shell"),
