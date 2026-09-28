@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -310,18 +311,35 @@ def test_a_verified_peer_answer_still_claims_the_peer(
     server_b.stop()
 
 
-def test_an_inbound_link_never_names_its_source_socket(
+def _await_membership_pull(link: relay.PeerLink, *, settle_s: float = 0.2) -> None:
+    """Wait out a just-admitted link's membership writers before editing a copy.
+
+    Admitting a link runs the accepting side's ``_note_peer_endpoints`` and
+    ``_pull_members`` -> ``_learn_members_from`` on its accept thread: both
+    rewrite and persist this device's copy of the peer's row, and the pull's
+    persist trails its ``member_pulled_at`` stamp (stamped BEFORE the merge).
+    An edit landing in that window is silently dropped — measured as 7 false
+    reds in 31 runs (review round 3, R3-1). So: wait for the pull's stamp (both
+    writers run before it), then settle past the bounded save.
+    """
+    deadline = time.monotonic() + 2.0
+    while not link.member_pulled_at and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(settle_s)
+
+
+def test_a_link_that_cannot_be_pinned_never_names_its_source_socket(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Round 2, R2-1/Q-3: the peer dialled US — routine after any restart.
+    """Round 2, R2-1/Q-3, inbound direction: the peer dialled US.
 
     An inbound link records the dialer's SOURCE socket, so that address may
     not be published as "the peer's link runs at …" (it dies with the
     connection), and the peer's own reachable address must not read unverified
-    merely because the peer was the dialer. The link fact — the peer is up —
-    is presented with no address at all; the ephemeral appears nowhere.
+    merely because the link's address cannot be named. The link fact — the peer
+    is up — is presented with no address at all; the ephemeral appears nowhere.
     """
     pair_devices: Devices = request.getfixturevalue("devices")
     server_a, server_b, host, port = pair_devices
@@ -330,16 +348,16 @@ def test_an_inbound_link_never_names_its_source_socket(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     live = _bind_and_start(server_b, record)
     # The PEER is the dialer: B completes the handshake into A, so A's link
-    # records B's ephemeral source socket rather than any declared address. The
-    # endpoint edit goes in AFTER the dial, because the dial's membership sync
-    # re-writes A's copy of B's row and would drop it (the same seam the round-1
-    # link cells record).
-    inbound, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
-    assert inbound is not None, reason
-    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live, "127.0.0.1:1"])
+    # records B's ephemeral source socket rather than any declared address.
+    peer_link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert peer_link is not None, reason
     link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001 — the one link seam
     assert link is not None
     ephemeral = str(link.peer_addr)
+    # Both membership writers run before the pull's stamp; the stamp + settle
+    # then pass the pull's own save (R3-1) — only after that is the edit safe.
+    _await_membership_pull(link)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live, "127.0.0.1:1"])
 
     rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
     # The dead sibling address keeps the report red; the peer's own address
@@ -348,7 +366,7 @@ def test_an_inbound_link_never_names_its_source_socket(
     rows = {row["endpoint"]: row for row in _rows(payload, "reachability")}
     live_row = rows[live]
     assert live_row["ok"] is True
-    assert live_row["observed"]["outcome"] == "connected_inbound"
+    assert live_row["observed"]["outcome"] == "connected_unpinned"
     reading = readiness.reachability_reading(live_row)
     assert "its link is live" in reading
     assert "not identified" not in reading
@@ -362,6 +380,54 @@ def test_an_inbound_link_never_names_its_source_socket(
     # gone and the row legitimately reads connected_link instead.)
     if ephemeral not in (live, "127.0.0.1:1"):
         assert ephemeral not in json.dumps(payload)
+    server_b.stop()
+
+
+def test_an_unpinnable_link_carries_no_direction_claim(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 3, R3-2: "unpinnable" is the condition, not a direction.
+
+    An OUTBOUND link whose recorded address has left the declared set is
+    unpinned too — the row and its remedy must say so without claiming the
+    peer dialled us.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    # A dials B: OUTBOUND, recorded at ``live``.
+    dialed, reason = server_a.dial(
+        record.network_id,
+        host=live,
+        epoch=record.epoch,
+        expected_device=server_b.identity.device_id,
+    )
+    assert dialed is not None, reason
+    link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001 — the one link seam
+    assert link is not None
+    _await_membership_pull(link)
+    # The declared set no longer contains the recorded address (as if the peer
+    # had re-published elsewhere): the link is unpinned while still outbound.
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, ["127.0.0.1:1"])
+
+    rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    assert rc == 1
+    row = _rows(payload, "reachability")[0]
+    assert row["endpoint"] == "127.0.0.1:1"
+    assert row["ok"] is False
+    assert row["observed"]["outcome"] == "refused"
+    assert row["observed"].get("link_unpinned") is True
+    assert "link_address" not in row["observed"]
+    assert "its link is live" in row["remedies"][0]
+    # NO DIRECTION CLAIM anywhere: the field names the condition (R3-2).
+    rendered = json.dumps(payload)
+    assert "link_inbound" not in rendered
+    assert "inbound" not in rendered
     server_b.stop()
 
 
