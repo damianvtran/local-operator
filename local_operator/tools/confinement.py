@@ -35,11 +35,13 @@ refusal -- it would read as a solved problem.
 WHAT THIS DOES NOT COVER, stated rather than implied:
 
 * Reads of SYSTEM paths stay allowed -- ``/usr``, ``/System``, ``/Library``,
-  ``/opt/homebrew``, ``/private/etc`` and the per-user temp and dyld caches.
-  Running an interpreter at all requires reading the interpreter; these are
-  the host's machinery, not the operator's data. The operator's own home
-  (outside the root), other volumes, ``/tmp`` and every other user's files
-  are NOT in the allowlist and the kernel denies them.
+  ``/opt/homebrew``, ``/private/etc``, the dyld caches, and
+  ``/private/var/folders`` (the per-user temp: READS of it are permitted,
+  WRITES are not -- the session's own temp is redirected INSIDE the root,
+  see the ``bash`` tool). Running an interpreter at all requires reading the
+  interpreter; these are the host's machinery, not the operator's data. The
+  operator's own home (outside the root), other volumes, ``/tmp`` and every
+  other user's files are NOT in the allowlist and the kernel denies them.
 * Network is deliberately unchanged (``network-outbound`` is allowed): this
   boundary is about the filesystem, and an episode's shell needing to reach a
   package index is not the leak this closes.
@@ -55,6 +57,13 @@ WHAT THIS DOES NOT COVER, stated rather than implied:
 * ``/dev`` reads are allowed wholesale (devices a child legitimately opens:
   null, zero, random, tty, fd). Raw disk devices are root-only by their own
   permissions, and this module does not attempt to re-den them.
+* ``mktemp``'s macOS defaults: the system ``mktemp`` consults the per-user
+  confstr temp, NOT ``$TMPDIR``, so bare ``mktemp`` and ``mktemp -t`` fail
+  inside the jail (the write deny is by design). Working forms a confined
+  script should use: ``mktemp -p "$TMPDIR" <template>``, a relative template
+  (``mktemp ./x.XXXXXX``), or Python's ``tempfile`` (it honours ``TMPDIR``,
+  which the ``bash`` tool redirects into the root). Stated because a model
+  that reaches for plain ``mktemp`` burns a step discovering this.
 * Names, not content: ``file-read-metadata`` is allowed on the WHOLE tree,
   because path resolution (``realpath``, ``namei`` walks, DNS) stats
   ancestors, and without it ordinary commands break (see :meth:`profile`). A
@@ -65,6 +74,20 @@ WHAT THIS DOES NOT COVER, stated rather than implied:
   securityd included -- answer requests under their OWN access controls.
   Ordering Mach service registration is a follow-up; this module makes no
   claim about it.
+* DAEMON-MEDIATED SPAWN AND AUTOMATION -- the family where a request leaves the
+  jail through a host service rather than a syscall. **Tested:** ``launchctl
+  submit`` is refused inside the jail (rc=1, no job registered); ``launchctl
+  print gui/<uid>`` answers metadata; ``open -a <missing app>`` prints the
+  ordinary "Unable to find application named" (not a sandbox denial) -- and
+  the SAME text appears under a blanket ``(deny mach-lookup)`` profile, so the
+  missing-app path is not evidence either way. **NOT tested, deliberately:**
+  whether ``open -a <existing app>`` is actually honoured from inside the jail,
+  and whether Apple Events (``appleevent-send``) are reachable -- a real launch
+  or an Apple Event can raise an app window or a TCC consent prompt on the
+  operator's screen, which the campaign's own noise rules forbid. Treat app
+  launch / URL open / automation from a confined child as UNVERIFIED until a
+  bench-side run answers it (start from the blanket-mach probe above); named
+  follow-up.
 
 USING IT. The enforcement points all read one answer -- ``ToolContext.
 confinement_root`` -- so a session that carries a confinement can never have

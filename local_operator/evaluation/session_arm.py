@@ -445,8 +445,10 @@ class ActionBridge:
     #: has the IDENTICAL contract (see ``runner/completion.py``): at the default
     #: ON, the first ``done`` claim is challenged once and the second is always
     #: accepted, so the gate can never trap an episode in a challenge loop. A
-    #: control arm flips the gate rather than the code path -- the driver's own
-    #: ``--completion-gate``/``--completion-challenges`` reach both channels.
+    #: control arm flips the gate rather than the code path: the driver's
+    #: ``--no-completion-gate`` disables the gate for BOTH channels, and the
+    #: ``completion_challenges`` config bound applies to both (it has no CLI
+    #: flag).
     completion_gate: bool = True
     completion_challenges: int = 1
     #: The channel sentence appended to the challenge -- see
