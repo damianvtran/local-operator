@@ -422,10 +422,10 @@ lop sessions move 9f3ac1e0b7d2 --to build-box --keep   # copy it and leave the o
 ```
 
 <p align="center">
-  <img src="./static/ui-mesh-recall.png" alt="The desktop app's Mesh tab with a peer's device panel open on the right — cloud-node-1's memberships, its conversations and an Invite to a network button — and over it the Recall to this device dialog, whose selected choice reads 'the copy here is deleted once it arrives' and whose alternative reads 'Copy here, leave it there — the original stays where it is'" width="720">
+  <img src="./static/ui-mesh-recall.png" alt="The desktop app's Mesh tab with a peer's device panel open on the right — cloud-node-1's memberships, its conversations and an Invite to a network button — and over it the 'Recall to this device' dialog, whose subtitle reads 'The copy on cloud-node-1 is deleted once this device has it.' above a selected 'Recall to this device' choice and a 'Copy here, leave it there' alternative" width="720">
 </p>
 
-<p align="center"><i>Recalling a conversation from a peer, and the <code>--keep</code> distinction in a single dialog: the selected choice deletes the copy on the device it leaves, the other copies it and leaves the original running. From the same evidence set as below.</i></p>
+<p align="center"><i>Recalling a conversation from a peer, and the <code>--keep</code> distinction in a single dialog: the recall deletes the copy on the device the conversation leaves — the subtitle names it, <code>cloud-node-1</code> — while the other choice copies it and leaves the original running. From the same evidence set as below.</i></p>
 
 The device that will **hold** the conversation is the one that issues the move,
 so `--to <peer>` is this machine asking the peer to pull and `--to local` is
@@ -449,8 +449,9 @@ lent: its grants are signed with the fingerprint of the device that made them.
 **The desktop app has its own view of it.**
 [`local-operator-ui`](https://github.com/damianvtran/local-operator-ui) mounts a
 **Mesh** tab beside the sessions it lists: the networks this device is paired
-with, the devices in each, and what each of them is holding. Nothing above
-documents a command that does not run today.
+with, the devices in each, and what each of them is holding. The tab appears once
+this device is in a mesh — a device in none shows no Mesh row at all, so pairing
+comes first. Nothing above documents a command that does not run today.
 
 <p align="center">
   <img src="./static/ui-mesh-canvas.png" alt="The desktop app's Mesh tab: a summary line reading '1 network · 2 devices · this device is damians-MacBook-Pro' above a canvas whose damian-mesh network node joins by one edge each to cloud-node-1 (4 conv · seen 4m ago) and to this device, marked 'this device' and 'no conversations here', with a Canvas/List toggle at the top right" width="720">
