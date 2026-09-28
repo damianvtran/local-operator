@@ -1191,6 +1191,10 @@ async def test_the_invite_arm_accepts_every_line_its_own_receipt_prints(
     monkeypatch.setattr("local_operator.tui.app.run_network", run)
     parser = argparse.ArgumentParser(prog="lop")
     net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    # The SUBparser, taken the way `tests/unit/network/test_cli.py` takes it, so
+    # the argv below is checked against the verb's own grammar rather than by
+    # re-listing the flags this test already expects.
+    network = net_fixtures.subcommands_of(parser)["network"]
 
     accepted = {
         # The bare form, and the line `/network new` prints as its next step.
@@ -1212,7 +1216,7 @@ async def test_the_invite_arm_accepts_every_line_its_own_receipt_prints(
             await _submit(pilot, app, command)
             await app.workers.wait_for_complete()
             assert run.calls[before:] == [expected], (command, run.calls[before:])
-            parser.parse_args(["network", *run.calls[before]])
+            network.parse_args(run.calls[before])
         for command in refused:
             before = len(run.calls)
             await _submit(pilot, app, command)
