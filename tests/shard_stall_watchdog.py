@@ -204,7 +204,8 @@ LOCAL_ENV_SECONDS = "LOCAL_OPERATOR_LOCAL_STALL_SECONDS"
 #: only to say it is not what the local default is calibrated against.
 #:
 #: CI's 240s is NOT the local number and is not a candidate for one: it is priced
-#: against a 20-minute job cap that a local run does not have.
+#: against the CI job's cap (20 minutes when written, raised to 25 on
+#: 2026-09-28), which a local run does not have.
 LOCAL_DEFAULT_SECONDS = 900.0
 
 #: Opt-in per-test HARD bound (kills the process, naming the item through xdist's
