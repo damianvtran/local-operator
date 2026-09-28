@@ -7425,12 +7425,37 @@ def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
 #: through a real store) rather than a table of strings someone maintains by hand.
 _RELEASE_PROBE_VALUES = (
     # BOUNDARY PROBES — one inside each rule's own band, and each is MASKED on this
-    # head, so loosening its rule releases it and moves the measurement. They are
-    # the only corpus entries that can discriminate, and the lesson is recorded
-    # because it cost two review rounds: a probe that does not sit INSIDE the band
-    # guards nothing. Round 3 (R3-1) widened the digit cap with the module green;
-    # round 4 (R4-1) did the same to the length cap, because every probe then in
-    # the corpus was shorter than the cap it was supposed to be testing.
+    # head, so loosening its rule releases it and moves the measurement. They are the
+    # only corpus entries that can discriminate, and the lesson is recorded because it
+    # cost five review rounds: a probe that does not sit INSIDE the band guards
+    # nothing. Round 3 (R3-1) widened the digit cap with the module green; round 4
+    # (R4-1) did the same to the length cap, because every probe was shorter than the
+    # cap it was supposed to be testing; round 5 (R5-1) did the same to the alphabet,
+    # because the one uppercase-carrying probe also carried enough digits for the
+    # digit cap to refuse it first; round 6 (R6-1) did the same to the start anchor,
+    # with no corpus value leading with a digit or a capital. A probe has to fail the
+    # rule it guards and nothing else.
+    #
+    # Every arm of the refusal and the corpus value that DECIDES it. Keep this list
+    # and the probes together: an arm added without a probe here is the same failure
+    # again, and five rounds were spent rediscovering one arm at a time.
+    #   digit cap            -> "quick_brown_fox_123"
+    #   length cap           -> "mongo_primary_admin_passphrase_01" (33 chars)
+    #   alphabet             -> "us_East_1"
+    #   start anchor         -> "2fa_backup_codes"
+    #   underscore required  -> "bucketv4" (refused only by the missing "_")
+    #   end anchor           -> "us_East_1" (`fullmatch` -> `match` reds on it)
+    #   the `not strong` gate -> NO single-value probe can straddle it: the whole
+    #     corpus is measured under the weak name "KEY", so removing the gate
+    #     (`redaction_shapes.py`, the `and not strong` condition) leaves THIS test
+    #     green and reds 354 rows of
+    #     `test_a_credential_shape_is_masked_on_every_surface` instead. That sibling
+    #     test owns the condition — a green reading here is NOT coverage of it
+    #     (agent review R7-1).
+    #
+    # The hyphen is deliberately absent from the list: no masked corpus value
+    # contains one, and the hyphenated values are released through a separate
+    # clause, so no single-value probe can decide that arm (agent review round 7).
     "quick_brown_fox_123",  # 3 digits -> the digit cap
     "bucketv4",  # no underscore -> the underscore rule
     "mongo_primary_admin_passphrase_01",  # 33 chars -> the length cap
