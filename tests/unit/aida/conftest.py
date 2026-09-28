@@ -1,0 +1,64 @@
+"""Fixtures shared by the aida tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+
+def isolated_root_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A scratch config root, reachable BOTH explicitly and via ``paths``.
+
+    Production code reads the root two ways — callers pass it in (the boot
+    hooks hand ``config_dir`` to ``ensure_session``) and the session hooks
+    resolve it through ``local_operator.paths.config_dir()`` — so the fixture
+    sets the override AND HOME, and hands back the same path it set. Every
+    module in this package can therefore exercise the real call shapes.
+
+    The body is a FUNCTION rather than living in the fixture so a test in
+    ANOTHER directory (``tests/unit/server/test_desktop_aida.py``, which owns
+    route-level tests for her contract) can build the same root without
+    importing a fixture object: pytest resolves imported fixtures from the
+    module namespace, but a file that imports one and also names it as a
+    parameter is an F811 redefinition — and the two-roots divergence that
+    comment warns about is exactly what the shared body prevents.
+    """
+    root = tmp_path / "config"
+    home = tmp_path / "home"
+    root.mkdir(parents=True, exist_ok=True)
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_AIDA", raising=False)
+    return root
+
+
+@pytest.fixture()
+def isolated_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    return isolated_root_path(tmp_path, monkeypatch)
+
+
+def tree(root: Path) -> set[str]:
+    """Every path under ``root``, as relative strings — a footprint snapshot."""
+    if not root.exists():
+        return set()
+    return {str(path.relative_to(root)) for path in root.rglob("*")}
+
+
+def write_config(root: Path, values: dict[str, Any]) -> None:
+    """Merge ``values`` into ``<root>/config.yml``'s ``values:`` mapping.
+
+    The shape ``ConfigManager`` actually reads (see its written files), which
+    is why tests cannot just append a top-level key.
+    """
+    import yaml
+
+    path = root / "config.yml"
+    document = yaml.safe_load(path.read_text()) if path.exists() else {}
+    document = document if isinstance(document, dict) else {}
+    merged = document.setdefault("values", {})
+    for key, value in values.items():
+        merged[key] = value
+    path.write_text(yaml.safe_dump(document))

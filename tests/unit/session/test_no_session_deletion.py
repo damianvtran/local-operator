@@ -1987,6 +1987,40 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "clears the pid-suffixed .tmp FILE this call just wrote, on the failure path",
     ),
+    # Aida's small stores: ``<config>/aida/state.json``, ``onboarding.json``,
+    # ``escalate.json``. Every path in the package is built from
+    # ``config_dir()/aida/`` plus a literal basename — no session id, no caller
+    # input — so none of them can name a path under ``sessions/``. The
+    # ``os.unlink`` is mkstemp's own temp on the failure path; the quiet unlink
+    # is the escalation tray, removed only after it has been read.
+    (
+        "local_operator/aida/state.py::write_json",
+        "os.replace",
+        "tmp FILE -> <config_dir>/aida/*.json FILE; aida-derived, never sessions/",
+    ),
+    (
+        "local_operator/aida/state.py::write_json",
+        "os.unlink",
+        "clears the mkstemp FILE this call just wrote, on the failure path",
+    ),
+    (
+        "local_operator/aida/state.py::_unlink_quietly",
+        "<path>.unlink",
+        "removes the <config_dir>/aida/escalate.json tray FILE after reading it",
+    ),
+    # The ONE call of hers that removes a DIRECTORY: the create-failure
+    # cleanup. It is guarded twice in the same function — the directory must
+    # exist AND hold no transcript — so the window it can act in is between
+    # the fresh ``mkdir`` and the first transcript append, and a real
+    # conversation can never be inside it. The id it names was minted by the
+    # very call that created the directory (``uuid4().hex[:12]``), never read
+    # from her state file, so a retry after a partial failure cannot reach an
+    # established id either.
+    (
+        "local_operator/aida/bootstrap.py::_discard_failed_create",
+        "shutil.rmtree",
+        "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
+    ),
     (
         "local_operator/evaluation/session_arm.py::declare_action_server",
         "<path>.replace",

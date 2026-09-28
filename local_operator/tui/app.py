@@ -176,6 +176,7 @@ from local_operator.session.runtime.types import (
     update_phrase,
 )
 from local_operator.slash_commands import (
+    AIDA_SUBCOMMANDS,
     NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
     PROJECT_NAME_VERBS,
@@ -377,6 +378,7 @@ from local_operator.tui.widgets.projects_view import (
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
+    AIDA_MARKER,
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
 )
@@ -5218,6 +5220,17 @@ class OperatorApp(App[None]):
         # Unlike a destination-scoped switch receipt, a completed create must
         # remain discoverable wherever the user navigated while it was copying.
         self._pending_fork_outcome: tuple[str, NoticeKind] | None = None
+        #: A ``/aida <request>`` typed BEFORE her conversation is on screen:
+        #: ``(session_id, text, attachments)``, spent by ``_submit_aida_prompt``
+        #: at the same adoption seams as the boot prompt and dropped — rather
+        #: than misdelivered — when the transition lands elsewhere. Initialised
+        #: here so the seam's consumption is a no-op on an app that never ran
+        #: ``/aida``; without it the FIRST adoption of any kind raised.
+        self._pending_aida_prompt: tuple[str, str, Any] | None = None
+        #: The scheduled first-run Aida ensure `run_tui` starts — never awaited
+        #: there (see `_schedule_aida_boot_ensure`). Held so the task cannot be
+        #: garbage-collected mid-flight; ``None`` until a CLI boot starts one.
+        self._aida_boot_task: asyncio.Task[None] | None = None
         self._fork_in_progress = False
         self._fork_source_session: Any = None
         self._fork_cancelled = False
@@ -9220,6 +9233,13 @@ class OperatorApp(App[None]):
             # line does not have to make it.
             if not source.display_only:
                 self._submit_boot_prompt(session)
+                # Her stashed ``/aida <request>`` is consumed at the SAME seams
+                # as the boot prompt — adoption is where a typed-but-unspent
+                # prompt belongs, and a refresh onto her conversation is one of
+                # those moments. Every site is safe to call because consuming
+                # clears the stash (``_submit_aida_prompt``), so the first
+                # landing takes it and later ones see None.
+                self._submit_aida_prompt(session)
             session.resume_viewer_gates()
             self._session_sidebar.set_current(session_id)
             self._session_sidebar.refresh()
@@ -12361,6 +12381,7 @@ class OperatorApp(App[None]):
         self._adopt_session(session)
         self._report_degraded_attach(session)
         self._submit_boot_prompt(session)
+        self._submit_aida_prompt(session)
         # TRIGGER 3, on the other owning host: a goal whose continuation was in
         # flight when this terminal closed is re-engaged ONCE, here, where the
         # restored record is readable and the session is current.
@@ -15353,6 +15374,10 @@ class OperatorApp(App[None]):
                 # `fork.consume_boot_prompt` promises to keep by construction.
                 # Consuming it here makes both modes read it exactly once.
                 self._submit_boot_prompt(session)
+                # Same seam for her stashed request (see the refresh site
+                # above): a `/aida <request>` landing on a live in-process
+                # session must spend the text here or carry it forever.
+                self._submit_aida_prompt(session)
                 # The replacement gets a runtime on the same terms the boot
                 # path gives one, so `/resume` and `/new` land on a complete
                 # band rather than on the half-filled one a cold viewer paints.
@@ -16049,6 +16074,16 @@ class OperatorApp(App[None]):
             # ONE ``registry.scan()`` and ONE ``wakes.store.read_index()`` for
             # the whole list, never a probe per row.
             rows = self._overlay_live_state(rows)
+
+            # Pinned conversations lead, in pin order (R27). AFTER the overlay
+            # because the ordering is the last word on the list the screen
+            # receives, and the pin store is the same one the sidebar reads —
+            # one store, two surfaces, one order. This call site is the ONLY
+            # one: the method existed without a caller for a while, which the
+            # rendered picker caught and no unit test could, because the unit
+            # test exercised the reorder function itself rather than the
+            # screen's row pipeline.
+            rows = self._pinned_first(rows)
 
             # AFTER the empty check, so a store with nothing to offer does no
             # scanning, and BEFORE the screen is pushed, so the first keystroke
@@ -17032,6 +17067,10 @@ class OperatorApp(App[None]):
                             "process, then resume again",
                             "warning",
                         )
+                        # The transition will not land, so a request waiting
+                        # for it ends here rather than firing on some later
+                        # adoption (U1's stale half).
+                        self._drop_pending_aida_request(concrete)
                         return
                     if (
                         record is not None
@@ -17109,9 +17148,11 @@ class OperatorApp(App[None]):
                 remaining = deadline - _resume_redial_clock()
                 if static is not None:
                     verdict(static_text())
+                    self._drop_pending_aida_request(concrete)
                     return
                 if attempt >= RESUME_CONNECT_ATTEMPTS or remaining <= 0:
                     verdict(gave_up_text(error))
+                    self._drop_pending_aida_request(concrete)
                     return
                 # STATED AS A BOUND, and in the composer's register for the same
                 # wait: no denominator the user cannot act on, no diagnosis the
@@ -17167,6 +17208,14 @@ class OperatorApp(App[None]):
             # The composer's refusal row describes the same state, so it ends
             # with the operation on every exit too.
             self._retire_composer_refusal()
+            # THE CANCELLATION/UNWIND EXIT OWES THE REQUEST ITS ENDING TOO.
+            # `settled` is False only when no verdict resolved this run (the
+            # cancellation arm above, or an unexpected unwind), and on a
+            # SUCCESSFUL dial it is True here — the adopt below spends the
+            # stash itself — so this fires exactly when the transition died
+            # without landing.
+            if not settled:
+                self._drop_pending_aida_request(concrete)
 
         # The retry row described a dial that is now over; leaving it up would
         # have the transcript promise a reconnect that already happened. The
@@ -17224,6 +17273,18 @@ class OperatorApp(App[None]):
         try:
             self._reset_ledger_for_swap()
             self._adopt_session(remote)
+            # HER STASHED REQUEST IS SPENT HERE TOO (UX round 1, U1). This is
+            # the adoption seam for an ALREADY-BUILT viewer — the attach path
+            # onto a live owner (`_attach_or_refuse`; the ordinary case once
+            # her runtime is up, from any prior open or her 09:00 cadence) and
+            # the mesh remote path — and it used to spend neither prompt seam,
+            # so `/aida hello` against a live her switched the conversation
+            # and silently dropped the words: no transcript row, no notice,
+            # nothing on disk. Spending it at the same moment every other
+            # adoption does is what makes R2's flow true wherever she is
+            # running; consuming clears the stash, so no other seam fires it
+            # twice.
+            self._submit_aida_prompt(remote)
             if attach_behind:
                 # The bind behind the paint: the same engage a cold boot runs,
                 # which finds this owner's record and attaches to it rather
@@ -34131,6 +34192,11 @@ class OperatorApp(App[None]):
             self._cmd_credential(arg, notice)
         elif command == "/team":
             self._cmd_team(arg, notice, attachments)
+        elif command == "/aida":
+            # Beside the roster commands because it is the same gesture at a
+            # fixed destination: open a conversation and (optionally) hand it
+            # a request as its next turn.
+            self._cmd_aida(arg, notice, attachments)
         elif command == "/agent":
             self._cmd_agent(arg, notice, attachments)
         elif command == "/project":
@@ -42044,6 +42110,253 @@ class OperatorApp(App[None]):
         if stored:
             return "logged in"
         return "env key" if providers.is_usable(provider_id) else "needs login"
+
+    # -- /aida ----------------------------------------------------------------
+
+    def _cmd_aida(
+        self,
+        arg: str,
+        notice: NoticeFn,
+        attachments: Mapping[int, Marked] | None = None,
+    ) -> None:
+        """``/aida [request]`` | ``pause`` | ``resume`` | ``status``.
+
+        Her front door (R2). Bare, or with a request, it opens her one long
+        conversation — created on first use through ``aida.ensure_session``,
+        which is also what pins her (R27) and arms the cadence — and the
+        request is sent as a real user turn via ``_submit_command_prompt``
+        (the ``/team`` shape: the request text is the transcript subject, so
+        the slash line itself does not echo).
+
+        ``pause``/``resume``/``status`` are RESERVED words parsed HERE rather
+        than by the registry — the ``/team chart`` precedent, including its
+        escape: ``/aida =pause …`` sends her a message that merely starts with
+        the word (the ``=`` prefix, like ``/team =chart``).
+
+        A RESERVED WORD COUNTS ONLY AS THE WHOLE ARGUMENT (cross-host grammar
+        ruling, UI review round 1, MINOR-3). The first cut split on the first
+        space, so ``/aida pause and think`` ran the control word and silently
+        DROPPED the rest — a typed request, gone, under a receipt about
+        pausing. One grammar for both hosts now: the word alone is the
+        control; anything longer is a message for her, verbatim.
+
+        Both halves run in workers: opening resolves (and on first use
+        creates) her session off the loop, and the control words write config
+        and wake files under the aida lock, which must not park the loop.
+        """
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        text = arg.strip()
+        escaped = text.startswith("=")
+        if escaped:
+            text = text[1:].lstrip()
+        # WHOLE ARGUMENT, not first token (see the docstring): one grammar for
+        # the TUI and the desktop, so `/aida pause and think` reaches her as
+        # the message it looks like.
+        if not escaped and text.casefold() in AIDA_SUBCOMMANDS:
+            self.run_worker(
+                self._aida_control(text.casefold(), notice), thread=False, group="session"
+            )
+            return
+        if self._resume_factory is None:
+            self._system_notice(
+                "opening Aida requires a session-capable launcher — see the CLI",
+                "warning",
+            )
+            return
+        self.run_worker(self._aida_open(text, attachments, notice), thread=False, group="session")
+
+    async def _aida_open(
+        self, text: str, attachments: Mapping[int, Marked] | None, notice: NoticeFn
+    ) -> None:
+        """Ensure her session exists, then open it (stashing ``text`` for adoption).
+
+        The stash is id-scoped and consumed in ``_reload_session`` once the
+        transition lands (``_submit_aida_prompt``): a boot that fails or lands
+        elsewhere drops it, which is the same deal ``/fork``'s boot prompt
+        keeps. Nothing is stashed when this terminal is ALREADY on her
+        conversation — the request is simply submitted.
+        """
+        from local_operator.aida import ensure_session
+
+        try:
+            session_id = await ensure_session()
+        except Exception as error:  # noqa: BLE001 — a boot path never raises
+            logger.warning("aida: ensure failed", exc_info=True)
+            self._system_notice(f"{AIDA_MARKER} could not reach Aida: {error}", "warning")
+            return
+        if session_id is None:
+            notice(f"{AIDA_MARKER} Aida is disabled on this install (aida.enabled is false).")
+            return
+        if self._conversation_id() == session_id:
+            if text:
+                self._submit_command_prompt(text, attachments)
+            else:
+                notice(f"{AIDA_MARKER} This conversation is Aida's — already open.")
+            return
+        if text:
+            self._pending_aida_prompt = (session_id, text, attachments)
+        self._resume_session(session_id, notice)
+
+    async def _aida_control(self, word: str, notice: NoticeFn) -> None:
+        """``pause`` / ``resume`` / ``status`` — receipts over the aida engine.
+
+        ``pause``/``resume`` flip ``aida.cadence.paused`` (the authority: the
+        config watcher delivers the change to a live session in ANY process
+        within its 2 s tick, which is how a pause reaches a session this
+        terminal is not sitting on), hold or clear the supervisor's
+        ``held_at`` marker, and cancel/re-arm her wake rows through the
+        external writer when no runtime owns them. A session that does not
+        exist yet still takes the config write, so a first pause before her
+        first open is honoured by the boot that creates her.
+
+        ``status`` reads what is actually on disk — enabled, paused, next
+        cadence, today's escalation budget — never a cached copy.
+        """
+        from local_operator.aida import proactive, state
+        from local_operator.paths import config_dir
+
+        try:
+            root = config_dir()
+            if word == "status":
+                notice(self._aida_status_line(proactive.status(root)))
+                return
+            session_id = state.session_id_of(root) or ""
+            if word == "pause":
+                outcome = await proactive.pause(root, session_id)
+                if outcome.owner_blocked:
+                    notice(
+                        f"{AIDA_MARKER} Aida: paused — her open session applies it within "
+                        "a couple of seconds. /aida resume re-arms her check-ins."
+                    )
+                else:
+                    notice(
+                        f"{AIDA_MARKER} Aida: paused — no proactive check-ins. "
+                        "/aida resume re-arms them."
+                    )
+                return
+            armed = await proactive.resume(root, session_id)
+            when = self._aida_when(proactive.status(root))
+            if armed == "owner":
+                notice(
+                    f"{AIDA_MARKER} Aida: active again — her open session will arm the "
+                    "next check-in within a couple of seconds."
+                )
+            elif when:
+                notice(f"{AIDA_MARKER} Aida: active again — next check-in {when}.")
+            else:
+                notice(f"{AIDA_MARKER} Aida: active again — her next boot arms the check-in.")
+        except Exception as error:  # noqa: BLE001 — the refusal is the receipt
+            logger.warning("aida: control op failed", exc_info=True)
+            self._system_notice(f"could not {word} Aida: {error}", "warning")
+
+    @staticmethod
+    def _aida_when(st: Mapping[str, Any]) -> str:
+        """``HH:MM`` for the next cadence instant, or ``""`` when none is armed."""
+        due = st.get("cadence_due_at")
+        if not isinstance(due, int):
+            return ""
+        return time.strftime("%H:%M", time.localtime(due / 1000))
+
+    @staticmethod
+    def _aida_status_line(st: Mapping[str, Any]) -> str:
+        """One line: state, next check-in, today's escalation budget."""
+        if not st.get("enabled"):
+            word = "disabled"
+        elif st.get("paused"):
+            word = "paused"
+        else:
+            word = "active"
+        parts = [f"{AIDA_MARKER} Aida: {word}"]
+        when = OperatorApp._aida_when(st)
+        if when:
+            parts.append(f"next check-in {when}")
+        # PLAIN COPY, not budget jargon (design round 1, D3): "0/2" never said
+        # what counted as extra or what the ceiling was. The sentence keeps the
+        # status line's label voice.
+        # The count and its ceiling ride NON-BREAKING spaces (the "42\u00a0s"
+        # precedent in the attach narration): the receipt wraps in the narrow
+        # column a sidebar-open layout leaves, and "0 of\n2" split the pair
+        # that D3's copy exists to make plain.
+        parts.append(
+            f"extra check-ins used today: {int(st.get('extras_today', 0))}\u00a0"
+            f"of\u00a0{int(st.get('max_extra_per_day', 0))}"
+        )
+        return " — ".join(parts)
+
+    def _drop_pending_aida_request(self, session_id: str) -> bool:
+        """Consume-and-drop a ``/aida <request>`` stash aimed at ``session_id``.
+
+        THE FAILURE ENDING of a transition that was supposed to spend it. A
+        request typed for her must not survive a transition that did not land:
+        the next adoption of her id would otherwise deliver words typed
+        minutes earlier into a fresh conversation, and the user would have
+        been told nothing either way. Consuming is id-scoped (a stash aimed
+        elsewhere is left for its own transition) and the drop is NARRATED,
+        because the one outcome worse than a dropped request is a dropped
+        request nobody hears about (UX round 1, U1: "never silence").
+
+        Returns whether a stash was dropped, so callers can keep their own
+        sentences to one row per event.
+        """
+        pending = self._pending_aida_prompt
+        if pending is None or pending[0] != session_id:
+            return False
+        self._pending_aida_prompt = None
+        self._system_notice(
+            f"{AIDA_MARKER} Request not sent — Aida's conversation did not open, "
+            "so nothing ran.",
+            "warning",
+        )
+        return True
+
+    def _submit_aida_prompt(self, session: Any) -> None:
+        """Consume a stashed ``/aida <request>`` once its session is adopted.
+
+        Called from the same seam as :meth:`_submit_boot_prompt` (a
+        ``/fork``'s opening message), for the same reason: a prompt must be
+        spent on the conversation it was typed for. The id check IS the
+        scope — a transition that failed, or landed on a different session,
+        drops the stash and the user retypes it.
+        """
+        pending, self._pending_aida_prompt = self._pending_aida_prompt, None
+        if pending is None:
+            return
+        session_id, text, attachments = pending
+        if not session_id or getattr(session, "session_id", "") != session_id:
+            return
+        if not text.strip():
+            return
+        self._submit_command_prompt(text, attachments)
+
+    def _pinned_first(self, rows: list[Any]) -> list[Any]:
+        """Pinned conversations first, in pin order; the rest unchanged.
+
+        R27's picker half. The sidebar has rendered pinned rows first since
+        the pin store landed (``read_pins`` feeds ``load_catalog``), while the
+        picker listed the same store in pure recency — one store, two orders.
+        The pin IS the user's statement about what belongs at the top, so the
+        picker reads it through the SAME store rather than growing its own
+        notion. Best-effort: an unreadable pin file leaves the order alone.
+        """
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.tui.sidebar_pins import read_pins
+
+            pins = read_pins(config_dir())
+        except Exception:  # noqa: BLE001 — decoration, never a gate
+            logger.debug("aida: could not read pins for the picker", exc_info=True)
+            return rows
+        if not pins:
+            return rows
+        by_id = {getattr(row, "id", ""): row for row in rows}
+        pinned = [by_id[pin] for pin in pins if pin in by_id]
+        if not pinned:
+            return rows
+        taken = {pin for pin in pins if pin in by_id}
+        return [*pinned, *[row for row in rows if getattr(row, "id", "") not in taken]]
 
     def _cmd_mobile(self, arg: str, notice: NoticeFn) -> None:
         """A convenience over the same CLI lifecycle, never an implicit login side effect.

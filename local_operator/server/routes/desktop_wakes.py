@@ -440,7 +440,9 @@ def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dic
     for session_id, raw in index.items():
         if not isinstance(raw, Mapping):
             continue
-        dormant = bool(raw.get("stopped_at"))
+        # ``held_at`` (Aida paused) reads as dormant for the same reason
+        # ``stopped_at`` does: it will not fire until a lever is lifted.
+        dormant = bool(raw.get("stopped_at") or raw.get("held_at"))
         if dormant and not include_dormant:
             continue
         session_dir = Path(config_dir) / "sessions" / session_id

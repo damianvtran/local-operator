@@ -77,6 +77,24 @@ from typing import Any, Callable, Mapping
 #: lines and ``lop wake serve``'s identical.
 logger = logging.getLogger("local_operator.wakes.supervisor")
 
+
+def _is_held_entry(entry: Mapping[str, Any] | None) -> bool:
+    """``wakes.store.is_held``, for this module's five decisions.
+
+    Parking has two levers now — the stop's ``stopped_at`` and Aida's
+    ``held_at`` (see ``wakes/store.is_held``) — and every supervisor decision
+    that used to ask about the first must ask about both: engaging a held
+    entry would send the proactive output a pause asked to silence, list it
+    as due, or count it toward keeping the supervised process alive. One
+    wrapper rather than five call sites spelling two key names, and the
+    import stays INSIDE it to match this file's stdlib-only-at-module-scope
+    rule (the store is a leaf, but ``--help`` must not pay for it).
+    """
+    from local_operator.wakes.store import is_held
+
+    return is_held(entry)
+
+
 #: Never sleep longer than this, however far away the next wake is. A long
 #: sleep is not a correctness problem (the due time is recomputed on every
 #: pass) but it is an OBSERVABILITY one: a supervisor asleep for nine hours
@@ -379,19 +397,22 @@ def _due_sessions(
     the user's, and a spooled turn is not an exception to it.
     """
     from local_operator.wakes.spooled import next_attempt_at_ms
-    from local_operator.wakes.store import next_due_at
+    from local_operator.wakes.store import is_held, next_due_at
 
     due: list[tuple[str, str, int]] = []
     dormant: set[str] = set()
     for session_id, entry in index.items():
         if not isinstance(entry, dict):
             continue
-        if entry.get("stopped_at"):
-            # Dormant: the session was deliberately stopped, and PR 3's
-            # contract is that its wakes stay armed but do not fire until the
-            # user reopens it. Firing here would resurrect a session the kill
-            # switch ended. A pending delivery record is left in place for the
-            # same reason: reopening the session is what delivers it.
+        if is_held(entry):
+            # Dormant: the session was deliberately stopped OR Aida is
+            # paused (``held_at`` — the same "will not fire until a lever is
+            # lifted" state; see ``wakes.store.is_held``). PR 3's contract is
+            # that the wakes stay armed but do not fire until the user lifts
+            # it. Firing here would resurrect a session the kill switch
+            # ended, or send the proactive output a pause asked to silence.
+            # A pending delivery record is left in place for the same
+            # reason: reopening/resuming is what delivers it.
             dormant.add(session_id)
             continue
         earliest = next_due_at(entry)
@@ -638,7 +659,7 @@ def _reconcile_deliveries(
             remove_delivery(config_dir, session_id)
             del deliveries[session_id]
             continue
-        if entry.get("stopped_at"):
+        if _is_held_entry(entry):
             continue
         if record.get("occurrence_ms") not in _schedule_due_times(entry):
             remove_delivery(config_dir, session_id)
@@ -651,7 +672,7 @@ def _next_wake_ms(index: dict[str, dict[str, Any]]) -> int | None:
 
     earliest: int | None = None
     for entry in index.values():
-        if not isinstance(entry, dict) or entry.get("stopped_at"):
+        if not isinstance(entry, dict) or _is_held_entry(entry):
             continue
         due = next_due_at(entry)
         if due is None:
@@ -1325,13 +1346,13 @@ def _has_fireable_wakes(
             if not isinstance(record, dict):
                 continue
             entry = index.get(session_id)
-            if isinstance(entry, dict) and entry.get("stopped_at"):
+            if isinstance(entry, dict) and _is_held_entry(entry):
                 continue
             if config_dir is not None and not _session_exists(config_dir, session_id):
                 continue
             return True
     for session_id, entry in index.items():
-        if not isinstance(entry, dict) or entry.get("stopped_at"):
+        if not isinstance(entry, dict) or _is_held_entry(entry):
             continue
         if not entry.get("schedules"):
             continue
@@ -1456,7 +1477,12 @@ def _retirement_reason(config_dir: Path) -> str:
         # for a session that does not exist. Ghost is also the STRONGER fact:
         # a stale wake still has a session to be delivered into, and a ghost
         # has nothing at all, so it is the one worth telling the operator.
-        if entry.get("stopped_at"):
+        if _is_held_entry(entry):
+            # ``held_at`` counts here beside ``stopped_at`` (and is the
+            # reason this reads the shared predicate): both are "parked by a
+            # lever" and both read as dormant rather than as a problem. An
+            # Aida pause that showed as "stale" or "ghost" would send the
+            # operator chasing a delivery that is deliberately not coming.
             dormant += 1
         elif not _session_exists(config_dir, session_id):
             ghost += 1

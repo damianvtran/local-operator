@@ -60,6 +60,10 @@ PREFIXES_TEXT_POLICY = {
     "fork": True,
     # The name AND the request the manager is given.
     "team": True,
+    # The request SHE is given (or a reserved word the handler reads — `=`
+    # escapes it). Same shape as `/team`: a request is a prompt, so an inline
+    # engage reassembles the draft to the front rather than splicing it.
+    "aida": True,
     # The name AND the message the persona is given.
     "agent": True,
     # --- commands whose trailing text is a VALUE chosen from a list -----------
@@ -237,6 +241,12 @@ ARGUMENT_SHAPE_POLICY = {
     # `/project delete this thing` stays a message while `/project delete x` is
     # the command on every surface that validates it.
     "project": ArgumentShape.SUBCOMMAND,
+    # ANY text, because everything after the word is either a reserved word
+    # (`AIDA_SUBCOMMANDS`) the HANDLER parses or a request she is given.
+    # SUBCOMMAND would make the command route refuse a request
+    # (`/aida fix the flaky test`), which is the one thing this row must
+    # accept.
+    "aida": ArgumentShape.ANY,
     # ANY text: a handler or a form field takes it, so every whole-draft form is
     # the command. `/rename <title>`'s title is arbitrary text, and `/move <path>`
     # executes the path directly, spaces included.
@@ -342,6 +352,11 @@ def test_the_vocabulary_is_exactly_the_desktop_argument_set() -> None:
         "btw",
         "fork",
         "team",
+        # Aida's request (or a reserved verb the HANDLER reads before this
+        # question is asked). Added deliberately: `/aida <request>` is the
+        # same claim `/team` makes — text after the word is a prompt the
+        # conversation is given — and the reserved words escape with `=`.
+        "aida",
         "agent",
         # a value chosen from an inline list
         "model",

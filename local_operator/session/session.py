@@ -3108,6 +3108,12 @@ class Session:
             ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        #: Whether this session is AIDA's (``local_operator.aida``), resolved
+        #: once per open by :meth:`_aida_is_hers` — one stat of
+        #: ``<config>/aida/state.json`` on every session that is not hers, and
+        #: the gate on every aida hook below (load hold, persist reconcile,
+        #: config-watch reconcile, delivery guard, after-turn tray drain).
+        self._aida_duty = False
         #: Set by the deliver trampoline, consumed by the next persist, which
         #: is what stamps ``last_fired_at`` on the wake index entry. See
         #: :meth:`_persist_wake_schedules`.
@@ -9922,6 +9928,13 @@ class Session:
             # operator's rotation ticket has to exist even when the turn that
             # leaked the credential is the one being aborted.
             await self._flush_shape_incidents()
+            # AIDA'S TRAY DRAIN, at the end of the turn that may have written
+            # it: one stat when the tray is empty (every turn of every other
+            # session skips on the duty flag). Awaited, not spawned, because
+            # the turn lock is still held here and the arm it may perform is
+            # sub-millisecond file work.
+            if getattr(self, "_aida_duty", False):
+                await self._aida_after_turn()
             # LAST, by design: ``_run_turn``'s own ``finally`` has already
             # cleared ``_is_streaming`` on the way out of the await above, and
             # ``_flush_held_end`` has delivered the end event, so a reader
@@ -15313,6 +15326,17 @@ class Session:
     # -- wakes -------------------------------------------------------------------
 
     def _load_wake_schedules(self) -> None:
+        # AIDA'S DUTY IS RESOLVED FIRST, before every early return below, and
+        # that placement is load-bearing rather than stylistic: a session with
+        # NO wake-schedules entry at all is exactly the state her engine must
+        # be able to recover from (her first arm may have failed, or a pause
+        # may have emptied the list), and a flag gated behind "this session
+        # already has rows" would make that state unreachable from her own
+        # persist hook — no rows, no duty, no reconcile, no rows. One stat of
+        # her state file on every other session, and the gate for the load
+        # hold, the persist reconcile, the config-watch reconcile, the
+        # delivery guard and the after-turn tray drain.
+        self._aida_duty = self._aida_is_hers()
         # A wake is active ownership, not conversation history. A fork declines
         # only snapshots copied at its creation boundary; snapshots appended
         # afterwards belong to the fork and must survive its next resume.
@@ -15333,7 +15357,99 @@ class Session:
                 schedules.append(WakeSchedule.model_validate(raw))
             except Exception:
                 logger.warning("dropping malformed persisted wake schedule: %r", raw)
+        # AIDA'S LOAD-TIME HOLD, at the one place rows enter memory. While she
+        # is paused or disabled, her ``aida-*`` rows do not get loaded at all —
+        # a session opened during a pause must not arm them, and the index
+        # guard the supervisor reads cannot help a session that is already
+        # live (this is the delivery-side half of that hole; see
+        # ``delivery_allowed`` in the same module for the fire-time half).
+        if self._aida_duty:
+            schedules = self._aida_filter_rows(schedules)
         self._wake.load(schedules)
+
+    # -- aida engine attachment ---------------------------------------------
+
+    def _aida_is_hers(self) -> bool:
+        """Whether THIS session is the one ``aida/state.json`` names.
+
+        One stat on every other session on the machine, and the flag every
+        aida hook is gated on, so an install that never enabled her pays one
+        missed stat per session open. Failure answers False: a session that
+        cannot prove it is hers must not run her engine.
+        """
+        try:
+            from local_operator.aida import state as aida_state
+            from local_operator.paths import config_dir
+
+            return aida_state.is_aida_session(config_dir(), self._session_id)
+        except Exception:  # noqa: BLE001 — a lookup, never a boot dependency
+            logger.debug("aida: could not resolve her session identity", exc_info=True)
+            return False
+
+    def _aida_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+        """Drop her ``aida-*`` rows when she is paused or disabled."""
+        try:
+            from local_operator.aida import proactive
+            from local_operator.paths import config_dir
+
+            return proactive.filter_on_load(schedules, config_dir=config_dir())
+        except Exception:  # noqa: BLE001 — the fire-time guard still holds
+            logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
+            return schedules
+
+    async def _aida_reconcile_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+        """The engine's reconcile over one schedule list, notes journaled.
+
+        Called from the persist (so a fire's automatic re-arm and every wake
+        tool mutation land through ONE writer), from the config watcher (a
+        pause/resume issued in another process arrives here within its 2 s
+        tick) and from the after-turn drain. Never raises: a failure leaves
+        the list exactly as the caller gave it.
+        """
+        try:
+            from local_operator.aida import proactive
+            from local_operator.paths import config_dir
+
+            result = proactive.reconcile(
+                schedules, config_dir=config_dir(), session_id=self._session_id
+            )
+            if result.notes:
+                await proactive.append_notes(self._transcript, result.notes)
+            return result.schedules
+        except Exception:  # noqa: BLE001 — the schedule write outranks the engine
+            logger.warning("aida: reconcile failed; leaving the list as given", exc_info=True)
+            return schedules
+
+    async def _aida_reconcile_now(self) -> None:
+        """Reconcile the LIVE list and persist only when something moved."""
+        try:
+            current = list(self._wake.schedules)
+            updated = await self._aida_reconcile_rows(current)
+            if updated != current:
+                await self.set_wake_schedules(updated)
+        except Exception:  # noqa: BLE001 — best-effort by contract
+            logger.warning("aida: live reconcile failed", exc_info=True)
+
+    async def _aida_after_turn(self) -> None:
+        """Turn-end drain of her escalation tray. One stat when idle.
+
+        The tray is written BY Aida during a turn, so the end of that turn is
+        the earliest honest moment to act on it; without this the request
+        would wait for the next unrelated persist (potentially a day), which
+        is exactly the lag the tray exists to avoid.
+        """
+        try:
+            from local_operator.aida import state
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+            if not state.is_aida_session(root, self._session_id):
+                return
+            if not state.escalate_path(root).exists():
+                return
+            await self._aida_reconcile_now()
+        except Exception:  # noqa: BLE001 — an instrument never fails a turn
+            logger.warning("aida: after-turn drain failed", exc_info=True)
 
     async def _wake_deliver_via_hook(self, due: DueWake) -> None:
         """Scheduler-facing deliver trampoline: reads the CURRENT hook at fire
@@ -15728,6 +15844,23 @@ class Session:
         if pending:
             superseded = {schedule.id for schedule in pending}
             schedules = [*[s for s in schedules if s.id not in superseded], *pending]
+        # AIDA'S ENGINE WRITES HERE, and nowhere else while this session is
+        # live: the reconcile applies the pause/disable hold, ensures the
+        # single cadence row (this is how a fired one-shot is re-armed for
+        # tomorrow — the pump persists the advanced list immediately after a
+        # delivery), and drains the escalation tray within its budget. Its
+        # output IS what the transcript and index below are written from, so
+        # the one-writer invariant holds: external armers refuse a session
+        # with a live owner (``wakes/arm.py``), and the live owner's rows are
+        # exactly this function's output.
+        #
+        # ``getattr`` rather than a bare read: this method is bound onto
+        # partial test hosts (``test_serving_drain``'s ``PersistHost`` is the
+        # precedent), and a host that never ran ``Session.__init__`` has no
+        # aida flag — absent means "not her session", which is the same answer
+        # every other non-Aida caller gets.
+        if getattr(self, "_aida_duty", False):
+            schedules = await self._aida_reconcile_rows(schedules)
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
@@ -16237,7 +16370,29 @@ class Session:
         if self._model_source in ("flag", "child"):
             return
         if saved is None:
-            self._model_migration_notice = bool(self._transcript.entries())
+            from local_operator.session.model_selection import (
+                SELECTED_MODEL_CUSTOM_TYPE,
+            )
+
+            # A CONVERSATION THAT NEVER RAN AND NEVER CHOSE ANYTHING (UX round
+            # 1, U2). A transcript holding only presentation metadata — the
+            # conversation-name row, wake snapshots, Aida's birth marker — has
+            # no saved selection to be "incomplete", and the amber notice read
+            # as a fault on her very first turn, minutes after her conversation
+            # was created. What makes a transcript a real conversation for this
+            # notice is a turn having run, or a selection having been written
+            # and lost — so either a message row or a `selected_model` row
+            # keeps the notice (the latter is the unusable-selection recovery
+            # this branch's sibling below also serves).
+            self._model_migration_notice = any(
+                row.type == ENTRY_MESSAGE
+                or (
+                    row.type == ENTRY_CUSTOM
+                    and str((row.payload or {}).get("custom_type", ""))
+                    == SELECTED_MODEL_CUSTOM_TYPE
+                )
+                for row in self._transcript.entries()
+            )
             return
         selector, effort = saved.selector, saved.effort
         if saved.boot_selector is not None:
@@ -16364,7 +16519,27 @@ class Session:
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
         annotated as missed — the agent must not read it as punctual, and a
         recurring one names the skipped occurrences (deduplicated to a count;
-        the identical message is NOT repeated per miss)."""
+        the identical message is NOT repeated per miss).
+
+        AIDA'S FIRE-TIME GUARD rides FIRST: an ``aida-*`` occurrence that comes
+        due while she is held is dropped (the schedule still advances in the
+        pump, so unpausing re-arms forward rather than replaying). This is the
+        window between a pause landing in another process and its delivery to
+        this one's schedule list; the load-time filter and the supervisor skip
+        cover the other two paths.
+        """
+        if getattr(self, "_aida_duty", False):
+            try:
+                from local_operator.aida import proactive
+                from local_operator.paths import config_dir
+
+                if proactive.is_aida_row(due.schedule.id) and not proactive.delivery_allowed(
+                    config_dir()
+                ):
+                    logger.info("aida: dropping held wake %s (%s)", due.schedule.id, "paused")
+                    return
+            except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
+                logger.debug("aida: delivery guard could not read the hold", exc_info=True)
         text = format_wake_delivery_text(due)
         missed_note = self._missed_delivery_note(due)
         if missed_note:
@@ -16629,6 +16804,16 @@ class Session:
                 self._web_tools_dirty = True
         if "hosting" in changed or "model_name" in changed or "model_effort" in changed:
             self._on_configured_model_changed(values, local=source == "local", changed=changed)
+        # AIDA'S LIVE-CONFIG SEAM. A pause or resume issued from ANOTHER
+        # process (the desktop app, a second terminal — the ops write the
+        # ``aida.cadence.paused`` key) reaches this session through the
+        # platform's own registry-key diff, which is what makes "ask the owner
+        # to drop/re-arm its rows in-process" need no bespoke RPC: the owner is
+        # THIS process, and the reconcile below is the in-process actor. The
+        # reconcile persists through the normal writer, so the index and
+        # transcript follow in the same breath.
+        if getattr(self, "_aida_duty", False) and any(key.startswith("aida.") for key in changed):
+            self._spawn_background(self._aida_reconcile_now())
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.

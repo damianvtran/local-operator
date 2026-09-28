@@ -609,6 +609,21 @@ SECTIONS: tuple[Section, ...] = (
         "relay will hold at once, session-copy cadence and how long a borrowed login "
         "lives. All take effect when the relay restarts.",
     ),
+    # The Aida keys. Scope LIVE, with the caveats stated in the description
+    # rather than hidden behind a dishonest label: the pause flag is delivered
+    # to every live process by the config watcher on its 2 s tick (that IS the
+    # mechanism that reaches a session running in another terminal), and the
+    # others are read at her next action — a boot, `/aida`, or the next fire —
+    # which for an always-on assistant is the same thing in practice. The one
+    # sentence a user needs before pressing Enter is written there.
+    Section(
+        "aida",
+        "Aida",
+        Scope.LIVE,
+        "Your chief of staff's proactive cadence: when she checks in, how much "
+        "she may escalate, and the pause switch. Edits are read at her next "
+        "action; /aida pause|resume act immediately.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -3419,6 +3434,80 @@ SETTINGS: tuple[Setting, ...] = (
             "The longest a device may use a login it borrowed from its owner before "
             "asking again, and so how long a revoked or offline owner's login keeps "
             "working elsewhere. Never longer than the token itself."
+        ),
+    ),
+    # -- aida --------------------------------------------------------------
+    # Defaults are LITERALS here, not imports: this module deliberately keeps the
+    # aida package off its import path (it is loaded on every CLI start), and
+    # `_consumer_defaults()` in tests/unit/test_settings_io.py imports the real
+    # constants from ``local_operator/aida/`` to pin that these cannot drift.
+    Setting(
+        key="aida.enabled",
+        path=("aida", "enabled"),
+        section="aida",
+        label="Aida enabled",
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices("enabled", "disabled"),
+        help="Read at boot and by /aida; a disabled install never creates her session.",
+    ),
+    Setting(
+        key="aida.cadence.at",
+        path=("aida", "cadence", "at"),
+        section="aida",
+        label="Daily check-in time",
+        kind=Kind.TEXT,
+        default="09:00",
+        placeholder="09:00",
+        help="Local wall-clock HH:MM. An invalid value falls back to 09:00 at the next arm.",
+    ),
+    Setting(
+        key="aida.cadence.paused",
+        path=("aida", "cadence", "paused"),
+        section="aida",
+        label="Cadence paused",
+        kind=Kind.BOOL,
+        default=False,
+        choices=_bool_choices("paused", "running"),
+        help=(
+            "Written by /aida pause|resume, which also hold her wakes; editing it "
+            "here works the same way at her next tick."
+        ),
+    ),
+    Setting(
+        key="aida.cadence.max_extra_per_day",
+        path=("aida", "cadence", "max_extra_per_day"),
+        section="aida",
+        label="Extra check-ins / day",
+        kind=Kind.INT,
+        default=2,
+        minimum=0,
+        maximum=12,
+        help="How many escalation check-ins she may arm per day. 0 disables escalation.",
+    ),
+    Setting(
+        key="aida.cadence.min_gap_minutes",
+        path=("aida", "cadence", "min_gap_minutes"),
+        section="aida",
+        label="Minimum gap (minutes)",
+        kind=Kind.INT,
+        default=90,
+        minimum=0,
+        maximum=1440,
+        help="Minimum spacing between one Aida wake and the next; closer requests are refused.",
+    ),
+    Setting(
+        key="aida.onboarding.nudge_days",
+        path=("aida", "onboarding", "nudge_days"),
+        section="aida",
+        label="Integration nudge interval (days)",
+        kind=Kind.INT,
+        default=14,
+        minimum=1,
+        maximum=365,
+        help=(
+            "How rarely she may nudge about setting up an integration. Read from "
+            "the onboarding slice."
         ),
     ),
 )

@@ -750,9 +750,17 @@ async def test_a_completion_inside_active_reorders_the_list_and_is_announced(
         assert working_edge["payload"]["revision"] >= 1
 
         before = (await client.get("/v1/desktop/sessions", params={"limit": 50})).json()["result"]
-        before_ids = [row["id"] for row in before["sessions"]]
+        # HER BUILT-IN ROW IS IN EVERY LIST. The server boot hook ensures
+        # Aida's session (a USER session by design — R3/R7), so a fresh
+        # config root lists three rows here, not two. This test's subject is
+        # the two rows IT created, so her row — cold, and none of this
+        # test's business — is filtered out; her presence and pinning are
+        # asserted by their own tests.
+        her_id = json.loads((root / "aida" / "state.json").read_text())["session_id"]
+        before_rows = [row for row in before["sessions"] if row["id"] != her_id]
+        before_ids = [row["id"] for row in before_rows]
         assert before_ids.index(elder) < before_ids.index(completer), before_ids
-        assert all(row["active"] for row in before["sessions"]), before["sessions"]
+        assert all(row["active"] for row in before_rows), before_rows
 
         # IT FINISHES: the record goes quiet and the completion lands. The section
         # stays "Active chats"; only the row's position inside it changes.
@@ -772,7 +780,7 @@ async def test_a_completion_inside_active_reorders_the_list_and_is_announced(
     # row. Both rows are still Active: this is the resort, not a section move.
     listed = await client.get("/v1/desktop/sessions", params={"limit": 50})
     assert listed.status_code == 200, listed.text
-    after = listed.json()["result"]["sessions"]
+    after = [row for row in listed.json()["result"]["sessions"] if row["id"] != her_id]
     assert after[0]["id"] == completer, after
     assert (after[0]["active"], after[1]["active"]) == (True, True), after
     assert (after[0]["status"]["code"], after[0]["status"]["label"]) == (
@@ -847,7 +855,14 @@ async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
                 f"/v1/desktop/sessions/{session_id}/pin", json={"pinned": True}
             )
             assert pinned.status_code == 200, pinned.text
-            assert (root / "sidebar-pins.json").read_text() == json.dumps([session_id])
+            # HER PIN IS THERE TOO (R27's auto-pin, written by the same boot
+            # hook that created her): the claim under test is that THIS pin
+            # write landed and rang the bell, so the file must hold both ids
+            # and nothing else.
+            her_id = json.loads((root / "aida" / "state.json").read_text())["session_id"]
+            assert sorted(json.loads((root / "sidebar-pins.json").read_text())) == sorted(
+                [session_id, her_id]
+            )
 
             wrote_from = len(streamed)
             await asyncio.sleep(2.5)
