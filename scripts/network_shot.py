@@ -1,6 +1,6 @@
 """Capture the ``/network`` panel in BOTH of its phases, from one boot.
 
-Usage: python scripts/network_shot.py OUTDIR [100x30] [steady|lag|degraded|unanswered]
+Usage: python scripts/network_shot.py OUTDIR [100x30] [steady|lag|degraded|unanswered|unpaired]
 
 Writes ``network-loading.svg`` (+ ``.geometry.json``) and ``network-loaded.svg``
 (+ ``.geometry.json``) into ``OUTDIR``; a non-steady ``AUDIT`` state appends its
@@ -35,6 +35,17 @@ isolation import must stay FIRST for the same reason it does in ``info_shot.py``
 ``local_operator`` can resolve the operator's real config), and every ``CMUX_*``
 variable is cleared before any application import: a headless pilot must not
 rename the operator's real workspaces through an inherited id.
+
+THE THIRD STATE, ``unpaired``, is the ONE frame here that needs no fixture and
+is safe by construction: a device with no identity, no networks and no relay is
+what every installation is before its first ``/network new``, which is the state
+the splash tip sends people into and therefore the frame that has to teach the
+path. Nothing is stubbed for it — the panel's own worker runs the real
+``lop network <verb> --json`` against the isolated root and every verb answers
+"there is nothing here yet" — so there are no real ids, names or member counts
+in it to redact. It is also captured as ONE frame rather than a
+loading/loaded pair, because there is no relay answer to differ between the two:
+the pair exists to show a verified state arriving, and this state has none.
 """
 
 from __future__ import annotations
@@ -61,6 +72,7 @@ from local_operator.tui.widgets.network_panel import (  # noqa: E402
     NetworkLocal,
     NetworkScreen,
     PeerEntry,
+    capture_local,
 )
 from scripts.visual_capture import (  # noqa: E402
     refuse_flag_shaped_argument,
@@ -303,28 +315,49 @@ async def main() -> None:
         body = {"ls": _ls_payload, "peers": _peers_payload}.get(verb)
         return NetworkRun(tuple(args), 0, stdout=body() if body else "")
 
-    import local_operator.tui.widgets.network_panel as panel
+    unpaired = audit == "unpaired"
+    if unpaired:
+        # capture_local(), not an empty NetworkLocal(): the disk-only half is
+        # exactly what a device in this state has (no identity file, no network
+        # records, no relay record), and reading it through the same call the
+        # screen reads it through is what keeps this frame from being a mock of
+        # the first-run state rather than the first-run state.
+        local = capture_local()
+    else:
+        import local_operator.tui.widgets.network_panel as panel
 
-    panel.run_network = stubbed  # type: ignore[assignment]
+        panel.run_network = stubbed  # type: ignore[assignment]
+        local = _local()
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        screen = NetworkScreen(_local())
+        screen = NetworkScreen(local)
         app.push_screen(screen)
         await pilot.pause()
         await pilot.pause()
-        # LOADING: the worker is parked, so this is the real first paint.
-        save_capture(app, out / f"network-loading{suffix}.svg")
-        # Released, then settled by EVENT rather than by a clock: the panel
-        # repaints when the worker's answer lands, and waiting for the worker
-        # ends is waiting for the thing that changes the frame.
-        released.set()
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-        await pilot.pause()
-        save_capture(app, out / f"network-loaded{suffix}.svg")
-    print(f"wrote {out}/network-loading{suffix}.svg and {out}/network-loaded{suffix}.svg")
+        if unpaired:
+            # SETTLED BY EVENT, not by a clock: the panel's worker is running the
+            # real CLI, and its answer is what turns the `checking…` rows into the
+            # empty state this frame is evidence FOR — so the thing to wait on is
+            # the worker finishing, and a fixed sleep would be a race against a
+            # subprocess.
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.pause()
+            save_capture(app, out / f"network{suffix}.svg")
+        else:
+            # LOADING: the worker is parked, so this is the real first paint.
+            save_capture(app, out / f"network-loading{suffix}.svg")
+            released.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.pause()
+            save_capture(app, out / f"network-loaded{suffix}.svg")
+    if unpaired:
+        print(f"wrote {out}/network{suffix}.svg")
+    else:
+        print(f"wrote {out}/network-loading{suffix}.svg and {out}/network-loaded{suffix}.svg")
 
 
 if __name__ == "__main__":

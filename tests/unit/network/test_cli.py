@@ -1108,6 +1108,13 @@ def test_the_printed_join_command_does_not_pin_an_endpoint_the_token_carries(
     The command also names the token FILE rather than the path it happens to have on this
     machine: the line is addressed to another device, which does not share this one's
     ``$HOME`` (design review round 1, D3).
+
+    And it says the file has to TRAVEL, because that is the half the reader cannot infer:
+    the command alone describes one step where the trip is two, and the file is the only
+    channel a TUI client has — ``--print`` is refused on a non-TTY stdout, which is every
+    front end of this family. The clause was lost when a fold of main re-wrote this line
+    for the path above, so it is restored here by design round 2's D2-1; the placeholder
+    stays, and the two answer different halves of the same sentence.
     """
     token = tmp_path / "inv1.invite"
     token.write_text("TOKEN", encoding="utf-8")
@@ -1129,8 +1136,12 @@ def test_the_printed_join_command_does_not_pin_an_endpoint_the_token_carries(
     # the words "on the other device": that device does not have this path, and printing it
     # as though the two shared a filesystem hands one device's home directory to another
     # (design review round 1, D3). The concrete path stays exactly ONCE — on the line above,
-    # advice for the machine that really holds the file.
-    assert "then, on the other device: lop network join @<token-file>" in printed, printed
+    # advice for the machine that really holds the file. The clause that says the file has
+    # to be carried over is on it too (design round 2, D2-1).
+    assert (
+        "then, on the other device: carry that file over and run lop network join @<token-file>"
+        in printed
+    ), printed
     assert printed.count(str(token)) == 1, printed
     assert "--host 127.0.0.1:4197" not in printed, printed
     assert "--host" not in printed, printed

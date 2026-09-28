@@ -48,6 +48,7 @@ from local_operator.tui.widgets.welcome import (
     MARK_WIDTH,
     MODEL_PENDING,
     TIP_GLYPH,
+    TIP_MESH,
     TIP_MIN_WIDTH,
     TIP_PASTE,
     TIP_ROTATE_INTERVAL_S,
@@ -1248,11 +1249,17 @@ def test_the_tip_is_quieter_than_the_hints_it_sits_under() -> None:
     assert _contrast(glyph, ground) < _contrast(body, ground)
 
 
-def test_fork_tips_cover_commands_settings_and_backend_detection() -> None:
+def test_fork_tips_cover_commands_and_settings() -> None:
     """Discovery names the real entry points without promising one backend's UI.
 
-    The cmux-only placement is qualified explicitly; terminal detection stays
-    capability-shaped because not every supported backend has workspaces.
+    The cmux-only placement is qualified explicitly — that qualifier is what
+    keeps the row from reading as "this app is cmux-only", and since the mesh
+    tip took the mechanism clause's slot it is the ONLY place the pool says so:
+    `lop detects terminal or multiplexer, then picks placement` retired for it
+    (see the pool's own note), because it was the pool's one entry whose subject
+    was the mechanism rather than something a person can act on. What a reader
+    can act on is what is still asserted here: where the setting lives, and the
+    multiplexer case that needs the other spelling.
     """
     fork_tips = [
         tip
@@ -1266,9 +1273,31 @@ def test_fork_tips_cover_commands_settings_and_backend_detection() -> None:
     assert "/settings → Fork → Where a fork opens" in joined
     assert "Under cmux, Where it opens" in joined
     assert "workspace or surface" in joined
-    assert "detects terminal or multiplexer" in joined
-    assert "then picks placement" in joined
     assert all(word not in joined.lower() for word in ("always", "unsupported"))
+
+
+def test_the_mesh_tip_names_a_subcommand_the_handler_accepts() -> None:
+    """One word deeper than the generic check can see.
+
+    ``test_every_tip_names_something_this_build_answers`` proves the leading
+    ``/token`` is a real command, which for a tip that spells a SUBCOMMAND is
+    only half the claim: ``/network new`` is accepted or refused by
+    ``NETWORK_SUBCOMMANDS``, a table the registry does not consult. The pool's
+    stated rule — a splash advertising a command the app rejects is worse than a
+    blank row — is therefore asserted against the family's own vocabulary here.
+
+    The word matters in both directions: ``new`` is the CLI's spelling of
+    ``init`` (the verb a user reads is not the verb a shell types), so the token
+    in the pool and the word the handler matches are deliberately different
+    tables, and this is the test that keeps the row pointing at the first one.
+    """
+    from local_operator.slash_commands import NETWORK_SUBCOMMANDS
+
+    mesh_tips = [tip for tip in TIPS if tip.startswith("/network")]
+    assert mesh_tips, "the mesh has no entry in the pool"
+    for tip in mesh_tips:
+        word = tip.split()[1]
+        assert word in NETWORK_SUBCOMMANDS, f"{tip!r} names a refused subcommand: {word}"
 
 
 def test_advancing_the_rotation_changes_the_tip_and_never_the_row_count() -> None:
@@ -1614,6 +1643,127 @@ async def test_the_composed_splash_pins_paste_on_apple_terminal(
         await pilot.pause()
         after = [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])]
         assert after == [f"{TIP_GLYPH} {TIPS[1]}"]
+
+
+def test_the_mesh_tip_takes_the_opening_frame_on_a_device_in_no_mesh() -> None:
+    """U1, at the builder every splash frame comes from.
+
+    Measured on the real splash before this: the mesh sentence is ``TIPS[13]`` of
+    17, the row opens on ``TIPS[0]`` (or a setup/paste pin) and the first tick jumps
+    to a DRAWN resume point — so the mesh's only passive advertisement arrived at
+    72.1 s of a focused idle frame, worst case 204 s, and a user who submits a first
+    prompt sees exactly ONE tip and never reaches it, because the row retires with
+    the splash. For a feature whose discoverability plan IS the rotation, that is
+    not discoverability.
+
+    The remedy is the mechanism that already exists twice, and the precedence is
+    part of it: setup first (a first-run user cannot create a network before
+    ``/login``), then mesh, then paste. Mesh outranks paste because the two pins
+    fire on disjoint populations and only one of them is stranded on the frame:
+    the paste pin's reader is a WORKING user — someone who pasted a screenshot
+    into a session (#430) — while a device that has never paired has no session to
+    paste into, and a paired Terminal.app launch keeps the paste pin exactly as it
+    was. Setup, mesh and paste are each one row at every width.
+    """
+    from local_operator.tui.widgets.welcome import TIP_MESH, _tip_lines
+
+    # The pin and the ring entry are ONE string, which is what keeps the pool's
+    # width budget and the row count true of the pin as well.
+    assert TIP_MESH in TIPS
+    opening = _tip_lines(ROOMY_W, 0, pin_mesh=True)
+    assert len(opening) == 1
+    assert opening[0].plain.strip() == f"{TIP_GLYPH} {TIP_MESH}"
+    # The ring still turns: the pin is the OPENING frame only.
+    later = _tip_lines(ROOMY_W, 1, pin_mesh=True)
+    assert later[0].plain.strip() == f"{TIP_GLYPH} {TIPS[1]}"
+    # Setup outranks both of the state pins.
+    setup = _tip_lines(ROOMY_W, 0, setup=True, pin_mesh=True, pin_paste=True)
+    assert setup[0].plain.strip() == f"{TIP_GLYPH} {TIP_SETUP}"
+    # Mesh outranks paste; a device already IN a mesh is unchanged.
+    both = _tip_lines(ROOMY_W, 0, pin_mesh=True, pin_paste=True)
+    assert both[0].plain.strip() == f"{TIP_GLYPH} {TIP_MESH}"
+    assert _tip_lines(ROOMY_W, 0)[0].plain.strip() == f"{TIP_GLYPH} {TIPS[0]}"
+
+
+@pytest.mark.asyncio
+async def test_the_splash_pins_the_mesh_tip_only_while_the_device_is_unpaired(
+    monkeypatch: pytest.MonkeyPatch, animation_on: None
+) -> None:
+    """The pin through the REAL splash, and the membership gate with it.
+
+    The suite's autouse fixture closes the gate (an isolated HOME is "unpaired"
+    by construction, which is a fact about the test run rather than about the
+    code); this is the test that opens it. The second half is the half the round
+    asked to keep: a device that is already in a mesh must not see this tip, and
+    the gate is re-read where the opening frame is RE-PINNED — `/clear` brings the
+    splash back, and by then the device may have paired.
+    """
+    monkeypatch.setattr("local_operator.tui.widgets.welcome._mesh_unpaired", lambda: True)
+    app = _make_app(FakeSession())
+    async with app.run_test(size=(100, 30)) as pilot:
+        welcome = await _settled_welcome(pilot)
+        assert welcome._pin_mesh_tip is True
+        shown = [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])]
+        assert shown == [f"{TIP_GLYPH} {TIP_MESH}"]
+        # A tick still walks the ordinary ring and never the mesh tip again.
+        welcome._tip_resume = 1
+        welcome._tip_tick()
+        await pilot.pause()
+        assert [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])] == [
+            f"{TIP_GLYPH} {TIPS[1]}"
+        ]
+        # THE MEMBERSHIP GATE: the device pairs, the splash comes back, the
+        # opening frame is re-pinned — and re-read, so the reader who is in a mesh
+        # opens on `/resume`.
+        monkeypatch.setattr("local_operator.tui.widgets.welcome._mesh_unpaired", lambda: False)
+        welcome._stop_tip_timer()
+        welcome._sync_tip_timer()
+        await pilot.pause()
+        assert welcome._pin_mesh_tip is False
+        assert [row.strip() for row in _tip_rows([text for text, _ in _frame(app)])] == [
+            f"{TIP_GLYPH} {TIPS[0]}"
+        ]
+
+
+def test_the_mesh_tips_gate_reads_the_panels_own_state_and_defends_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate's two halves, and what a FAILED read is allowed to mean.
+
+    Both halves are the panel's own disk-only facts (an identity file, the network
+    records) read through the panel's own reader, so the splash and the `/network`
+    screen cannot come to different answers about what "unpaired" means. The
+    defended read is asymmetric on purpose: staying quiet costs a rotation slot,
+    while telling a PAIRED user the mesh does not exist is exactly what the
+    membership gate is for — and taking down the first render is not on the table
+    either (the reads in `session_welcome_info` are defended for that same reason).
+    """
+    from local_operator.tui.widgets import network_panel
+    from local_operator.tui.widgets.welcome import _mesh_unpaired
+
+    unpaired = network_panel.NetworkLocal(
+        device_id="", device_name="", identity_present=False, relay_state=""
+    )
+    monkeypatch.setattr(network_panel, "capture_local", lambda root=None: unpaired)
+    assert _mesh_unpaired() is True
+
+    # An identity and no network is NOT this population: `init` writes an identity
+    # file too, so a device that has ever paired — or created a network — is not
+    # pitched a first step it has already taken.
+    monkeypatch.setattr(
+        network_panel,
+        "capture_local",
+        lambda root=None: network_panel.NetworkLocal(
+            device_id="d_self", device_name="this-mbp", identity_present=True, relay_state=""
+        ),
+    )
+    assert _mesh_unpaired() is False
+
+    def _boom(root: object = None) -> None:
+        raise OSError("no store")
+
+    monkeypatch.setattr(network_panel, "capture_local", _boom)
+    assert _mesh_unpaired() is False
 
 
 # --- the defects the design round found in the tip ------------------------------

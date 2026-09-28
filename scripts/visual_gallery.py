@@ -113,7 +113,14 @@ def cases() -> list[dict[str, Any]]:
                 # Both of the panel's phases from one boot, so the pair differs by
                 # nothing but the relay's answer. It writes into the case's own
                 # directory and the gallery globs both SVGs.
-                args = ["{directory}", "100x30"]
+                #
+                # `unpaired` is the surface's THIRD state — the device every
+                # installation starts as, before its first `/network new`, and the
+                # one the splash tip sends a person into. It needs no fixture (the
+                # real CLI answers it from an isolated root), so it is a variant of
+                # this script rather than a sample of its own, and it writes a
+                # single frame: there is no relay answer for a pair to differ by.
+                args = ["{directory}", "100x30"] + ([] if variant == "both" else [variant])
             elif script == "new_remote_shot.py":
                 # The two states of the `/new` device picker: a device that knows
                 # peers (the rows must read as a device selection) and one that
