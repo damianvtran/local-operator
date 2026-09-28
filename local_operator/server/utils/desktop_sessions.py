@@ -102,6 +102,7 @@ from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     read_latest_custom,
     read_latest_custom_entry,
+    validate_page_request,
 )
 
 # The move shares the TUI's own `/move` machinery rather than a second resolver:
@@ -3176,7 +3177,18 @@ class DesktopSessionBridge:
         journal here, the wire there. The contract above -- ``entries``,
         ``has_more``, ``cursor_missing``, a backward ``before_id`` -- is the same
         on both, so no caller changes.
+
+        THE PRECONDITIONS ARE CHECKED BEFORE EITHER READER IS CHOSEN (remediation
+        round 1, R1-1): the remote reader validates nothing itself, so without
+        this a malformed combination (before/after with no anchor, an anchor
+        named with a cursor) would answer 409 on a local session and 200 on a
+        peer — the same request failing two ways depending only on where the
+        conversation happens to live. The local path validates again inside
+        ``load_transcript_page``; that duplicate is deliberate, because the
+        façade is a door other callers reach directly and its own contract must
+        not depend on this method having run first.
         """
+        validate_page_request(before_id, through_id, around_id, before, after, limit)
         if self.remote_row is not None:
             if around_id is not None:
                 # V1 CANNOT ANCHOR A PEER'S WINDOW (design §D4; the exact remote
@@ -3263,7 +3275,12 @@ class DesktopSessionBridge:
         """
         remote = self.remote
         if remote is None:
-            return {"entries": [], "has_more": False, "cursor_missing": False}
+            return {
+                "entries": [],
+                "has_more": False,
+                "cursor_missing": False,
+                "has_newer": None,
+            }
         if remote.is_cold:
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
                 await remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
@@ -3297,6 +3314,7 @@ class DesktopSessionBridge:
             ],
             "has_more": has_more,
             "cursor_missing": False,
+            "has_newer": None,
         }
 
     def _remote_rows(
