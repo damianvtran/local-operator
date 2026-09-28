@@ -1316,7 +1316,8 @@ class AuthStore:
     def upsert_credential(self, provider: str, credential: dict[str, Any]) -> StoredCredential:
         """Insert, or update the row for the same identity (org scope ⇒ rows).
 
-        Revives soft-deleted rows for the same identity (re-login).
+        Revives soft-deleted rows for the same identity (re-login), and lifts
+        the row's retry backoff blocks — see :meth:`_after_credential_write`.
 
         The login path already resolves ``store_credentials_as`` before calling
         here, so this normalization is usually a no-op. It is applied anyway
@@ -1387,9 +1388,36 @@ class AuthStore:
         """Read the row back, then run what a completed write implies.
 
         One exit for both the update and the insert path, so a later caller
-        cannot land in a branch that skips the re-arm.
+        cannot land in a branch that skips the re-arm or the un-block.
+
+        A COMPLETED WRITE ALSO SUPERSEDES THE ROW'S BACKOFF BLOCKS, carrying
+        ``upsert_credential``'s marker premise over to the blocks table: every
+        ``auth_credential_blocks`` row is a verdict about the credential
+        material as it was before this write (a refresh that failed, a quota
+        reading), so the write is the freshest evidence against it. Left
+        standing, the write's own predecessor keeps the credential out of
+        rotation for up to its block window — the deferred root of
+        local-operator-ui#583: an interactive re-login landing inside the
+        previous refusal's ``DEFAULT_BLOCK_MS`` window was answered 502
+        ``credential_unavailable`` with zero upstream calls until the window
+        passed, and the UI's commissioned re-read could not heal it.
+
+        WHAT THIS DOES NOT WEAKEN. No block writer comes through here —
+        ``_resolve``'s failed-refresh arm, ``rotate_sibling``, the usage
+        preflight, the mesh owner — and the model OAuth refresh path bypasses
+        this method by design (``_ensure_oauth_fresh`` writes the row
+        directly), so a landed refresh or a read cannot lift a block. The MCP
+        token store also writes through ``upsert_credential`` — its refresh
+        leg included — but under ``mcp-oauth``, a namespace no block writer
+        accepts, and its own dead-grant marker is a payload key, not a block.
+        The clears that carry their own evidence — ``clear_blocks_for_model``
+        off a recovery probe, ``clear_block`` from usage-aware fallback — are
+        untouched. Lifting a still-true verdict costs one probe, which re-arms
+        the block: a block is a cost-avoidance backoff, not a correctness
+        gate.
         """
         stored = self._reread_after_write(credential_id)
+        self.clear_blocks(stored.id)
         self._rearm_parked_tunnel_login(provider, stored)
         return stored
 
