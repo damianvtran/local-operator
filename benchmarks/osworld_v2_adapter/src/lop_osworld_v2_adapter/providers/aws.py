@@ -289,6 +289,26 @@ def _error_code(error: Exception) -> str:
     return ""
 
 
+#: The first-failure segment: how an annotated diagnostic names the failure
+#: upstream's retry loop swallowed. The harness keeps only the HEAD of a wire
+#: message (``rpc.MAX_DETAIL_MESSAGE`` = 512, ``worker._control_safe``'s
+#: ``[:limit]``), so the segment is bounded AND placed first -- appended to a
+#: variable-length tail it can be cut off silently, which is the exact
+#: swallow this attachment exists to undo (review round 1, R1-F1 measured it:
+#: a 500-char last-failure reason pushed a tail-appended note past the cut
+#: entirely).
+_FIRST_FAILURE_MARKER = "[first reset setup attempt failed with: "
+_FIRST_FAILURE_NOTE_LIMIT = 180
+
+
+def _first_failure_segment(note: str) -> str:
+    """``note`` as the wire-bounded head segment of an annotated message."""
+
+    if len(note) > _FIRST_FAILURE_NOTE_LIMIT:
+        note = note[: _FIRST_FAILURE_NOTE_LIMIT - 3] + "..."
+    return f"{_FIRST_FAILURE_MARKER}{note}]"
+
+
 class UpstreamAllocationRefused(RuntimeError):
     """Upstream OSWorld tried to allocate, revert, or release an instance.
 
@@ -512,8 +532,9 @@ class AwsProvider:
         # episode death. ``_reset_in_flight`` is true only while the ONE
         # ``env.reset`` this adapter makes (in ``_start_desktop_env``) is
         # executing; ``_reset_completed`` becomes true only once that call
-        # returns; and ``_reset_first_failure`` keeps the first failure that
-        # triggered a retry, so the trigger is never swallowed.
+        # returns (and is re-armed with each window); and ``_reset_first_failure``
+        # keeps the first failure that triggered a retry, so the trigger is
+        # never swallowed.
         self._reset_in_flight = False
         self._reset_completed = False
         self._reset_first_failure: str | None = None
@@ -915,8 +936,15 @@ class AwsProvider:
         # The ONE reset call is the window in which upstream's retry loop
         # runs; ``_reset_completed`` (set only after reset RETURNS) is what
         # keeps a later revert -- a second reset on a genuinely used env --
-        # sealed. See ``_seal_upstream`` for the retry discrimination.
+        # sealed. All three window fields are re-armed together, completion
+        # included: a provider that ever served a SECOND environment must
+        # classify that env's first-reset retry inside ITS window, or env #2
+        # would die on the sealed revert -- the original defect's shape
+        # (review round 1, R1-F2; latent today, since every reset_start
+        # builds a fresh provider). See ``_seal_upstream`` for the retry
+        # discrimination.
         self._reset_first_failure = None
+        self._reset_completed = False
         self._reset_in_flight = True
         try:
             env.reset(task_config=task_instance)
@@ -989,10 +1017,10 @@ class AwsProvider:
                 )
                 if self._reset_first_failure is not None:
                     # A refusal on an env whose reset already had to recover
-                    # from a failed first attempt names that attempt: the
-                    # reader must never have to guess what preceded it.
-                    note = self._reset_first_failure
-                    message += f" [first reset setup attempt failed with: {note}]"
+                    # from a failed first attempt names that attempt -- and
+                    # the segment LEADS, so the wire's head-keep cannot drop
+                    # it behind the (fixed-size) refusal sentence.
+                    message = f"{_first_failure_segment(self._reset_first_failure)} {message}"
                 raise UpstreamAllocationRefused(message)
 
             return _refused
@@ -1135,17 +1163,19 @@ class AwsProvider:
         ``reset`` raising after its retries already names the LAST failure;
         without this, the FIRST -- the reason the loop was retrying at all --
         would survive only in ``_reset_first_failure`` and the skip log. The
-        message is rewritten through ``args``, the one surface every
-        exception accepts: the class, the traceback and the cause chain (the
-        parts the wire diagnostic renders) all stay intact.
+        segment leads the message (bounded, ahead of the variable-length
+        text: see ``_first_failure_segment``) and the message is rewritten
+        through ``args``, the one surface every exception accepts: the class,
+        the traceback and the cause chain (the parts the wire diagnostic
+        renders) all stay intact.
         """
 
         note = self._reset_first_failure
-        if note is None or note in str(error):
+        if note is None or _FIRST_FAILURE_MARKER in str(error):
             return
         try:
             error.args = (
-                f"{error} [first reset setup attempt failed with: {note}]",
+                f"{_first_failure_segment(note)} {error}",
                 *error.args[1:],
             )
         except Exception:  # pragma: no cover - ``args`` accepts any tuple

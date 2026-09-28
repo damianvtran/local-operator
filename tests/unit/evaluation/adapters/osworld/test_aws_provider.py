@@ -49,6 +49,7 @@ from lop_osworld_v2_adapter.providers.base import (
 )
 
 from local_operator import computer_input
+from local_operator.evaluation.adapters import rpc as adapter_rpc
 from local_operator.evaluation.adapters.api import ScopedInfraValue
 from tests.unit.evaluation.adapters.osworld import fixtures
 
@@ -1008,13 +1009,18 @@ class _RetryingFakeEnv(_FakeEnv):
     ``is_environment_used`` is set; the flag is set True BEFORE task setup and
     is NOT cleared when an attempt fails; and a failed attempt ``continue``s
     into the next iteration. ``setup_failures`` scripts how many leading
-    ``_setup_task`` calls raise before one succeeds.
+    ``_setup_task`` calls raise before one succeeds, ``setup_returns_false``
+    scripts leading calls that return ``(False, True)`` instead, and
+    ``setup_error_message`` replaces the raised message (the wire-bound
+    cells need a deliberately long one).
     """
 
     def __init__(
         self,
         *,
         setup_failures: int = 0,
+        setup_returns_false: int = 0,
+        setup_error_message: str | None = None,
         ready_failures: int | None = None,
         **kwargs: Any,
     ) -> None:
@@ -1023,6 +1029,8 @@ class _RetryingFakeEnv(_FakeEnv):
         self.start_emulator_calls = 0
         self.setup_errors: list[Exception] = []
         self._setup_failures = setup_failures
+        self._setup_returns_false = setup_returns_false
+        self._setup_error_message = setup_error_message
         if ready_failures is not None:
             self.setup_controller = _FakeSetupController(ready_failures=ready_failures)
 
@@ -1032,7 +1040,12 @@ class _RetryingFakeEnv(_FakeEnv):
     def _setup_task(self, task_config: Any, use_proxy: bool) -> tuple[bool, bool]:
         self.setup_calls += 1
         if self.setup_calls <= self._setup_failures:
-            raise _TransientSetupError(f"attempt {self.setup_calls} hit a transient setup fault")
+            raise _TransientSetupError(
+                self._setup_error_message
+                or f"attempt {self.setup_calls} hit a transient setup fault"
+            )
+        if self.setup_calls <= self._setup_failures + self._setup_returns_false:
+            return False, True
         return True, True
 
     def reset(self, task_config: Any) -> None:
@@ -1203,6 +1216,145 @@ async def test_a_control_server_that_never_answered_is_captured_as_the_first_fai
     assert env.setup_controller.ready_calls == 2
     assert env.setup_calls == 1, "setup itself succeeded on the first attempt that ran"
     assert provider._reset_first_failure == "the guest control server was not ready"
+
+
+@pytest.mark.asyncio
+async def test_a_setup_return_that_reports_failure_is_captured_too(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """R1-F3: ``(False, True)`` from ``_setup_task`` is a declared trigger.
+
+    The loop treats an unsuccessful, non-raising return exactly like a raised
+    error; the capture must classify it as the first failure too.
+    """
+
+    with _Stubs() as stubs:
+        provider, env = await _allocated_retrying(
+            stubs, monkeypatch, tmp_path, setup_returns_false=1
+        )
+    assert env.setup_calls == 2, "the retry ran after the False return"
+    assert provider._reset_first_failure == "_setup_task reported an unsuccessful setup"
+    assert env.provider.reached == []
+
+
+@pytest.mark.asyncio
+async def test_the_first_failure_note_leads_the_reset_error_within_the_wire_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """R1-F1: the note must survive the wire's head-keep, not sit past the cut.
+
+    ``worker._error_detail`` renders ``str(error)`` under
+    ``MAX_DETAIL_MESSAGE`` keeping only the HEAD (``_control_safe``'s
+    ``[:limit]``). The segment is bounded and leads, so a deliberately huge
+    failure message -- which pushed a tail-appended note past the cut entirely
+    before this round -- cannot displace it.
+    """
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        envs: list[_RetryingFakeEnv] = []
+
+        def factory(**kwargs: Any) -> _RetryingFakeEnv:
+            env = _RetryingFakeEnv(
+                setup_failures=5,
+                setup_error_message="verify step " + "L" * 600,
+                **kwargs,
+            )
+            envs.append(env)
+            return env
+
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=factory,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        with pytest.raises(_TransientSetupError) as excinfo:
+            await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+    head = str(excinfo.value)
+    assert envs[0].setup_calls == 5
+    assert head.startswith(aws_mod._FIRST_FAILURE_MARKER)
+    assert "..." in head, "an oversized note is elided, not dropped"
+    segment_end = head.index("]", len(aws_mod._FIRST_FAILURE_MARKER))
+    assert segment_end <= len(aws_mod._FIRST_FAILURE_MARKER) + aws_mod._FIRST_FAILURE_NOTE_LIMIT
+    assert len(head) <= adapter_rpc.MAX_DETAIL_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_note_heads_the_message_within_the_wire_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """R1-F1 at the refusal site: the segment leads, and the message fits the wire.
+
+    The refusal sentence is fixed-size and the note is bounded and leads, so
+    neither can push the other past ``MAX_DETAIL_MESSAGE``.
+    """
+
+    with _Stubs() as stubs:
+        provider, env = await _allocated_retrying(
+            stubs,
+            monkeypatch,
+            tmp_path,
+            setup_failures=1,
+            setup_error_message="verify step " + "L" * 600,
+        )
+        with pytest.raises(aws_mod.UpstreamAllocationRefused) as excinfo:
+            env.reset(task_config={"id": "again"})
+    message = str(excinfo.value)
+    assert message.startswith(aws_mod._FIRST_FAILURE_MARKER)
+    assert "..." in message, "an oversized note is elided, not dropped"
+    assert len(message) <= adapter_rpc.MAX_DETAIL_MESSAGE
+    assert "refused before any boto3 call" in message
+
+
+@pytest.mark.asyncio
+async def test_a_second_environment_on_one_provider_re_arms_the_reset_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """R1-F2: the window belongs to the CURRENT environment.
+
+    Every ``reset_start`` builds a fresh provider today, so a provider serving
+    two environments is latent; its env #2 first-reset retry must still be
+    inside ITS window -- otherwise the original defect's shape returns through
+    a caller change instead of failing loudly.
+    """
+
+    with _Stubs() as stubs:
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        _expect_describe_images(stubs)
+        _expect_run_instances(stubs)
+        _expect_create_schedule(stubs)
+        _expect_running(stubs)
+        envs: list[_RetryingFakeEnv] = []
+
+        def factory(**kwargs: Any) -> _RetryingFakeEnv:
+            env = _RetryingFakeEnv(setup_failures=1, **kwargs)
+            envs.append(env)
+            return env
+
+        provider = _provider(
+            stubs,
+            monkeypatch,
+            desktop_env_factory=factory,
+            task_factory=lambda t: {"id": t.task_id},
+        )
+        await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+        await provider.allocate(_plan(), _task(), cache_root=_cache_root(tmp_path))
+        stubs.ec2_stub.assert_no_pending_responses()
+    assert [env.setup_calls for env in envs] == [2, 2], (
+        "each environment's own retry must survive; a 1 here means the window "
+        "never re-armed and env #2 died on the sealed revert"
+    )
 
 
 @pytest.mark.asyncio
