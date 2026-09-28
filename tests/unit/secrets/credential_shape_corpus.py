@@ -1083,6 +1083,30 @@ POSITIVE_CASES: tuple[Case, ...] = (
         "https://h/v1?key=" + OPAQUE_UUID_VALUE,
         "?key= still masks an opaque value: the release is the readable class only",
     ),
+    # --- 2026-09-28, round 1: the boundary cases that must KEEP masking --------
+    # The OPAQUE control: the value keeps its mask (and its registration) while
+    # the trailing parameter stays readable — the release is the readable
+    # class's alone.
+    Case(
+        "https://h/v1/flags?key=" + "abcdef0123456789" + "abcdef0123456789" + "&page=2",
+        "an opaque value keeps its mask; the trailing parameter is not swallowed",
+    ),
+    # ...and the issuer-prefixed values: ``key=glpat-<name>`` / ``key=sk-<name>``
+    # moved masked->released when the release judged spelling alone (R1-2); the
+    # vendor prefixes keep their mask on both spellings, and an unbroken tail
+    # keeps the label it had at base (pinned in the secrets tests).
+    Case(
+        "key=glpat-" + KEBAB_IDENTIFIER,
+        "an issuer-prefixed value under a weak name keeps its mask",
+    ),
+    Case(
+        "https://h/v1/flags?key=sk-" + KEBAB_IDENTIFIER,
+        "the same under the query spelling",
+    ),
+    Case(
+        "key=sk-" + "abcdefghijklmnopqrstuvwxyz",
+        "an unbroken issuer tail keeps its mask (and the base label)",
+    ),
 )
 
 
@@ -1716,6 +1740,29 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         _compact(("flagKey", KEBAB_IDENTIFIER)),
         "flagKey is not a credential name: the argument is never its own match",
+    ),
+    # --- 2026-09-28, round 1: the boundary the greedy run crossed -------------
+    # R1-1: with the ambiguous parameter not last, the assignment rule's run
+    # (``[^\s]{4,200}``) crossed the query entry's own value boundary, so the
+    # phrase was judged as one compound, the release was missed, and the mask
+    # swallowed ``&env=prod``, which ``origin/main`` kept. These rows pin the
+    # fixed reading: the phrase is the query entry's value, and everything after
+    # the boundary stays outside every match.
+    Case(
+        "https://h/v1/flags?key=" + KEBAB_IDENTIFIER + "&env=prod",
+        "the readable phrase with a trailing &env=prod: released, boundary kept",
+    ),
+    Case(
+        "https://h/v1/flags?key=" + KEBAB_IDENTIFIER + "&page=2",
+        "the same with a trailing &page=2",
+    ),
+    Case(
+        "https://h/v1/flags?key=" + KEBAB_IDENTIFIER + "#section",
+        "the same with a trailing #section",
+    ),
+    Case(
+        "https://h/v1/flags?api_key=" + KEBAB_IDENTIFIER + "&page=2",
+        "the api_key spelling of the same boundary",
     ),
 )
 

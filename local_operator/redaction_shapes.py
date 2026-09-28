@@ -1530,9 +1530,17 @@ def _is_readable_hyphen_phrase(value: str) -> bool:
     the others. The released set is MEASURED, not listed (``_RELEASED_WORD_SHAPED``
     in the secrets tests freezes it over a declared corpus in both directions):
     a loosening releases a probe and reds, a tightening masks one and reds.
+
+    An ISSUER-PREFIXED value is refused even when its spelling satisfies the
+    class: ``key=glpat-<name>`` and ``key=sk-<name>`` were measured moving
+    masked->released when the class was judged on spelling alone (agent review
+    R1-2), and those values are the vendor rule's to handle. The refusal reuses
+    the vendor rule's OWN pattern rather than a retyped prefix list, so the two
+    cannot drift about what a prefix is.
     """
     return (
-        len(value) <= _WORD_SHAPED_MAX_LEN
+        _VENDOR_PATTERN.search(value) is None
+        and len(value) <= _WORD_SHAPED_MAX_LEN
         and sum(char.isdigit() for char in value) <= _WORD_SHAPED_MAX_DIGITS
         and _WORD_SHAPED_VALUE_HYPHEN.fullmatch(value) is not None
     )
@@ -2294,6 +2302,25 @@ def _is_an_ambiguous_query_param(match: Match[str]) -> bool:
     return match.group(1).lower() in _AMBIGUOUS_QUERY_PARAM_NAMES
 
 
+#: The characters the query entry's value class stops at, spelled ONCE: its
+#: pattern carries ``[^&\s\"'#]`` and the assignment rule's deference below has
+#: to read the value to the same boundary (agent review R1-1).
+_QUERY_VALUE_STOP = re.compile(r"[&\s\"'#]")
+
+
+def _query_value_prefix(run: str) -> str:
+    """The run as the QUERY entry reads it: everything up to its value boundary.
+
+    WHY this and not the assignment rule's own value: that rule's run is
+    ``[^\\s]{4,200}``, so ``key=<phrase>&env=prod`` matched as ONE span — the
+    deference was judged over the whole compound, missed the release, and this
+    rule then masked ``&env=prod``, which ``origin/main`` had kept (agent review
+    R1-1). The query surface's value ENDS at the first ``&``, ``#``, quote or
+    whitespace, and so does the judgement.
+    """
+    return _QUERY_VALUE_STOP.split(run, maxsplit=1)[0]
+
+
 def _assignment_value_guard(match: Match[str]) -> bool:
     """The checks both spellings of the named-assignment rule share.
 
@@ -2348,8 +2375,15 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     # release straight back — the query rule releases ``?api_key=…`` and
     # this rule, which cannot see the ``?``, would immediately re-mask it. Every
     # other value keeps this rule's verdict.
+    #
+    # The judgement reads the phrase over the QUERY entry's OWN value boundary
+    # (first ``&``, ``#``, quote or whitespace — :func:`_query_value_prefix`),
+    # not this rule's greedy run: judging the run whole missed the release on
+    # ``key=<phrase>&env=prod`` and then masked the trailing parameter that
+    # ``origin/main`` had kept (agent review R1-1), and nothing past the
+    # boundary may sit inside a mask.
     if _is_an_ambiguous_query_param(match) and _is_readable_hyphen_phrase(
-        _value_before_an_escape(match.group(4))
+        _query_value_prefix(_value_before_an_escape(match.group(4)))
     ):
         return False
     if _value_is_not_a_credential(
