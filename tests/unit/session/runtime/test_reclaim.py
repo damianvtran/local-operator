@@ -1260,9 +1260,10 @@ def test_a_real_childs_environment_is_read_by_the_real_reader(env_child: _EnvChi
     invalid option, ``_run_command`` answered ``""``, and both readers below
     returned nothing while every injected test in this file stayed green.
     """
-    # Same exec race as the Linux-only /proc cell below: on Linux this reader is
-    # that same /proc file, and on macOS a ``ps`` fork per poll would be the wait.
-    # Deferred rather than widened here: no CI run has failed this read.
+    # Same exec race as the Linux-only /proc cell below: on Linux this reader AND the
+    # ``process_envs()`` batch below are that same /proc file, and on macOS a ``ps``
+    # fork per poll would be the wait. Deferred rather than widened here: no CI run
+    # has failed these reads (R1-F3).
     env = reclaim.process_env(env_child.pid)
     assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in env
     assert config_root_of(env) == str(env_child.root)
