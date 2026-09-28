@@ -27,6 +27,8 @@ from rich.console import Console
 
 from local_operator.ansi import sanitize_prompt_line, strip_control_sequences
 from local_operator.harness.types import (
+    FAULT_KEY,
+    INTERRUPTED_FAULTS,
     AgentEndEvent,
     AgentEvent,
     CompactionStartEvent,
@@ -281,7 +283,23 @@ class PrintRenderer:
         elif isinstance(event, ToolExecutionEndEvent):
             if event.is_error:
                 name = strip_control_sequences(event.tool_name)
-                self.console.print(f"✗ {name} failed", style="red", highlight=False, markup=False)
+                # A MARKED abort/skip is not a failure: the user stopped it or
+                # steering redirected it, and the line must not send a piped
+                # log's reader hunting a tool that never had a chance to work
+                # (the same {skipped, aborted} → interrupted rule the TUI and
+                # the phone apply). Marker only — never the wording — so a
+                # genuine `exit 3` that happens to read like an abort stays
+                # red.
+                details = getattr(event.result, "details", None)
+                fault = details.get(FAULT_KEY) if isinstance(details, dict) else None
+                if fault in INTERRUPTED_FAULTS:
+                    self.console.print(
+                        f"⊘ {name} interrupted", style="dim", highlight=False, markup=False
+                    )
+                else:
+                    self.console.print(
+                        f"✗ {name} failed", style="red", highlight=False, markup=False
+                    )
         elif isinstance(event, NoticeEvent):
             style = {"error": "red", "warning": "yellow"}.get(event.kind, "dim")
             # A GLYPH carries the severity, not just the colour. This renderer

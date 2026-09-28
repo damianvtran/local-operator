@@ -99,6 +99,27 @@ FAULT_KEY = "__fault"
 #: what a test pins.
 FAULT_INVALID_ARGUMENTS = "invalid_arguments"
 
+#: The fault class for a call the USER stopped: the turn aborted while it ran
+#: (or before it could start). Declared HERE for ``FAULT_INVALID_ARGUMENTS``'s
+#: reason and one stronger: a tool BODY writes it without importing the loop —
+#: the bash and eval "pre-aborted" receipts each claim it at the source — and
+#: every display surface needs it to settle the row as ``interrupted`` rather
+#: than ``failed``. One spelling for writer and readers.
+FAULT_ABORTED = "aborted"
+
+#: The fault class for a call steering redirected away before it ran. The
+#: verdict is decided in the loop, but it is half of the SAME
+#: ``{skipped, aborted} → interrupted`` pair every frontend applies, so the two
+#: values live together or the pair drifts apart.
+FAULT_SKIPPED = "skipped"
+
+#: The pair a frontend must settle as ``interrupted`` rather than ``failed``:
+#: the operator redirected or stopped the work, so the row must not read as a
+#: fault of the tool or the model. Every surface reads THIS set instead of
+#: re-spelling the two values, so the live, replay and durable readings of one
+#: call cannot disagree about which class it is in.
+INTERRUPTED_FAULTS: frozenset[str] = frozenset({FAULT_ABORTED, FAULT_SKIPPED})
+
 #: Key under which a SYNTHETIC tool result records that the OUTPUT LIMIT is why
 #: its call never ran. A harness bookkeeping key like ``FAULT_KEY`` above, and
 #: declared in the same place for the same reason: the loop writes it and a
@@ -1741,6 +1762,16 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     records by id, and a synthetic start would claim the tool ran — so the
     compose surface is the only one that announced them and the only one that
     can honestly settle them.
+
+    ``not_run_kind`` is the FAULT_* CLASS of that verdict, for a consumer to
+    route on rather than parse the reason's wording: the ``{skipped, aborted}``
+    pair (``INTERRUPTED_FAULTS``) settles the row as ``interrupted``, while the
+    planning faults keep the failure class ``not_run_reason`` already paints.
+    A plain ``str`` rather than a Literal, deliberately — the field is additive,
+    and a Literal would make today's viewer REJECT a future value instead of
+    ignoring it. Only the terminal never-run frame carries a value; ``None``
+    means "no verdict" (an ordinary dictation frame, or an older producer) and
+    every consumer keeps today's behaviour for it.
     """
 
     type: Literal["tool_call_compose"] = "tool_call_compose"
@@ -1751,6 +1782,7 @@ class ToolCallComposeEvent(AgentEvent[Literal["tool_call_compose"]]):
     supersedes_tool_call_id: str | None = None
     dictation_complete: bool = False
     not_run_reason: str | None = None
+    not_run_kind: str | None = None
 
 
 class ToolExecutionStartEvent(AgentEvent[Literal["tool_execution_start"]]):

@@ -471,6 +471,15 @@ async def test_abort_pairs_dangling_tool_calls():
     tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
     assert {m.tool_call_id for m in tool_messages} == call_ids
     assert all(m.is_error and m.text == "aborted" for m in tool_messages)
+    # ...and each paired result carries the abort MARKER, which is what every
+    # frontend routes on: an unmarked result here made the SAME turn settle as
+    # an interruption on one surface and a red failure on another. Read RAW
+    # from the persisted payload — this is the value a replay/durable view
+    # reads too, not a live-only handle.
+    from local_operator.harness.loop import FAULT_KEY
+
+    payloads = [(m.provider_payload or {}).get("details") or {} for m in tool_messages]
+    assert all(p.get(FAULT_KEY) == "aborted" for p in payloads), payloads
 
 
 @pytest.mark.asyncio
@@ -2270,6 +2279,12 @@ async def test_an_aborted_tool_still_emits_its_end_event(interruptible):
     assert len(starts) == 1
     assert len(ends) == len(starts), "a started tool card was never settled"
     assert {e.tool_call_id for e in ends} == {e.tool_call_id for e in starts}
+    # The backfill was the one abort emitter that forgot the marker. Pin it:
+    # this end event IS the backfill's own, and the frontends settle it as the
+    # dim `interrupted` row only because of this field.
+    from local_operator.harness.loop import FAULT_KEY
+
+    assert all((e.result.details or {}).get(FAULT_KEY) == "aborted" for e in ends)
 
 
 @pytest.mark.asyncio
@@ -3090,6 +3105,13 @@ class TestRefusalEndsTheRunVisibly:
         tool_messages = [m for m in context.messages if isinstance(m, Message) and m.role == "tool"]
         assert [m.tool_call_id for m in tool_messages] == ["c1"]
         assert all(m.is_error for m in tool_messages)
+        # The REFUSAL arm shares this branch with the abort arm and must NOT be
+        # marked as an interruption: nothing was stopped, the provider declined
+        # — a `{skipped, aborted}` marker here would relabel a genuine failure
+        # as an interruption on every frontend AND drop it from the ledger's
+        # execution-fault rate. So the refusal pair carries no `__fault` key.
+        payloads = [(m.provider_payload or {}).get("details") or {} for m in tool_messages]
+        assert all("__fault" not in p for p in payloads), payloads
 
     @pytest.mark.asyncio
     async def test_refusal_message_survives_onto_the_assistant_message(self) -> None:

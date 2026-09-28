@@ -96,6 +96,7 @@ from local_operator.harness.subagent import (
     model_may_choose_tier,
 )
 from local_operator.harness.types import (
+    FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
     AbortSignal,
@@ -3665,11 +3666,16 @@ async def execute_bash(
     # _check_approval in execute_read/execute_grep.
 
     # Pre-aborted signal: never spawn a child there is no intention to run.
+    # The receipt is MARKED `aborted`, not merely error-shaped: the frontends
+    # settle a marked abort as ``interrupted`` (the user stopped the turn) and
+    # the ledger excludes it from the execution-fault rate, where an unmarked
+    # result hashed as a tool failure the user caused.
     if signal is not None and signal.aborted:
         return _error(
             tool_call_id,
             "bash",
             f"aborted ({signal.reason or 'aborted'}): {params.command}",
+            details={FAULT_KEY: FAULT_ABORTED},
         )
 
     # Session credentials ride the child environment so the agent can USE a
@@ -4543,6 +4549,9 @@ async def execute_bash(
         # pipeline decision (R1-3) argues for covering. Computed BEFORE the text
         # is scrubbed so its own output goes through the same redaction pass.
         aborted_missing = _missing_tool_notice(stderr_chunks.decode(), context)
+        # Marked like the pre-aborted arm above: the run was stopped by the
+        # user, so the row is an interruption on every frontend and the
+        # ledger's abort bucket, not an execution fault.
         return _error(
             tool_call_id,
             "bash",
@@ -4555,6 +4564,7 @@ async def execute_bash(
             f"{_redact_tool_text(params.command, context)}\n"
             f"{_redact_tool_text(partial, context)}"
             + (f"\n{aborted_missing}" if aborted_missing else ""),
+            details={FAULT_KEY: FAULT_ABORTED},
         )
 
     # Decoding, redaction and (for oversized output) spilling/eliding run in a

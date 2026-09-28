@@ -227,6 +227,58 @@ def test_failed_tool_row_carries_the_error() -> None:
     assert "boom" in row.error
 
 
+def test_a_marked_abort_settles_interrupted_and_an_unmarked_failure_stays_failed() -> None:
+    """The phone's live end-event ladder reads the marker before `is_error`.
+
+    One call stopped by the user (a receipt MARKED `aborted`), one genuine
+    failure (same wire shape, no marker). The stopped row takes the phone's
+    interrupted tier and keeps its measured interval; the failure keeps the
+    red wash. The discrimination is the whole change — a ladder that flipped
+    both would be as wrong as the one that flipped neither.
+    """
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="t3", tool_name="bash", args={"command": "sleep 300"})
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="t3",
+            tool_name="bash",
+            duration_s=2.4,
+            result=ToolResult(
+                tool_call_id="t3",
+                tool_name="bash",
+                is_error=True,
+                content=[TextContent(text="aborted (stop): sleep 300")],
+                details={"__fault": "aborted"},
+                duration_s=2.4,
+            ),
+        )
+    )
+    stopped = fold.projection.transcript[-1]
+    assert stopped.tool_state == "interrupted"
+    assert "aborted (stop)" in stopped.error
+    assert stopped.elapsed_s == 2.4
+
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="t4", tool_name="bash", args={"command": "exit 3"})
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="t4",
+            tool_name="bash",
+            result=ToolResult(
+                tool_call_id="t4",
+                tool_name="bash",
+                is_error=True,
+                content=[TextContent(text="exit 3: boom")],
+            ),
+        )
+    )
+    failing = fold.projection.transcript[-1]
+    assert failing.tool_state == "failed"
+
+
 def test_subagent_roster_running_first_then_settled() -> None:
     fold = make_fold()
     fold.fold_event(SubagentStartEvent(job_id="j1", label="first"))
@@ -1385,6 +1437,41 @@ def test_history_fold_pairs_tool_calls_with_results() -> None:
     assert tool_row.details["output"] == "file body"
 
 
+def test_a_durable_marked_abort_rebuilds_as_interrupted_not_failed() -> None:
+    """A reconnect fold must agree with the live fold about one stopped call.
+
+    The persisted result is error-shaped (the model-facing form), so a durable
+    rebuild that only reads `is_error` paints the phone's failure wash for the
+    user's own stop — while the live frame it was watching said interrupted.
+    The marker in `provider_payload.details` is the classifier, exactly as on
+    the live and compose arms.
+    """
+    fold = make_fold()
+    call = ToolCall(id="c9", name="bash", arguments={"command": "sleep 300"})
+    history: list[AgentMessage] = [
+        Message.user("run it"),
+        Message.assistant("running", tool_calls=[call]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="c9",
+                tool_name="bash",
+                is_error=True,
+                content=[TextContent(text="aborted (stop): sleep 300")],
+                details={"__fault": "aborted"},
+                duration_s=2.4,
+            )
+        ),
+    ]
+    fold.fold_history(history)
+    row = fold.projection.transcript[-1]
+    assert row.tool_state == "interrupted"
+    # The interval the executor measured survives the rebuild, as it must for
+    # the duration column to agree with the live row.
+    assert row.elapsed_s == 2.4
+    # And the reason is not dropped: the row carries it behind a tap.
+    assert "aborted (stop)" in row.error
+
+
 def test_history_fold_maps_peer_message_to_its_own_kind() -> None:
     from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 
@@ -2213,6 +2300,36 @@ def test_a_never_run_verdict_fails_the_phone_row_with_the_reason() -> None:
     assert row.tool_state == "failed"
     assert row.error == "Tool not found: wake"
     assert row.summary == "Tool not found: wake"
+
+
+def test_a_skipped_verdict_interrupts_the_phone_row_with_the_reason() -> None:
+    """The same terminal frame that painted `failed` now paints the interruption.
+
+    The frame carries `not_run_kind="skipped"` — the operator steered the turn
+    away before this call ran — so the row takes the phone's interrupted tier
+    (the state the retirement fold already uses for a call nothing settled)
+    instead of the failure wash, while the harness's reason stays ON the row,
+    one tap away, exactly as the planning-fault arm keeps it.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolCallComposeEvent(tool_call_id="call_x", tool_name="wake", argument_bytes=14)
+    )
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="call_x",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Tool call skipped: interrupted by steering.",
+            not_run_kind="skipped",
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "interrupted"
+    assert row.error == "Tool call skipped: interrupted by steering."
+    assert row.summary == row.error
 
 
 def test_a_verdict_for_a_call_that_already_started_is_not_applied() -> None:

@@ -770,6 +770,56 @@ def test_no_renderer_branch_interprets_a_tool_name_as_markup() -> None:
     )
 
 
+def test_a_marked_abort_renders_interrupted_and_an_unmarked_one_does_not() -> None:
+    """The headless line follows the same {skipped, aborted} → interrupted rule.
+
+    A piped log's reader must not be sent hunting a tool failure for a call the
+    USER stopped — the TUI and phone both settle these as the dim ⊘ tier, and
+    this renderer is the third surface of the same wire. The MARKER is the
+    classifier, never the wording, so the negative control below keeps the red
+    line for a genuine error result.
+    """
+
+    def render(event: object) -> str:
+        buffer = io.StringIO()
+        console = Console(file=buffer, no_color=True, highlight=False, width=100)
+        PrintRenderer(json_mode=False, console=console).handle(event)  # type: ignore[arg-type]
+        return buffer.getvalue()
+
+    stopped = ToolResult(
+        tool_call_id="c1",
+        tool_name="bash",
+        is_error=True,
+        content=[TextContent(text="aborted (stop): sleep 300")],
+        details={"__fault": "aborted"},
+    )
+    assert (
+        render(ToolExecutionEndEvent(tool_call_id="c1", tool_name="bash", result=stopped))
+        == "⊘ bash interrupted\n"
+    )
+
+    skipped = ToolResult(
+        tool_call_id="c2",
+        tool_name="wake",
+        is_error=True,
+        content=[TextContent(text="Tool call skipped: interrupted by steering.")],
+        details={"__fault": "skipped"},
+    )
+    assert (
+        render(ToolExecutionEndEvent(tool_call_id="c2", tool_name="wake", result=skipped))
+        == "⊘ wake interrupted\n"
+    )
+
+    # Unmarked and not-aborted: unchanged red failure.
+    failed = ToolResult(
+        tool_call_id="c3", tool_name="read", is_error=True, content=[TextContent(text="nope")]
+    )
+    assert (
+        render(ToolExecutionEndEvent(tool_call_id="c3", tool_name="read", result=failed))
+        == "✗ read failed\n"
+    )
+
+
 def test_renderer_tracks_failure() -> None:
     renderer = PrintRenderer(json_mode=False)
     renderer.handle(AgentEndEvent(error="boom"))

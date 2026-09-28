@@ -72,6 +72,7 @@ from local_operator.harness.comms import (
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
 from local_operator.harness.rows import is_harness_notice_row
+from local_operator.harness.types import FAULT_KEY, INTERRUPTED_FAULTS
 from local_operator.session.page_cache import load_transcript_page
 from local_operator.session.transcript import (
     CUSTOM_KIND_CUSTOM,
@@ -762,13 +763,26 @@ def fold_transcript_entries(
                 if not call_id:
                     continue
                 result = results.get(call_id)
+                # The child's FAULT class decides the outcome before `is_error`
+                # does — the same mapping the live fold and the parent
+                # transcript apply, so a call the operator stopped or steering
+                # skipped cannot read `failed` on the durable page while the
+                # live page said `interrupted`.
+                outcome = None
+                if result is not None:
+                    child_details = result[2] if isinstance(result[2], Mapping) else {}
+                    fault = child_details.get(FAULT_KEY)
+                    if fault in INTERRUPTED_FAULTS:
+                        outcome = "interrupted"
+                    else:
+                        outcome = "error" if result[1] else "success"
                 folded.append(
                     SubagentEntry(
                         call_id,
                         "tool",
                         tool_name=str(raw_call.get("name") or "tool"),
                         tool_args=dict(raw_call.get("arguments") or {}),
-                        outcome=("error" if result[1] else "success") if result else None,
+                        outcome=outcome,
                         result_text=result[0] if result else "",
                         details=result[2] if result else None,
                         duration_s=result[3] if result else None,
@@ -928,13 +942,25 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             result = result if isinstance(result, Mapping) else {}
             details = result.get("details")
             event_duration = _duration(event.get("duration_s"))
+            # The child's own FAULT class decides the outcome FIRST: a call the
+            # operator stopped (``aborted``) or steering skipped (``skipped``)
+            # is INTERRUPTED, not failed — the same mapping the parent
+            # transcript applies. Without it a child's killed batch painted
+            # `N failed` in this page's own chrome for calls the user ended.
+            fault = details.get(FAULT_KEY) if isinstance(details, Mapping) else None
+            if fault in INTERRUPTED_FAULTS:
+                outcome = "interrupted"
+            elif event.get("is_error") or result.get("is_error"):
+                outcome = "error"
+            else:
+                outcome = "success"
             tools[call_id] = SubagentEntry(
                 key=call_id,
                 kind="tool",
                 tool_name=started.tool_name,
                 tool_args=started.tool_args,
                 intent=started.intent,
-                outcome="error" if (event.get("is_error") or result.get("is_error")) else "success",
+                outcome=outcome,
                 result_text=_content_text(result),
                 details=dict(details) if isinstance(details, Mapping) else None,
                 duration_s=(
