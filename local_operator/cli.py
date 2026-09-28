@@ -1011,6 +1011,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # the move has committed, hands the runtime no work, and cannot resume a turn — a
     # source whose turn is in flight is still refused with `busy` and the `--wait`
     # remedy, flag or no flag.
+    #
+    # AND THE HELP NAMES THE MEMBER A SCRIPT MUST READ (review round 1, R1-5). The exit
+    # status cannot carry the engage's outcome by design — a failed engage leaves a
+    # successful move (`sessions_move_command` returns the MOVE's status) — so on the
+    # device that engaged the answer is only in `engagement.engaged`, and the help is
+    # where a caller that never reads this comment finds that out.
     move_parser.add_argument(
         "--engage-on-arrival",
         action="store_true",
@@ -1018,7 +1024,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "start the conversation on the destination as soon as it lands, so it is "
             "live there without a first prompt; a conversation whose turn is in "
             "flight is still refused rather than drained, and a failure to start it "
-            "does not affect the move"
+            "does not affect the move — so the exit status is the MOVE's: a script "
+            "reads `engagement.engaged` in --json, and on a move to a peer that "
+            "device's own log is where the outcome shows"
         ),
     )
     move_parser.add_argument("--json", action="store_true", help="machine-readable output")
