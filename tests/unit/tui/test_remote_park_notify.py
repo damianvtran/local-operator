@@ -23,7 +23,6 @@ connector); this one is the mesh half.
 
 from __future__ import annotations
 
-import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,7 +81,11 @@ class AttachedFake(FakeSession):
     runtime_locality = "another-machine"
 
     def __init__(
-        self, *, session_id: str = "s_parked", device_id: str = "d_bb", device_name: str = "demo-laptop"
+        self,
+        *,
+        session_id: str = "s_parked",
+        device_id: str = "d_bb",
+        device_name: str = "demo-laptop",
     ) -> None:
         super().__init__()
         self._session_id = session_id
@@ -228,9 +231,7 @@ async def test_the_sidebar_poll_is_the_detector(
     from local_operator.session import peer_rows as peer_rows_module
 
     rows = (_parked(),)
-    monkeypatch.setattr(
-        peer_rows_module, "peer_session_rows", lambda *a, **k: rows
-    )
+    monkeypatch.setattr(peer_rows_module, "peer_session_rows", lambda *a, **k: rows)
 
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 40)) as pilot:
