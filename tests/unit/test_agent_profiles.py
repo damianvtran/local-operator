@@ -219,7 +219,7 @@ def test_aida_goes_by_the_name_the_operator_configured() -> None:
     assert "/aida" in text
 
 
-def test_aida_hands_off_work_a_team_or_agent_should_own() -> None:
+def test_aida_hands_off_work_a_team_should_own() -> None:
     """The manager handoff: refresh the project, spawn the manager session
     with the brief, let the manager drive it, and say the handoff out loud —
     who owns it and when she will look again. Without these beats she sits in
@@ -227,6 +227,18 @@ def test_aida_hands_off_work_a_team_or_agent_should_own() -> None:
     flat = " ".join(seed("aida").instructions.split())
     assert "spawn the manager session with the brief" in flat
     assert "who owns it now" in flat
+
+
+def test_aida_names_the_approval_route_a_headless_delegation_needs() -> None:
+    """QA round 1 (advisory): a headless spawn has no terminal to approve its
+    tool calls, so without a route the child lands read-only ("Approval
+    unavailable … Run with --yolo") and the delegation stalls one recovery
+    cycle in. The delegation line must name the launcher's routes and say the
+    consequence of having none."""
+    flat = " ".join(seed("aida").instructions.split())
+    assert "their approvals need a route" in flat
+    assert "--control" in flat and "--yolo" in flat and "--tools" in flat
+    assert "without one, the run is read-only" in flat
 
 
 def test_aida_routes_a_watch_to_the_session_that_owns_it() -> None:
@@ -263,7 +275,8 @@ def test_aida_learns_at_the_narrowest_scope_and_says_so() -> None:
     assert "system_prompt.md" in text
     assert "teams/<id>/instructions.md" in text
     assert "agents/<id>/system_prompt.md" in text
-    assert "FUTURE creations" in flat
+    assert "never overwritten without an explicit force" in flat
+    assert "reaches a live copy only when a sync runs" in flat
     assert "token cost" in flat
     assert "proposed, not applied" in flat
 
