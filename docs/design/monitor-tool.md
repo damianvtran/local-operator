@@ -2,7 +2,7 @@
 
 Status: design + interface contract, 2026-09-28. Author: architect (deepseek/deepseek-flash, lopdev).
 Base: `origin/main` @ `e3b117f34`. All `file:line` references are against that tree;
-bared refs are shorthand — `session.py` is `local_operator/session/session.py`,
+bare refs are shorthand — `session.py` is `local_operator/session/session.py`,
 `builtin.py` is `local_operator/tools/builtin.py` (other modules are named in full).
 
 This file is the contract the implementation slices code against. Reviewers and
@@ -331,14 +331,14 @@ arm time (fail loudly, §6.7) and re-checked at run time (§6.8).
 |---|---|---|
 | `read`, `grep`, `glob` (static read tier) | `approval_tier == "read"` | accept |
 | `web_search`, `web_fetch` | static read tier; `web_fetch` is GET/idempotent today (`web_fetch/service.py:842-843` requires any non-idempotent method to gate itself) | accept |
-| `hub` (parent), `list`/`peek` | `call_approval_tier` returns `read` for these two ops (`builtin.py:20988-20996`; op vocabulary `builtin.py:21195-21201`) | accept `list`/`peek`; reject `send`/`ask`/`steer`/`pause`/`cancel`/`resume` |
+| `hub` (parent), `list`/`peek` | `call_approval_tier` returns `read` for these two ops (`builtin.py:20988-20996`; op vocabulary `builtin.py:20428`, inside `class HubParams` at :20423) | accept `list`/`peek`; reject `send`/`ask`/`steer`/`pause`/`cancel`/`resume` |
 | `jobs` (static `read`; ops `list`/`peek`/`cancel`, `builtin.py:20284-20305`) | per-op rule (§6.2) | accept `list`/`peek`; **reject `cancel`** |
 | `todo` (static `read`; ops `init`/`add`/`done`/`block`/`drop`/`view`, `builtin.py:11640-11649`) | per-op rule | accept `view` only — the rest mutate the session's plan |
-| `agent` (static `read`; ops `list`/`show`/`search`/`install`/`reset`/`create`/`update`/`sync`, `agent_tool.py:120`) | per-op rule | accept `list`/`show`/`search`; reject the rest |
-| `team` (static `read`; ops `list`/`show`/`create`/`update`, `team_tool.py:57`) | per-op rule | accept `list`/`show`; reject `create`/`update` |
-| `project` (static `read`; ops incl. `create`/`update`/`link`/`unlink`/`milestone`, `project_tool.py:82`) | per-op rule | accept `list`/`show`; reject the rest |
+| `agent` (static `read`; ops `list`/`show`/`search`/`install`/`reset`/`create`/`update`/`sync`, `local_operator/tools/agent_tool.py:117-120`) | per-op rule | accept `list`/`show`/`search`; reject the rest |
+| `team` (static `read`; ops `list`/`show`/`create`/`update`, `local_operator/tools/team_tool.py:57`) | per-op rule | accept `list`/`show`; reject `create`/`update` |
+| `project` (static `read`; ops incl. `create`/`update`/`link`/`unlink`/`milestone`, `local_operator/tools/project_tool.py:81-82`) | per-op rule | accept `list`/`show`; reject the rest |
 | `ask`, `wait` (static `read`) | — | **reject**: `ask` sends a message to the parent; `wait` parks the turn |
-| `lsp` (`action` verbs all observing, `lsp.py:208`), `list_variables`, `read_variable` | `approval_tier` | accept |
+| `lsp` (`action` verbs all observing, `local_operator/tools/lsp.py:208`), `list_variables`, `read_variable` | `approval_tier` | accept |
 | `task` (static `write`, **no** dynamic tier, `builtin.py:19699-19706`) | — | **reject, even for `peek`** |
 | any other dynamic-tier tool | whatever its `call_approval_tier` answers for these args | honored as-is |
 | `bash` | **no tier exists at this head** — static `exec` (`builtin.py:4803`) | see §6.4 |
@@ -384,7 +384,18 @@ fields do not answer, and this module is where their answer lives.
 ### 6.4 bash: provably read-only, defined
 
 A command qualifies only if it is **a single logical line** that parses to a
-pipeline of simple commands where:
+pipeline of simple commands — judged on the words a shell will actually
+receive. **Tokenisation comes first** (round-2 review R2-F1): the line is
+word-split shell-faithfully (`shlex`, POSIX mode — the same quote and
+backslash resolution the executing `bash -c` applies), and every rule below
+judges the RESOLVED words, so quoting is not an escape hatch —
+`rg '--pre=<cmd>' .` resolves to the word `--pre=<cmd>` and is denied;
+`file '-C'` resolves to `-C`, denied; `ls \-la` resolves to `-la`, the
+allowed cluster it literally is. Two inputs are refused outright rather
+than modelled: any word containing `$` (variable expansion is a second
+evaluation pass the evaluator cannot see), and a line the tokeniser cannot
+parse (unbalanced quote, trailing backslash) — rejected fail-closed with
+the parse error named. The rules:
 
 1. **No shell metacharacters beyond `|` and ordinary word characters**: no
    `;`, `&&`, `||`, `&`, newline, backticks, `$(`, `<`, `>`, `>>`, `2>`, no
@@ -395,8 +406,8 @@ pipeline of simple commands where:
 3. **Flags are DEFAULT-DENY** (round-1 review F1: an enumerated deny-list let
    named write/exec switches ride allowed commands). Every command declares
    the flags it may carry; a token that begins with `-` (other than a lone
-   `-`) must match an allowed flag of that command, or it is rejected naming
-   the token:
+   `-`) must match an allowed flag of that command, or it is rejected,
+   naming the resolved word:
    - short flags may be clustered (`-la` = `-l -a`) and **every letter must
      be individually allowed**;
    - a value-taking flag matches glued or separate spellings alike (`-L2`,
@@ -412,7 +423,8 @@ pipeline of simple commands where:
 
 v1 allow-list, deliberately short and grown on demand (each addition is a
 reviewable line plus tests). "Allowed flags" is the complete set for that
-command; everything else about it is denied:
+command — for `git`, the complete sets are the per-subcommand table below —
+and everything else about the command is denied, operands included:
 
 | command | allowed flags (default-deny) | notes |
 |---|---|---|
@@ -431,9 +443,29 @@ command; everything else about it is denied:
 | `grep` | `-i -r -R -n -l -L -c -v -w -x -E -F -G -q -s -h -o -e`(v) `-f`(v) `-A`(v) `-B`(v) `-C`(v) `-m`(v) `--include`(v) `--exclude`(v) `--exclude-dir`(v) | `--output` denied |
 | `rg` | `-i -n -l -c -v -w -x -F -s -q -o -e`(v) `-f`(v) `-g`(v) `-t`(v) `-T`(v) `-A`(v) `-B`(v) `-C`(v) `-m`(v) `--hidden --no-ignore --iglob`(v) | `--pre`, `--pre-glob` denied — they EXECUTE a program per file |
 | `jq` | `-r -c -n -e -s -R -j -a -S` | writes nothing without redirection |
-| `git` | subcommands `status log diff show blame rev-parse ls-files grep branch` (list form), per-subcommand flags (e.g. `--oneline --graph --stat --name-only --format`(v) `-n`(v) `-p`) | every other subcommand denied; `-c`/`--config-env`, `--output`(v), `--ext-diff`, `--textconv`, `-O`/`--open-files-in-pager` denied (config override, file write, program execution) |
+| `git` | subcommands `status log diff show blame rev-parse ls-files grep branch`; **complete per-subcommand sets in the table below** | every other subcommand denied; `-c`/`--config-env`, `--output`(v), `--ext-diff`, `--textconv`, `--show-signature`, `-O`/`--open-files-in-pager` denied (config override, file write, program execution) |
 | `gh`, `glab` | `pr view/list/diff/checks/status`, `issue view/list`, `run view/list`; flags `--json`(v) `-q/--jq`(v) `-t/--template`(v) `--repo`(v) `--comments` `--log` | everything else denied, incl. bare `gh api` (method-flippable) and `--web`/`-w` (launches a browser); `--watch` denied (waits) |
 
+**`git` — the complete per-subcommand flag sets** (round-2 review R2-F2;
+default-deny beyond these; anything not listed is denied):
+
+| subcommand | allowed flags (complete) | operands |
+|---|---|---|
+| `status` | `-s -b --short --porcelain --ignored --no-renames -u`(v) `--untracked-files`(v) | pathspecs (read) |
+| `log` | `--oneline --graph --stat --name-only --name-status --decorate --no-decorate --abbrev-commit --no-merges --merges --follow --all -p -s --no-patch --format`(v) `--pretty`(v) `--date`(v) `--since`(v) `--until`(v) `-n`(v) | revisions and `-- <pathspecs>` — select what is READ; cannot write |
+| `diff` | `--stat --name-only --name-status --numstat --shortstat --cached --staged --no-index -w -b -U`(v) `--color`(v) | two paths (or none) — select what is read |
+| `show` | `--stat --name-only --name-status --abbrev-commit -s --no-patch --format`(v) `--pretty`(v) | one rev (+ `-- <pathspecs>`) |
+| `blame` | `-L`(v) `-w -p --porcelain --line-porcelain --date`(v) | one path |
+| `rev-parse` | `--verify --short`(v) `--abbrev-ref --show-toplevel --is-inside-work-tree --is-bare-repository` | one rev |
+| `ls-files` | `-s --stage -o --others -m --modified -d --deleted -c --cached --exclude-standard` | pathspecs/patterns |
+| `grep` | `-n -i -I -l -L -c -w -E -F -e`(v) `-A`(v) `-B`(v) `-C`(v) `--cached --untracked` | pattern + pathspecs |
+| `branch` | **list forms only**: `-v -vv -a -r --list --all --remotes --format`(v) `--merged`(v) `--no-merged`(v) | **no operands** — `git branch <name>` CREATES a ref and is denied; `-d/-D/-m/-M/-c/-C/--edit-description/--set-upstream-to/-u` are not in the set and are denied |
+
+Not listed ⇒ denied, which is how `--show-signature` (spawns gpg),
+`--ext-diff`/`--textconv` (run programs), `--output` (writes a file) and
+`-c`/`--config-env` (config override) are excluded. The `date` operand
+channel is closed the same way: `date` accepts `+<format>` operands only
+(the print form); a bare operand is the SET form and is denied.
 
 (v) = takes a value; matching is by base flag name and covers the glued and
 separate spellings above.
@@ -453,7 +485,11 @@ evaluator — default-deny at BOTH layers (command words, then flags) — not a
 sandbox. A missed allowance (a flag with a write/exec side effect the
 per-command list failed to omit) is still a write vector, which is why the
 lists stay small, every named hole is a matrix row (§6.9), and flags are
-allow-listed rather than denied-away; the
+allow-listed rather than denied-away. One expansion stays UNMODELLED and is
+named rather than implied: a filename glob (`*`, `?`, `[`) expanded by the
+shell can hand a program a word this evaluator never saw (a file literally
+named `-C`, say); v1 does not reject globs because `find`'s pattern operand
+requires them, and §21 records the sandbox as the replacement. The
 kernel-level alternative (seatbelt) exists only for evaluation-confined
 sessions and macOS only (`tools/confinement.py`), and is not a general
 mechanism here. The evaluator's conservatism is the current mitigation; §21
@@ -524,8 +560,21 @@ glued/separate spellings): `rg --pre 'wc -l' .`, `rg --pre-glob '*.py' --pre x .
 Reject — op-mutating under a read tier (F6): `jobs {op:"cancel"}`,
 `todo {op:"add"}`, `agent {op:"create"}`, `team {op:"create"}`,
 `project {op:"update"}`, `ask`, `wait`.
+Reject — quoting/escaping (round-2 review R2-F1; resolution happens first):
+`rg '--pre=<cmd>' .`, `rg \--pre=x .`, `git log '--output=/tmp/x'`,
+`file '-C'`, `file \-C`; accept `ls \-la` (resolves to the allowed
+`ls -la`), and reject `cat "$F"` (a `$` word).
+Reject — git operands/flags (round-2 review R2-F2): `git branch x`,
+`git branch -d x`, `git branch --edit-description`,
+`git log --show-signature`, `date 2020-01-01`; accept `git status --porcelain`,
+`git branch -vv`, `git log --oneline -n 5`, `date +%s`.
 Each case asserts the exact refusal sentence's discriminating phrase, so a
 reordered message fails a test rather than drifting.
+
+**This matrix is the assurance mechanism, not a sample:** the flag sets are
+maintained by adversarial review rounds, and every construct a round finds
+is either rejected by construction or added here as a row — the coverage is
+auditable one row at a time.
 
 ## 7. Diff pipeline & snapshots (R4)
 
@@ -543,20 +592,41 @@ reordered message fails a test rather than drifting.
    instead of sequence compare. Off by default because ordering can *be* the
    change (a sorted-by-newest listing); on for set-like outputs.
 
-### 7.2 Snapshot, hash, compare
+### 7.2 Snapshot, hash, compare — two files, one baseline
 
-- The **hash** is `sha256` over the FULL normalized text — equality detection
-  is exact regardless of what is stored.
-- The **stored** normalized text is capped at
-  `values.monitor.snapshotMaxChars` (default 32,768); the cap keeps state
-  bounded and is noted in the state file (`snapshot_truncated`).
-- Compare = hash equality. If hashes differ but the stored copies are
-  identical (both truncated; the change is beyond the window), the delta is
+The baseline is the PAIR of §10.3's files (round-2 review R2-F3): the blob
+(`<id>.snap`) is the diff input; the counters file's `content_hash` is the
+equality fast-path (`sha256` over the FULL normalized text, so equality is
+exact regardless of the stored cap; the cap lives in the blob as
+`snapshot_truncated`). The rules, including loss and crash windows:
+
+- **Compare = the hash first.** Equal ⇒ quiet tick.
+- **Changed ⇒ diff against the BLOB.** If the resolved line diff is empty
+  while the hash disagreed and the blob is untruncated, the stored hash was
+  TORN (a crash between the two writes): silently re-adopt the blob
+  (recompute the hash) and stay quiet. If the blob is truncated and the diff
+  is empty, the change is beyond the stored window: the delta is
   `change beyond the stored snapshot window` plus the new checksum — honest,
   not empty.
-- A **missing/corrupt state file** → silent baseline re-establishment (no
-  delivery of a full dump), recorded in health as
-  `baseline re-established` — the self-healing posture the store uses.
+- **Write order per check:** the blob first, the counters file second — the
+  counters write is the commit point, so the baseline advances only when its
+  hash lands. A crash between the two leaves blob=new / hash=old and the
+  next check resolves it through the empty-diff branch above (quiet) or by
+  delivering the newer diff against the new blob.
+- **Loss semantics, per file:**
+  - counters only: the hash is rebuilt from an untruncated blob
+    (`snapshot_truncated: false` ⇒ the blob IS the full normalized text; the
+    other counters reset — that is why the rewrite happens on the next
+    check); a truncated blob cannot yield the hash, so the baseline is
+    re-established silently.
+  - blob only, content unchanged: healed for free — this tick's normalized
+    text is exactly the baseline (the hash proved it), so the blob is
+    rewritten.
+  - blob only, content changed: no diff input ⇒ the beyond-the-window
+    marker, with the current output's checksum (honest, not empty).
+  - both lost/corrupt: silent baseline re-establishment (no full-dump
+    delivery of the new content), recorded in health as
+    `baseline re-established` — the self-healing posture the store uses.
 
 ### 7.3 The delta
 
