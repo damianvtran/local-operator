@@ -1805,7 +1805,13 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     # the advice verbatim (QA round 2, Q-3). The placeholder stays for the one state
     # where the token names no endpoint at all, because there the flag is exactly what
     # the join asks for (QA round 1, Q2).
-    command = f"then, on the other device: lop network join @{path}"
+    # THE LOCAL PATH DOES NOT TRAVEL (design review round 1, D3). This line is advice for
+    # the OTHER device, and the absolute path it used to carry was the inviter's own
+    # `$HOME` — a path that device does not have, printed as though the two shared a
+    # filesystem. `@<token-file>` is the placeholder the rest of this module's receipts
+    # already use, so the line keeps one spelling; the concrete path is in the line above,
+    # where it is the inviter's own business.
+    command = "then, on the other device: lop network join @<token-file>"
     if not payload.get("hosts"):
         command += " --host <this device's address:port>"
     return _emit(

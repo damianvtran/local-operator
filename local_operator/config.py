@@ -237,26 +237,30 @@ def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> Non
     operator can find later, and the version check is about the file being NEWER
     than the build, which the user has to see while it happens.
 
-    ONLY STRING KEYS ARE REPORTED, deliberately. YAML 1.1 parses ``2024:`` as an int,
-    ``on:``/``yes:`` as a bool, and has dates, floats and null besides, so a report that
-    NAMED them could not say where they belong (``values.2024`` is not a setting path)
-    and — worse — a report that merely SORTED them died: ``sorted`` over mixed keys
-    raised ``TypeError: '<' not supported between instances of 'int' and 'str'`` inside
+    WHAT IT REPORTS, and the two decisions behind it. Non-string keys are NEVER sorted
+    into the same pass as string ones: ``sorted`` over mixed keys raised ``TypeError:
+    '<' not supported between instances of 'int' and 'str'`` inside
     ``ConfigManager.__init__``, which is every ``lop`` verb failing with a stack-trace
     panel on precisely the file class this mechanism exists to make readable (review
-    round 1, B1). A key this store cannot spell is not made visible by naming it, so it
-    is passed over in silence; a string key beside it is still reported.
+    round 1, B1) — so the string keys are filtered first, and the rest are ordered by
+    ``repr`` beside them.
+
+    Those non-string keys (YAML 1.1 parses ``2024:`` as an int, ``on:``/``yes:`` as a
+    bool, and has dates, floats and null besides) cannot be given a ``values.`` home to
+    move to, so they are named in their OWN SENTENCE with the only advice that applies —
+    delete, or re-spell as a string — rather than as a clause inside the first sentence,
+    where the key read as the subject of the store's behaviour and got no action (design
+    review round 1, D2). A file where EVERY unmodelled key is one of those is therefore
+    not silence either: it still gets that sentence.
     """
     unmodelled = sorted(
         key for key in config_dict if isinstance(key, str) and key not in _MODELLED_TOP_LEVEL
     )
     # A key this store cannot SPELL — no `values.` path exists to move it to — is still a
     # key somebody wrote, so a file where EVERY unmodelled key is one of those is not
-    # silence: the keys are reported by `repr` with the one advice that applies. They are
-    # kept OUT of the sentence that names `values.` homes (naming a non-string as a
-    # settings path sends the operator to a home that cannot exist), and they are
-    # reported beside it in the mixed case too, in their own clause (review round 1,
-    # optional nit).
+    # silence. Its own sentence rather than a clause hung off the first one, and its own
+    # action: the sibling sentence tells a string key where to move, which is advice
+    # these cannot use.
     unnameable = sorted((key for key in config_dict if not isinstance(key, str)), key=repr)
     if not unmodelled and not unnameable:
         return
@@ -264,33 +268,43 @@ def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> Non
     if seen in _UNMODELLED_WARNED:
         return
     _UNMODELLED_WARNED.add(seen)
+    listed = ", ".join(repr(key) for key in unnameable)
+    # NOT NAMED TWICE: the all-unnameable shape has already put the key in the first
+    # sentence, so its second sentence takes `A non-string key`; the mixed shape has not,
+    # so it names the key there. Two mentions in one warning read as two keys.
+    if len(unnameable) == 1:
+        subject = "A non-string key" if not unmodelled else f"Non-string key {listed}"
+        unnamed = (
+            f" {subject} cannot be a settings path at all — delete it, or re-spell it "
+            "as a string if it was meant to be one."
+        )
+    elif unnameable:
+        subject = "Non-string keys" if not unmodelled else f"Non-string keys {listed}"
+        unnamed = (
+            f" {subject} cannot be settings paths at all — delete them, or re-spell them "
+            "as strings if that was the intent."
+        )
+    else:
+        unnamed = ""
     if not unmodelled:
         logger.warning(
             "%s has top-level %s, which this store does not read: every setting lives "
-            "under `values:`, and a key that is not a string cannot be addressed as a "
-            "settings path at all — delete it, or re-spell it as a string if it was "
-            "meant to be one.",
+            "under `values:`, so the key does nothing.%s",
             path,
-            (
-                f"key {unnameable[0]!r}"
-                if len(unnameable) == 1
-                else "keys " + ", ".join(repr(key) for key in unnameable)
-            ),
+            f"key {unnameable[0]!r}" if len(unnameable) == 1 else "keys " + listed,
+            unnamed,
         )
         return
     homes = ", ".join(f"values.{key}" for key in unmodelled)
     named = f"key {unmodelled[0]}" if len(unmodelled) == 1 else "keys " + ", ".join(unmodelled)
-    if unnameable:
-        named += "; also present, and not addressable as a settings path: " + ", ".join(
-            repr(key) for key in unnameable
-        )
     logger.warning(
         "%s has top-level %s, which this store does not read: every setting lives "
         "under `values:`, so the key does nothing. It is left in place rather than "
-        "deleted — move it to %s (or set it in /settings) to make it take effect.",
+        "deleted — move it to %s (or set it in /settings) to make it take effect.%s",
         path,
         named,
         homes,
+        unnamed,
     )
 
 

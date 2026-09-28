@@ -1104,6 +1104,10 @@ def test_the_printed_join_command_does_not_pin_an_endpoint_the_token_carries(
     ``--host`` is an override, so the receipt no longer re-types an endpoint the token
     already carries; the placeholder stays for the state where the token names none,
     because there the flag is exactly what the join asks for.
+
+    The command also names the token FILE rather than the path it happens to have on this
+    machine: the line is addressed to another device, which does not share this one's
+    ``$HOME`` (design review round 1, D3).
     """
     token = tmp_path / "inv1.invite"
     token.write_text("TOKEN", encoding="utf-8")
@@ -1121,7 +1125,13 @@ def test_the_printed_join_command_does_not_pin_an_endpoint_the_token_carries(
     )
     assert net_cli._cmd_invite(args) == 0  # noqa: SLF001
     printed = capsys.readouterr().out
-    assert f"lop network join @{token}" in printed, printed
+    # THE JOIN LINE IS A PLACEHOLDER, and the inviter's own `$HOME` must not appear under
+    # the words "on the other device": that device does not have this path, and printing it
+    # as though the two shared a filesystem hands one device's home directory to another
+    # (design review round 1, D3). The concrete path stays exactly ONCE — on the line above,
+    # advice for the machine that really holds the file.
+    assert "then, on the other device: lop network join @<token-file>" in printed, printed
+    assert printed.count(str(token)) == 1, printed
     assert "--host 127.0.0.1:4197" not in printed, printed
     assert "--host" not in printed, printed
 

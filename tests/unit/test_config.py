@@ -849,7 +849,7 @@ def test_a_non_string_top_level_key_cannot_take_the_store_down(
     # send the operator to a path that cannot exist (review round 1, optional nit).
     assert "2024" in reported[0]
     assert "values.2024" not in reported[0], reported[0]
-    assert "not addressable as a settings path" in reported[0]
+    assert "cannot be a settings path at all" in reported[0]
 
     # AND THE VERB THAT DIED NOW ROUND-TRIPS, with both keys still in the file.
     manager._write_config(vars(manager.config))
@@ -884,4 +884,4 @@ def test_a_file_whose_only_stray_keys_are_unnameable_is_still_reported(
     reported = [r.getMessage() for r in caplog.records if "top-level" in r.getMessage()]
     assert len(reported) == 1, reported
     assert "2024" in reported[0]
-    assert "cannot be addressed as a settings path" in reported[0]
+    assert "cannot be a settings path at all" in reported[0]
