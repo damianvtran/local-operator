@@ -538,8 +538,10 @@ whole tree is **~84 minutes projected at the four workers this host's hook resol
 where its own `timeout: 3600` killed it**: the projection is 58 min over 69% (and 26
 points in the last 20 min gives ~82 min), so read it as "~84 min projected, and at
 least the 60 min it actually ran" rather than a measured total — and **20 minutes for
-two TUI files alone at `-n 6`**; `tests/durations.json` carries 12,663 call-phase
-seconds of it, **77.2% of that total under `tests/unit/tui`** (9,775 s). (The 82.3% in
+two TUI files alone at `-n 6`**; `tests/durations.json` carries 16,477 call-phase
+seconds of it, **67.5% of that total under `tests/unit/tui`** (11,115 s) since the
+2026-09-28 refresh (#1720; before it, the same figures read 12,663 s / 77.2% /
+9,775 s). (The 82.3% in
 the Environment section above is a share of a different total — 108 test-minutes —
 and quoting one total with the other's percentage is how a number stops being
 evidence.) Prefer the scoped inner loop above, and remember that the scoped `test`
