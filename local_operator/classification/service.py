@@ -434,6 +434,15 @@ class ClassificationService:
         if question.id in self._disabled_shapes:
             # A schema rejection disabled this shape for the session; re-asking
             # would spend a request per call to re-learn one fact (§4).
+            #
+            # Unlike the message path, this check runs BEFORE the cache read:
+            # ``_recommend`` serves a warm entry first and filters disabled
+            # shapes only on a miss (``_plan_for``). The difference is
+            # observable in one case — a state cached before the rejection
+            # stops being served — and it is the conservative direction: once
+            # the vendor has rejected this shape, the gate does not keep
+            # deciding from it, and every affected change falls OPEN to a
+            # delivery.
             logger.debug("classification: decide skipped (shape %r disabled)", question.id)
             return None
         key = _decide_key(state, question)

@@ -697,9 +697,12 @@ class MonitorScheduler:
         """One gate call for one change (§8.1); the class, or ``None`` → deliver.
 
         Serialised across the session's monitors (``_classify_lock``), bounded
-        by ``classifyMaxChars``, and fail-OPEN on every fault — including a
-        gate callback that raises. The deadline is NOT duplicated here: the
-        call's own bound is ``values.classification.timeoutMs`` inside
+        by ``classifyMaxChars`` through
+        :func:`~local_operator.monitors.classify.bounded_state` (whose marker
+        floor is the one place the bound is not literal), and fail-OPEN on
+        every fault — including a gate callback that raises. The deadline is NOT
+        duplicated here: the call's own bound is
+        ``values.classification.timeoutMs`` inside
         ``ClassificationService.decide`` (§8.2), and a second timer would be a
         second policy for one call (the classification layer's own rule).
         """

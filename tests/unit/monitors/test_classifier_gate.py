@@ -399,6 +399,9 @@ def test_bounded_state_cuts_and_marks() -> None:
     # A non-positive bound is treated as "no bound" by the reader's convention:
     # classifyMaxChars is read through the settings' positive-value reader.
     assert bounded_state(long, 0) == long
+    # The marker floor, stated in the docstring and pinned here: a cap below
+    # the marker's own length returns the bare marker (hand-edited config only).
+    assert bounded_state(long, 5) == classify_module.TRUNCATION_MARKER
 
 
 def test_the_truncation_marker_matches_the_classification_layer() -> None:
