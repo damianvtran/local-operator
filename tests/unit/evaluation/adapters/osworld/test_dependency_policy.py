@@ -65,16 +65,21 @@ def test_adapter_environment_carries_mcp_2x() -> None:
     action server dies at start (``Server.add_request_handler`` is 2.x-only)
     and the episode driver's MCP client dies at connect
     (``read_timeout_seconds`` is a float in 2.x, a ``timedelta`` in 1.x). The
-    pyproject floor states the requirement; this test holds the lock to it for
-    EVERY platform, so a future re-resolution cannot silently re-split the
-    environment the way the pre-fix lock did.
+    declared floor must admit no 1.x version, and the lock, which the build
+    actually installs, must pin no mcp below 2 -- so a future re-resolution
+    cannot silently re-split the environment the way the pre-fix lock did.
     """
 
     adapter = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/pyproject.toml").read_text())
     declared = _requirements(adapter["project"]["dependencies"])
     assert "mcp" in declared
-    assert Version("1.19.0") not in declared["mcp"].specifier
-    assert Version("2.2.0") in declared["mcp"].specifier
+    # The declared floor must refuse the whole 1.x line, probed at more than
+    # one point on purpose: a `>1.19.0`-shaped bound still admits 1.19.1+
+    # (measured in round 1), so a single-equality probe would not guard the
+    # split this test exists for. The lock loop below is what pins the
+    # version actually installed; the floor must only not admit any pre-2.
+    for pre_2 in ("1.0", "1.19.1", "1.99.99"):
+        assert not declared["mcp"].specifier.contains(Version(pre_2), prereleases=True), pre_2
 
     lock = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/uv.lock").read_text())
     pinned = [package for package in lock["package"] if package["name"] == "mcp"]
