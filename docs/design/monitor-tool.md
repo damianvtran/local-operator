@@ -1,7 +1,9 @@
 # The Monitor tool: delta-watch over repeated read-only calls
 
 Status: design + interface contract, 2026-09-28. Author: architect (deepseek/deepseek-flash, lopdev).
-Base: `origin/main` @ `e3b117f34`. All `file:line` references are against that tree.
+Base: `origin/main` @ `e3b117f34`. All `file:line` references are against that tree;
+bared refs are shorthand — `session.py` is `local_operator/session/session.py`,
+`builtin.py` is `local_operator/tools/builtin.py` (other modules are named in full).
 
 This file is the contract the implementation slices code against. Reviewers and
 QA check the implementation against this document; where it says "decide", the
@@ -287,11 +289,13 @@ counted as skipped.
 ### 5.3 Cost of a tick that finds nothing
 
 **Zero model tokens, zero context injection, no transcript entry, no log line**
-(debug-level logs only). One small atomic write of the per-monitor state file
-(§10.3) records `last_check_at`/`next_due_at`/counters; that write is the only
-per-tick I/O the harness does for a quiet monitor. The measured cost class of
-such a write is the wake index's: ~400-byte JSON via staged write +
-`os.replace` (`wakes/store.py:222-259`), the same shape this reuses.
+(debug-level logs only). One small atomic write of the per-monitor COUNTERS
+file (§10.3) records `last_check_at`/`next_due_at`/counters — a ≲ 1 KiB JSON
+via staged write + `os.replace` (the shape of `wakes/store.py:222-259`, at the
+counter file's size) — and it is the only per-tick I/O the harness does for a
+quiet monitor. The snapshot blob is NOT rewritten per tick (round-1 review F4:
+it is rewritten only when content changes, §10.3), so the 32 KiB snapshot
+bound never rides a quiet tick.
 
 ### 5.4 Timeouts, jitter, first check
 
@@ -327,13 +331,29 @@ arm time (fail loudly, §6.7) and re-checked at run time (§6.8).
 |---|---|---|
 | `read`, `grep`, `glob` (static read tier) | `approval_tier == "read"` | accept |
 | `web_search`, `web_fetch` | static read tier; `web_fetch` is GET/idempotent today (`web_fetch/service.py:842-843` requires any non-idempotent method to gate itself) | accept |
-| `hub` (parent), `list`/`peek` | `call_approval_tier` returns `read` for these two ops (`builtin.py:20988-20996`) | accept; reject `resume`/`steer`/`now`/… |
-| `jobs` (static `read`, `builtin.py:20284`) | `approval_tier` | accept |
+| `hub` (parent), `list`/`peek` | `call_approval_tier` returns `read` for these two ops (`builtin.py:20988-20996`; op vocabulary `builtin.py:21195-21201`) | accept `list`/`peek`; reject `send`/`ask`/`steer`/`pause`/`cancel`/`resume` |
+| `jobs` (static `read`; ops `list`/`peek`/`cancel`, `builtin.py:20284-20305`) | per-op rule (§6.2) | accept `list`/`peek`; **reject `cancel`** |
+| `todo` (static `read`; ops `init`/`add`/`done`/`block`/`drop`/`view`, `builtin.py:11640-11649`) | per-op rule | accept `view` only — the rest mutate the session's plan |
+| `agent` (static `read`; ops `list`/`show`/`search`/`install`/`reset`/`create`/`update`/`sync`, `agent_tool.py:120`) | per-op rule | accept `list`/`show`/`search`; reject the rest |
+| `team` (static `read`; ops `list`/`show`/`create`/`update`, `team_tool.py:57`) | per-op rule | accept `list`/`show`; reject `create`/`update` |
+| `project` (static `read`; ops incl. `create`/`update`/`link`/`unlink`/`milestone`, `project_tool.py:82`) | per-op rule | accept `list`/`show`; reject the rest |
+| `ask`, `wait` (static `read`) | — | **reject**: `ask` sends a message to the parent; `wait` parks the turn |
+| `lsp` (`action` verbs all observing, `lsp.py:208`), `list_variables`, `read_variable` | `approval_tier` | accept |
 | `task` (static `write`, **no** dynamic tier, `builtin.py:19699-19706`) | — | **reject, even for `peek`** |
 | any other dynamic-tier tool | whatever its `call_approval_tier` answers for these args | honored as-is |
 | `bash` | **no tier exists at this head** — static `exec` (`builtin.py:4803`) | see §6.4 |
 | MCP (`mcp__…`) | `annotations.readOnlyHint is True` on the server's `tools/list` row | see §6.5 |
 | `eval` | none | reject, §6.6 |
+
+**The per-op rule** (round-1 review F6 — the class, not one tool): a read-tier
+tool whose op surface is not wholly observing is monitorable only for the verbs
+in a declarative observing map (`monitors/readonly.py`, keyed by the tool's own
+verb parameter — `op` for most, `action` for `lsp`), and **an op-bearing
+read-tier tool absent from the map is rejected fail-closed** (a new such tool
+must add itself and its test; it cannot be admitted by accident). The
+child-shape `hub` (`builtin.py:20951`, static `read`, its send messages the
+parent) never coexists with the monitor tool — children prune it (§4.4) — and
+the map would reject it anyway.
 
 Correction of a premise in the brief, recorded so nobody builds on it: **PR
 #1696's "bash scope" is not a per-command approval tier.** At this head the
@@ -353,8 +373,10 @@ def readonly_verdict(tool: AgentTool, args: Mapping[str, Any],
     """None = read-only (accept). A sentence = the refusal reason (reject)."""
 ```
 
-It is consulted by the monitor tool's arm-time validation and by the
-run-time re-check. It reads the same fields the loop reads; it is not a
+For read-tier tools whose op surface is not wholly observing it applies the
+per-op map (§6.2) before answering. It is consulted by the monitor tool's
+arm-time validation and by the run-time re-check. It reads the same fields the
+loop reads; it is not a
 second gating *convention* (AGENTS.md: "extend the table, do not invent a
 parallel mechanism") — bash and MCP are the two classes where the existing
 fields do not answer, and this module is where their answer lives.
@@ -370,23 +392,51 @@ pipeline of simple commands where:
    `sh -c` wrappers. (These are rejected with the offending token named.)
 2. **Every command word is on the v1 allow-list** (below), matched by
    basename, with no path prefix (`/bin/ls` and `./script` are rejected).
-3. **No denied flag on any command** — the per-command write/execution
-   switches: `find` `-delete -exec -execdir -ok -okdir -fprint* -fls`,
-   `sort -o`, `grep`/`rg` `--output`, `jq` file-writing forms are impossible
-   (no redirection), `git -c`, `gh` non-read subcommands, etc.
+3. **Flags are DEFAULT-DENY** (round-1 review F1: an enumerated deny-list let
+   named write/exec switches ride allowed commands). Every command declares
+   the flags it may carry; a token that begins with `-` (other than a lone
+   `-`) must match an allowed flag of that command, or it is rejected naming
+   the token:
+   - short flags may be clustered (`-la` = `-l -a`) and **every letter must
+     be individually allowed**;
+   - a value-taking flag matches glued or separate spellings alike (`-L2`,
+     `-L 2`, `--output=x`, `--output x`) — the value is consumed as data;
+   - `--` itself is rejected (a v1 operand that begins with `-` has no form).
+4. **`find` is expression-allow-listed**, because it has no flag/operand
+   grammar a deny-list can bound: the permitted primaries are the read tests
+   (`-name`, `-iname`, `-type`, `-maxdepth`, `-mindepth`, `-path`, `-ipath`,
+   `-newer`, `-mtime`, `-mmin`, `-size`, `-empty`, `-perm`, `-user`, `-group`)
+   and the operators (`-a`, `-o`, `-and`, `-or`, `-not`, `!`, `(`, `)`,
+   `-print`, `-printf`); anything else — `-delete`, `-exec`, `-execdir`,
+   `-ok`, `-okdir`, every `-fprint*`/`-fls` — is rejected by construction.
 
 v1 allow-list, deliberately short and grown on demand (each addition is a
-reviewable line plus tests):
+reviewable line plus tests). "Allowed flags" is the complete set for that
+command; everything else about it is denied:
 
-| command | allowed form | denied |
+| command | allowed flags (default-deny) | notes |
 |---|---|---|
-| `cat` `head` `tail` `wc` `ls` `stat` `file` `date` `uname` `whoami` `id` `nproc` `df` `du` `ps` `tree` | as-is | — |
-| `find` | read forms | `-delete -exec -execdir -ok -okdir -fprint -fprint0 -fprintf -fls` |
-| `grep` `rg` | read forms | `--output` |
-| `jq` | expressions only | none that write without redirection |
-| `git` | `status log diff show blame rev-parse ls-files grep branch` (list form) | every other subcommand (`push`, `fetch`, `checkout`, `-c` overrides…) |
-| `gh` | `pr view`, `pr list`, `pr diff`, `pr checks`, `pr status`, `issue view`, `issue list`, `run view`, `run list` | everything else, incl. bare `gh api` (its method is flag-flippable) |
-| `glab` | the same read subcommands | everything else |
+| `cat` | `-n -b -s -A -v -e -t -T -u` | |
+| `head`, `tail` | `-n`(v) `-c`(v) `-q -v` | `-f`/`-F` denied — no following |
+| `wc` | `-l -w -c -m -L` | |
+| `ls` | `-l -a -h -t -r -S -d -1 -n` | |
+| `stat` | `-f -c`(v) `-L -t` | |
+| `file` | `-b -i --mime-type --mime-encoding` | `-C`, `-c`, `-m` denied (magic write/read) |
+| `date` | `-u -R` | `-s` denied (sets the clock) |
+| `uname` | `-a -s -r -m -n -v -o` | |
+| `whoami`, `id`, `nproc` | none | |
+| `df`, `du` | `-h -k -m -P -i -T`; `du` also `-s -a -c -d`(v) | |
+| `ps` | `-e -f -A -a -x -u -o -w -ww -p`(v) | |
+| `tree` | `-a -d -f -i -n -L`(v) | `-o`/`-X` denied (write files) |
+| `grep` | `-i -r -R -n -l -L -c -v -w -x -E -F -G -q -s -h -o -e`(v) `-f`(v) `-A`(v) `-B`(v) `-C`(v) `-m`(v) `--include`(v) `--exclude`(v) `--exclude-dir`(v) | `--output` denied |
+| `rg` | `-i -n -l -c -v -w -x -F -s -q -o -e`(v) `-f`(v) `-g`(v) `-t`(v) `-T`(v) `-A`(v) `-B`(v) `-C`(v) `-m`(v) `--hidden --no-ignore --iglob`(v) | `--pre`, `--pre-glob` denied — they EXECUTE a program per file |
+| `jq` | `-r -c -n -e -s -R -j -a -S` | writes nothing without redirection |
+| `git` | subcommands `status log diff show blame rev-parse ls-files grep branch` (list form), per-subcommand flags (e.g. `--oneline --graph --stat --name-only --format`(v) `-n`(v) `-p`) | every other subcommand denied; `-c`/`--config-env`, `--output`(v), `--ext-diff`, `--textconv`, `-O`/`--open-files-in-pager` denied (config override, file write, program execution) |
+| `gh`, `glab` | `pr view/list/diff/checks/status`, `issue view/list`, `run view/list`; flags `--json`(v) `-q/--jq`(v) `-t/--template`(v) `--repo`(v) `--comments` `--log` | everything else denied, incl. bare `gh api` (method-flippable) and `--web`/`-w` (launches a browser); `--watch` denied (waits) |
+
+
+(v) = takes a value; matching is by base flag name and covers the glued and
+separate spellings above.
 
 Rejections are sentences, e.g.:
 
@@ -395,10 +445,15 @@ Rejections are sentences, e.g.:
   command, web_fetch, or an MCP tool that declares readOnlyHint.`
 - `monitor can't watch "ls > out.txt": output redirection writes to disk.`
 - `monitor can't watch "find . -delete": "-delete" makes find a write.`
+- `monitor can't watch "rg --pre 'wc -l' .": "--pre" runs a program for
+  every file — a monitor must be provably read-only.`
 
 **Residual risk, stated rather than implied:** this is a conservative static
-allow-list, not a sandbox. A missing denial on an allow-listed command is a
-write vector, which is why the list stays small and every entry is tested; the
+evaluator — default-deny at BOTH layers (command words, then flags) — not a
+sandbox. A missed allowance (a flag with a write/exec side effect the
+per-command list failed to omit) is still a write vector, which is why the
+lists stay small, every named hole is a matrix row (§6.9), and flags are
+allow-listed rather than denied-away; the
 kernel-level alternative (seatbelt) exists only for evaluation-confined
 sessions and macOS only (`tools/confinement.py`), and is not a general
 mechanism here. The evaluator's conservatism is the current mitigation; §21
@@ -450,12 +505,25 @@ A call that lost its qualification (settings change moved a dynamic tier; a
 ### 6.9 Test matrix (the R3 deliverable)
 
 Accept: `read`/`grep`/`glob`; `web_fetch`; `web_search`; `hub {op:list}`;
-`jobs`; `bash` with `gh pr view 1710 --json state`, `ls -la`,
-`cat f | grep x | wc -l`, `find . -name '*.md'`.
-Reject: `bash` with `rm`, `ls > f`, `cat f > out`, `find . -delete`,
-`git push`, `echo $(date)`, `a && b`, `python3 -c …`, `sed -i …`; `eval`
-(any args); `hub {op:"resume"}`; `task {op:"peek"}` (write tier, no dynamic tier); `mcp__x__y` without / with
+`jobs {op:"list"}`; `todo {op:"view"}`; `agent {op:"list"}`;
+`team {op:"show"}`; `project {op:"list"}`; `bash` with
+`gh pr view 1710 --json state`, `ls -la`, `cat f | grep x | wc -l`,
+`find . -name '*.md'`.
+Reject — tiers: `eval` (any args); `hub {op:"send"}`; `task {op:"peek"}`
+(write tier, no dynamic tier); `mcp__x__y` without / with
 `readOnlyHint: false`; a tool not in the session's set.
+Reject — bash metacharacters/commands: `rm`, `ls > f`, `cat f > out`,
+`find . -delete`, `git push`, `echo $(date)`, `a && b`, `python3 -c …`,
+`sed -i …`.
+Reject — bash flags (round-1 review F1's named holes, one row each, plus the
+glued/separate spellings): `rg --pre 'wc -l' .`, `rg --pre-glob '*.py' --pre x .`,
+`git log --output=/tmp/x`, `git log --output /tmp/x`, `git diff --ext-diff`,
+`git show --textconv`, `git grep -O pager`, `gh pr view --web`,
+`gh pr diff -w`, `tree -o out.txt`, `file -C`, `date -s '2020-01-01'`,
+`head -f x`, `tail -f x`, `find . -fprintf out '%p'`.
+Reject — op-mutating under a read tier (F6): `jobs {op:"cancel"}`,
+`todo {op:"add"}`, `agent {op:"create"}`, `team {op:"create"}`,
+`project {op:"update"}`, `ask`, `wait`.
 Each case asserts the exact refusal sentence's discriminating phrase, so a
 reordered message fails a test rather than drifting.
 
@@ -515,9 +583,13 @@ The guide says this explicitly.
 ### 8.1 When it runs
 
 Only on a **heuristic hit** — a normalized-output difference (§7). An
-unchanged tick makes **zero** classifier calls. Multiple monitors' hits in one
-pump pass fold into **one** call: the state is the concatenation of their
-bounded deltas, each with its monitor name, total ≤ `classifyMaxChars`.
+unchanged tick makes **zero** classifier calls. **Each changed monitor is
+classified with its own call** (round-1 review F3): the state is that
+monitor's bounded delta (≤ `classifyMaxChars`) and the answer is attributed to
+it by construction, so the per-monitor counters (§8.4, §10.3) and the delivery
+decision can never be blended. Calls are issued sequentially within the pump
+pass — hits are rare, and this keeps the request rate inside the cascade's own
+limits.
 
 ### 8.2 The service seam
 
@@ -560,7 +632,21 @@ metadata` vs `ignorable` — the numbers that tell an operator what their
 monitor is drowning in) and because a binary question invites collapsing
 "metadata churn" into "noise", which is the distinction the normalization
 tuning needs next. The fork is still binary; the split is telemetry, and it is
-cheap. (Cost of a call at the classification layer's measured Radient-route
+cheap.
+
+**Attribution — one call per changed monitor (round-1 review F3).** Measured,
+both ways, on two representative changed monitors: two per-monitor calls =
+995 + 901 chars ≈ ~358 + ~324 billed (~682 total); one call carrying two
+per-monitor questions over a concatenated state = 1,916 chars ≈ ~689 billed
+(dict-form state: 1,930 ≈ ~694). The shapes cost the same within ~1% — the
+question body is spent per question either way — so the decision is made on
+attribution and failure granularity: per-monitor calls attribute exactly, a
+failed call fails open for THAT monitor only, and the seam stays
+`decide(state, question)`, the single-question shape R5 specified (the
+question id may carry the monitor id for vendor-side logs
+(`monitor_materiality:m1`), but attribution never depends on it).
+
+(Cost of a call at the classification layer's measured Radient-route
 rate — `$0.00003` per ~1,091 input tokens, `classification-layer.md` §8 — is
 ≈ $0.00001 per call; the arithmetic is in §17.)
 
@@ -622,9 +708,11 @@ final delivery after `until` passes. The body is the bounded delta (§7.3).
 **Bounds, measured:** envelope ≈ 163 chars / 53 cl100k / ~59 billed;
 representative 8-line body = 668 chars / 207 cl100k / ~240 billed; worst case
 (12 × ~100-char lines + marker) = **1,406 chars / 274 cl100k / ~506 billed** —
-the "~≤500 tokens" budget in the brief, hit and measured. Same-pass folds
-share the one 1,200-char delta budget, so the bound holds for any number of
-coalesced monitors.
+the "~≤500 tokens" budget in the brief, hit and measured. **One message per
+material monitor** (round-1 review F3): a fold could not name one id or one
+cancel hint, and each message carries its own 1,200-char delta budget, so the
+measured bound holds per message. Several monitors delivering in one pass
+queue as separate messages; §9.4's hourly cap bounds the volume.
 
 ### 9.2 How it lands
 
@@ -731,24 +819,40 @@ cold reader's `next_due_at` is best-effort between change events (documented;
 from `wakes/store.py`, which persists after every fire: a wake fires rarely; a
 30 s monitor would rewrite its index 2,880×/day for no reader's benefit.
 
-### 10.3 Per-monitor state (snapshots)
+### 10.3 Per-monitor state — split so a quiet tick stays small
 
-`<config_dir>/monitors/state/<session_id>/<monitor_id>.json` — bounded
-(~≤ snapshotMaxChars + counters), atomic staged writes; the schema is §7's
-snapshot + counters + health:
+Two files per monitor under `<config_dir>/monitors/state/<session_id>/`
+(round-1 review F4: one file embedding the snapshot made every quiet tick
+rewrite up to `snapshotMaxChars` ≈ 32 KiB — at a 30 s cadence that is ~2,880
+blob rewrites/day):
+
+- `<monitor_id>.json` — the **counters/health file**, rewritten on every
+  check. Bound: ≲ 1 KiB.
+- `<monitor_id>.snap` — the **snapshot blob** (normalized text + truncated
+  flag), rewritten only on baseline establishment and on change. Bound:
+  ≤ `snapshotMaxChars` (32,768 default).
 
 ```jsonc
+// <monitor_id>.json — per check (≲ 1 KiB)
 { "schema": 1, "monitor_id": "m1",
-  "content_hash": "sha256:…", "snapshot": "…", "snapshot_truncated": false,
+  "content_hash": "sha256:…",           // mirrors the blob; survives blob loss
   "last_check_at": …, "last_change_at": …, "next_due_at": …,
   "checks": 41, "deliveries": 3,
   "suppressed": {"non_material_metadata": 11, "ignorable": 2},
   "rate_window_start": 0, "rate_window_count": 0,
   "consecutive_failures": 0, "disabled_reason": "", "last_error": "" }
+
+// <monitor_id>.snap — per change only (≤ snapshotMaxChars)
+{ "schema": 1, "monitor_id": "m1", "snapshot": "…", "snapshot_truncated": false }
 ```
 
-Why not the transcript: a snapshot rewrite per tick would put a durable
-transcript row on disk every 30–60 s per monitor — the exact bloat the "no
+The per-quiet-tick cost is therefore one ≲ 1 KiB atomic write; the 32 KiB
+figure is a per-CHANGE cost. `snapshotMaxChars` keeps its default: it bounds
+the per-monitor disk footprint and the diff input, and with the split it is no
+longer on the per-tick write path.
+
+Why not the transcript: ANY per-check state in the transcript would put a
+durable row on disk every 30–60 s per monitor — the exact bloat the "no
 transcript entry per tick" rule (R2) exists to prevent, and transcript size is
 the compaction machinery's rival. Snapshots are cache-like derived state: if
 lost, the next check re-establishes a baseline silently (§7.2).
@@ -814,9 +918,10 @@ they open turns, and the brief's "propose 30s; 60s default" lands here.
 ### 11.2 Jitter
 
 `+uniform(0, min(5 s, every/10))` per tick (positive-only, §5.4). Rationale:
-de-synchronize monitors that share an interval; 10 % keeps a 30 s monitor's
-effective cadence within 27–30 checks/min-scale bounds, and the 5 s cap keeps
-long intervals from drifting visibly.
+de-synchronize monitors that share an interval; the added delay keeps the
+effective interval within +10 % member-wise — a 30 s monitor fires every
+30–33 s, a 60 s monitor every 60–65 s — and the 5 s cap keeps long intervals
+from drifting visibly.
 
 ### 11.3 Failure ladder and auto-disable
 
@@ -983,42 +1088,54 @@ change adds a field to it and never a second publication.
 
 ### 14.2 The rule
 
-Computed **once**, by the session, at turn end; every surface reads the
-computed value and none re-derives it (the notifications design's "the bridge
-observes the publication, not a rebuilt decision", `descriptive-
-notifications.md` §5.1, is exactly the posture):
+**Computed once, by the session, at the point the outcome's `kind` is known**;
+every surface then reads that one value and none re-derives it (the
+notifications design's own rule, `descriptive-notifications.md` §5.1: the
+bridge's job is to *observe* the publication, "not to re-derive it"):
 
 ```
-triggers  = custom-typed inputs that opened or folded into the run
-            ("wake_prompt" | "monitor_prompt")  ∪  {"user"} when any plain
-            user message is in the run's inputs
-notify_requested = OR over the wake/monitor deliveries in the run of their
-            own ``notify`` parameter (copied from the schedule/spec)
-awaiting_user    = a plain user message is queued but not yet consumed
+triggers          = the run's inputs, classified by custom type:
+                    "user"            any plain (non-custom) user message was
+                                      part of the run's inputs
+                    "wake_prompt" / "monitor_prompt"   each delivery
+                    "internal"        ANY other system input — peer message,
+                                      job result, resume catch-up, incident
+                                      notice, … — one class for all of them
+non_user_triggers = triggers − {"user"}
+notify_requested  = OR over the run's wake/monitor deliveries of their own
+                    ``notify`` parameter (copied from the schedule/spec)
+awaiting_user     = a plain user message is queued but not yet consumed
 
-notify = awaiting_user
-         or ("user" in triggers)                       # R15a: user semantics win
-         or (triggers ⊆ {"wake_prompt", "monitor_prompt"} and notify_requested)
-         or (no wake/monitor delivery in the run)      # every other origin: unchanged
+notify = ( awaiting_user
+           or "user" in triggers                      # R15a: user semantics win
+           or not (non_user_triggers
+                   and non_user_triggers ⊆ {"wake_prompt", "monitor_prompt"})
+                                                      # any other origin, incl.
+                                                      # wake+peer mixed: unchanged
+           or notify_requested )                      # wake/monitor-only runs only
+         or kind == "error"                           # errors always notify
 ```
 
 Notes that make it implementable without ambiguity:
 
+- **The trigger domain is the three classes above** (round-1 review F7): the
+  delivery parameter governs only runs whose non-user triggers are exclusively
+  wake/monitor. A wake delivery joined by a peer message, a job result or any
+  other internal input falls into the third clause and behaves exactly as
+  today — notify — and a quiet delivery never suppresses such a run.
 - The **discriminator is `custom_type`, never `attribution`**: wake deliveries
   ride `attribution="user"` by design (`session.py:16602-16606`), so only the
   custom type separates a delivery from a person.
 - The rule is **gate-free for user turns** — "today's behaviour unchanged":
   all existing gates (children running, focus, test hosting, loop suppression)
   keep applying on top of `notify`.
-- **Errors and interruptions are out of the parameter's reach**: `kind="error"`
-  keeps notifying on wake/monitor turns (an unattended turn that *failed* is
-  the case a user who walked away most needs pulled in; silencing failures is
-  how silent breakage starts). `interrupted` stays suppressed as today.
-- **Peer messages / child re-entry / other internal triggers are unchanged**
-  (not in this contract's scope; they fall into the "no wake/monitor delivery"
-  line).
-- **Mixed triggers → user semantics, exactly one notification.** The single
-  row already guarantees "once"; the rule guarantees "not silenced".
+- **Errors always notify, and that clause is inside the formula** (round-1
+  review F2): an unattended turn that *failed* is the case a user who walked
+  away most needs pulled in, and folding it into the single computed value is
+  what keeps every consumer free of per-kind logic. `interrupted` stays
+  suppressed by the consumers' existing kind filters, unchanged.
+- **One row, one value, never a per-consumer judgement.** §14.3 stamps the
+  value exactly once.
 
 ### 14.3 Where the value rides (mechanics)
 
@@ -1026,9 +1143,12 @@ Notes that make it implementable without ambiguity:
    `notify_requested` at admission (from `initial`) and as wake/monitor
    messages fold in via the busy-path steering queue; both are consumed and
    reset per run beside `_attention_run_token` (`session.py:9912-9916`).
-2. At turn end, before `_flush_held_end()`, the value is finalized and
-   stamped on the emitted `AgentEndEvent` as `notify: bool = True` (additive;
-   default preserves every existing reader) — this is what the live TUI reads.
+2. At turn end — after the run's `kind` is determinable from the end event's
+   own error/abort facts, and before `_flush_held_end()` — the value is
+   finalized ONCE by the formula (§14.2, error clause included) and stamped on
+   the emitted `AgentEndEvent` as `notify: bool = True` (additive; default
+   preserves every existing reader); `_publish_attention_outcome` then carries
+   the same value to the journal and the row. No other code path decides it.
 3. `_publish_attention_outcome` journals it (`"notify": bool`) and passes it
    to `AttentionStore.publish`, adding `notify INTEGER NOT NULL DEFAULT 1` to
    `completions` via the existing additive-column migration pattern
@@ -1085,6 +1205,8 @@ outcome being missed.
 6. wake/monitor turn ending in `error` → emits regardless of the parameter.
 7. a pre-existing row without the column → treated as `notify=1` (migration
    test).
+8. mixed wake + peer (or any internal trigger) → NOT governed by the
+   parameter: emits as today, even with every delivery quiet (§14.2 F7).
 
 ## 15. The recommendations guide (R11)
 
@@ -1126,7 +1248,7 @@ requirement per AGENTS.md, "Adding a configuration key":
 | `runTimeoutMs` | int | `120000` | per-check deadline |
 | `snapshotMaxChars` | int | `32768` | stored normalized-snapshot cap |
 | `maxDeltaLines` | int | `12` | changed lines summarised per delivery |
-| `deltaMaxChars` | int | `1200` | total delta text (all coalesced monitors share it) |
+| `deltaMaxChars` | int | `1200` | total delta text, per delivery message |
 | `classifyMaxChars` | int | `1200` | classifier state bound |
 | `maxConsecutiveFailures` | int | `5` | auto-disable threshold |
 | `maxDeliveriesPerHour` | int | `12` | per-monitor delivery cap |
@@ -1137,7 +1259,7 @@ tool); recorded in §21 as a deliberate absence.
 
 ## 17. Costs — measured accounting (R12)
 
-**Method.** All numbers from three probe scripts run under the installed
+**Method.** All numbers from the probe scripts below, run under the installed
 `lop` generation interpreter (`~/.local/share/lop/generations/
 20260928T132436Z-11fc505e409d/tools/local-operator/bin/python`, Python 3.14.3,
 has `tiktoken`), reported three ways: **chars** (ground truth), **cl100k_base
@@ -1145,7 +1267,7 @@ tokens** (the repo's local ruler, `compaction/tokens.py`), and **billed
 tokens = chars / 2.78** (the repo's measured prompt-surface rate,
 `scripts/bench_context_budget.py:CHARS_PER_BILLED_TOKEN`). The scripts are
 `probe_wake_tool.py`, `probe_question_costs.py`, `probe_injection_costs.py`,
-`probe_final3.py` (this session's scratchpad). A number from this table may be
+`probe_final3.py`, `probe_f3_attribution.py` (this session's scratchpad). A number from this table may be
 compared against another in this table, never against a provider invoice (the
 token module's own rule). `WakeParams` is byte-identical between the released
 0.64.1 and this head (diffed), so the wake tool measured here is the shipped
@@ -1159,6 +1281,7 @@ one.
 | classifier request — choice (representative) | 1,037 | 253 | ~373 |
 | classifier request — noul (representative) | 862 | 217 | ~310 |
 | classifier question alone: choice / noul | 616 / 441 | 138 / 102 | ~222 / ~159 |
+| classifier, 2 changed monitors: per-monitor calls vs one 2-question request | 1,896 vs 1,916 | 460 vs 467 | ~682 vs ~689 |
 | injection: envelope only | 163 | 53 | ~59 |
 | injection: representative (8 lines) | 668 | 207 | ~240 |
 | injection: worst case (12 × ~100 chars) | 1,406 | 274 | ~506 |
@@ -1170,10 +1293,11 @@ one.
 
 - *Armed, quiet tick:* 0 model tokens, 0 injected context; one ≤ ~1 KB atomic
   state write; 0 classifier calls.
-- *Heuristic hit:* one classifier call ≈ 373 billed tokens ≈ **$0.000010**
-  at the classification layer's measured Radient-route rate ($0.00003 per
-  ~1,091 input tokens, `classification-layer.md` §8) — derived from that
-  measured rate, not a new run.
+- *Heuristic hit:* one classifier call **per changed monitor** ≈ 373 billed
+  tokens each ≈ **$0.000010** each — at the classification layer's measured
+  Radient-route rate ($0.00003 per ~1,091 input tokens,
+  `classification-layer.md` §8), derived from that measured rate, not a new
+  run.
 - *Material delivery:* one injection ≤ 506 billed tokens + the turn the agent
   then chooses to spend (the turn is the product working, not overhead).
 - *Arming:* one `monitor` tool call; the schema tax (~767 billed) is paid only
@@ -1195,13 +1319,15 @@ bounds incl. the truncation marker; hash semantics incl. the
 beyond-stored-window case; silent baseline on missing/short/corrupt state).
 Read-only rejection matrix (§6.9, exact phrases). Classifier fork (material →
 deliver; both suppress classes → suppress+count; `None` → deliver; bounded
-state; one call per folded pass; service guards reused — enabled, breaker,
-cache, timeout — with a fake vendor). Reaper/caps (index self-heal on open;
+state; one call per changed monitor (two changed monitors → two calls, each
+attributed; material A beside non-material B → A delivered, B suppressed +
+counted); service guards reused — enabled, breaker, cache, timeout — with a
+fake vendor). Reaper/caps (index self-heal on open;
 orphan prune; cleanup refusal + `_forget`; park/unpark round-trip).
 Persistence sync (transcript ↔ index ↔ state coherence; a failed index write
 never fails the append). Import-light index pinned in
 `tests/unit/test_import_graph.py` beside the wake siblings. Notifications
-(§14.6, all seven). Prompts (system.md renders the new sentences; guide
+(§14.6, all eight). Prompts (system.md renders the new sentences; guide
 discovered with its description; inventory names the tool when present, not
 when absent).
 
@@ -1215,8 +1341,12 @@ suppression counters; a failing fake proves backoff → disable → reactivate.
 **One live end-to-end** (the brief's requirement): a monitor on something real
 that changes — e.g. `bash gh pr view <this PR> --json state,reviewDecision`
 against this session's own PR, with a real push flipping the state, delivering
-a delta — and a suppressed non-material case (a file whose stdout changes only
-in a normalized timestamp → suppressed, counter moved). Commands and their
+a delta — plus a suppressed non-material case that REACHES the classifier
+(a change that survives normalization but is metadata: e.g. a JSON status
+whose `request_id` — an un-normalized volatile id — changes → heuristic hit →
+classifier `non-material-metadata` → suppressed, counter moved), and
+separately a normalized-away quiet case (a timestamp-only change → no
+classifier call at all, nothing injected, counter unmoved). Commands and their
 actual outputs become PR evidence.
 
 **TUI/UI.** Rendered **before/after** frames per AGENTS.md "Visual
@@ -1236,8 +1366,9 @@ contract for all of them.
    merge + subagent prune), config keys, `guide://monitor`, the system.md
    sentence, unit + integration tests. Deliveries happen on every heuristic
    hit (no classifier yet); notifications behave as today.
-2. **Classifier gate** — `ClassificationService.decide`, the typed question,
-   the fork, counters, tests, cost logging.
+2. **Classifier gate** — `ClassificationService.decide`, the
+   per-changed-monitor typed question, the fork, counters, tests, cost
+   logging.
 3. **Notifications** — the `notify` parameter (wake + monitor), trigger
    recording, event/row field + migration, consumer gates, §14.6 tests.
 4. **Surfaces** — frontend state + TUI band + frames, catalog, `lop monitor
@@ -1261,9 +1392,10 @@ contract for all of them.
 - **Classifier cost on noisy sources**: suppressed calls only happen on hits;
   a badly-tuned monitor costs ~$0.00001/hit — the tuning loop is the answer,
   and the counters make it visible.
-- **Index/state churn on shared disks**: bounded file sizes, atomic writes,
-  and the no-quiet-tick-index-write rule (§10.2); the store's measured read
-  is ~0.2 ms for the wake sibling.
+- **Index/state churn on shared disks**: a quiet tick writes one ≲ 1 KiB
+  counters file (the snapshot blob is rewritten only on change — §10.3), the
+  index only on change events (§10.2); bounded file sizes and atomic writes;
+  the store's measured read is ~0.2 ms for the wake sibling.
 - **Two sessions watching one URL**: no cross-session dedupe (§2); the guide
   advises naming a watcher per source. Recorded, not solved.
 
