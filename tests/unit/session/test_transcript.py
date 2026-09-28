@@ -2234,6 +2234,13 @@ def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypa
     cursor is in the sweep on purpose: its answer is the RECONCILED tail page,
     which a locator that "decided" the cursor was missing could silently turn
     into an empty or unreconciled page.
+
+    The anchored mode rides the same rule (design §D4) and is in the sweep for
+    both of its edges: an absent anchor's answer is the EMPTY reconciled page
+    (the same trap, with the opposite page as the wrong answer), and the forward
+    half — the one part with no cursor precedent — must not depend on which
+    pass found the anchor: when the walk is what found it, its own bytes are
+    located so the newer rows still read from its true position.
     """
     directory, ids = _variant_journal(tmp_path, "plain", rows=600, pad=300)
     cases = [
@@ -2243,8 +2250,12 @@ def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypa
         ("through_id", ids[1]),
         ("through_id", ids[len(ids) // 2]),
         ("through_id", ids[-1]),
+        ("around_id", ids[1]),
+        ("around_id", ids[len(ids) // 2]),
+        ("around_id", ids[-1]),
         ("before_id", "f" * 32),
         ("through_id", "f" * 32),
+        ("around_id", "f" * 32),
     ]
     real_locate = transcript_module._locate_cursor_row
 
@@ -2255,12 +2266,16 @@ def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypa
     for window in (transcript_module._PAGE_LOCATE_WINDOW_BYTES, 1024):
         monkeypatch.setattr(transcript_module, "_PAGE_LOCATE_WINDOW_BYTES", window)
         for kind, cursor in cases:
-            located = read_transcript_page(directory, **{kind: cursor}, limit=100)
+            # ``Any`` rather than ``str``: the keyword NAME comes from the case
+            # table, and a checker validating a str against every parameter the
+            # signature could take rightfully rejects ``before``/``after``.
+            window_kwargs: dict[str, Any] = {kind: cursor}
+            located = read_transcript_page(directory, **window_kwargs, limit=100)
             if cursor != "f" * 32:
                 assert located.entries, f"{kind}={cursor} answered nothing to compare"
             transcript_module._locate_cursor_row = _locate_nothing
             try:
-                unlocated = read_transcript_page(directory, **{kind: cursor}, limit=100)
+                unlocated = read_transcript_page(directory, **window_kwargs, limit=100)
             finally:
                 transcript_module._locate_cursor_row = real_locate
             assert located == unlocated, f"{kind}={cursor} at window {window}"
