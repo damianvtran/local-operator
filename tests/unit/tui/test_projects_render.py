@@ -98,7 +98,7 @@ def test_list_row_carries_every_field_the_row_owns() -> None:
     result = render_project_list([view], cursor=0, now=NOW)
     assert result.height == 1
     assert result.text.plain == (
-        "▸ alpha [active] · est 13pt · →2026-10-15 · M 1/2 · 1 session (1 live) "
+        "▸ alpha [● active] · est 13pt · →2026-10-15 · M 1/2 · 1 session (1 live) "
         '· progress 2h ago · "Payments migration"'
     )
 
@@ -137,11 +137,11 @@ def test_list_row_caps_a_long_description_at_the_tool_budget() -> None:
 def test_list_row_shows_the_title_first_with_the_key_secondary() -> None:
     titled = _view("payments-migration", title="Q4 Payments Migration")
     plain = render_project_list([titled], cursor=0, now=NOW).text.plain
-    assert plain.startswith("▸ Q4 Payments Migration (payments-migration) [active]")
+    assert plain.startswith("▸ Q4 Payments Migration (payments-migration) [● active]")
 
     # No title → the key is the label (every surface's fallback).
     fallback = render_project_list([_view("plain-key")], cursor=0, now=NOW).text.plain
-    assert fallback.startswith("▸ plain-key [active]")
+    assert fallback.startswith("▸ plain-key [● active]")
 
 
 def test_list_truncates_past_the_render_cap_naming_the_count() -> None:
@@ -162,7 +162,10 @@ def test_board_columns_fixed_order_and_archived_only_when_non_empty() -> None:
     ]
     result = render_project_board(views, now=NOW)
     header = result.text.plain.splitlines()[0]
-    assert "active · 1" in header
+    # D4: the bucket column is LABELLED for what it holds — planning/qa/
+    # validation ride it, so "active · 1" over one true active was two things
+    # called active on one screen.
+    assert "in flight · 1" in header
     assert "paused · 1" in header
     assert "done · 1" in header
     assert "archived" not in header
@@ -186,8 +189,8 @@ def test_board_card_is_three_lines_with_absent_chips_omitted() -> None:
     # header, blank, name, facts, freshness. The name line opens with the
     # two-cell marker column (S3b): `▸` the selection, `◆` the session's own,
     # two spaces otherwise — the card grid does not move.
-    assert lines[0].startswith("active · 1")
-    assert lines[2] == "  solo"
+    assert lines[0].startswith("in flight · 1")
+    assert lines[2] == "  solo [● active]"
     assert lines[3] == "est 9pt · M 0/1 · →2026-10-15"
     assert lines[4] == "reported 5m ago · 2 live"
 
@@ -223,9 +226,12 @@ def test_board_adds_the_key_only_when_the_column_holds_title_and_key() -> None:
     long = _view("payments-migration", title="Q4 Payments Migration")
     result = render_project_board([short, long], now=NOW)
     plain = result.text.plain
-    assert "Short (k)" in plain  # both fit in 31 cells
-    assert "Q4 Payments Migration" in plain
-    assert "(payments-migration)" not in plain  # too wide — the title wins alone
+    # The chip spends 10 of the 29 content cells, so `Short (k)` fits beside it
+    # and the long title is ellipsized to make room for the chip (D1: the chip
+    # is never shed).
+    assert "Short (k) [● active]" in plain
+    assert "Q4 Payments Migra… [● active]" in plain
+    assert "(payments-migration)" not in plain  # too wide — the key never joins
 
 
 def test_board_empty_store_uses_the_shared_sentence() -> None:
@@ -373,7 +379,7 @@ def test_detail_footer_names_progress_reporter_and_staleness() -> None:
     )
     view["progress_stale"] = True
     text = detail_footer(view, now=NOW).plain
-    assert "alpha [active]" in text
+    assert "alpha [● active]" in text
     assert "progress reported 2h ago by 4e92693767fa · stale: cutover done" in text
     assert "no linked sessions" in text
 
@@ -381,7 +387,7 @@ def test_detail_footer_names_progress_reporter_and_staleness() -> None:
 def test_detail_footer_shows_title_first_with_the_key() -> None:
     view = _view("payments-migration", title="Q4 Payments Migration")
     text = detail_footer(view, now=NOW).plain
-    assert text.startswith("Q4 Payments Migration (payments-migration) [active]")
+    assert text.startswith("Q4 Payments Migration (payments-migration) [● active]")
 
 
 def test_detail_footer_trades_the_key_away_before_the_title() -> None:
@@ -389,10 +395,10 @@ def test_detail_footer_trades_the_key_away_before_the_title() -> None:
     # Wide: both. Too tight for both but enough for title + chip: the key
     # sheds first (`title wins when only one fits`), the chip survives whole.
     wide = detail_footer(view, now=NOW, width=200).plain
-    assert "Q4 Payments Migration (payments-migration) [active]" in wide
-    tight = detail_footer(view, now=NOW, width=30).plain
+    assert "Q4 Payments Migration (payments-migration) [● active]" in wide
+    tight = detail_footer(view, now=NOW, width=34).plain
     assert "(payments-migration)" not in tight
-    assert tight.startswith("Q4 Payments Migration [active]")
+    assert tight.startswith("Q4 Payments Migration [● active]")
 
 
 def test_detail_footer_omits_unknown_counts_instead_of_zeroing_them() -> None:
@@ -519,7 +525,7 @@ def test_detail_footer_truncates_explicitly_when_even_the_identity_overflows() -
 
     view = _view("x" * 120)
     narrow = detail_footer(view, now=NOW, width=20)
-    assert "\u2026 [active]" in narrow.plain
+    assert "\u2026 [● active]" in narrow.plain
     assert cell_len(narrow.plain) <= 20
     tiny = detail_footer(view, now=NOW, width=6)
     assert tiny.plain.endswith("\u2026")
@@ -575,7 +581,7 @@ def test_status_chips_use_the_per_status_styles() -> None:
         cursor=0,
         style_for=resolve,
     )
-    assert result.text.plain.count("[active]") == 1
+    assert result.text.plain.count("[● active]") == 1
     assert "status_active" in seen and "status_paused" in seen and "status_done" in seen
 
 
@@ -639,10 +645,10 @@ def test_footer_keeps_the_status_chip_whole_when_the_name_overflows() -> None:
 
     view = _view("long-horizon-annotator-overhaul-with-many-many-words", status="paused")
     text = detail_footer(view, now=NOW, width=56).plain
-    assert "[paused]" in text
-    assert "[p…" not in text
+    assert "[‖ paused]" in text
+    assert "[‖…" not in text
     assert cell_len(text) <= 56
-    assert text.endswith("[paused]")  # the chip is the survivor, the name gives way
+    assert text.endswith("[‖ paused]")  # the chip is the survivor, the name gives way
 
 
 def test_detail_footer_sheds_the_key_before_the_milestone_rollup() -> None:
@@ -658,24 +664,28 @@ def test_detail_footer_sheds_the_key_before_the_milestone_rollup() -> None:
     # 96 cells is the 100x30 footer box (the D1 measurement): the rollup stays,
     # the key sheds.
     tight = detail_footer(view, width=96).plain
-    assert "Q4 Payments Migration [active]" in tight
+    assert "Q4 Payments Migration [● active]" in tight
     assert "M 1/2" in tight and "[completed]" in tight
     assert "(payments-migration)" not in tight
     # Wide enough for identity-with-key plus the rollup, the key returns.
     wide = detail_footer(view, width=140).plain
-    assert "Q4 Payments Migration (payments-migration) [active]" in wide
+    assert "Q4 Payments Migration (payments-migration) [● active]" in wide
     assert "M 1/2" in wide
 
 
 def test_detail_footer_marks_shed_content_down_to_the_bare_identity() -> None:
     """D4: the marker now reaches the keyless rung; only the chip tight band stays bare."""
+    from rich.cells import cell_len
+
     view = _view("payments-migration", title="Q4 Payments Migration")
     marked = detail_footer(view, width=40).plain
-    assert marked == "Q4 Payments Migration [active] …"
+    assert marked == "Q4 Payments Migration [● active] …"
     # Below the bare identity the chip already spends the width (the tight
-    # rebuild) — the marker-less band is only 27-32 cells now (was 27-49).
+    # rebuild): 31 cells hold a 10-cell chip, a space and a truncated name.
     bare = detail_footer(view, width=31).plain
-    assert bare == "Q4 Payments Migration [active]"
+    assert bare.endswith("[● active]")
+    assert "…" in bare
+    assert cell_len(bare) == 31
 
 
 # -- S3b: the marker column and the reveal's geometry -------------------------
@@ -810,15 +820,137 @@ def test_the_cap_note_disappears_when_nothing_is_left_hidden() -> None:
     assert f"p{selected_index:02d}" in canvas.splitlines()[position[1]]
 
 
-def test_board_key_budget_counts_the_marker_column() -> None:
-    """D5: the two marker cells share the name cell, so `label (key)` has 29."""
-    from local_operator.tui.projects_render import cell_len
+def test_board_key_budget_shares_the_line_with_the_chip() -> None:
+    """D1/D5: the chip is never shed, so `label (key)` budgets the rest."""
+    from local_operator.tui.projects_render import cell_len, status_chip_text
 
-    kept = _view("keeptest", title="A" * 18)
-    shed = _view("shedtest", title="B" * 19)
-    assert cell_len("A" * 18 + " (keeptest)") == 29
-    assert cell_len("B" * 19 + " (shedtest)") == 30
+    chip = status_chip_text("active")
+    # 31 cells = 2 marker cells + label + key + separator space + chip.
+    budget = 31 - 2 - cell_len(chip) - 1
+    assert budget == 18
+    kept = _view("keeptest", title="A" * (budget - len(" (keeptest)")))
+    shed = _view("shedtest", title="B" * (budget - len(" (shedtest)") + 1))
     plain = render_project_board([kept, shed], now=NOW).text.plain
-    assert "A" * 18 + " (keeptest)" in plain  # exactly the budget: key kept
-    assert " (shedtest)" not in plain  # one past it: the title wins alone
-    assert "B" * 19 in plain
+    # Exactly at the budget: the key stays. One cell past it: the key sheds
+    # and the title keeps its whole self beside the chip.
+    assert f"{'A' * (budget - len(' (keeptest)'))} (keeptest) [● active]" in plain
+    assert " (shedtest)" not in plain
+    assert f"{'B' * (budget - len(' (shedtest)') + 1)} [● active]" in plain
+
+
+def test_board_buckets_lifecycle_statuses_into_the_in_flight_column() -> None:
+    views = [
+        _view("qa-run", status="qa"),
+        _view("plan-new", status="planning"),
+        _view("val-ship", status="validation"),
+    ]
+    board = render_project_board(views, now=NOW).text.plain
+    header = board.splitlines()[0]
+    assert "in flight · 3" in header  # they ride the in-flight column...
+    assert "qa ·" not in header and "planning ·" not in header  # ...not columns
+    # D1: every card carries its OWN exact chip (glyph + word) — the column
+    # tells the coarse story, the chip stays exact.
+    assert "[◐ qa]" in board and "[○ planning]" in board and "[◉ validation]" in board
+
+
+def test_board_falls_back_to_the_leading_column_for_unknown_statuses() -> None:
+    board = render_project_board([_view("mystery", status="shipped")], now=NOW).text.plain
+    assert "mystery" in board  # a newer build's status must not vanish
+    assert "[? shipped]" in board  # ...and it says it does not know the word
+
+
+def test_lifecycle_chips_paint_in_the_footer() -> None:
+    assert "[◐ qa]" in detail_footer(_view("qa-run", status="qa"), now=NOW, width=120).plain
+    assert (
+        "[◉ validation]"
+        in detail_footer(_view("val-ship", status="validation"), now=NOW, width=120).plain
+    )
+
+
+def test_aggregate_footer_counts_every_true_status() -> None:
+    from local_operator.tui.projects_render import aggregate_footer
+
+    views = [
+        _view("q", status="qa"),
+        _view("p", status="planning"),
+        _view("a", status="archived"),
+        _view("x", status="active"),
+    ]
+    text = aggregate_footer(views).plain
+    assert "1 planning" in text and "1 active" in text and "1 qa" in text
+    assert "1 archived" in text
+    assert "paused" not in text
+
+
+# -- round 3: the glyph family, the ladder and the per-card chips --------------
+
+
+def test_every_status_glyph_is_one_cell_and_its_chip_is_the_one_composition() -> None:
+    from rich.cells import cell_len
+
+    from local_operator.tui.projects_render import STATUS_GLYPHS, status_chip_text
+
+    for status, glyph in STATUS_GLYPHS.items():
+        assert cell_len(glyph) == 1, (status, glyph)
+        assert status_chip_text(status) == f"[{glyph} {status}]"
+    # An unknown status keeps a chip: the '?' glyph says the word is not ours.
+    assert status_chip_text("shipped") == "[? shipped]"
+    # The chip is its own whole token — the screen keeps it intact.
+    for status in [*STATUS_GLYPHS, "shipped"]:
+        chip = status_chip_text(status)
+        assert cell_len(chip) == len(chip)
+
+
+def test_the_board_card_carries_every_statuses_exact_chip() -> None:
+    from local_operator.tui.projects_render import STATUS_GLYPHS, status_chip_text
+
+    views = [_view(f"card-{status}", status=status) for status in STATUS_GLYPHS]
+    board = render_project_board(views, now=NOW).text.plain
+    for status in STATUS_GLYPHS:
+        assert status_chip_text(status) in board, status
+
+
+def test_the_counts_line_sheds_whole_segments_at_60_100_150() -> None:
+    from rich.cells import cell_len
+
+    from local_operator.tui.projects_render import aggregate_footer
+
+    views = [
+        _view("pl", status="planning"),
+        _view("ac", status="active", sessions=[_session(state="live")]),
+        _view("qa", status="qa"),
+        _view("va", status="validation"),
+        _view("pa", status="paused"),
+        _view("do", status="done"),
+        _view("ar", status="archived"),
+    ]
+    full = aggregate_footer(views, style_for=lambda key: Style()).plain
+    assert full == (
+        "7 projects · 1 planning · 1 active · 1 qa · 1 validation · 1 paused "
+        "· 1 done · 1 archived · 1 live session"
+    )
+    # 150: everything fits.
+    assert aggregate_footer(views, style_for=lambda key: Style(), width=150).plain == full
+    # 100: the live clause shortens to the card idiom ("1 live"); nothing is
+    # cut mid-word (the old bug's "· 0" tail).
+    at_100 = aggregate_footer(views, style_for=lambda key: Style(), width=100).plain
+    assert at_100.endswith("1 live")
+    assert cell_len(at_100) <= 100
+    # 60: the counts themselves ellipsize at a SEGMENT boundary with an
+    # explicit marker — a cut line says more exists.
+    at_60 = aggregate_footer(views, style_for=lambda key: Style(), width=60).plain
+    assert at_60 == "7 projects · 1 planning · 1 active · 1 qa · 1 validation · …"
+    assert cell_len(at_60) <= 60
+    # Below that the segment list is a STRICT PREFIX — one that cannot fit
+    # ends the line; a shorter later segment must never be skipped in (the
+    # "1 qa · 1 paused · …" shape that silently dropped validation).
+    at_56 = aggregate_footer(views, style_for=lambda key: Style(), width=56).plain
+    assert at_56 == "7 projects · 1 planning · 1 active · 1 qa · …"
+    assert "paused" not in at_56
+    # With a tier the zoom clause sheds before anything else does.
+    tiered = aggregate_footer(views, tier="month", style_for=lambda key: Style(), width=150).plain
+    assert tiered.endswith("· zoom: month")
+    tiered_100 = aggregate_footer(
+        views, tier="month", style_for=lambda key: Style(), width=100
+    ).plain
+    assert "zoom" not in tiered_100 and tiered_100.endswith("1 live")

@@ -13,9 +13,10 @@ and every other reader calls — so a chip on a card and a line in a tool result
 cannot disagree about which milestone is late.
 
 **``progress_stale`` is server-computed**, from the one staleness constant in
-:mod:`local_operator.projects` — four hours, and only for ``active`` rows
-(settled records never read stale) — so the UI's stale badge and the completion
-check can never disagree about one record.
+:mod:`local_operator.projects` — four hours, and only for the in-flight rows
+(``planning``/``active``/``qa``/``validation``; settled records never read
+stale) — so the UI's stale badge and the completion check can never disagree
+about one record.
 
 **``extra="allow"`` on the view models**, matching the other desktop payloads: a
 field added by a later build crosses additively and an older renderer ignores
@@ -188,7 +189,15 @@ class ProjectDeleted(BaseModel):
 #: phone's compile-time section order mirrors it (``STATUS_ORDER`` in
 #: ``mobile/web/src/components/projects-sheet.tsx``, which cannot import
 #: Python).
-STATUS_RANK = {"active": 0, "paused": 1, "done": 2, "archived": 3}
+STATUS_RANK = {
+    "planning": 0,
+    "active": 1,
+    "qa": 2,
+    "validation": 3,
+    "paused": 4,
+    "done": 5,
+    "archived": 6,
+}
 
 
 class _Request(BaseModel):

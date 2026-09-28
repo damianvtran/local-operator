@@ -638,13 +638,6 @@ def test_settled_records_never_read_stale(store) -> None:
         assert not progress_is_stale(settled)  # and against the real clock
 
 
-def test_never_reported_is_stale_only_while_active(store) -> None:
-    project = create(store)
-    assert progress_is_stale(project)  # the first honest line is still owed
-    done = store.update_project(project.id, ProjectEdit(status="done")).project
-    assert not progress_is_stale(done)
-
-
 def test_every_new_line_appends_to_the_history(store) -> None:
     project = create(store)
     assert project.updates == []
@@ -1006,3 +999,146 @@ def test_a_post_replace_failure_keeps_the_rows_files(store, tmp_path, monkeypatc
     assert all(Path(path).exists() for path in stored_paths)
     # The store converges to the landed row on a fresh read.
     assert store.get_project(project.id).updates[-1].text == "newest"
+
+
+def test_the_status_vocabulary_is_one_source_and_round_trips(store) -> None:
+    from typing import get_args
+
+    from local_operator.projects import (
+        PROJECT_LIVE_STATUSES,
+        PROJECT_STATUSES,
+        ProjectStatus,
+    )
+
+    # ONE copy: the model literal, the tool's vocabulary and the refusal text
+    # all derive from PROJECT_STATUSES (and the tool's list is this tuple).
+    assert tuple(get_args(ProjectStatus)) == PROJECT_STATUSES
+    assert PROJECT_LIVE_STATUSES == {"planning", "active", "qa", "validation"}
+    for status in PROJECT_STATUSES:
+        project = create(store, name=f"st-{status}", status=status)
+        assert store.get_project(project.id).status == status
+
+
+@pytest.mark.parametrize("status", ["planning", "active", "qa", "validation"])
+def test_in_flight_statuses_can_read_stale(store, status) -> None:
+    project = create(store, name=f"live-{status}", status=status, progress="older line")
+    row = store.get_project(project.id)
+    stale_moment = row.progress_updated_at + PROJECT_PROGRESS_STALE_S + 60
+    assert progress_is_stale(row, now=stale_moment)
+
+
+def test_never_reported_is_stale_for_every_in_flight_status(store) -> None:
+    for status in ("planning", "active", "qa", "validation"):
+        project = create(store, name=f"nr-{status}", status=status)
+        assert progress_is_stale(project), status
+    for status in ("paused", "done", "archived"):
+        project = create(store, name=f"nr-settled-{status}", status=status)
+        assert not progress_is_stale(project), status
+
+
+def test_lifecycle_rows_written_before_the_extension_still_load(store) -> None:
+    # Back-compat: every status the OLD vocabulary could write is still valid,
+    # and a fresh reader loads each row unchanged.
+    project = create(store)
+    row = json.loads((store.projects_dir / f"{project.id}.json").read_text())
+    for legacy in ("active", "paused", "done", "archived"):
+        row["status"] = legacy
+        (store.projects_dir / f"{project.id}.json").write_text(json.dumps(row))
+        reader = ProjectRegistry(store.config_dir)
+        assert reader.get_project(project.id).status == legacy
+
+
+def test_done_needs_complete_milestones_or_force_done(store) -> None:
+    project = create(
+        store,
+        milestones=[
+            ProjectMilestone(name="beta cut"),
+            ProjectMilestone(name="gamma review", completed_at="2026-01-01"),
+        ],
+    )
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(project.id, ProjectEdit(status="done"), reporter=SESSION_A)
+    message = str(excinfo.value)
+    assert "cannot set status 'done'" in message
+    assert "'beta cut'" in message  # the incomplete one is named
+    assert "'gamma review'" not in message  # the complete one is not
+    assert "force_done=true" in message  # and the escape hatch is in the sentence
+    assert store.get_project(project.id).status != "done"
+
+    forced = store.update_project(
+        project.id, ProjectEdit(status="done"), reporter=SESSION_A, force_done=True
+    )
+    assert forced.project.status == "done"
+    assert forced.project.completed_at is not None  # the stamp still applies
+
+
+def test_done_is_allowed_when_the_plan_is_complete_or_empty(store) -> None:
+    complete = create(
+        store,
+        name="complete-plan",
+        milestones=[ProjectMilestone(name="one", completed_at="2026-01-01")],
+    )
+    assert store.update_project(complete.id, ProjectEdit(status="done")).project.status == "done"
+    empty = create(store, name="plan-less")
+    assert store.update_project(empty.id, ProjectEdit(status="done")).project.status == "done"
+
+
+def test_a_same_call_replace_to_a_complete_list_passes_the_gate(store) -> None:
+    project = create(store, milestones=[ProjectMilestone(name="open")])
+    outcome = store.update_project(
+        project.id,
+        ProjectEdit(
+            status="done",
+            milestones=[ProjectMilestone(name="closed", completed_at="2026-01-01")],
+        ),
+        reporter=SESSION_A,
+    )
+    assert outcome.project.status == "done"
+
+
+def test_create_refuses_done_with_incomplete_milestones(store) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        store.create_project(
+            ProjectEdit(
+                name="born-done", status="done", milestones=[ProjectMilestone(name="open")]
+            ),
+            sessions=[SESSION_A],
+        )
+    assert "force_done=true" in str(excinfo.value)
+    made = store.create_project(
+        ProjectEdit(
+            name="born-done-forced",
+            status="done",
+            milestones=[ProjectMilestone(name="open")],
+        ),
+        sessions=[SESSION_A],
+        force_done=True,
+    )
+    assert made.status == "done"
+
+
+def test_a_row_with_an_unknown_status_loads_with_a_warning(store, caplog) -> None:
+    """QA round 1, Q1: a row from a NEWER build must LOAD — the word is
+    preserved and every surface renders it (the board's leading column, a
+    ``[? word]`` chip) — while the WRITE path stays strict."""
+    import logging
+
+    project = create(store, name="future-row", status="qa")
+    path = store.projects_dir / f"{project.id}.json"
+    row = json.loads(path.read_text())
+    row["status"] = "shipped"
+    path.write_text(json.dumps(row))
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        reader = ProjectRegistry(store.config_dir)
+        names = [candidate.name for candidate in reader.list_projects()]
+    assert "future-row" in names  # loaded, not dropped
+    found = reader.get_project_by_name("future-row")
+    assert found is not None and found.status == "shipped"  # preserved verbatim
+    assert any("unknown status 'shipped'" in record.message for record in caplog.records)
+
+    # Writes stay strict: the edit vocabulary refuses the word before any lock.
+    # (`ProjectEdit`'s status is the Literal, so the refusal is at construction;
+    # the kwargs form is the deliberate type violation this test pins.)
+    with pytest.raises(ValueError):
+        ProjectEdit.model_validate({"status": "shipped"})
