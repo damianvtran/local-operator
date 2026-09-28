@@ -168,7 +168,12 @@ def record_profile_note(
     # never replaced by `os.replace`.
     write_target = path
     try:
-        if path.exists() and not Path(os.path.realpath(path)).is_relative_to(root_real):
+        # The resolve is UNCONDITIONAL, and that is the fix, not a style
+        # choice: `path.exists()` follows the link, so a DANGLING symlink to
+        # an out-of-root target read as "nothing there", the guard was
+        # skipped, and the write then CREATED that target through the link
+        # (review round 1, F2). `realpath` resolves a missing target fine.
+        if not Path(os.path.realpath(path)).is_relative_to(root_real):
             return "unsafe"
         if path.is_symlink():
             write_target = Path(os.path.realpath(path))

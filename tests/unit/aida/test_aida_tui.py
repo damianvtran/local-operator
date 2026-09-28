@@ -41,6 +41,35 @@ def _boot(tmp_path, monkeypatch, *, resume_boots=None):
     return app
 
 
+async def _settle(pilot, seconds: float = 2.0) -> None:
+    """Pause for a bounded WALL-CLOCK grace, not an iteration count.
+
+    WHY DEADLINES RATHER THAN LOOP BUDGETS (round-1 remediation): the first
+    `/aida` open in a process pulls `session_factory` in cold while checking
+    whether a greeting is owed (~0.8-2.3 s measured here), so a budget counted
+    in event-loop iterations made a test's outcome depend on which test in an
+    xdist worker happened to pay that import — a worker-order change flipped
+    whole tests. These loops mean "give the worker enough time"; a wall-clock
+    bound says exactly that and is order-independent.
+    """
+    import time as _time
+
+    deadline = _time.monotonic() + seconds
+    while _time.monotonic() < deadline:
+        await pilot.pause()
+
+
+async def _until(pilot, predicate, seconds: float = 20.0) -> None:
+    """Pause until ``predicate()`` holds, or the deadline; assert after."""
+    import time as _time
+
+    deadline = _time.monotonic() + seconds
+    while _time.monotonic() < deadline:
+        await pilot.pause()
+        if predicate():
+            return
+
+
 @pytest.mark.asyncio
 async def test_the_picker_leads_with_her_pinned_row(tmp_path, monkeypatch) -> None:
     """R27's picker half, through the pipeline that actually builds the rows.
@@ -76,10 +105,10 @@ async def test_the_picker_leads_with_her_pinned_row(tmp_path, monkeypatch) -> No
         editor.move_cursor(editor._end_of_buffer())
         await pilot.pause()
         await pilot.press("enter")
-        for _ in range(120):
-            await pilot.pause()
-            if isinstance(app.screen, SessionPickerScreen) and app.screen._all:
-                break
+        await _until(
+            pilot,
+            lambda: isinstance(app.screen, SessionPickerScreen) and bool(app.screen._all),
+        )
 
         picker = app.screen
         assert isinstance(picker, SessionPickerScreen)
@@ -127,8 +156,7 @@ async def test_the_pause_resume_status_receipts(tmp_path, monkeypatch) -> None:
             editor.move_cursor(editor._end_of_buffer())
             await pilot.pause()
             await pilot.press("enter")
-            for _ in range(60):
-                await pilot.pause()
+            await _settle(pilot, 3.0)
             return _transcript_text(app)
 
         body = await run("/aida status")
@@ -221,16 +249,18 @@ async def test_a_request_rides_the_adoption_onto_her_conversation(tmp_path, monk
     app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
+        # Wait for the boot session before sending: a command handled while the
+        # boot is in flight sees `_session is None` and answers "still
+        # starting" instead of opening her — the race this test hit
+        # deterministically under load (round-1 remediation).
+        await _until(pilot, lambda: bool(app._conversation_id()))
         editor = app.query_one(Editor)
         editor.focus()
         editor.text = "/aida summarise everything in flight"
         editor.move_cursor(editor._end_of_buffer())
         await pilot.pause()
         await pilot.press("enter")
-        for _ in range(120):
-            await pilot.pause()
-            if built and built[-1].prompts:
-                break
+        await _until(pilot, lambda: built and built[-1].prompts)
 
         assert boots == [her_id], f"the factory must be asked for HER conversation: {boots}"
         assert built[0].prompts == ["summarise everything in flight"], built[0].prompts
@@ -395,6 +425,11 @@ async def test_a_reserved_word_counts_only_as_the_whole_argument(tmp_path, monke
 
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
+        # Wait for the boot session before sending (see the sibling note in
+        # `test_a_request_rides_the_adoption_onto_her_conversation`): a command
+        # handled mid-boot sees no session and answers "still starting"
+        # instead of reaching her.
+        await _until(pilot, lambda: bool(app._conversation_id()))
         editor = app.query_one(Editor)
 
         async def send(command: str, *, wait_for_prompt: bool) -> None:
@@ -402,11 +437,16 @@ async def test_a_reserved_word_counts_only_as_the_whole_argument(tmp_path, monke
             editor.text = command
             editor.move_cursor(editor._end_of_buffer())
             await pilot.pause()
+            before = len(built[-1].prompts) if built else 0
             await pilot.press("enter")
-            for _ in range(120):
-                await pilot.pause()
-                if not wait_for_prompt or (built and built[-1].prompts):
-                    break
+            if wait_for_prompt:
+                # Wait for THIS send's prompt, not merely for a non-empty
+                # history: after the first message, `built[-1].prompts` is
+                # already populated and the old condition returned before the
+                # new prompt landed (a race that read as a fast test).
+                await _until(pilot, lambda: built and len(built[-1].prompts) > before)
+            else:
+                await _settle(pilot, 2.0)
 
         # Words with more in them are a MESSAGE — never the control, and never
         # silently truncated.
@@ -852,22 +892,28 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         await _await_setup_state(app, pilot)
         editor = app.query_one(Editor)
 
-        async def send(line: str) -> None:
+        async def send(line: str, until: object = None) -> None:
             editor.focus()
             editor.text = line
             editor.move_cursor(editor._end_of_buffer())
             await pilot.pause()
             await pilot.press("enter")
-            for _ in range(120):
-                await pilot.pause()
+            if callable(until):
+                await _until(pilot, until)
+            else:
+                await _settle(pilot, 3.0)
 
-        await send("/aida")
+        await send("/aida", lambda: "no provider configured" in _transcript_text(app))
         assert app._aida_setup_view is True
         assert "/login openai" in (app._splash_notice or "")
         body = _transcript_text(app)
         assert "Aida" in body
         assert "no provider configured" in body
         assert "still starting" not in body
+        # D1: no introduction promise — the greeting is gated on
+        # `first_run_pending` and an install with conversations never gets it,
+        # so the sentence was false there.
+        assert "introduce herself" not in body
 
         # Her durable session exists (created WITHOUT a provider), so the
         # conversation opened after `/login` is the same one (R7).
@@ -877,7 +923,7 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         assert her_id and (tmp_path / "sessions" / her_id).is_dir()
 
         # A typed send is refused with the SAME cue, and says nothing was sent.
-        await send("hello there")
+        await send("hello there", lambda: "can't reply yet" in _transcript_text(app))
         body = _transcript_text(app)
         assert "can't reply yet" in body
         assert "your message was not sent" in body
@@ -887,9 +933,48 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         # `/aida <text>` opens the view and says the request was not sent.
         # Asserted on the unwrapped fragment: the block wraps at 100 columns,
         # so the sentence arrives with a newline inside it.
-        await send("/aida book me a flight")
+        await send("/aida book me a flight", lambda: "say it again once" in _transcript_text(app))
         body = _transcript_text(app)
         assert "say it again once" in body
+
+
+@pytest.mark.asyncio
+async def test_a_typed_message_at_the_setup_splash_names_login(tmp_path, monkeypatch) -> None:
+    """U3: with no provider, the refusal must name the route that CONNECTS one.
+
+    The launcher's shared startup map says "Settings > Providers" — desktop
+    vocabulary on a terminal, naming a surface the TUI does not have (its
+    `/settings` Providers section holds provider OPTIONS, not a place to
+    connect one). In the setup state there is no session and no turn, so the
+    answer is the shared cue; this pins the splash half, and her view's half is
+    pinned above.
+    """
+    from local_operator.session_factory import HostingNotConfiguredError
+    from tests.unit.tui.test_app_pilot import _await_setup_state
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    async def _no_hosting_factory():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(_no_hosting_factory, resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "hello"
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        await pilot.press("enter")
+        await _until(pilot, lambda: "/login openai" in _transcript_text(app))
+
+        body = _transcript_text(app)
+        assert "/login openai" in body
+        assert "still starting" not in body
+        assert "Settings > Providers" not in body
 
 
 @pytest.mark.asyncio
@@ -949,10 +1034,7 @@ async def test_first_run_login_opens_her_conversation_and_arms_the_greeting(
         editor.move_cursor(editor._end_of_buffer())
         await pilot.pause()
         await pilot.press("enter")
-        for _ in range(200):
-            await pilot.pause()
-            if boots:
-                break
+        await _until(pilot, lambda: boots and app._conversation_id() == her_id)
 
         assert boots == [her_id], f"the rebuild must target HER conversation: {boots}"
         assert app._conversation_id() == her_id
@@ -963,3 +1045,68 @@ async def test_first_run_login_opens_her_conversation_and_arms_the_greeting(
     entry = wake_store.read_entry(tmp_path, her_id) or {}
     ids = [row["id"] for row in entry.get("schedules") or []]
     assert "aida-greeting" in ids, entry
+
+
+@pytest.mark.asyncio
+async def test_opening_her_conversation_arms_the_owed_greeting(tmp_path, monkeypatch) -> None:
+    """R20/R22 on the OTHER first contact: `/aida` on a provider-present install.
+
+    The setup seam only runs when a `/login` ENDS a setup state; an install
+    that already resolves a provider boots to a normal conversation and meets
+    her from `/aida` (or the picker). Nothing armed the greeting on that path
+    — first contact got no greeting, and the earliest natural fire was the
+    next 09:00 cadence (review round 1, U2).
+    """
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ConfigManager(config_dir=tmp_path).update_config({"hosting": "test", "model_name": "mock"})
+
+    from local_operator import aida as aida_pkg
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id
+
+    boots: list[str | None] = []
+
+    class HerSession(FakeSession):
+        @property
+        def session_id(self) -> str:  # type: ignore[override]
+            return her_id
+
+    async def resume_factory(session_id):
+        boots.append(session_id)
+        return HerSession()
+
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
+    entry = {}
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        # Wait for the boot session before sending (the mid-boot race above).
+        await _until(pilot, lambda: bool(app._conversation_id()))
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "/aida"
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        await pilot.press("enter")
+
+        from local_operator.wakes import store as wake_store
+
+        def _armed() -> bool:
+            entry = wake_store.read_entry(tmp_path, her_id) or {}
+            ids = [row.get("id") for row in entry.get("schedules") or []]
+            return "aida-greeting" in ids
+
+        await _until(pilot, _armed)
+        entry = wake_store.read_entry(tmp_path, her_id) or {}
+
+    ids = [row.get("id") for row in entry.get("schedules") or []]
+    assert "aida-greeting" in ids, entry
+    assert boots == [her_id], boots
+    from local_operator.aida import onboarding
+
+    assert onboarding.greeted_at(tmp_path) is not None

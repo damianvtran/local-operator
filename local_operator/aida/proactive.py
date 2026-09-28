@@ -641,6 +641,35 @@ def _row_ids(entry: Mapping[str, Any] | None) -> set[str]:
 #: and that one do not form a load-time cycle.
 GREETING_WAKE_ID = "aida-greeting"
 
+#: Display labels for the engine-armed rows on the human receipt surfaces,
+#: keyed by the id the engine writes. Without them the first frame of a fresh
+#: install's first conversation is `wake  aida-greeting (1/1).` — a raw
+#: schedule id where a greeting belongs (design review round 1, D2). Kept
+#: HERE, beside the ids, so a renamed row cannot leave a stale label behind on
+#: a surface that spelled the label itself; `harness/rows.py` reads the map
+#: lazily, the same way it reads `WAKE_SCRATCH_CLAUSE`.
+WAKE_DISPLAY_LABELS: dict[str, str] = {
+    GREETING_WAKE_ID: "Aida's introduction",
+    CADENCE_ID: "Aida's check-in",
+}
+
+#: The label for the bounded escalation one-shots (``aida-extra-<n>``): their
+#: ids carry a counter, so they are matched by prefix.
+EXTRA_DISPLAY_LABEL = "Aida's follow-up"
+
+
+def wake_display_label(wake_id: str) -> str:
+    """The human label for an engine-armed row; unknown ids name themselves.
+
+    Identity for everything else — a user-created wake's own words ARE its
+    identity — so a caller can substitute unconditionally.
+    """
+    if wake_id in WAKE_DISPLAY_LABELS:
+        return WAKE_DISPLAY_LABELS[wake_id]
+    if wake_id.startswith(EXTRA_ID_PREFIX):
+        return EXTRA_DISPLAY_LABEL
+    return wake_id
+
 
 def _clear_greeted(config_dir: Path | str) -> None:
     """Un-stamp the greeting via `onboarding`, best-effort."""
