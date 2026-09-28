@@ -1488,6 +1488,26 @@ def _is_type_expression(value: str) -> bool:
     return parsed and index == len(value) and is_a_type_name
 
 
+#: A snake_case WORD: lowercase letters, digits and underscores, carrying at least
+#: one underscore. Deliberately narrower than "identifier-shaped", which is what the
+#: first cut of this refusal used and what agent review round 1 (R1-1) caught: a
+#: 32-character hex key (`AES_KEY=abcdef0123456789…`) IS identifier-shaped, so the
+#: broad form refused it outright — masked=False, registered=False — i.e. a real
+#: credential left in the clear, conditioned on the key's first character. The
+#: underscore is the discriminator: it marks a compound NAME (`bucket_v4`,
+#: `schema_registry`) rather than an opaque token, and no hex or base64 blob the
+#: table cares about carries one in that position.
+_WORD_SHAPED_VALUE = re.compile(r"[a-z][a-z0-9_]*_[a-z0-9_]*")
+
+#: How many digit characters a word-shaped value may carry and still be read as a
+#: name. A version suffix (`_v4`) has one; a hex digest of the same alphabet has
+#: many, which is the second half of the R1-1 exclusion.
+_WORD_SHAPED_MAX_DIGITS = 2
+
+#: And how long it may be. Names are short; opaque secrets are not.
+_WORD_SHAPED_MAX_LEN = 32
+
+
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
 
@@ -1536,6 +1556,70 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # them; a JWT — the one credential that looks dotted — is caught by its own
     # bare-token rule rather than by a name-driven one.
     if _DOTTED_PATH.fullmatch(value):
+        return True
+    # A snake_case WORD is a NAME, not a secret, and this clause is what keeps one out
+    # of the session-wide registration set. The name beside it says only that a
+    # credential COULD sit there; the value says none did.
+    #
+    # Measured, and the failure it exists for: a read carrying ``BUCKET_KEY=bucket_v4``
+    # made ``bucket_v4`` a registered redaction, so EVERY later occurrence in that
+    # session was masked — including inside a Go struct tag. An agent reading its own
+    # file back saw ``bson:"[redacted],omitempty"`` where two DISTINCT field names had
+    # been, took the marker for a display quirk, and wrote it into source
+    # (radient-ml/agent-server #52): the two tags came out byte-identical, Mongo index
+    # creation failed at boot with no error, and only a byte hash showed it. The damage
+    # outlives the line that caused it, which is why the refusal belongs on the VALUE
+    # rather than on any one rule's name list.
+    #
+    # NARROW ON PURPOSE, and the width is review-driven. The first cut refused any
+    # bare identifier and agent review round 1 (R1-1) measured the hole that made:
+    # ``AES_KEY=<32 hex chars>``, ``HASH_KEY=<sha256>`` and a mixed-case token all
+    # stopped being masked AND registered, so a real key escaped — intermittently,
+    # because whether it escaped depended on the first character. The underscore and
+    # the digit cap are what separate a name from an opaque token; a hex digest fails
+    # both tests and keeps its mask.
+    #
+    # WEAK names only, deliberately: a STRONG name (``password``, ``api_key``,
+    # ``…_token``) must keep masking any opaque value, which is the split ``strong``
+    # already encodes and the reason the corpus positives — ``PASSWORD=swordfish``,
+    # ``token=abcdefghijklmnop`` — stay caught.
+    #
+    # THE TRADE THIS MAKES, stated because it is a posture and not an accident
+    # (agent review round 2, R2-2, and the operator's ruling on it). A word-shaped
+    # VALUE under a weak name is no longer masked AT ALL — not in place, not by
+    # containment — so every corpus value whose shape this refuses now reads in the
+    # clear where the table used to hide it: resource identifiers (`bucket_v4`,
+    # `ca_central_1`) and, because the value alone cannot tell them apart, some
+    # name-like strings a reader would call credential-ish. The operator's ruling
+    # is the reason that cost is acceptable: a value stored in something
+    # credential-shaped is not thereby a secret, and only keys and passwords need
+    # masking.
+    #
+    # The released class is MEASURED, not listed — `_RELEASED_WORD_SHAPED` in the
+    # secrets tests freezes it over a declared corpus in both directions, so a
+    # widening of this clause releases a probe and reds and a narrowing masks one and
+    # reds. It reds only for the rules a probe straddles, so the corpus carries one
+    # inside each cap's own band rather than values merely near it.
+    #
+    # Do not add an example of a released credential to this comment: agent review
+    # round 3 (R3-2) caught the first version of it publishing a
+    # realistic-looking passphrase in the clear, and the point can be made without
+    # one.
+    #
+    # Nothing in this table can have both. The damage being fixed is a value that
+    # was masked in a FILE READ and transcribed back as the marker; any value still
+    # masked there is a value an agent can still copy back. So the choice is between
+    # masking low-confidence words (and corrupting files) and releasing them (and
+    # leaving them readable), and the operator ruled for the second, which is
+    # consistent with the standing instruction to keep "automatic redactions of HIGH
+    # CONFIDENCE credential shapes". Every high-confidence shape is untouched: hex
+    # and base64 keys, prefixed tokens, DSNs, strong-named assignments.
+    if (
+        not strong
+        and len(value) <= _WORD_SHAPED_MAX_LEN
+        and sum(char.isdigit() for char in value) <= _WORD_SHAPED_MAX_DIGITS
+        and _WORD_SHAPED_VALUE.fullmatch(value)
+    ):
         return True
     # A lowercase hyphenated word-phrase under a CODE-ish name is a NAME, not a
     # secret (``_PUBLIC_LISTING_TOKEN = "public-catalogue-read"``). The

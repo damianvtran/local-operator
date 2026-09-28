@@ -7298,3 +7298,295 @@ def test_the_settled_cap_bounds_what_is_published_not_the_pass():
 
     assert builtin._REDACT_STREAM_LIMIT_CHARS == SPILL_ENTRY_LIMIT_BYTES
     assert builtin._REDACT_STREAM_LIMIT_CHARS > builtin.TOOL_OUTPUT_LIMIT_CHARS
+
+
+# ---------------------------------------------------------------------------
+# A weak credential name must not PROMOTE a bare identifier
+# ---------------------------------------------------------------------------
+#
+# Registration is a session-wide PROMOTION, so a false positive here outlives
+# the line that caused it. That is how a cosmetic redaction became committed
+# corruption: a read carrying ``BUCKET_KEY=bucket_v4`` registered ``bucket_v4``,
+# every later occurrence was masked — including inside a Go struct tag — and an
+# agent reading its own file back took the marker for a display quirk and wrote
+# it into source. Two DISTINCT field names came out byte-identical, index
+# creation failed at boot with no error, and only a byte hash showed it.
+
+
+def _promotes(line: str, value: str) -> bool:
+    """Whether ``line`` leaves ``value`` registered for the rest of the session.
+
+    The store is asked directly rather than through a rendered transcript: a
+    mask that happens to hide the value in place and a REGISTRATION that masks
+    it in every later result are different claims, and it is the second one that
+    damages a file the agent then writes.
+    """
+    store = VariableStore(cwd=".")
+    store.redact_with_report(line)
+    return store.redact(value) != value
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "BUCKET_KEY=bucket_v4",
+        '{"bucket_key": "bucket_v4"}',
+        "NETWORK_BUCKET_KEY=bucket_v4",
+    ],
+)
+def test_a_weak_credential_name_does_not_promote_a_bare_identifier(line: str) -> None:
+    """The reported false positive: an identifier under a weak name is not a secret.
+
+    ``key`` is a credential word, so the assignment rule reads
+    ``BUCKET_KEY=<value>`` as a credential — but the VALUE says none did. The
+    name only says one COULD sit there.
+    """
+    assert not _promotes(line, "bucket_v4"), (
+        f"{line!r} promoted 'bucket_v4' to a session-wide redaction; every later "
+        "occurrence of an ordinary identifier would be masked, which is the "
+        "damage mode this test exists to keep closed"
+    )
+
+
+def test_a_weak_name_leaves_the_bare_identifier_readable_in_place() -> None:
+    """Not promoted means not masked: the line a coding agent reads stays intact.
+
+    A mask in place would still corrupt the agent's next edit — the value it
+    copies back would be the marker — so the refusal has to cover the mask too,
+    not only the registration.
+    """
+    line = "BUCKET_KEY=bucket_v4"
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert scrubbed == line
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        ("SERVICE_TOKEN=" + "FAKE" + "TOKENVALUE1234567890", "FAKE" + "TOKENVALUE1234567890"),
+        ("GH_TOKEN=" + "ghp_" + "A" * 36, "ghp_" + "A" * 36),
+        (
+            "AWS_SECRET_ACCESS_KEY=" + "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+        ),
+        (
+            "mongodb://app:" + "FAKEPASSWORD" + "word@db.example.com/app",
+            "FAKEPASSWORD" + "word",
+        ),
+    ],
+)
+def test_a_strong_name_or_a_real_shape_still_promotes(line: str, value: str) -> None:
+    """The control: narrowing must not open a hole.
+
+    A STRONG name (``…_token``, ``secret``) must keep masking any opaque value,
+    and a DSN's password must keep being contained whatever its shape. Those are
+    the corpus positives the value proof was relaxed for; this test is what
+    stops the new refusal from being widened into them.
+    """
+    assert _promotes(line, value), f"{line!r} no longer contains {value!r}"
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        # The clause keys off a snake_case WORD. Every value below is the same
+        # alphabet, so a rule that widened back to "identifier-shaped" would
+        # release them — which is exactly what agent review round 1 (R1-1)
+        # measured: a 32-character hex key under the WEAK name `AES_KEY` came
+        # back masked=False registered=False, i.e. a real credential in the
+        # clear, and whether it escaped depended on its first character.
+        (
+            "AES_KEY=" + "abcdef0123456789" + "abcdef0123456789",
+            "abcdef0123456789" + "abcdef0123456789",
+        ),
+        (
+            "HASH_KEY=" + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+        ("SORT_KEY=" + "aB3kL9mN2pQ7Zr4", "aB3kL9mN2pQ7Zr4"),
+    ],
+)
+def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
+    """The control that the first cut of this fix FAILED.
+
+    A weak name plus a value that is opaque — a hex digest, a mixed-case token —
+    must keep being masked and contained. The refusal is for snake_case WORDS,
+    not for everything that happens to match an identifier's alphabet, and this
+    test is what holds that line: it reds if the clause is widened.
+    """
+    assert _promotes(line, value), f"{line!r} no longer contains {value!r}"
+    scrubbed, hits = scrub_shapes_with_hits(line)
+    assert value not in scrubbed, f"{line!r} left {value!r} readable"
+    assert hits, f"{line!r} produced no hit at all"
+
+
+#: The corpus the released class is MEASURED over — values already exercised through
+#: the assignment rule, so the probe is the same call the pipeline makes (`KEY=<value>`
+#: through a real store) rather than a table of strings someone maintains by hand.
+_RELEASE_PROBE_VALUES = (
+    # BOUNDARY PROBES — one inside each rule's own band, and each is MASKED on this
+    # head, so loosening its rule releases it and moves the measurement. They are the
+    # only corpus entries that can discriminate, and the lesson is recorded because it
+    # cost five review rounds: a probe that does not sit INSIDE the band guards
+    # nothing. Round 3 (R3-1) widened the digit cap with the module green; round 4
+    # (R4-1) did the same to the length cap, because every probe was shorter than the
+    # cap it was supposed to be testing; round 5 (R5-1) did the same to the alphabet,
+    # because the one uppercase-carrying probe also carried enough digits for the
+    # digit cap to refuse it first; round 6 (R6-1) did the same to the start anchor,
+    # with no corpus value leading with a digit or a capital. A probe has to fail the
+    # rule it guards and nothing else.
+    #
+    # Every arm of the refusal and the corpus value that DECIDES it. Keep this list
+    # and the probes together: an arm added without a probe here is the same failure
+    # again, and five rounds were spent rediscovering one arm at a time.
+    #   digit cap            -> "quick_brown_fox_123"
+    #   length cap           -> "mongo_primary_admin_passphrase_01" (33 chars)
+    #   alphabet             -> "us_East_1"
+    #   start anchor         -> "2fa_backup_codes"
+    #   underscore required  -> "bucketv4" (refused only by the missing "_")
+    #   end anchor           -> "us_East_1" (`fullmatch` -> `match` reds on it)
+    #   the `not strong` gate -> NO single-value probe can straddle it: the whole
+    #     corpus is measured under the weak name "KEY", so removing the gate
+    #     (`redaction_shapes.py`, the `and not strong` condition) leaves THIS test
+    #     green and reds 354 rows of
+    #     `test_a_credential_shape_is_masked_on_every_surface` instead. That sibling
+    #     test owns the condition — a green reading here is NOT coverage of it
+    #     (agent review R7-1).
+    #
+    # The hyphen is deliberately absent from the list: no masked corpus value
+    # contains one, and the hyphenated values are released through a separate
+    # clause, so no single-value probe can decide that arm (agent review round 7).
+    "quick_brown_fox_123",  # 3 digits -> the digit cap
+    "bucketv4",  # no underscore -> the underscore rule
+    "mongo_primary_admin_passphrase_01",  # 33 chars -> the length cap
+    "primary_replica_connection_string_01",  # 36 chars -> the length cap
+    "us_East_1",  # uppercase -> the alphabet
+    "2fa_backup_codes",  # digit-leading -> the start anchor
+    "bucket_v4",
+    "bucket_v6",
+    "schema_registry",
+    "service_account_name",
+    "prod_db_pass_01",
+    "user_1_pass",
+    "sec1_ret",
+    "db_password_1",
+    "vault_token_1",
+    "rabbit_pass_01",
+    "grafana_admin_pass",
+    "my_password",
+    "db_pass",
+    "hunter2",
+    "correct_horse_battery_staple",
+    "server_password_2",
+    "redis_auth_1",
+    "mq_secret_01",
+    "api_key_prod",
+    "admin_pw_01",
+    "network_bucket_v4",
+    "ca_central_1",
+    "us_east_1",
+    "internal_token_2",
+    "app_secret_key",
+    "staging_db_pass_02",
+    "smtp_pass_1",
+    "ldap_bind_pw",
+    "kafka_sasl_secret",
+    "db_user_name",
+    "cache_key_name",
+    "swordfish",
+    "correct-horse-battery",
+    "hunter2x",
+    "aB3kL9mN2pQ7Zr4",
+    "abcdef0123456789abcdef0123456789",
+)
+
+
+def _released_values() -> set[str]:
+    """The corpus values this head neither masks nor contains.
+
+    Asked of the STORE rather than a rendered transcript: a mask that hides the
+    value in place and a REGISTRATION that hides it in every later result are
+    different claims, and the released class is about both being gone.
+    """
+    released: set[str] = set()
+    for value in _RELEASE_PROBE_VALUES:
+        # A fresh store per value on purpose: registration is sticky WITHIN a store,
+        # so reusing one would let an earlier value's registration decide a later
+        # value's reading and the corpus would stop measuring single values.
+        store = VariableStore(cwd=".")
+        scrubbed, _ = store.redact_with_report("KEY=" + value)
+        if value in scrubbed and store.redact(value) == value:
+            released.add(value)
+    return released
+
+
+#: FROZEN, in both directions, and this is a RATCHET rather than a list: every corpus
+#: value outside this set is masked and contained on this head, so a WIDENING of the
+#: refusal (a bigger digit cap, a longer length cap, a looser shape) releases one and
+#: reds, and a NARROWING masks one and reds. Both have to come through an edit to this
+#: set with a reason in the commit.
+#:
+#: It reds only for the rules a probe actually straddles, which is why the boundary
+#: probes exist and why each one names its rule. A rule with no probe inside its band
+#: is unguarded however wide the rest of the corpus looks.
+#:
+#: The first cut of this froze a hand-picked three values and agent review round 3
+#: (R3-1) showed exactly what that was worth: it caught a SHRINK and nothing else, so
+#: the clause could be widened to three digits and release `db_password_1`-style
+#: values with the whole module still green. Measuring the class is the fix.
+_RELEASED_WORD_SHAPED = frozenset(
+    (
+        "admin_pw_01",
+        "api_key_prod",
+        "app_secret_key",
+        "bucket_v4",
+        "bucket_v6",
+        "ca_central_1",
+        "cache_key_name",
+        "correct_horse_battery_staple",
+        "db_pass",
+        "db_password_1",
+        "db_user_name",
+        "grafana_admin_pass",
+        "hunter2",
+        "internal_token_2",
+        "kafka_sasl_secret",
+        "ldap_bind_pw",
+        "mq_secret_01",
+        "my_password",
+        "network_bucket_v4",
+        "prod_db_pass_01",
+        "rabbit_pass_01",
+        "redis_auth_1",
+        "schema_registry",
+        "sec1_ret",
+        "server_password_2",
+        "service_account_name",
+        "smtp_pass_1",
+        "staging_db_pass_02",
+        "swordfish",
+        "us_east_1",
+        "user_1_pass",
+        "vault_token_1",
+    )
+)
+
+
+def test_the_released_word_shaped_class_is_measured_and_frozen() -> None:
+    """The cost of the fix, measured rather than listed.
+
+    These values are not oversights — the operator ruled that the narrowing stands
+    and the released class is recorded, on the principle that a value stored in
+    something credential-shaped is not thereby a secret and only keys and passwords
+    need masking. This test does not ask for them to be masked; it asks that the set
+    never move without someone deciding to, and it measures the set rather than
+    trusting this comment.
+    """
+    measured = _released_values()
+    newly_released = sorted(measured - _RELEASED_WORD_SHAPED)
+    newly_masked = sorted(_RELEASED_WORD_SHAPED - measured)
+    assert not newly_released and not newly_masked, (
+        "the released class moved — the refusal was widened or narrowed without "
+        f"declaring it. newly released: {newly_released}; newly masked: {newly_masked}. "
+        "If deliberate, update _RELEASED_WORD_SHAPED in the same commit and say why."
+    )
