@@ -14,7 +14,10 @@ the second half of these tests is as important as the first:
 
 * a terminal `dictation_complete` frame per latched call at stream end;
 * a terminal frame carrying a bounded `not_run_reason` for a call the harness
-  judged and will not execute.
+  judged and will not execute — together with the verdict's FAULT class as
+  `not_run_kind`, so a frontend can settle `{skipped, aborted}` as the
+  interruption it is instead of re-parsing the reason's wording (`None` is the
+  legacy / no-verdict reading a planning-fault-free frame carries).
 
 The tool-record surface is deliberately untouched — the API server pairs records
 by id, and a synthetic `tool_execution_start`/`_end` for a call that never ran
@@ -249,14 +252,25 @@ async def test_a_planning_failure_settles_its_announcement_with_the_reason() -> 
 
     terminal = _terminal(events, WAKE_ID)
     assert terminal.not_run_reason == "Tool not found: wake"
+    # The verdict's class rides WITH the reason, read RAW from the synthetic
+    # result's own marker (not through `_classify_fault`, which is the
+    # analytics reader): the frontends route on the class, and a class that had
+    # degraded to `execution` here would settle this row as a red failure.
+    assert terminal.not_run_kind == "unknown_tool"
     assert terminal.argument_bytes == len('{"text":"30m"}')
     # Two terminal frames, in this order: the stream end (no verdict — the call
     # was merely queued) and then the plan's judgement. The LAST is the one a
     # consumer acts on, and the earlier one is why a viewer never had to wait
-    # for the batch to learn that dictation was over.
+    # for the batch to learn that dictation was over. The verdict frame is also
+    # the ONLY one carrying a class: an ordinary dictation ending says `None`,
+    # the legacy reading every consumer keeps today's behaviour for.
     assert [frame.not_run_reason for frame in _terminal_frames(events, WAKE_ID)] == [
         None,
         "Tool not found: wake",
+    ]
+    assert [frame.not_run_kind for frame in _terminal_frames(events, WAKE_ID)] == [
+        None,
+        "unknown_tool",
     ]
     started, ended = _lifecycle(events, WAKE_ID)
     assert started == [] and ended == [], "a never-run call gets no tool-record events"
@@ -320,6 +334,7 @@ async def test_an_invalid_arguments_failure_settles_with_the_validation_message(
     reason = _terminal(events, "call_strict_1").not_run_reason or ""
     assert reason.startswith("Invalid arguments:")
     assert "missing required argument 'text'" in reason
+    assert _terminal(events, "call_strict_1").not_run_kind == "invalid_arguments"
     started, ended = _lifecycle(events, "call_strict_1")
     assert started == [] and ended == []
     # The call queued behind it still executes normally, exactly as before.
@@ -351,6 +366,9 @@ async def test_the_never_run_reason_is_bounded_to_one_clipped_line() -> None:
     assert len(reason) == NOT_RUN_REASON_MAX_CHARS
     assert reason.endswith("…")
     assert "\n" not in reason
+    # The class rides the same clipped frame: it is a small fixed word, so the
+    # budget that forces the reason to one line cannot force it out.
+    assert _terminal(events, "call_long_1").not_run_kind == "unknown_tool"
 
 
 @pytest.mark.asyncio
@@ -379,6 +397,7 @@ async def test_a_duplicate_id_settles_the_loser_without_closing_the_winners_reco
     verdicts = [f for f in _frames(events, "call_dup_1") if f.not_run_reason]
     assert len(verdicts) == 1
     assert verdicts[0].not_run_reason == "Duplicate call id 'call_dup_1' skipped."
+    assert verdicts[0].not_run_kind == "duplicate_id"
     started, ended = _lifecycle(events, "call_dup_1")
     assert len(started) == 1 and len(ended) == 1, "the winner runs exactly once"
     assert executed == ["echo"]
@@ -444,6 +463,11 @@ async def test_a_steering_skip_settles_every_remaining_announcement() -> None:
     for call_id in ("call_b", "call_c"):
         terminal = _terminal(events, call_id)
         assert terminal.not_run_reason == "Tool call skipped: interrupted by steering."
+        # THE operator's case, pinned at the wire: a steering skip must carry
+        # `skipped`, the class every frontend settles as `interrupted` (a dim
+        # ⊘ row) rather than the red failure it used to paint. This is the
+        # field half of the fix; the settle half lives in the TUI tests.
+        assert terminal.not_run_kind == "skipped"
         # ONE verdict per call. The skip describes the whole remaining tail, so
         # an emitter that announced it per member of that tail would hand every
         # viewer the same fact twice — and a seed would carry it twice.
@@ -472,4 +496,8 @@ async def test_a_call_that_ran_gets_no_not_run_reason() -> None:
 
     assert all(f.not_run_reason is None for f in _frames(events, WAIT_ID))
     assert all(f.not_run_reason is None for f in _frames(events, WAKE_ID))
+    # And no class either: the field is the VERDICT's, so a call that ran must
+    # not carry one — a stray kind on a running call would settle a live row.
+    assert all(f.not_run_kind is None for f in _frames(events, WAIT_ID))
+    assert all(f.not_run_kind is None for f in _frames(events, WAKE_ID))
     assert executed == ["wait", "wake"]

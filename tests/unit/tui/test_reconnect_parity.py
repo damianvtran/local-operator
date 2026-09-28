@@ -46,11 +46,12 @@ from local_operator.session.attached import AttachedSession
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.transcript import Transcript
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.events import ToolStarted
+from local_operator.tui.events import HistoryRowsSettled, ToolStarted
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.transcript import TranscriptView
 from tests.unit.session.runtime.test_server import FakeHandle
 from tests.unit.session.test_remote import _never_take_over, _wait_record
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 # One transparent 1x1 PNG: enough for the image pipeline without a real
 # screenshot in the fixture.
@@ -74,6 +75,11 @@ def _remote_factory(remote: AttachedSession) -> Any:
 _GAP_DURATION_S = 7.25
 
 _DURATION_CALL_ID = "call-duration-1"
+
+#: The call the marked-abort settle pin drives: one id, because the live card,
+#: the retirement and the gap's result must all name the same call for the
+#: result to reach the card that is already mounted.
+_ABORT_CALL_ID = "call-abort-1"
 
 
 def _duration_call_row() -> Message:
@@ -399,7 +405,77 @@ async def test_a_settled_painted_card_restores_the_same_duration_a_cold_boot_sho
     # The settled card carries the persisted interval, not a blank and not a
     # clock started when this terminal painted the row.
     assert settled_durations == [pytest.approx(_GAP_DURATION_S)], settled_durations
-
     # And it agrees with the other path over the identical transcript.
     cold_durations = await _fresh_boot_durations(tmp_path)
     assert settled_durations == cold_durations
+
+
+@pytest.mark.asyncio
+async def test_a_marked_abort_settles_the_same_interrupted_row_on_the_gap_path() -> None:
+    """The marker must reach ``_settle_painted_tool_card`` too, not just cold boot.
+
+    A user-stopped call persists as an error-shaped result MARKED ``{skipped,
+    aborted}``. Taught to only one settle path, the same transcript row reads
+    ``⊘ interrupted`` on a cold boot and a red failure on a reconnect — class
+    signature identical, the divergence this file exists to catch (the module
+    docstring records the duration round that cost exactly this). The cold path
+    is pinned in ``test_app_pilot``; this pins the settle-painted one over a
+    card painted live, retired by the disconnect handler (what a dropped socket
+    does to a stranded row) and settled from the gap — the shape
+    ``test_output_limit_row_receipts`` established, minus the limit receipt.
+
+    The receipt must survive here as well: the marker arm keeps it reachable,
+    and a path that dropped it would leave the resumed row showing "⊘" and
+    nothing else while the cold boot shows the abort's own words.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        for _ in range(400):
+            await pilot.pause()
+            if app._session is not None:
+                break
+
+        app.on_tool_started(
+            ToolStarted(
+                ToolExecutionStartEvent(
+                    tool_call_id=_ABORT_CALL_ID, tool_name="bash", args={"command": "sleep 30"}
+                )
+            )
+        )
+        await pilot.pause()
+        card = app._painted_tool_card(_ABORT_CALL_ID)
+        assert card is not None
+
+        # What the disconnect handler does to a stranded row.
+        app._retire_live_tool_cards()
+        assert app._painted_tool_card(_ABORT_CALL_ID) is card
+
+        # The result lands durably during the gap: error-shaped, but MARKED.
+        # `Message.tool_result` writes details/duration into the payload it
+        # persists, which is the exact shape `_settle_painted_tool_card` reads.
+        # The text deliberately does NOT start with `aborted (`: the legacy
+        # sniff must not be what settles this row, or the pin would stay green
+        # with the marker arm deleted.
+        aborted_row = Message.tool_result(
+            ToolResult(
+                tool_call_id=_ABORT_CALL_ID,
+                tool_name="bash",
+                is_error=True,
+                content=[TextContent(text="stopped mid-run: sleep 30")],
+                details={"__fault": "aborted"},
+                duration_s=_GAP_DURATION_S,
+            )
+        )
+        app.on_history_rows_settled(HistoryRowsSettled([aborted_row]))
+        for _ in range(10):
+            await pilot.pause()
+
+        assert card.state == "interrupted", card.classes
+        assert "tool-interrupted" in card.classes
+        assert "tool-error" not in card.classes
+        # The gap's own interval is read back — a blank here beside a cold
+        # boot's number is the duration divergence reopened for a new field.
+        assert card._duration == pytest.approx(_GAP_DURATION_S)
+        assert card.can_expand(), "the abort receipt must stay reachable"
+        assert any("stopped mid-run: sleep 30" in line for line in card._output), card._output

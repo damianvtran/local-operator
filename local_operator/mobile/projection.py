@@ -60,6 +60,8 @@ from local_operator.harness.rows import (
     wake_receipt_headline,
 )
 from local_operator.harness.types import (
+    FAULT_KEY,
+    INTERRUPTED_FAULTS,
     AgentEndEvent,
     AgentEvent,
     AgentMessage,
@@ -1456,9 +1458,23 @@ def fold_messages_to_entries(history: list[AgentMessage]) -> list[TranscriptEntr
         elif message.role == "tool":
             entry = tool_rows.get(message.tool_call_id or "")
             if entry is not None:
-                entry.tool_state = "failed" if message.is_error else "done"
                 payload = message.provider_payload or {}
                 result_details = payload.get("details")
+                # The result's FAULT class, when its emitter marked one,
+                # settles the tier BEFORE `is_error` does: {skipped, aborted}
+                # means the user stopped the call or steering skipped it, and
+                # the phone has an `interrupted` glyph/tier for exactly that
+                # (tool-row.tsx GLYPH) — the failure wash is for calls that
+                # really failed. Same {skipped, aborted} rule as the live arm
+                # below and as the TUI, so a reconnect cannot repaint an
+                # interrupted call as a failure.
+                fault = (
+                    result_details.get(FAULT_KEY) if isinstance(result_details, Mapping) else None
+                )
+                if fault in INTERRUPTED_FAULTS:
+                    entry.tool_state = "interrupted"
+                else:
+                    entry.tool_state = "failed" if message.is_error else "done"
                 # A call the OUTPUT LIMIT kept from running persists a SYNTHETIC
                 # result whose text is addressed to the MODEL, so the failed row
                 # used to carry an imperative meant for the agent ("Reply with
@@ -1805,7 +1821,16 @@ class ProjectionFold:
             started = row.tool_state in ("running", "done", "failed")
             if event.not_run_reason:
                 if not started:
-                    row.tool_state = "failed"
+                    # The verdict's FAULT class decides the tier, mirroring the
+                    # TUI: {skipped, aborted} means the operator redirected or
+                    # stopped the call, so the row takes the phone's own
+                    # `interrupted` tier rather than the red failure the
+                    # planning faults keep. The reason text is kept and shown
+                    # either way — it is the row's whole content behind a tap.
+                    if getattr(event, "not_run_kind", None) in INTERRUPTED_FAULTS:
+                        row.tool_state = "interrupted"
+                    else:
+                        row.tool_state = "failed"
                     row.error = _compact(event.not_run_reason, 200)
                     # The reason in the one-line summary too: the row is all a
                     # phone shows by default, and "this call never ran, here is
@@ -1864,7 +1889,18 @@ class ProjectionFold:
         elif isinstance(event, ToolExecutionEndEvent):
             row = self._tool_row(event.tool_call_id, event.tool_name)
             result = event.result
-            row.tool_state = "failed" if result.is_error else "done"
+            # The call's FAULT class, when its emitter marked one, decides the
+            # tier first: {skipped, aborted} is an interruption (the user
+            # stopped the run, or steering skipped the call) rather than the
+            # red `failed` the is_error reading alone paints. Read RAW from the
+            # result's details — the same value the TUI settles on, so the two
+            # surfaces cannot disagree about one call.
+            details = result.details
+            fault = details.get(FAULT_KEY) if isinstance(details, Mapping) else None
+            if fault in INTERRUPTED_FAULTS:
+                row.tool_state = "interrupted"
+            else:
+                row.tool_state = "failed" if result.is_error else "done"
             # From the instant this fold holds for the call: its own observation
             # of the start, or the producer's seeded epoch
             # (``reconcile_clocks``), so a call that began BEFORE this fold
