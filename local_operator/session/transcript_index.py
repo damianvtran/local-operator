@@ -973,6 +973,7 @@ def _scan_full(path: Path, naming_raw: dict[str, Any] | None) -> TranscriptIndex
         sig={
             "size": reader.last_end,
             "mtime": reader.st.st_mtime if reader.st else 0.0,
+            "inode": reader.st.st_ino if reader.st else 0,
             "last_id": reader.last_id,
         },
         coverage={
@@ -1017,6 +1018,7 @@ def _scan_incremental(
         sig={
             "size": reader.last_end,
             "mtime": reader.st.st_mtime if reader.st else 0.0,
+            "inode": reader.st.st_ino if reader.st else 0,
             "last_id": reader.last_id,
         },
         coverage={
@@ -1043,16 +1045,31 @@ def _assert_same_file(reader: _RowReader) -> None:
 
 
 def _sig_matches(sig: dict[str, Any], st: os.stat_result) -> bool:
-    return sig.get("size") == st.st_size and sig.get("mtime") == st.st_mtime
+    """Is the cached scan exactly current for this stat?
+
+    The inode is part of the comparison on purpose: ``compact_file`` REPLACES
+    the journal (tmp + ``os.replace``), so a rewrite can preserve the size
+    and can even make the file LONGER than the recorded scan (folding a
+    one-byte tool body into a long notice, with the prune row itself dropped);
+    a size+mtime test alone then happily pairs old ordinals with new bytes.
+    An append never changes the inode, so requiring it costs nothing there.
+    """
+    return (
+        sig.get("size") == st.st_size
+        and sig.get("mtime") == st.st_mtime
+        and sig.get("inode") == st.st_ino
+    )
 
 
 def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     """Bring one session's cache up to date; ``None`` when there is no journal.
 
-    The whole invalidation ladder, in order: an exact (size, mtime) match
-    reuses; a grown file whose recorded tail still verifies increments; anything
-    else rescans. One retry covers a concurrent ``compact_file`` (which replaces
-    the file, changing the inode under the read).
+    The whole invalidation ladder, in order: an exact (size, mtime, inode)
+    match reuses; a GROWN file from the SAME inode whose recorded tail still
+    verifies increments; anything else — including a compact rewrite, whose
+    ``os.replace`` changes the inode — rescans. One retry covers a concurrent
+    ``compact_file`` (which replaces the file, changing the inode under the
+    read).
     """
     path = _journal_path(config_dir, session_id)
     for attempt in (0, 1):
@@ -1067,6 +1084,7 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
         try:
             if (
                 previous is not None
+                and st.st_ino == previous.sig.get("inode")
                 and st.st_size > previous.scan.offset
                 and _verify_tail(path, previous.scan.offset, str(previous.sig.get("last_id", "")))
             ):
