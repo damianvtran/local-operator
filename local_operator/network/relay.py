@@ -6217,8 +6217,34 @@ class RelayServer:
         Carries NO prompt (§2.2): a prompt smuggled into an engage would be a
         second way to start a turn, and the one way is `prompt`.
         """
-        session_id = str(frame.get("session_id") or "")
-        cwd = str(frame.get("cwd") or "")
+        return self.engage_session(
+            str(frame.get("session_id") or ""), cwd=str(frame.get("cwd") or "")
+        )
+
+    def engage_session(self, session_id: str, *, cwd: str = "") -> dict[str, Any]:
+        """Engage one of THIS device's sessions, answering in the engage op's shape.
+
+        THE ACT AND ITS VOCABULARY, IN ONE PLACE. A session can be engaged from
+        inside the process as well as over the mesh: a conversation that ARRIVES on
+        this device with ``engage_on_arrival`` asks its new owner for exactly this
+        act (``mobility._destination_move``), and a second spelling of "start or
+        join a runtime" there would be a second error vocabulary for one outcome —
+        which is why the move's step calls this method rather than reaching for
+        ``_engage_locally`` beside it.
+
+        Both callers go through ``_engage_locally``, the single entry point every
+        engage path in the product uses (a viewer's first message, a wake,
+        ``lop exec``), so INV-1's guard and the lease arbitration that decides WHO
+        RUNS (``launch.engage_runtime``) apply here unchanged. A caller that arrives
+        after a runtime already holds the lease therefore loses there — by joining
+        the winner or by a sentence — rather than by a check of its own.
+
+        ``engaged`` is the outcome; ``detail`` is the sentence when it is ``False``
+        and the state when it is ``True``. Nothing here raises: an engage that could
+        not be started is an answer, because the callers that need it most (a move
+        that has already committed, a create that has already answered) must not
+        lose their own result to it.
+        """
         error = self._engage_locally(session_id, cwd=cwd)
         if error:
             return {"engaged": False, "detail": error, "session_id": session_id}

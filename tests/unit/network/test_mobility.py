@@ -114,6 +114,7 @@ def _move(
     keep: bool = False,
     wait_s: float = 0.0,
     from_replica: bool = False,
+    engage_on_arrival: bool = False,
     monkeypatch: pytest.MonkeyPatch | None = None,
 ) -> dict[str, Any]:
     """``lop sessions move``, driven the way the CLI drives it.
@@ -122,6 +123,11 @@ def _move(
     by calling the protocol directly: the hop the CLI makes is part of what the
     mesh's own error shapes are for, and a test that skipped it would not notice a
     local verb that never got registered.
+
+    ``engage_on_arrival`` is the verb's one opt-in flag (``--engage-on-arrival``), and
+    it is passed through here rather than by building the control frame in the caller:
+    a test that hand-rolled the frame would not be exercising the same hop the CLI's
+    flag travels.
     """
     if monkeypatch is not None:
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server.root))
@@ -133,6 +139,7 @@ def _move(
             wait_s=wait_s,
             root=server.root,
             from_replica=from_replica,
+            engage_on_arrival=engage_on_arrival,
         )
     )
 

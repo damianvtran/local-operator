@@ -1000,6 +1000,27 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "device that held it is gone"
         ),
     )
+    # THE ONE OPT-IN ON THIS VERB. A move leaves a conversation COLD on purpose
+    # (mesh-session-mobility.md §6.3 step 17: "It does not auto-engage a runtime"),
+    # because the move's contract is about where the bytes live and a runtime is a
+    # process the destination may not want. This flag is for the operator who means
+    # "and carry on there" — the destination starts the runtime as soon as the copy
+    # lands, so the conversation is live when the command returns.
+    #
+    # IT IS NOT TURN HANDOFF, and the help says so out loud: the engage happens after
+    # the move has committed, hands the runtime no work, and cannot resume a turn — a
+    # source whose turn is in flight is still refused with `busy` and the `--wait`
+    # remedy, flag or no flag.
+    move_parser.add_argument(
+        "--engage-on-arrival",
+        action="store_true",
+        help=(
+            "start the conversation on the destination as soon as it lands, so it is "
+            "live there without a first prompt; a conversation whose turn is in "
+            "flight is still refused rather than drained, and a failure to start it "
+            "does not affect the move"
+        ),
+    )
     move_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
     # `lop sessions sync`: pull the latest cut of a conversation another device
@@ -4525,7 +4546,9 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
         return _local_relay_refusal()
 
 
-def _sessions_move_words(result: dict[str, Any], *, session_id: str, to: str) -> list[str]:
+def _sessions_move_words(
+    result: dict[str, Any], *, session_id: str, to: str, engage_on_arrival: bool = False
+) -> list[str]:
     """The human lines for a move, from the contract's own fields.
 
     THE SENTENCE NAMES BOTH DEVICES, because a move is the one command where being
@@ -4534,6 +4557,13 @@ def _sessions_move_words(result: dict[str, Any], *, session_id: str, to: str) ->
     words — the busy sentence includes the reason ONLY the owning machine can see —
     and the ``--keep`` case says out loud that the original is still running, since
     that is the flag's whole point.
+
+    ``engage_on_arrival`` is the CALLER's own flag passed back in, not a field of the
+    receipt, and the two places it is used are different cases of the same request:
+    a receipt that carries an ``engagement`` block came from the device that did the
+    engaging, and its outcome is quoted; a receipt WITHOUT one belongs to an OFFLOAD,
+    where this device asked a peer to engage and settled on its own durable progress
+    instead of waiting for that — so there the line says what was asked.
     """
     if not result.get("ok"):
         lines = [str(result.get("message") or "the move was refused")]
@@ -4543,23 +4573,55 @@ def _sessions_move_words(result: dict[str, Any], *, session_id: str, to: str) ->
                 "than retrying from scratch."
             )
         return lines
+
     to_block = result.get("to_device") or {}
     from_block = result.get("from_device") or {}
     target = str(to_block.get("name") or to_block.get("device_id") or to)
     source = str(from_block.get("name") or from_block.get("device_id") or "another device")
     new_id = str(result.get("new_session_id") or session_id)
+    # THE ENGAGE, WHEN IT WAS ASKED FOR (``--engage-on-arrival``). It is a SEPARATE
+    # sentence from the move's own, and it has to be: the move succeeded either way,
+    # and the one outcome a person must not misread is a failure to start the
+    # runtime as a failure to transfer. The engage's own words are quoted, because
+    # they name the cause (a handoff still in progress, a spawn that could not be
+    # started) that this layer cannot rediscover.
+    engage_lines: list[str] = []
+    engagement = result.get("engagement")
+    if isinstance(engagement, dict):
+        engaged = bool(engagement.get("engaged"))
+        detail = str(engagement.get("detail") or "")
+        engage_lines = (
+            [f"It is live on {target}: the runtime is starting."]
+            if engaged
+            else [
+                f"It arrived cold: the runtime was not started ({detail or 'no reason given'}). "
+                "The move itself succeeded — open the conversation there to start it."
+            ]
+        )
+    elif engage_on_arrival:
+        # ASKED HERE, ANSWERED THERE. On an offload the receipt is the SOURCE's, and the
+        # engage is the destination's own post-move work: this device settles on its own
+        # durable progress and does not wait for the peer's runtime to start, so the
+        # sentence says what was asked rather than what happened. Claiming the outcome
+        # from here would be an assertion this side cannot observe.
+        engage_lines = [
+            f"{target} was asked to start it as soon as it lands; that device's own "
+            "listing is where it shows."
+        ]
     if result.get("mode") == "keep":
         return [
             f"Copied {session_id} to {target} as {new_id}.",
             f"The original is still running on {source} and the two are separate now.",
+            *engage_lines,
         ]
     if result.get("recovered"):
         return [
             f"Recovered {session_id} as {new_id} from the copy last synced here.",
             "It is a new conversation: work done on the device that held it since that "
             "copy is not in it.",
+            *engage_lines,
         ]
-    return [f"Moved {session_id} to {target} ({result.get('phase')})."]
+    return [f"Moved {session_id} to {target} ({result.get('phase')}).", *engage_lines]
 
 
 def sessions_move_command(args: argparse.Namespace) -> int:
@@ -4582,11 +4644,21 @@ def sessions_move_command(args: argparse.Namespace) -> int:
         keep=bool(args.keep),
         wait_s=wait_s,
         from_replica=bool(args.from_replica),
+        # ``--engage-on-arrival``: a flag on THIS verb, so the only callers that get
+        # the engaged arrival are the ones that asked for it. The TUI's own `/move`
+        # does not pass it and therefore still moves a conversation cold, which is
+        # today's behaviour and the behaviour every existing caller keeps.
+        engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
     )
     if getattr(args, "json", False):
         print(_json.dumps(result, indent=2, sort_keys=True, default=str))
         return 0 if result.get("ok") else 1
-    lines = _sessions_move_words(dict(result), session_id=session_id, to=str(args.to))
+    lines = _sessions_move_words(
+        dict(result),
+        session_id=session_id,
+        to=str(args.to),
+        engage_on_arrival=bool(getattr(args, "engage_on_arrival", False)),
+    )
     if result.get("ok"):
         for line in lines:
             print(line)
