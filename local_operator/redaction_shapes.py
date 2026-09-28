@@ -1587,10 +1587,21 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     # THE TRADE THIS MAKES, stated because it is a posture and not an accident
     # (agent review round 2, R2-2, and the operator's ruling on it). A word-shaped
     # VALUE under a weak name is no longer masked AT ALL — not in place, not by
-    # containment — so values in the released class (``prod_db_pass_01``,
-    # ``correct_horse_battery_staple``, a bare ``hunter2``) that the table used to
-    # hide now appear in the clear. That class is FROZEN in
-    # ``_RELEASED_WORD_SHAPED`` so it can never widen unnoticed.
+    # containment — so every corpus value whose shape this refuses now reads in the
+    # clear where the table used to hide it: resource identifiers (`bucket_v4`,
+    # `ca_central_1`) and, because the value alone cannot tell them apart, some
+    # name-like strings a reader would call credential-ish. The operator's ruling
+    # is the reason that cost is acceptable: a value stored in something
+    # credential-shaped is not thereby a secret, and only keys and passwords need
+    # masking.
+    #
+    # The released class is MEASURED, not listed — `_RELEASED_WORD_SHAPED` in the
+    # secrets tests freezes it over a declared corpus in both directions, so a
+    # widening of this clause adds names and reds, and a narrowing removes them and
+    # reds. Do not add an example of a released credential to this comment: agent
+    # review round 3 (R3-2) caught the first version of it publishing a
+    # realistic-looking passphrase in the clear, and the point can be made without
+    # one.
     #
     # Nothing in this table can have both. The damage being fixed is a value that
     # was masked in a FILE READ and transcribed back as the marker; any value still
