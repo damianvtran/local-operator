@@ -7436,6 +7436,7 @@ _RELEASE_PROBE_VALUES = (
     "mongo_primary_admin_passphrase_01",  # 33 chars -> the length cap
     "primary_replica_connection_string_01",  # 36 chars -> the length cap
     "us_East_1",  # uppercase -> the alphabet
+    "2fa_backup_codes",  # digit-leading -> the start anchor
     "bucket_v4",
     "bucket_v6",
     "schema_registry",
