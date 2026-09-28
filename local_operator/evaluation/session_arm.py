@@ -231,6 +231,11 @@ def declare_action_server(
         # episode's tools.
         "preloadTools": True,
         "enabledTools": [ACTION_TOOL_NAME],
+        # The surface IS the measurement: a delegated child driving it (or
+        # ending it) would make the record unattributable, so the declaration
+        # reserves it for the episode's own turn -- children do not inherit it
+        # and the harness refuses an execution carrying a child's job id.
+        "ownTurnOnly": True,
     }
     if cwd is not None:
         entry["cwd"] = str(cwd)

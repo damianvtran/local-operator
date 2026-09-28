@@ -151,6 +151,7 @@ from local_operator.harness.types import (
     ToolExecutionStartEvent,
     Usage,
 )
+from local_operator.mcp.config import server_own_turn_only
 from local_operator.paths import config_dir
 from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
 
@@ -1620,6 +1621,17 @@ _MCP_ACTIVATION_DENIED = (
     "this tool needs enabling on its side."
 )
 
+#: Rendered in place of a tool schema when a child reads an ``mcp://`` tool URL
+#: of a server declared ``ownTurnOnly`` (see ``MCPStdioServerConfig``). The
+#: server belongs to the OWNING session's own turn: a child discovers it but
+#: must route the work back to the parent, the only session that can act.
+_OWN_TURN_ONLY_DENIED = (
+    "This MCP server is reserved for the owning session's own turn "
+    "(`ownTurnOnly`): a delegated child neither inherits its tools nor can "
+    "enable them. If the task needs this server, report to your parent "
+    "(`hub`) so the parent's own turn makes the call."
+)
+
 
 def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) -> _ChildMcp | None:
     """Give the child the PARENT's MCP surface, on the parent's live manager.
@@ -1710,7 +1722,15 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
     child: Session | None = None
 
     def selected(source: list[AgentTool]) -> list[AgentTool]:
-        return [tool for tool in source if origin(tool) in enabled]
+        def included(tool: AgentTool) -> bool:
+            found = origin(tool)
+            if found is None or found not in enabled:
+                return False
+            # ``ownTurnOnly`` servers belong to the parent's own turn: a child
+            # neither inherits their tools nor can activate them back in.
+            return not server_own_turn_only(manager.get_server_config(found[0]))
+
+        return [tool for tool in source if included(tool)]
 
     def base() -> list[AgentTool]:
         # Derived from the LIVE inventory on every activation rather than
@@ -1757,12 +1777,27 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
             # Resolve fresh after reload/reconnect; retaining AgentTool objects
             # would execute a stale server wrapper after its transport closes.
             for tool in manager.get_tools():
-                if tool.name == name and origin(tool) in deferred:
-                    return tool
+                found = origin(tool)
+                if tool.name != name or found not in deferred:
+                    continue
+                # The fallback must not hand a child what ``selected`` would
+                # not: an ``ownTurnOnly`` server stays out of reach even when a
+                # discovery deferred its schema (search defers rather than
+                # activates on this side).
+                if server_own_turn_only(manager.get_server_config(found[0])):
+                    continue
+                return tool
             return prior(name) if prior is not None else None
 
         setattr(session, "_mcp_deferred_origins", deferred)
         session.set_fallback_tool_resolver(resolve_deferred)
+
+    def own_turn_only_reason(server_name: str) -> str | None:
+        # Asked fresh per read: ``/mcp reload`` replaces the manager's configs
+        # wholesale, so a snapshot taken at wiring time would go stale.
+        if server_own_turn_only(manager.get_server_config(server_name)):
+            return _OWN_TURN_ONLY_DENIED
+        return None
 
     return _ChildMcp(
         tools=selected(manager.get_tools()),
@@ -1771,6 +1806,7 @@ def _child_mcp_wiring(parent_session: "Session", *, restricted: bool = False) ->
             manager,
             activate,
             deny_activation_reason=_MCP_ACTIVATION_DENIED if restricted else None,
+            deny_server_reason=own_turn_only_reason,
             defer=defer,
         ),
         attach=attach,

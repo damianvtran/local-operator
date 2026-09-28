@@ -33,6 +33,7 @@ from local_operator.harness.types import (
     SubagentStartEvent,
     Usage,
 )
+from local_operator.mcp.config import MCPStdioServerConfig
 from local_operator.mobile.projection import (
     ProjectionFold,
     SessionProjection,
@@ -1070,6 +1071,48 @@ async def test_child_starts_with_the_tools_the_parent_already_activated(tmp_path
 
     child_mcp = sorted(t.name for t in child._tools if t.name.startswith("mcp__"))
     assert child_mcp == ["mcp__linear_list_teams"]
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_child_neither_inherits_nor_activates_an_own_turn_only_server(
+    tmp_path, monkeypatch
+):
+    """``ownTurnOnly`` belongs to the parent's own turn: the child gets none of
+    its preloaded tools, its reads refuse, and even a deferred discovery of the
+    server stays out of the fallback path."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    own_turn_config = MCPStdioServerConfig.model_validate({"command": "x", "ownTurnOnly": True})
+
+    class OwnTurnManager(FakeMcpManager):
+        def get_server_config(self, name: str) -> object | None:
+            return own_turn_config if name == "episode" else None
+
+    manager = OwnTurnManager({"episode": ["apply_actions"], "linear": ["list_teams"]})
+    parent = make_session(tmp_path, OneShotStream())
+    attach_manager(parent, manager)
+    for tool in manager.get_tools():
+        parent.refresh_tools(list(parent._tools) + [tool])
+    # A deferred discovery of the same server must not re-open the fallback
+    # path either (the parent's discovered set is what the child inherits).
+    setattr(
+        parent,
+        "_mcp_deferred_origins",
+        {("episode", "apply_actions"), ("linear", "list_teams")},
+    )
+
+    child = await build_child(parent)
+
+    child_mcp = sorted(t.name for t in child._tools if t.name.startswith("mcp__"))
+    assert child_mcp == ["mcp__linear_list_teams"]
+    answer = resolve(child, "mcp://episode/apply_actions")
+    assert answer is not None and "ownTurnOnly" in answer
+    assert "not enabled" in answer
+    # The fallback resolves a deferred tool for the child -- except the
+    # own-turn server's, which is out of reach at every layer.
+    assert child._resolve_tool_outside_inventory("mcp__linear_list_teams") is not None
+    assert child._resolve_tool_outside_inventory("mcp__episode_apply_actions") is None
     await child.dispose()
     await parent.dispose()
 
