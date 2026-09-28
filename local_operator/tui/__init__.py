@@ -151,6 +151,39 @@ def _forward_redaction_to_runtime(app: Any, forward: Any, value: str) -> None:
         ) from exc
 
 
+def _schedule_aida_boot_ensure(app: Any) -> "asyncio.Task[None]":
+    """Schedule Aida's first-run ensure — SCHEDULED, NEVER AWAITED (see below).
+
+    On an install that has never run her this creates her session, pins it and
+    arms the cadence (installing the wake supervisor in the same breath), so
+    the supervisor can start her at 09:00 whether or not any terminal is open
+    then. NONE OF THAT BELONGS ON THE FIRST PAINT: the first run builds a
+    session and shells out to install the supervisor, and awaiting it held the
+    UI behind all of it — CI's ubuntu e2e legs read the same class of delay on
+    the server side as a readiness failure. The task is kept on the app so it
+    cannot be garbage-collected mid-flight; BEST-EFFORT by the same rule the
+    secret registration follows — her bootstrap is worth a log line, never a
+    failed boot — and a cheap no-op on every later boot.
+
+    A named function rather than an inline closure so the scheduling itself is
+    pinnable without a pty: `tests/unit/tui/test_aida_boot_schedule.py` holds
+    the ensure and asserts this returns with it still in flight (review round
+    2, NIT-3).
+    """
+
+    async def _aida_boot_ensure() -> None:
+        try:
+            from local_operator.aida import ensure_session
+
+            await ensure_session()
+        except Exception:  # noqa: BLE001 — never the boot's failure
+            logger.warning("aida: boot ensure failed", exc_info=True)
+
+    task = asyncio.create_task(_aida_boot_ensure())
+    app._aida_boot_task = task
+    return task
+
+
 async def run_tui(
     session_factory: Callable[[], Awaitable[SessionProtocol]],
     theme_name: str = "dark",
@@ -253,26 +286,7 @@ async def run_tui(
         # and the store is an optional capability rather than a boot dependency
         # (§13).
         registration = _register_secret_session(app)
-        # AIDA'S BOOT ENSURE — SCHEDULED, NEVER AWAITED HERE. On an install
-        # that has never run her this creates her session, pins it and arms
-        # the cadence (installing the wake supervisor in the same breath), so
-        # the supervisor can start her at 09:00 whether or not any terminal is
-        # open then. None of that belongs on the terminal's first paint: the
-        # first run builds a session and shells out to install the supervisor,
-        # and awaiting it held the UI behind all of it. The task is kept on the
-        # app so it cannot be garbage-collected mid-flight; BEST-EFFORT by the
-        # same rule the registration above follows — her bootstrap is worth a
-        # log line, never a failed boot — and a cheap no-op on later boots.
-
-        async def _aida_boot_ensure() -> None:
-            try:
-                from local_operator.aida import ensure_session
-
-                await ensure_session()
-            except Exception:  # noqa: BLE001 — never the boot's failure
-                logger.warning("aida: boot ensure failed", exc_info=True)
-
-        app._aida_boot_task = asyncio.create_task(_aida_boot_ensure())
+        _schedule_aida_boot_ensure(app)
         try:
             await app.run_async()
         except KeyboardInterrupt:

@@ -52,7 +52,11 @@ rather than silent. WHERE the note lands depends on the writer: the in-session
 reconcile journals it to her transcript (the requesting turn can read it
 there); the external drain — a runtime-less `resume`, or boot recovery for a
 tray left by a process that died mid-turn — has no transcript writer and logs
-it instead (`logger.info`, module `local_operator.aida.proactive`).
+it instead (`logger.warning`, module `local_operator.aida.proactive`). The
+level is WARNING, not INFO, deliberately (QA round 2, Q3): every note here is a
+request that did not take effect or was handed to another writer, and `lop
+serve` configures its console logging at WARNING by default — info-level lines
+were exactly the lines a default-daemon operator could not see.
 
 ## Pausing
 
