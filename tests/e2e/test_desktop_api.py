@@ -154,3 +154,59 @@ async def test_desktop_controls_over_real_http(tmp_path: Path, monkeypatch: pyte
         server.should_exit = True
         await asyncio.wait_for(serving, timeout=20)
         listener.close()
+
+
+@pytest.mark.asyncio
+async def test_the_server_reports_ready_without_waiting_for_the_aida_boot_ensure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Startup must not be held behind her first-run work (the CI failure).
+
+    The boot ensure builds a session and installs the wake supervisor through
+    a subprocess; awaiting it in the lifespan parked `server.started` behind
+    all of it, and the ubuntu legs of the e2e matrix — whose readiness window
+    is turns of the loop, not seconds — failed with `assert server.started`
+    while every behaviour was simply later. Pinned by a HELD ensure: the
+    server must become ready with the ensure still in flight, which is only
+    possible if the ensure is scheduled rather than awaited.
+    """
+    root = tmp_path / "desktop-config"
+    monkeypatch.setenv("HOME", str(tmp_path / "desktop-home"))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", secrets.token_hex(32))
+
+    import local_operator.aida as aida_pkg
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held_ensure(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(aida_pkg, "ensure_session", held_ensure)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=listener.getsockname()[1], log_level="error")
+    )
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        for _ in range(1000):
+            if server.started:
+                break
+            if serving.done():
+                await serving
+            await asyncio.sleep(0)
+        assert server.started, "startup waited for the aida ensure"
+        # ...and the ensure is genuinely in flight, not skipped: the task must
+        # have entered its wait by now.
+        for _ in range(1000):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0)
+        assert entered.is_set(), "the ensure must still run, just off the startup path"
+    finally:
+        release.set()
+        server.should_exit = True
+        await serving
