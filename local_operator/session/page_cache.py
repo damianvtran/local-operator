@@ -187,8 +187,14 @@ class PageKey:
     ``directory`` is the session directory as a string (not a ``Path``, so the
     key is hashable and comparable across the two processes' spellings of the
     same directory). ``inode`` and ``size`` are the invalidation (see the module
-    docstring); the three cursor fields make the key a page's identity rather
-    than merely its file's.
+    docstring); the cursor fields make the key a page's identity rather than
+    merely its file's.
+
+    The anchored mode's fields are the REQUESTED values rather than the defaults
+    the reader resolves: two spellings of one window (``before=None`` and the
+    number it resolves to) key apart and cost one duplicate read in a case that
+    is rare by construction, while resolving the defaults in two places is how
+    the cache and the reader would come to disagree about what the key names.
     """
 
     directory: str
@@ -196,6 +202,9 @@ class PageKey:
     size: int
     before_id: str | None
     through_id: str | None
+    around_id: str | None
+    before: int | None
+    after: int | None
     limit: int
 
 
@@ -204,6 +213,9 @@ def page_key(
     *,
     before_id: str | None = None,
     through_id: str | None = None,
+    around_id: str | None = None,
+    before: int | None = None,
+    after: int | None = None,
     limit: int = 100,
 ) -> PageKey | None:
     """``directory``'s current page key, or ``None`` when its journal is absent.
@@ -223,6 +235,9 @@ def page_key(
         size=stat.st_size,
         before_id=before_id,
         through_id=through_id,
+        around_id=around_id,
+        before=before,
+        after=after,
         limit=limit,
     )
 
@@ -363,6 +378,9 @@ async def _read_and_publish(
     directory: str,
     before_id: str | None,
     through_id: str | None,
+    around_id: str | None,
+    before: int | None,
+    after: int | None,
     limit: int,
 ) -> TranscriptPage:
     """The one read behind a key, published only if the file did not move.
@@ -380,11 +398,23 @@ async def _read_and_publish(
         directory,
         before_id=before_id,
         through_id=through_id,
+        around_id=around_id,
+        before=before,
+        after=after,
         limit=limit,
     )
     if (
         key is not None
-        and page_key(directory, before_id=before_id, through_id=through_id, limit=limit) == key
+        and page_key(
+            directory,
+            before_id=before_id,
+            through_id=through_id,
+            around_id=around_id,
+            before=before,
+            after=after,
+            limit=limit,
+        )
+        == key
     ):
         _PAGE_CACHE.put(key, page)
     return page
@@ -395,23 +425,38 @@ async def load_transcript_page(
     *,
     before_id: str | None = None,
     through_id: str | None = None,
+    around_id: str | None = None,
+    before: int | None = None,
+    after: int | None = None,
     limit: int = 100,
 ) -> TranscriptPage:
     """A cached, single-flighted :func:`read_transcript_page`.
 
-    Same contract, same three special returns, same three precondition errors —
-    the preconditions are validated by the reader's own validator so a caller
-    cannot tell which entry point answered it. What changes is only who pays for
-    the read: the first caller for a key pays it, every other caller for the same
+    Same contract, same special returns, same precondition errors — the
+    preconditions are validated by the reader's own validator so a caller cannot
+    tell which entry point answered it. What changes is only who pays for the
+    read: the first caller for a key pays it, every other caller for the same
     key shares that one read, and a caller for a key this process has already
     read pays nothing at all.
+
+    The anchored mode is part of the key through its REQUESTED fields (see
+    :class:`PageKey`), so an around read is single-flighted and invalidated
+    exactly like every other page — no second caching story to keep in step.
 
     The returned page is SHARED with the cache and with any other caller for the
     same key: read the rows, do not mutate them (see :meth:`TranscriptPageCache.get`).
     """
-    validate_page_request(before_id, through_id, limit)
+    validate_page_request(before_id, through_id, around_id, before, after, limit)
     directory = str(directory)
-    key = page_key(directory, before_id=before_id, through_id=through_id, limit=limit)
+    key = page_key(
+        directory,
+        before_id=before_id,
+        through_id=through_id,
+        around_id=around_id,
+        before=before,
+        after=after,
+        limit=limit,
+    )
     if key is not None:
         cached = _PAGE_CACHE.get(key)
         if cached is not None:
@@ -423,7 +468,9 @@ async def load_transcript_page(
         # the read the other waiter — or the leader's own request — depends on;
         # the task is not the follower's to end.
         return await asyncio.shield(flight[1])
-    task = asyncio.create_task(_read_and_publish(key, directory, before_id, through_id, limit))
+    task = asyncio.create_task(
+        _read_and_publish(key, directory, before_id, through_id, around_id, before, after, limit)
+    )
     if key is not None:
         _FLIGHTS[key] = (loop, task)
         # A done-callback rather than a ``finally`` around every awaiter: it fires
