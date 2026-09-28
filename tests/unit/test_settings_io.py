@@ -103,6 +103,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
     )
+    from local_operator.hook_forwarding import FORWARD_CLAUDE_DEFAULT, FORWARD_CODEX_DEFAULT
     from local_operator.tools import shell_env
     from local_operator.tools.builtin import (
         BASH_SHELL_DEFAULT,
@@ -147,6 +148,8 @@ def _consumer_defaults() -> dict[str, object]:
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
+        "hooks.forward_claude": FORWARD_CLAUDE_DEFAULT,
+        "hooks.forward_codex": FORWARD_CODEX_DEFAULT,
         # The four memory_guard keys. The consumer constants live next to the
         # reader in memory_guard.py, so this mapping is what stops the registry
         # default and the code default drifting.
