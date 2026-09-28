@@ -826,3 +826,140 @@ async def test_opening_her_conversation_with_a_framework_toast_up_survives(
         app._reset_band_for_swap()
         assert app.is_running
         assert list(app.query(FrameworkToast)), "the foreign toast was not touched"
+async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeypatch) -> None:
+    """R28: in the setup state, `/aida` renders HER view at the provider cue.
+
+    The defect this replaces: with no provider, `/aida` answered "session is
+    still starting…" — a promise of a session that cannot arrive until
+    `/login` succeeds. The view instead frames the screen as hers, carries the
+    shared cue, creates her durable session (the bootstrap works without a
+    provider, and R7 needs the SAME one after login), and refuses a typed send
+    with the same cue instead of the generic waiting line.
+    """
+    from local_operator.session_factory import HostingNotConfiguredError
+    from tests.unit.tui.test_app_pilot import _await_setup_state
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    async def _no_hosting_factory():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(_no_hosting_factory, resume_factory=_resume_factory([]))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        editor = app.query_one(Editor)
+
+        async def send(line: str) -> None:
+            editor.focus()
+            editor.text = line
+            editor.move_cursor(editor._end_of_buffer())
+            await pilot.pause()
+            await pilot.press("enter")
+            for _ in range(120):
+                await pilot.pause()
+
+        await send("/aida")
+        assert app._aida_setup_view is True
+        assert "/login openai" in (app._splash_notice or "")
+        body = _transcript_text(app)
+        assert "Aida" in body
+        assert "no provider configured" in body
+        assert "still starting" not in body
+
+        # Her durable session exists (created WITHOUT a provider), so the
+        # conversation opened after `/login` is the same one (R7).
+        from local_operator.aida import state as aida_state
+
+        her_id = aida_state.session_id_of(tmp_path)
+        assert her_id and (tmp_path / "sessions" / her_id).is_dir()
+
+        # A typed send is refused with the SAME cue, and says nothing was sent.
+        await send("hello there")
+        body = _transcript_text(app)
+        assert "can't reply yet" in body
+        assert "your message was not sent" in body
+        assert "/login openai" in body
+        assert "still starting" not in body
+
+        # `/aida <text>` opens the view and says the request was not sent.
+        # Asserted on the unwrapped fragment: the block wraps at 100 columns,
+        # so the sentence arrives with a newline inside it.
+        await send("/aida book me a flight")
+        body = _transcript_text(app)
+        assert "say it again once" in body
+
+
+@pytest.mark.asyncio
+async def test_first_run_login_opens_her_conversation_and_arms_the_greeting(
+    tmp_path, monkeypatch
+) -> None:
+    """R26: finishing setup on a fresh install opens HER conversation.
+
+    Driven through the real `/login` flow: the setup state leaves, the routing
+    predicate is true (no human conversations, a provider now resolves), the
+    rebuild targets her id, and the greeting row is already armed when the
+    reload lands. An existing install fails the predicate and boots as before
+    — pinned in `tests/unit/aida/test_aida_onboarding.py` on the predicate
+    itself, which is the half a fake-session test cannot see.
+    """
+    from local_operator.session_factory import HostingNotConfiguredError
+    from tests.unit.tui.test_app_pilot import FakeProviderController, _await_setup_state
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from local_operator import aida as aida_pkg
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    boots: list[str | None] = []
+
+    class HerSession(FakeSession):
+        def __init__(self, sid: str) -> None:
+            super().__init__()
+            self._sid = sid
+
+        @property
+        def session_id(self) -> str:
+            return self._sid
+
+    async def resume_factory(session_id):
+        boots.append(session_id)
+        return HerSession(session_id or "")
+
+    async def _no_hosting_factory():
+        raise HostingNotConfiguredError("Hosting platform is not configured.")
+
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(
+        _no_hosting_factory,
+        resume_factory=resume_factory,
+        provider_controller=FakeProviderController(),
+    )
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_setup_state(app, pilot)
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "/login deepseek"
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(200):
+            await pilot.pause()
+            if boots:
+                break
+
+        assert boots == [her_id], f"the rebuild must target HER conversation: {boots}"
+        assert app._conversation_id() == her_id
+
+    # The greeting was armed BEFORE the reload, so it fires into her session.
+    from local_operator.wakes import store as wake_store
+
+    entry = wake_store.read_entry(tmp_path, her_id) or {}
+    ids = [row["id"] for row in entry.get("schedules") or []]
+    assert "aida-greeting" in ids, entry

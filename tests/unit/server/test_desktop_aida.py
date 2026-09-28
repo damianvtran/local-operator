@@ -100,7 +100,15 @@ async def test_greet_refuses_without_a_provider_and_stamps_nothing(
         response = await http.post("/v1/desktop/aida", json={"op": "greet"})
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "aida_no_provider"
-    assert not (isolated_root / "aida" / "onboarding.json").exists()
+    # The GREETING is still owed, which is the invariant this test exists for
+    # (a refusal must not spend the one-time greeting). Asserted on the
+    # greeting's own ledger rather than on file absence since slice B: the
+    # nudge window (R25) shares `onboarding.json` and the `open` above armed a
+    # cadence row, whose message spends a nudge window — so the file now
+    # exists for a ledger that has nothing to do with the greeting.
+    from local_operator.aida import onboarding
+
+    assert onboarding.greeted_at(isolated_root) is None
 
 
 @pytest.mark.asyncio

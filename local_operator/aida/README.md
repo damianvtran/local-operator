@@ -1,10 +1,11 @@
 # Aida — the built-in chief of staff
 
 Aida ships with local-operator; there is no setup step. She is one long-lived
-conversation you reach with `/aida` (TUI or desktop composer), and she wakes
-herself once a day to review the state of your world and report what needs you.
-This document is the operator-facing summary: what she writes to disk, how to
-pause her, and how to switch her off entirely.
+conversation you reach with `/aida` (TUI or desktop composer), she introduces
+herself on a fresh install's first run, and she wakes herself once a day to
+review the state of your world and report what needs you. This document is the
+operator-facing summary: what she writes to disk, how to pause her, and how to
+switch her off entirely.
 
 ## Using her
 
@@ -33,6 +34,43 @@ payload's `name` field, and the first-run greeting. `aida.name` defaults to
 control characters) is refused with the same validator `/settings` uses. The
 config key is canonical: if it and her conversation's title ever disagree, the
 title is rewritten to match it.
+
+## First-run onboarding (R20–R26)
+
+On a **fresh install** whose setup has just completed (a provider configured,
+no human conversations yet), the first conversation is hers: she greets you,
+introduces herself as your chief of staff, says briefly what she can do, and
+asks a few details — your name, how you want to be addressed, what you work on,
+an email if you want it on file. She then records what you agree to keep,
+saying so first, with one command that writes ONLY into
+`<config root>/system_prompt.md` (the "About the operator" section every future
+session and subagent reads):
+
+```sh
+lop aida note "Name: …" 
+```
+
+The write is guarded at the source: the file is resolved from the config root
+(never a path argument), a section marker keeps her notes apart from your own
+instructions, nothing outside the root is ever written, and oversized or
+malformed notes are refused with a sentence rather than half-applied. Editing
+the section yourself is supported — deleting it is how you say "forget".
+Existing installs are never re-routed: the routing predicate is "no human
+conversations besides hers AND the greeting still owed".
+
+**With no provider configured** — she still has a view. `/aida` opens it with
+the provider cue as a system block, and sends are refused with the same cue
+(`/login openai to get started — no provider configured (/provider lists all)`)
+instead of a session-starting promise. Connecting a provider afterwards runs
+the same first-run routing.
+
+**Integration nudges (R25).** When a check-in's cadence message carries a
+nudge-window line (the engine opens one at most every
+`aida.onboarding.nudge_days`, default 14), she may suggest ONE missing
+integration and offer to set it up; she can add an MCP server for you, and
+where a login is interactive she hands you the command rather than attempting
+it. The window is recorded in `aida/onboarding.json` by the engine, so the
+bound is enforced, not merely advised.
 
 ## The proactive cadence
 
@@ -104,6 +142,16 @@ joined, so no session is created, no state file is written, no wake is armed
 and no supervisor is installed. Re-enabling restores everything on the next
 boot or `/aida`.
 
+**Auto-activation (R21), the default beyond the switches.** A boot only
+CREATES her when a human surface is present in that process: a terminal
+(the TUI, a `lop serve` you started yourself), or a daemon the desktop app
+spawned (`LOCAL_OPERATOR_DESKTOP_TOKEN`). A cloud/automation install —
+agent-runtime-svc pipes, no desktop plane — is not auto-activated by default;
+it pays no session, no cadence and no wake cost, and still gets her the moment
+something opens her explicitly (`POST /v1/desktop/aida {op:"open"}`, `/aida`,
+a desktop claim). Deployers who want no trace at all set one of the switches
+above.
+
 ## What she writes to disk
 
 Everything lives under `<config>/aida/` (default `~/.local-operator/aida/`),
@@ -112,11 +160,12 @@ plus the standard session directory:
 | path | what it is |
 |---|---|
 | `aida/state.json` | which session id is hers, when she was last paused, today's escalation budget |
-| `aida/onboarding.json` | the one-time greeting ledger (`greeted_at`) |
+| `aida/onboarding.json` | the one-time greeting ledger (`greeted_at`) and the R25 nudge-window bookkeeping (`nudge_offered_at`, `nudge_offers`) |
 | `aida/escalate.json` | her escalation in-tray (written by her, consumed by the engine) |
 | `aida/ensure.lock` | the cross-process lock serialising all of the above |
 | `sessions/<id>/` | her conversation — a normal session directory (transcript, attachment sidecar naming the `aida` role, its current title — `aida.name`) |
 | `wakes/<id>.json` | the standard wake index entry for her session |
+| `system_prompt.md` | the operator's custom instructions — written by her ONLY through `lop aida note`, inside the `About the operator` section |
 
 None of these is a config key: they are runtime-managed bookkeeping, not
 settings a user authors.
@@ -131,7 +180,7 @@ settings a user authors.
 | `aida.cadence.paused` | `false` | the pause flag (written by `/aida pause|resume`) |
 | `aida.cadence.max_extra_per_day` | `2` | escalation budget (`0` disables escalation) |
 | `aida.cadence.min_gap_minutes` | `90` | minimum spacing between Aida wakes |
-| `aida.onboarding.nudge_days` | `14` | integration-nudge bound (used by the onboarding slice) |
+| `aida.onboarding.nudge_days` | `14` | integration-nudge window length, read by the cadence engine (R25) |
 
 All seven are editable from `/settings` (section "Aida") and `lop config`.
 Renames made through `/aida rename` or a conversation rename also write

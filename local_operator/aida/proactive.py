@@ -242,17 +242,44 @@ def is_aida_row(wake_id: str) -> bool:
     return isinstance(wake_id, str) and wake_id.startswith(ROW_PREFIX)
 
 
-def cadence_schedule(now_ms: int, at: str = DEFAULT_CADENCE_AT) -> WakeSchedule:
+def cadence_message(config_dir: Path | str, now_ms: int) -> str:
+    """The cadence row's message: the standing prompt plus today's nudge window.
+
+    R25's bound lives here, at the moment a cadence row is BUILT: the nudge
+    permission is part of the row (its message is what the fire carries), and
+    ``onboarding.nudge_offer`` both decides whether the window is open and
+    stamps it — so a fire can never carry a nudge whose window was not spent.
+    The import is function-local, like the engine's other onboarding reads
+    (the two modules are import-light and must not form a load-time cycle).
+    A failure answers the bare standing prompt: the cadence outranks the
+    ledger, and a closed window is the safe direction.
+    """
+    try:
+        from local_operator.aida import onboarding
+
+        clause = onboarding.nudge_offer(config_dir, now_ms=now_ms)
+    except Exception:  # noqa: BLE001 — a ledger miss must not cost the check-in
+        logger.warning("aida: could not resolve the nudge window", exc_info=True)
+        clause = None
+    return f"{CADENCE_MESSAGE}\n\n{clause}" if clause else CADENCE_MESSAGE
+
+
+def cadence_schedule(
+    now_ms: int, at: str = DEFAULT_CADENCE_AT, *, config_dir: Path | str
+) -> WakeSchedule:
     """The cadence row: one-shot, due at the next ``at``.
 
     ``created_at`` carries ``now`` so the scheduler's stable ordering keeps it
     where it was planted; ``next_due_at`` is the next occurrence, never "now"
     (a due-now cadence would fire inside ``LOAD_GRACE_MS`` of an ensure, which
-    is a boot-time turn nobody asked for).
+    is a boot-time turn nobody asked for). ``config_dir`` is REQUIRED — the
+    message composes the R25 nudge clause through :func:`cadence_message`, and
+    a caller that could skip it would be a second path that arms a row without
+    the ledger moving.
     """
     return WakeSchedule(
         id=CADENCE_ID,
-        message=CADENCE_MESSAGE,
+        message=cadence_message(config_dir, now_ms),
         next_due_at=next_cadence_ms(now_ms, at),
         every_ms=None,
         created_at=now_ms,
@@ -527,7 +554,11 @@ def reconcile(
         # generic wake machinery owns missed-while-down delivery, and this
         # engine deliberately has no second implementation of it.
         existing = next((row for row in original if row.id == CADENCE_ID), None)
-        kept.append(existing if existing is not None else cadence_schedule(now, pol.at))
+        kept.append(
+            existing
+            if existing is not None
+            else cadence_schedule(now, pol.at, config_dir=config_dir)
+        )
 
     # -- the one-time greeting, on the same ensure rule as the cadence -------
     # A live session is the ONLY writer that can arm it when the owner holds
@@ -711,7 +742,10 @@ async def ensure_armed(
                 await arm_wake(
                     root,
                     session_id,
-                    {"message": CADENCE_MESSAGE, "at": _iso_due(next_cadence_ms(now, pol.at))},
+                    {
+                        "message": cadence_message(root, now),
+                        "at": _iso_due(next_cadence_ms(now, pol.at)),
+                    },
                     wake_id=CADENCE_ID,
                     now_ms=now,
                 )

@@ -177,8 +177,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async def _aida_boot_ensure() -> None:
         try:
-            from local_operator.aida import ensure_session
+            from local_operator.aida import activation, ensure_session
 
+            # R17/R21: an install with no human surface is NOT auto-activated.
+            # The task above is scheduled on every boot; this predicate is what
+            # keeps a cloud/automation daemon (no terminal, not desktop-spawned)
+            # from paying for a session, a cadence and a wake supervisor it
+            # never asked for — explicit opens still work, and the documented
+            # switches disable her entirely. See `aida/activation.py`.
+            if not activation.human_surface_present():
+                logger.info("aida: no human surface at boot; not auto-activating")
+                return
             await ensure_session(config_dir)
         except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
             logger.warning("aida: boot ensure failed", exc_info=True)

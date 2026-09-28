@@ -2019,6 +2019,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "clears the mkstemp FILE this call just wrote, on the failure path",
     ),
     (
+        "local_operator/aida/profile.py::_atomic_write",
+        "os.replace",
+        # The R23 profile writer: a staged mkstemp FILE beside
+        # <config root>/system_prompt.md -> that FILE. The path is resolved by
+        # this module alone (the API takes text, never a path) and asserted
+        # to stay inside the config root, so it cannot name a session dir.
+        "tmp FILE -> <config root>/system_prompt.md FILE; path-free, never sessions/",
+    ),
+    (
+        "local_operator/aida/profile.py::_atomic_write",
+        "os.unlink",
+        "clears the mkstemp FILE this call just staged, on the failure path",
+    ),
+    (
         "local_operator/aida/state.py::_unlink_quietly",
         "<path>.unlink",
         "removes the <config_dir>/aida/escalate.json tray FILE after reading it",
