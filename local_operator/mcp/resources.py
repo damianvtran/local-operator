@@ -529,6 +529,7 @@ def make_mcp_resolver(
     activate: Callable[[str, str], bool | None],
     *,
     deny_activation_reason: str | None = None,
+    deny_server_reason: Callable[[str], str | None] | None = None,
     defer: Callable[[str, str], None] | None = None,
 ) -> Callable[[str], str | None]:
     """Create a ``read`` resolver that activates exactly one selected tool.
@@ -543,6 +544,12 @@ def make_mcp_resolver(
     never arrive. The split lives here because this is the module that parses
     ``mcp://`` URLs, and a caller re-deriving "is this a tool URL?" would be a
     second parser to keep in step with this one.
+
+    ``deny_server_reason`` is the same split for ONE server at a time: a child
+    reading a tool URL of a server declared ``ownTurnOnly`` (see
+    ``MCPStdioServerConfig``) gets the rule's refusal instead of an activation
+    promise the child's inventory would never honour -- the server belongs to
+    the owning session's own turn.
 
     ``activate``'s RETURN VALUE is what the enabled reply promises: ``False``
     means the schema is deferred to the next turn (the caller's tools array is
@@ -603,11 +610,14 @@ def make_mcp_resolver(
             )
 
         raw_name, tool = found
-        if deny_activation_reason is not None:
+        deny_reason = deny_activation_reason
+        if deny_reason is None and deny_server_reason is not None:
+            deny_reason = deny_server_reason(server_name)
+        if deny_reason is not None:
             return "\n".join(
                 [
                     f"# MCP tool not enabled: {server_name}/{raw_name}",
-                    deny_activation_reason,
+                    deny_reason,
                 ]
             )
         description = _compact(tool.description, MAX_TOOL_DETAIL_CHARS) or "No description."
