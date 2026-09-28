@@ -384,3 +384,18 @@ async def test_a_row_written_before_the_new_fields_reads_with_nulls(api) -> None
     assert project["updates"] == []
     listed = (await client.get("/v1/desktop/projects")).json()["result"]["projects"][0]
     assert listed["owner"] is None and listed["title"] is None
+
+
+def test_status_rank_covers_the_lifecycle_in_order() -> None:
+    from local_operator.server.models.desktop_projects import STATUS_RANK
+
+    ordered = [key for key, _ in sorted(STATUS_RANK.items(), key=lambda kv: kv[1])]
+    assert ordered == [
+        "planning",
+        "active",
+        "qa",
+        "validation",
+        "paused",
+        "done",
+        "archived",
+    ]

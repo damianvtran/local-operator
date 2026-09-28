@@ -44,7 +44,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
-from local_operator.projects import PROJECT_ROW_CAP
+from local_operator.projects import PROJECT_ROW_CAP, PROJECT_STATUSES
 from local_operator.projects import age_text as derived_age_text
 from local_operator.projects import display_name
 from local_operator.projects import milestone_state as derived_milestone_state
@@ -65,6 +65,16 @@ LIST_ROW_CAP = PROJECT_ROW_CAP
 #: (the desktop board's rule, kept identical so the two boards agree).
 BOARD_COLUMNS: tuple[str, ...] = ("active", "paused", "done")
 BOARD_EXTRA_COLUMN = "archived"
+
+#: The lifecycle statuses the three columns do not name, mapped to the column
+#: they ride in. Kept as data (not inline in the renderer) because the desktop
+#: board reads the same mapping off the payload's status; a card's own chip
+#: stays the exact word either way.
+BOARD_STATUS_BUCKET: dict[str, str] = {
+    "planning": "active",
+    "qa": "active",
+    "validation": "active",
+}
 
 #: Card column width in cells, header included. "Fixed ~32 cells" per the
 #: design: columns must be comparable side by side, so the width cannot be
@@ -486,7 +496,17 @@ def _columns_of(views: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, A
     by_status: dict[str, list[dict[str, Any]]] = {name: [] for name in BOARD_COLUMNS}
     for view in views:
         status = str(_row(view).get("status") or "active")
-        by_status.setdefault(status, []).append(view)
+        # Lifecycle statuses beyond the board's three columns are BUCKETED into
+        # the column they belong to, not given columns of their own: planning,
+        # qa and validation are all "in the machine", and the card still
+        # carries its own [qa]-style chip, so the column tells the coarse story
+        # while the chip stays exact. An entirely unknown status (a row from a
+        # newer build) rides the leading column rather than vanishing — the
+        # board's one job is that every project is visible somewhere.
+        bucket = BOARD_STATUS_BUCKET.get(status, status)
+        if bucket not in (*BOARD_COLUMNS, BOARD_EXTRA_COLUMN):
+            bucket = BOARD_COLUMNS[0]
+        by_status.setdefault(bucket, []).append(view)
     columns = [(name, by_status.get(name, [])) for name in BOARD_COLUMNS]
     archived = by_status.get(BOARD_EXTRA_COLUMN) or []
     if archived:
@@ -1189,7 +1209,11 @@ def aggregate_footer(
         status = str(_row(view).get("status") or "active")
         counts[status] = counts.get(status, 0) + 1
     text = Text(no_wrap=True, overflow="ellipsis")
-    order = [*BOARD_COLUMNS, BOARD_EXTRA_COLUMN]
+    # The counts line is per TRUE status, in lifecycle order: the board buckets
+    # planning/qa/validation into one column, but the summary must not merge
+    # them — "1 active" over a store that also holds two qa rows would be a lie
+    # of omission (the same reason archived has always had its own count).
+    order = [*PROJECT_STATUSES]
     parts = [f"{counts[status]} {status}" for status in order if counts.get(status)]
     text.append(f"{len(views)} project{'' if len(views) == 1 else 's'}", style=resolver("dim"))
     if parts:

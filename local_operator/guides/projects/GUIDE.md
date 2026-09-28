@@ -23,12 +23,30 @@ Do **not** make one for a one-turn task, for anything already fully described by
 
 - `op='list'` — one compact row per project (status, owner/team when set, estimate, target, milestone count, session count, progress age, description). Start here.
 - `op='create' name='…'` — creates the project and **links the calling session automatically**; say so when you report it. Optional on create: `description` (markdown — see below), `title` (human display name; falls back to the key), `owner`/`team` (who owns / which team manages the stream), `status`, `tags` (each `[a-z0-9][a-z0-9_-]{0,23}`), `start_date`/`target_date` (ISO `YYYY-MM-DD`), `estimate` (+ `estimate_unit`: `points`|`days`), `milestones`.
-- `op='update' name='…'` — merges only the fields you pass; anything omitted is left alone. Fields: `description`, `title`, `owner`/`team`, `status` (`active`|`paused`|`done`|`archived`), `progress`, `tags` (replace-set), dates, `estimate`/`estimate_unit`. Passing `milestones` here REPLACES the whole list and is **refused** unless you also pass `replace_milestones=true`; to change one milestone, use `op='milestone'` instead — it upserts by name and leaves every sibling alone.
+- `op='update' name='…'` — merges only the fields you pass; anything omitted is left alone. Fields: `description`, `title`, `owner`/`team`, `status` (see the lifecycle below), `progress`, `tags` (replace-set), dates, `estimate`/`estimate_unit`. Passing `milestones` here REPLACES the whole list and is **refused** unless you also pass `replace_milestones=true`; to change one milestone, use `op='milestone'` instead — it upserts by name and leaves every sibling alone.
 - `op='link'` / `op='unlink' name='…' [session_id=…]` — attach or detach a session; without `session_id` they act on the calling session. The link lives only in the project row (cap 64; `link` refuses past it and names `unlink`).
 - `op='milestone' name='…' milestone='beta cut'` — add-or-update by name: `milestone_target_date='2026-10-01'` sets a date, `milestone_completed=true|false` marks or clears completion, `remove=true` deletes the entry (renaming is remove + add). This is the vocabulary for changing ONE milestone: siblings are never touched. Milestone names are unique per project, case-insensitively.
 - `project_delete name='…'` — permanent removal, and it asks for write approval. Deleting a project never touches session directories.
 
 Set `status='done'` and `completed_at` is stamped to today unless you pass one; pass `completed_at=''` to clear it, and moving a status away from `done` leaves the date untouched. `target_date` before `start_date` is refused when both are set. `owner` and `team` are short free-text labels (trimmed, at most 80 characters); pass `''` to clear one back to unknown — absent means **unknown**, never a placeholder.
+
+## The status lifecycle
+
+`status` is where a tracked stream stands, and moving it is part of keeping the record true — set it at `create` and move it on **material changes**, not on a cadence:
+
+| status | what it means | move here when |
+| --- | --- | --- |
+| `planning` | RFC / research — the shape is still being decided | the work is scoped but not being built yet |
+| `active` | implementation is the work | research lands and building starts |
+| `qa` | review / QA / design / copy cycles | implementation is complete and the rounds begin |
+| `validation` | deployed and being validated, observation and fix-forward included | the change shipped somewhere real and is proving itself |
+| `paused` | a side-state: deliberately not being worked | the stream is set aside without closing |
+| `done` | fully validated — requirements closed, todos addressed, milestones complete | the rounds are clean and nothing is owed |
+| `archived` | the finished drawer | the row stops being worth showing |
+
+Setting `status='done'` is a CLAIM, so it is gated: every milestone must be complete, or you pass `force_done=true` to close with them open — the refusal names the incomplete milestones. A plan with no milestones closes normally (there is nothing to prove). `done` also stamps `completed_at` to today unless you pass one.
+
+Only `planning`/`active`/`qa`/`validation` can read **stale** — those are the in-flight statuses the completion check watches (below). `paused`, `done` and `archived` are deliberate statements that the record is settled; they never read stale.
 
 `title` is the human-readable display name: listings and headers show it first, with the key `name` as secondary (recoverable in the detail), and every surface falls back to `name` when it is absent. `name` remains THE key — addressing (`/project show <name>`, `@project:<name>`, file names) never changes. `description` is **markdown** (multiple paragraphs, headings, lists and code are allowed) and is rendered, not dumped raw; `title` and `description` are the agent-editable fields for scope and change updates.
 
@@ -51,19 +69,19 @@ Two consequences worth knowing: the block is a **snapshot**, so it is as fresh a
 
 ## Views and the record
 
-Today the row is read through the `project` tool, the terminal's `/project` listing, and the terminal's full-page projects view. The view has three canvases — list / board / timeline — reachable across every project (`/project board`, `/project timeline`) or scoped to one conversation: **nameless `/project show`** opens the calling session's own projects on the board (their rows/cards carry the `◆` marker; no links falls back to the all-projects board). Reading requires no session at all — a bare terminal opens the same store — and `↵` on the selected row/card/bar opens that project's live conversation (`/resume` machinery) or says honestly which sessions exist and what starts one. `↑`/`↓` move that selection in every canvas (the view follows it); `←`/`→` pan the canvas, and `r` refreshes the page without moving the reader's row. The desktop **Projects** tab (the same three views, plus a detail page with milestones and linked sessions) lands in a later UI slice. All of them render from one composition of "what is each linked session doing" — runtime state, subagent counts, todo counts.
+Today the row is read through the `project` tool, the terminal's `/project` listing, and the terminal's full-page projects view. The view has three canvases — list / board / timeline — reachable across every project (`/project board`, `/project timeline`) or scoped to one conversation: **nameless `/project show`** opens the calling session's own projects on the board (their rows/cards carry the `◆` marker; no links falls back to the all-projects board). The board keeps its three columns; `planning`/`qa`/`validation` cards ride the in-flight column while their own chip (and the counts line) keeps the exact status. Reading requires no session at all — a bare terminal opens the same store — and `↵` on the selected row/card/bar opens that project's live conversation (`/resume` machinery) or says honestly which sessions exist and what starts one. `↑`/`↓` move that selection in every canvas (the view follows it); `←`/`→` pan the canvas, and `r` refreshes the page without moving the reader's row. The desktop **Projects** tab (the same three views, plus a detail page with milestones and linked sessions) lands in a later UI slice. All of them render from one composition of "what is each linked session doing" — runtime state, subagent counts, todo counts.
 
 What is **stored** versus **derived** matters when you report:
 
 - **Stored:** `status`, `title`, `progress` + its freshness pair, `start_date`/`target_date`/`completed_at`, `estimate` + unit, tags, `owner`/`team`, the append-only `updates` history (per entry: text, timestamp, reporter, attachment metadata), the milestone list with each milestone's dates, the linked session ids.
-- **Derived at render:** milestone status (`completed` when `completed_at` is set, else `overdue` when its target date has passed, else `upcoming`); overdue-ness itself; progress staleness (read only for `active` projects — settled `paused`/`done`/`archived` records never read stale); each linked session's runtime state. Nothing derived is stored, so a derived badge can never drift from the date it contradicts.
+- **Derived at render:** milestone status (`completed` when `completed_at` is set, else `overdue` when its target date has passed, else `upcoming`); overdue-ness itself; progress staleness (read only for the in-flight statuses — `planning`/`active`/`qa`/`validation`; settled `paused`/`done`/`archived` records never read stale); each linked session's runtime state. Nothing derived is stored, so a derived badge can never drift from the date it contradicts.
 - `null` means **unknown**, never zero: a session with no subagent roster file and no persisted todo snapshot reports `null` for those, not `0`.
 
 ## The completion check
 
-Once a session is linked to a project, the harness watches for a specific failure: work moving while the record stays stale. When a turn **has done work** (at least one tool call) and yields while a linked, `active` project's progress is older than four hours (or missing), the harness injects one reminder naming the stale projects. It is injected, not shown to the user.
+Once a session is linked to a project, the harness watches for a specific failure: work moving while the record stays stale. When a turn **has done work** (at least one tool call) and yields while a linked, in-flight project's progress is older than four hours (or missing), the harness injects one reminder naming the stale projects. It is injected, not shown to the user.
 
-It fires at most once per turn, only after a worked turn, only for stale records, and never for `paused`/`done`/`archived` projects. The exits it offers are the honest ones: update the record, change the status, re-send the line to refresh it, or `unlink` the session if it no longer belongs to the project. A reminder that repeats after you have acted is a bug, not a hint.
+It fires at most once per turn, only after a worked turn, only for stale records, and never for `paused`/`done`/`archived` projects (the in-flight statuses — `planning`/`active`/`qa`/`validation` — are the ones it watches). The exits it offers are the honest ones: update the record, change the status, re-send the line to refresh it, or `unlink` the session if it no longer belongs to the project. A reminder that repeats after you have acted is a bug, not a hint.
 
 ## Housekeeping
 

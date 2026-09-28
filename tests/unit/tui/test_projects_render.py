@@ -822,3 +822,44 @@ def test_board_key_budget_counts_the_marker_column() -> None:
     assert "A" * 18 + " (keeptest)" in plain  # exactly the budget: key kept
     assert " (shedtest)" not in plain  # one past it: the title wins alone
     assert "B" * 19 in plain
+
+
+def test_board_buckets_lifecycle_statuses_into_the_in_flight_column() -> None:
+    views = [
+        _view("qa-run", status="qa"),
+        _view("plan-new", status="planning"),
+        _view("val-ship", status="validation"),
+    ]
+    board = render_project_board(views, now=NOW).text.plain
+    header = board.splitlines()[0]
+    assert "active · 3" in header  # they ride the in-flight column...
+    assert "qa ·" not in header and "planning ·" not in header  # ...not columns
+    assert "qa-run" in board and "plan-new" in board  # and never vanish
+
+
+def test_board_falls_back_to_the_leading_column_for_unknown_statuses() -> None:
+    board = render_project_board([_view("mystery", status="shipped")], now=NOW).text.plain
+    assert "mystery" in board  # a newer build's status must not vanish
+
+
+def test_lifecycle_chips_paint_in_the_footer() -> None:
+    assert "[qa]" in detail_footer(_view("qa-run", status="qa"), now=NOW, width=120).plain
+    assert (
+        "[validation]"
+        in detail_footer(_view("val-ship", status="validation"), now=NOW, width=120).plain
+    )
+
+
+def test_aggregate_footer_counts_every_true_status() -> None:
+    from local_operator.tui.projects_render import aggregate_footer
+
+    views = [
+        _view("q", status="qa"),
+        _view("p", status="planning"),
+        _view("a", status="archived"),
+        _view("x", status="active"),
+    ]
+    text = aggregate_footer(views).plain
+    assert "1 planning" in text and "1 active" in text and "1 qa" in text
+    assert "1 archived" in text
+    assert "paused" not in text
