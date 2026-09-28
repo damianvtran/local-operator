@@ -42,6 +42,12 @@ from local_operator.resume import (
 from local_operator.server.models.desktop_sessions import AdmissionStatus, MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 
+# The derived per-session index behind the checkpoint rail (design D1/D8/D9):
+# one module owns the scan, its cache and its invalidation, and this adapter is
+# only the door. Imported as a module so tests can drive its decision paths off
+# the bridge without a second seam.
+from local_operator.session import transcript_index
+
 # The pin store is the sidebar's OWN module, reused rather than re-implemented —
 # for the reason the `move_targets` import above cites, which is also that
 # module's stated model: it imports no Textual, so a non-Textual frontend can
@@ -3288,6 +3294,29 @@ class DesktopSessionBridge:
             cut = next((index for index, row in enumerate(rows) if row.id == before_id), None)
             rows = rows[:cut] if cut is not None else []
         return rows
+
+    async def checkpoints(self) -> dict[str, Any]:
+        """The checkpoint rail's manifest (design D1/D9), derived per session.
+
+        LOCAL sessions only, deliberately: the derivation reads THIS device's
+        journal, and a peer conversation's journal is not here. v1 answers
+        ``state: "unsupported"`` for a peer (D4) and the renderer falls back to
+        near-jump; that is a fact about where the bytes are, not a failure.
+
+        Everything else — the fresh read, the background build, the first-paint
+        wait — lives in :mod:`local_operator.session.transcript_index`, which
+        also documents the cache format and its invalidation rules. This method
+        is the door, and it never blocks on a full scan: a cold or stale cache
+        answers ``building`` while the refresh task runs (22 s for the
+        operator's 272 MB journal, S1), so the rail's first paint is immediate.
+        """
+        if self.remote_row is not None:
+            return {
+                "session_id": self.session_id,
+                "index": {"state": "unsupported"},
+                "checkpoints": [],
+            }
+        return await transcript_index.checkpoints_view(self.root, self.session_id)
 
     async def watch(self, subscription_id: str, *, visible: bool, can_notify: bool) -> None:
         sub = self.subscribers.get(subscription_id)

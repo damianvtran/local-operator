@@ -572,6 +572,86 @@ class ChildTranscriptPage(HistoryPage):
     state: ChildTranscriptState
 
 
+#: What one rail tick is: a user message or a completed agent turn (design D1).
+CheckpointKind = Literal["user", "completion"]
+
+#: A completion tick's outcome. ``open`` is the live tail that has no evidence
+#: of settling yet — the rail paints it as an in-progress dot rather than a tick
+#: (D1). The other three are the attention marker's own kinds.
+CheckpointOutcome = Literal["complete", "error", "interrupted", "open"]
+
+#: The manifest's own lifecycle state (D9). ``unsupported`` is the peer/remote
+#: degradation (D4): v1 derives checkpoints from THIS device's journal only.
+CheckpointIndexState = Literal["ready", "building", "stale", "error", "unsupported"]
+
+#: The naming overlay's state (D2/D9). ``pending`` is what the rail polls on.
+CheckpointNamingState = Literal["ready", "pending", "unavailable"]
+
+
+class CheckpointNaming(BaseModel):
+    """The naming overlay for one completion checkpoint (D2/D9).
+
+    ``ready`` carries a generated name and summary; ``pending`` is the
+    pre-generation state the rail polls on; ``unavailable`` is the failure /
+    cooldown state. Non-ready states carry null ``name``/``summary`` rather
+    than omitting the keys — this surface's nullable fields are all plain
+    nulls (``cold_reason``, ``replayed``), and the UI contract ships in
+    lockstep.
+    """
+
+    state: CheckpointNamingState
+    name: str | None = None
+    summary: str | None = None
+
+
+class CheckpointEntry(BaseModel):
+    """One rail tick: a user message or a completed agent turn (D1).
+
+    ``id`` is a REAL journal entry id — the user row, or the turn's last
+    ``message``-type row (the row a jump lands on; the collapse branch's
+    ``closingAnswerId`` semantics) — so click-to-jump needs no translation and
+    forks keep their checkpoints. ``seq`` is the journal row ordinal (0-based),
+    which places ticks proportionally in the rail; ``turn`` is 1-based.
+    ``outcome`` is null unless the turn's own completion marker carried a kind,
+    and ``open`` on the live unsettled tail. ``naming`` is present on
+    completions only — user ticks have nothing to name.
+    """
+
+    id: str
+    kind: CheckpointKind
+    turn: int
+    ts: float
+    seq: int
+    text: str
+    outcome: CheckpointOutcome | None = None
+    naming: CheckpointNaming | None = None
+
+
+class CheckpointIndex(BaseModel):
+    """The manifest's own state block (D9).
+
+    ``ready`` is a fresh cache; ``building`` means a refresh is in flight and
+    ``checkpoints`` carries the previous scan where one exists; ``error`` means
+    the last refresh failed and is inside its cooldown; ``stale`` is reserved
+    for a manifest deliberately served out of date (no caller emits it today);
+    ``unsupported`` is a peer conversation.
+
+    ``built_at`` is the index cache file's mtime — the moment the served scan
+    was written, not the moment this request read it.
+    """
+
+    state: CheckpointIndexState
+    built_at: float | None = None
+
+
+class CheckpointManifest(BaseModel):
+    """``GET /v1/desktop/sessions/{session_id}/checkpoints`` (D9)."""
+
+    session_id: str
+    index: CheckpointIndex
+    checkpoints: list[CheckpointEntry]
+
+
 #: Why a child job's live window could not be handed over, when its absence
 #: needs naming. A TOKEN, not a sentence: the copy belongs to the surface.
 #:
