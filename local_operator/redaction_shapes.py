@@ -1507,6 +1507,36 @@ _WORD_SHAPED_MAX_DIGITS = 2
 #: And how long it may be. Names are short; opaque secrets are not.
 _WORD_SHAPED_MAX_LEN = 32
 
+#: The same declared class on its OTHER join: lowercase words joined by hyphens,
+#: carrying at least one (``some-kebab-flag``, ``is-clm-2-enabled``). A lowercase
+#: hyphenated phrase is how a readable IDENTIFIER is spelled on the surface this
+#: pass reads most — a LaunchDarkly flag key, a kebab-case slug, an item id in a
+#: URL — and under an AMBIGUOUS name it is a NAME for the same reason the
+#: underscore spelling is: the separator marks a compound name rather than an
+#: opaque token, and no hex or base64 blob the table cares about carries one in
+#: that position. The anchors mirror :data:`_WORD_SHAPED_VALUE` deliberately —
+#: a lowercase letter first (``2fa-backup-codes`` keeps its mask), the same
+#: alphabet — so the two joins cannot drift into two classes.
+_WORD_SHAPED_VALUE_HYPHEN = re.compile(r"[a-z][a-z0-9-]*-[a-z0-9-]*")
+
+
+def _is_readable_hyphen_phrase(value: str) -> bool:
+    """The declared readable hyphen phrase class, caps included, as ONE judgement.
+
+    WHY A FUNCTION rather than the inline spelling the underscore clause uses:
+    THREE sites release on this class — the weak-name value proof, the query
+    guard, and the assignment rule's deference to a query spelling — and the
+    boundary has to be one predicate so a widening cannot move one site without
+    the others. The released set is MEASURED, not listed (``_RELEASED_WORD_SHAPED``
+    in the secrets tests freezes it over a declared corpus in both directions):
+    a loosening releases a probe and reds, a tightening masks one and reds.
+    """
+    return (
+        len(value) <= _WORD_SHAPED_MAX_LEN
+        and sum(char.isdigit() for char in value) <= _WORD_SHAPED_MAX_DIGITS
+        and _WORD_SHAPED_VALUE_HYPHEN.fullmatch(value) is not None
+    )
+
 
 def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     """Whether a matched value must NOT be masked, and why.
@@ -1620,6 +1650,26 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
         and sum(char.isdigit() for char in value) <= _WORD_SHAPED_MAX_DIGITS
         and _WORD_SHAPED_VALUE.fullmatch(value)
     ):
+        return True
+    # The same declared class above, on its OTHER join — and the omission here
+    # was a gap with the same tail the underscore spelling was fixed for. A
+    # readable hyphen phrase cleared every clause the underscore spelling clears
+    # EXCEPT the shape test itself, so under an ambiguous name it masked as soon
+    # as it escaped the short-value clause below (>=20 characters, or the one or
+    # two digits a flag name like ``is-clm-2-enabled`` carries), and the masked
+    # value was REGISTERED — registration is session-wide, so the phrase came
+    # back as the marker in every later result AND in the agent's own later
+    # arguments. Measured on a flag-list read (2026-09-28): the read's ``key``
+    # field was masked, the agent sent the marker as the flag key, and the next
+    # operation failed on it. The operator's ruling recorded above is the reason
+    # this is a release and not a widening: a readable word under an ambiguous
+    # name is a NAME on this join for the same reason it is on the underscore
+    # one. Strong names are untouched (``not strong``), so the hyphenated
+    # password positives and the identifier arm's hyphen neighbour keep masking;
+    # every opaque value keeps its mask through the caps this class SHARES with
+    # the underscore spelling — the digit cap refuses hex, base64 and UUIDs,
+    # the start anchor refuses a digit-led phrase, the alphabet refuses case.
+    if not strong and _is_readable_hyphen_phrase(value):
         return True
     # A lowercase hyphenated word-phrase under a CODE-ish name is a NAME, not a
     # secret (``_PUBLIC_LISTING_TOKEN = "public-catalogue-read"``). The
@@ -2226,6 +2276,24 @@ def _value_before_an_escape(value: str) -> str:
     return value
 
 
+def _is_an_ambiguous_query_param(match: Match[str]) -> bool:
+    """Whether an assignment match is a URL query parameter of an ambiguous name.
+
+    ``?key=…`` / ``&api_key=…`` — the character before the name is the query
+    separator, and the name is one of the spellings the query table entry judges
+    with the value proof (:data:`_AMBIGUOUS_QUERY_PARAM_NAMES`). The query entry
+    runs EARLIER in the table and masks every value it can match, so the
+    deferral below (:func:`_assignment_value_guard`) is for the class that entry
+    RELEASES: a readable hyphen phrase under one of these names is a released
+    value here too, and without this predicate the strong-name reading of
+    ``api_key`` would take the query surface's own release straight back.
+    """
+    index = match.start(1) - 1
+    if index < 0 or match.string[index] not in "?&":
+        return False
+    return match.group(1).lower() in _AMBIGUOUS_QUERY_PARAM_NAMES
+
+
 def _assignment_value_guard(match: Match[str]) -> bool:
     """The checks both spellings of the named-assignment rule share.
 
@@ -2271,6 +2339,19 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     # breaks for the judgement too, so what is judged is the run before the first
     # of them while the mask covers the whole run (see
     # :func:`_value_before_an_escape`).
+    #
+    # ...and a QUERY-PARAMETER spelling of an ambiguous name defers to the query
+    # entry's value proof for the class that entry releases: ``?key=…`` and
+    # ``?api_key=…`` are how a public item identifier travels, and the query
+    # entry (earlier in the table) releases the readable hyphen phrase there.
+    # Without this clause the STRONG reading of ``api_key`` would take that
+    # release straight back — the query rule releases ``?api_key=…`` and
+    # this rule, which cannot see the ``?``, would immediately re-mask it. Every
+    # other value keeps this rule's verdict.
+    if _is_an_ambiguous_query_param(match) and _is_readable_hyphen_phrase(
+        _value_before_an_escape(match.group(4))
+    ):
+        return False
     if _value_is_not_a_credential(
         _value_before_an_escape(match.group(4)),
         name=name,
@@ -2333,6 +2414,33 @@ def _url_value_guard(match: Match[str]) -> bool:
         or _URL_CRED_QUERY.search(value)
         or _URL_KEY_USERINFO.search(value)
     )
+
+
+#: The query-parameter names whose VALUE gets the ambiguous-name value proof,
+#: and the boundary of that release: ``key`` and its ``api[-_]?key`` spellings
+#: are how a PUBLIC item identifier travels in a URL (a LaunchDarkly flag read
+#: is one), while ``token``, ``password``, ``secret``, ``sig`` and the rest of
+#: the rule's names have no reading but a credential and keep masking any value.
+#: Deliberately a NAME LIST rather than ``not is_strong_credential_name``: the
+#: line here is the SURFACE (a query string names an item) rather than the
+#: name's spelling, and ``apikey`` is strong by the key-qualifier test.
+_AMBIGUOUS_QUERY_PARAM_NAMES = frozenset({"key", "apikey", "api_key", "api-key"})
+
+
+def _query_param_guard(match: Match[str]) -> bool:
+    """Whether a credential query parameter's value must be masked.
+
+    Every parameter but the ambiguous names above is masked whatever it carries —
+    that is what this rule has always done. For the ambiguous ones the value is
+    judged the way the assignment rule judges a weak name's, and by the SAME
+    predicate (:func:`_is_readable_hyphen_phrase`): a readable lowercase hyphen
+    phrase is the NAME of the item the URL addresses, while an opaque value —
+    hex, base64, a UUID — keeps its mask through the class's caps.
+    """
+    name = match.group(1).lstrip("?&").rstrip("=").lower()
+    if name not in _AMBIGUOUS_QUERY_PARAM_NAMES:
+        return True
+    return not _is_readable_hyphen_phrase(match.group(2))
 
 
 #: The credential SHAPES, as ``(label, pattern, replacement, secret_group)``.
@@ -3375,14 +3483,19 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     ),
     # A credential in a query string — how several of these services accept one
     # and therefore how one comes back in a URL that a log or an upstream quotes.
+    # The value judgement is the guard's: the ambiguous ``key``/``apikey``
+    # spellings release a readable hyphen phrase (the same class and predicate
+    # the assignment rule's weak-name proof uses), and every other name here
+    # keeps masking any value it carries.
     Shape(
         "credential-query-param",
         re.compile(
             r"(?i)([?&](?:api[-_]?key|apikey|key|token|access[-_]?token|secret|"
             r"password|passwd|pwd|sig|signature|auth)=)([^&\s\"'#]{4,})"
         ),
-        r"\1" + REDACTION_MARKER,
+        None,  # rendered by the guarded path; the guard owns the value judgement
         2,
+        guard=_query_param_guard,
     ),
     # --- named assignments ---------------------------------------------------
     # ``AWS_SECRET_ACCESS_KEY=…``, ``"api_key": "…"``, ``DB_PASSWORD=…``,
