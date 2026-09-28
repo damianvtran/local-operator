@@ -169,6 +169,7 @@ from local_operator.scratchpad import (
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import group_reaper, search_guard, shell_env, sleep_guard
+from local_operator.tools.confinement import confinement_of
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -1018,6 +1019,25 @@ def _spill_detail(meta: SpillMeta) -> dict[str, Any]:
 
 def _safe_cwd(context: ToolContext | None) -> str:
     return context.cwd if context and context.cwd else "."
+
+
+def _confinement_denial(
+    path: Path, context: ToolContext | None, *, resolvable: bool = True
+) -> str | None:
+    """The refusal for a path a confined session's tools cannot reach.
+
+    ``path`` is the RESOLVED path the calling tool's own resolution already
+    computed (``_resolve_workspace_path``); this never resolves a second time
+    -- a symlink moved between two resolutions would decide the verdict for
+    bytes the reader has already taken from a file the confinement does not
+    cover. ``resolvable=False`` denies for the same reason: a path that cannot
+    be resolved cannot be shown to be inside.
+    """
+
+    confinement = confinement_of(context)
+    if confinement is None:
+        return None
+    return confinement.path_denial(path, resolvable=resolvable)
 
 
 def normalise_path_argument(raw: str) -> str:
@@ -3799,6 +3819,19 @@ async def execute_bash(
     # above are worth keeping in EITHER mode, so they ride the policy as
     # intentional injections rather than around it — see
     # local_operator.tools.shell_env, the one place this decision is made.
+    # A confined session's shell runs inside the host's kernel sandbox; the
+    # boundary is the syscall, not this command's text, so absolute paths,
+    # ``cd`` and constructed strings are all the same case (see
+    # ``local_operator.tools.confinement``). The temp redirection rides the
+    # same env the child already receives: tools that honour ``TMPDIR`` keep
+    # working, and a temp file they leave behind sits inside the same boundary
+    # as everything else the session writes. Hosts with no mechanism refuse
+    # the command below rather than run it unwrapped.
+    confinement = confinement_of(context)
+    if confinement is not None:
+        temp = confinement.temp_dir()
+        injections["TMPDIR"] = str(temp)
+        injections["TMP"] = str(temp)
     env = shell_env.child_environment(injections=injections)
 
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
@@ -3818,11 +3851,18 @@ async def execute_bash(
         # path they never asked for. See WINDOWS_NO_BASH_MESSAGE.
         return _error(tool_call_id, "bash", WINDOWS_NO_BASH_MESSAGE)
     cwd = _safe_cwd(context)
+    shell_argv = [shell, "-c", params.command]
+    if confinement is not None:
+        cwd_denial = confinement.cwd_denial(cwd)
+        if cwd_denial is not None:
+            return _error(tool_call_id, "bash", cwd_denial)
+        wrapped = confinement.wrap(shell_argv)
+        if wrapped is None:
+            return _error(tool_call_id, "bash", confinement.spawn_refusal())
+        shell_argv = wrapped
     try:
         process = await asyncio.create_subprocess_exec(
-            shell,
-            "-c",
-            params.command,
+            *shell_argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
@@ -6009,6 +6049,9 @@ async def execute_read(
     # answer the guard-area exemption may consume (see
     # ``_record_resolved_path``). Before ``_read_path``, which opens ``path``.
     _record_resolved_path(context, path, resolvable)
+    denial = _confinement_denial(path, context, resolvable=resolvable)
+    if denial is not None:
+        return _error(tool_call_id, "read", denial)
     return await _read_path(
         tool_call_id, params, context, path=path, inside=inside, resolvable=resolvable
     )
@@ -8784,6 +8827,9 @@ async def execute_edit(
         path = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
+        denial = _confinement_denial(path, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "edit", denial)
     if not path.is_file():
         # Name the URL when the caller used one: the raw string is what the
         # model typed, and echoing the mangled filesystem path the scheme would
@@ -9160,6 +9206,9 @@ async def execute_write(
         path = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
+        denial = _confinement_denial(path, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "write", denial)
 
     # The read-modify-write-diff block runs in a thread: the loop this
     # coroutine rides is the SAME loop that renders the TUI, and a previous
@@ -10645,6 +10694,9 @@ async def execute_grep(
     # ``execute_read`` uses, so the guard-area verdict is the reader's at both
     # readers and never a second resolution at a second moment.
     _record_resolved_path(context, target, resolvable)
+    denial = _confinement_denial(target, context, resolvable=resolvable)
+    if denial is not None:
+        return _error(tool_call_id, "grep", denial)
     if not target.exists():
         # Deliberately NOT a model fault: a well-formed path that does not
         # exist is unsatisfiable, not malformed, and the file may have vanished
@@ -13421,6 +13473,9 @@ async def _browser_screenshot(
             return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(raw_path, _safe_cwd(context))
         target = str(resolved)
+        denial = _confinement_denial(resolved, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "browser", denial)
     else:
         import tempfile
 
@@ -16299,6 +16354,9 @@ async def _bridge_action(
             return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
         target = str(resolved)
+        denial = _confinement_denial(resolved, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "browser", denial)
     else:
         import tempfile
 

@@ -87,6 +87,7 @@ from local_operator.tools.builtin import (
     _validation_error,
     spill_truncate,
 )
+from local_operator.tools.confinement import confinement_of
 
 #: Per-call wall clock. Kernel calls are expected to be short (they replace
 #: one-shot bash snippets, not training runs); 30s catches the runaway case
@@ -1249,6 +1250,22 @@ async def execute_eval(
         return _validation_error(tool_call_id, "eval", exc)
     if not params.code.strip():
         return _error(tool_call_id, "eval", "code must be a non-empty string")
+
+    # A confined session refuses the Python kernel: the worker is a general
+    # execution environment on this host (arbitrary imports, arbitrary child
+    # spawns), and this boundary does not cover it. Jailing the worker itself
+    # -- extending the profile with the interpreter and the package root -- is
+    # a named follow-up; until then, refusal is the honest answer (see
+    # ``tools.confinement``).
+    confinement = confinement_of(context)
+    if confinement is not None:
+        return _error(
+            tool_call_id,
+            "eval",
+            "refused: this session is confined to "
+            f"{confinement.root}; the Python kernel is a general execution "
+            "environment this boundary does not cover",
+        )
 
     # Pre-aborted signal: never spawn (or disturb a resident kernel) for a
     # call there is no intention to run.

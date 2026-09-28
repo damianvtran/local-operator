@@ -2104,6 +2104,12 @@ class Session:
         #: rebuilt every turn, so anything set only on the construction-time
         #: context reaches the createIf check and never the executor.
         job_id: str | None = None,
+        #: The root this session's local tools are confined to (see
+        #: :meth:`set_tool_confinement`), or ``None``. A constructor parameter
+        #: as well as a setter because ``task`` children copy it at
+        #: construction (``harness.subagent``): a setter-only value installed
+        #: on a parent after construction would otherwise never reach a child.
+        confinement_root: str | None = None,
         #: The short name this session was DELEGATED under, set only on a
         #: subagent (``zoom-scroll-fix``, ``bridge-qa``). A child never
         #: generates a conversation title — naming runs in the TUI host and the
@@ -2317,6 +2323,11 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        #: The confinement root, when this session's local tools must stay
+        #: inside one. ``None`` everywhere no caller asked for confinement;
+        #: read by ``_build_tool_context`` on every turn, which is what makes
+        #: it reach both the createIf checks and the executors.
+        self._confinement_root = confinement_root
         #: Settled model-owned jobs whose auto-delivery was declined because a
         #: turn was streaming (see ``_on_job_completed``), in settle order. The
         #: turn's ``finally`` hands them over once it is idle again; see
@@ -7601,6 +7612,37 @@ class Session:
         allowed = self._declared_tools
         return [tool for tool in tools if getattr(tool, "name", None) in allowed]
 
+    def set_tool_confinement(self, root: str | Path | None) -> None:
+        """Confine this session's local tool reach to ``root``, or lift it.
+
+        WHY THIS EXISTS. A session's local tools run in the operator's own
+        account; that is right for a session the operator opened and wrong
+        for one they did not. Measured on the benchmark's session engagement:
+        an episode's model ran ``find /Users/damian/worktrees/osworld ...`` and
+        read a task input out of the campaign apparatus's gated assets -- a
+        tree that also holds other tasks' material. This is the session-level
+        answer, in the same shape as :meth:`set_tool_inventory`: a property of
+        the SESSION, enforced wherever its tools run, carrying to the children
+        it spawns.
+
+        What changes is the REACH of the existing surface, never the surface:
+        the shell runs inside a kernel sandbox scoped to ``root`` (macOS
+        seatbelt; a host with no mechanism refuses those commands rather than
+        running them unwrapped), and the file tools refuse paths that resolve
+        outside it. See ``local_operator.tools.confinement`` for the
+        boundary's stated residual holes -- metadata, network, Mach services,
+        and the surfaces it deliberately does not cover.
+
+        ``None`` lifts the confinement. Callers that install one should do so
+        BEFORE the first turn, so no tool call runs against an unconfined
+        context.
+        """
+
+        if root is None:
+            self._confinement_root = None
+            return
+        self._confinement_root = str(Path(root).expanduser().resolve())
+
     def set_tool_inventory(
         self,
         names: Sequence[str] | None,
@@ -10731,6 +10773,10 @@ class Session:
         # work, and for teardown to be able to close the tab.
         return ToolContext(
             cwd=self._cwd,
+            # The session's confinement root, when it has one: every local
+            # tool's enforcement point reads this single answer (see
+            # ``local_operator.tools.confinement``).
+            confinement_root=self._confinement_root,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
             # The session's OWN directory: where the eval tool records its
