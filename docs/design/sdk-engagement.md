@@ -388,6 +388,44 @@ async with open_session(spec, roots=roots) as session:
   an object), and exec's namespace literal now sits in
   `exec_mode._make_default_session_factory` (~L672), not L123-137.
 
+**PR 2 as implemented (this tree) — the benchmark pilot arm:**
+
+- `local_operator/evaluation/session_arm.py` — `declare_action_server` (writes
+  the per-session MCP declaration into the episode's scoped config dir, cwd
+  asserted inside the scratch by [redacted] path), `ObservationRenderer`
+  (frames published through the adapter's `verify_artifact`, returned as
+  image content), `ActionBridge` (UNIX socket inside the scratch; one rendered
+  observation per batch; `finish` terminal and non-executing; step budget;
+  typed refusals; the `ask` route), `run_session_episode` (one
+  `sdk.open_session(..., mode="own")` turn, `ApprovalPolicy.auto()`, bounded
+  wall abort, score → `aggregate_cleanup` → close, PILOT record incl.
+  `score.json`/`outcome.json`), and `_await_action_tool` — the arm holds the
+  prompt until the action tool is in the session's **live** inventory and
+  refuses when it never arrives.
+- `local_operator/evaluation/action_server.py` — the MCP server
+  (`python -m local_operator.evaluation.action_server`), stdio JSON-RPC, one
+  `apply_actions` tool from the negotiated surface, forwarding to the bridge
+  as a one-shot line protocol.
+- `scripts/run_episode.py` — `--engagement {reply,session}` (default reply),
+  `--session-route`, `--session-wall-s`; the session branch refuses an ambient
+  home and requires the launchd scratch env.
+- The reply-channel arm is UNCHANGED and remains the default (design §5's
+  not-to-be-moved list); the session arm writes a PILOT record and is not
+  comparable to reply-arm results.
+- Measured behaviors worth keeping (from the PR's evidence): MCP discovery is
+  asynchronous and the first request publishes its array once per turn — a
+  prompt sent immediately after `open` gets `Tool not found` for the action
+  tool until settle, which is why the arm gates on it; `EpisodeSession.tool_names`
+  reads the live inventory, never a snapshot; the bridge endpoint is a short
+  session-unique name because `sun_path` (~104 B on macOS) is close under
+  `scratch-homes/<run-name>`.
+- Tests: `tests/unit/evaluation/test_session_arm.py`,
+  `tests/unit/evaluation/test_action_server.py`,
+  `tests/unit/mcp/test_tool_bridge.py` (image forwarding, transport helpers).
+- Parity (§7) as measured on this tree: an SDK session and
+  `exec --json` on the same spec published IDENTICAL tool arrays (29 names,
+  incl. the minted action tool) and identical 10-event sequences.
+
 **Not yet implemented (planned):** attach auto-spawn; post-open state on
-`spawn_session` via a resumed sidecar; the benchmark arm (PR 2); the
-namespace-literal collapse (PR 3, optional).
+`spawn_session` via a resumed sidecar; the namespace-literal collapse (PR 3,
+optional).

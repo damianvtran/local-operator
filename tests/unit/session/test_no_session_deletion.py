@@ -1973,6 +1973,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "clears the pid-suffixed .tmp FILE this call just wrote, on the failure path",
     ),
+    (
+        "local_operator/evaluation/session_arm.py::declare_action_server",
+        "<path>.replace",
+        # Atomic publish of the episode's OWN MCP declaration: the temporary is a
+        # sibling of the declaration itself (``.<name>.<hex>.tmp``) under the
+        # episode's scratch config dir. Both paths derive from that dir alone —
+        # no session id, no caller input — so neither can name an entry under
+        # ``sessions/``.
+        "<episode>/.local-operator/mcp.json temp -> same file; both paths episode-scratch-derived",
+    ),
+    (
+        "local_operator/evaluation/session_arm.py::ActionBridge.stop",
+        "<path>.unlink",
+        # Removes exactly the UNIX socket this bridge bound: a session-unique name
+        # (``b-<hex>.sock``) inside the episode scratch, by the exact path it
+        # bound — never a session-store entry.
+        "removes the episode's own bridge socket, by the exact path it bound",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
