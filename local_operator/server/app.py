@@ -42,6 +42,7 @@ from local_operator.server.routes import (
     chat,
     config,
     credentials,
+    desktop_aida,
     desktop_catalogues,
     desktop_claim,
     desktop_lifecycle,
@@ -159,6 +160,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
+    # AIDA'S BOOT ENSURE, at the same posture as the warm-ups above and for
+    # the same class of reason: a headless install (no TUI ever opened) must
+    # still have her session, pinned and with the cadence armed, so the wake
+    # supervisor can start her at 09:00 and the desktop finds her already
+    # there. BEST-EFFORT — a bootstrap that cannot run costs her, never the
+    # daemon (a raise here fails startup) — and a cheap no-op once she exists
+    # (one state read + one stat).
+    try:
+        from local_operator.aida import ensure_session
+
+        await ensure_session(config_dir)
+    except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
+        logger.warning("aida: boot ensure failed", exc_info=True)
     app.state.job_manager = JobManager()
     # The SSE fan-out. One instance per process: it is the ONLY streaming
     # transport the server offers (the deprecated /v1/ws socket surface was
@@ -648,6 +662,11 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
 
 
 app.include_router(capabilities.router)
+# Aida's two routes, beside the capabilities that advertise them. Registered
+# unconditionally (the handlers answer `enabled: false` themselves): hiding
+# the routes on the env switch would make the desktop's discovery loop read a
+# 404 as a broken backend rather than a switched-off feature.
+app.include_router(desktop_aida.router)
 # The way IN to a daemon the desktop app did not start. It carries no
 # `require_desktop` dependency on purpose (that is the deadlock the design
 # names): the gate is the record's 0600 key, checked inside the route.

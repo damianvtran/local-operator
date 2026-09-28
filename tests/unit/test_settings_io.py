@@ -271,6 +271,21 @@ def _consumer_defaults() -> dict[str, object]:
         consumers[f"providers.{provider}.base_url"] = endpoint
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     consumers.update(_classification_consumer_defaults())
+    # The Aida keys, asked of the package that reads them. The registry rows
+    # above carry literals on purpose (``settings_io`` must stay off the aida
+    # package's import path — it is loaded on every CLI start), and this block
+    # is the half that turns a drifted literal into a red test rather than a
+    # page that lies about what the engine will do.
+    from local_operator.aida import onboarding as aida_onboarding
+    from local_operator.aida import proactive as aida_proactive
+    from local_operator.aida.bootstrap import DEFAULT_ENABLED
+
+    consumers["aida.enabled"] = DEFAULT_ENABLED
+    consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
+    consumers["aida.cadence.paused"] = aida_proactive.DEFAULT_PAUSED
+    consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
+    consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
+    consumers["aida.onboarding.nudge_days"] = aida_onboarding.DEFAULT_NUDGE_DAYS
     return consumers
 
 

@@ -530,6 +530,24 @@ async def capabilities():
                 # backend does not know what a project is. Its own key rather
                 # than a bump of anything above it, by the rule every neighbour
                 # states — nothing on an existing surface changes shape here.
+                # AIDA (the built-in chief of staff): the sidebar row, the
+                # `/aida` command handling, and the `/v1/desktop/aida` routes
+                # — design §4's frozen pair (capability + route contract).
+                #
+                # ONE KEY GATES BOTH HALVES, by the rule `projects` states
+                # above: a row that opened a route an older backend does not
+                # serve is a dead end, and a served route with no row is an
+                # orphan. Absent ⇒ no row, no command handling, and the UI
+                # must not call the route at all; a client that typed `/aida`
+                # at such a backend keeps today's behaviour (the word is
+                # prose to it — its registry has no such entry).
+                #
+                # `1` IS THE FEATURE'S FIRST VERSION, not the contract's: the
+                # route shape is frozen in the design, so a later change to
+                # it bumps this key. NOT a bump of `commands`: nothing on the
+                # command surface changes shape — an older renderer simply
+                # never hears of this word.
+                "aida": 1,
                 "projects": 1,
                 **({"references": 1} if at_references_enabled() else {}),
             },

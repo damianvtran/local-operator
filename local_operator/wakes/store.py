@@ -91,6 +91,28 @@ def _schedule_dict(schedule: "WakeSchedule | Mapping[str, Any]") -> dict[str, An
     raise TypeError(f"not a wake schedule: {schedule!r}")
 
 
+def is_held(entry: Mapping[str, Any] | None) -> bool:
+    """Whether an entry is parked: ``stopped_at`` or Aida's ``held_at``.
+
+    ONE predicate for both markers because they mean the same thing to every
+    reader that ACTS on them — this session must not fire until someone
+    reopens it (``stopped_at``, the stop lever's) or resumes it (``held_at``,
+    the pause lever's, written by ``local_operator.aida.proactive.pause`` and
+    cleared by resume). Kept beside the entry shape so a reader does not have
+    to know both key names, and so a future park marker has one place to land.
+
+    The two are deliberately separate keys rather than one: reopening a
+    stopped session must not resume a paused Aida, and resuming her must not
+    un-stop a session the user ended. Readers that only ask "will this fire"
+    ask this; readers that OWN one of the levers keep naming their own key
+    (``clear=("stopped_at",)`` on the open-time rewrite, ``clear=("held_at",)``
+    on resume).
+    """
+    if not isinstance(entry, Mapping):
+        return False
+    return bool(entry.get("stopped_at") or entry.get("held_at"))
+
+
 def next_due_at(entry: Mapping[str, Any]) -> int | None:
     """Earliest ``next_due_at`` (epoch ms) across an entry's schedules, or
     ``None`` when the entry carries none. Tolerates malformed rows: a

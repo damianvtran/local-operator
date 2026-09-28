@@ -5336,7 +5336,11 @@ def _wake_rows() -> "list[dict[str, Any]]":
     for session_id, entry in read_index(root).items():
         if not isinstance(entry, dict):
             continue
-        dormant = bool(entry.get("stopped_at"))
+        # ``held_at`` reads as dormant here too: a paused Aida's entry will not
+        # fire until resume, and listing it as armed would be the same
+        # fabricated-alarm disease this listing exists to end (see
+        # ``wakes.store.is_held`` for why the two markers share one meaning).
+        dormant = bool(entry.get("stopped_at") or entry.get("held_at"))
         # GHOST, asked with the supervisor's own predicate (round 2, Q4). The
         # supervisor refuses an entry whose session has no transcript and
         # retires on a ghost-only store, while this listing had no ghost

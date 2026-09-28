@@ -1762,7 +1762,9 @@ class DesktopFeed:
             subagents_running=subagents_running,
             subagents_queued=subagents_queued,
             wakes=len(schedules),
-            wakes_dormant=bool(isinstance(entry, dict) and entry.get("stopped_at")),
+            wakes_dormant=bool(
+                isinstance(entry, dict) and (entry.get("stopped_at") or entry.get("held_at"))
+            ),
             kind=kind,
             heartbeat_age_s=age,
         )
