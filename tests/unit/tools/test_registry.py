@@ -142,9 +142,7 @@ def test_default_set_drops_wake_without_scheduler() -> None:
     # only error.
     tools = create_tools(_engine_context(wake_scheduler=None))
     names = [tool.name for tool in tools]
-    assert names == [
-        name for name in DEFAULT_TOOL_NAMES if name not in {"wake", "patience"}
-    ]
+    assert names == [name for name in DEFAULT_TOOL_NAMES if name not in {"wake", "patience"}]
 
 
 def test_default_set_drops_monitor_without_scheduler() -> None:

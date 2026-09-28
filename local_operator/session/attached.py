@@ -8585,6 +8585,25 @@ class AttachedSession:
         self._gates_detached = False
         self._maybe_start_gate()
 
+    async def cleanup_after_class_switch(self, profile_name: str) -> dict[str, Any]:
+        """The viewer's answer to a class switch: nothing to cancel in THIS process.
+
+        ``/agent class`` writes the registry from whichever process the user
+        is looking at, and that write is the whole switch — the class is read
+        live at every arm and every fire (``action_class.session_action_class``,
+        and the delivery-time guard the design turns on). The owner-side
+        cleanup this mirrors (``Session.cleanup_after_class_switch``) cancels
+        the session's pending patience rows immediately, which is an
+        OPTIMISATION over the mechanism rather than the mechanism itself: a
+        fire that finds a reactive class retires silently at that read, and the
+        episode TTL bounds the difference (design §8.2.6). Only the OWNER holds
+        the wake writer, so a viewer cannot do that work without a control op
+        this design does not define — and the empty outcome is the honest
+        answer here: nothing was cancelled, so the caller's receipt renders the
+        switch without the clause rather than claiming work nobody did.
+        """
+        return {"session": self._session_id, "patience_cancelled": [], "cadence_dropped": False}
+
     async def adopt_aside(self, messages: list[Message]) -> None:
         """Promote the aside exchange into the conversation through the owner.
 

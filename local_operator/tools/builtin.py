@@ -12520,9 +12520,8 @@ class SendParams(BaseModel):
         default=None,
         description=(
             "Optional hidden patience wait attached to this message, e.g. '5m' "
-            "(defaults to the configured 5m; clamped 60s..24h). If the peer does "
-            "not reply in time you wake with a private note. Only for proactive- "
-            "class senders; the wait and its fire are invisible to the peer."
+            "(clamped 60s..24h). If no reply arrives you wake with a private "
+            "note. Proactive-class senders only; invisible to the peer."
         ),
     )
 

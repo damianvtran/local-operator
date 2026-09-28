@@ -1897,3 +1897,19 @@ class GoalRecordProtocol(Protocol):
     ) -> None:
         """Journal one judge transition and publish it — the judge's only writer."""
         ...
+
+    # --- proactive class ----------------------------------------------------
+    async def cleanup_after_class_switch(self, profile_name: str) -> dict[str, Any]:
+        """Best-effort cleanup after ``/agent class`` flipped ``profile_name``.
+
+        Declared because the one call site (``tui/app.py``'s class command)
+        holds a session of EITHER kind, and reaches it through a duck-probe.
+        The registry write IS the switch; this immediate cleanup is the
+        optimisation on top of it — the owner cancels this session's pending
+        patience waits and reconciles the packaged agent's cadence, while
+        anything it does not reach self-corrects at the next delivery-time
+        class read and the episode TTL bounds the difference (design §8.2.6).
+        The owner's answer carries what it cancelled; a viewer answers with the
+        empty outcome, because only the owner holds the wake writer.
+        """
+        ...
