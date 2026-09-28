@@ -760,10 +760,13 @@ def detail_footer(
     shed WHOLE, tail-first among equals, in a fixed preference order, and the
     row never clips mid-word — the Rich ``ellipsis`` this Text declares is
     inert under the widget's default fold, so the fitting is done here
-    (UX round 1, U1). The order keeps the footer's stated purpose longest:
-    the identity always, the milestones and the session rollup before the
-    (long, and duplicated by the canvas row) progress body. When even the
-    identity does not fit it is ellipsized explicitly, never cut silently.
+    (UX round 1, U1). The order keeps the footer's stated purpose longest, the
+    identity always surviving: the progress body goes first (its age is also
+    on the canvas row), then the session rollup, then the identity's ``(key)``
+    span — painted on the canvas row and recoverable in the detail/receipts,
+    while the milestone rollup has no other home (design review round 1, D1)
+    — and the milestones last. When even the bare identity does not fit it is
+    ellipsized explicitly, never cut silently.
     """
     resolver = _styles(style_for)
     project = _row(view)
@@ -777,18 +780,25 @@ def detail_footer(
 
     clauses: dict[str, Text] = {}
     identity = Text(no_wrap=True)
-    # Title-first, key secondary: the tight-width rebuild below keeps the
-    # title and the status chip and trades the key away first — the key stays
-    # recoverable in the detail/receipts, while the title is what the reader
-    # knows the project by.
+    # Title-first, key secondary. The key span is its own SHEDDABLE piece: it
+    # is also painted on the canvas row and recoverable in the detail and
+    # receipts, while the milestone rollup has no other home — so the ladder
+    # trades the key away before the rollup (design review round 1, D1).
     name_text = display_name(project) or "(unnamed)"
     status = str(project.get("status") or "active")
-    identity.append(name_text, style=resolver("name"))
     key = str(project.get("name") or "")
-    if project.get("title") and key:
+    keyed_identity = bool(project.get("title") and key)
+    identity.append(name_text, style=resolver("name"))
+    if keyed_identity:
         identity.append(f" ({key})", style=resolver("dim"))
     identity.append(f" [{status}]", style=chip(status))
     clauses["identity"] = identity
+    if keyed_identity:
+        keyless_identity = Text(no_wrap=True)
+        keyless_identity.append(name_text, style=resolver("name"))
+        keyless_identity.append(f" [{status}]", style=chip(status))
+    else:
+        keyless_identity = identity
 
     progress = Text(no_wrap=True)
     age = progress_age_text(view, now=now)
@@ -871,35 +881,44 @@ def detail_footer(
     )
     # Preference ladder, longest first, by PROGRESSIVE shedding in the order
     # the docstring states: the progress body goes first (its age is also on
-    # the canvas row), then the session rollup, then the milestones — so the
-    # 192-235-cell band keeps the rollup instead of the body (agent review
-    # round 2: the rollup used to shed before the body, against this ladder's
-    # own statement). Every rung keeps the identity.
-    rungs: list[tuple[str, ...]] = [order]
-    remaining = order
-    for shed in ("progress", "sessions", "milestones"):
-        candidate = tuple(key for key in remaining if key != shed)
-        if candidate != remaining:
-            rungs.append(candidate)
-        remaining = candidate
+    # the canvas row), then the session rollup, then the identity's KEY span
+    # (also on the canvas row, recoverable in the detail/receipts — design
+    # review round 1, D1), then the milestones — so the 192-235-cell band
+    # keeps the rollup instead of the body (agent review round 2), and a
+    # titled identity at a 96-cell box keeps the rollup instead of shedding
+    # the whole milestone clause (D1). Every rung keeps the (bare) identity.
+    no_progress = tuple(key for key in order if key != "progress")
+    no_sessions = tuple(key for key in no_progress if key != "sessions")
+    no_milestones = tuple(key for key in no_sessions if key != "milestones")
+    rungs: list[tuple[tuple[str, ...], bool]] = [
+        (order, True),
+        (no_progress, True),
+        (no_sessions, True),
+        (no_sessions, False),
+        (no_milestones, True),
+        (no_milestones, False),
+    ]
 
-    def compose(keys: tuple[str, ...]) -> Text:
+    def compose(keys: tuple[str, ...], with_key: bool = True) -> Text:
         row_text = Text(no_wrap=True)
         for index, key in enumerate(keys):
             if index:
                 row_text.append("  ·  ", style=resolver("dim"))
-            row_text.append_text(clauses[key])
-        if len(keys) < len(order):
-            # Say that more exists; a footer that stopped at a clause boundary
-            # with no marker reads as if it were the whole story.
+            if key == "identity" and not with_key:
+                row_text.append_text(keyless_identity)
+            else:
+                row_text.append_text(clauses[key])
+        if keys != order or (keyed_identity and not with_key):
+            # Say that more exists; a footer that stopped at a clause (or key)
+            # boundary with no marker reads as if it were the whole story.
             row_text.append(" …", style=resolver("dim"))
         return row_text
 
     if width is None:
         return compose(order)
     fitted = compose(order)
-    for keys in rungs:
-        candidate = compose(keys)
+    for keys, with_key in rungs:
+        candidate = compose(keys, with_key=with_key)
         if cell_len(candidate.plain) <= width:
             fitted = candidate
             break

@@ -324,3 +324,23 @@ async def test_attach_refusals_surface_the_stores_sentence(context, tmp_path) ->
         context, op="update", name="alpha", progress="x", attach=[str(tmp_path / "nope.png")]
     )
     assert "no file at" in body
+
+
+@pytest.mark.asyncio
+async def test_history_zero_omits_the_section_even_when_empty(context) -> None:
+    """``history=0`` honours "0 omits the section" for an empty log too (review F2)."""
+    await call(context, op="create", name="alpha")
+    shown = await call(context, op="show", name="alpha")
+    assert "history: none recorded" in shown
+    assert "history" not in await call(context, op="show", name="alpha", history=0)
+
+
+@pytest.mark.asyncio
+async def test_attachment_sizes_print_one_decimal_across_the_unit(context, tmp_path) -> None:
+    """The pin for the D2 style: one decimal place for KB and MB, bytes exact."""
+    await call(context, op="create", name="alpha")
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(b"k" * 4104)
+    await call(context, op="update", name="alpha", progress="kb line", attach=[str(frame)])
+    shown = await call(context, op="show", name="alpha")
+    assert "attachment: frame.png [image, 4.0 KB]" in shown

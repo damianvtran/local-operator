@@ -689,4 +689,4 @@ def test_show_receipt_states_title_key_owner_team_and_history() -> None:
     assert "team: Platform" in receipt
     assert "history (2):" in receipt
     assert "  - 2026-09-27T21:05:00Z: second" in receipt  # no reporter → no ` by`
-    assert "attachment: shot.png [image, 2 KB] /tmp/x/shot.png" in receipt
+    assert "attachment: shot.png [image, 2.0 KB] /tmp/x/shot.png" in receipt
