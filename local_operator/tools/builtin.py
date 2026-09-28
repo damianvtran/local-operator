@@ -11718,10 +11718,12 @@ def _wake_due_label(schedule: WakeSchedule) -> str:
 
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
     # Patience waits are filtered from EVERY listing surface (design §8.2.2 item
-    # 5): they are hidden internal timers, and the model manages them through
-    # the ``perience`` tool instead — showing them here would be a second
-    # listing to keep in sync for rows the agent did not create as wakes.
-    schedules = [s for s in scheduler.schedules if getattr(s, "kind", "scheduled") != "patience"]
+    # 5): one shared filter with the panel and the CLI
+    # (``wakes.store.scheduled_rows``), so the model's listing and the user's
+    # panel cannot disagree. The model manages patience through its own tool.
+    from local_operator.wakes.store import scheduled_rows
+
+    schedules = list(scheduled_rows(scheduler.schedules))
     if not schedules:
         return _text(
             tool_call_id,

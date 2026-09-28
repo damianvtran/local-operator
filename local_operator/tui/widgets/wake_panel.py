@@ -119,18 +119,14 @@ class WakePanel(Container):
             # HIDDEN rows (patience waits) never paint: the panel is a human
             # surface, and the requirement is "no wake listing, no badge" for
             # a timer the user was never told about (design §8.2.2 item 5).
-            # Filtering HERE — before the fingerprint — also means a
-            # patience-only session collapses the panel entirely, which is
-            # exactly what its empty state means.
-            schedules = (
-                [
-                    schedule
-                    for schedule in scheduler.schedules
-                    if getattr(schedule, "kind", "scheduled") != "patience"
-                ]
-                if scheduler is not None
-                else []
-            )
+            # The one shared filter (``wakes.store.scheduled_rows``) is used
+            # here too, so the panel cannot disagree with the CLI or the
+            # sidebar about which rows exist. Filtering before the
+            # fingerprint also means a patience-only session collapses the
+            # panel entirely, which is exactly what its empty state means.
+            from local_operator.wakes.store import scheduled_rows
+
+            schedules = scheduled_rows(scheduler.schedules) if scheduler is not None else []
             monitors = self._monitor_rows(session)
             owed = self._owed(session)
             fingerprint = tuple(self._fingerprint(schedule, owed) for schedule in schedules)

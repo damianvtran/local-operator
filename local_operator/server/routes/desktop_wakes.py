@@ -451,15 +451,13 @@ def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dic
         # A session whose ONLY rows are internal timers (patience waits) is not
         # a wake-carrying session on any human surface: the entry would render
         # as an empty row, and the user never armed anything it could show.
-        # The supervisor still reads the raw index unfiltered — only listings
-        # and counts exclude patience rows (design §8.2.2 item 5). An entry
-        # that shows zero rows without any being filtered is left as it was
-        # (a hand-written empty entry is the store's own "no wakes" shape and
-        # the listing has always carried it).
-        if not schedules and any(
-            isinstance(row, Mapping) and str(row.get("kind") or "") == "patience"
-            for row in raw.get("schedules") or ()
-        ):
+        # An entry that shows zero rows without any being filtered is left as
+        # it was (the store's own "no wakes" shape, which the listing has
+        # always carried).
+        from local_operator.wakes.store import scheduled_rows as _scheduled
+
+        raw_rows = list(raw.get("schedules") or ())
+        if not schedules and len(_scheduled(raw_rows)) != len(raw_rows):
             continue
         entries.append(
             WakeEntry(
@@ -497,14 +495,14 @@ def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dic
 
 
 def _schedule_rows(entry: Mapping[str, Any], now_ms: int, is_stale) -> list[WakeScheduleRow]:
+    from local_operator.wakes.store import scheduled_rows
+
     rows: list[WakeScheduleRow] = []
-    for raw in entry.get("schedules") or ():
+    # HIDDEN patience waits never appear in a listing (design §8.2.2 item 5):
+    # one shared filter with the CLI, the feed and the picker's count. The
+    # supervisor reads the same index unfiltered.
+    for raw in scheduled_rows(entry.get("schedules") or ()):
         if not isinstance(raw, Mapping):
-            continue
-        # HIDDEN patience waits never appear in a listing (design §8.2.2
-        # item 5): they are internal timers, filtered like every other human
-        # surface filters them. The supervisor reads the same index unfiltered.
-        if str(raw.get("kind") or "") == "patience":
             continue
         due = _as_int(raw.get("next_due_at"))
         if due is None:

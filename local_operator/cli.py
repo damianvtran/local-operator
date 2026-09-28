@@ -5572,15 +5572,13 @@ def _wake_rows() -> "list[dict[str, Any]]":
         # it twice.
         ghost = not dormant and not _session_exists(root, session_id)
         record = deliveries.get(session_id)
-        for raw in entry.get("schedules") or ():
+        # Patience waits are INTERNAL timers: one shared filter, so the listing,
+        # the dormant count and the sidebar's wake glyph cannot disagree about
+        # which rows a human may see (design §8.2.2 item 5).
+        from local_operator.wakes.store import scheduled_rows
+
+        for raw in scheduled_rows(entry.get("schedules") or ()):
             if not isinstance(raw, dict):
-                continue
-            # Patience waits are INTERNAL timers, filtered from every listing
-            # surface (design §8.2.2 item 5): the user never saw them armed and
-            # must never see them listed. They still fire — the supervisor and
-            # the session read the same index unfiltered; only LISTINGS and
-            # COUNTS exclude them.
-            if str(raw.get("kind") or "") == "patience":
                 continue
             due = raw.get("next_due_at")
             if isinstance(due, bool) or not isinstance(due, int):

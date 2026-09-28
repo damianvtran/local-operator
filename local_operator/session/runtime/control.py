@@ -706,12 +706,15 @@ def _mark_wakes_dormant(record: SessionRecord, root: Path) -> int:
         preserve=dict(entry, stopped_at=int(time.time() * 1000)),
     )
     # The count is the receipt's "N wakes dormant" — a HUMAN-facing number, so
-    # it counts SCHEDULED rows only: patience waits are hidden internal timers
-    # and "3 wakes dormant" about rows the user never saw would be a claim
-    # about machinery they cannot see (design §8.2.2 item 5). The park itself
-    # still covers every row — a stopped session must not fire hidden timers
-    # either, so the write above is deliberately unfiltered.
-    return sum(1 for raw in schedules if str(raw.get("kind") or "") != "patience")
+    # it counts SCHEDULED rows only through the one shared filter
+    # (``wakes.store.scheduled_rows``): patience waits are hidden internal
+    # timers and "3 wakes dormant" about rows the user never saw would be a
+    # claim about machinery they cannot see (design §8.2.2 item 5). The park
+    # itself still covers every row — a stopped session must not fire hidden
+    # timers either, so the write above is deliberately unfiltered.
+    from local_operator.wakes.store import scheduled_rows
+
+    return len(scheduled_rows(schedules))
 
 
 async def _park_wakes(record: SessionRecord, root: Path) -> int:

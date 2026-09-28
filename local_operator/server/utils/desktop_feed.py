@@ -112,7 +112,7 @@ import zlib
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Mapping, cast
+from typing import Any, AsyncIterator, Callable, cast
 
 from local_operator.monitors.store import read_index as read_monitor_index
 from local_operator.notifications import notification_payload
@@ -407,17 +407,16 @@ class FeedSubscription:
 def scheduled_wake_rows(schedules: Any) -> list[Any]:
     """The SCHEDULED rows of an index entry — hidden patience waits removed.
 
-    A count that included patience rows would show "1 wake" for a session with
-    nothing the user can see or manage (design §8.2.2 item 5: derived-index
-    consumers count scheduled rows only). Module-level rather than inline so
-    the rule has one home and a direct test, while every OTHER reader of the
-    index (the supervisor, the session) keeps reading it unfiltered.
+    A count that included them would show "1 wake" for a session with nothing
+    the user can see or manage (design §8.2.2 item 5). Delegates to the one
+    shared filter beside the index readers
+    (:func:`local_operator.wakes.store.scheduled_rows`), so this feed, the
+    sidebar's count, the desktop listing and the CLI cannot drift; every OTHER
+    reader of the index (the supervisor, the session) stays unfiltered.
     """
-    return [
-        raw
-        for raw in schedules or ()
-        if isinstance(raw, Mapping) and str(raw.get("kind") or "") != "patience"
-    ]
+    from local_operator.wakes.store import scheduled_rows
+
+    return list(scheduled_rows(schedules))
 
 
 class DesktopFeed:
