@@ -139,7 +139,20 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     init.add_argument("name")
     init.add_argument("--listen-address", default="", help="Bind address (127.0.0.1 = dial-only)")
     init.add_argument("--port", type=int, default=0)
-    init.add_argument("--advertise-host", action="append", default=[], dest="advertise_hosts")
+    # THE TWIN OF `join --advertise-host`, and the one that decides what an INVITE
+    # carries: the declared entries LEAD the list the record publishes, so on a device
+    # behind a tunnel this is how every invite it mints names an address a joiner can
+    # dial. The help string was missing while its twin had one (review round 1, N1).
+    init.add_argument(
+        "--advertise-host",
+        action="append",
+        default=[],
+        dest="advertise_hosts",
+        help=(
+            "host:port peers should use to reach THIS device (repeatable), in "
+            "preference order; add a tunnel or public address here"
+        ),
+    )
     init.add_argument("--no-start", action="store_true", help="Do not start the relay")
     init.add_argument("--json", action="store_true")
 
@@ -166,6 +179,22 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "token", nargs="?", default="", help="A token, @path, or nothing for the newest"
     )
     join.add_argument("--host", default="", help="Override the endpoint to dial")
+    # THE OTHER HALF OF `init --advertise-host`, and the one an operator needs most:
+    # the inviter can name its address when it creates the network, but a JOINER
+    # could only do so by hand-editing `network.advertise_hosts` into config.yml —
+    # which took no effect at all until this release (see `settings_io`, the
+    # `network` section). Without it, a joining device behind a tunnel published
+    # nothing dialable and every peer that later tried to reach it got `no_endpoint`.
+    join.add_argument(
+        "--advertise-host",
+        action="append",
+        default=[],
+        dest="advertise_hosts",
+        help=(
+            "host:port peers should use to reach THIS device (repeatable), in "
+            "preference order; add a tunnel or public address here"
+        ),
+    )
     join.add_argument("--verify", action="store_true", help="Compare the 160-bit fingerprint")
     join.add_argument("--emit-sas", action="store_true", help="Print this device's code, then wait")
     # THE TWO-PHASE PAIR (design §1.4.3). ``--park`` opens the ceremony and waits for a
@@ -1766,6 +1795,25 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     if args.print_token:
         print(Path(path).read_text(encoding="utf-8").strip())
         return 0
+    # THE COMMAND THE RECEIPT PRINTS IS THE ONE THAT WORKS, so it does not re-type an
+    # endpoint the token already carries. ``--host`` is an OVERRIDE, and the printed
+    # value was ``hosts[0]`` — an entry a joiner is not obliged to be able to dial: the
+    # list leads with the record's own snapshot (``init``'s write, plus any
+    # ``--advertise-host`` declaration), which can name a port the listener does not
+    # hold. Pinning the flag to it turned a working ``join @token`` — which walks the
+    # whole list — into ``ConnectionRefusedError`` and rc=1 when the operator followed
+    # the advice verbatim (QA round 2, Q-3). The placeholder stays for the one state
+    # where the token names no endpoint at all, because there the flag is exactly what
+    # the join asks for (QA round 1, Q2).
+    # THE LOCAL PATH DOES NOT TRAVEL (design review round 1, D3). This line is advice for
+    # the OTHER device, and the absolute path it used to carry was the inviter's own
+    # `$HOME` — a path that device does not have, printed as though the two shared a
+    # filesystem. `@<token-file>` is the placeholder the rest of this module's receipts
+    # already use, so the line keeps one spelling; the concrete path is in the line above,
+    # where it is the inviter's own business.
+    command = "then, on the other device: lop network join @<token-file>"
+    if not payload.get("hosts"):
+        command += " --host <this device's address:port>"
     return _emit(
         args,
         payload,
@@ -1775,16 +1823,7 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             f"token written to {path}",
             "it is single use and is not printed: read that file, or run this with a TTY "
             "and --print",
-            f"then, on the other device: lop network join @{path}"
-            + (
-                f" --host {payload['hosts'][0]}"
-                if payload.get("hosts")
-                # NOTHING IN THIS STATE NAMES AN ENDPOINT, so the guidance names the
-                # flag the join will ask for instead of a command that cannot work
-                # (QA round 1, Q2: this line silently dropped the one flag the
-                # operator had to pass, and the join refused ``no_host``).
-                else " --host <this device's address:port>"
-            ),
+            command,
         ],
     )
 
@@ -1939,6 +1978,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
             identity=identity,
             settings=settings,
             args=args,
+            declared_hosts=tuple(args.advertise_hosts or []),
             wire=wire,
             Handshake=Handshake,
             Credential=Credential,
@@ -2020,6 +2060,7 @@ def _join_one(
     identity: Any,
     settings: Any,
     args: argparse.Namespace,
+    declared_hosts: tuple[str, ...] = (),
     **helpers: Any,
 ) -> tuple[list[str], dict[str, Any]] | str | None:
     """One dial attempt: handshake, the human step, then admission.
@@ -2030,6 +2071,13 @@ def _join_one(
     "nothing was listening at 52.27.70.210:4200" and "the handshake stopped with
     ConnectionResetError" are different problems, and the second is what a refused
     or already-redeemed token looks like from here (QA round 1, F-4).
+
+    ``declared_hosts`` is ``--advertise-host``, threaded as an argument rather than
+    read off ``args`` because this driver also runs from tests that build their own
+    ``Namespace`` for the flags the ceremony needs (``tests/unit/network/
+    test_relay_e2e.py``): an attribute read here would make those rigs carry a flag
+    they do not exercise. Empty means "declare nothing" — the detected addresses
+    are published either way — and the CLI is the only caller that passes more.
     """
     import socket
 
@@ -2059,7 +2107,12 @@ def _join_one(
     # inviter copies the hello's list onto our member row, and `listen` is what
     # every later reader of this record sees. Deriving them separately is how the
     # record came to claim the INVITER's address (QA round 1, F-7).
-    advertised = relay_mod.advertise_endpoints(settings)
+    #
+    # `declared_hosts` leads that list, exactly as it does for `init` (mesh-
+    # transport-identity §10.4): the joiner is the device that most often has no
+    # dialable address of its own — that is usually WHY it is joining rather than
+    # hosting — and a tunnel or public address is something only its operator knows.
+    advertised = relay_mod.advertise_endpoints(settings, declared=declared_hosts)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         handshake = Handshake.new(
