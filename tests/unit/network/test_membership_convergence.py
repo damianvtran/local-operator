@@ -968,3 +968,144 @@ def test_the_announced_rotation_carries_its_statement_on_the_row(
     # Verified from the OTHER device's copy of the old key: what makes the row
     # admissible to a peer that never saw the frame.
     identity.verify_rotation_statement(proof, old_row.public_key)
+
+
+# ---------------------------------------------------------------------------
+# The third way to get a wrong address onto a row
+# ---------------------------------------------------------------------------
+
+
+def test_a_member_that_declares_nothing_gets_no_endpoint_not_the_observed_one(
+    devices: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row's ``endpoints`` is what ``_ensure_link`` DIALS, so a value that cannot be
+    dialled is worse than no value — it is read as an address.
+
+    The pair ceremony used to fall back to the OBSERVED source address of the pairing
+    connection when the joiner declared nothing: ``peer_addr``, the peer's ephemeral
+    port on this one socket, gone the moment the pairing link drops. On a loopback rig
+    that is ``127.0.0.1:<ephemeral>`` — a loopback address AND a port nothing listens
+    on (``127.0.0.1:52315`` in the audit that reported it) — and on a real pair it is
+    whatever the NAT mapped for that connection. Both are confidently wrong, where the
+    honest answer already has vocabulary everywhere it is read: ``endpoints: []``,
+    reported as ``no_endpoint`` ("no address published for it") and ``reachable:
+    false``, with the member kept.
+
+    The silent device is silent BY CONSTRUCTION — the ``devices`` fixture's ``SILENT``
+    mode answers nothing on every path that publishes an endpoint — so this cannot pass
+    because some host happened to advertise, and the precondition is asserted rather
+    than assumed. What this does NOT claim is that a DECLARED loopback endpoint is
+    wrong: `--listen-address 127.0.0.1` is the documented dial-only mode saying "you
+    cannot reach me", and ``test_relay_e2e``'s F-2 case pins that it stays.
+    """
+    hub = _make(devices, "hub")
+    silent = _make(devices, "silent-joiner", mode=SILENT)
+    _init_network(hub.server)
+    # THE PRECONDITION: nothing declared, so the row has an OBSERVATION and no
+    # declaration to be built from. Without this, a rig that advertised would satisfy
+    # the assertion below for entirely the wrong reason.
+    assert relay.advertise_endpoints(silent.server.settings) == []
+
+    _join(silent, inviter=hub, monkeypatch=monkeypatch)
+
+    record = store.load(store.list_networks(hub.root)[0].network_id, hub.root)
+    row = record.member(silent.identity.device_id)
+    assert row is not None and row.active, _members(hub)
+    assert row.endpoints == [], row.endpoints
+
+    # AND THE HONEST SENTENCE. "Nothing to dial" must read as nothing declared rather
+    # than as a failed dial: the dial's refusal is a claim about the peer, and the peer
+    # here has said nothing about itself at all.
+    #
+    # THE CEREMONY'S LINK IS CLOSED FIRST, and that is the fix for a race this assertion
+    # used to lose: the join has just paired over a real socket, so this device's link to
+    # the joiner is still ALIVE — `_ensure_link_with_reason` answers the link cache before
+    # it dials anything, and `_link_for` counts any link whose `_closed` is unset — and
+    # whether its reader had noticed the close yet was a coin flip. CI shard 0 caught it
+    # (`assert <PeerLink> is None`); 25 local runs did not. Closing HERE, synchronously,
+    # makes the subject the product's answer for a member with no live link — the state
+    # `no_endpoint` is vocabulary for — instead of the teardown's timing. The alternative,
+    # branching on "the link may still be alive", would assert two different claims and
+    # pass either way, which is the shape this file has already been burned by.
+    found = hub.server._link_for(silent.identity.device_id)  # noqa: SLF001
+    if found is not None:
+        found.close("test-closed")
+    assert hub.server._link_for(silent.identity.device_id) is None, "the link must be gone"
+    link, reason = hub.server._ensure_link_with_reason(  # noqa: SLF001 — the surface's reader
+        silent.identity.device_id
+    )
+    assert link is None
+    assert reason == "no_endpoint", reason
+
+
+def test_an_invite_names_the_live_listener_not_only_the_records_stale_port(
+    devices: Any,
+) -> None:
+    """An invite's hosts are where a joiner DIALS, so the LIVE listener must be among them.
+
+    ``record.listen["advertised"]`` is written once, by ``init``, from the config as it
+    stood then. A listener bound to a port the record does not name used to mint invites
+    naming that dead port ALONE — the QA rig saw the invite read ``47774`` while ``lsof``
+    showed the listener on ``47778``, and a joiner following it dialed nothing (review
+    round 1, Q-1). The relay answers from what it actually bound
+    (``_own_relay_listen``/``advertised_endpoints``), and the record's own entries are
+    KEPT ahead of it because that list is also where a deliberate ``--advertise-host``
+    declaration lives — so the property is that the live port is always named, not that
+    the record is ignored.
+    """
+    hub = _make(devices, "hub")
+    record = _init_network(hub.server)
+    live_port = int(record.listen["port"])
+    stale_port = live_port + 17
+    # The stale half: what a record written by an earlier launch would carry.
+    record.listen["port"] = stale_port
+    record.listen["advertised"] = [f"127.0.0.1:{stale_port}"]
+    store.save(record, hub.root)
+    assert hub.server.settings.port == live_port, "the fixture's bind is the live port"
+
+    minted = hub.server._ctl_invite(
+        {  # noqa: SLF001 — the CLI's own control op
+            "network": record.name,
+            "role": "read",
+            "ttl_s": 600.0,
+        }
+    )
+
+    assert f"127.0.0.1:{live_port}" in minted["hosts"], minted["hosts"]
+    # THE PRECEDENCE THE DOCSTRING NAMES, and a claim the line above does NOT make: the
+    # record's OWN entry is kept beside the live one, because that list is also where a
+    # deliberate `--advertise-host` declaration lives. The clause this replaces — "not the
+    # stale entry alone" — could not fail where the line above passed (`stale_port` is
+    # `live_port + 17`, so a live entry already rules that singleton out) and passed where
+    # the line above failed (an empty list is not that singleton): it passed either way,
+    # which is the shape this file's own comment says it has been burned by (review round
+    # 3, MINOR). Dropping the record half of the mint fails THIS line and leaves the one
+    # above green, which is the teeth the old clause only looked like it had.
+    assert f"127.0.0.1:{stale_port}" in minted["hosts"], minted["hosts"]
+
+
+def test_an_invite_falls_back_to_the_record_when_nothing_is_detected(devices: Any) -> None:
+    """The fallback is load-bearing: a device that detects nothing still hands out its row.
+
+    The silent rig answers ``[]`` for every path that publishes an endpoint, so the live
+    half of ``_invite_hosts`` is empty BY CONSTRUCTION — the same shape as a real device
+    behind a NAT that holds nothing dialable. The record is then what a joiner gets, and
+    without it such a device would mint ``hosts: []`` and send the joiner to
+    ``--host host:port``, which is the state this change exists to remove.
+    """
+    quiet = _make(devices, "silent-joiner", mode=SILENT)
+    record = _init_network(quiet.server)
+    recorded = int(record.listen["port"])
+    record.listen["advertised"] = [f"127.0.0.1:{recorded}"]
+    store.save(record, quiet.root)
+    assert relay.advertise_endpoints(quiet.server.settings) == [], "the rig must detect nothing"
+
+    minted = quiet.server._ctl_invite(
+        {  # noqa: SLF001
+            "network": record.name,
+            "role": "read",
+            "ttl_s": 600.0,
+        }
+    )
+
+    assert minted["hosts"] == [f"127.0.0.1:{recorded}"], minted["hosts"]

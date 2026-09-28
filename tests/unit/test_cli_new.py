@@ -560,6 +560,63 @@ def test_config_edit_rejects_an_out_of_range_value(
     assert cli.config_edit_command(argparse.Namespace(key="retry.maxRetries", value="9999")) == 1
 
 
+def test_config_edit_can_set_a_list_valued_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A comma-separated list used to be stored as a STRING and then refused by the
+    one message that had just asked for a list.
+
+    ``config edit``'s guessing ladder knows int/float/bool/null, so a LIST value fell
+    through it as text and ``validate`` answered "expected a comma-separated list" — to
+    a user who had typed exactly that. Every list-valued key was unreachable from this
+    command because of it (``providers.openrouter.order``, ``providers.openrouter.only``,
+    ``web_search.providers``), while the /settings page could set them, because the page
+    calls ``coerce`` — the parse this branch was skipping. The mesh is where it bit
+    hardest: ``network.advertise_hosts`` IS a list, so the documented way to declare a
+    tunnel or public address did nothing here.
+
+    Asserted through the READER, not the file alone: the point is not that a list
+    reached YAML but that ``NetworkSettings`` reads the addresses a peer will dial.
+    """
+    import yaml
+
+    from local_operator.network import relay
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    args = argparse.Namespace(
+        key="network.advertise_hosts", value="tunnel.example.com:4100, 203.0.113.7:4097"
+    )
+    assert cli.config_edit_command(args) == 0
+
+    values = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert values["network"]["advertise_hosts"] == [
+        "tunnel.example.com:4100",
+        "203.0.113.7:4097",
+    ]
+    assert relay.NetworkSettings.from_config(tmp_path).advertise_hosts == (
+        "tunnel.example.com:4100",
+        "203.0.113.7:4097",
+    )
+
+
+def test_config_edit_keeps_a_closed_list_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same route must not become a way PAST the vocabulary a closed list owns.
+
+    ``web_search.providers`` is a closed allow-list, and the refusal is the point: a
+    provider name no implementation answers to is a search that silently stops working.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert (
+        cli.config_edit_command(argparse.Namespace(key="web_search.providers", value="nope")) == 1
+    )
+
+    captured = capsys.readouterr()
+    assert "unknown: nope" in captured.err + captured.out
+
+
 def test_config_create_command(tmp_home: Path) -> None:
     manager = MagicMock()
     with patch("local_operator.cli.ConfigManager", return_value=manager):
@@ -3080,3 +3137,68 @@ def test_the_workstream_flag_is_carried_and_leaves_the_approval_posture_alone(
     assert main() == 0
     exec_args = captured.pop("args")
     assert (exec_args.workstream, exec_args.control) == (True, True)
+
+
+def test_config_edit_refuses_an_endpoint_that_cannot_be_dialed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The row promises "every entry needs its port"; now the command enforces it.
+
+    An entry with no port (``203.0.113.7``) or an impossible one (``…:70000``) used to be
+    accepted and persisted into ``listen.advertised``, and from there into every invite
+    this device minted — where it reads as an address a joiner can dial and is not. The
+    promise and the behaviour disagreed, and the promise was the older of the two (review
+    round 1, M1).
+    """
+    import yaml
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    for typed in ("203.0.113.7", "tunnel.example.com:70000", "tunnel.example.com:"):
+        args = argparse.Namespace(key="network.advertise_hosts", value=typed)
+        assert cli.config_edit_command(args) == 1, typed
+
+    written = (
+        yaml.safe_load((tmp_path / "config.yml").read_text())
+        if (tmp_path / "config.yml").exists()
+        else {}
+    )
+    assert (written.get("values") or {}).get("network") is None, written
+    assert "not a dialable host:port" in capsys.readouterr().err
+
+
+def test_config_edit_with_an_empty_value_clears_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``empty_unsets`` means an empty ARGUMENT, on this command too.
+
+    The page has the clear-to-unset gesture and the server's ``PATCH /v1/settings`` has
+    the branch, but ``config edit`` stored the empty string's parse instead: for a LIST
+    that is ``[]``, so the key stayed present carrying an explicit "none" — and
+    ``settings_get`` then reported a deliberate choice where the user had asked for the
+    automatic one, which is the state ``reset_setting`` exists to avoid (review round 1,
+    M4).
+    """
+    import yaml
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    assert (
+        cli.config_edit_command(
+            argparse.Namespace(
+                key="network.advertise_hosts", value="tunnel.example.com:4100, 203.0.113.7:4097"
+            )
+        )
+        == 0
+    )
+    values = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert values["network"]["advertise_hosts"]
+
+    assert cli.config_edit_command(argparse.Namespace(key="network.advertise_hosts", value="")) == 0
+
+    values = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert values.get("network") in (None, {}), values
+    assert "Cleared" in capsys.readouterr().out
+    setting = settings_io.BY_KEY["network.advertise_hosts"]
+    assert settings_io.read_setting(ConfigManager(tmp_path), setting) == []

@@ -184,18 +184,28 @@ _CACHE: dict[str, tuple[float, DesktopPresence]] = {}
 
 
 def desktop_run_dir(root: Path | None = None) -> Path:
-    """The delivery-lease directory, created 0700 on first use.
+    """The delivery-lease directory AS A PATH — creates NOTHING; see :func:`ensure_desktop_run_dir`.
 
-    Creating is the WRITER's business, but a reader reaches it too and a
-    missing directory is an ordinary answer ("no desktop app has ever been
-    paired here"), so this stays mkdir-on-read like ``viewer_run_dir``.
+    The directory permissions ARE the authorization story, and they are the reason
+    the whole mechanism is safe to make machine-wide: the file carries a routing
+    answer, never a credential, and only the owning account can read the directory
+    it lives in.
 
-    The directory permissions ARE the authorization story, and they are the
-    reason the whole mechanism is safe to make machine-wide: the file carries a
-    routing answer, never a credential, and only the owning account can read
-    the directory it lives in.
+    Creating is the WRITER's business, and it is a separate function now because
+    "a reader reaches it too and a missing directory is an ordinary answer" — the
+    reasoning this docstring used to carry — is true about the ANSWER and wrong
+    about the WRITE. A reader that materialises the namespace it reads is the
+    shape ruled on in ``server/utils/desktop_feed.py`` (review round 1, MAJOR 1 /
+    QA Q2) and again for the network and run planes on #1666 (review round 1,
+    R1-1), so this module follows the same split rather than repeating the
+    reasoning a third time.
     """
-    path = (root or config_dir()) / DESKTOP_RUN_DIRNAME
+    return (root or config_dir()) / DESKTOP_RUN_DIRNAME
+
+
+def ensure_desktop_run_dir(root: Path | None = None) -> Path:
+    """``desktop_run_dir``, created 0700 on first use — the WRITERS' spelling."""
+    path = desktop_run_dir(root)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -207,8 +217,18 @@ def delivery_path(root: Path | None = None) -> Path:
 
 
 def delivery_dir(root: Path | None = None) -> Path:
-    """The directory holding one record per publishing backend (R6)."""
-    path = desktop_run_dir(root) / DELIVERY_DIRNAME
+    """The directory holding one record per publishing backend (R6), as a PATH.
+
+    ``glob`` over an absent directory answers "no publisher has ever run here",
+    which is the truthful answer and the reason nothing needs creating here.
+    """
+    return desktop_run_dir(root) / DELIVERY_DIRNAME
+
+
+def ensure_delivery_dir(root: Path | None = None) -> Path:
+    """``delivery_dir``, created 0700 down the chain — the WRITERS' spelling."""
+    ensure_desktop_run_dir(root)
+    path = delivery_dir(root)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -263,9 +283,10 @@ def _record_paths(root: Path | None) -> list[Path]:
     """Every record a reader must consider: the legacy file, then the per-instance ones.
 
     Built from the directory rather than through :func:`delivery_path` so that a
-    failure to create it degrades to "no records" instead of raising — this
-    reader runs on the announce path, where an exception would break a turn's
-    completion to answer a banner question.
+    failure to list it degrades to "no records" instead of raising — this reader
+    runs on the announce path, where an exception would break a turn's
+    completion to answer a banner question. Nothing is created on the way now
+    either: an absent directory IS "no records".
     """
     try:
         directory = delivery_dir(root)

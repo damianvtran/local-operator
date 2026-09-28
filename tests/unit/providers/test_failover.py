@@ -4959,6 +4959,39 @@ def test_append_auth_recovery_generic_without_provider() -> None:
     assert "/login <provider>" in out
 
 
+def test_is_rendered_usage_limit_error_reads_the_quota_label() -> None:
+    """The string-form gate the Radient recovery keys off, both quota routes.
+
+    402 and 429 both render through the same label (``_classify_fields``),
+    which is what lets a display site with only the rendered string decide
+    "this is a usage limit" without the original exception.
+    """
+    from local_operator.providers.failover import is_rendered_usage_limit_error
+
+    assert is_rendered_usage_limit_error(
+        "rate limit or quota exceeded (HTTP 402): insufficient credits"
+    )
+    assert is_rendered_usage_limit_error("Rate limit or quota exceeded (HTTP 429): slow down")
+    assert not is_rendered_usage_limit_error("authentication failed (HTTP 401): bad key")
+    assert not is_rendered_usage_limit_error("transient provider error: boom")
+    assert not is_rendered_usage_limit_error("")
+
+
+def test_a_quota_error_never_receives_the_auth_hint() -> None:
+    """The disjointness the display sites rely on: one kind, one remedy.
+
+    A Radient quota error is exactly the case the two remedies could collide
+    on (the usage-limit sentence names `/login radient` for the sign-out
+    branch), so the auth gate must keep leaving quota errors alone — a login
+    cannot fix an unclaimed grant, and stacking both sentences under one
+    failure is the double-fire the contract forbids.
+    """
+    from local_operator.providers.failover import append_auth_recovery
+
+    rendered = "rate limit or quota exceeded (HTTP 402): insufficient credits"
+    assert append_auth_recovery(rendered, "radient") == rendered
+
+
 # ---------------------------------------------------------------------------
 # Connectivity loss — patient backoff for an OFFLINE machine
 # ---------------------------------------------------------------------------

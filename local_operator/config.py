@@ -95,6 +95,29 @@ def _package_version() -> str:
     return answer
 
 
+#: The top-level keys ``Config`` models. EVERY setting is read from ``values``
+#: (``ConfigManager.get_value`` / ``get_nested_value``), and ``version``/``metadata``
+#: are the two the file carries beside it. A key outside this set is not read by
+#: anything — which is worth stating in one place, because two behaviours hinge on
+#: it: ``_load_config`` says so on stderr, and ``_write_config`` carries it through
+#: rather than deleting it. Both were a bug: a hand-written
+#: ``network: {advertise_hosts: ["203.0.113.7:4097"]}`` — the dotted key
+#: ``network.advertise_hosts`` as YAML, which is how the mesh docs spell it — was
+#: invisible to the reader AND erased by the next write, so an operator's declared
+#: address did nothing and then vanished (leaving only the cleanup migration's
+#: ``config.yml.pre-cleanup-migration.<stamp>`` backup behind).
+_MODELLED_TOP_LEVEL = ("version", "metadata", "values")
+
+#: ``(path, keys)`` already reported, so the warning below is once per process per
+#: key set rather than once per ``ConfigManager`` — a session's construction path
+#: builds five of them (see :func:`_package_version`), and five identical lines is
+#: noise where one is information. The file's own ``stat`` is deliberately NOT part
+#: of the key: an unrelated rewrite must not re-report a key the operator has not
+#: touched yet, and once they move or delete it the warning stops on its own.
+#: The key set is ``(path, string keys, unnameable keys)``: the third element is the
+#: non-string keys this store cannot address, reported beside the others.
+_UNMODELLED_WARNED: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
+
 #: One parsed ``config.yml`` per path, keyed by what ``fstat`` said about the
 #: bytes it was parsed from. See :func:`_parse_config_stream`.
 _PARSED: dict[str, tuple[tuple[int, ...], Any]] = {}
@@ -176,6 +199,113 @@ def _parse_config_stream(path: Path, stream: Any) -> Any:
         if unchanged:
             _PARSED[name] = (key, deepcopy(loaded))
     return loaded
+
+
+def _unmodelled_top_level(path: Path) -> Dict[str, Any]:
+    """Top-level keys of the config file that this store has no field for.
+
+    Read from the FILE, not from the live ``Config``, because ``Config`` holds only
+    the modelled keys — that is what makes them unmodelled. An unreadable or
+    unparseable file answers ``{}``: every caller is on a path that already reports
+    that condition with its own message (``ConfigManager._load_config`` moves a bad
+    file aside; ``_write_config`` is about to overwrite it), and a second complaint
+    from here would be the louder of the two for no reason.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            parsed = _parse_config_stream(path, stream)
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {key: value for key, value in parsed.items() if key not in _MODELLED_TOP_LEVEL}
+
+
+def _report_unmodelled_top_level(path: Path, config_dict: Dict[str, Any]) -> None:
+    """Say ONCE per process that a top-level key is not a setting, and where one lives.
+
+    The half of this that makes it a fix rather than a note: the key does nothing
+    (every setting is read from ``values``), so an operator who wrote it — or who
+    followed a sentence in the mesh docs that spells the path in dots — has to be
+    TOLD, because the file gives no sign. ``_write_config`` keeps the key so the
+    edit survives to be moved; this names it and its ``values:`` home, which is the
+    spelling ``settings_io`` writes and ``get_nested_value`` reads.
+
+    A library caller constructing ``ConfigManager`` in a loop reports once per key
+    set (``_UNMODELLED_WARNED``), and the message is a WARNING rather than the
+    ``print`` the version check beside it uses: this one belongs in the log the
+    operator can find later, and the version check is about the file being NEWER
+    than the build, which the user has to see while it happens.
+
+    WHAT IT REPORTS, and the two decisions behind it. Non-string keys are NEVER sorted
+    into the same pass as string ones: ``sorted`` over mixed keys raised ``TypeError:
+    '<' not supported between instances of 'int' and 'str'`` inside
+    ``ConfigManager.__init__``, which is every ``lop`` verb failing with a stack-trace
+    panel on precisely the file class this mechanism exists to make readable (review
+    round 1, B1) — so the string keys are filtered first, and the rest are ordered by
+    ``repr`` beside them.
+
+    Those non-string keys (YAML 1.1 parses ``2024:`` as an int, ``on:``/``yes:`` as a
+    bool, and has dates, floats and null besides) cannot be given a ``values.`` home to
+    move to, so they are named in their OWN SENTENCE with the only advice that applies —
+    delete, or re-spell as a string — rather than as a clause inside the first sentence,
+    where the key read as the subject of the store's behaviour and got no action (design
+    review round 1, D2). A file where EVERY unmodelled key is one of those is therefore
+    not silence either: it still gets that sentence.
+    """
+    unmodelled = sorted(
+        key for key in config_dict if isinstance(key, str) and key not in _MODELLED_TOP_LEVEL
+    )
+    # A key this store cannot SPELL — no `values.` path exists to move it to — is still a
+    # key somebody wrote, so a file where EVERY unmodelled key is one of those is not
+    # silence. Its own sentence rather than a clause hung off the first one, and its own
+    # action: the sibling sentence tells a string key where to move, which is advice
+    # these cannot use.
+    unnameable = sorted((key for key in config_dict if not isinstance(key, str)), key=repr)
+    if not unmodelled and not unnameable:
+        return
+    seen = (str(path), tuple(unmodelled), tuple(repr(key) for key in unnameable))
+    if seen in _UNMODELLED_WARNED:
+        return
+    _UNMODELLED_WARNED.add(seen)
+    listed = ", ".join(repr(key) for key in unnameable)
+    # NOT NAMED TWICE: the all-unnameable shape has already put the key in the first
+    # sentence, so its second sentence takes `A non-string key`; the mixed shape has not,
+    # so it names the key there. Two mentions in one warning read as two keys.
+    if len(unnameable) == 1:
+        subject = "A non-string key" if not unmodelled else f"Non-string key {listed}"
+        unnamed = (
+            f" {subject} cannot be a settings path at all — delete it, or re-spell it "
+            "as a string if it was meant to be one."
+        )
+    elif unnameable:
+        subject = "Non-string keys" if not unmodelled else f"Non-string keys {listed}"
+        unnamed = (
+            f" {subject} cannot be settings paths at all — delete them, or re-spell them "
+            "as strings if that was the intent."
+        )
+    else:
+        unnamed = ""
+    if not unmodelled:
+        logger.warning(
+            "%s has top-level %s, which this store does not read: every setting lives "
+            "under `values:`, so the key does nothing.%s",
+            path,
+            f"key {unnameable[0]!r}" if len(unnameable) == 1 else "keys " + listed,
+            unnamed,
+        )
+        return
+    homes = ", ".join(f"values.{key}" for key in unmodelled)
+    named = f"key {unmodelled[0]}" if len(unmodelled) == 1 else "keys " + ", ".join(unmodelled)
+    logger.warning(
+        "%s has top-level %s, which this store does not read: every setting lives "
+        "under `values:`, so the key does nothing. It is left in place rather than "
+        "deleted — move it to %s (or set it in /settings) to make it take effect.%s",
+        path,
+        named,
+        homes,
+        unnamed,
+    )
 
 
 class Config:
@@ -634,6 +764,8 @@ class ConfigManager:
                     if key not in config_dict["values"]:
                         config_dict["values"][key] = deepcopy(value)
 
+            _report_unmodelled_top_level(self.config_file, config_dict)
+
             return Config(config_dict)
 
     # LOADING IS READ-ONLY. A migration used to live here, run from
@@ -671,6 +803,20 @@ class ConfigManager:
 
         config["metadata"]["last_modified"] = datetime.now().isoformat()
 
+        # Every setting is read from `values`, so a key beside it is inert — and
+        # `_write_config` writes the file back from `vars(self.config)`, which holds
+        # only the modelled keys, so before this the inert key was also DELETED by
+        # the next write. Read from DISK rather than remembered from load, because
+        # the file is the only place that still has the key once `Config` has been
+        # constructed, and because a key the operator removed by hand must stop being
+        # carried through at the next write. The parse is the cached one
+        # (`_parse_config_stream`), so a write pays a dict lookup when the file has
+        # not moved since the read that preceded it, against the `yaml.dump` + fsync
+        # it is about to do.
+        document: Dict[str, Any] = dict(config)
+        for key, value in _unmodelled_top_level(self.config_file).items():
+            document.setdefault(key, value)
+
         # ATOMIC. This was a plain `open(..., "w")`, which truncates the file
         # before it writes a byte: a crash, a full disk, or a kill between the
         # truncate and the flush left config.yml empty or half-written, and the
@@ -701,7 +847,7 @@ class ConfigManager:
         )
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as f:
-                yaml.dump(config, f, default_flow_style=False)
+                yaml.dump(document, f, default_flow_style=False)
                 f.flush()
                 os.fsync(f.fileno())
             if preserve_mode is not None:
