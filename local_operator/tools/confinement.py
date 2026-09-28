@@ -389,13 +389,15 @@ class ToolConfinement:
         are the strictest list in the file.
 
         The fourth: the network line. ``(deny network*)`` REPLACED the
-        ``(allow network-outbound)`` this profile used to carry, and it sits
-        after nothing that allows network -- measured on the build host, an
-        allow placed before a later deny WINS in seatbelt's rule order, so
-        the deny is documentation for the reader and the correctness comes
-        from the absent allow. What the line does was measured too: TCP
-        (internet and loopback), UDP and AF_UNIX connects all fail with
-        ``EPERM``, and DNS fails fast, while in-scratch file work is
+        ``(allow network-outbound)`` this profile used to carry. The deny line
+        is documentation for the reader; the correctness is the ABSENT allow,
+        because seatbelt lets a network allow defeat a network deny wherever
+        either line sits -- measured on the build host in BOTH orders
+        (``allow;deny`` and ``deny;allow`` each reached a live loopback
+        listener; only the allow-free profile refused, and the same is true
+        of the internet leg). What the allow-free profile does was measured
+        too: TCP (internet and loopback), UDP and AF_UNIX connects all fail
+        with ``EPERM``, and DNS fails fast, while in-scratch file work is
         untouched (see the module docstring's network section).
         """
 

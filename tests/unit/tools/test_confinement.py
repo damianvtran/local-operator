@@ -78,11 +78,12 @@ class TestConfinementDecisions:
         assert '(allow file-read-metadata (subpath "/"))' in profile
         assert '(literal "/dev/null")' in profile
         # The network line: no allowance survives, and the explicit deny is
-        # present for the reader. Measured while building this: an allow
-        # placed BEFORE a later deny WINS in seatbelt's rule order, so the
-        # correctness is the absent allow and the deny is documentation --
-        # both are pinned so a future edit that reintroduces the allow (however
-        # spelled) fails here before it fails a probe run.
+        # present for the reader. Measured while building this: a network
+        # ALLOW defeats a network deny wherever either line sits (both orders
+        # reached a live loopback listener; only the allow-free profile
+        # refused), so the correctness is the absent allow and the deny is
+        # documentation -- both are pinned so a future edit that reintroduces
+        # the allow (however spelled) fails here before it fails a probe run.
         assert "network-outbound" not in profile
         assert "(deny network*)" in profile
 
