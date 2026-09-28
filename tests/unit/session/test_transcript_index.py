@@ -436,6 +436,43 @@ async def test_compact_file_rewrite_rescans(tmp_path, monkeypatch):
     assert index.scan.offset == journal_path(tmp_path).stat().st_size
 
 
+@pytest.mark.asyncio
+async def test_a_compact_that_left_the_file_longer_still_rescans(tmp_path, monkeypatch):
+    """The shape a size+tail test cannot see through: a rewrite that NET GREW.
+
+    ``compact_file`` only rewrites when it reclaims bytes against the CURRENT
+    file, but that file already carried appends since the last scan — so the
+    compacted result can still be LONGER than the recorded scan while the tail
+    row parses unchanged. Folding is reserved for tool rows and dropped prune
+    rows, so only the inode exposes the replacement; without it the incremental
+    path keeps stale ordinals from before the drop (the drop shifts every
+    later row) and the rail places ticks off the end of the journal.
+    """
+    session = tmp_path / "sessions" / SID
+    transcript = Transcript(session)
+    await transcript.append_message(Message.user("do a thing", id="u1"))
+    small = Message(role="tool", content=[TextContent(text="x")], tool_call_id="c1")
+    small.id = "x1"
+    await transcript.append_message(small)
+    await transcript.append_message(
+        Message(role="assistant", content=[TextContent(text="done")], id="a1")
+    )
+    first = ti.refresh_index(tmp_path, SID)
+    assert first.scan.offset == journal_path(tmp_path).stat().st_size
+    calls = _scanners(monkeypatch)
+    # A notice much longer than the one-byte body it replaces, and a prune row
+    # whose drop reclaims more than the fold spends — so the rewrite fires and
+    # the file still ends up longer than the recorded scan.
+    await transcript.append_prune(
+        "x1", "[pruned: a notice long enough that the fold spends more than it reclaimed]"
+    )
+    assert await transcript.compact_file(min_reclaim_bytes=0) > 0
+    assert journal_path(tmp_path).stat().st_size > first.scan.offset
+    index = ti.refresh_index(tmp_path, SID)
+    assert calls == {"full": 1, "incremental": 0}
+    assert [c.id for c in index.checkpoints] == ["u1", "a1"]
+
+
 def test_version_bump_discards_scans_and_preserves_naming(tmp_path, monkeypatch):
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
     ti.refresh_index(tmp_path, SID)
