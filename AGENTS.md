@@ -2822,8 +2822,9 @@ than widening the bound. Do not merge a red head on the assumption that it is
 
 **There is no `pytest-timeout` in this suite.** A test that waits forever hangs
 its CI job until the workflow's `timeout-minutes` reclaims the runner
-(`timeout-minutes: 20` for `test` in `.github/workflows/ci.yml` — quoted from
-the file, and that ceiling exists because a job once held a slot for 3h38m).
+(`timeout-minutes: 25` for `test` in `.github/workflows/ci.yml` — quoted from
+the file as of 2026-09-28, when it was raised from 20; that ceiling exists
+because a job once held a slot for 3h38m).
 So an unbounded wait is not merely slow, it is expensive for everyone queued
 behind it — which is the other half of why `wait_for` carries
 `DEADLOCK_GUARD_S`.
