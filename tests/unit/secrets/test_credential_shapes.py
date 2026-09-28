@@ -7395,8 +7395,10 @@ def test_a_strong_name_or_a_real_shape_still_promotes(line: str, value: str) -> 
         # measured: a 32-character hex key under the WEAK name `AES_KEY` came
         # back masked=False registered=False, i.e. a real credential in the
         # clear, and whether it escaped depended on its first character.
-        ("AES_KEY=" + "abcdef0123456789" + "abcdef0123456789",
-         "abcdef0123456789" + "abcdef0123456789"),
+        (
+            "AES_KEY=" + "abcdef0123456789" + "abcdef0123456789",
+            "abcdef0123456789" + "abcdef0123456789",
+        ),
         (
             "HASH_KEY=" + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
