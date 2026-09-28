@@ -45,7 +45,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures and he
     pair,
 )
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — the fixture `pair` reaches for
-    _pair,
+    _pair_settled,
     devices,
 )
 
@@ -99,7 +99,7 @@ def test_an_unconfirmed_commit_is_refused_with_the_route_home(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     # ONLY THE TIMEOUT IS SHORTENED, and it is a timeout rather than a tolerance: the
     # destination dies either way, so a smaller window cannot make a wrong answer
@@ -141,7 +141,7 @@ def test_the_receipt_is_true_when_the_receiver_DID_promote(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     monkeypatch.setattr(mobility, "OFFLOAD_CONFIRM_WAIT_S", 0.5)
     original_ask = mobility.LinkTransport.ask
@@ -196,7 +196,7 @@ def test_the_device_holding_the_staged_copy_can_adopt_it(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     moved = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     assert moved["ok"] is True, moved
@@ -286,7 +286,7 @@ def test_an_invite_names_the_endpoint_the_relay_actually_listens_on(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, _server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=both[1].settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=both[1].settings)
     record = server_a._require_network("")  # noqa: SLF001 — the relay's own resolver
     live = server_a.advertised_endpoints()
 
