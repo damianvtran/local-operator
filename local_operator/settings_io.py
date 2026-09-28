@@ -631,9 +631,10 @@ SECTIONS: tuple[Section, ...] = (
         "aida",
         "Aida",
         Scope.LIVE,
-        "Your chief of staff's proactive cadence: when she checks in, how much "
-        "she may escalate, and the pause switch. Edits are read at her next "
-        "action; /aida pause|resume act immediately.",
+        "Your chief of staff: her display name, and the proactive cadence — "
+        "when she checks in, how much she may escalate, and the pause switch. "
+        "The name applies everywhere at once; edits are read at her next "
+        "action, and /aida pause|resume act immediately.",
     ),
     Section(
         "retired",
@@ -1090,6 +1091,41 @@ def _validate_advertise_hosts(value: object) -> object:
                 "for example tunnel.example.com:4100"
             )
     return value
+
+
+#: The ``aida.name`` cap — a LITERAL here because this module deliberately
+#: stays off the aida package's import path (see the aida block below); the
+#: real constant is ``aida.naming.MAX_NAME_CHARS`` and the anti-drift test in
+#: ``tests/unit/aida/test_aida_naming.py`` pins the two together the way
+#: ``_consumer_defaults()`` pins the defaults. 80 matches the session title's
+#: own cap (``session.naming.MAX_TITLE_CHARS``) on purpose: a session rename
+#: syncs its title into this key, so a title the session layer accepted must
+#: never be refused by the config layer mid-sync.
+_AIDA_NAME_MAX_CHARS = 80
+
+
+def _validate_aida_name(value: Any) -> None:
+    """``aida.name`` is a display name: trimmed, non-empty, bounded, no controls.
+
+    Enforced at the write facade for the same reason ``_validate_advertise_hosts``
+    is — every writer (/settings, ``lop config edit``, ``PATCH /v1/settings``)
+    funnels through :func:`validate` — and the rename paths reuse THIS refusal
+    via ``aida.naming.validate_name``, so the settings page and a ``/aida
+    rename`` receipt cannot disagree about what a name is (the drift rule:
+    one rule set, one funnel). Whitespace is collapsed before the checks, so
+    ``"  Maya  "`` is the valid name ``Maya`` — readers normalize identically —
+    while control characters (a pasted escape sequence) are refused outright,
+    because they would corrupt every surface that renders the name.
+    """
+    if not isinstance(value, str):
+        raise ValueError("expected a name, e.g. Aida")
+    name = " ".join(value.split())
+    if not name:
+        raise ValueError("a name is required")
+    if len(name) > _AIDA_NAME_MAX_CHARS:
+        raise ValueError(f"at most {_AIDA_NAME_MAX_CHARS} characters — this is {len(name)}")
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise ValueError("control characters are not allowed in a name")
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -3578,14 +3614,28 @@ SETTINGS: tuple[Setting, ...] = (
         help="Read at boot and by /aida; a disabled install never creates her session.",
     ),
     Setting(
+        key="aida.name",
+        path=("aida", "name"),
+        section="aida",
+        label="Display name",
+        kind=Kind.TEXT,
+        default="Aida",
+        placeholder="Aida",
+        validate_value=_validate_aida_name,
+        help=(
+            "What she is called on every surface. Renaming her conversation — or "
+            "/aida rename <name> — updates this."
+        ),
+    ),
+    Setting(
         key="aida.cadence.at",
         path=("aida", "cadence", "at"),
         section="aida",
         label="Daily check-in time",
         kind=Kind.TEXT,
-        default="09:00",
-        placeholder="09:00",
-        help="Local wall-clock HH:MM. An invalid value falls back to 09:00 at the next arm.",
+        default="08:30",
+        placeholder="08:30",
+        help="Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm.",
     ),
     Setting(
         key="aida.cadence.paused",

@@ -17372,7 +17372,7 @@ class OperatorApp(App[None]):
             # HER STASHED REQUEST IS SPENT HERE TOO (UX round 1, U1). This is
             # the adoption seam for an ALREADY-BUILT viewer — the attach path
             # onto a live owner (`_attach_or_refuse`; the ordinary case once
-            # her runtime is up, from any prior open or her 09:00 cadence) and
+            # her runtime is up, from any prior open or her 08:30 cadence) and
             # the mesh remote path — and it used to spend neither prompt seam,
             # so `/aida hello` against a live her switched the conversation
             # and silently dropped the words: no transcript row, no notice,
@@ -42458,14 +42458,20 @@ class OperatorApp(App[None]):
         ``pause``/``resume``/``status`` are RESERVED words parsed HERE rather
         than by the registry — the ``/team chart`` precedent, including its
         escape: ``/aida =pause …`` sends her a message that merely starts with
-        the word (the ``=`` prefix, like ``/team =chart``).
+        the word (the ``=`` prefix, like ``/team =chart``). ``rename`` is the
+        same namespace's one argument-taking verb: ``/aida rename <name>``
+        renames HER (the config key and her conversation), bare ``rename``
+        reports, and ``/aida =rename …`` still reaches her as a message.
 
         A RESERVED WORD COUNTS ONLY AS THE WHOLE ARGUMENT (cross-host grammar
         ruling, UI review round 1, MINOR-3). The first cut split on the first
         space, so ``/aida pause and think`` ran the control word and silently
         DROPPED the rest — a typed request, gone, under a receipt about
         pausing. One grammar for both hosts now: the word alone is the
-        control; anything longer is a message for her, verbatim.
+        control; anything longer is a message for her, verbatim — ``rename``
+        alone is still the report. ``/aida rename <name>`` is the one
+        argument-taking form (the ``/team chart <name>`` shape), because a
+        name with a space in it is one name, not three words of a request.
 
         Both halves run in workers: opening resolves (and on first use
         creates) her session off the loop, and the control words write config
@@ -42487,6 +42493,18 @@ class OperatorApp(App[None]):
                 self._aida_control(text.casefold(), notice), thread=False, group="session"
             )
             return
+        # `rename` WINS IN FIRST POSITION and takes the rest of the line as
+        # its argument — the `/team chart <name>` shape, so a name with a
+        # space in it is one name. Checked before the message path below, so
+        # a request that merely STARTS with the word escapes with `=` like
+        # the others (see the docstring).
+        if not escaped:
+            first, _, rest = text.partition(" ")
+            if first.casefold() == "rename":
+                self.run_worker(
+                    self._aida_rename(rest.strip(), notice), thread=False, group="session"
+                )
+                return
         if self._resume_factory is None:
             self._system_notice(
                 "opening Aida requires a session-capable launcher — see the CLI",
@@ -42507,21 +42525,26 @@ class OperatorApp(App[None]):
         conversation — the request is simply submitted.
         """
         from local_operator.aida import ensure_session
+        from local_operator.aida import naming as aida_naming
 
+        # The configured display name, read ONCE for every sentence below.
+        # Never raises: the default stands in when the key is unset or the
+        # stored value is unusable (see local_operator.aida.naming).
+        name = aida_naming.display_name()
         try:
             session_id = await ensure_session()
         except Exception as error:  # noqa: BLE001 — a boot path never raises
             logger.warning("aida: ensure failed", exc_info=True)
-            self._system_notice(f"{AIDA_MARKER} could not reach Aida: {error}", "warning")
+            self._system_notice(f"{AIDA_MARKER} could not reach {name}: {error}", "warning")
             return
         if session_id is None:
-            notice(f"{AIDA_MARKER} Aida is disabled on this install (aida.enabled is false).")
+            notice(f"{AIDA_MARKER} {name} is disabled on this install (aida.enabled is false).")
             return
         if self._conversation_id() == session_id:
             if text:
                 self._submit_command_prompt(text, attachments)
             else:
-                notice(f"{AIDA_MARKER} This conversation is Aida's — already open.")
+                notice(f"{AIDA_MARKER} This conversation is {name}'s — already open.")
             return
         if text:
             self._pending_aida_prompt = (session_id, text, attachments)
@@ -42542,25 +42565,30 @@ class OperatorApp(App[None]):
         ``status`` reads what is actually on disk — enabled, paused, next
         cadence, today's escalation budget — never a cached copy.
         """
+        from local_operator.aida import naming as aida_naming
         from local_operator.aida import proactive, state
         from local_operator.paths import config_dir
 
+        # Read OFF the try, so the failure receipt below can always name her:
+        # ``display_name`` never raises (the default stands in for an unset or
+        # unusable value), which is exactly what makes that safe.
+        name = aida_naming.display_name()
         try:
             root = config_dir()
             if word == "status":
-                notice(self._aida_status_line(proactive.status(root)))
+                notice(self._aida_status_line(proactive.status(root), name))
                 return
             session_id = state.session_id_of(root) or ""
             if word == "pause":
                 outcome = await proactive.pause(root, session_id)
                 if outcome.owner_blocked:
                     notice(
-                        f"{AIDA_MARKER} Aida: paused — her open session applies it within "
+                        f"{AIDA_MARKER} {name}: paused — her open session applies it within "
                         "a couple of seconds. /aida resume re-arms her check-ins."
                     )
                 else:
                     notice(
-                        f"{AIDA_MARKER} Aida: paused — no proactive check-ins. "
+                        f"{AIDA_MARKER} {name}: paused — no proactive check-ins. "
                         "/aida resume re-arms them."
                     )
                 return
@@ -42568,16 +42596,74 @@ class OperatorApp(App[None]):
             when = self._aida_when(proactive.status(root))
             if armed == "owner":
                 notice(
-                    f"{AIDA_MARKER} Aida: active again — her open session will arm the "
+                    f"{AIDA_MARKER} {name}: active again — her open session will arm the "
                     "next check-in within a couple of seconds."
                 )
             elif when:
-                notice(f"{AIDA_MARKER} Aida: active again — next check-in {when}.")
+                notice(f"{AIDA_MARKER} {name}: active again — next check-in {when}.")
             else:
-                notice(f"{AIDA_MARKER} Aida: active again — her next boot arms the check-in.")
+                notice(f"{AIDA_MARKER} {name}: active again — her next boot arms the check-in.")
         except Exception as error:  # noqa: BLE001 — the refusal is the receipt
             logger.warning("aida: control op failed", exc_info=True)
-            self._system_notice(f"could not {word} Aida: {error}", "warning")
+            self._system_notice(f"could not {word} {name}: {error}", "warning")
+
+    async def _aida_rename(self, name: str, notice: NoticeFn) -> None:
+        """``rename`` — set her display name (config + conversation); bare, report.
+
+        ONE gesture, two stores. ``aida.name`` is canonical — every surface
+        reads it live (the /aida receipts, the desktop payload's ``name``) —
+        and her conversation's title is what the picker, the sidebar and the
+        band render. The config write goes through ``settings_io`` so a live
+        session in ANY process hears it on its watcher; the title half is
+        applied here for the not-open case (``reconcile_session_title``) and
+        by that same watcher for an open one, so every surface converges
+        without a restart either way. Runs in a worker: the write is file IO,
+        and retitling an open session journals to its transcript.
+        """
+        from local_operator.aida import naming as aida_naming
+        from local_operator.aida import state as aida_state
+        from local_operator.paths import config_dir
+
+        try:
+            root = config_dir()
+            if not name:
+                current = aida_naming.display_name(root)
+                notice(f"{AIDA_MARKER} {current}: /aida rename <name> renames her everywhere.")
+                return
+            stored = aida_naming.set_name(root, name)
+        except ValueError as error:
+            # The refusal, verbatim from the ONE rule set the settings page
+            # also validates through (settings_io), so the page and this
+            # receipt cannot disagree about what a name is.
+            notice(f"{AIDA_MARKER} not renamed: {error}", "warning")
+            return
+        except Exception as error:  # noqa: BLE001 — the refusal is the receipt
+            logger.warning("aida: rename failed", exc_info=True)
+            self._system_notice(f"could not rename her: {error}", "warning")
+            return
+        # The session half, when her session exists. On HER conversation in
+        # THIS terminal, rename in place through the ordinary writer (the
+        # same path /title takes, so the band, the tab and the mobile
+        # notification follow); otherwise point the stored title at the new
+        # name so the picker and the sidebar — which read disk — follow now
+        # rather than at a later boot.
+        session_id = aida_state.session_id_of(root)
+        if session_id and self._conversation_id() == session_id and self._session is not None:
+            session = self._session
+            try:
+                stored_name = session.set_conversation_name(stored, user_set=True)
+            except Exception:  # noqa: BLE001 — the config half already landed
+                logger.warning("aida: could not retitle the open session", exc_info=True)
+                stored_name = stored
+            if self._status is not None:
+                self._status.update(
+                    conversation_name=stored_name,
+                    forked=bool(getattr(session, "wears_inherited_title", False)),
+                )
+            self._notify_mobile_title(stored_name)
+        elif session_id:
+            await aida_naming.reconcile_session_title(root, session_id)
+        notice(f"{AIDA_MARKER} renamed: {stored} — every surface reads it now.")
 
     @staticmethod
     def _aida_when(st: Mapping[str, Any]) -> str:
@@ -42588,15 +42674,21 @@ class OperatorApp(App[None]):
         return time.strftime("%H:%M", time.localtime(due / 1000))
 
     @staticmethod
-    def _aida_status_line(st: Mapping[str, Any]) -> str:
-        """One line: state, next check-in, today's escalation budget."""
+    def _aida_status_line(st: Mapping[str, Any], name: str) -> str:
+        """One line: state, next check-in, today's escalation budget.
+
+        ``name`` is the configured display name, PASSED IN rather than read
+        here: the caller has just read it once (``aida.naming.display_name``),
+        and one receipt must not be able to disagree with itself about what
+        she is called.
+        """
         if not st.get("enabled"):
             word = "disabled"
         elif st.get("paused"):
             word = "paused"
         else:
             word = "active"
-        parts = [f"{AIDA_MARKER} Aida: {word}"]
+        parts = [f"{AIDA_MARKER} {name}: {word}"]
         when = OperatorApp._aida_when(st)
         if when:
             parts.append(f"next check-in {when}")
@@ -42632,9 +42724,11 @@ class OperatorApp(App[None]):
         if pending is None or pending[0] != session_id:
             return False
         self._pending_aida_prompt = None
+        from local_operator.aida import naming as aida_naming
+
         self._system_notice(
-            f"{AIDA_MARKER} Request not sent — Aida's conversation did not open, "
-            "so nothing ran.",
+            f"{AIDA_MARKER} Request not sent — {aida_naming.display_name()}'s "
+            "conversation did not open, so nothing ran.",
             "warning",
         )
         return True

@@ -289,11 +289,13 @@ def _consumer_defaults() -> dict[str, object]:
     # package's import path — it is loaded on every CLI start), and this block
     # is the half that turns a drifted literal into a red test rather than a
     # page that lies about what the engine will do.
+    from local_operator.aida import naming as aida_naming
     from local_operator.aida import onboarding as aida_onboarding
     from local_operator.aida import proactive as aida_proactive
     from local_operator.aida.bootstrap import DEFAULT_ENABLED
 
     consumers["aida.enabled"] = DEFAULT_ENABLED
+    consumers["aida.name"] = aida_naming.DEFAULT_NAME
     consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
     consumers["aida.cadence.paused"] = aida_proactive.DEFAULT_PAUSED
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
@@ -614,6 +616,11 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     # `sys.executable` is one on every machine the suite runs on; an invented
     # name would be refused by the very check this sample exists to satisfy.
     settings_io._validate_desktop_launch_command: f"{sys.executable} --open-session {{session}}",
+    # A display name that is valid, non-default, and reads as a name (the
+    # validator refuses empties, control characters and over-longs, so the
+    # arbitrary "round-trip-probe" spelling would do fine — but a real name
+    # keeps the sample honest about what the field carries).
+    settings_io._validate_aida_name: "Sovereign",
 }
 
 
