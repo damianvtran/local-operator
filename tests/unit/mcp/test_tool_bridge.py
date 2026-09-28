@@ -16,6 +16,7 @@ from mcp.types import (
 )
 
 from local_operator.harness.intent import INTENT_PROPERTY
+from local_operator.harness.types import ImageContent as HarnessImageContent
 from local_operator.harness.types import ToolContext
 from local_operator.mcp.tool_bridge import (
     INTENT_FIELD,
@@ -181,18 +182,78 @@ class TestFormatMcpResult:
         assert formatted.tool_call_id == "id1"
         assert formatted.tool_name == "mcp__srv_tool"
 
-    def test_image_placeholder(self) -> None:
+    def test_image_block_is_inlined(self) -> None:
+        """A decodable image under the cap reaches the model AS an image block.
+
+        This is the property the benchmark arm depends on: a computer-use
+        observation comes back through an MCP tool result, and the model must
+        SEE the frame, not a caption of it.
+        """
+        payload = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        result = CallToolResult(
+            content=[ImageContent(type="image", data=payload, mime_type="image/png")],
+            is_error=False,
+        )
+        formatted = format_mcp_result(result)
+        assert len(formatted.content) == 1
+        block = formatted.content[0]
+        assert block.type == "image"
+        assert block.data == payload
+        assert block.mime_type == "image/png"
+        # No text block was invented for an image-only result.
+        assert formatted.text == ""
+
+    def test_image_after_text_caption(self) -> None:
+        """Text leads, images follow -- the order a local image read uses."""
+        payload = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
         result = CallToolResult(
             content=[
-                ImageContent(
-                    type="image",
-                    data=base64.b64encode(b"\x89PNG\r\n\x1a\n").decode(),
-                    mime_type="image/png",
-                )
+                TextContent(type="text", text="step 1"),
+                ImageContent(type="image", data=payload, mime_type="image/png"),
             ],
             is_error=False,
         )
-        assert format_mcp_result(result).text == "[Image: image/png]"
+        formatted = format_mcp_result(result)
+        assert [block.type for block in formatted.content] == ["text", "image"]
+        assert formatted.text == "step 1"
+
+    def test_oversized_image_falls_back_to_placeholder(self) -> None:
+        """Past the cap the payload is never inlined; the model gets a caption."""
+        from local_operator.imaging import IMAGE_MAX_BYTES
+
+        payload = base64.b64encode(b"x" * (IMAGE_MAX_BYTES + 1)).decode()
+        result = CallToolResult(
+            content=[ImageContent(type="image", data=payload, mime_type="image/png")],
+            is_error=False,
+        )
+        formatted = format_mcp_result(result)
+        assert [block.type for block in formatted.content] == ["text"]
+        assert formatted.text == "[Image: image/png]"
+
+    def test_undecodable_image_falls_back_to_placeholder(self) -> None:
+        """Garbage must not enter history as an image the provider will 400 on."""
+        result = CallToolResult(
+            content=[ImageContent(type="image", data="not base64!!", mime_type="image/png")],
+            is_error=False,
+        )
+        formatted = format_mcp_result(result)
+        assert [block.type for block in formatted.content] == ["text"]
+        assert formatted.text == "[Image: image/png]"
+
+    def test_dict_image_inlines_under_snake_case_mime(self) -> None:
+        """Cached/raw-dict results carry the snake_case mime key too."""
+        payload = base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+        result = {
+            "content": [{"type": "image", "data": payload, "mime_type": "image/png"}],
+            "isError": False,
+        }
+        formatted = format_mcp_result(result)
+        assert [block.type for block in formatted.content] == ["image"]
+        image = formatted.content[0]
+        # The HARNESS type, not mcp.types': the bridge rewrites the SDK shape
+        # into the one the loop carries.
+        assert isinstance(image, HarnessImageContent)
+        assert image.data == payload
 
     def test_resource_uri_plus_text(self) -> None:
         """A text resource contributes its body; a blob resource is URI-only."""
