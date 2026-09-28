@@ -644,13 +644,13 @@ def process_row(
 def record_file(root: Path, pid: int) -> Path:
     """Where a runtime's discovery record WOULD be, creating nothing.
 
-    ``registry.record_path`` is the owner of the ``<pid>.json`` spelling, but it
-    goes through ``registry.run_dir``, which CREATES the directory it names — and
-    a re-read at signal time may not. The candidate's own root can be a path that
-    is GONE (the class this sweep exists for), and conjuring it back would be the
-    sweep inventing the very store the runtime could then publish into, i.e.
-    manufacturing the reachability it was checking for. Note the same reasoning
-    in ``roster``, which refuses to scan a sibling root that is not a directory
+    ``registry.record_path`` owns the ``<pid>.json`` spelling and is now a pure
+    resolver too (#1666 review round 1, R1-1 — it used to route through
+    ``registry.run_dir``, which CREATED the directory it named), so this could
+    delegate. It keeps its own spelling because it is the one caller whose ``root``
+    is always supplied and never the ambient one, and the sweep it belongs to is
+    the class of caller that must not re-derive anything from the config store —
+    see ``roster``, which refuses to scan a sibling root that is not a directory
     right now for the same reason.
     """
     return Path(root) / RUN_DIRNAME / f"{pid}.json"

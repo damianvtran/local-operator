@@ -103,7 +103,7 @@ def _record(pid: int, session_id: str, name: str, **fields: object) -> None:
         started=True,
         **fields,  # type: ignore[arg-type]
     )
-    directory = registry.run_dir()
+    directory = registry.ensure_run_dir()
     path = directory / f"{pid}.json"
     path.write_text(json.dumps(record.to_json()))
     os.chmod(path, 0o600)
@@ -118,7 +118,7 @@ def _age(pid: int, session_id: str, name: str, age_s: float, **fields: object) -
     stopped arriving.
     """
     _record(pid, session_id, name, **fields)
-    path = registry.run_dir() / f"{pid}.json"
+    path = registry.ensure_run_dir() / f"{pid}.json"
     payload = json.loads(path.read_text())
     payload["heartbeat_at"] = time.time() - age_s
     path.write_text(json.dumps(payload))
