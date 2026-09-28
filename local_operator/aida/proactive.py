@@ -494,7 +494,7 @@ def reconcile(
                     if too_close:
                         notes.append(
                             "escalation request refused: within the "
-                            f"{pol.min_gap_minutes}-minute spacing floor of another Aida wake."
+                            f"{pol.min_gap_minutes}-minute spacing floor of her other wakes."
                         )
                         continue
                     kept.append(
@@ -514,7 +514,7 @@ def reconcile(
         # TRUE NOW, and it was not before (M1b): the tray is consumed inside
         # the lock, so a contended acquisition leaves the file exactly where
         # it was. The sentence is what makes the failure observable.
-        notes.append("escalation tray left unread (another Aida operation is in flight).")
+        notes.append("escalation tray left unread (another operation is in flight).")
 
     # -- cadence ------------------------------------------------------------
     if not any(row.id == CADENCE_ID for row in kept):
@@ -795,7 +795,7 @@ async def _drain_tray_external(
             if too_close:
                 notes.append(
                     "escalation request refused: within the "
-                    f"{pol.min_gap_minutes}-minute spacing floor of another Aida wake."
+                    f"{pol.min_gap_minutes}-minute spacing floor of her other wakes."
                 )
                 continue
             extra_id = _next_extra_id(ids)

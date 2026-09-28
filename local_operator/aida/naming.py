@@ -215,3 +215,16 @@ async def reconcile_session_title(
     except Exception:  # noqa: BLE001 — a title is decoration; never fail the caller
         logger.warning("aida: could not reconcile her stored title", exc_info=True)
         return None
+
+
+def is_her_session(session: object) -> bool:
+    """Whether ``session`` is HERS, whoever is asking.
+
+    The rename receipts and the config sync must agree about when the "she is
+    now called X everywhere" clause is true (UX round 1, U3); ``_aida_duty``
+    stays the single source — the same gate the sync itself reads — and this
+    accessor only spares each caller its own private-attribute walk. Read
+    defensively: a reduced facade need not carry the flag, and "not hers" is
+    the answer that changes no wording.
+    """
+    return bool(getattr(session, "_aida_duty", False))
