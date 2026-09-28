@@ -7420,47 +7420,134 @@ def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
     assert hits, f"{line!r} produced no hit at all"
 
 
-#: The values this refusal RELEASES: masked AND contained on `origin/main`, read in
-#: the clear on this head. Declared rather than discovered, and frozen here so the
-#: trade cannot widen quietly — a later widening or narrowing must come through this
-#: table, the way `_PARTIAL_MASK_RESIDUAL` works for the mask ratchet.
-#:
-#: The trade is deliberate (agent review round 2, R2-2, and the operator's ruling on
-#: it): the thing being fixed is a value masked in a FILE READ and transcribed back
-#: as the marker, and any value still masked there is a value an agent can still copy
-#: back. So it is masking low-confidence words and corrupting files, or releasing them
-#: and leaving them readable; the operator chose the second, consistent with the
-#: standing instruction to keep "automatic redactions of high confidence credential
-#: shapes". Every high-confidence shape is untouched.
-#:
-#: MEASURED on both trees, and only values whose behaviour CHANGED are listed.
-#: `correct_horse_battery_staple` and `hunter2` are absent on purpose: they sit below
-#: the assignment rule's own eight-character value floor, so `origin/main` did not
-#: mask them either and this change is not why they read in the clear. The round-2
-#: finding listed them among the released; the differential says otherwise, and the
-#: narrower class is the honest one.
-_RELEASED_WORD_SHAPED = (
+#: The corpus the released class is MEASURED over — values already exercised through
+#: the assignment rule, so the probe is the same call the pipeline makes (`KEY=<value>`
+#: through a real store) rather than a table of strings someone maintains by hand.
+_RELEASE_PROBE_VALUES = (
+    # BOUNDARY PROBES. Each sits just outside the refusal and is MASKED on this
+    # head, so widening any one cap releases it and moves the measurement.
+    # Without these the ratchet has no teeth: agent review round 3 (R3-1) widened
+    # the digit cap and the length cap and the module stayed green.
+    "quick_brown_fox_123",  # 3 digits  -> digit cap
+    "bucketv4",  # no "_"    -> underscore rule
+    "bucket_v4",
+    "bucket_v6",
+    "schema_registry",
+    "service_account_name",
     "prod_db_pass_01",
     "user_1_pass",
     "sec1_ret",
+    "db_password_1",
+    "vault_token_1",
+    "rabbit_pass_01",
+    "grafana_admin_pass",
+    "my_password",
+    "db_pass",
+    "hunter2",
+    "correct_horse_battery_staple",
+    "server_password_2",
+    "redis_auth_1",
+    "mq_secret_01",
+    "api_key_prod",
+    "admin_pw_01",
+    "network_bucket_v4",
+    "ca_central_1",
+    "us_east_1",
+    "internal_token_2",
+    "app_secret_key",
+    "staging_db_pass_02",
+    "smtp_pass_1",
+    "ldap_bind_pw",
+    "kafka_sasl_secret",
+    "db_user_name",
+    "cache_key_name",
+    "swordfish",
+    "correct-horse-battery",
+    "hunter2x",
+    "aB3kL9mN2pQ7Zr4",
+    "abcdef0123456789abcdef0123456789",
 )
 
 
-@pytest.mark.parametrize("value", _RELEASED_WORD_SHAPED)
-def test_the_released_word_shaped_class_is_declared(value: str) -> None:
-    """The cost of the fix, frozen.
+def _released_values() -> set[str]:
+    """The corpus values this head neither masks nor contains.
 
-    These are not oversights to be fixed later — they are the declared price of
-    refusing a word-shaped value under a weak name. This test does not ask for them
-    to be masked; it asks that the set never move without someone deciding to, and it
-    is what makes R2-2's differential reproducible instead of a surprise.
+    Asked of the STORE rather than a rendered transcript: a mask that hides the
+    value in place and a REGISTRATION that hides it in every later result are
+    different claims, and the released class is about both being gone.
     """
-    line = "KEY=" + value
-    scrubbed, _ = scrub_shapes_with_hits(line)
-    assert value in scrubbed, (
-        f"{value!r} is masked again — if that is deliberate, remove it from "
-        "_RELEASED_WORD_SHAPED and say why in the PR"
+    released: set[str] = set()
+    for value in _RELEASE_PROBE_VALUES:
+        store = VariableStore(cwd=".")
+        scrubbed, _ = store.redact_with_report("KEY=" + value)
+        if value in scrubbed and store.redact(value) == value:
+            released.add(value)
+    return released
+
+
+#: FROZEN, in both directions, and this is a RATCHET rather than a list: `origin/main`
+#: masks and contains every value in the corpus below that is not in this set, so a
+#: WIDENING of the refusal (a bigger digit cap, a longer length cap, a looser shape)
+#: adds names here and reds, and a NARROWING removes them and reds. Both have to come
+#: through an edit to this set with a reason in the commit.
+#:
+#: The first cut of this froze a hand-picked three values and agent review round 3
+#: (R3-1) showed exactly what that was worth: it caught a SHRINK and nothing else, so
+#: the clause could be widened to three digits and release `db_password_1`-style
+#: values with the whole module still green. Measuring the class is the fix.
+_RELEASED_WORD_SHAPED = frozenset(
+    (
+        "admin_pw_01",
+        "api_key_prod",
+        "app_secret_key",
+        "bucket_v4",
+        "bucket_v6",
+        "ca_central_1",
+        "cache_key_name",
+        "correct_horse_battery_staple",
+        "db_pass",
+        "db_password_1",
+        "db_user_name",
+        "grafana_admin_pass",
+        "hunter2",
+        "internal_token_2",
+        "kafka_sasl_secret",
+        "ldap_bind_pw",
+        "mq_secret_01",
+        "my_password",
+        "network_bucket_v4",
+        "prod_db_pass_01",
+        "rabbit_pass_01",
+        "redis_auth_1",
+        "schema_registry",
+        "sec1_ret",
+        "server_password_2",
+        "service_account_name",
+        "smtp_pass_1",
+        "staging_db_pass_02",
+        "swordfish",
+        "us_east_1",
+        "user_1_pass",
+        "vault_token_1",
     )
-    assert not _promotes(
-        line, value
-    ), f"{value!r} is contained again — same: change the declared set deliberately"
+)
+
+
+def test_the_released_word_shaped_class_is_measured_and_frozen() -> None:
+    """The cost of the fix, measured rather than listed.
+
+    These values are not oversights — the operator ruled that the narrowing stands
+    and the released class is recorded, on the principle that a value stored in
+    something credential-shaped is not thereby a secret and only keys and passwords
+    need masking. This test does not ask for them to be masked; it asks that the set
+    never move without someone deciding to, and it measures the set rather than
+    trusting this comment.
+    """
+    measured = _released_values()
+    newly_released = sorted(measured - _RELEASED_WORD_SHAPED)
+    newly_masked = sorted(_RELEASED_WORD_SHAPED - measured)
+    assert not newly_released and not newly_masked, (
+        "the released class moved — the refusal was widened or narrowed without "
+        f"declaring it. newly released: {newly_released}; newly masked: {newly_masked}. "
+        "If deliberate, update _RELEASED_WORD_SHAPED in the same commit and say why."
+    )
