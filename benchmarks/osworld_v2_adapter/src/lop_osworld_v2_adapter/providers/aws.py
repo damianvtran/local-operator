@@ -78,6 +78,8 @@ from lop_osworld_v2_adapter.providers.base import (
 from lop_osworld_v2_adapter.provisioning import ProvisioningPlan
 from lop_osworld_v2_adapter.taskfile import TaskDescriptor
 
+logger = logging.getLogger(__name__)
+
 # The tag every resource this adapter creates carries. It is both the leak
 # detector's filter (``audit``) and the condition key on the operator's TTL
 # role, so it must match ``provisioning.resolve`` exactly.
@@ -298,10 +300,13 @@ class UpstreamAllocationRefused(RuntimeError):
     tag audit, unreachable by descriptor-driven rescue, and unleased -- the
     exact leak this provider exists to prevent. ``stop_emulator`` is the
     unconfirmed terminate we also never want. So ``_seal_upstream`` replaces
-    every one of those methods on the live env with a raiser, and this is
-    what it raises: BEFORE any boto3 call, from inside the worker, surfacing
-    to the runner as an adapter error whose cleanup path terminates OUR
-    tagged instance by tag and confirms it.
+    every one of those methods on the live env with a raiser -- except
+    inside the first reset, where upstream's own retry loop asks to revert a
+    setup attempt that failed before anything ran (see ``_seal_upstream``)
+    -- and this is what it raises whenever it refuses: BEFORE any boto3
+    call, from inside the worker, surfacing to the runner as an adapter
+    error whose cleanup path terminates OUR tagged instance by tag and
+    confirms it.
     """
 
 
@@ -499,6 +504,19 @@ class AwsProvider:
         # (teardown-only) provider never allocates and never needs one.
         self._cache_root: Path | None = None
         self._schedule_created = False
+        # Reset-retry tracking for ``_seal_upstream``. Upstream's ``reset``
+        # loop writes ``is_environment_used = True`` before task-specific
+        # setup and does not clear it when an attempt fails, so its OWN retry
+        # re-enters the "used" branch and calls ``_revert_to_snapshot`` -- a
+        # retry-hygiene revert the sealed refusal must not turn into an
+        # episode death. ``_reset_in_flight`` is true only while the ONE
+        # ``env.reset`` this adapter makes (in ``_start_desktop_env``) is
+        # executing; ``_reset_completed`` becomes true only once that call
+        # returns; and ``_reset_first_failure`` keeps the first failure that
+        # triggered a retry, so the trigger is never swallowed.
+        self._reset_in_flight = False
+        self._reset_completed = False
+        self._reset_first_failure: str | None = None
 
     @classmethod
     def for_teardown(
@@ -894,7 +912,24 @@ class AwsProvider:
             use_public_ip=True,
         )
         self._seal_upstream(env)
-        env.reset(task_config=task_instance)
+        # The ONE reset call is the window in which upstream's retry loop
+        # runs; ``_reset_completed`` (set only after reset RETURNS) is what
+        # keeps a later revert -- a second reset on a genuinely used env --
+        # sealed. See ``_seal_upstream`` for the retry discrimination.
+        self._reset_first_failure = None
+        self._reset_in_flight = True
+        try:
+            env.reset(task_config=task_instance)
+        except Exception as error:
+            # The retry loop's own failure, with the FIRST attempt's error
+            # attached: a run that dies here must be able to name the
+            # transient failure it died retrying through.
+            self._enrich_reset_failure(error)
+            raise
+        else:
+            self._reset_completed = True
+        finally:
+            self._reset_in_flight = False
         self._env = env
 
     def _install_default_session(self, region: str) -> None:
@@ -911,8 +946,7 @@ class AwsProvider:
             region_name=region,
         )
 
-    @staticmethod
-    def _seal_upstream(env: Any) -> None:
+    def _seal_upstream(self, env: Any) -> None:
         """Replace every upstream allocate/revert/release path with a raiser.
 
         Applied to the LIVE env object (not the class) immediately after
@@ -925,6 +959,19 @@ class AwsProvider:
         ``close``/``stop_emulator`` (unconfirmed terminate) all raise
         ``UpstreamAllocationRefused`` BEFORE any boto3 call.
 
+        ONE of those paths is not an unconditional raiser, because upstream
+        asks for it as retry hygiene rather than as a revert of used state:
+        its reset loop writes ``is_environment_used = True`` before
+        task-specific setup and does not clear it when an attempt fails, so
+        the loop's own retry calls ``_revert_to_snapshot`` (and then
+        ``_start_emulator``) on an environment where nothing has run yet.
+        Inside that first reset the revert is SKIPPED and
+        ``_start_emulator`` is skipped with it -- the environment is our own
+        tagged instance, it has no completed setup to revert to, and
+        skipping performs no boto3 call at all. Everywhere else -- a
+        completed reset, a revert with no reset in flight, the direct
+        provider/manager paths -- the refusal stands unchanged.
+
         The env is sealed at the instance level so the seal cannot leak
         into another ``DesktopEnv`` in the same process, and it survives
         upstream re-assigning ``self.provider``/``self.manager`` in
@@ -935,15 +982,34 @@ class AwsProvider:
 
         def refuse(name: str) -> Callable[..., Any]:
             def _refused(*_args: Any, **_kwargs: Any) -> Any:
-                raise UpstreamAllocationRefused(
+                message = (
                     f"upstream DesktopEnv.{name} would allocate, revert, or release an "
                     "EC2 instance outside the adapter's tagged, leased, "
                     "rescue-resolvable path; refused before any boto3 call"
                 )
+                if self._reset_first_failure is not None:
+                    # A refusal on an env whose reset already had to recover
+                    # from a failed first attempt names that attempt: the
+                    # reader must never have to guess what preceded it.
+                    note = self._reset_first_failure
+                    message += f" [first reset setup attempt failed with: {note}]"
+                raise UpstreamAllocationRefused(message)
 
             return _refused
 
-        env._revert_to_snapshot = refuse("_revert_to_snapshot")
+        def guarded_revert_to_snapshot() -> None:
+            # Upstream's retry loop calls this at the top of every attempt
+            # after a failed one; inside the FIRST reset that is the loop
+            # retrying its own setup, not a used environment being reverted
+            # (nothing has run, and no reset has completed). Skip so the
+            # retry can proceed; refuse -- as before this guard -- anywhere
+            # else.
+            if self._reset_retry_in_flight():
+                self._note_retry_skip("_revert_to_snapshot")
+                return
+            refuse("_revert_to_snapshot")()
+
+        env._revert_to_snapshot = guarded_revert_to_snapshot
         env.close = refuse("close")
         env._save_state = refuse("_save_state")
         provider = getattr(env, "provider", None)
@@ -954,6 +1020,136 @@ class AwsProvider:
         manager = getattr(env, "manager", None)
         if manager is not None:
             manager.get_vm_path = refuse("manager.get_vm_path")
+
+        # Follows the guarded revert: the loop calls ``_start_emulator``
+        # right after a revert, and the instance the retry would "start" is
+        # our own, already running and readied in ``allocate``. Skipped only
+        # under the same predicate; everywhere else the upstream method runs
+        # exactly as it did before this seal existed -- it only ever starts
+        # OUR instance, and it is exactly the method ``__init__`` relies on.
+        start_emulator = getattr(env, "_start_emulator", None)
+        if callable(start_emulator):
+
+            def guarded_start_emulator() -> Any:
+                if self._reset_retry_in_flight():
+                    self._note_retry_skip("_start_emulator")
+                    return None
+                return start_emulator()
+
+            env._start_emulator = guarded_start_emulator
+
+        # Capture whatever makes the loop retry, so the trigger of the
+        # hazard above is persistable: an exception out of ``_setup_task``,
+        # an unsuccessful ``_setup_task`` return, a control server that
+        # never answered (``ensure_ready`` False), or a failed proxy setup
+        # all leave ``is_environment_used`` set the same way.
+        setup_task = getattr(env, "_setup_task", None)
+        if callable(setup_task):
+
+            def tracked_setup_task(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    outcome = setup_task(*args, **kwargs)
+                except Exception as error:
+                    self._record_reset_setup_failure(f"{type(error).__name__}: {error}")
+                    raise
+                if isinstance(outcome, tuple) and outcome and not outcome[0]:
+                    self._record_reset_setup_failure("_setup_task reported an unsuccessful setup")
+                return outcome
+
+            env._setup_task = tracked_setup_task
+
+        setup_controller = getattr(env, "setup_controller", None)
+        if setup_controller is not None:
+            for name, label in (
+                ("ensure_ready", "the guest control server was not ready"),
+                ("_proxy_setup", "proxy setup failed"),
+            ):
+                original = getattr(setup_controller, name, None)
+                if callable(original):
+                    setattr(
+                        setup_controller,
+                        name,
+                        self._track_controller_result(original, label),
+                    )
+
+    def _reset_retry_in_flight(self) -> bool:
+        """True while the FIRST ``env.reset`` of this env is still running.
+
+        The discrimination the guarded revert needs, in one sentence: a loop
+        retrying its first setup has nothing to revert TO -- no reset has
+        completed (so no step is reachable; steps only happen after reset
+        returns) and no setup has succeeded -- while a revert of a genuinely
+        used environment always follows a completed reset or runs outside
+        one. ``_reset_completed`` closes the window the moment reset
+        returns.
+        """
+
+        return self._reset_in_flight and not self._reset_completed
+
+    def _record_reset_setup_failure(self, failure: str) -> None:
+        """Keep the FIRST setup failure of the in-flight reset.
+
+        First, not last: the loop's final error already names the last
+        failure, and the first is the one nothing else records -- it is the
+        trigger the retry exists to survive, and the fact a reader needs to
+        tell a transient hiccup from a persistent fault.
+        """
+
+        if self._reset_in_flight and self._reset_first_failure is None:
+            self._reset_first_failure = failure
+
+    def _track_controller_result(
+        self, original: Callable[..., Any], label: str
+    ) -> Callable[..., Any]:
+        """Wrap a ``SetupController`` result so a ``False`` is recorded.
+
+        The loop's non-raising continue paths (``ensure_ready`` and
+        ``_proxy_setup`` returning False) leave ``is_environment_used`` set
+        exactly as a raised setup error does, so they are equally good
+        triggers of the sealed revert and would otherwise stay invisible.
+        """
+
+        def tracked(*args: Any, **kwargs: Any) -> Any:
+            result = original(*args, **kwargs)
+            if result is False:
+                self._record_reset_setup_failure(label)
+            return result
+
+        return tracked
+
+    def _note_retry_skip(self, name: str) -> None:
+        """Record one sealed call skipped for the retry's sake."""
+
+        logger.warning(
+            "upstream reset is retrying its first setup; skipping %s instead of "
+            "dying on the sealed revert. The environment is this adapter's own "
+            "tagged instance with no completed setup to revert to, so the retry "
+            "re-runs setup on it. First failure: %s",
+            name,
+            self._reset_first_failure or "not captured",
+        )
+
+    def _enrich_reset_failure(self, error: Exception) -> None:
+        """Attach the first setup attempt's failure to the reset's error.
+
+        ``reset`` raising after its retries already names the LAST failure;
+        without this, the FIRST -- the reason the loop was retrying at all --
+        would survive only in ``_reset_first_failure`` and the skip log. The
+        message is rewritten through ``args``, the one surface every
+        exception accepts: the class, the traceback and the cause chain (the
+        parts the wire diagnostic renders) all stay intact.
+        """
+
+        note = self._reset_first_failure
+        if note is None or note in str(error):
+            return
+        try:
+            error.args = (
+                f"{error} [first reset setup attempt failed with: {note}]",
+                *error.args[1:],
+            )
+        except Exception:  # pragma: no cover - ``args`` accepts any tuple
+            logger.exception("could not attach the first setup failure to %r", error)
 
     # ------------------------------------------------------------------
     # episode I/O
