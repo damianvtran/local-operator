@@ -310,6 +310,61 @@ def test_a_verified_peer_answer_still_claims_the_peer(
     server_b.stop()
 
 
+def test_an_inbound_link_never_names_its_source_socket(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Round 2, R2-1/Q-3: the peer dialled US — routine after any restart.
+
+    An inbound link records the dialer's SOURCE socket, so that address may
+    not be published as "the peer's link runs at …" (it dies with the
+    connection), and the peer's own reachable address must not read unverified
+    merely because the peer was the dialer. The link fact — the peer is up —
+    is presented with no address at all; the ephemeral appears nowhere.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, host, port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    # The PEER is the dialer: B completes the handshake into A, so A's link
+    # records B's ephemeral source socket rather than any declared address. The
+    # endpoint edit goes in AFTER the dial, because the dial's membership sync
+    # re-writes A's copy of B's row and would drop it (the same seam the round-1
+    # link cells record).
+    inbound, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert inbound is not None, reason
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live, "127.0.0.1:1"])
+    link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001 — the one link seam
+    assert link is not None
+    ephemeral = str(link.peer_addr)
+
+    rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    # The dead sibling address keeps the report red; the peer's own address
+    # does not.
+    assert rc == 1
+    rows = {row["endpoint"]: row for row in _rows(payload, "reachability")}
+    live_row = rows[live]
+    assert live_row["ok"] is True
+    assert live_row["observed"]["outcome"] == "connected_inbound"
+    reading = readiness.reachability_reading(live_row)
+    assert "its link is live" in reading
+    assert "not identified" not in reading
+    assert "link_address" not in live_row["observed"]
+    dead_row = rows["127.0.0.1:1"]
+    assert dead_row["ok"] is False
+    assert "its link is live" in dead_row["remedies"][0]
+    # The ephemeral is nowhere in the payload: not in observed, not in the
+    # summary message, not in a remedy. (Guarded only for the theoretical
+    # port-reuse collision, where the premise — an unpinnable address — is
+    # gone and the row legitimately reads connected_link instead.)
+    if ephemeral not in (live, "127.0.0.1:1"):
+        assert ephemeral not in json.dumps(payload)
+    server_b.stop()
+
+
 # ---------------------------------------------------------------------------
 # The ask: a real answer, and the capability gate for a peer that predates it
 # ---------------------------------------------------------------------------
