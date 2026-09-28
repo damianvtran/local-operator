@@ -60,6 +60,7 @@ from local_operator.evaluation.session_arm import (
     SessionArmError,
     assert_declaration_resolved,
     declare_action_server,
+    open_episode_session,
     session_tool_names,
 )
 from local_operator.harness.types import (
@@ -148,6 +149,11 @@ def _bridge(
     observation: Observation | None = None,
     execute: Any = None,
     max_steps: int = 8,
+    record: Any = None,
+    instruction: str = "the task as stated",
+    completion_gate: bool = True,
+    completion_challenges: int = 1,
+    reply_guidance: str | None = None,
 ) -> ActionBridge:
     obs0 = observation or _observation()
     obs1 = _observation(sequence=1, text="screen B")
@@ -162,6 +168,11 @@ def _bridge(
         render=lambda observation: [TextContent(text=f"seen {observation.sequence}")],
         execute=execute or default_execute,
         max_steps=max_steps,
+        record=record,
+        instruction=instruction,
+        completion_gate=completion_gate,
+        completion_challenges=completion_challenges,
+        reply_guidance=reply_guidance,
     )
     bridge.arm(obs0)
     return bridge
@@ -306,9 +317,13 @@ class TestBridgeDiscipline:
             return await original(batch)
 
         bridge.execute = record
-        reply = await bridge.call(
-            {"actions": [{"kind": "finish", "status": "done", "reason": "complete"}]}
-        )
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "complete"}]}
+        # The first `done` claim is CHALLENGED (the session-path completion
+        # gate, see TestCompletionGate); the episode ends on the second. NEITHER
+        # claim ever reaches the adapter -- a finish mutates nothing.
+        first = await bridge.call(claim)
+        assert first["details"]["terminal"] == "completion-challenged"
+        reply = await bridge.call(claim)
         assert reply["is_error"] is False
         assert reply["details"]["terminal"] == "finish"
         assert bridge.terminal is True
@@ -353,6 +368,197 @@ class TestBridgeDiscipline:
         )
         reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert reply["is_error"] is True
+
+
+class TestCompletionGate:
+    """The session path's completion gate: one challenge, then the claim stands.
+
+    WHY THIS EXISTS. The first real-task session run (arm 1687c, task_013)
+    filled a form correctly and then called ``finish`` WITHOUT submitting it:
+    the evaluator's own state capture carried no ``form_response``, and the
+    episode scored 0 where the reply channel's identical answers scored 1.0.
+    The reply channel scored because its runner refuses a ``done`` declaration
+    ONCE (``runner/completion.py``) and re-asks the model to check the claim
+    against the screen; the session path accepted the claim immediately.
+    These tests pin the identical contract on this channel:
+
+    * the challenge fires ONCE, then every later finish is accepted -- the
+      bound is what stops a genuinely-finished model looping forever;
+    * the challenge is a refusal of the CLAIM, not a protocol error: nothing
+      moves (no step counted, no terminal set, no adapter call) and a
+      corrected action batch still executes afterwards;
+    * ``failed`` claims are never challenged (there is no completion to
+      confirm), and the gate's budget is the runner's own config knob.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_first_done_claim_is_challenged_and_nothing_moves(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[tuple[str, dict[str, Any]]] = []
+        obs = _observation()
+        bridge = _bridge(
+            tmp_path, observation=obs, record=lambda kind, payload: events.append((kind, payload))
+        )
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "filled the form"}]}
+        )
+        assert reply["is_error"] is False
+        assert reply["details"]["terminal"] == "completion-challenged"
+        text = reply["content"][0].text
+        assert "That declaration is a CLAIM" in text
+        assert "filled the form" in text
+        assert "the task as stated" in text
+        assert bridge.terminal is False
+        assert bridge.end_requested is None
+        assert bridge.steps == 0
+        assert [kind for kind, _ in events] == ["completion_challenged"]
+        assert events[0][1]["reason"] == "filled the form"
+        assert events[0][1]["observation_id"] == obs.observation_id
+
+    @pytest.mark.asyncio
+    async def test_the_second_done_claim_ends_the_episode(self, tmp_path: Path) -> None:
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        claim = {"actions": [{"kind": "finish", "status": "done", "reason": "done again"}]}
+        await bridge.call(claim)
+        second = await bridge.call(claim)
+        assert second["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+        assert bridge.end_requested == "finish"
+        # The record carries the CLAIM -- status and reason survive -- which is
+        # what the challenge (and any reader grading this finish) reasons about.
+        assert [payload for kind, payload in events if kind == "finish"] == [
+            {
+                "status": "done",
+                "reason": "done again",
+                "actions": 1,
+                "completion_challenged": True,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_action_batch_after_the_challenge_still_executes(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path)
+        await bridge.call({"actions": [{"kind": "finish", "status": "done", "reason": "early"}]})
+        executed = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
+        assert executed["is_error"] is False
+        assert bridge.steps == 1
+        # The executed batch consumed the turn's token; the turn boundary is
+        # what re-arms it (`fold`), exactly as the live loop delivers it.
+        bridge.fold(TurnEndEvent())
+        # Exactly ONE challenge per episode: the finish that follows the action
+        # ends the episode rather than repeating the challenge -- the loop this
+        # gate must not create.
+        end = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "now"}]}
+        )
+        assert end["details"]["terminal"] == "finish"
+        assert bridge.terminal is True
+
+    @pytest.mark.asyncio
+    async def test_a_failed_claim_is_never_challenged(self, tmp_path: Path) -> None:
+        events: list[tuple[str, dict[str, Any]]] = []
+        bridge = _bridge(tmp_path, record=lambda kind, payload: events.append((kind, payload)))
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "failed", "reason": "cannot finish"}]}
+        )
+        assert reply["details"]["terminal"] == "finish"
+        assert [kind for kind, _ in events] == ["finish"]
+
+    @pytest.mark.asyncio
+    async def test_the_gate_can_be_disabled_for_a_control_arm(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path, completion_gate=False)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        )
+        assert reply["details"]["terminal"] == "finish"
+
+    @pytest.mark.asyncio
+    async def test_a_zero_challenge_budget_accepts_the_first_claim(self, tmp_path: Path) -> None:
+        bridge = _bridge(tmp_path, completion_challenges=0)
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        )
+        assert reply["details"]["terminal"] == "finish"
+
+    @pytest.mark.asyncio
+    async def test_the_challenge_re_attaches_the_shown_state_and_the_channel_guidance(
+        self, tmp_path: Path
+    ) -> None:
+        from local_operator.evaluation.session_arm import CHALLENGE_REPLY_GUIDANCE
+
+        bridge = _bridge(
+            tmp_path,
+            reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name="apply_actions"),
+        )
+        reply = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        )
+        text = reply["content"][0].text
+        assert "Reply with a single `apply_actions` call" in text
+        assert "JSON batch" not in text
+        # The state the model is looking at rides WITH the challenge: the same
+        # rendered blocks, attached -- never re-rendered (the renderer appends
+        # a turn per render; a second render would duplicate the frame).
+        assert len(reply["content"]) == 2
+        assert reply["content"][1].text == "seen 0"
+
+
+def _confinement_fake_opener(installed: list[Any]) -> Any:
+    """An ``sdk.open_session`` stand-in whose session records the install."""
+
+    class _FakeSession:
+        def set_tool_confinement(self, root: Any) -> None:
+            installed.append(root)
+
+        def subscribe(self, sink: Any) -> Any:
+            del sink
+            return lambda: None
+
+    class _FakeContext:
+        async def __aenter__(self) -> Any:
+            return _FakeSession()
+
+        async def __aexit__(self, *exc: Any) -> bool:
+            del exc
+            return False
+
+    def opener(spec: Any, *, roots: Any, mode: Any) -> Any:
+        del spec, roots, mode
+        return _FakeContext()
+
+    return opener
+
+
+class TestConfinementInstall:
+    """The episode session is opened confined, before any tool call can run."""
+
+    @pytest.mark.asyncio
+    async def test_the_episode_session_is_confined_to_the_scratch(self, tmp_path: Path) -> None:
+        installed: list[Any] = []
+        scratch = tmp_path / "scratch"
+        handle = await open_episode_session(
+            spec=SessionSpec(),
+            roots=_roots_free(),
+            session_opener=_confinement_fake_opener(installed),
+            confinement_root=scratch,
+        )
+        # Installed BEFORE the sink and the first prompt: the session rebuilds
+        # its tool context per turn, so this call is the earliest point at
+        # which no tool call can run against an unconfined context.
+        assert installed == [scratch]
+        assert handle.session is not None
+
+    @pytest.mark.asyncio
+    async def test_no_confinement_root_installs_nothing(self, tmp_path: Path) -> None:
+        installed: list[Any] = []
+        await open_episode_session(
+            spec=SessionSpec(),
+            roots=_roots_free(),
+            session_opener=_confinement_fake_opener(installed),
+        )
+        assert installed == []
 
 
 class TestMcpWire:

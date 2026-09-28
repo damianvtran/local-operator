@@ -416,6 +416,37 @@ async with open_session(spec, roots=roots) as session:
   episode's own turn can drive or end the run. Pinned end to end by the
   spawned whole-episode rig (``test_session_arm_script.py``) and at unit level
   in ``test_manager.py`` / ``test_launch_subagent.py``.
+- **Completion gate on the session path (landed 2026-09-28).** The reply
+  channel's completion challenge (``runner/completion.py``: one refusal of a
+  ``done`` claim, then the claim stands) is now enforced for the session
+  channel too: the FIRST ``done`` claim on ``ActionBridge`` is refused with the
+  shared challenge text (``provider_client.build_completion_challenge``, whose
+  reply sentence is the one channel-specific parameter) and every later finish
+  is accepted, so the gate cannot loop. Found by the first real-task probe run:
+  arm 1687c's task_013 filled the form correctly and called ``finish`` without
+  submitting -- binary 0 through the session channel where the reply arm's
+  identical answers scored 1.0 through exactly this gate. The record now
+  carries the claim's ``status``/``reason`` (previously an action count alone)
+  plus an ``action_completion_challenged`` event per challenge, and both arms
+  share the driver's ``--completion-gate``/``--completion-challenges`` knobs.
+  Pinned by ``test_session_arm.py`` (unit) and the spawned rig
+  (``test_session_arm_script.py``, incl. the challenge→corrective-action→
+  re-declare rescue shape).
+- **Episode tool confinement (landed 2026-09-28).** A session opened by the
+  episode arm is confined to the run's scratch:
+  ``Session.set_tool_confinement(scratch_root)`` installs it before the first
+  prompt, ``task`` children copy it, and every local tool's enforcement point
+  reads the one answer (``ToolContext.confinement_root``). The shell's
+  children run under a macOS seatbelt profile (reads allowlisted to the root +
+  system machinery + ancestor metadata; writes to the root + null devices;
+  default deny), the file tools refuse paths that resolve outside, and hosts
+  with no mechanism refuse the shell outright rather than run it unwrapped.
+  Measured need: the same probe run read a task input with
+  ``find /Users/damian/worktrees/osworld ...`` + ``pdftotext .../gated/assets/``
+  -- the apparatus tree, outside the episode. ``eval``/``lsp`` refuse under
+  confinement (their reach is not filesystem-checkable in-process);
+  ``local_operator/tools/confinement.py`` states the remaining holes
+  (metadata probes, network, Mach services, host-capability surfaces).
 - The reply-channel arm is UNCHANGED and remains the default (design §5's
   not-to-be-moved list); the session arm writes a PILOT record and is not
   comparable to reply-arm results.

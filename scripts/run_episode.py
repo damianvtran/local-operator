@@ -1155,6 +1155,14 @@ async def _run_session_arm(
         secrets=resolved,
         display_name=f"arm-{spec.episode_id}",
         max_wall_s=args.session_wall_s,
+        # The episode's tools are confined to the run's scratch: an episode runs
+        # a real session on the HOST, and without this its shell and file tools
+        # reach the operator's whole filesystem -- measured 2026-09-28: an
+        # episode's model ran `find /Users/damian/worktrees/osworld ...` and
+        # read a task input out of the apparatus's gated assets. See
+        # ``local_operator.tools.confinement`` for the boundary and its stated
+        # residual holes; reversal is deleting this one argument.
+        confinement_root=scratch_root,
     )
     print(json.dumps(_session_outcome_json(outcome), indent=2, sort_keys=True))
     diagnostic = outcome.diagnostic or ""

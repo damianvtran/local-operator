@@ -1028,6 +1028,14 @@ class ToolContext(BaseModel):
     #: the class of bug ``tests/unit/session/test_tool_context_parity.py``
     #: exists to catch.
     scratchpad_dir: str | None = None
+    #: The root this session's LOCAL tools are confined to (its episode/main
+    #: scratch), or ``None`` on an unconfined session. Set by
+    #: ``Session.set_tool_confinement`` and carried into every tool call so the
+    #: enforcement points -- the shell spawn, the path readers -- consult ONE
+    #: answer instead of each re-deriving it. What a confined session's tools
+    #: may reach, and what the boundary explicitly does not cover, is stated in
+    #: ``local_operator.tools.confinement``.
+    confinement_root: str | None = None
     #: This session's own DIRECTORY on disk (``.../sessions/<id>``), absolute,
     #: or ``None`` wherever ``scratchpad_dir`` is ``None`` (agent directories
     #: are exported wholesale and stay free of runtime files). Its one consumer

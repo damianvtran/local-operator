@@ -2270,6 +2270,12 @@ async def _construct_child_session(
         yolo=False,
         has_ui=parent_session._has_ui,
         cwd=cwd,
+        # The parent's confinement, when it has one: a child runs the same
+        # local tools against the same host, so a child that was NOT confined
+        # would be the bypass the boundary must not have (`task` is in the
+        # default surface). Copied at construction because the child rebuilds
+        # its tool context per turn and never re-reads the parent.
+        confinement_root=getattr(parent_session, "_confinement_root", None),
         request_approval=request_approval,
         # Which job the child's approvals belong to, so a host can scope a
         # denial to the work that provoked it. Reaches the executor through
