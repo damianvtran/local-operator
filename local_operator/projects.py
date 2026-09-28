@@ -1457,6 +1457,40 @@ class ProjectRegistry:
             except OSError:  # pragma: no cover - best-effort reclaim
                 continue
 
+    def _row_references_paths(self, project_id: str, paths: Sequence[str]) -> bool:
+        """True when the ON-DISK row references any of ``paths``.
+
+        Used by ``update_project``'s take-back guard to tell a failure raised
+        BEFORE the row replace (nothing references the new files — take them
+        back) from one raised AFTER it: ``_save_project_locked`` keeps the
+        just-replaced bytes when the follow-up directory fsync fails, and the
+        file policy must mirror the row policy — unlinking here would leave a
+        live row pointing at a deleted file (agent review round 2, F3). The
+        disk artifact is the ground truth for "did the replace stand", so the
+        check reads it rather than trusting a flag through the call. An
+        unreadable or unparseable row reads as True: keeping a file can at
+        worst leak, while unlinking one a landed row points at corrupts.
+        """
+        wanted = {str(path) for path in paths}
+        if not wanted:
+            return False
+        try:
+            payload = json.loads(
+                (self.projects_dir / f"{validate_project_id(project_id)}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, ValueError):
+            return True
+        entries = payload.get("updates") if isinstance(payload, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            for attachment in entry.get("attachments") or []:
+                if isinstance(attachment, dict) and str(attachment.get("path") or "") in wanted:
+                    return True
+        return False
+
     def create_project(
         self,
         fields: ProjectEdit,
@@ -1663,11 +1697,23 @@ class ProjectRegistry:
                 candidate.updated_at = now
                 saved = self._save_project_locked(candidate)
             except BaseException:
-                # A refusal on THIS call's path (name conflict, schema guard,
-                # validation) must take back the files it already copied: an
-                # orphaned copy has no entry to point at it (agent review
-                # round 1, F1).
-                self._reclaim_attachment_files(attachment.path for attachment in stored_attachments)
+                # A refusal raised BEFORE the row replace (name conflict,
+                # schema guard, validation, a write that never published) must
+                # take back the files this call already copied: an orphaned
+                # copy has no entry to point at it (agent review round 1, F1).
+                # AFTER the replace the file policy MIRRORS the row policy:
+                # ``_save_project_locked`` deliberately keeps the just-replaced
+                # bytes when the follow-up directory fsync fails, so the files
+                # those bytes reference must be kept with them — unlinking
+                # would leave a live row pointing at a deleted file (agent
+                # review round 2, F3). "The replace stood" is read from disk,
+                # the artifact the decision is about.
+                if stored_attachments and not self._row_references_paths(
+                    project_id, [attachment.path for attachment in stored_attachments]
+                ):
+                    self._reclaim_attachment_files(
+                        attachment.path for attachment in stored_attachments
+                    )
                 raise
             for evicted in evicted_entries:
                 self._reclaim_attachment_files(a.path for a in evicted.attachments)

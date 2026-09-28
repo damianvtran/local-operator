@@ -964,3 +964,45 @@ def test_a_midcopy_failure_reclaims_the_copies_already_made(store, tmp_path, mon
     folder = store.projects_dir / "attachments" / project.id
     assert not (folder.exists() and any(folder.iterdir()))
     assert store.get_project(project.id).updates == []
+
+
+def test_a_post_replace_failure_keeps_the_rows_files(store, tmp_path, monkeypatch) -> None:
+    """F3: once the row replace lands, the file policy mirrors the row policy.
+
+    ``_save_project_locked`` keeps the just-replaced bytes when the follow-up
+    directory fsync fails; the take-back must not run past that point, or the
+    live row would point at a deleted file.
+    """
+    import local_operator.projects as projects_module
+
+    project = create(store)
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"x" * 32)
+    calls = {"count": 0}
+
+    def flaky(path):
+        calls["count"] += 1
+        raise OSError("EIO: simulated directory fsync failure")
+
+    monkeypatch.setattr(projects_module, "_fsync_dir", flaky)
+    with pytest.raises(OSError):
+        store.update_project(
+            project.id,
+            ProjectEdit(progress="newest"),
+            reporter=SESSION_A,
+            attachments=[shot],
+        )
+
+    # The simulated failure fired on the post-replace directory fsync...
+    assert calls["count"] >= 1
+    # ...and the row that replace landed must keep its files.
+    payload = json.loads((store.projects_dir / f"{project.id}.json").read_text())
+    stored_paths = [
+        attachment["path"]
+        for entry in payload["updates"]
+        for attachment in entry.get("attachments") or []
+    ]
+    assert stored_paths
+    assert all(Path(path).exists() for path in stored_paths)
+    # The store converges to the landed row on a fresh read.
+    assert store.get_project(project.id).updates[-1].text == "newest"

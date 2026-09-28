@@ -808,3 +808,17 @@ def test_the_cap_note_disappears_when_nothing_is_left_hidden() -> None:
     assert position is not None
     assert position[1] == 2 + 4 * BOARD_CARDS_MAX
     assert f"p{selected_index:02d}" in canvas.splitlines()[position[1]]
+
+
+def test_board_key_budget_counts_the_marker_column() -> None:
+    """D5: the two marker cells share the name cell, so `label (key)` has 29."""
+    from local_operator.tui.projects_render import cell_len
+
+    kept = _view("keeptest", title="A" * 18)
+    shed = _view("shedtest", title="B" * 19)
+    assert cell_len("A" * 18 + " (keeptest)") == 29
+    assert cell_len("B" * 19 + " (shedtest)") == 30
+    plain = render_project_board([kept, shed], now=NOW).text.plain
+    assert "A" * 18 + " (keeptest)" in plain  # exactly the budget: key kept
+    assert " (shedtest)" not in plain  # one past it: the title wins alone
+    assert "B" * 19 in plain

@@ -444,11 +444,15 @@ def _card_lines(
     label = display_name(project) or "(unnamed)"
     name.append(label)
     key = str(project.get("name") or "")
-    if project.get("title") and key and cell_len(f"{label} ({key})") <= BOARD_COLUMN_WIDTH - 1:
+    if project.get("title") and key and 2 + cell_len(f"{label} ({key})") <= BOARD_COLUMN_WIDTH - 1:
         # The key joins the title only when the fixed 32-cell column can hold
-        # BOTH: cards truncate at the column edge, and a half-drawn ``(key``
-        # reads as corruption. Title wins otherwise; the key stays recoverable
-        # in the footer/detail.
+        # BOTH — and the two-cell marker column is painted FIRST, so the budget
+        # for ``label (key)`` is BOARD_COLUMN_WIDTH - 3 (31 cells minus the two
+        # markers), the same shape as the timeline's ``- 2``. Without the
+        # marker term a 30-31-cell ``label (key)`` passed this check and then
+        # clipped the key mid-token at the cell edge, which the rule's own
+        # comment names as corruption (design review round 2, D5). Title wins
+        # otherwise; the key stays recoverable in the footer/detail.
         name.append(f" ({key})", style=style_for("dim"))
     facts = Text(no_wrap=True)
     bits: list[str] = []
