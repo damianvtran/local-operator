@@ -50,10 +50,12 @@ from local_operator.tui.projects_render import (
     RenderResult,
     aggregate_footer,
     auto_timeline_tier,
+    board_position,
     detail_footer,
     render_project_board,
     render_project_list,
     render_project_timeline,
+    timeline_position,
     timeline_span,
 )
 from local_operator.tui.widgets.subagent_view import READ_ONLY_NOTE, HintButton
@@ -104,6 +106,10 @@ def _style_resolver() -> Callable[[str], Style]:
         "status_done": Style(color=color("muted")),
         "status_archived": Style(color=color("dim")),
         "cursor": Style(color=color("accent"), bold=True),
+        # The session's own projects carry `◆` in the row's leading column
+        # (S3b): the accent without the cursor's bold, so `▸` still owns the
+        # glyph where both apply — the marker column costs no width either way.
+        "session": Style(color=color("accent")),
         "dim": Style(color=color("dim")),
         # A live session is the accent-of-success: the one fact the page exists
         # to surface ("what is actually running?").
@@ -124,6 +130,28 @@ def _style_resolver() -> Callable[[str], Style]:
     return resolve
 
 
+class ProjectsViewJumpRequested(Message):
+    """``↵`` on the selected project: open its conversation (S3b).
+
+    Carries the project's name and its linked sessions (id + state, a stale
+    link as ``missing``) so the host can choose a live one — or say honestly
+    what exists — without re-reading the store for one keystroke. The page
+    never touches session machinery its host owns; it asks.
+    """
+
+    def __init__(
+        self,
+        *,
+        project_id: str,
+        project_name: str,
+        sessions: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.project_name = project_name
+        self.sessions = sessions
+
+
 class ProjectsView(Vertical):
     """The page: a title, a rule, the scrollable canvas, the detail footer, hints.
 
@@ -137,8 +165,10 @@ class ProjectsView(Vertical):
     # Arrows CLAMP — this is the full-page mode AGENTS.md names as the second
     # member of the clamp exception (`/settings` is the first): its list is
     # several times its viewport, so the bottom is a destination, not a place
-    # to wrap away from. In the list view up/down move the CURSOR (clamped);
-    # in the board/timeline views they scroll the canvas. `←→` are NOT
+    # to wrap away from. In EVERY view up/down move the CURSOR (clamped, with
+    # the canvas following through the reveal — UX round 1, U2 made board and
+    # timeline selectable, not just pannable); ←/→ pan, and the page keys page
+    # the canvas. `←→` are NOT
     # view-switch keys — they belong to the canvas scroll, because a page that
     # scrolls horizontally must keep its pan axis (the settings PANE-cycle
     # convention does not transfer). Shift+arrows page horizontally and
@@ -158,6 +188,9 @@ class ProjectsView(Vertical):
         Binding("down", "down", "Down", show=False),
         Binding("left", "scroll_left", "Scroll left", show=False),
         Binding("right", "scroll_right", "Scroll right", show=False),
+        # The page keys still PAGE the canvas in board/timeline: with ↑/↓ on the
+        # selection, a reader who wants to read further without moving `↵`'s
+        # target reaches for these.
         Binding("pageup", "page_up", "Page up", show=False),
         Binding("pagedown", "page_down", "Page down", show=False),
         Binding("shift+left", "page_left", "Page left", show=False),
@@ -167,6 +200,9 @@ class ProjectsView(Vertical):
         # Textual's scroll_end reaches the bottom-LEFT, not the right edge).
         Binding("home", "scroll_home", "To start", show=False),
         Binding("end", "scroll_end", "To end", show=False),
+        # `↵` opens the SELECTED project's conversation (S3b) — the one action
+        # that reaches outside the page, and the same key in every view.
+        Binding("enter", "jump", "Open", show=False),
         Binding("escape", "leave", "Back", show=False),
     ]
 
@@ -175,6 +211,11 @@ class ProjectsView(Vertical):
         #: The composed project views (``build_project_view`` payloads), handed
         #: in by the app. Held so view/zoom/cursor repaints never re-read.
         self._views: list[dict[str, Any]] = []
+        #: Project ids the CALLING session is linked to (S3b): their rows/cards/
+        #: rows get the `◆` marker and the title names the set. Empty on the
+        #: all-projects entries (bare `board`/`timeline`, and the nameless
+        #: `show` of a session with no links).
+        self._associated: frozenset[str] = frozenset()
         #: Current view type, the list cursor (list view only; clamped), the
         #: timeline tier, and the one-clock "updated at" the title states.
         self._view: str = "list"
@@ -202,6 +243,15 @@ class ProjectsView(Vertical):
         # and disappeared would move the body on every view switch).
         self._detail = Static(classes="projects-view-detail")
         self._scroll_hint = HintButton("↔↕", self._focus_canvas)
+        # `↵` opens the selected project's conversation (S3b). The rung is a
+        # pure addition to the BOARD's ladder — ` · ↵  open` = 10 cells (key +
+        # label + seam) — and sheds first, ahead of `r refresh`. On the
+        # TIMELINE it defers `+/- zoom`: the with-open+zoom plan measures 101
+        # cells, so zoom flips back at 107 terminal columns (absent at 106,
+        # avail 100; present at 107, avail 101 — this harness) where it used to
+        # return at ~97 (open outranks zoom in `all_leads` — the recorded
+        # trade; review rounds 2 R2-2b and 3 R3-1).
+        self._open_hint = HintButton("↵", lambda: self.action_jump())
         self._list_hint = HintButton("1", lambda: self.action_show_list())
         self._board_hint = HintButton("2", lambda: self.action_show_board())
         self._timeline_hint = HintButton("3", lambda: self.action_show_timeline())
@@ -219,25 +269,53 @@ class ProjectsView(Vertical):
         views: list[dict[str, Any]],
         highlight: str | None = None,
         updated_at: float | None = None,
+        view: str | None = None,
+        associated: frozenset[str] | None = None,
     ) -> None:
         """Point the page at a fresh composition and paint it.
 
         ``highlight`` names a project id to put the list cursor on (``/project
         show <name>`` lands here); left ``None`` the cursor is KEPT — a refresh
-        must not move the reader off the row they were reading.
+        must not move the reader off the row they were reading. ``view`` opens
+        a named canvas directly (``/project board`` and ``/project timeline``,
+        which do not force the list), and ``associated`` marks the calling
+        session's own project ids with ``◆`` (the nameless ``/project show``;
+        S3b) — the title says whose set it is, and a load CARRYING a set seeds
+        the cursor onto it (an entry), while one that carries none (a refresh)
+        never moves the reader.
         """
         self._views = list(views)
+        if associated is not None:
+            self._associated = frozenset(str(pid) for pid in associated)
+            if self._associated:
+                # The caller's own set seeds the SELECTION (UX round 1, U1):
+                # the nameless entry's one action (`↵`) must aim at a MEMBER,
+                # and with several links the cursor otherwise stayed on row 0
+                # — a project the reader has no link to. A reader already
+                # inside their set keeps their row. The seed rides the load
+                # that SPECIFIES a set: a refresh passes none (it must not move
+                # the reader — R2-3), and an entry naming no set has nothing
+                # to seed from.
+                if self.current_project_id() not in self._associated:
+                    for index, view_row in enumerate(self._views):
+                        project = view_row.get("project") if isinstance(view_row, dict) else None
+                        if isinstance(project, dict) and str(project.get("id")) in self._associated:
+                            self._cursor = index
+                            break
         if updated_at is not None:
             self._updated_at = updated_at
+        if view is not None and view in VIEWS:
+            self._view = view
         if highlight is not None:
-            for index, view in enumerate(self._views):
-                project = view.get("project") if isinstance(view, dict) else None
+            for index, view_row in enumerate(self._views):
+                project = view_row.get("project") if isinstance(view_row, dict) else None
                 if isinstance(project, dict) and str(project.get("id")) == str(highlight):
                     self._cursor = index
                     break
-            if self._view != "list":
-                # The cursor only exists on the list canvas; showing a project
-                # means being ABLE to see it, so a `show` lands on the list.
+            if view is None and self._view != "list":
+                # The cursor only exists on the list canvas; a NAMED `show`
+                # means being able to see it, so it lands on the list. A
+                # requested `view` (the board/timeline entries) outranks that.
                 self._view = "list"
         self._cursor = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
         if self._view == "timeline":
@@ -316,12 +394,24 @@ class ProjectsView(Vertical):
         """
         resolver = _style_resolver()
         if self._view == "board":
-            return render_project_board(self._views, style_for=resolver)
+            return render_project_board(
+                self._views,
+                cursor=self._cursor if self._views else None,
+                associated=self._associated,
+                style_for=resolver,
+            )
         if self._view == "timeline":
-            return render_project_timeline(self._views, tier=self._tier, style_for=resolver)
+            return render_project_timeline(
+                self._views,
+                tier=self._tier,
+                cursor=self._cursor if self._views else None,
+                associated=self._associated,
+                style_for=resolver,
+            )
         return render_project_list(
             self._views,
             cursor=self._cursor if self._views else None,
+            associated=self._associated,
             style_for=resolver,
         )
 
@@ -345,20 +435,43 @@ class ProjectsView(Vertical):
     def _paint_chrome(self) -> None:
         muted = Style(color=theme_mod.semantic_color("muted"))
         dim = Style(color=theme_mod.semantic_color("dim"))
-        title = Text(no_wrap=True, overflow="ellipsis")
-        title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
-        title.append(f" · {self._view}", style=muted)
-        tracked = len(self._views)
-        title.append(f" · {tracked} tracked", style=dim)
-        if self._view == "timeline":
-            # The tier is always stated so an auto-chosen axis explains itself
-            # (the org chart's tier-title rule).
-            title.append(f" · zoom: {self._tier}", style=dim)
-        if self._updated_at is not None:
-            import time as _time
+        # The nameless entry's set (S3b): whose projects the `◆` markers are,
+        # and how many. It SHEDS FIRST when the title cannot hold the whole
+        # line (design round 1, D2; round 2 extended the ladder to the
+        # timeline's `zoom:` clause, D6): the title Static clips silently —
+        # Rich's `overflow="ellipsis"` is inert on it — so the newest clauses
+        # yield rather than letting `tracked`/`updated` be cut with no `…`.
+        set_clause = f" · this session ({len(self._associated)})" if self._associated else None
 
-            stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
-            title.append(f" · updated {stamp}", style=dim)
+        def build_title(*, with_set: bool, with_zoom: bool = True) -> Text:
+            title = Text(no_wrap=True, overflow="ellipsis")
+            title.append("projects", style=Style(color=theme_mod.semantic_color("fg"), bold=True))
+            title.append(f" · {self._view}", style=muted)
+            if with_set and set_clause:
+                title.append(set_clause, style=muted)
+            tracked = len(self._views)
+            title.append(f" · {tracked} tracked", style=dim)
+            if with_zoom and self._view == "timeline":
+                # The tier is always stated so an auto-chosen axis explains
+                # itself (the org chart's tier-title rule) — until the row
+                # cannot hold it, which was the pre-existing 60-col clip D6.
+                title.append(f" · zoom: {self._tier}", style=dim)
+            if self._updated_at is not None:
+                import time as _time
+
+                stamp = _time.strftime("%H:%M", _time.localtime(self._updated_at))
+                title.append(f" · updated {stamp}", style=dim)
+            return title
+
+        from rich.cells import cell_len
+
+        title = build_title(with_set=True)
+        available = self._title.content_size.width or self._title.size.width
+        if available and cell_len(title.plain) > available:
+            if set_clause is not None:
+                title = build_title(with_set=False)
+            if cell_len(title.plain) > available and self._view == "timeline":
+                title = build_title(with_set=False, with_zoom=False)
         self._title.update(title)
 
         width = max(self.size.width - 2, 1)
@@ -411,6 +524,7 @@ class ProjectsView(Vertical):
         board_hint = (self._board_hint, " board", True)
         timeline_hint = (self._timeline_hint, " timeline", True)
         refresh = (self._refresh_hint, " refresh", True)
+        open_hint = (self._open_hint, " open", True)
         nxt = (self._next_hint, " next", True)
         # `+/-` is TIME zoom: it acts only on the timeline, and a hinted key
         # that changes nothing is worse than an absent one (the org chart's own
@@ -435,11 +549,24 @@ class ProjectsView(Vertical):
                 )
             ]
 
-        all_leads = leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, zoom)
+        all_leads = leads_of(
+            scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint, zoom
+        )
         rungs: list[tuple[list[tuple[HintButton, str, bool]], str]] = [
             rung(all_leads, "back to conversation", state=True),
             rung(all_leads, "back to conversation", state=False),
             rung(all_leads, "back", state=False),
+            rung(
+                leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh, open_hint),
+                "back",
+                state=False,
+            ),
+            # `↵ open` sheds HERE, before `r refresh` in the RUNG ORDER. The
+            # measured boundaries (terminal columns, this harness): `scroll`
+            # returns at 72, `refresh` at 85, `open` at 95; at 60 all three are
+            # absent and the row is `1 list · 2 board · 3 timeline · v next ·
+            # esc back` (review round 2 R2-2a corrected the earlier claim that
+            # 60 keeps the refresher).
             rung(
                 leads_of(scroll, list_hint, board_hint, timeline_hint, nxt, refresh),
                 "back",
@@ -481,6 +608,7 @@ class ProjectsView(Vertical):
             self._timeline_hint,
             self._next_hint,
             self._refresh_hint,
+            self._open_hint,
             self._zoom_hint,
             self._exit_hint,
             self._state_hint,
@@ -512,6 +640,7 @@ class ProjectsView(Vertical):
             yield self._timeline_hint
             yield self._next_hint
             yield self._refresh_hint
+            yield self._open_hint
             yield self._zoom_hint
             yield self._exit_hint
             yield self._state_hint
@@ -545,6 +674,9 @@ class ProjectsView(Vertical):
         finding 8: the hint lit on hover on a canvas that could not scroll).
         """
         self._scroll_hint.set_actionable(self._body.max_scroll_x > 0 or self._body.max_scroll_y > 0)
+        # `↵ open` needs an object: on an empty store there is nothing to open
+        # and the hint stops offering itself (the same rule as the arrows).
+        self._open_hint.set_actionable(bool(self._views))
 
     # -- geometry probes (for tests / visual validation) --------------------
     @property
@@ -605,9 +737,17 @@ class ProjectsView(Vertical):
             # (`_choose_tier`).
             self._tier = self._choose_tier()
         # The canvas is a different shape now; start the reader at its origin
-        # rather than at a scroll offset computed for the previous canvas.
+        # rather than at a scroll offset computed for the previous canvas —
+        # then reveal the SELECTION, so the canvas opens on the card/row `↵`
+        # would act on (S3b; with the default cursor at row 0 both land on the
+        # origin, as before). The reveal runs NOW and again once the new
+        # layout lands: the limits read on the first call still belong to the
+        # canvas being left, and nothing re-ran it before (QA round 1, Q1 — a
+        # switch left the selection off-screen at every size).
         self._body.scroll_to(x=0, y=0, animate=False)
         self._repaint()
+        self._scroll_cursor_into_view()
+        self.call_after_refresh(self._scroll_cursor_into_view)
 
     def action_show_list(self) -> None:
         self._set_view("list")
@@ -620,6 +760,48 @@ class ProjectsView(Vertical):
 
     def action_cycle_view(self) -> None:
         self._set_view(VIEWS[(VIEWS.index(self._view) + 1) % len(VIEWS)])
+
+    def action_jump(self) -> None:
+        """``↵``: ask the host to open the selected project's conversation.
+
+        The selection is the page's ONE cursor — the row the list paints `▸`
+        on and the card/row the other canvases mark — so the key means the
+        same thing in every view (S3b). The message carries each linked
+        session with its state, and the HOST decides: a live one is switched
+        to through the existing session machinery, and anything less is named
+        honestly. The page does not guess, and never opens a session itself.
+        """
+        if not (0 <= self._cursor < len(self._views)):
+            return
+        view_row = self._views[self._cursor]
+        project_value = view_row.get("project") if isinstance(view_row, dict) else None
+        project = project_value if isinstance(project_value, dict) else {}
+        sessions: list[tuple[str, str]] = []
+        rows = view_row.get("sessions")
+        for session_row in rows if isinstance(rows, list) else []:
+            if not isinstance(session_row, dict):
+                continue
+            session_id = str(session_row.get("session_id") or "")
+            if not session_id:
+                continue
+            if session_row.get("exists") is False:
+                # The RECEIPT's word, deliberately: a link whose directory is
+                # gone reads `missing` on every surface, so `↵` must not say
+                # `[stopped]` about the same link (QA round 1, Q2 — the
+                # composed row carries state `stopped` for a record-less link,
+                # which made the old branch unreachable).
+                sessions.append((session_id, "missing"))
+                continue
+            runtime_value = session_row.get("runtime")
+            runtime = runtime_value if isinstance(runtime_value, dict) else {}
+            sessions.append((session_id, str(runtime.get("state") or "stopped")))
+        self.post_message(
+            ProjectsViewJumpRequested(
+                project_id=str(project.get("id") or ""),
+                project_name=str(project.get("name") or "(unnamed)"),
+                sessions=tuple(sessions),
+            )
+        )
 
     def action_refresh(self) -> None:
         self.post_message(ProjectsViewRefreshRequested())
@@ -663,16 +845,26 @@ class ProjectsView(Vertical):
 
     # -- movement and scrolling (all CLAMP; no wrap on a canvas) ------------
     def action_up(self) -> None:
-        if self._view == "list":
-            self._move(-1)
-            return
-        self._body.scroll_up()
+        # ↑/↓ move the ONE selection in every canvas (UX round 1, U2): a rung
+        # that says `↵ open` needs an object the reader can choose, and before
+        # this the board/timeline arrows only panned — `↵` stayed aimed at
+        # whatever the list cursor happened to be, on a card often off-screen.
+        # The canvas follows the selection through the reveal; ←/→ and the
+        # page keys still pan.
+        self._move(-1)
 
     def action_down(self) -> None:
-        if self._view == "list":
-            self._move(1)
-            return
-        self._body.scroll_down()
+        self._move(1)
+
+    def current_project_id(self) -> str | None:
+        """The selected project's id, or ``None`` (the host seeds from it)."""
+        if not (0 <= self._cursor < len(self._views)):
+            return None
+        view_row = self._views[self._cursor]
+        project = view_row.get("project") if isinstance(view_row, dict) else None
+        if not isinstance(project, dict):
+            return None
+        return str(project.get("id") or "") or None
 
     def _move(self, delta: int) -> None:
         """Move the list cursor, CLAMPED, then reveal it (reveal-then-act)."""
@@ -699,27 +891,88 @@ class ProjectsView(Vertical):
             self._body.container_size.height - self._body.scrollbar_size_horizontal,
         )
 
+    def _usable_width(self) -> int:
+        """Columns the body can show — the v-scrollbar's column excluded.
+
+        The arithmetic ``_usable_height`` states, on the other axis: a reveal
+        that counts the vertical scrollbar's column can park a card under it.
+        """
+        return max(
+            0,
+            self._body.container_size.width - self._body.scrollbar_size_vertical,
+        )
+
+    def _position_for(self, index: int) -> tuple[int, int] | None:
+        """Canvas ``(x, y)`` of ``views[index]`` in the CURRENT view, or None.
+
+        The board and the timeline answer from their own renderers' position
+        helpers — one source for the painter's geometry and the reveal's, so
+        the two cannot disagree about where a card or row is; the list reveals
+        by row index and answers ``None`` here.
+        """
+        if self._view == "board":
+            return board_position(self._views, index)
+        if self._view == "timeline":
+            return timeline_position(self._views, index)
+        return None
+
     def _scroll_cursor_into_view(self) -> None:
-        """Keep the cursor row inside the scrolled viewport.
+        """Keep the SELECTION inside the scrolled viewport, in every view.
 
         The body is a ScrollableContainer around ONE painted Static, so there
         is no child widget to call ``scroll_visible`` on — the offset is
-        computed from the row index directly, against the rows the body can
-        actually show. Guarded because the container has no size until it is
-        laid out.
+        computed from the selection's own coordinates. The list reveals by row
+        index; the board and the timeline read their renderers' position
+        helpers and CLAMP the selection back to the last painted project
+        first, so `↵` never asks about a card or row no reader can see (design
+        round 1, D2's rule, applied to the other canvases; S3b). Guarded
+        because the container has no size until it is laid out.
         """
         height = self._usable_height()
-        if height <= 0:
+        width = self._usable_width()
+        if height <= 0 or width <= 0:
             return
-        offset = self._body.scroll_offset.y
-        if self._cursor < offset:
-            target = self._cursor
-        elif self._cursor >= offset + height:
-            target = self._cursor - height + 1
+        offset_x = self._body.scroll_offset.x
+        offset_y = self._body.scroll_offset.y
+        if self._view == "list":
+            x: int | None = None  # the list scrolls vertically only
+            y = self._cursor
         else:
+            position = self._position_for(self._cursor)
+            if position is None:
+                clamped = False
+                for candidate in range(self._cursor - 1, -1, -1):
+                    if self._position_for(candidate) is not None:
+                        self._cursor = candidate
+                        clamped = True
+                        position = self._position_for(candidate)
+                        break
+                if clamped:
+                    # The clamp MOVED the reader's selection: repaint, or the
+                    # clamped card/row shows no `▸` until something else
+                    # repaints (agent review round 1, MINOR 3).
+                    self._repaint()
+            if position is None:
+                return
+            x, y = position
+
+        def window(offset: int, size: int, span: int) -> int:
+            """The offset that brings ``span`` inside ``[offset, offset+size)``."""
+            if span < offset:
+                return span
+            if span >= offset + size:
+                return span - size + 1
+            return offset
+
+        target_y = max(0, min(window(offset_y, height, y), self._body.max_scroll_y))
+        target_x = (
+            offset_x
+            if x is None
+            else max(0, min(window(offset_x, width, x), self._body.max_scroll_x))
+        )
+        if (target_x, target_y) == (offset_x, offset_y):
             return
-        target = max(0, min(target, self._body.max_scroll_y))
-        self._body.scroll_to(x=self._body.scroll_offset.x, y=target, animate=False)
+        self._body.scroll_to(x=target_x, y=target_y, animate=False)
 
     def action_scroll_left(self) -> None:
         self._body.scroll_left()
