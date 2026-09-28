@@ -1072,7 +1072,16 @@ def test_an_invite_names_the_live_listener_not_only_the_records_stale_port(
     )
 
     assert f"127.0.0.1:{live_port}" in minted["hosts"], minted["hosts"]
-    assert set(minted["hosts"]) != {f"127.0.0.1:{stale_port}"}, minted["hosts"]
+    # THE PRECEDENCE THE DOCSTRING NAMES, and a claim the line above does NOT make: the
+    # record's OWN entry is kept beside the live one, because that list is also where a
+    # deliberate `--advertise-host` declaration lives. The clause this replaces — "not the
+    # stale entry alone" — could not fail where the line above passed (`stale_port` is
+    # `live_port + 17`, so a live entry already rules that singleton out) and passed where
+    # the line above failed (an empty list is not that singleton): it passed either way,
+    # which is the shape this file's own comment says it has been burned by (review round
+    # 3, MINOR). Dropping the record half of the mint fails THIS line and leaves the one
+    # above green, which is the teeth the old clause only looked like it had.
+    assert f"127.0.0.1:{stale_port}" in minted["hosts"], minted["hosts"]
 
 
 def test_an_invite_falls_back_to_the_record_when_nothing_is_detected(devices: Any) -> None:

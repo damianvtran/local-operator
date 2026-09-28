@@ -3240,8 +3240,14 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.TEXT,
         default="0.0.0.0",
         help=(
-            "Where this relay accepts connections: 127.0.0.1 = dial-only (accept "
-            "nothing), 0.0.0.0 = every interface, or one interface's address."
+            # 49 CELLS, and the number is a constraint rather than a style: the detail
+            # line is ONE row that sheds (help · clause · key → help · clause → …), and
+            # the rung that matters is `help · clause` at 80 columns — 74 cells of
+            # budget, less this row's 16-cell `default: 0.0.0.0` and the 3-cell joiner.
+            # The old 132-cell sentence was dropped WHOLE off-default, so the reader who
+            # had set a mesh address got the key path and no explanation of the field
+            # (design review round 1, D1).
+            "127.0.0.1 = dial-only; 0.0.0.0 = all; or one address."
         ),
     ),
     # INT with the port range enforced, because the value is a socket bind and a
@@ -3257,8 +3263,10 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1,
         maximum=65535,
         help=(
-            "The port peers dial, and the one an advertised endpoint names when it "
-            "does not carry a port of its own."
+            # 48 cells: same rung and the same reason as `listen_address` above — this
+            # row's clause is 13 cells (`default: 4097`), so anything past ~55 sheds the
+            # help whole at 80 columns.
+            "The port peers dial; endpoints without one use it."
         ),
     ),
     # LIST over an OPEN namespace — deliberately no `members`. The vocabulary is
@@ -3275,11 +3283,20 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.LIST,
         default=[],
         help=(
-            "Where peers should TRY to reach this device, in this order. Empty = "
-            "the detected local addresses only; add a tunnel or public host:port "
-            "when peers cannot dial the detected one. Every entry needs its port."
+            # 58 cells, the tightest of the three rows: its clause is `default: —` (10)
+            # and the joiner is 3, against 74 at 80 columns — 3 cells of slack, and no
+            # more, because the rung below (`clause · key`) drops the help ENTIRELY.
+            # THE PORT RULE IS THE PART THAT MUST SURVIVE: `config edit` refuses a bare
+            # address with exactly that rule, so a reader who never sees the help learns
+            # it only by failing. The 204-cell sentence it replaces never rendered its
+            # last sentence at ANY usable width, not even 200 columns (design review
+            # round 1, D1).
+            "Empty = detected. Others: host:port, e.g. 203.0.113.7:4097"
         ),
-        placeholder="tunnel.example.com:4100, 203.0.113.7:4097",
+        # THE BARE ADDRESS LEADS. The ghost clips rather than wraps, and the example a
+        # reader most needs is the one that shows an address WITH its port; the hostname
+        # example it used to lead with ate the row and hid this one (design round 1, D4).
+        placeholder="203.0.113.7:4097, tunnel.example.com:4100",
         empty_unsets=True,
         validate_value=_validate_advertise_hosts,
     ),
