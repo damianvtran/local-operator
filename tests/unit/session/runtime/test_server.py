@@ -4366,6 +4366,34 @@ async def test_a_long_reasoning_stream_still_emits_a_readable_frame() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_overflow_switch_keeps_the_receipt_with_the_caller() -> None:
+    """``drop_on_overflow=False`` must not kill the connection nor queue the frame.
+
+    The ``complete_aside`` receipt rides the same FIFO as its chunks; when the
+    queue cannot take it even after a fold (a client 64 unmergeable frames
+    behind), the caller falls back to a direct write — losing the receipt is
+    the one outcome the stream contract forbids — so the switch has to report
+    the failure and must NOT drop the client.
+    """
+    from local_operator.session.runtime.server import _EVENT_QUEUE_MAX
+
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+    # Fill the FIFO with frames no fold can touch (distinct, non-delta ops).
+    for i in range(_EVENT_QUEUE_MAX):
+        conn.event_queue.put_nowait({"op": "filler", "i": i})
+
+    receipt = {"op": "ack", "req": 1, "detail": "done", "duplicate": False}
+    assert server._enqueue_client_frame(conn, receipt, drop_on_overflow=False) is False
+    assert server.dropped == [], "the receipt path must not drop the client"
+
+    # The default arm still drops, unchanged: that is the slow reader's path.
+    assert server._enqueue_client_frame(conn, receipt) is True
+    assert server.dropped, "the default overflow arm must still drop"
+
+
+@pytest.mark.asyncio
 async def test_a_long_aside_stream_still_emits_a_readable_frame() -> None:
     """Delta-sized byte accounting has to hold for the aside family too."""
     from local_operator.session.runtime.server import _MAX_LINE_BYTES

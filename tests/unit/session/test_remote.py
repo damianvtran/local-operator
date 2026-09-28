@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -360,6 +361,21 @@ async def test_a_pre_wrapped_client_against_an_owner_that_ignores_the_flag(
         registrant.close()
 
 
+class StreamingAsideHandle(FakeHandle):
+    """An owner that streams two chunks from the session-loop thread."""
+
+    async def complete_aside(self, turns, *, on_delta=None) -> str:  # noqa: ANN001, ANN202
+        self.calls.append(("complete_aside", (turns,), {}))
+
+        def worker() -> None:
+            if on_delta is not None:
+                on_delta("part one. ")
+                on_delta("part two.")
+
+        await asyncio.to_thread(worker)
+        return "part one. part two."
+
+
 @pytest.mark.asyncio
 async def test_remote_aside_streams_the_owners_chunks_before_the_receipt(
     tmp_path: Path, monkeypatch
@@ -368,32 +384,26 @@ async def test_remote_aside_streams_the_owners_chunks_before_the_receipt(
 
     THE HANDLE HOPS TO ANOTHER THREAD, which is not decoration — every handle
     this seam serves (``ServingSessionHandle``, ``TuiSessionHandle``) runs the
-    primitive on the session's loop and not on the runtime's, and that is what
-    orders the chunks ahead of the receipt (the receipt's own hop is one step
-    later than the enqueues). An inline handle is not a production shape, so a
-    test built on one would be pinning an ordering no deployment has.
+    primitive on the session's loop and not on the runtime's. The chunks'
+    order ahead of the receipt is structural rather than a timing accident:
+    the receipt is enqueued on the same connection FIFO the sink's
+    ``call_soon_threadsafe`` callbacks fill, and the op cannot return before
+    its last ``on_delta`` has. The receipt used to be written DIRECTLY, which
+    waits on ``send_lock`` and never on the queue, so whenever the drain had
+    not reached a queued chunk the receipt went out first, the sink was gone
+    by the time the chunks arrived, and the card painted nothing until the
+    settled answer appeared — CI caught exactly that as this test's flake.
+    An inline handle is not a production shape, so a test built on one would
+    be pinning an ordering no deployment has.
 
     The ORDER is asserted, not merely the delivery: a caller that receives the
     answer first has its sink deregistered by then and would drop the chunks —
-    exactly the failure a renderer shows as "nothing streamed".
+    exactly the failure a renderer shows as "nothing streamed". The sibling
+    below (``test_aside_receipt_cannot_overtake_its_queued_chunks``) pins the
+    same property by construction instead of by racing the scheduler.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     (tmp_path / "sessions" / "s1").mkdir(parents=True)
-
-    class StreamingAsideHandle(FakeHandle):
-        """An owner that streams two chunks from the session-loop thread."""
-
-        async def complete_aside(self, turns, *, on_delta=None) -> str:  # noqa: ANN001, ANN202
-            self.calls.append(("complete_aside", (turns,), {}))
-
-            def worker() -> None:
-                if on_delta is not None:
-                    on_delta("part one. ")
-                    on_delta("part two.")
-
-            await asyncio.to_thread(worker)
-            return "part one. part two."
-
     observed: list[tuple[str, str]] = []
     handle = StreamingAsideHandle()
     registrant = RuntimeServer(handle, kind="tui")
@@ -417,6 +427,108 @@ async def test_remote_aside_streams_the_owners_chunks_before_the_receipt(
         ]
         assert remote.history() == []
     finally:
+        if remote is not None:
+            await remote.dispose()
+        registrant.close()
+
+
+class _DrainGatedServer(RuntimeServer):
+    """A runtime that can hold its chunk writes — the ordering window, built.
+
+    Frame-TYPE gated: connect-time relays (``frontend_update``) must keep
+    flowing or the attach below could not finish, so only ``aside_delta``
+    writes park, which is the state under test (the chunks are queued but
+    unwritten while the receipt is already produced). ``threading.Event``
+    rather than ``asyncio`` because ``RuntimeServer.start`` runs the runtime
+    on its own loop in its own thread while the release and the parked signal
+    come from the test's — the drain parks via ``to_thread``, so the
+    runtime's loop keeps servicing everything else meanwhile.
+    """
+
+    def __init__(self, handle: Any, *, kind: str) -> None:
+        super().__init__(handle, kind=kind)
+        self.stream_parked = threading.Event()
+        self.stream_released = threading.Event()
+
+    async def _drain_event_queue(self, conn: Any) -> None:  # type: ignore[override]
+        try:
+            while id(conn.writer) in self._clients and not self._closed.is_set():
+                frame = await conn.event_queue.get()
+                try:
+                    if frame.get("op") == "aside_delta" and not self.stream_released.is_set():
+                        self.stream_parked.set()
+                        await asyncio.to_thread(self.stream_released.wait)
+                    await self._send_to(conn, frame)
+                finally:
+                    conn.event_queue.task_done()
+                if id(conn.writer) not in self._clients:
+                    return
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if conn.event_writer_task is asyncio.current_task():
+                conn.event_writer_task = None
+
+
+@pytest.mark.asyncio
+async def test_aside_receipt_cannot_overtake_its_queued_chunks(tmp_path: Path, monkeypatch) -> None:
+    """The receipt must not resolve the request while its chunks sit unwritten.
+
+    Deterministic sibling of the test above: instead of racing the scheduler,
+    the drain is PARKED at the first ``aside_delta`` frame, so both chunks are
+    produced (and the owner op finishes) while nothing of the stream has been
+    written. A receipt written DIRECTLY then goes out inside that window: the
+    caller resolves, its sink is deregistered, and the chunks that follow are
+    dropped — the settled answer appears once, at the end, exactly as CI
+    observed this test's flake (``[('delta', 'p.... part two.')]`` against two
+    streamed chunks). A receipt on the same FIFO instead waits behind the
+    chunks, and the release below writes chunk, chunk, receipt in order.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "sessions" / "s1").mkdir(parents=True)
+    handle = StreamingAsideHandle()
+    registrant = _DrainGatedServer(handle, kind="tui")
+    registrant.start()
+    remote = None
+    try:
+        record = await _wait_record(tmp_path)
+        remote = await AttachedSession.connect(
+            record, "s1", config_dir=tmp_path, takeover_factory=_never_take_over
+        )
+        observed: list[tuple[str, str]] = []
+        request = asyncio.create_task(
+            remote.complete_aside(
+                [Message.user("Why this approach?")],
+                on_delta=lambda chunk: observed.append(("delta", chunk)),
+            )
+        )
+        for _ in range(500):
+            if registrant.stream_parked.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert registrant.stream_parked.is_set(), "the drain never reached the chunk stream"
+        # Let the owner finish while the stream is held still: a direct-write
+        # receipt resolves the caller HERE. Generous on purpose — the window
+        # can only be missed by resolving too EARLY, never by resolving late.
+        deadline = asyncio.get_running_loop().time() + 2
+        while not request.done() and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+        assert not request.done(), (
+            "the receipt overtook the held stream: the caller resolved while its "
+            "chunks were still queued, so they will be dropped on arrival"
+        )
+        registrant.stream_released.set()
+        answer = await asyncio.wait_for(request, timeout=10)
+        observed.append(("answer", answer))
+
+        assert observed == [
+            ("delta", "part one. "),
+            ("delta", "part two."),
+            ("answer", "part one. part two."),
+        ]
+        assert remote.history() == []
+    finally:
+        registrant.stream_released.set()
         if remote is not None:
             await remote.dispose()
         registrant.close()
