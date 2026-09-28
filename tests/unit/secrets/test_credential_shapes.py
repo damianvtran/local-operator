@@ -3997,12 +3997,7 @@ _PARTIAL_MASK_RESIDUAL = {
     # case. They still all fall in the "a quote cannot occur here in real output" class.
     "pem-private-key": 119,
     "gcp-service-account-value": 42,
-    # 10 → 8 with the bare-identifier refusal (weak names only): two corpus cases
-    # place a URL-shaped value under a WEAK credential name whose value is a bare
-    # identifier, so the rule no longer runs on them at all and the synthetic
-    # partial mask they used to expose cannot occur. The remaining 8 are the
-    # by-design host-and-path case, unchanged.
-    "credential-url-value": 8,
+    "credential-url-value": 10,
 }
 
 
@@ -7389,3 +7384,35 @@ def test_a_strong_name_or_a_real_shape_still_promotes(line: str, value: str) -> 
     stops the new refusal from being widened into them.
     """
     assert _promotes(line, value), f"{line!r} no longer contains {value!r}"
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        # The clause keys off a snake_case WORD. Every value below is the same
+        # alphabet, so a rule that widened back to "identifier-shaped" would
+        # release them — which is exactly what agent review round 1 (R1-1)
+        # measured: a 32-character hex key under the WEAK name `AES_KEY` came
+        # back masked=False registered=False, i.e. a real credential in the
+        # clear, and whether it escaped depended on its first character.
+        ("AES_KEY=" + "abcdef0123456789" + "abcdef0123456789",
+         "abcdef0123456789" + "abcdef0123456789"),
+        (
+            "HASH_KEY=" + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+        ("SORT_KEY=" + "aB3kL9mN2pQ7Zr4", "aB3kL9mN2pQ7Zr4"),
+    ],
+)
+def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
+    """The control that the first cut of this fix FAILED.
+
+    A weak name plus a value that is opaque — a hex digest, a mixed-case token —
+    must keep being masked and contained. The refusal is for snake_case WORDS,
+    not for everything that happens to match an identifier's alphabet, and this
+    test is what holds that line: it reds if the clause is widened.
+    """
+    assert _promotes(line, value), f"{line!r} no longer contains {value!r}"
+    scrubbed, hits = scrub_shapes_with_hits(line)
+    assert value not in scrubbed, f"{line!r} left {value!r} readable"
+    assert hits, f"{line!r} produced no hit at all"
