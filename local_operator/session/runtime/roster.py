@@ -386,15 +386,14 @@ def build_roster(
         }
     )[:FOREIGN_ROOT_LIMIT]
     for root_text in needed:
-        # NOT ``is_dir`` BY ACCIDENT: ``registry.scan`` starts at ``registry.run_dir``,
-        # which CREATES the directory it is about to read (documented for the swept
-        # root, where it is harmless because the caller owns the store). On a SIBLING
-        # root that is gone — or whose path is a file, or on a mount that has been
-        # unmounted — that mkdir either conjures a directory inside someone else's
-        # store or raises ``NotADirectoryError``, and this reader may do neither. So a
-        # foreign root is scanned only when it is a directory RIGHT NOW, and any
-        # failure below degrades to "no facts from there" rather than to an error on a
-        # roster read.
+        # NOT ``is_dir`` BY ACCIDENT, and since #1666's review round 1 (R1-1) this is
+        # DEFENCE IN DEPTH rather than the mechanism: ``registry.scan`` resolves
+        # ``run_dir`` without creating and answers ``[]`` for an absent directory, so
+        # it no longer conjures a directory inside someone else's store and no longer
+        # raises on a path that is a file. What the guard still buys is the mount case
+        # and the honesty of the call site: a foreign root is scanned only when it is a
+        # directory RIGHT NOW, and any failure below degrades to "no facts from there"
+        # rather than to an error on a roster read.
         try:
             # ``Path``, not the string: ``registry.scan`` hands its ``root`` to
             # ``run_dir``, which joins it with ``/`` (a str root is a TypeError there).

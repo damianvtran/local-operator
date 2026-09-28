@@ -85,7 +85,7 @@ async def live_owners(
         # records and the serve daemon's are one implementation now): accepted
         # and passed through so this stub keeps the real signature, while the
         # re-keying below — the reason the stub exists at all — is unchanged.
-        directory = registry.run_dir(root, dirname)
+        directory = registry.ensure_run_dir(root, dirname)
         record.heartbeat_at = time.time()
         handle, path = tempfile.mkstemp(dir=directory, prefix=".x.", suffix=".tmp")
         with os.fdopen(handle, "w") as stream:

@@ -85,19 +85,51 @@ DUPLICATE_FLAG_COUNT = 3
 
 
 def network_root(root: Path | None = None) -> Path:
-    """``<config>/network``, created 0700 on first use.
+    """``<config>/network`` — THE PATH, whether or not anything is there.
+
+    NOTHING IS CREATED HERE. It used to mkdir, which made every reader that only
+    wanted to NAME a path beneath it — a status line, a desktop route, an identity
+    read whose answer is ``None`` — the reason ``<config>/network`` appeared on a
+    machine that had never joined a network. Measured on a fresh config root:
+    ``GET /v1/desktop/commands`` reached it through ``network.store.list_networks``
+    and left both ``network/`` and ``network/networks/`` behind, so
+    ``server.utils.desktop_mesh.has_any_network`` — an ``is_dir`` probe, and honest
+    on its own — then answered that this device was in a mesh it had never joined.
+
+    So the creator is a SEPARATE FUNCTION (:func:`ensure_network_root`) rather than
+    a flag on this one: a reading call site cannot create a directory by accident,
+    and a writing one cannot forget to, because the creating spelling is visible
+    where it is spelled. The same split, for the same reason, runs through
+    ``network.store``'s four ``*_dir`` resolvers and their ``ensure_*`` twins.
 
     ``root`` exists so a test — or the QA harness running two "devices" on one
     host — can point at its own directory without monkeypatching ``HOME``. The
     default is ``paths.config_dir()``, which honours ``LOCAL_OPERATOR_CONFIG_DIR``.
     """
-    path = (root or config_dir()) / "network"
+    return (root or config_dir()) / "network"
+
+
+def ensure_network_root(root: Path | None = None) -> Path:
+    """``<config>/network``, created 0700 on first use — WRITERS ONLY.
+
+    The one spelling that brings the plane into being, and the one that repairs the
+    mode of a root an upgrade or a restored backup left at 0755 (:func:`_ensure_dir`
+    is where that repair is documented).
+    """
+    path = network_root(root)
     _ensure_dir(path)
     return path
 
 
 def identity_dir(root: Path | None = None) -> Path:
-    path = network_root(root) / "identity"
+    """``<config>/network/identity`` — the path; see :func:`network_root`."""
+    return network_root(root) / "identity"
+
+
+def ensure_identity_dir(root: Path | None = None) -> Path:
+    """``<config>/network/identity``, created 0700 down the chain — WRITERS ONLY."""
+    ensure_network_root(root)
+    path = identity_dir(root)
     _ensure_dir(path)
     return path
 
@@ -268,8 +300,15 @@ def mint(root: Path | None = None, *, name: str = "") -> DeviceIdentity:
 
 
 def save(identity: DeviceIdentity, root: Path | None = None) -> Path:
-    """Write the identity file atomically: 0600, staged, then renamed."""
+    """Write the identity file atomically: 0600, staged, then renamed.
+
+    The chain is created HERE, by the writer, so that :func:`identity_dir` — which
+    every reader uses, including the ones that answer "no identity yet" — never
+    has to. ``_staged_write``'s own ``_ensure_dir`` stays as the belt for a caller
+    that reaches it by another route.
+    """
     path = identity_path(root)
+    ensure_identity_dir(root)
     _staged_write(path, identity.to_json())
     return path
 

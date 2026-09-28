@@ -2970,7 +2970,7 @@ def test_decorate_rows_carries_the_age_the_registry_measured(tmp_path) -> None:
         control_key="k",
     )
     record.heartbeat_at = time.time() - 243
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     # Written directly: ``publish`` stamps a fresh heartbeat by design, and a
     # quiet owner is exactly one whose beat stopped arriving.
     (directory / f"{record.pid}.json").write_text(json.dumps(record.to_json()))

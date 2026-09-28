@@ -94,6 +94,16 @@ def has_any_network(root: Path | None = None) -> bool:
 
 
 def _relay_record(root: Path | None) -> Any:
+    """This install's live relay record, or ``None`` — and NOTHING is created here.
+
+    ``find_own_relay`` scans ``run/peers``, which used to mkdir it: this call made
+    ``GET /v1/desktop/networks`` create ``run/`` and ``run/peers/`` on a machine
+    that had never run a relay (review round 1, R1-1). The fix is at the SOURCE —
+    ``registry.scan`` resolves without creating and answers ``[]`` for an absent
+    directory — so this reader inherits the property rather than guarding for it,
+    which is the difference between this call site and the two in
+    ``desktop_feed`` that had to compensate by hand.
+    """
     from local_operator.network import store
 
     return store.find_own_relay(root)
