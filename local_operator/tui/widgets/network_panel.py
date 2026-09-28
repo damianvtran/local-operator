@@ -928,26 +928,37 @@ class NetworkScreen(ModalScreen[None]):
             # replaced (62 cells) did not wrap. No phrasing carrying both facts fits
             # the 62 cells that keep this block at ONE wrapping threshold, so the
             # clause went and the Relay block's own rows carry the state, as they
-            # did before. What is left is the half that is this section's subject,
-            # and it keeps its own verb (`mints`, not the Networks row's `creates`)
-            # so the two rows read as two facts rather than one instruction twice.
+            # did before. What is left is the half that is this section's subject:
+            # the state, and the command that clears it.
             #
-            # AND IT NOW FITS THE NARROWEST CARD (UX round 1, U5), so the `<name>`
-            # placeholder went: at 43 cells — what the card holds at 56x20 — this
-            # sentence is 48, and a row that wraps costs a row of an eight-row
-            # viewport on the frame where the pairing sequence has to be legible.
-            # The argument it named is not lost: the Networks row one block down IS
-            # `/network new <name>`, and the arm refuses a bare `/network new` with
-            # its own usage line rather than doing something the reader did not ask
-            # for. What stayed is the verb — the half that makes this row a
-            # different fact from the one below it.
+            # AND THAT COMMAND IS COMPLETE AS PRINTED (review round 2, R2-1). U5
+            # took the `<name>` placeholder off this row to fit the narrowest card,
+            # which left it naming `/network new` — a step whose arm is `needs=1`,
+            # so the reader who follows the row literally reads `That is not a
+            # complete /network new command`. That is the U2 defect one row up: a
+            # row that names a step, where typing the step as written does not run
+            # it. The placeholder is back, and the clause that paid for it is the
+            # verb (`mints it`), never the argument.
+            #
+            # THE BUDGET IT HAD TO FIT, measured — the window is 37..40 cells and
+            # this sentence is 37. At 56x20 the card is 43 and `_hanging_row` keeps
+            # the scrollbar's cell clear, so 40 cells are usable; a row longer than
+            # that wraps and costs a row of an eight-row viewport on the frame where
+            # the pairing sequence has to be legible (the U5 fault). At 50x18 and
+            # 40x20 the card is 39 and 30, so anything from 37 up already breaks on
+            # words there and every continuation carries the lead. Spelling the row
+            # out WITH its verb is 46 — it wraps at 56x20 — so the verb went: two
+            # `state — <command>` rows read as the one step they are, where two
+            # different verbs (`mints it` beside the Networks row's `creates one`)
+            # read as two steps. What the command MAKES is still on the frame, in
+            # the mesh tip pinned on exactly this device (`TIP_MESH`).
             #
             # HUNG as well, for the sizes below the band's floor (40x20 lays the
             # body out in ~36 cells, where nothing can fit it): a continuation at
             # column 0 read as a new row at section level — measured on the real
             # frame as `mints it` flush left under the row it belongs to.
             body.append(
-                _hanging_row("  ", "no identity yet — /network new mints it", width) + "\n",
+                _hanging_row("  ", "no identity yet — /network new <name>", width) + "\n",
                 style="yellow",
             )
         else:

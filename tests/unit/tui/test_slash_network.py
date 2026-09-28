@@ -798,8 +798,11 @@ def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
 
 #: The sizes the unpaired empty state is expected to fit WHOLE. The card is 83
 #: cells at 100x30, 81 at 98x30, 79 at 96x30, 68 at 84x16, 65 at 80x24 and 43 at
-#: 56x20, and no row of that frame is wider than 41 — the longest of them being
-#: the This-device line.
+#: 56x20, and no row of the block is wider than 40 — the longest of them being the
+#: pairing-sequence row. The This-device row held that title at 41 until review
+#: round 2's R2-1: its `<name>` placeholder came back and the `mints it` clause
+#: paid for it, which puts the row at 39 — two cells NARROWER than the incomplete
+#: wording it replaced.
 #:
 #: 56x20 IS IN THIS LIST NOW and was not before (UX round 1, U5): the block's rows
 #: were 62 and 60 cells, so every line of it wrapped at 43 — which is what put the
@@ -1021,7 +1024,7 @@ async def test_a_row_that_wraps_below_the_band_floor_keeps_its_indent() -> None:
             # teaching rows below it, which these sizes scroll off. It is read off
             # the FRAME rather than off the model, because the model is not where
             # the defect was: the row was one long line and the break was Rich's.
-            sentence = "no identity yet — /network new mints it"
+            sentence = "no identity yet — /network new <name>"
             first = next(i for i, row in enumerate(visible) if "no identity yet" in row)
             lines: list[str] = []
             for row in visible[first:]:
@@ -1045,6 +1048,83 @@ async def test_a_row_that_wraps_below_the_band_floor_keeps_its_indent() -> None:
                 size,
                 block,
             )
+
+
+@pytest.mark.asyncio
+async def test_the_first_run_rows_advice_runs_at_the_caret_that_printed_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-1: THE FIRST-RUN ROW NAMES A STEP, AND THIS RUNS IT.
+
+    WHAT THE FRAME SAID BEFORE THIS ROUND, measured on the real panel at 100x30:
+    ``no identity yet — /network new mints it``. The `new` arm is `needs=1`, so the
+    reader who followed that row literally — typing the command it names — read
+    ``That is not a complete /network new command``: the step named did not run,
+    which is U2's defect one row up. So the guard is U2's shape rather than a
+    string assertion: the row is read off the PAINTED frame, its own words are
+    handed to the real editor and the real submit handler, and the assertion is
+    what the arm did with them.
+
+    WHY THE EXECUTION HALF ALONE IS NOT ENOUGH, which is the part worth stating:
+    the `new` arm joins the WHOLE tail into the name, so a row whose command is
+    followed by prose still RUNS — it runs with the prose as the network's name
+    (measured on the pre-remediation row: its tail ``/network new mints it``
+    reaches the CLI as ``init "mints it"``). "Something ran" therefore passes on
+    the defect. The assertion that observes it is the argv: the words the row
+    prints have to BE the command, so the name the arm takes from them is the
+    row's own placeholder and nothing else. `<name>` is the family's spelling —
+    the Networks row one block down, `TIP_MESH`, and `/network new`'s own usage
+    line all print it.
+
+    NOTHING RUNS ON DISK: the first frame is a fixed `NetworkLocal` in the state
+    this row is painted in, and both `run_network` seams (the app's and the
+    panel's) are recorders — unstubbed, `/network new` starts the relay, and a
+    unit test must not leave a daemon behind. What is NOT stubbed is the path the
+    words travel: the real `/network` arm, the real editor, the real handler.
+    """
+    from local_operator.tui.widgets.network_panel import NetworkLocal, NetworkScreen
+
+    monkeypatch.setattr(
+        "local_operator.tui.widgets.network_panel.capture_local",
+        lambda root=None: NetworkLocal(
+            device_id="", device_name="", identity_present=False, relay_state=""
+        ),
+    )
+    # The panel's own worker and the app's arm call the same module, so both are
+    # redirected: one recorder would otherwise miss the calls the other makes.
+    monkeypatch.setattr(
+        "local_operator.tui.widgets.network_panel.run_network",
+        lambda args, **kwargs: NetworkRun(tuple(args), 0, stdout="", stderr=""),
+    )
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, NetworkScreen), screen
+        painted = [_row_text(row) for row in _visible_body_rows(app, screen)]
+        row = next(row for row in painted if "no identity yet" in row)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Every row of this block is `state — instruction`, so the tail is what a
+        # reader copies out of it.
+        assert "—" in row, row
+        advice = row.split("—", 1)[1].strip()
+        assert advice.startswith("/network new "), row
+        before = len(run.calls)
+        await _submit(pilot, app, advice)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        notices = "\n".join(_notices(app))
+
+    assert "not a complete /network new command" not in notices, (row, notices)
+    assert run.calls[before:] == [["init", "<name>"]], (row, run.calls[before:])
 
 
 def test_a_receipt_is_read_back_in_the_composers_spelling() -> None:
@@ -1179,7 +1259,10 @@ async def test_the_invite_arm_accepts_every_line_its_own_receipt_prints(
     tail were passed through blind — the first as the network's NAME (the defect
     this branch was filed for), the second as a dropped word — so the assertion is
     that nothing ran AND that the sentence the user reads is this family's usage
-    line rather than argparse's.
+    line rather than argparse's. The third is the same silence in the other half
+    (review round 2, R2-2): a surplus WORD ran the first name's invite and said
+    nothing about the rest, which is the accepted-and-then-dropped class the flag
+    refusal above exists for, one branch away from it.
     """
     import argparse
 
@@ -1206,7 +1289,11 @@ async def test_the_invite_arm_accepts_every_line_its_own_receipt_prints(
         # The named form: the first token that is not part of a flag pair.
         "/network invite devmesh": ["invite", "--role", "drive", "--network", "devmesh"],
     }
-    refused = ("/network invite --role", "/network invite devmesh --role admin")
+    refused = (
+        "/network invite --role",
+        "/network invite devmesh --role admin",
+        "/network invite devmesh extra",
+    )
 
     app = _app_fixture()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -1225,6 +1312,8 @@ async def test_the_invite_arm_accepts_every_line_its_own_receipt_prints(
         notices = "\n".join(_notices(app))
         assert "--role needs a value" in notices, notices
         assert "takes one network name and a leading --role" in notices, notices
+        # The surplus word's own refusal, and the one thing it must not do: run.
+        assert "devmesh extra is more than one name" in notices, notices
         assert "error: argument" not in notices, notices
 
 
