@@ -663,3 +663,23 @@ async def test_no_nudge_fires_while_the_turn_is_parked_on_an_ask(tmp_path) -> No
     assert len(stream.requests) == 3, "after the ask settles, the boundary nudge still fires"
     assert len(stream.reminders(2)) == 1
     await session.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["planning", "qa", "validation"])
+async def test_lifecycle_in_flight_statuses_are_nudged(tmp_path, status) -> None:
+    """planning/qa/validation are work in flight: the completion check watches
+    them exactly as it watches active."""
+    store = ProjectRegistry(tmp_path / "config")
+    project_id = registered(store, "payments-migration")
+    store.update_project(project_id, ProjectEdit(progress="2026-09-26: moved"), reporter=SESSION)
+    store.update_project(project_id, ProjectEdit(status=status))
+    backdate(store, project_id, PROJECT_PROGRESS_STALE_S + 60)
+    store = ProjectRegistry(tmp_path / "config")
+    stream = ScriptedStream([worked_turn(), prose("Done.")])
+    session = make_session(tmp_path, stream, store=store)
+
+    await session.prompt("check")
+
+    assert any(stream.reminders(index) for index in range(len(stream.requests)))
+    await session.dispose()

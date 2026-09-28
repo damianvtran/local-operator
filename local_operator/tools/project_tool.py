@@ -38,6 +38,7 @@ from local_operator.projects import (
     _SESSION_ID_RE,
     HISTORY_DEFAULT_TAIL,
     MILESTONES_MAX,
+    PROJECT_STATUSES,
     SESSIONS_MAX,
     UPDATES_MAX,
     MilestoneEdit,
@@ -48,6 +49,7 @@ from local_operator.projects import (
     ProjectRegistry,
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
+    ProjectStatus,
     build_project_view,
     display_name,
     history_lines,
@@ -68,7 +70,10 @@ from local_operator.tools.builtin import (
 logger = logging.getLogger(__name__)
 
 
-_STATUS_WORDS = ("active", "paused", "done", "archived")
+#: The status vocabulary — ONE copy, imported from the store, so the tool's
+#: validation, its field description and the model literal can never drift
+#: apart.
+_STATUS_WORDS = PROJECT_STATUSES
 
 
 class ProjectParams(BaseModel):
@@ -91,9 +96,13 @@ class ProjectParams(BaseModel):
         default=None,
         description="create/update: display name (falls back to the key ``name``); '' clears it.",
     )
-    status: Literal["active", "paused", "done", "archived"] | None = Field(
+    status: ProjectStatus | None = Field(
         default=None,
-        description="create/update: 'done' stamps completed_at unless it is given.",
+        description=(
+            f"create/update: {'|'.join(_STATUS_WORDS)}. 'done' needs every "
+            "milestone complete (or force_done=true) and stamps completed_at "
+            "unless given."
+        ),
     )
     progress: str | None = Field(
         default=None,
@@ -141,6 +150,10 @@ class ProjectParams(BaseModel):
             "list; without it, supplying 'milestones' to update is refused "
             "(use op='milestone' for one milestone)."
         ),
+    )
+    force_done: bool = Field(
+        default=False,
+        description="create/update: close a 'done' status although milestones are incomplete.",
     )
     milestone: str | None = Field(
         default=None, description="milestone: its name (add-or-update by name)."
@@ -333,6 +346,9 @@ def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:
         # field (ProjectEdit forbids extras, so a leak here would be a
         # validation error on every deliberate replace).
         "replace_milestones",
+        # The DONE gate's switch: consumed by `_op_create`/`_op_update`, never
+        # a row field — same reason.
+        "force_done",
         "attach",
         "history",
     }
@@ -402,7 +418,9 @@ async def _op_create(
     session_id = _calling_session_id(context)
     try:
         fields = _project_edit(params, creating=True)
-        project = registry.create_project(fields, sessions=[session_id] if session_id else ())
+        project = registry.create_project(
+            fields, sessions=[session_id] if session_id else (), force_done=params.force_done
+        )
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     except ProjectSchemaGuardError as exc:
@@ -418,6 +436,16 @@ async def _op_create(
         return _error(tool_call_id, "project", readable_error(exc))
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project", f"could not save project: {exc}")
+    forced = ""
+    if (
+        params.force_done
+        and project.status == "done"
+        and any(milestone.completed_at is None for milestone in project.milestones)
+    ):
+        # The update path's deliberate-act rule applies to the other path too
+        # (agent review round 1, N2): a creation that closed over open
+        # milestones must say so, or the receipt reads as an ordinary create.
+        forced = "status 'done' forced with milestones incomplete (force_done=true). "
     if session_id:
         receipt = (
             f"created project {project.name!r} [{project.status}] and linked this session "
@@ -432,6 +460,7 @@ async def _op_create(
         tool_call_id,
         "project",
         receipt
+        + forced
         + "Update status/progress with op='update' as the work moves; read guide://projects.",
     )
 
@@ -474,7 +503,11 @@ async def _op_update(
     try:
         fields = _project_edit(params, creating=False)
         outcome = registry.update_project(
-            project.id, fields, reporter=reporter, attachments=params.attach or ()
+            project.id,
+            fields,
+            reporter=reporter,
+            attachments=params.attach or (),
+            force_done=params.force_done,
         )
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
@@ -507,6 +540,16 @@ async def _op_update(
             f"; milestones replaced deliberately ({_milestone_counts(updated)}; "
             "replace_milestones=true)"
         )
+    forced = ""
+    if (
+        params.force_done
+        and updated.status == "done"
+        and any(milestone.completed_at is None for milestone in updated.milestones)
+    ):
+        # A forced close is as deliberate as a replaced list, and this receipt
+        # names deliberate acts (the M1 rule): without the clause, a plan that
+        # closed over open milestones would read as an ordinary update.
+        forced = "; status 'done' forced with milestones incomplete (force_done=true)"
     if outcome.refreshed:
         return _text(
             tool_call_id,
@@ -514,7 +557,7 @@ async def _op_update(
             # The STAMP moved, not the text: "now dated today" read as if the
             # snippet had gained a date (agent review round 1, n2).
             f"refreshed project {updated.name!r} — the progress line is unchanged, "
-            f"re-stamped just now ({reporter}){replaced}.",
+            f"re-stamped just now ({reporter}){replaced}{forced}.",
         )
     age = reported_age(updated)
     detail = f"progress {age} ago" if age is not None else "no progress recorded"
@@ -524,6 +567,7 @@ async def _op_update(
         # think it reported something.
         detail = f"status {updated.status}"
     detail += replaced
+    detail += forced
     stored = len(params.attach or ())
     if stored:
         detail += f", {stored} attachment{'s' if stored != 1 else ''} stored"
