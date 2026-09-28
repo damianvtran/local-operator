@@ -8019,7 +8019,9 @@ async def test_the_remote_hint_sheds_whole_clauses_rather_than_truncating() -> N
         approval.set_remote_device("demo-laptop")
         await _settle(app, pilot)
         hint_rows = [
-            row.strip() for row in approval.render_lines_for_test() if row.strip().startswith("runs on")
+            row.strip()
+            for row in approval.render_lines_for_test()
+            if row.strip().startswith("runs on")
         ]
         assert len(hint_rows) == 1, hint_rows
         (hint,) = hint_rows
