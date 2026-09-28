@@ -293,8 +293,20 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                 )
                 continue
             has_row: bool | None = None
+            has_placement = False
             if transport in ("http", "sse") and url:
                 has_row = _mcp_row_exists(store, url)
+                # THIS device's own placement document: does an entry for the
+                # server exist HERE? It is what tells the viewer whether a share
+                # on the owner's books has REACHED this device — the pull is paid
+                # on an explicit act (``lop network credentials``), never on the
+                # provider path, so a peer that has not pulled cannot borrow and
+                # must not be reported as ready to.
+                from local_operator.network.credentials.placement import (
+                    placement_entries_for,
+                )
+
+                has_placement = placement_entries_for(mcp_url=url, root=root) is not None
             servers.append(
                 {
                     "name": _safe_text(name, limit=120),
@@ -304,6 +316,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                     # credential verdict's copy, never a claim about the server.
                     "auth_declared": bool(raw.get("oauth") or raw.get("auth")),
                     "has_row": has_row,
+                    "has_placement": has_placement,
                 }
             )
     finally:
@@ -1064,6 +1077,32 @@ def model_credential_row(
         )
     mine = viewer.provider_rows(provider)
     if mine:
+        # A SHARE THIS DEVICE ALREADY MADE IS NOT "NOT SHARED". ``pull_placement``
+        # is paid on an explicit act (``lop network credentials``, client.py's
+        # own docstring), never on the provider path — so a peer that has not
+        # pulled yet answers with an EMPTY placement, and a report that stopped
+        # here would (a) deny a share that is on the books on THIS device and
+        # (b) send the operator to repeat a command that already ran. Read this
+        # device's own document: a peer that is a holder THERE is missing the
+        # pull, not the share.
+        own_entry = viewer.placement(provider=provider)
+        if member.device_id in _holder_names(own_entry):
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_MODEL_CREDENTIAL,
+                ok=False,
+                code=CODE_NOT_SHARED,
+                detail=(
+                    f"the share for {provider} is on this network's books, but {peer_label} "
+                    "has not pulled the placement yet: nothing would reach it until it does"
+                ),
+                remedies=[
+                    f"run `lop network credentials` on {peer_label} (it pulls the share), "
+                    "then re-check"
+                ],
+                source=SOURCE_LOCAL,
+            )
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -1173,6 +1212,30 @@ def _mcp_credential_row(
     owner = str(placement.get("owner_device") or "")
     peer_is_holder = member.device_id in _holder_names(placement)
     if owner and peer_is_holder:
+        # THE PULL GAP, per server: this device's own document says the peer is a
+        # holder, but the peer's OWN answer says it has no placement entry for
+        # the url — the share has not reached it yet, and a borrow there would
+        # find nothing until it pulls. Both halves are observed facts; the row
+        # reports the gap rather than either half's comfortable reading.
+        if not server.get("has_placement"):
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_MCP_CREDENTIAL,
+                ok=False,
+                code=CODE_NOT_SHARED,
+                detail=(
+                    f"the login for {name} is shared with {peer_label} on this device's "
+                    "books, but it has not pulled the placement yet: nothing would reach "
+                    "it until it does"
+                ),
+                remedies=[
+                    f"run `lop network credentials` on {peer_label} (it pulls the share), "
+                    "then re-check"
+                ],
+                source=SOURCE_LOCAL,
+                observed={"server": name, "url": url},
+            )
         if owner == viewer.device_id:
             return _capability_row(
                 device_id=member.device_id,
@@ -1655,7 +1718,9 @@ def _peer_checks(
             )
         )
         return rows
-    timeout = READINESS_OP_TIMEOUT_S if remaining is None else min(READINESS_OP_TIMEOUT_S, remaining)
+    timeout = (
+        READINESS_OP_TIMEOUT_S if remaining is None else min(READINESS_OP_TIMEOUT_S, remaining)
+    )
     facts, problem = _ask_readiness(server, link, timeout=timeout)
     if facts is None:
         rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
