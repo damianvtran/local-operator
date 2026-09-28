@@ -273,7 +273,7 @@ For each due monitor, in `next_due_at` order (pump pass):
    `AgentTool.execute` the loop calls, under `values.monitor.runTimeoutMs`
    (default 120 s), with the spec's captured `cwd`. Result text is the
    model-visible content.
-4. **Normalize + hash + compare** (§7). Unchanged → state file write only.
+4. **Normalize + hash + compare** (§7). Unchanged → counters-file write only (§10.3).
 5. **On change:** heuristic materiality is "the normalized output differs"
    (nothing else — §8.1); then the classifier gate (§8); then either deliver
    (§9) or suppress + count.
@@ -391,16 +391,29 @@ backslash resolution the executing `bash -c` applies), and every rule below
 judges the RESOLVED words, so quoting is not an escape hatch —
 `rg '--pre=<cmd>' .` resolves to the word `--pre=<cmd>` and is denied;
 `file '-C'` resolves to `-C`, denied; `ls \-la` resolves to `-la`, the
-allowed cluster it literally is. Two inputs are refused outright rather
-than modelled: any word containing `$` (variable expansion is a second
-evaluation pass the evaluator cannot see), and a line the tokeniser cannot
-parse (unbalanced quote, trailing backslash) — rejected fail-closed with
-the parse error named. The rules:
+allowed cluster it literally is. Refusals are layered so each is checked
+where it is visible (round-3 review R3-F1/R3-F2):
+
+- **before tokenisation** — a raw newline or carriage return anywhere in
+  the line (a shell runs the remainder as a second command, and shlex
+  folds it into whitespace, so only this layer can see it) and `{`/`}`
+  anywhere in the line (bash brace-expands before word splitting,
+  inventing words the tokeniser never sees; quoted braces are included —
+  a small, deliberate over-strictness) — each refused with the position
+  named;
+- **at resolution** — any word containing `$` (variable expansion is a
+  second evaluation pass the evaluator cannot see);
+- **on failure** — a line the tokeniser cannot parse (unbalanced quote,
+  trailing backslash) is rejected fail-closed, with the parse error
+  named.
+
+The rules:
 
 1. **No shell metacharacters beyond `|` and ordinary word characters**: no
-   `;`, `&&`, `||`, `&`, newline, backticks, `$(`, `<`, `>`, `>>`, `2>`, no
-   variable assignments before the command word, no `env`/`sudo`/`xargs`/
-   `sh -c` wrappers. (These are rejected with the offending token named.)
+   `;`, `&&`, `||`, `&`, backticks, `$(`, `<`, `>`, `>>`, `2>` (newlines
+   and carriage returns are refused pre-tokenisation, above), no variable
+   assignments before the command word, no `env`/`sudo`/`xargs`/`sh -c`
+   wrappers. (These are rejected with the offending token named.)
 2. **Every command word is on the v1 allow-list** (below), matched by
    basename, with no path prefix (`/bin/ls` and `./script` are rejected).
 3. **Flags are DEFAULT-DENY** (round-1 review F1: an enumerated deny-list let
@@ -412,7 +425,10 @@ the parse error named. The rules:
      be individually allowed**;
    - a value-taking flag matches glued or separate spellings alike (`-L2`,
      `-L 2`, `--output=x`, `--output x`) — the value is consumed as data;
-   - `--` itself is rejected (a v1 operand that begins with `-` has no form).
+   - `--` itself is rejected, stated once and applied everywhere: a v1
+     operand that begins with `-` has no form, and no separator carve-out
+     exists (each program's own `--` handling would be a new per-command
+     trust surface).
 4. **`find` is expression-allow-listed**, because it has no flag/operand
    grammar a deny-list can bound: the permitted primaries are the read tests
    (`-name`, `-iname`, `-type`, `-maxdepth`, `-mindepth`, `-path`, `-ipath`,
@@ -447,14 +463,16 @@ and everything else about the command is denied, operands included:
 | `gh`, `glab` | `pr view/list/diff/checks/status`, `issue view/list`, `run view/list`; flags `--json`(v) `-q/--jq`(v) `-t/--template`(v) `--repo`(v) `--comments` `--log` | everything else denied, incl. bare `gh api` (method-flippable) and `--web`/`-w` (launches a browser); `--watch` denied (waits) |
 
 **`git` — the complete per-subcommand flag sets** (round-2 review R2-F2;
-default-deny beyond these; anything not listed is denied):
+default-deny beyond these; anything not listed is denied). The `--`
+separator is rejected like every other `-`-leading word (§6.4 rule 3);
+operands are plain, non-dash words:
 
 | subcommand | allowed flags (complete) | operands |
 |---|---|---|
 | `status` | `-s -b --short --porcelain --ignored --no-renames -u`(v) `--untracked-files`(v) | pathspecs (read) |
-| `log` | `--oneline --graph --stat --name-only --name-status --decorate --no-decorate --abbrev-commit --no-merges --merges --follow --all -p -s --no-patch --format`(v) `--pretty`(v) `--date`(v) `--since`(v) `--until`(v) `-n`(v) | revisions and `-- <pathspecs>` — select what is READ; cannot write |
+| `log` | `--oneline --graph --stat --name-only --name-status --decorate --no-decorate --abbrev-commit --no-merges --merges --follow --all -p -s --no-patch --format`(v) `--pretty`(v) `--date`(v) `--since`(v) `--until`(v) `-n`(v) | revisions and pathspecs (no `--` separator — rule 3) — select what is READ; cannot write |
 | `diff` | `--stat --name-only --name-status --numstat --shortstat --cached --staged --no-index -w -b -U`(v) `--color`(v) | two paths (or none) — select what is read |
-| `show` | `--stat --name-only --name-status --abbrev-commit -s --no-patch --format`(v) `--pretty`(v) | one rev (+ `-- <pathspecs>`) |
+| `show` | `--stat --name-only --name-status --abbrev-commit -s --no-patch --format`(v) `--pretty`(v) | one rev (+ pathspecs, no `--`) |
 | `blame` | `-L`(v) `-w -p --porcelain --line-porcelain --date`(v) | one path |
 | `rev-parse` | `--verify --short`(v) `--abbrev-ref --show-toplevel --is-inside-work-tree --is-bare-repository` | one rev |
 | `ls-files` | `-s --stage -o --others -m --modified -d --deleted -c --cached --exclude-standard` | pathspecs/patterns |
@@ -483,17 +501,30 @@ Rejections are sentences, e.g.:
 **Residual risk, stated rather than implied:** this is a conservative static
 evaluator — default-deny at BOTH layers (command words, then flags) — not a
 sandbox. A missed allowance (a flag with a write/exec side effect the
-per-command list failed to omit) is still a write vector, which is why the
-lists stay small, every named hole is a matrix row (§6.9), and flags are
-allow-listed rather than denied-away. One expansion stays UNMODELLED and is
-named rather than implied: a filename glob (`*`, `?`, `[`) expanded by the
-shell can hand a program a word this evaluator never saw (a file literally
-named `-C`, say); v1 does not reject globs because `find`'s pattern operand
-requires them, and §21 records the sandbox as the replacement. The
-kernel-level alternative (seatbelt) exists only for evaluation-confined
-sessions and macOS only (`tools/confinement.py`), and is not a general
-mechanism here. The evaluator's conservatism is the current mitigation; §21
-records what would replace it.
+per-command list failed to omit) is still a write vector; the mitigations
+are stated, not immunity: the lists stay small, and every named hole is a
+matrix row (§6.9).
+
+**Refused by construction, listed once (round-3 review):** quoting and
+backslash escapes are resolved to the words the shell will receive;
+`$`-bearing words are refused; `{` and `}` are refused; raw newlines and
+carriage returns are refused; `--` and every other `-`-leading word that
+is not an allowed flag is refused; the rule-1 metacharacters are refused;
+and an unparseable line fails closed. **Exactly one remaining channel can
+falsify a verdict: shell filename-glob expansion** — an unquoted `*`/`?`/`[`
+word is expanded by the shell *after* this evaluator passed it, and a
+directory entry beginning with `-` can land in flag position. Globs are not
+refused because after resolution the evaluator cannot tell an inert quoted
+glob from an expanding unquoted one, and refusing every glob-bearing word
+would strip the quoted pattern operand `find`/`grep` monitors legitimately
+use (the matrix's own accept rows quote their patterns). Everything else
+the shell expands either is refused above or cannot falsify a verdict:
+tilde expansion rewrites an operand's spelling (`~/x`) and can produce
+neither a leading `-` nor a write. The kernel-level alternative (seatbelt)
+exists only for evaluation-confined sessions and macOS only
+(`tools/confinement.py`), and is not a general mechanism here; §21 item 7
+records the sandbox that would replace this evaluator, closing the glob
+channel.
 
 ### 6.5 MCP: `readOnlyHint` is the only key
 
@@ -568,13 +599,27 @@ Reject — git operands/flags (round-2 review R2-F2): `git branch x`,
 `git branch -d x`, `git branch --edit-description`,
 `git log --show-signature`, `date 2020-01-01`; accept `git status --porcelain`,
 `git branch -vv`, `git log --oneline -n 5`, `date +%s`.
+Reject — expansions refused before rules (round-3 review R3-F1/R3-F2):
+`rg {--pre=./pre.sh,content} f.txt`, `git log {--output=./out.txt,HEAD}`,
+`ls {a,b}`, `echo {1..9}`, the empty-element form `{,--probe=/tmp/x}`, a
+nested `{{a,b},c}`, and the quoted form `rg 'a{2,3}' f` (the accepted
+over-strictness: quantified regexes are refused — write flat alternatives);
+a line whose second command follows a raw newline (`ls /dev/null`, newline,
+`printf INJECTED`) and a backslash-newline continuation (a backslash as the
+line's final character) — both refused with the position named.
+Reject — unparseable, fail-closed (QA round-3 Q1): `ls 'unclosed` →
+`monitor can't watch "ls 'unclosed": the command line does not parse —
+unterminated quote starting at position 4. Fix the quoting.`
 Each case asserts the exact refusal sentence's discriminating phrase, so a
 reordered message fails a test rather than drifting.
 
 **This matrix is the assurance mechanism, not a sample:** the flag sets are
 maintained by adversarial review rounds, and every construct a round finds
-is either rejected by construction or added here as a row — the coverage is
-auditable one row at a time.
+is either rejected by construction (§6.4's refused-by-construction list —
+quotes resolved; `$`; braces; raw newlines/CRs; unallowed `-`-leading
+words; parse errors fail-closed) or added here as a row — the coverage is
+auditable one row at a time. The one channel not refused — filename-glob
+expansion — is named in §6.4 and owned by §21 item 7.
 
 ## 7. Diff pipeline & snapshots (R4)
 
@@ -883,7 +928,7 @@ scan skips anything not ending `.json`, so state lives under
 ```
 
 Rewritten on: arm / cancel / disable / re-arm / delivery / park / session open.
-**Not** on every quiet tick — for a quiet tick the state file alone moves, so a
+**Not** on every quiet tick — for a quiet tick the counters file alone moves, so a
 cold reader's `next_due_at` is best-effort between change events (documented;
 `lop monitor status` labels it as such). This is the one deliberate divergence
 from `wakes/store.py`, which persists after every fire: a wake fires rarely; a
@@ -1052,7 +1097,7 @@ from drifting visibly.
   not arm the refusal; their entries are pruned like any other dead state.
 - **No unbounded accumulation:** ≤ 8 monitors/session; bounded snapshot
   (32 KiB each) and delta (1.2 k); capped deliveries/hour; classifier called
-  only on hits; one state file per monitor; index files pruned with their
+  only on hits; two bounded files per monitor (counters + snapshot blob); index files pruned with their
   sessions. Counts are visible in `monitor list`, the TUI band, and
   `lop monitor status`.
 
@@ -1453,7 +1498,7 @@ contract for all of them.
   the same class as reading any page; the guide states the posture.
 - **bash allow-list gaps** (§6.4): a missed denial on an allowed command is a
   write vector. Mitigation: small list, every entry tested, arm-time and
-  run-time checks; open question records the sandbox replacement.
+  run-time checks; §21 item 7 records the kernel-level replacement.
 - **MCP server honesty** (§6.5): `readOnlyHint` is self-declared; a lying
   server can mutate. The operator already trusts the server's tools; recorded.
 - **Wake notification default change** (§14.4): reminders armed by older
@@ -1485,6 +1530,11 @@ contract for all of them.
    change.
 6. **CLI default for `wake create --notify`**: quiet matches the contract;
    revisit if scripted reminder flows want loud-by-default.
+7. **Kernel-level confinement for monitor checks** (§6.4): a sandbox that
+   replaces the static evaluator, closing its one remaining falsifiable
+   channel (filename-glob expansion) with it; demanded by usage. Today's
+   seatbelt path is evaluation-only and macOS-only, so a general mechanism
+   is the real ask.
 
 ## Appendix A — corrections to the brief's map
 
