@@ -301,6 +301,13 @@ _AMBIENT_VARS = (
     "PNPM_HOME",
     "XDG_DATA_HOME",
     "COREPACK_HOME",
+    # Aida's kill switch (``aida/state.ENV_DISABLE``). An inherited value is the
+    # escape-hatch class this list exists for: every cell that asserts her
+    # behaviour — session created, pinned, cadence armed, pause honoured — would
+    # silently drive a disabled install while looking like it tested the
+    # feature, and the zero-footprint cells would pass for the wrong reason.
+    # The aida conftest clears it for its own package; this scrubs it everywhere.
+    "LOCAL_OPERATOR_NO_AIDA",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real
