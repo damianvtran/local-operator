@@ -75,6 +75,7 @@ Deliberately LEFT on ``_AskHost``, having been checked rather than assumed:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import itertools
 import textwrap
@@ -7973,3 +7974,59 @@ async def test_a_windowed_reveal_still_reaches_the_whole_description() -> None:
             "a revealed line still marks a cut the reserved column should have prevented",
             sel_lines,
         )
+
+
+# ---------------------------------------------------------------------------
+# A gate on ANOTHER device: the card's hint row (slice 2, design note §4).
+#
+# An ask IS answerable from the attached origin viewer (``ask_answer`` carries
+# no authority check), so the hint's job is the locality fact plus that
+# reassurance; an approval's is the opposite — allow happens there, deny works
+# here. Both are one row under the question, present only for a remote gate.
+
+
+@pytest.mark.asyncio
+async def test_a_remote_card_carries_the_device_hint_and_a_local_one_does_not() -> None:
+    """The ask card's hint, both halves of the condition."""
+    app, card = await _real_app_card((100, 30), [_question()])
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _show(app, pilot, card)
+        rows = [row.strip() for row in card.render_lines_for_test()]
+        assert not any("runs on" in row for row in rows), rows
+
+        card.set_remote_device("demo-laptop")
+        await _settle(app, pilot)
+        rows = [row.strip() for row in card.render_lines_for_test()]
+        assert "runs on demo-laptop — answer it from here" in rows, rows
+
+
+@pytest.mark.asyncio
+async def test_the_remote_hint_sheds_whole_clauses_rather_than_truncating() -> None:
+    """The ladder, not a clamp: a half-printed hint reads as an instruction.
+
+    At a width where the full approval rung cannot fit, the card must drop a
+    WHOLE clause (the ``_hint_row`` discipline) rather than print ``runs on
+    demo-laptop — allow the…``, which the reader could take for something this
+    machine can do. The chosen rung must therefore always be one of the
+    composed rungs, must fit the card, and must carry no ellipsis.
+    """
+    from local_operator.tui.notify import remote_park_hints
+
+    rungs = remote_park_hints("demo-laptop", "approval")
+    app, _card = await _real_app_card((70, 30), [_question()])
+    async with app.run_test(size=(70, 30)) as pilot:
+        approval, task = await _real_approval_card(app, pilot)
+        approval.set_remote_device("demo-laptop")
+        await _settle(app, pilot)
+        hint_rows = [
+            row.strip() for row in approval.render_lines_for_test() if row.strip().startswith("runs on")
+        ]
+        assert len(hint_rows) == 1, hint_rows
+        (hint,) = hint_rows
+        assert hint in rungs, hint
+        assert not hint.endswith("…"), hint
+        assert cell_len(hint) <= approval._layout().width, (hint, approval._layout().width)
+        assert hint != rungs[0], "the full rung should not fit at this width"
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task

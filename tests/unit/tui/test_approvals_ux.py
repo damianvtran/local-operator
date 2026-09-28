@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -995,3 +996,70 @@ async def test_the_signature_prompt_copy_is_painted_where_a_human_can_read_it(
         app._on_operator_prompt(object(), "a copy for a session that is no longer current")
         await pilot.pause()
         assert len(_notices(app)) == before, "a stale prompt copy was painted"
+
+
+class RemoteGatedSession(GatedSession):
+    """A GatedSession whose runtime is a PEER's — the attached origin viewer.
+
+    Shaped like the facade ``_remote_owner_facts`` reads: locality says
+    another machine, and the owner carries the device facts the hint names.
+    """
+
+    runtime_locality = "another-machine"
+
+    def __init__(
+        self,
+        *,
+        session_id: str = "s_remote",
+        device_id: str = "d_bb",
+        device_name: str = "demo-laptop",
+    ) -> None:
+        super().__init__()
+        self._session_id = session_id
+        self._owner = SimpleNamespace(
+            facts=SimpleNamespace(device_id=device_id, device_name=device_name)
+        )
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+
+@pytest.mark.asyncio
+async def test_a_remote_gate_card_names_the_device_and_a_local_one_does_not() -> None:
+    """The dock card's remote hint, both halves of the condition.
+
+    An allow pressed in the origin viewer is refused by the OWNER's runtime by
+    design (``operator_challenge`` never crosses the mesh; the origin holds no
+    key a peer can verify), so the card the user is about to answer must say
+    where the gesture happens. A local card must NOT carry the line — that
+    half also pins the byte-identical claim the feature rests on: nothing about
+    a local gate's frame changes.
+    """
+    hinted = "runs on demo-laptop — allow there (Touch ID) / its paired phone; deny works here"
+
+    session = RemoteGatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        assert app._session is session, "the app never adopted the session under test"
+        task = asyncio.ensure_future(_gate(session)("bash", "run: ls"))
+        await _wait_prompt(pilot, app)
+        (prompt,) = app.query(ApprovalPrompt)
+        rows = [row.strip() for row in prompt.render_lines_for_test()]
+        assert hinted in rows, rows
+        await pilot.press("n")
+        assert await asyncio.wait_for(task, 2) is False
+
+    # The local half: a card that can allow says nothing about other devices.
+    local = GatedSession()
+    app = OperatorApp(lambda: _factory(local))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        task = asyncio.ensure_future(_gate(local)("bash", "run: ls"))
+        await _wait_prompt(pilot, app)
+        (prompt,) = app.query(ApprovalPrompt)
+        rows = [row.strip() for row in prompt.render_lines_for_test()]
+        assert not any("runs on" in row for row in rows), rows
+        await pilot.press("n")
+        assert await asyncio.wait_for(task, 2) is False
