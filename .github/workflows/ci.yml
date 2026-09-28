@@ -642,17 +642,20 @@ jobs:
     # tests, coverage, or the independent per-test/e2e watchdogs.
     #
     # 20 -> 25 on 2026-09-28, because the ceiling was cancelling HEALTHY
-    # shards: across the last 45 main runs, eight shard jobs were cancelled at
-    # 20.1-20.3 minutes, and each inspected carried a clean verdict from the
-    # stall watchdog below (`timer armed but never fired` -- no item exceeded
-    # its 240s bound). Two were killed with the shard at 99%, and one had all
-    # 6480 of its tests green (`6480 passed ... in 1152.15s`, 0:19:12) when the
-    # cap fired during the artifact uploads. The heaviest SUCCESSFUL shards in
-    # that window ran 19.2-19.8 minutes, so 20 sat inside the healthy tail; 25
-    # leaves the worst observed healthy shard ~5 minutes of headroom. The
-    # weight skew this also exposes (shards 0/2/4 p50 17.0-17.8 against
-    # 13.4-15.6 for 1/3) is a manifest question, not a ceiling one -- see
-    # scripts/gen_test_durations.py.
+    # shards: across the last 45 main runs, eight shard jobs were cancelled --
+    # every one of them at 20.1-20.3 minutes, and every one with a clean
+    # verdict from the stall watchdog below. Five dumps read `timer armed but
+    # never fired` (no item exceeded its 240s bound); the other three read
+    # `no shard stall report: nothing stalled long enough to trip the
+    # watchdog`. Five shards were killed with their last progress at 99%;
+    # three had ALL their tests green (0:19:12 / 0:19:28 / 0:19:34) when the
+    # cap fired at the artifact-upload step. The heaviest SUCCESSFUL shards in
+    # that window ran up to 19.98 minutes (top six: 19.98 / 19.95 / 19.83 /
+    # 19.80 / 19.77 / 19.70), so 20 sat inside the healthy tail; 25 leaves the
+    # worst observed healthy shard ~5 minutes of headroom. The weight skew
+    # this also exposes (heavy shards 0/2/4 around p50 17.0-17.7 against
+    # 13.5-15.6 for shards 1/3) is a manifest question, not a ceiling one --
+    # see scripts/gen_test_durations.py.
     timeout-minutes: 25
     strategy:
       fail-fast: false
