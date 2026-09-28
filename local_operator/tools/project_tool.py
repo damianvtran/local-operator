@@ -396,11 +396,18 @@ async def _op_update(
         return _error(
             tool_call_id, "project", f"no project named {name!r} to update (try op='list')."
         )
-    if "milestones" in params.model_fields_set and not params.replace_milestones:
+    if (
+        "milestones" in params.model_fields_set
+        and params.milestones is not None
+        and not params.replace_milestones
+    ):
         # The incident this guard exists for: an agent read "update a milestone"
         # as `op='update'` with a one-entry list, and the store did what its
         # field said — replaced the whole list, silently wiping the siblings.
-        # Refuse BEFORE any edit is built; the safe path is one op away.
+        # Refuse BEFORE any edit is built; the safe path is one op away. The
+        # `is not None` arm keeps an explicit `milestones=null` the no-op the
+        # store has always made of it — refusing there would drop the call's
+        # other fields, which applied pre-guard (agent review round 1, M2).
         return _error(
             tool_call_id,
             "project",
@@ -427,6 +434,22 @@ async def _op_update(
             "project",
             f"project {updated.name!r} already held those values — nothing written.",
         )
+    # The receipt must NAME a deliberate replace wherever the call made one — a
+    # bare "updated project" is exactly the sentence that hid the wipe this
+    # guard stops, and the refreshed branch below used to return before the
+    # note was appended (agent review round 1, M1). A supplied LIST under the
+    # flag is what constitutes a replace; an explicit `milestones=null`
+    # replaces nothing and must not be claimed (M2).
+    replaced = ""
+    if (
+        params.replace_milestones
+        and "milestones" in params.model_fields_set
+        and params.milestones is not None
+    ):
+        replaced = (
+            f"; milestones replaced deliberately ({_milestone_counts(updated)}; "
+            "replace_milestones=true)"
+        )
     if outcome.refreshed:
         return _text(
             tool_call_id,
@@ -434,7 +457,7 @@ async def _op_update(
             # The STAMP moved, not the text: "now dated today" read as if the
             # snippet had gained a date (agent review round 1, n2).
             f"refreshed project {updated.name!r} — the progress line is unchanged, "
-            f"re-stamped just now ({reporter}).",
+            f"re-stamped just now ({reporter}){replaced}.",
         )
     age = reported_age(updated)
     detail = f"progress {age} ago" if age is not None else "no progress recorded"
@@ -443,13 +466,7 @@ async def _op_update(
         # status-only update that says "progress 3h ago" invites the model to
         # think it reported something.
         detail = f"status {updated.status}"
-    if params.replace_milestones and "milestones" in params.model_fields_set:
-        # The receipt must NAME the replace: a bare "updated project" is
-        # exactly the sentence that hid the wipe this guard now stops.
-        detail += (
-            f"; milestones replaced deliberately ({_milestone_counts(updated)}; "
-            "replace_milestones=true)"
-        )
+    detail += replaced
     return _text(
         tool_call_id,
         "project",
