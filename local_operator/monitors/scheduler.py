@@ -1,0 +1,804 @@
+"""The in-session monitor scheduler (contract §5, §11).
+
+In-process only: no supervisor, no daemon, no cold engagement (§10.4 — a
+session that goes cold has dormant monitors; they resume with it). The
+scheduler owns the armed timer, the per-monitor runtime state, and the
+tick → run → normalize → compare → deliver loop. Everything with a session in
+it — resolving the tool, executing the call, delivering the delta, persisting
+the list — arrives as a callback, so this module is testable without a
+session and the session is testable without timers.
+
+It preserves the ``WakeScheduler`` load-bearing properties because they were
+paid for once already:
+
+1. **A single armed asyncio timer**, re-armed after every pump, capped at
+   ``MAX_ARM_MS`` so sleep/clock skew is absorbed by re-reading the wall clock.
+2. **``dispose()`` cancels the armed handle and every in-flight check task** —
+   a pending tick must never keep the event loop alive.
+3. **``needs_rearm``** for construction without a running loop; the session's
+   async init re-arms by calling ``pump()`` once.
+4. **A write lock** around pump/update mutations so an arm landing inside a
+   pump cannot be overwritten by the pump's stale snapshot.
+5. **A delivery (or any tick-side failure) still advances** — a broken check
+   must never become a hot loop.
+
+Two ceilings, both contract numbers: a global semaphore of 2 bounds
+simultaneous checks (a deferred check stays due and runs on the next pass —
+not counted as skipped), and the failure ladder backs off
+``every_ms × 2^(n-1)`` capped at 15 minutes before auto-disabling at
+``maxConsecutiveFailures``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+import random
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, TypedDict
+
+from local_operator.monitors import state as monitor_state
+from local_operator.monitors.delivery import MonitorDelivery
+from local_operator.monitors.diff import (
+    beyond_window_text,
+    content_hash,
+    has_line_difference,
+    normalize,
+    render_delta,
+)
+from local_operator.monitors.settings import MonitorSettings
+from local_operator.monitors.spec import MonitorSpec, next_monitor_seq, spec_identity
+
+logger = logging.getLogger(__name__)
+
+#: Never arm further out than this; long waits re-check the wall clock.
+MAX_ARM_MS = 60_000
+#: No zero-delay re-entry loop.
+MIN_ARM_MS = 25
+#: The first check after arm/resume runs within this window, so the baseline
+#: is captured promptly and a broken spec surfaces as a health line early
+#: (§5.4).
+FIRST_CHECK_MIN_MS = 1_000
+FIRST_CHECK_MAX_MS = 3_000
+#: The failure ladder's ceiling (§11.3).
+RETRY_CAP_MS = 900_000
+#: The delivery rate window (§9.4).
+DELIVERY_WINDOW_MS = 3_600_000
+
+
+def _skipped_checks_since(last_check_at: int, every_ms: int, now_ms: int) -> int:
+    """Checks that came due and never ran, counted from ``last_check_at``.
+
+    Rounded to the nearest interval so jitter and a slightly-late resume do
+    not invent a skip, minus the one the current check itself supersedes — a
+    resume whose only lapse is "this check is a touch late" reports zero
+    (contract §9.3; the count is named once, in the first delivery).
+    """
+    if last_check_at <= 0 or every_ms <= 0:
+        return 0
+    gap = now_ms - last_check_at
+    if gap <= 0:
+        return 0
+    intervals = (gap + every_ms // 2) // every_ms
+    return max(0, intervals - 1)
+
+
+class CheckOutcome(TypedDict, total=False):
+    """What one check produced: model-visible text, or a failure reason."""
+
+    text: str | None
+    error: str | None
+
+
+@dataclass
+class _Entry:
+    """One monitor's live runtime: its spec plus its counters/health."""
+
+    spec: MonitorSpec
+    counters: dict[str, Any]
+    generation: int = 0
+
+
+@dataclass
+class MonitorRuntime:
+    """Read-only view of one monitor for list surfaces (tests, TUI later)."""
+
+    spec: MonitorSpec
+    counters: dict[str, Any] = field(default_factory=dict)
+
+
+def fresh_counters(monitor_id: str, next_due_at: int | None) -> dict[str, Any]:
+    """A new monitor's counters/health file content (§10.3 shape)."""
+    return {
+        "schema": 1,
+        "monitor_id": monitor_id,
+        "content_hash": "",
+        "last_check_at": 0,
+        "last_change_at": 0,
+        "next_due_at": next_due_at,
+        "checks": 0,
+        "deliveries": 0,
+        "suppressed": {"non_material_metadata": 0, "ignorable": 0, "rate_cap": 0},
+        "rate_window_start": 0,
+        "rate_window_count": 0,
+        "rate_cap_held": 0,
+        "consecutive_failures": 0,
+        "disabled": False,
+        "disabled_reason": "",
+        "last_error": "",
+        "last_note": "",
+        "skipped_overlap": 0,
+    }
+
+
+class MonitorScheduler:
+    """Owns the monitor specs, their runtime state, and one armed asyncio timer."""
+
+    def __init__(
+        self,
+        *,
+        now: Callable[[], int],
+        config_dir: Path,
+        session_id: str,
+        settings: MonitorSettings,
+        validate: Callable[[str, Mapping[str, Any]], str | None],
+        run_check: Callable[[MonitorSpec], Awaitable[CheckOutcome]],
+        deliver: Callable[[MonitorDelivery], Awaitable[None] | None],
+        persist: Callable[[list[MonitorSpec]], Awaitable[None] | None],
+        on_change: Callable[[], None] | None = None,
+        index_writable: Callable[[], bool] | None = None,
+        uniform: Callable[[float, float], float] = random.uniform,
+    ) -> None:
+        self._now = now
+        self._config_dir = Path(config_dir)
+        self._session_id = session_id
+        self._settings = settings
+        self._validate = validate
+        self._check_runner = run_check
+        self._deliver = deliver
+        self._persist = persist
+        self._on_change = on_change
+        self._index_writable = index_writable
+        self._uniform = uniform
+
+        self._entries: dict[str, _Entry] = {}
+        self._next_seq = 1
+        self._timer: asyncio.TimerHandle | None = None
+        # Every timer-created tick and every spawned check is tracked, so
+        # dispose() cancels all of them (the wake scheduler's _tick_tasks
+        # rationale: a re-arm must not orphan a previous pump).
+        # ``set[Task[Any]]``, not ``Task[None]``: the tick task wraps pump()
+        # (an int) and the check tasks wrap _run_check (None) — disposal only
+        # ever cancels them.
+        self._tick_tasks: set[asyncio.Task[Any]] = set()
+        self._check_tasks: set[asyncio.Task[Any]] = set()
+        self._inflight: set[str] = set()
+        # pump()/update() mutate the entry table across await points; without
+        # mutual exclusion an arm landing inside a pump is overwritten by the
+        # pump's pre-update snapshot.
+        self._write_lock = asyncio.Lock()
+        # Bounds simultaneous checks across the session's monitors (the wake
+        # supervisor's concurrency ceiling). A deferred check stays due.
+        self._sem = asyncio.Semaphore(2)
+        self._disposed = False
+        #: Set when ``_arm`` runs without a running loop; the session's async
+        #: init re-arms by calling ``pump()`` once.
+        self.needs_rearm = False
+
+    # -- read surface -------------------------------------------------------
+
+    @property
+    def monitors(self) -> tuple[MonitorSpec, ...]:
+        return tuple(entry.spec for entry in self._ordered_entries())
+
+    @property
+    def settings(self) -> MonitorSettings:
+        return self._settings
+
+    @property
+    def disposed(self) -> bool:
+        return self._disposed
+
+    @property
+    def next_seq(self) -> int:
+        """The next monitor sequence number (persisted beside the rows)."""
+        return self._next_seq
+
+    def runtime(self, monitor_id: str) -> MonitorRuntime | None:
+        entry = self._entries.get(monitor_id)
+        if entry is None:
+            return None
+        return MonitorRuntime(spec=entry.spec, counters=dict(entry.counters))
+
+    def next_monitor_due_at(self) -> int | None:
+        """Earliest ``next_due_at`` across ARMED monitors, or ``None``.
+
+        Disabled and expired rows are excluded: they cannot fire, and the
+        pristine probe must not pin a runtime on a schedule that will not run.
+        """
+        now = self._now()
+        due: int | None = None
+        for entry in self._entries.values():
+            if not self._is_active(entry, now):
+                continue
+            candidate = entry.counters.get("next_due_at")
+            if not isinstance(candidate, int) or isinstance(candidate, bool):
+                continue
+            if due is None or candidate < due:
+                due = candidate
+        return due
+
+    def index_rows(self) -> list[dict[str, Any]]:
+        """The rows the session writes into the derived index (§10.2)."""
+        rows: list[dict[str, Any]] = []
+        for entry in self._ordered_entries():
+            counters = entry.counters
+            rows.append(
+                {
+                    **entry.spec.model_dump(),
+                    "next_due_at": counters.get("next_due_at"),
+                    "last_check_at": counters.get("last_check_at", 0),
+                    "checks": counters.get("checks", 0),
+                    "deliveries": counters.get("deliveries", 0),
+                    "consecutive_failures": counters.get("consecutive_failures", 0),
+                    "disabled": bool(counters.get("disabled")),
+                    "disabled_reason": counters.get("disabled_reason", ""),
+                }
+            )
+        return rows
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def load(self, specs: Sequence[MonitorSpec], *, next_seq: Any = None) -> None:
+        """Adopt persisted specs at session open and arm.
+
+        Runtime state (next due, failures, disabled, rate window) comes from
+        each monitor's counters file; an absent/unreadable one is rebuilt —
+        and an overdue `next_due_at` (the process was down) re-arms within the
+        first-check window, which is what makes the resume delivery land
+        promptly instead of a full interval later.
+        """
+        now = self._now()
+        adopted: list[_Entry] = []
+        for raw in specs:
+            try:
+                # Persisted rows are untrusted input (a hand-edited transcript
+                # can carry values the field constraints reject): drop, don't
+                # let a later tick die (the wake load() contract).
+                spec = MonitorSpec.model_validate(raw.model_dump())
+            except Exception:
+                logger.warning("dropping invalid monitor spec %r", getattr(raw, "id", raw))
+                continue
+            counters = monitor_state.read_counters(self._config_dir, self._session_id, spec.id)
+            if counters is None or counters.get("monitor_id") != spec.id:
+                counters = fresh_counters(spec.id, None)
+            next_due = counters.get("next_due_at")
+            if (
+                not counters.get("disabled")
+                and (not isinstance(next_due, int) or next_due <= now)
+                and (spec.until_at is None or now < spec.until_at)
+            ):
+                next_due = now + self._first_check_delay_ms()
+            counters["next_due_at"] = next_due
+            adopted.append(_Entry(spec=spec, counters=counters))
+        adopted.sort(key=lambda entry: entry.spec.created_at)
+        self._entries = {entry.spec.id: entry for entry in adopted}
+        self._next_seq = next_monitor_seq([entry.spec.id for entry in adopted], next_seq)
+        self._arm()
+
+    async def update(self, monitors: list[MonitorSpec]) -> None:
+        """Caller-driven full-list update: persist, then re-arm and notify.
+
+        The parameter is named ``monitors`` because the protocol (and the
+        ``WakeScheduler`` precedent) name it that way: pyright treats a
+        protocol's parameter NAME as part of conformance, and a keyword-call
+        mismatch is a real defect, not a lint.
+        """
+        async with self._write_lock:
+            now = self._now()
+            synced: dict[str, _Entry] = {}
+            for spec in sorted(monitors, key=lambda item: item.created_at):
+                existing = self._entries.get(spec.id)
+                if existing is not None:
+                    existing.spec = spec.model_copy(deep=True)
+                    synced[spec.id] = existing
+                else:
+                    synced[spec.id] = _Entry(
+                        spec=spec.model_copy(deep=True),
+                        counters=fresh_counters(spec.id, now + self._first_check_delay_ms()),
+                    )
+            for removed_id in set(self._entries) - set(synced):
+                monitor_state.remove_monitor_state(self._config_dir, self._session_id, removed_id)
+            self._entries = synced
+            self._next_seq = max(
+                self._next_seq, next_monitor_seq([entry.spec.id for entry in synced.values()], 0)
+            )
+            try:
+                await self._maybe_await(self._persist([entry.spec for entry in synced.values()]))
+            except Exception:
+                # The rows are already live in memory; a failed persist (disk
+                # full, transcript I/O) must not kill the scheduler — the next
+                # successful write re-records them.
+                logger.warning("monitor persist failed", exc_info=True)
+            self._arm()
+            self._notify_change()
+
+    # -- the tool's create/cancel flows ------------------------------------
+
+    async def create(self, request: Mapping[str, Any], *, cwd: str) -> dict[str, Any]:
+        """The whole arm flow; returns a typed outcome for the tool to phrase.
+
+        Order is load-bearing: shape+read-only validation first (so a bad
+        request is a sentence, never an armed half-monitor), then dedupe
+        (an identical spec is an answer, not an error), then the cap, then
+        the storm guard (a third monitor with one name).
+        """
+        from local_operator.monitors.spec import build_monitor_spec
+
+        now = self._now()
+        if self._index_writable is not None and not self._index_writable():
+            return {
+                "error": (
+                    "the monitor index cannot be written right now (the last write "
+                    "failed); arming now would lose the monitor. Fix the config "
+                    "directory and retry."
+                ),
+                "malformed": False,
+            }
+
+        entries = list(self._entries.values())
+        # The id is computed (not yet issued) so an omitted name can derive
+        # from it; the sequence only advances when the arm actually lands
+        # below, so a failed request never issues an id — and an issued id is
+        # never reused (the high-water rule).
+        monitor_id = f"m{self._next_seq}"
+        outcome = build_monitor_spec(
+            request,
+            monitor_id=monitor_id,
+            now_ms=now,
+            settings=self._settings,
+            cwd=cwd,
+            validate=self._validate,
+        )
+        if "error" in outcome:
+            # TypedDict → dict: the tool-facing return type is deliberately the
+            # loose mapping, and a TypedDict is not assignable to dict[str, Any].
+            return dict(outcome)
+
+        spec = outcome["spec"]
+        identity = spec_identity(spec.tool, spec.arguments)
+        for entry in entries:
+            if spec_identity(entry.spec.tool, entry.spec.arguments) != identity:
+                continue
+            if entry.counters.get("disabled"):
+                # Reactivate: same call, reset failures, keep the snapshot
+                # blob so the first check still diffs against the old baseline.
+                # The fresh counters are written to disk HERE, before the
+                # update: a reactivation that only reset memory would be
+                # undone by the next process's load(), which reads the
+                # disabled counters back and keeps the monitor dark.
+                entry.counters = fresh_counters(entry.spec.id, now + self._first_check_delay_ms())
+                entry.generation += 1
+                self._write_counters(entry)
+                await self.update(list(self.monitors))
+                return {"reactivated": True, "spec": entry.spec}
+            return {"duplicate": True, "spec": entry.spec}
+
+        if len(entries) >= self._settings.max_monitors:
+            return {
+                "error": (
+                    f"monitor limit reached ({self._settings.max_monitors} per session) — "
+                    "cancel one first (monitor list)."
+                ),
+                "malformed": False,
+            }
+        same_name = sum(1 for entry in entries if entry.spec.name == spec.name)
+        if same_name >= 2:
+            return {
+                "error": (
+                    f"three monitors named '{spec.name}' is a storm — cancel one or "
+                    "use a distinct name."
+                ),
+                "malformed": False,
+            }
+
+        entry = _Entry(
+            spec=spec, counters=fresh_counters(spec.id, now + self._first_check_delay_ms())
+        )
+        self._entries[spec.id] = entry
+        self._next_seq += 1
+        await self.update(list(self.monitors))
+        return {"created": True, "spec": spec}
+
+    async def cancel(self, monitor_id: str) -> dict[str, Any]:
+        """Remove one monitor; the shared update persists the shrunken list."""
+        entry = self._entries.get(monitor_id)
+        if entry is None:
+            return {
+                "error": (
+                    f"No monitor with id '{monitor_id}' "
+                    f"(known: {', '.join(sorted(self._entries)) or 'none'})"
+                ),
+                "malformed": False,
+            }
+        remaining = [spec for spec in self.monitors if spec.id != monitor_id]
+        await self.update(remaining)
+        return {"cancelled": monitor_id, "spec": entry.spec}
+
+    # -- the tick -----------------------------------------------------------
+
+    async def pump(self, now_ms: int | None = None) -> int:
+        """Start every due check the semaphore admits; returns how many started.
+
+        Called by the armed timer and by the session's async init (the
+        ``needs_rearm`` path). Each started check is a task; the pump itself
+        never awaits a check, so a slow call cannot stall an arm landing
+        behind it.
+        """
+        if self._disposed:
+            return 0
+        started = 0
+        async with self._write_lock:
+            now = now_ms if now_ms is not None else self._now()
+            due = [entry for entry in self._entries.values() if self._is_due(entry, now)]
+            due.sort(key=lambda entry: entry.counters.get("next_due_at") or 0)
+            loop = asyncio.get_running_loop()
+            for entry in due:
+                if entry.spec.id in self._inflight:
+                    # No overlap, ever: the tick is skipped and counted; the
+                    # backoff keeps a slow check from making this a spin.
+                    entry.counters["skipped_overlap"] = (
+                        int(entry.counters.get("skipped_overlap") or 0) + 1
+                    )
+                    entry.counters["next_due_at"] = now + min(entry.spec.every_ms, 15_000)
+                    self._write_counters(entry)
+                    logger.debug("monitor %s skipped: previous check still running", entry.spec.id)
+                    continue
+                if self._sem.locked():
+                    # Deferred, NOT skipped: the check stays due and runs on
+                    # the next pass with a free slot.
+                    continue
+                self._inflight.add(entry.spec.id)
+                task = loop.create_task(self._run_check(entry.spec.id, entry.generation))
+                self._check_tasks.add(task)
+                task.add_done_callback(self._check_tasks.discard)
+                started += 1
+            self._arm()
+        return started
+
+    async def _run_check(self, monitor_id: str, generation: int) -> None:
+        async with self._sem:
+            try:
+                entry = self._entries.get(monitor_id)
+                if entry is None or entry.generation != generation:
+                    return
+                outcome = await self._check_runner(entry.spec)
+                deliveries: list[MonitorDelivery] = []
+                async with self._write_lock:
+                    entry = self._entries.get(monitor_id)
+                    if entry is None or entry.generation != generation:
+                        return  # cancelled/replaced mid-flight: drop the result
+                    now = self._now()
+                    error = outcome.get("error")
+                    if error:
+                        self._apply_failure(entry, error, now)
+                    else:
+                        delivery = self._apply_success(entry, outcome.get("text") or "", now)
+                        if delivery is not None:
+                            deliveries.append(delivery)
+                    self._write_counters(entry)
+                    if deliveries or entry.counters.get("disabled"):
+                        self._notify_change()
+                for delivery in deliveries:
+                    try:
+                        await self._maybe_await(self._deliver(delivery))
+                    except Exception:
+                        # A delivery that throws still advances — one broken
+                        # monitor must not become a hot loop.
+                        logger.warning("monitor delivery failed for %s", monitor_id, exc_info=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("monitor check failed for %s", monitor_id, exc_info=True)
+            finally:
+                self._inflight.discard(monitor_id)
+                # A deferred monitor may now have a free slot, and the timer
+                # must reflect the new earliest due.
+                self._arm()
+
+    # -- the tick's decision core ------------------------------------------
+
+    def _apply_success(self, entry: _Entry, text: str, now: int) -> MonitorDelivery | None:
+        """One successful check: the diff state machine of §7.2 in full."""
+        spec = entry.spec
+        counters = entry.counters
+        old_last_check = int(counters.get("last_check_at") or 0)
+        skipped = _skipped_checks_since(old_last_check, spec.every_ms, now)
+        normalized = normalize(
+            text,
+            sort_lines=spec.sort_lines,
+            ignore=spec.ignore,
+            normalize_timestamps=self._settings.normalize_timestamps,
+        )
+        new_hash = content_hash(normalized)
+        old_hash = str(counters.get("content_hash") or "")
+
+        counters["checks"] = int(counters.get("checks") or 0) + 1
+        counters["last_check_at"] = now
+        counters["consecutive_failures"] = 0
+        counters["last_error"] = ""
+
+        if new_hash == old_hash:
+            # Quiet tick. One ≲1 KiB write is the whole cost; the blob is only
+            # probed so a blob-only loss heals for free (§7.2).
+            if old_hash and not monitor_state.snapshot_exists(
+                self._config_dir, self._session_id, spec.id
+            ):
+                self._write_snapshot(spec, normalized)
+            counters["next_due_at"] = self._advance(spec, now)
+            return None
+
+        blob = monitor_state.read_snapshot(self._config_dir, self._session_id, spec.id)
+        if blob is None:
+            if not old_hash:
+                # No baseline at all (first check, or both files lost): the
+                # baseline is established SILENTLY — never a full-dump
+                # delivery.
+                if self._write_snapshot(spec, normalized):
+                    counters["content_hash"] = new_hash
+                    counters["last_note"] = (
+                        "baseline re-established" if old_last_check else "baseline captured"
+                    )
+                else:
+                    counters["last_note"] = "baseline write failed"
+                counters["next_due_at"] = self._advance(spec, now)
+                return None
+            delta_text, changes = beyond_window_text(new_hash)
+        else:
+            blob_text = str(blob.get("snapshot") or "")
+            truncated = bool(blob.get("snapshot_truncated"))
+            if not old_hash and truncated:
+                # Counters lost AND the blob is truncated: the hash cannot be
+                # rebuilt (§7.2 "a truncated blob cannot yield the hash") and a
+                # clipped prefix cannot diff honestly, so the baseline is
+                # re-established silently rather than diffed against a window
+                # that may hide the change.
+                if self._write_snapshot(spec, normalized):
+                    counters["content_hash"] = new_hash
+                    counters["last_note"] = "baseline re-established"
+                else:
+                    counters["last_note"] = "baseline write failed"
+                counters["next_due_at"] = self._advance(spec, now)
+                return None
+            if not has_line_difference(blob_text, normalized):
+                if not truncated:
+                    # The hash disagreed while the content did not: the stored
+                    # hash was TORN (a crash between the two writes). Re-adopt
+                    # the blob ((recompute) and stay quiet.
+                    counters["content_hash"] = new_hash
+                    counters["next_due_at"] = self._advance(spec, now)
+                    return None
+                delta_text, changes = beyond_window_text(new_hash)
+            else:
+                delta_text, changes = render_delta(
+                    blob_text,
+                    normalized,
+                    max_delta_lines=self._settings.max_delta_lines,
+                    delta_max_chars=self._settings.delta_max_chars,
+                )
+
+        # Order matters (§7.2): blob first, counters second — the counters
+        # write is the commit point, so the baseline advances only when its
+        # hash lands.
+        if not self._write_snapshot(spec, normalized):
+            counters["last_note"] = "snapshot write failed"
+            counters["next_due_at"] = self._advance(spec, now)
+            return None
+        counters["content_hash"] = new_hash
+        counters["last_change_at"] = now
+        counters["next_due_at"] = self._advance(spec, now)
+
+        if not self._rate_allows(counters, now):
+            entry.counters["suppressed"]["rate_cap"] = (
+                int(entry.counters["suppressed"].get("rate_cap") or 0) + 1
+            )
+            counters["rate_cap_held"] = int(counters.get("rate_cap_held") or 0) + 1
+            return None
+        counters["rate_window_count"] = int(counters.get("rate_window_count") or 0) + 1
+        counters["deliveries"] = int(counters.get("deliveries") or 0) + 1
+        held = int(counters.get("rate_cap_held") or 0)
+        counters["rate_cap_held"] = 0
+        return MonitorDelivery(
+            monitor_id=spec.id,
+            name=spec.name,
+            tool=spec.tool,
+            changes=changes,
+            checks=int(counters["checks"]),
+            skipped=skipped,
+            delta_text=delta_text,
+            at_ms=now,
+            held_by_cap=held,
+            final=self._is_final(spec, now),
+            description=spec.description,
+        )
+
+    def _apply_failure(self, entry: _Entry, error: str, now: int) -> None:
+        counters = entry.counters
+        counters["checks"] = int(counters.get("checks") or 0) + 1
+        counters["last_check_at"] = now
+        counters["consecutive_failures"] = int(counters.get("consecutive_failures") or 0) + 1
+        counters["last_error"] = str(error)[:500]
+        failures = counters["consecutive_failures"]
+        if failures >= self._settings.max_consecutive_failures:
+            counters["disabled"] = True
+            counters["disabled_reason"] = counters["last_error"]
+            logger.warning(
+                "monitor %s disabled after %d consecutive failures: %s",
+                entry.spec.id,
+                failures,
+                counters["last_error"],
+            )
+        else:
+            backoff = min(RETRY_CAP_MS, entry.spec.every_ms * (2 ** (failures - 1)))
+            counters["next_due_at"] = now + backoff
+
+    def _rate_allows(self, counters: dict[str, Any], now: int) -> bool:
+        start = int(counters.get("rate_window_start") or 0)
+        if start == 0 or now - start >= DELIVERY_WINDOW_MS:
+            counters["rate_window_start"] = now
+            counters["rate_window_count"] = 0
+            return True
+        return int(counters.get("rate_window_count") or 0) < self._settings.max_deliveries_per_hour
+
+    def _is_final(self, spec: MonitorSpec, now: int) -> bool:
+        """Whether the cancel hint is obsolete (the monitor stops soon).
+
+        The last check before ``until`` — within one interval of it — is the
+        final delivery: the monitor will not run again, so "cancel once its
+        goal is met" no longer describes anything the reader can act on.
+        """
+        return spec.until_at is not None and spec.until_at - now <= spec.every_ms
+
+    def _advance(self, spec: MonitorSpec, now: int) -> int | None:
+        """The next due instant: now + every + positive-only jitter (§11.2).
+
+        Clamped at ``until_at`` (a monitor never checks past its stop time);
+        the due scan treats "next_due ≥ until" as expired.
+        """
+        jitter_cap = float(min(5_000, spec.every_ms // 10))
+        candidate = now + spec.every_ms + int(self._uniform(0.0, jitter_cap))
+        if spec.until_at is not None:
+            return min(candidate, spec.until_at)
+        return candidate
+
+    # -- internals ----------------------------------------------------------
+
+    def _ordered_entries(self) -> list[_Entry]:
+        return sorted(self._entries.values(), key=lambda entry: entry.spec.created_at)
+
+    def _is_active(self, entry: _Entry, now: int) -> bool:
+        if entry.counters.get("disabled"):
+            return False
+        spec = entry.spec
+        return not (spec.until_at is not None and now >= spec.until_at)
+
+    def _is_due(self, entry: _Entry, now: int) -> bool:
+        if not self._is_active(entry, now):
+            return False
+        due = entry.counters.get("next_due_at")
+        return isinstance(due, int) and not isinstance(due, bool) and due <= now
+
+    def _first_check_delay_ms(self) -> int:
+        return int(self._uniform(float(FIRST_CHECK_MIN_MS), float(FIRST_CHECK_MAX_MS)))
+
+    def _write_counters(self, entry: _Entry) -> None:
+        try:
+            monitor_state.write_counters(
+                self._config_dir, self._session_id, entry.spec.id, entry.counters
+            )
+        except Exception:
+            logger.warning("monitor counters write failed for %s", entry.spec.id, exc_info=True)
+
+    def _write_snapshot(self, spec: MonitorSpec, normalized: str) -> bool:
+        """Write the snapshot blob; ``False`` when the write did not land.
+
+        A failed blob write must NOT advance the baseline hash — the counters
+        file's hash and the blob are a pair (§7.2), and advancing the hash
+        while the blob stayed stale would make every later diff compare
+        against the wrong window. A quiet-tick heal treats failure as
+        "nothing happened"; the change path records the failure and keeps the
+        old hash so the next check retries the whole diff.
+        """
+        cap = self._settings.snapshot_max_chars
+        truncated = len(normalized) > cap
+        snapshot = normalized[:cap] if truncated else normalized
+        try:
+            monitor_state.write_snapshot(
+                self._config_dir,
+                self._session_id,
+                spec.id,
+                snapshot,
+                truncated=truncated,
+            )
+        except Exception:
+            logger.warning("monitor snapshot write failed for %s", spec.id, exc_info=True)
+            return False
+        return True
+
+    def _notify_change(self) -> None:
+        if self._on_change is None:
+            return
+        try:
+            self._on_change()
+        except Exception:  # noqa: BLE001 — observation cannot break scheduling
+            logger.warning("monitor on_change failed", exc_info=True)
+
+    @staticmethod
+    async def _maybe_await(value: Any) -> Any:
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
+    def _arm(self) -> None:
+        self._cancel_timer()
+        if self._disposed:
+            return
+        now = self._now()
+        due_values: list[int] = [
+            due
+            for entry in self._entries.values()
+            if self._is_active(entry, now)
+            for due in (entry.counters.get("next_due_at"),)
+            if isinstance(due, int) and not isinstance(due, bool)
+        ]
+        if not due_values:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (constructed outside async): the session's async
+            # init re-arms with one pump().
+            logger.debug("monitor scheduler armed without a running event loop")
+            self.needs_rearm = True
+            return
+        self.needs_rearm = False
+        next_due = min(due_values)
+        delay_ms = max(0, next_due - now)
+        delay_ms = min(delay_ms, MAX_ARM_MS)
+        delay_ms = max(delay_ms, MIN_ARM_MS)
+        self._timer = loop.call_later(delay_ms / 1000.0, self._on_timer)
+
+    def _cancel_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _on_timer(self) -> None:
+        self._timer = None
+        if self._disposed:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.pump())
+        self._tick_tasks.add(task)
+        task.add_done_callback(self._tick_tasks.discard)
+
+    def dispose(self) -> None:
+        """Cancel the armed timer and every in-flight tick/check task.
+
+        asyncio has no ``unref``: this is what stops a pending monitor from
+        keeping the event loop alive, and what ensures a check in flight
+        cannot apply its result after teardown.
+        """
+        self._disposed = True
+        self._cancel_timer()
+        for task in [*self._tick_tasks, *self._check_tasks]:
+            if not task.done():
+                task.cancel()
+        self._tick_tasks.clear()
+        self._check_tasks.clear()

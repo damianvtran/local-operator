@@ -469,6 +469,17 @@ SECTIONS: tuple[Section, ...] = (
         "Advisory skills, guides and MCP servers a decision model may suggest "
         "per message. Off keeps the prompt unchanged.",
     ),
+    Section(
+        "monitor",
+        "Monitors",
+        # NEW_SESSIONS for the classification section's reason: the monitor
+        # scheduler is built per session and handed a SNAPSHOT of this section
+        # (docs/design/monitor-tool.md §16), so an edit lands on the next
+        # session start. Claiming LIVE would be a painted lie.
+        Scope.NEW_SESSIONS,
+        "Delta-watching monitors: how often they check, how much they keep, "
+        "and when they give up.",
+    ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
     # launch-time (autosave and the cleanup policy), and these keys take
@@ -2505,6 +2516,121 @@ SETTINGS: tuple[Setting, ...] = (
     # into the transcript at all (the operator asked for it gone: it is an internal
     # resource-selection step, and it was landing under the reply), so the switch has
     # nothing left to gate — see the retired row below.
+    # -- monitors ------------------------------------------------------------
+    #
+    # docs/design/monitor-tool.md §16. Scope is NEW_SESSIONS on the SECTION
+    # above (the scheduler is built per session and handed a snapshot), so an
+    # edit lands on the next session start — the classification block's scope
+    # and reason, verbatim. The numbers are the §16 defaults the monitor
+    # package's own readers fall back to; `_monitor_consumer_defaults()` in
+    # tests/unit/test_settings_io.py binds the two so neither can drift.
+    #
+    # 0 means "use the default" for every number here, exactly like the
+    # classification rows: the readers refuse a non-positive value rather than
+    # honouring it, so a hand-edit cannot leave a 0-second poll.
+    Setting(
+        key="monitor.defaultIntervalS",
+        path=("monitor", "defaultIntervalS"),
+        section="monitor",
+        label="Default interval (s)",
+        kind=Kind.INT,
+        default=60,
+        help="Checks every N seconds when 'every' is omitted; floor 30s.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.maxMonitors",
+        path=("monitor", "maxMonitors"),
+        section="monitor",
+        label="Max per session",
+        kind=Kind.INT,
+        default=8,
+        help="Refuses arms past N; cancel one first.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.runTimeoutMs",
+        path=("monitor", "runTimeoutMs"),
+        section="monitor",
+        label="Run timeout (ms)",
+        kind=Kind.INT,
+        default=120000,
+        help="Per-check deadline; 0 uses 120000 ms.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.snapshotMaxChars",
+        path=("monitor", "snapshotMaxChars"),
+        section="monitor",
+        label="Snapshot cap (chars)",
+        kind=Kind.INT,
+        default=32768,
+        help="Stored normalized output; bounds disk and diff input.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.maxDeltaLines",
+        path=("monitor", "maxDeltaLines"),
+        section="monitor",
+        label="Max delta lines",
+        kind=Kind.INT,
+        default=12,
+        help="Changed lines summarised per delivery.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.deltaMaxChars",
+        path=("monitor", "deltaMaxChars"),
+        section="monitor",
+        label="Delta budget (chars)",
+        kind=Kind.INT,
+        default=1200,
+        help="Total delta text per delivery message.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.classifyMaxChars",
+        path=("monitor", "classifyMaxChars"),
+        section="monitor",
+        label="Classifier state (chars)",
+        kind=Kind.INT,
+        default=1200,
+        help="Bound on the state the materiality check receives.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.maxConsecutiveFailures",
+        path=("monitor", "maxConsecutiveFailures"),
+        section="monitor",
+        label="Disable after failures",
+        kind=Kind.INT,
+        default=5,
+        help="Consecutive check failures before a monitor is disabled.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.maxDeliveriesPerHour",
+        path=("monitor", "maxDeliveriesPerHour"),
+        section="monitor",
+        label="Deliveries per hour",
+        kind=Kind.INT,
+        default=12,
+        help="Per monitor; over the cap, changes are held and counted.",
+        minimum=0,
+    ),
+    Setting(
+        key="monitor.normalizeTimestamps",
+        path=("monitor", "normalizeTimestamps"),
+        section="monitor",
+        label="Ignore timestamp churn",
+        kind=Kind.BOOL,
+        default=True,
+        help="Treat timestamps as noise before diffing, so clock fields do not alarm.",
+        choices=_bool_choices(
+            "timestamps do not count as changes",
+            "timestamps diff like any text",
+        ),
+    ),
     # -- fork ---------------------------------------------------------------
     #
     # Both paths are genuinely NESTED two-element tuples, not flat dotted keys.

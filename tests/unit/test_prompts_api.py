@@ -71,6 +71,31 @@ class _FakeSchedulerForBlocks:
         pass
 
 
+class _FakeMonitorSchedulerForBlocks:
+    """Minimal monitor scheduler (the Runtime_checkable protocol's surface).
+
+    ``monitor`` is createIf-gated on ``ToolContext.monitor_scheduler`` exactly
+    as ``wake`` is on ``wake_scheduler``, and ToolContext's runtime_checkable
+    protocol means every member must exist for the context to validate.
+    """
+
+    @property
+    def monitors(self) -> list[Any]:
+        return []
+
+    async def update(self, monitors: list[Any]) -> None:
+        pass
+
+    async def create(self, request: Any, *, cwd: str) -> dict[str, Any]:
+        return {}
+
+    async def cancel(self, monitor_id: str) -> dict[str, Any]:
+        return {}
+
+    def index_rows(self) -> list[dict[str, Any]]:
+        return []
+
+
 class _FakeJobsForBlocks:
     """Minimal job manager so create_tools includes task/wait/jobs."""
 
@@ -615,6 +640,7 @@ def test_inventory_block_matches_default_tool_order() -> None:
         ToolContext(
             cwd=".",
             wake_scheduler=_FakeSchedulerForBlocks(),
+            monitor_scheduler=_FakeMonitorSchedulerForBlocks(),
             subagent_launcher=lambda label, prompt, *, agent="task", effort=None: "job-x",
             jobs=_FakeJobsForBlocks(),
             subagent_comms=_FakeCommsForBlocks(),
@@ -636,8 +662,49 @@ def test_inventory_block_matches_default_tool_order() -> None:
     )
     blocks = build_system_blocks(tools, "", ENV, DATE)
     lines = [line for line in blocks[1].splitlines() if line.startswith("- ")]
-    expected = list(DEFAULT_TOOL_NAMES)  # scheduler attached -> wake included
+    expected = list(DEFAULT_TOOL_NAMES)  # schedulers attached -> wake + monitor included
     assert [line.split(":")[0][2:] for line in lines] == expected
+
+
+def test_inventory_names_monitor_only_when_a_scheduler_is_attached() -> None:
+    """The inventory names `monitor` when a monitor scheduler is present and
+    NOT when it is absent — the createIf gate, observed from the prompt.
+
+    `wake` has carried the same contract; this is its monitor twin, and it is
+    asserted both ways because a gate that never excludes is not a gate.
+    """
+    from local_operator.tools.registry import create_tools
+
+    def inventory(context: ToolContext) -> str:
+        tools = create_tools(context)
+        blocks = build_system_blocks(tools, "", ENV, DATE)
+        return "\n".join(line for line in blocks[1].splitlines() if line.startswith("- "))
+
+    base: dict[str, Any] = {
+        "cwd": ".",
+        "subagent_launcher": lambda label, prompt, *, agent="task", effort=None: "job-x",
+        "jobs": _FakeJobsForBlocks(),
+        "subagent_comms": _FakeCommsForBlocks(),
+    }
+    without = inventory(ToolContext(**base))
+    with_scheduler = inventory(
+        ToolContext(**base, monitor_scheduler=_FakeMonitorSchedulerForBlocks())
+    )
+    assert not any(line.startswith("- monitor") for line in without.splitlines())
+    assert any(line.startswith("- monitor") for line in with_scheduler.splitlines())
+
+
+def test_system_md_teaches_wake_vs_monitor_and_the_no_action_norm() -> None:
+    """The harness-owned sentences: the wake-vs-monitor split and R14.
+
+    Unconditional prose, like the wake sentence beside it — no template flag
+    pair, because a missing tool just costs a line (design §13.1).
+    """
+    text = render_template("system.md", {})
+    flat = " ".join(text.split())
+    assert "`monitor` watches a read-only call for changes" in flat
+    assert "reports only deltas" in flat
+    assert "finds nothing needing action is complete" in flat
 
 
 def test_inventory_does_not_repeat_descriptions_the_tools_array_carries() -> None:
