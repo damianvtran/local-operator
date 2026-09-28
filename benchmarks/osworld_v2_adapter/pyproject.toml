@@ -35,6 +35,20 @@ dependencies = [
     # here costs nothing extra in the locked set.
     "boto3>=1.34",
     "requests>=2.31",
+    # The SDK-session engagement (run_episode.py --engagement session) runs the
+    # harness's MCP client in the episode driver AND spawns this package's
+    # action server as an MCP stdio child, both from THIS interpreter. That
+    # code uses the mcp 2.x API surface (Server.add_request_handler; a float
+    # read_timeout_seconds on ClientSession), but a lock resolved for Python
+    # < 3.14 had silently pinned mcp 1.19.0, where both sides fail: the client
+    # at connect ("'float' object has no attribute 'total_seconds'") and the
+    # action server at start ("'Server' object has no attribute
+    # 'add_request_handler'"), so the episode cannot act at all (measured on
+    # arm 1687, 2026-09-28: session refused at MCP settle, 0 steps). The floor
+    # keeps a future re-resolution from silently regressing the engagement to
+    # an incompatible client. Not an override: the harness itself declares
+    # mcp>=1.2, so nothing here overrides another package's bound.
+    "mcp>=2",
 ]
 
 [project.optional-dependencies]
