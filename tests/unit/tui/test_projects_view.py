@@ -848,3 +848,184 @@ async def test_the_title_sheds_before_clipping(tmp_path: Path) -> None:
         timeline_title = timeline_view.rendered_rows()[0]
         assert "zoom:" not in timeline_title, timeline_title
         assert "tracked" in timeline_title and "updated" in timeline_title
+
+
+# -- S6d: sections, the ruler and the canvas clicks ---------------------------
+
+
+def _grouped_registry(tmp_path: Path) -> ProjectRegistry:
+    """Four projects, two teams, one bucket of one — name-sorted b < m < p < r.
+
+    ``core`` = board-entry(0) + parity-spec(2); ``personal`` = mobile-sheet(1);
+    ``no team`` = references(3). The canvas rows are therefore 0 core header,
+    1..2 core rows, 3 personal header, 4 its row, 5 no-team header, 6 its row.
+    """
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="board-entry", title="Board entry", team="core"))
+    registry.create_project(
+        ProjectEdit(name="mobile-sheet", title="Mobile sheet", team="personal", status="done")
+    )
+    registry.create_project(ProjectEdit(name="parity-spec", title="TUI parity spec", team="core"))
+    registry.create_project(ProjectEdit(name="references", status="paused"))
+    return registry
+
+
+@pytest.mark.asyncio
+async def test_shift_arrows_jump_sections_and_clamp(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _grouped_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "board-entry")
+        assert [row["project"]["name"] for row in view._views] == [
+            "board-entry",
+            "mobile-sheet",
+            "parity-spec",
+            "references",
+        ]
+        assert view.cursor == 0
+        await pilot.press("shift+down")
+        await pilot.pause()
+        assert view.cursor == 1  # personal's first row
+        await pilot.press("shift+down")
+        await pilot.pause()
+        assert view.cursor == 3  # the `no team` bucket, last
+        await pilot.press("shift+down")
+        await pilot.pause()
+        assert view.cursor == 3  # clamped at the end
+        await pilot.press("shift+up")
+        await pilot.pause()
+        assert view.cursor == 1
+        await pilot.press("shift+up")
+        await pilot.pause()
+        assert view.cursor == 0
+        await pilot.press("shift+up")
+        await pilot.pause()
+        assert view.cursor == 0  # clamped at the top
+
+
+@pytest.mark.asyncio
+async def test_shift_arrows_do_nothing_without_teams(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta", "gamma")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "beta")
+        assert view.cursor == 1
+        await pilot.press("shift+down")
+        await pilot.pause()
+        assert view.cursor == 1
+        await pilot.press("shift+up")
+        await pilot.pause()
+        assert view.cursor == 1
+
+
+@pytest.mark.asyncio
+async def test_the_rule_is_a_section_ruler_that_tracks_the_viewport(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _grouped_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "board-entry")
+        rows = view.rendered_rows()
+        assert rows[1].startswith("── core · 2 ")
+        # The same width as the shipped plain rule (view 56 at 60 columns,
+        # minus the two-cell inset): the ruler changes the CONTENT, not the row.
+        assert len(rows[1]) == 54
+        # The body shows 4 rows of a 7-row canvas: scrolling to the personal
+        # header moves the ruler — and the cursor (still in core) earns the
+        # dim `sel core` clause.
+        view._body.scroll_to(y=3, animate=False)
+        await pilot.pause()
+        await pilot.pause()
+        assert view.rendered_rows()[1].startswith("── personal · 1 · sel core ")
+
+
+@pytest.mark.asyncio
+async def test_clicks_select_rows_and_headers_jump(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _grouped_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "board-entry")
+        canvas = view._canvas
+        # A row click selects it and moves the keyboard cursor there (canvas
+        # row 4 = mobile-sheet, in personal).
+        await pilot.click(canvas, offset=(5, 4))
+        await pilot.pause()
+        assert view.cursor == 1
+        # A header click jumps to that section's first row (row 5 = `no team`).
+        await pilot.click(canvas, offset=(5, 5))
+        await pilot.pause()
+        assert view.cursor == 3
+        # A header whose section already holds the cursor is a no-op.
+        await pilot.click(canvas, offset=(5, 3))
+        await pilot.pause()
+        assert view.cursor == 1
+
+
+@pytest.mark.asyncio
+async def test_board_card_clicks_select_the_card(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _grouped_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "board-entry")
+        await pilot.press("2")
+        await pilot.pause()
+        assert view.view_type == "board"
+        from local_operator.tui.projects_render import board_position
+
+        card = board_position(view._views, 2)  # parity-spec, core's second card
+        assert card is not None
+        x, y = card
+        assert x == 0 and y > 0
+        await pilot.click(view._canvas, offset=(x + 2, y))
+        await pilot.pause()
+        assert view.cursor == 2
+
+
+@pytest.mark.asyncio
+async def test_a_grouped_reveal_accounts_for_the_header_rows(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _grouped_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        # references sits on canvas row 6 (two headers above it); a reveal
+        # that used its INDEX would scroll 3 rows short.
+        view = await _open(pilot, app, "references")
+        assert view.cursor == 3
+        # The reveal scrolls clear of the horizontal scrollbar's row (the
+        # shipped downward-reveal rule): at 60 columns the rows are wider than
+        # the viewport, so the usable height is 3 and the offset lands on 4.
+        assert int(view._body.scroll_offset.y) == 4
+        # The ruler tracks the viewport, and the cursor's own section (the
+        # `no team` bucket) earns the sel clause.
+        assert view.rendered_rows()[1].startswith("── personal · 1 · sel no team ")
+        # A click after the scroll resolves through the same offset: widget
+        # offsets ARE canvas cells, whatever the viewport shows.
+        await pilot.click(view._canvas, offset=(5, 4))
+        await pilot.pause()
+        assert view.cursor == 1
+
+
+@pytest.mark.asyncio
+async def test_double_click_repeats_enter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _ProjectSession()
+    session.project_registry = _grouped_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "board-entry")
+        fired: list[bool] = []
+        monkeypatch.setattr(view, "action_jump", lambda: fired.append(True))
+        await pilot.click(view._canvas, offset=(5, 2), times=2)  # parity-spec's row
+        await pilot.pause()
+        assert fired, "the double click must repeat `↵`"
+        assert view.cursor == 2  # the acting gesture moves the caret

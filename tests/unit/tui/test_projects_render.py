@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from rich.cells import cell_len
 from rich.style import Style
 
 from local_operator.tui.projects_render import (
@@ -21,11 +22,19 @@ from local_operator.tui.projects_render import (
     TIMELINE_NAME_WIDTH,
     aggregate_footer,
     auto_timeline_tier,
+    board_position,
     detail_footer,
+    list_position,
+    project_at,
     render_project_board,
     render_project_list,
     render_project_timeline,
+    section_at,
+    section_header_at,
+    section_ruler,
+    sections_of,
     timeline_axis_cells,
+    timeline_position,
 )
 
 NOW = 1_760_000_000.0
@@ -954,3 +963,268 @@ def test_the_counts_line_sheds_whole_segments_at_60_100_150() -> None:
         views, tier="month", style_for=lambda key: Style(), width=100
     ).plain
     assert "zoom" not in tiered_100 and tiered_100.endswith("1 live")
+
+
+# -- S6d: team-grouped sections (the parity slice) ----------------------------
+
+
+def _grouped_store() -> list[dict[str, Any]]:
+    """The design's own store shape: two teams, one teamless, dated rows both ways."""
+    return [
+        _view(
+            "parity-spec",
+            title="TUI parity spec",
+            team="core",
+            status="active",
+            estimate=5.0,
+            target_date="2026-10-04",
+            progress="Spec reviewed",
+            progress_updated_at=NOW - 7200,
+        ),
+        _view("board-entry", title="Board entry", team="core", target_date="2026-09-28"),
+        _view("desktop-tab", title="Desktop tab", team="core", status="qa"),
+        _view("classifier", team="core", status="done"),
+        _view("mobile-sheet", title="Mobile sheet", team="personal", status="done"),
+        _view("references", status="paused"),
+    ]
+
+
+def test_sections_order_teams_case_insensitively_with_no_team_last() -> None:
+    views = [
+        _view("z", team="Zeta"),
+        _view("a", team="alpha"),
+        _view("n"),
+        _view("b", team="beta"),
+    ]
+    assert sections_of(views) == [
+        ("alpha", [1]),
+        ("beta", [3]),
+        ("Zeta", [0]),
+        ("no team", [2]),
+    ]
+    # No team anywhere: no sections at all — the canvases render flat, which
+    # is the byte-identical path the shipped tests above already pin.
+    assert sections_of([_view("a"), _view("b")]) is None
+
+
+def test_sections_cover_only_the_painted_rows() -> None:
+    views = [_view(f"p{index}", team="core") for index in range(PROJECTS_MAX + 2)]
+    assert sections_of(views) == [("core", list(range(PROJECTS_MAX)))]
+
+
+def test_teamless_canvases_report_no_sections() -> None:
+    flat = [_view("alpha"), _view("beta")]
+    assert render_project_list(flat, cursor=0).sections == ()
+    assert render_project_board(flat, cursor=0).sections == ()
+    assert render_project_timeline(flat, cursor=0).sections == ()
+
+
+def test_grouped_list_paints_headers_around_the_store_order() -> None:
+    views = _grouped_store()
+    result = render_project_list(views, cursor=1, now=NOW)
+    lines = result.text.plain.splitlines()
+    assert lines[0].startswith("── core · 4 ")
+    assert lines[5].startswith("── personal · 1 ")
+    assert lines[7].startswith("── no team · 1 ")
+    # Headers fill the canvas's own width (the widest row's edge).
+    assert cell_len(lines[0]) == result.width
+    # Sections keep the store's order (grouping is not a second sort) and the
+    # count is the section's painted rows.
+    assert "parity-spec" in lines[1] and "classifier" in lines[4]
+    assert "mobile-sheet" in lines[6] and "references" in lines[8]
+    assert result.sections == ((0, 5, "core"), (5, 7, "personal"), (7, 9, "no team"))
+    # The cursor's canvas row is no longer its index: the reveal and the
+    # clicks both read this table.
+    assert [list_position(views, index) for index in range(6)] == [1, 2, 3, 4, 6, 8]
+
+
+def test_grouped_board_stacks_a_block_per_section_with_nonempty_columns() -> None:
+    views = [
+        *_grouped_store(),
+        _view("old-thing", title="Old thing", team="core", status="archived"),
+    ]
+    result = render_project_board(views, cursor=0, now=NOW)
+    lines = result.text.plain.splitlines()
+    assert lines[0].startswith("── core · 5 ")
+    assert "in flight · 3" in lines[1] and "done · 1" in lines[1]
+    assert "archived · 1" in lines[1]
+    personal = next(
+        index for index, line in enumerate(lines) if line.startswith("── personal · 1 ")
+    )
+    # Personal paints ONLY its done column: a column carrying no cards in a
+    # section is not painted at all (no `paused · 0` under a populated block).
+    assert lines[personal + 1].startswith("done · 1")
+    assert "in flight" not in lines[personal + 1]
+    assert "paused · 0" not in result.text.plain and "archived · 0" not in result.text.plain
+    no_team = next(index for index, line in enumerate(lines) if line.startswith("── no team · 1 "))
+    assert lines[no_team + 1].startswith("paused · 1")
+    assert [label for _start, _end, label in result.sections] == ["core", "personal", "no team"]
+
+
+def test_grouped_board_positions_land_on_the_painted_cards() -> None:
+    views = _grouped_store()
+    result = render_project_board(views, cursor=0, now=NOW)
+    lines = result.text.plain.splitlines()
+    names = [
+        "TUI parity spec",
+        "Board entry",
+        "Desktop tab",
+        "classifier",
+        "Mobile sheet",
+        "references",
+    ]
+    for index, name in enumerate(names):
+        position = board_position(views, index)
+        assert position is not None, index
+        x, y = position
+        assert lines[y][x:].lstrip("▸ ◆ ").startswith(name), (index, lines[y])
+    # The second column's card sits a full pitch right of the first's, on the
+    # same card line.
+    first = board_position(views, 0)
+    second = board_position(views, 3)
+    assert first is not None and second is not None
+    assert second == (BOARD_COLUMN_WIDTH, first[1])
+
+
+def test_grouped_board_position_paints_the_past_cap_selected_card() -> None:
+    rows = [_view(f"c{index}", team="core") for index in range(BOARD_CARDS_MAX + 1)]
+    views = [*rows, _view("other", team="zeta")]
+    selected = BOARD_CARDS_MAX  # the (BOARD_CARDS_MAX + 1)-th card: past the cap
+    result = render_project_board(views, cursor=selected, now=NOW)
+    lines = result.text.plain.splitlines()
+    position = board_position(views, selected)
+    assert position is not None
+    x, y = position
+    assert lines[y][x:].lstrip("▸ ◆ ").startswith("c12")
+    # The extra card pushes the LATER section down. With the cursor on the
+    # past-cap card, core paints its header, 12 card rows and the extra card;
+    # with the cursor in the later section, the same card is only COUNTED by
+    # the overflow note, two lines shorter.
+    core_height = 1 + (1 + 4 * BOARD_CARDS_MAX + 2)  # section header + block
+    zeta_name = core_height + 3  # zeta's header + its column header + the blank
+    late = board_position(views, BOARD_CARDS_MAX + 1)
+    assert late is not None and late[1] == zeta_name
+    late_view = render_project_board(views, cursor=BOARD_CARDS_MAX + 1, now=NOW)
+    late_lines = late_view.text.plain.splitlines()
+    assert "other" in late_lines[late[1]]
+    # Without the selection the same card is only COUNTED by the overflow
+    # note, and the later section sits two lines higher.
+    assert any("… +1 more" in line for line in late_lines)
+
+
+def test_grouped_timeline_interrupts_dated_rows_and_splits_the_tail() -> None:
+    views = _grouped_store()
+    result = render_project_timeline(views, tier="month", cursor=0, now=NOW)
+    lines = result.text.plain.splitlines()
+    assert lines[1].startswith("── core · 2 ")
+    # The name column shows the title first (the key joins only when the
+    # 24-cell column holds it — D2's tight-fit rule).
+    assert "TUI parity spec" in lines[2] and "Board entry" in lines[3]
+    assert lines[4] == ""
+    assert lines[5].startswith("no dates (core, 2): ")
+    assert "Desktop tab" in lines[5] and "classifier" in lines[5]
+    assert lines[6].startswith("no dates (personal, 1): ") and "Mobile sheet" in lines[6]
+    assert lines[7].startswith("no dates (no team, 1): ") and "references" in lines[7]
+    assert result.sections == (
+        (1, 4, "core"),
+        (5, 6, "core"),
+        (6, 7, "personal"),
+        (7, 8, "no team"),
+    )
+
+
+def test_grouped_timeline_positions_land_on_the_painted_rows() -> None:
+    views = _grouped_store()
+    result = render_project_timeline(views, tier="month", cursor=0, now=NOW)
+    lines = result.text.plain.splitlines()
+    names = [
+        "TUI parity spec",
+        "Board entry",
+        "Desktop tab",
+        "classifier",
+        "Mobile sheet",
+        "references",
+    ]
+    for index, name in enumerate(names):
+        position = timeline_position(views, index)
+        assert position is not None, index
+        _x, y = position
+        assert name in lines[y], (index, lines[y])
+
+
+def test_project_at_maps_cells_back_to_the_painted_projects() -> None:
+    views = _grouped_store()
+    # List rows address their whole row; headers are not rows.
+    assert project_at(views, "list", 3, 1) == 0
+    assert project_at(views, "list", 3, 0) is None
+    assert project_at(views, "list", 3, 6) == 4
+    # Board cards their three content lines; the blank above a card, the
+    # gutter between columns and the header row are not cards.
+    card = board_position(views, 3)
+    assert card is not None
+    x, y = card
+    assert project_at(views, "board", x + 2, y) == 3
+    assert project_at(views, "board", x + 2, y - 1) is None
+    assert project_at(views, "board", BOARD_COLUMN_WIDTH - 1, y) is None
+    # The timeline's dated rows address the row; its tail lines pick the NAME
+    # the click landed on (one line lists several projects).
+    result = render_project_timeline(views, tier="month", cursor=0, now=NOW)
+    lines = result.text.plain.splitlines()
+    assert project_at(views, "timeline", 0, 0) is None  # the axis row
+    assert project_at(views, "timeline", 0, 2) == 0
+    tail_position = timeline_position(views, 3)
+    assert tail_position is not None
+    tail_y = tail_position[1]
+    assert project_at(views, "timeline", lines[tail_y].index("classifier") + 1, tail_y) == 3
+    assert project_at(views, "timeline", 0, tail_y) is None  # the prefix is not a name
+
+
+def test_section_lookups_cover_headers_and_bands() -> None:
+    views = _grouped_store()
+    assert section_header_at(views, "list", 0, 0) == "core"
+    assert section_header_at(views, "list", 0, 1) is None
+    assert section_at(views, "list", 0, 3) == "core"
+    assert section_at(views, "list", 0, 5) == "personal"
+    assert section_at(views, "list", 0, 9) is None
+    assert section_at(views, "board", 0, 0) == "core"
+    assert section_header_at(views, "timeline", 0, 1) == "core"
+    # Ungrouped canvases have no sections to look up.
+    flat = [_view("alpha")]
+    assert section_at(flat, "list", 0, 0) is None
+    assert section_header_at(flat, "board", 0, 0) is None
+
+
+def test_section_ruler_names_the_viewport_section_and_sheds_in_order() -> None:
+    views = _grouped_store()
+    full = section_ruler(views, "list", top_row=0, cursor=0, width=40)
+    assert full is not None
+    assert full.plain == "── core · 4 " + "─" * (40 - cell_len("── core · 4 "))
+    # A cursor in a DIFFERENT section appends the dim `· sel {team}` clause.
+    sel = section_ruler(views, "list", top_row=5, cursor=0, width=40)
+    assert sel is not None
+    assert sel.plain == "── personal · 1 · sel core " + "─" * (
+        40 - cell_len("── personal · 1 · sel core ")
+    )
+    # Same section: no clause.
+    same = section_ruler(views, "list", top_row=5, cursor=4, width=40)
+    assert same is not None and "sel" not in same.plain
+    # The shed order: the sel clause first, then the count, then the label's
+    # own fit (truncated with an ellipsis, never vanished).
+    no_sel = section_ruler(views, "list", top_row=5, cursor=0, width=26)
+    assert no_sel is not None and no_sel.plain == "── personal · 1 " + "─" * (
+        26 - cell_len("── personal · 1 ")
+    )
+    # The count still fits at 20 — it only sheds when it cannot.
+    counted = section_ruler(views, "list", top_row=5, cursor=0, width=20)
+    assert counted is not None and counted.plain == "── personal · 1 " + "─" * (
+        20 - cell_len("── personal · 1 ")
+    )
+    no_count = section_ruler(views, "list", top_row=5, cursor=0, width=14)
+    assert no_count is not None and no_count.plain == "── personal " + "─" * (
+        14 - cell_len("── personal ")
+    )
+    tiny = section_ruler(views, "list", top_row=5, cursor=0, width=10)
+    assert tiny is not None and tiny.plain == "── perso… "
+    # Off any band (and ungrouped) the caller paints the shipped plain rule.
+    assert section_ruler(views, "list", top_row=99, cursor=0, width=40) is None
+    assert section_ruler([_view("alpha")], "list", top_row=0, cursor=0, width=40) is None
