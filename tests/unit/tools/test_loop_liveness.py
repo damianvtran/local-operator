@@ -43,6 +43,20 @@ against 512-725 ms with the image decode put back on the loop, and 2.4-4.1 ms
 for the image workload under eight competing CPU hogs — i.e. load moves this
 statistic by a millisecond where it moved the wall gap by 300.
 
+One thing does move it WITHOUT load, and the probe subtracts it: a cyclic-GC
+collection that runs ON the loop thread pauses it for an interval whose cost
+scales with the process's accumulated HEAP, not with the code under test. A
+long-lived shard worker carries a heap large enough for one gen-2 pass to
+burn hundreds of milliseconds — measured here, a synthetic 900k-container
+cyclic heap costs ~85 ms per pass — so a raw thread-time delta cannot tell
+that pause from the regression the bound exists for. CI's single red sample
+in this file had exactly that shape (0.331 s against the 0.08 s bound, where
+the quiet-host widest is 4.3 ms). :class:`LoopCpuProbe` therefore records the
+intervals of collections that ran on ITS thread (``gc.callbacks``) and
+subtracts exactly those from each sample: a stretch put back on the loop is
+work, not a collection, and still lands in the sample
+(``test_a_stretch_beside_a_gc_pause_is_still_caught``).
+
 Which half is decisive differs by the SHAPE of the stretch, which is why both
 are here rather than either alone.
 
@@ -65,6 +79,7 @@ machine only widens the loop-bound side.
 from __future__ import annotations
 
 import asyncio
+import gc
 import io
 import threading
 import time
@@ -105,20 +120,67 @@ class LoopCpuProbe:
     ``time.thread_time`` is per-thread and excludes time asleep or waiting on
     the GIL, so a sample is large only when the loop thread genuinely ran
     without yielding — never merely because the machine was busy.
+
+    ONE PAUSE IS DEDUCTED, and it is why this class reads ``gc.callbacks``: a
+    cyclic-GC pass pauses the loop thread, and its cost scales with the HEAP
+    a long-lived process has accumulated — not with the code under test. The
+    module docstring carries the measurements; the deduction is scoped to
+    collections that ran ON this thread (a collection elsewhere pauses this
+    one without charging it CPU, so there is nothing to deduct) and to their
+    exact intervals, and ``samples`` is the only thing that shrinks —
+    ``raw_samples`` keeps the undeducted deltas so evidence stays visible.
     """
 
     def __init__(self) -> None:
+        #: Deducted samples — the loop thread's CPU less its own GC pauses;
+        #: what the workload assertions consume.
         self.samples: list[float] = []
+        #: The same windows WITHOUT the deduction, kept so a failure can show
+        #: how much of a stretch was GC (and so the deduction can be proved).
+        self.raw_samples: list[float] = []
+        #: Total loop-thread GC pause deducted across all windows.
+        self.gc_deducted = 0.0
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        # Constructed from inside the test coroutine, so this IS the loop's
+        # thread — asyncio offers no other way to name it.
+        self._thread_id = threading.get_ident()
+        self._gc_open: float | None = None
+        self._gc_intervals: list[tuple[float, float]] = []
+
+    def _on_gc(self, phase: str, info: dict[str, int]) -> None:
+        if threading.get_ident() != self._thread_id:
+            return
+        now = time.thread_time()
+        if phase == "start":
+            self._gc_open = now
+        elif phase == "stop" and self._gc_open is not None:
+            self._gc_intervals.append((self._gc_open, now))
+            self._gc_open = None
+
+    def _gc_overlap(self, start: float, end: float) -> float:
+        # A same-thread collection never spans a heartbeat wake: the wake is a
+        # task step, and the collection is synchronous, so every closed
+        # interval lies inside exactly one window and the overlap is exact.
+        return sum(
+            max(0.0, min(stop, end) - max(begin, start)) for begin, stop in self._gc_intervals
+        )
 
     async def _run(self) -> None:
-        last = time.thread_time()
-        while not self._stop.is_set():
-            await asyncio.sleep(HEARTBEAT_S)
-            now = time.thread_time()
-            self.samples.append(now - last)
-            last = now
+        gc.callbacks.append(self._on_gc)
+        try:
+            last = time.thread_time()
+            while not self._stop.is_set():
+                await asyncio.sleep(HEARTBEAT_S)
+                now = time.thread_time()
+                raw = now - last
+                deducted = self._gc_overlap(last, now)
+                self.raw_samples.append(raw)
+                self.gc_deducted += deducted
+                self.samples.append(raw - deducted)
+                last = now
+        finally:
+            gc.callbacks.remove(self._on_gc)
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -383,3 +445,80 @@ async def test_ripgrep_skipped_count_walk_stays_off_loop(
     assert not result.is_error, result.text
     assert "(ripgrep)" in result.text, "rg engine did not run; recount path untested"
     spy.assert_all_off_loop()
+
+
+def _cyclic_heap(pairs: int) -> list:
+    """A bounded cyclic heap; the cycles are why a gen-2 pass must walk it all."""
+    heap: list = []
+    for i in range(pairs):
+        node: dict = {"i": i}
+        node["self"] = node
+        heap.append([node, {"peer": node, "n": i}])
+    return heap
+
+
+@pytest.mark.asyncio
+async def test_the_probe_deducts_a_collection_on_the_loop_thread() -> None:
+    """The probe must record a loop-thread GC pause AND remove it from samples.
+
+    Mechanism-level pin for the deduction the module docstring explains. The
+    cost is measured around the forced collection on this very thread, so the
+    assertions are about bookkeeping and not about a magnitude — a fast
+    machine would make a magnitude-only version flaky, while the magnitude
+    evidence for why this exists is the CI sample (0.331 s) the docstring
+    cites.
+    """
+    heap = _cyclic_heap(20_000)
+    probe = LoopCpuProbe()
+    probe.start()
+    try:
+        await asyncio.sleep(HEARTBEAT_S)  # close a window without the pause
+        cost_start = time.thread_time()
+        gc.collect(2)
+        cost = time.thread_time() - cost_start
+        await asyncio.sleep(HEARTBEAT_S * 3)
+    finally:
+        await probe.stop()
+    del heap
+
+    assert probe.raw_samples and probe.samples
+    assert cost > 0.0
+    assert probe.gc_deducted >= cost * 0.8, (
+        f"the probe deducted {probe.gc_deducted:.6f}s for a collection that "
+        f"measured {cost:.6f}s on its own thread"
+    )
+    # The deduction reached the samples (not just the bookkeeping), and the
+    # per-window invariant holds exactly: samples = raw − deducted.
+    assert sum(probe.samples) <= sum(probe.raw_samples) - cost * 0.8
+    assert abs(sum(probe.samples) - (sum(probe.raw_samples) - probe.gc_deducted)) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_a_stretch_beside_a_gc_pause_is_still_caught() -> None:
+    """The deduction must not mask a real synchronous stretch.
+
+    The red this bound exists for — a decode put back on the loop — is work,
+    not a collection interval, so it lands in the sample even when a gen-2
+    collection happens inside the same window. Forced here so the claim is
+    test-local rather than argued.
+    """
+    heap = _cyclic_heap(50_000)
+    burn_s = MAX_LOOP_CPU_S * 2  # clear of the bound even after any deduction
+    probe = LoopCpuProbe()
+    probe.start()
+    try:
+        await asyncio.sleep(HEARTBEAT_S)
+        deadline = time.thread_time() + burn_s
+        gc.collect(2)
+        while time.thread_time() < deadline:  # synchronous stretch, the shape
+            pass
+        await asyncio.sleep(HEARTBEAT_S * 3)
+    finally:
+        await probe.stop()
+    del heap
+
+    assert probe.samples, "heartbeat never woke"
+    assert probe.worst >= MAX_LOOP_CPU_S, (
+        f"a {burn_s:.2f}s synchronous stretch beside a GC pause produced only "
+        f"{probe.worst:.4f}s — the deduction is eating real work"
+    )
