@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -600,3 +601,271 @@ async def test_checkpoints_view_cooldown_after_failure(tmp_path, monkeypatch):
     second = await ti.checkpoints_view(tmp_path, SID, wait_s=5)
     assert second["index"]["state"] == "error"
     assert calls["n"] == 1  # the cooldown absorbed the second ask
+
+
+# ---------------------------------------------------------------------------
+# Remediation round 1: the incremental window, the closing answer, extraction,
+# cache freshness, the inode term, and the build-pass sweep
+# ---------------------------------------------------------------------------
+
+
+def test_incremental_append_keeps_an_earlier_runs_outcome(tmp_path, tmp_path_factory, monkeypatch):
+    """BLOCKER-1: the first re-derived turn's run start must ride in the region.
+
+    Two settled runs, then ONE plain append. The re-derivation used to begin at
+    u1 while u1's run start (s1) stayed outside the region, so m1 looked like an
+    orphan and a1's ``complete`` vanished — while a full scan of the same bytes
+    kept it. The window now backs up to the start row itself.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "one"),
+            assistant("a1", 1.2, "answer one"),
+            marker("m1", 1.3, "t1"),
+            start("s2", 2.0, "t2"),
+            user("u2", 2.1, "two"),
+            assistant("a2", 2.2, "answer two"),
+            marker("m2", 2.3, "t2"),
+        ],
+    )
+    calls = _scanners(monkeypatch)
+    base = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 0}
+    assert [c.outcome for c in base.checkpoints if c.kind == "completion"] == [
+        "complete",
+        "complete",
+    ]
+
+    write_rows(tmp_path, [tool("x9", 3.0)])
+    grown = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 1}
+
+    other = tmp_path_factory.mktemp("reference")
+    write_rows(
+        other, [json.loads(line) for line in journal_path(tmp_path).read_text().splitlines()]
+    )
+    reference = refreshed(other)
+    assert [(c.id, c.kind, c.turn, c.seq, c.text, c.outcome) for c in grown.checkpoints] == [
+        (c.id, c.kind, c.turn, c.seq, c.text, c.outcome) for c in reference.checkpoints
+    ]
+    assert [(c.id, c.outcome) for c in grown.checkpoints if c.kind == "completion"] == [
+        ("a1", "complete"),
+        ("a2", "complete"),
+    ]
+
+
+def test_a_turn_closes_on_its_closing_answer_not_its_last_row(tmp_path):
+    """QA round 1's Q1 ruling: tool/inject rows no longer carry the tick.
+
+    The old rule closed on whatever row was last — on real sessions 43/67
+    closers were tool/inject rows and 24/67 hover texts were harness notices
+    like ``[model switch]``. The tick now rides the turn's last assistant row
+    with content; notices show through only via the no-answer fallback.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "do the thing"),
+            assistant("a1", 1.2, "the done answer"),
+            tool("x1", 1.3),
+            inject("i1", 1.4, text="[model switch] a notice"),
+            marker("m1", 1.5, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    completion = next(c for c in index.checkpoints if c.kind == "completion")
+    assert completion.id == "a1"
+    assert completion.text == "the done answer"
+    assert completion.outcome == "complete"
+
+
+def test_a_turn_with_no_answer_falls_back_to_its_last_row(tmp_path):
+    """The fallback half of the ruling: a turn that never produced an answer
+    still gets a tick, on its last message row."""
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "question"),
+            tool("x1", 1.2),
+            marker("m1", 1.3, "t1"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    completion = next(c for c in index.checkpoints if c.kind == "completion")
+    assert completion.id == "x1"
+    assert completion.text == ""
+    assert completion.outcome == "complete"
+
+
+def test_injected_rows_extract_text_beyond_the_text_key(tmp_path):
+    """MAJOR-2: a peer's ``body`` and a marker's ``summary`` are text too.
+
+    Indexing them as "" made a peer's message unfindable by BE-3's find — the
+    empty doc was indistinguishable from a genuinely empty one.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "go"),
+            {
+                "id": "i1",
+                "ts": 1.1,
+                "type": "message",
+                "payload": {
+                    "kind": "custom",
+                    "custom_type": "peer_message",
+                    "details": {"body": "peer body here", "sender": "w1"},
+                },
+            },
+            {
+                "id": "i2",
+                "ts": 1.2,
+                "type": "message",
+                "payload": {
+                    "kind": "custom",
+                    "custom_type": "compaction",
+                    "details": {"summary": "folded summary"},
+                },
+            },
+            {
+                "id": "i3",
+                "ts": 1.3,
+                "type": "message",
+                "payload": {"kind": "custom", "custom_type": "gate_timeout", "details": {}},
+            },
+            inject("i4", 1.4, text="plain text key"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    texts = {m.id: m.text for m in index.messages if m.injected}
+    assert texts == {
+        "i1": "peer body here",
+        "i2": "folded summary",
+        "i3": "",
+        "i4": "plain text key",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_naming_write_is_seen_without_a_journal_change(tmp_path):
+    """BE-2's freshness fix: the resident fast path must notice CACHE writes.
+
+    ``patch_naming`` moves the cache file's mtime and leaves the journal alone;
+    before the fix a resident index answered ``pending`` for as long as the
+    journal stayed quiet (87 s measured in a live daemon, then a restart showed
+    the name). The poll shape is deliberate: every subsequent view must agree.
+    """
+    write_rows(tmp_path, [user("u1", 1.0, "one"), assistant("a1", 1.1, "answer")])
+    refreshed(tmp_path)
+    first = await ti.checkpoints_view(tmp_path, SID)
+    assert first["index"]["state"] == "ready"
+    assert first["checkpoints"][1]["naming"] == {"state": "pending", "name": None, "summary": None}
+
+    before = journal_path(tmp_path).stat()
+    assert ti.patch_naming(tmp_path, SID, {"u1": {"name": "Do it", "summary": "Done."}}) is True
+    after = journal_path(tmp_path).stat()
+    assert (before.st_size, before.st_mtime_ns) == (after.st_size, after.st_mtime_ns)
+
+    for _ in range(3):  # the poll shape: ready stays ready, naming stays served
+        view = await ti.checkpoints_view(tmp_path, SID)
+        assert view["index"]["state"] == "ready"
+        naming = view["checkpoints"][1]["naming"]
+        assert naming["state"] == "ready"
+        assert naming["name"] == "Do it"
+
+
+def test_a_same_size_same_mtime_replacement_is_detected_by_inode(tmp_path, monkeypatch):
+    """R3's discriminating shape for the freshness term (QA proved it bites).
+
+    A byte-length-preserving rewrite under the SAME mtime: size and mtime both
+    match the recorded signature, so only the inode exposes the replacement —
+    drop that term and the stale text is served without a scan.
+    """
+    write_rows(tmp_path, [user("u1", 1.0, "first question"), assistant("a1", 1.1, "answer")])
+    refreshed(tmp_path)
+    stat = journal_path(tmp_path).stat()
+    rows = [json.loads(line) for line in journal_path(tmp_path).read_text().splitlines()]
+    assert rows[0]["payload"]["content"][0]["text"] == "first question"
+    rows[0]["payload"]["content"][0]["text"] = "first questioN"  # same byte length
+    swap = journal_path(tmp_path).with_suffix(".swap")
+    swap.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows))
+    os.utime(swap, ns=(stat.st_mtime_ns, stat.st_mtime_ns))
+    os.replace(swap, journal_path(tmp_path))
+    replaced = journal_path(tmp_path).stat()
+    assert replaced.st_ino != stat.st_ino  # the premise: a NEW inode ...
+    assert replaced.st_size == stat.st_size
+    assert replaced.st_mtime_ns == stat.st_mtime_ns  # ... at the SAME size and mtime
+
+    calls = _scanners(monkeypatch)
+    index = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 0}
+    assert index.checkpoints[0].text == "first questioN"
+
+
+@pytest.mark.asyncio
+async def test_a_fold_after_the_recorded_tail_still_rescans(tmp_path, monkeypatch):
+    """R3: a fold strictly past the recorded tail is invisible to size+bytes.
+
+    The tail row still verifies and the file NET GREW (the folded notice is
+    longer than the one-byte tool body), so the same-inode ladder alone would
+    take the incremental path; the inode is what selects the rescan. Asserted
+    on the BRANCH taken, not only the output, because the branch is what the
+    term exists for.
+    """
+    session = tmp_path / "sessions" / SID
+    transcript = Transcript(session)
+    await transcript.append_message(Message.user("one", id="u1"))
+    await transcript.append_message(
+        Message(role="assistant", content=[TextContent(text="answer one")], id="a1")
+    )
+    await transcript.append_message(Message.user("two", id="u2"))
+    await transcript.append_message(
+        Message(role="assistant", content=[TextContent(text="answer two")], id="a2")
+    )
+    first = refreshed(tmp_path)
+    assert first.scan.offset == journal_path(tmp_path).stat().st_size
+
+    calls = _scanners(monkeypatch)
+    small = Message(role="tool", content=[TextContent(text="x")], tool_call_id="c1")
+    small.id = "x9"
+    await transcript.append_message(small)
+    await transcript.append_prune(
+        "x9", "[pruned: a notice clearly longer than the one-byte body it replaces]"
+    )
+    assert await transcript.compact_file(min_reclaim_bytes=0) > 0
+    assert journal_path(tmp_path).stat().st_size > first.scan.offset  # net grew
+
+    index = refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 0}
+    assert index.scan.offset == journal_path(tmp_path).stat().st_size
+    assert [c.id for c in index.checkpoints] == ["u1", "a1", "u2", "a2"]
+
+
+def test_a_build_sweeps_the_cache_of_a_deleted_session(tmp_path, monkeypatch):
+    """MINOR-4: D8's cleanup bullet, in the pass that builds (a full scan)."""
+    write_rows(tmp_path, [user("u1", 1.0)])
+    refreshed(tmp_path)
+    gone = "beefbeef0001"
+    other = tmp_path / "sessions" / gone
+    other.mkdir(parents=True)
+    (other / "transcript.jsonl").write_text("")
+    assert ti.refresh_index(tmp_path, gone) is not None
+    assert ti.index_path(tmp_path, gone).exists()
+
+    (other / "transcript.jsonl").unlink()
+    other.rmdir()
+    # Force a BUILD pass on this root: a smaller journal means a full scan.
+    rows = [json.loads(line) for line in journal_path(tmp_path).read_text().splitlines()]
+    rows[0]["payload"]["content"] = [{"text": "h"}]
+    journal_path(tmp_path).write_text(
+        "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
+    )
+    calls = _scanners(monkeypatch)
+    refreshed(tmp_path)
+    assert calls == {"full": 1, "incremental": 0}
+    assert not ti.index_path(tmp_path, gone).exists()
+    assert ti.index_path(tmp_path, SID).exists()  # a live session keeps its cache

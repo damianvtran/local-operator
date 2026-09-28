@@ -1091,6 +1091,10 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
     ),
     _DoorRoute("snapshot", "GET", "/v1/desktop/sessions/{session_id}"),
     _DoorRoute("history", "GET", "/v1/desktop/sessions/{session_id}/history"),
+    # The checkpoint rail's manifest: a READ beside ``history``, and — like it —
+    # it takes a bridge, so the door is its gate and this row is what proves it
+    # rather than only that the route exists.
+    _DoorRoute("checkpoints", "GET", "/v1/desktop/sessions/{session_id}/checkpoints"),
     # The session's code memory (added upstream while this branch was in review:
     # the completeness test below is what reported it, which is the property the
     # round-2 MAJOR asked for — a route added under the door fails HERE).

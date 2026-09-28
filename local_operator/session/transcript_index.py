@@ -16,9 +16,12 @@ WHAT IT DERIVES, and from what:
   user messages.
 - **Completion checkpoints** — one per turn whose span (its opening user row to
   just before the next user checkpoint) contains at least one message row that is
-  not the opening user row. The checkpoint's ``id`` is the span's last
-  ``message``-type row — the row a jump lands on (the collapse branch's
-  ``closingAnswerId`` semantics; on a settled turn that is the final answer).
+  not the opening user row. The checkpoint's ``id`` is the span's closing ANSWER
+  row — its last assistant message row with non-empty content, the collapse
+  branch's ``closingAnswerId`` semantics — falling back to the span's last
+  message row only when the turn has no answer at all (QA round 1's Q1 ruling;
+  the last-message-row rule it replaces put 43 of 67 completion targets on
+  tool/inject rows and made ``[model switch]`` notices the hover text).
 - **Outcomes**, from ``completion_attention`` markers bound to their runs by
   token through ``attention_started`` (rules below).
 - **Message docs** — one per user/assistant message row and per injected row, in
@@ -59,7 +62,7 @@ scan sections and preserves ``naming`` when its ``prompt_version`` matches)::
 
     {
       "version": 1,
-      "sig": {"size": <covered bytes>, "mtime": <.9f>, "last_id": "<entry-id>"},
+      "sig": {"size": <covered bytes>, "mtime": <.9f>, "inode": N, "last_id": "<entry-id>"},
       "coverage": {"first_id", "last_id", "complete"},
       "checkpoints": [{"id","kind","turn","ts","seq","text","outcome"?}],
       "messages":    [{"id","ts","role","text","injected","seq"}],
@@ -67,24 +70,33 @@ scan sections and preserves ``naming`` when its ``prompt_version`` matches)::
       "scan": {"rows": N, "offset": B, "window": {"offset": B2, "rows": N2}}
     }
 
-TWO FIELDS RIDE BEYOND THE DESIGN DOC'S SKETCH, and the frozen invalidation rule
+FIELDS THAT RIDE BEYOND THE DESIGN DOC'S SKETCH, and the frozen invalidation rule
 ("size grew and last_id still parses at the recorded tail -> incremental append of
 the new tail") is why: an append must re-derive only what can still change, and
 that needs resume state the sketch did not enumerate. ``scan`` is the resume
 point (rows scanned, byte offset covered, and the "window" row the next append
 re-derives from); ``seq`` on message docs is the same ordinal the checkpoints
 carry, so the cache can be split at the window without re-reading the prefix.
-Both stay inside the version gate: a bump discards them.
+``sig`` also carries the journal's ``inode``: ``compact_file`` REPLACES the
+journal (tmp + ``os.replace``), so a rewrite can keep the recorded size — or
+net-grow past it — while no byte-level check at the tail can see it, and an
+append never changes the inode. All of it stays inside the version gate: a bump
+discards the scan sections.
 
 WHY THE WINDOW IS WHERE IT IS. Everything appended can change only the TAIL
 turn's completion checkpoint (its span keeps growing until the next user
 checkpoint lands) and the outcomes of runs still open at the old tail. A run's
 start row precedes its user row, so re-derivation must begin at or before the
-last run start that precedes the last user checkpoint — and at a USER row, so a
-span is never split across the frozen prefix. The window is therefore the last
-user checkpoint at or before the last start that precedes the last user
-checkpoint (falling back user -> start -> marker -> 0). Rows before it are
-frozen; ``seq < window.rows`` partitions both arrays.
+last run start that precedes the last user checkpoint — and the region must
+carry that start ROW itself, not just begin before it: ``_scan_incremental``
+registers starts only from inside the region, and a marker whose
+``attention_started`` sat one row outside it was treated as an orphan, silently
+dropping the first re-derived turn's outcome on every append (review round 1,
+BLOCKER-1). The window is therefore the first re-derived user's run start when
+one exists, else that user row (itself the last user checkpoint at or before the
+last start that precedes the last user checkpoint, falling back user -> start ->
+marker -> 0). Rows before the window are frozen; ``seq < window.rows``
+partitions both arrays.
 
 Text bounds: message ``text`` in full up to :data:`DOC_TEXT_CAP` per doc (rare
 prose exceeds it; a match beyond the cap is a stated miss, not a silent one);
@@ -313,9 +325,13 @@ class TranscriptIndex:
     version: int = TRANSCRIPT_INDEX_VERSION
 
 
+def _index_dir(config_dir: str | Path) -> Path:
+    return Path(config_dir) / "cache" / _INDEX_DIRNAME
+
+
 def index_path(config_dir: str | Path, session_id: str) -> Path:
     """Where one session's index lives."""
-    return Path(config_dir) / "cache" / _INDEX_DIRNAME / f"{session_id}.json"
+    return _index_dir(config_dir) / f"{session_id}.json"
 
 
 def _journal_path(config_dir: str | Path, session_id: str) -> Path:
@@ -407,6 +423,32 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         tmp.replace(path)
     except OSError:
         logger.warning("could not write the transcript index for %s", session_id, exc_info=True)
+
+
+def _sweep_missing(config_dir: str | Path) -> None:
+    """Drop cache files whose session directory is gone (design D8's cleanup
+    bullet: "cache files for missing sessions cleaned in the same pass that
+    builds").
+
+    Runs on the BUILD pass only — a full scan — because a per-session refresh
+    cannot see other sessions, and this is the one moment that can prune. A
+    session that is merely closed still has its directory; only a deleted one
+    loses its cache. Best-effort, like the write: an unreadable directory must
+    never fail a build. ``write_index``'s pid-temps are skipped by suffix.
+    """
+    try:
+        entries = list(_index_dir(config_dir).iterdir())
+    except OSError:
+        return
+    sessions = Path(config_dir) / "sessions"
+    for entry in entries:
+        if entry.suffix != ".json":
+            continue
+        try:
+            if not (sessions / entry.stem).is_dir():
+                entry.unlink()
+        except OSError:
+            continue
 
 
 def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any]) -> bool:
@@ -545,6 +587,26 @@ def _content_text(payload: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+#: The keys an injected row's displayable text has lived under, in priority
+#: order. ``text`` is the mechanism's own key; ``body`` is ``peer_message``'s —
+#: a peer's message indexed as "" and was therefore unfindable (review round 1,
+#: MAJOR-2); ``summary`` is the compaction marker's. Rows carrying none of them
+#: (the gate-timeout notice, notices without a body) index as empty,
+#: deliberately: find cannot fabricate text a row does not carry.
+_INJECT_TEXT_KEYS = ("text", "body", "summary")
+
+
+def _inject_text(details: Any) -> str:
+    """The first non-empty string among the known injected-text keys."""
+    if not isinstance(details, dict):
+        return ""
+    for key in _INJECT_TEXT_KEYS:
+        value = details.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _classify(
     ordinal: int, line_start: int, line_end: int, head: bytes, line: bytes | None
 ) -> _Row:
@@ -574,12 +636,6 @@ def _classify(
         payload = {}
     if etype == "message":
         if payload.get("kind") == "custom" and payload.get("custom_type"):
-            details = payload.get("details")
-            text = ""
-            if isinstance(details, dict):
-                raw_text = details.get("text")
-                if isinstance(raw_text, str):
-                    text = raw_text
             return _Row(
                 ordinal=ordinal,
                 offset=line_start,
@@ -587,7 +643,7 @@ def _classify(
                 id=id_,
                 ts=ts,
                 kind="inject",
-                text=text,
+                text=_inject_text(payload.get("details")),
             )
         role = payload.get("role")
         if role == "user" or role == "assistant":
@@ -752,10 +808,14 @@ class _Derivation:
         self.user_ords: list[int] = []
         self.messages: list[MessageDoc] = []
         self.starts: dict[str, int] = {}
+        self.start_ords: list[int] = []
+        self.start_offsets: list[int] = []
         self.markers: list[tuple[int, str, str | None, bool]] = []
         self.content: list[bool] = []
         self.last_row: list[_Row | None] = []
         self.last_text: list[str] = []
+        self.answer_row: list[_Row | None] = []
+        self.answer_text: list[str] = []
         self._last_start: tuple[int, int] | None = None
         self._last_start_le_user: tuple[int, int] | None = None
         self._last_user: tuple[int, int] | None = None
@@ -769,6 +829,8 @@ class _Derivation:
             self.content.append(False)
             self.last_row.append(None)
             self.last_text.append("")
+            self.answer_row.append(None)
+            self.answer_text.append("")
             self._last_user = (row.offset, row.ordinal)
             self._last_start_le_user = self._last_start
             self.messages.append(
@@ -809,6 +871,8 @@ class _Derivation:
             )
         elif kind == "start":
             self.starts[row.token] = row.ordinal
+            self.start_ords.append(row.ordinal)
+            self.start_offsets.append(row.offset)
             self._last_start = (row.offset, row.ordinal)
             return
         elif kind == "marker":
@@ -824,9 +888,24 @@ class _Derivation:
             self.last_row[index] = row
             if row.text:
                 self.last_text[index] = row.text
+            # The completion target rule (QA round 1's Q1 ruling): a turn
+            # closes on its last ASSISTANT row with non-empty content — the
+            # ``closingAnswerId`` semantics D1 cites — and only falls back to
+            # the last message row when the turn has no answer. Tracked here,
+            # not at emit time, because the region is re-derived on every
+            # incremental refresh.
+            if kind == "assistant" and row.text:
+                self.answer_row[index] = row
+                self.answer_text[index] = row.text
 
     def window(self) -> tuple[int, int]:
-        """The ``(offset, ordinal)`` the next append must re-derive from."""
+        """The ``(offset, ordinal)`` the next append must re-derive from.
+
+        Backs up from the rewind user to the START of its run when one exists:
+        the region must contain the start row itself or the first re-derived
+        turn's marker resolves against nothing and its outcome is dropped on
+        every append (review round 1, BLOCKER-1).
+        """
         anchor = (
             self._last_start_le_user or self._last_user or self._last_start or self._last_marker
         )
@@ -835,6 +914,9 @@ class _Derivation:
         rewind = bisect_right(self.user_ords, anchor[1]) - 1
         if rewind >= 0:
             user = self.users[rewind]
+            index = bisect_right(self.start_ords, user.ordinal) - 1
+            if index >= 0:
+                return (self.start_offsets[index], self.start_ords[index])
             return (user.offset, user.ordinal)
         return anchor
 
@@ -880,9 +962,14 @@ class _Derivation:
             )
             if not self.content[index]:
                 continue
-            closing = self.last_row[index]
+            # The completion TARGET: the turn's closing answer row, falling
+            # back to its last message row only when there is no answer (the
+            # Q1 ruling above; ``text`` follows the same row).
+            answer = self.answer_row[index]
+            closing = answer if answer is not None else self.last_row[index]
             if closing is None:
                 continue
+            closing_text = self.answer_text[index] if answer is not None else self.last_text[index]
             if index in outcomes:
                 outcome = outcomes[index]
             elif index == tail and not (
@@ -900,7 +987,7 @@ class _Derivation:
                     turn=turn_base + index + 1,
                     ts=closing.ts,
                     seq=closing.ordinal,
-                    text=_flatten(self.last_text[index], CHECKPOINT_TEXT_CAP),
+                    text=_flatten(closing_text, CHECKPOINT_TEXT_CAP),
                     outcome=outcome,
                 )
             )
@@ -1091,6 +1178,9 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
                 index = _scan_incremental(path, previous, raw)
             else:
                 index = _scan_full(path, raw)
+                # D8's cleanup bullet rides the build pass, and a build is the
+                # only moment that can see the whole cache directory.
+                _sweep_missing(config_dir)
         except _Replaced:
             if attempt:
                 raise
@@ -1141,6 +1231,14 @@ def probe_index(config_dir: str | Path, session_id: str) -> IndexProbe:
 #: bound to a dead loop.
 _IN_FLIGHT: dict[tuple[str, str], tuple[asyncio.AbstractEventLoop, "asyncio.Task[Any]"]] = {}
 _RESIDENT: "OrderedDict[tuple[str, str], TranscriptIndex]" = OrderedDict()
+
+#: The cache file's mtime each resident index was remembered under. The fast
+#: path revalidates the JOURNAL's stat; a naming write (``patch_naming``) moves
+#: the CACHE file and leaves the journal alone, so without this stamp a resident
+#: index keeps answering ``pending`` for as long as the journal stays quiet
+#: (BE-2's isolated run measured 87 s of exactly that). A moved stamp falls
+#: through to the disk read, which is where the write landed.
+_RESIDENT_STAMP: dict[tuple[str, str], float] = {}
 _FAILURES: dict[tuple[str, str], float] = {}
 
 
@@ -1148,12 +1246,18 @@ def _key(config_dir: str | Path, session_id: str) -> tuple[str, str]:
     return (str(config_dir), session_id)
 
 
-def _remember(key: tuple[str, str], index: TranscriptIndex) -> None:
-    """Keep a just-built index resident (loop thread only)."""
+def _remember(key: tuple[str, str], index: TranscriptIndex, cache_mtime: float | None) -> None:
+    """Keep a just-built index resident (loop thread only), with the cache
+    file's mtime it must still match to be served from here."""
     _RESIDENT[key] = index
     _RESIDENT.move_to_end(key)
+    if cache_mtime is None:
+        _RESIDENT_STAMP.pop(key, None)
+    else:
+        _RESIDENT_STAMP[key] = cache_mtime
     while len(_RESIDENT) > _RESIDENT_SESSIONS:
-        _RESIDENT.popitem(last=False)
+        old_key, _entry = _RESIDENT.popitem(last=False)
+        _RESIDENT_STAMP.pop(old_key, None)
 
 
 def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
@@ -1199,7 +1303,10 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "asyncio.Task[Any]
             raise
         _FAILURES.pop(key, None)
         if index is not None:
-            _remember(key, index)
+            cache_mtime = _mtime_or_none(
+                await asyncio.to_thread(_stat_or_none, index_path(config_dir, session_id))
+            )
+            _remember(key, index, cache_mtime)
         return index
 
     task = loop.create_task(_wrapped(), name=f"transcript-index:{session_id}")
@@ -1269,7 +1376,14 @@ async def checkpoints_view(
     resident_index = _RESIDENT.get(key)
     if resident_index is not None:
         st, cache_st = await asyncio.to_thread(_freshness_pair, config_dir, session_id)
-        if st is not None and _sig_matches(resident_index.sig, st):
+        stamp = _RESIDENT_STAMP.get(key)
+        if (
+            st is not None
+            and _sig_matches(resident_index.sig, st)
+            and stamp is not None
+            and cache_st is not None
+            and stamp == cache_st.st_mtime
+        ):
             _RESIDENT.move_to_end(key)
             return _manifest_state(session_id, "ready", resident_index, _mtime_or_none(cache_st))
     probe = await asyncio.to_thread(probe_index, config_dir, session_id)
@@ -1279,7 +1393,7 @@ async def checkpoints_view(
         return _manifest_state(session_id, "ready", None, None)
     if probe.state == "ready":
         if probe.index is not None:
-            _remember(key, probe.index)
+            _remember(key, probe.index, probe.built_at)
         return _manifest_state(session_id, "ready", probe.index, probe.built_at)
 
     failed_at = _FAILURES.get(key)
@@ -1330,4 +1444,5 @@ def _reset_for_tests() -> None:
     """
     _IN_FLIGHT.clear()
     _RESIDENT.clear()
+    _RESIDENT_STAMP.clear()
     _FAILURES.clear()
