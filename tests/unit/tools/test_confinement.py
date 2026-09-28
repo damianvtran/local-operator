@@ -345,6 +345,107 @@ class TestPathTools:
         assert outside.read_text() == "old"
 
     @pytest.mark.asyncio
+    async def test_glob_denies_a_symlinked_tree_outside_the_root(self, tmp_path: Path) -> None:
+        """The review round 1 blocker, pinned (R-1).
+
+        ``bash`` can create a symlink INSIDE the root (a legal write). Before
+        this fix ``glob "linkapp/*"`` listed the outside tree's top
+        directories and ``linkapp/**/*`` returned up to the 500-match cap of
+        its contents -- the one path reader without the resolution rule its
+        siblings (read/write/edit/grep/the shell) already had. This test pins
+        both the exact repro shapes and the controls that keep ordinary work
+        intact.
+        """
+
+        root = tmp_path / "jail"
+        root.mkdir()
+        outside = tmp_path / "outside-tree"
+        (outside / "assets" / "deep" / "a" / "b").mkdir(parents=True)
+        (outside / "assets" / "deep" / "a" / "b" / "leaf.txt").write_text("x")
+        (outside / "assets" / "secret.txt").write_text("TOPSECRET")
+        (outside / "manifests").mkdir()
+        (root / "inner" / "deep").mkdir(parents=True)
+        (root / "inner" / "deep" / "ok.txt").write_text("x")
+        (root / "linkapp").symlink_to(outside)
+        (root / "linkin").symlink_to(root / "inner")
+
+        context = _context(root)
+        for pattern in ("linkapp/*", "linkapp/**/*", "linkapp/**/secret.txt", "*.txt"):
+            result = await builtin.execute_glob(
+                "glob-out", {"pattern": pattern}, None, None, context
+            )
+            assert not result.is_error, result.text
+            assert "No paths matched" in result.text, (pattern, result.text)
+            assert "assets" not in result.text and "TOPSECRET" not in result.text
+
+        # An in-root symlink resolves INSIDE and keeps working: the rule is
+        # resolution, not a blanket ban on links.
+        inside_link = await builtin.execute_glob(
+            "glob-in-link", {"pattern": "linkin/**/*"}, None, None, context
+        )
+        assert "linkin/deep/ok.txt" in inside_link.text
+        # The ordinary in-root control.
+        control = await builtin.execute_glob(
+            "glob-in", {"pattern": "inner/**/*"}, None, None, context
+        )
+        assert "inner/deep/ok.txt" in control.text
+        # The free-session default is unchanged: no confinement, no filter.
+        free = ToolContext(cwd=str(root), session_id="free")
+        unconfined = await builtin.execute_glob(
+            "glob-free", {"pattern": "linkapp/*"}, None, None, free
+        )
+        assert "assets" in unconfined.text
+
+    @pytest.mark.asyncio
+    async def test_every_path_taking_tool_denies_outside_the_root(self, tmp_path: Path) -> None:
+        """The completeness table the round-1 standard asks for.
+
+        The blocker was ONE reader missing the rule; this table is the class
+        statement, so a future filesystem-reaching tool added without
+        ``_confinement_denial`` fails here rather than in a probe run. Each
+        case exercises the real executor against a target outside the root --
+        directly and, where the tool resolves a path, through a symlink that
+        resolves outside. ``bash`` is enforced at the kernel (darwin-only
+        tests above), ``eval``/``lsp`` refuse outright (test below), and the
+        browser tool's two write-destination sites share the same helper.
+        """
+
+        root = tmp_path / "jail"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("TOPSECRET")
+        (root / "link-out").symlink_to(outside / "secret.txt")
+        context = _context(root)
+
+        cases = [
+            ("read", builtin.execute_read, {"path": str(outside / "secret.txt")}),
+            ("read symlink", builtin.execute_read, {"path": str(root / "link-out")}),
+            (
+                "write",
+                builtin.execute_write,
+                {"path": str(outside / "new.txt"), "content": "x"},
+            ),
+            (
+                "edit",
+                builtin.execute_edit,
+                {"path": str(outside / "secret.txt"), "old_text": "TOPSECRET", "new_text": "x"},
+            ),
+            ("grep", builtin.execute_grep, {"pattern": "TOPSECRET", "path": str(outside)}),
+            ("glob symlinked dir", builtin.execute_glob, {"pattern": "link-out/*"}),
+        ]
+        for name, execute, args in cases:
+            result = await execute(f"{name}-case", args, None, None, context)
+            assert result.is_error or "No paths matched" in result.text, (name, result.text)
+            assert "confined" in result.text or "No paths matched" in result.text, (
+                name,
+                result.text,
+            )
+            assert "TOPSECRET" not in result.text, name
+        assert not (outside / "new.txt").exists()
+        assert (outside / "secret.txt").read_text() == "TOPSECRET"
+
+    @pytest.mark.asyncio
     async def test_eval_and_lsp_refuse_when_confined(self, tmp_path: Path) -> None:
         """The two tools whose reach cannot be vouched for are refused outright."""
         root = tmp_path / "jail"

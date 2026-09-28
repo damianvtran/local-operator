@@ -427,8 +427,12 @@ async with open_session(spec, roots=roots) as session:
   submitting -- binary 0 through the session channel where the reply arm's
   identical answers scored 1.0 through exactly this gate. The record now
   carries the claim's ``status``/``reason`` (previously an action count alone)
-  plus an ``action_completion_challenged`` event per challenge, and both arms
-  share the driver's ``--completion-gate``/``--completion-challenges`` knobs.
+  plus an ``action_completion_challenged`` event per challenge; both arms read
+  the same gate config (the driver's ``--no-completion-gate`` disables the gate
+  on both channels; the ``completion_challenges`` bound is a config field with
+  no CLI flag, and applies to both). The challenge costs one extra model round
+  trip per challenged episode (bounded at one); the probe's calibration re-run
+  reports its priced delta.
   Pinned by ``test_session_arm.py`` (unit) and the spawned rig
   (``test_session_arm_script.py``, incl. the challenge→corrective-action→
   re-declare rescue shape).
