@@ -9,7 +9,8 @@ The gate's monitor-side half, and nothing else:
   the measured request in the contract's §17; do not paraphrase it, the
   numbers and the two suppressed classes' descriptions were measured
   together);
-* the bounded state (:func:`bounded_state`, ≤ ``classifyMaxChars``);
+* the bounded state (:func:`bounded_state`; ``classifyMaxChars``, with the
+  truncation-marker floor its docstring states);
 * the fork's mapping (§8.4: which choice ids suppress, and under which
   counters keys, :func:`suppressed_counter`);
 * the adapter that turns the session's shared classification seam into the
@@ -135,6 +136,15 @@ def bounded_state(delta_text: str, max_chars: int) -> str:
     caller hands the gate text from elsewhere. A cut carries the layer's own
     truncation marker — the model should know the preview is incomplete —
     which lives in this module as a pinned duplicate (module docstring).
+
+    The result is ``≤ max(max_chars, len(TRUNCATION_MARKER))``, NOT simply
+    ``≤ max_chars``: a positive cap below the marker's own 14 characters
+    returns the bare marker, the same pathological-cap policy the
+    classification layer states for its state builder ("the marker alone is
+    the smallest valid request this module can build, and it is still a valid
+    one"). Reachable only by a hand-edited config (the settings reader refuses
+    non-positive caps but honours any positive one), and pinned by
+    ``test_bounded_state_cuts_and_marks``.
     """
     if max_chars <= 0 or len(delta_text) <= max_chars:
         return delta_text
