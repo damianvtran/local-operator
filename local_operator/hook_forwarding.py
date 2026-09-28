@@ -15,6 +15,13 @@ Both sources are OFF by default (``hooks.forward_claude`` /
 ``hooks.forward_codex``) and read at CALL time, the way ``bash.shell`` is, so
 toggling them in ``/settings`` reaches the very next tool call.
 
+Execution is platform-conditional: every hook spawns in its own session
+(``start_new_session``, POSIX-only — ignored on Windows), so a timeout or a
+cancelled turn stops the hook's whole tree — the process group on POSIX,
+``taskkill /T /F`` on Windows — through
+``local_operator.procstate.terminate_process_tree``, the repository's one kill
+path, which never raises.
+
 A hook can never break a turn: every failure (unreadable config, a hook that
 crashes, times out or prints garbage) is logged and the tool result goes back
 to the model unchanged.
@@ -28,12 +35,13 @@ import json
 import logging
 import os
 import re
-import signal
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from local_operator.procstate import terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +70,19 @@ TOOL_NAME_MAP: dict[str, str] = {
     "glob": "Glob",
     "web_fetch": "WebFetch",
     "web_search": "WebSearch",
-    "task": "Task",
+    # Claude Code's subagent tool is ``Agent``; ``Task`` survives as a matcher
+    # alias (``TOOL_MATCHER_ALIASES``) for hooks written against the old name.
+    "task": "Agent",
+}
+
+#: Extra names a matcher may use for the same call. Claude Code's subagent tool
+#: is ``Agent`` and its file-edit tools are ``Write``/``Edit``, while Codex
+#: reports edits as ``apply_patch`` — a hook written for either tool must fire
+#: under lop, so matching tries the canonical name and these aliases.
+TOOL_MATCHER_ALIASES: dict[str, tuple[str, ...]] = {
+    "write": ("apply_patch",),
+    "edit": ("apply_patch",),
+    "task": ("Task",),
 }
 
 _EXACT_MATCHER = re.compile(r"^[A-Za-z0-9_\-\s,|]*$")
@@ -148,10 +168,7 @@ def _commands_from(
                 continue
             matcher = group.get("matcher")
             for hook in group.get("hooks") or []:
-                if (
-                    not isinstance(hook, Mapping)
-                    or hook.get("type", "command") != "command"
-                ):
+                if not isinstance(hook, Mapping) or hook.get("type", "command") != "command":
                     continue
                 command = hook.get("command")
                 if not isinstance(command, str) or not command.strip():
@@ -193,10 +210,7 @@ def _enabled_plugin_roots(
             scope = entry.get("scope", "user")
             if scope != "user":
                 project = entry.get("projectPath")
-                if (
-                    not isinstance(project, str)
-                    or Path(project).resolve() != project_root
-                ):
+                if not isinstance(project, str) or Path(project).resolve() != project_root:
                     continue
             path = entry.get("installPath")
             if isinstance(path, str):
@@ -214,11 +228,28 @@ def load_hook_commands(
     if claude:
         claude_dir = home / ".claude"
         root = _project_root(cwd)
-        layers = [
-            ("claude:user", _read_json(claude_dir / "settings.json")),
-            ("claude:project", _read_json(root / ".claude" / "settings.json")),
-            ("claude:local", _read_json(root / ".claude" / "settings.local.json")),
-        ]
+        # ``~/.claude`` exists for every Claude Code user, so the ancestor walk
+        # resolves any cwd under $HOME to the home directory itself. $HOME is
+        # not a project: reading ``root/.claude/settings.json`` there would run
+        # the user layer's hooks a second time (and the walk could just as
+        # easily load an ANCESTOR's settings that Claude Code — cwd or git repo
+        # root only — never reads). Skip the project/local layers in that case.
+        candidates: list[tuple[str, Path]] = [("claude:user", claude_dir / "settings.json")]
+        if root != home.resolve():
+            candidates += [
+                ("claude:project", root / ".claude" / "settings.json"),
+                ("claude:local", root / ".claude" / "settings.local.json"),
+            ]
+        # Dedupe by RESOLVED path: a file reached through more than one slot (a
+        # symlink, or $HOME resolved as its own project) is loaded once.
+        layers: list[tuple[str, dict[str, Any] | None]] = []
+        seen: set[Path] = set()
+        for source, path in candidates:
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            layers.append((source, _read_json(path)))
         # ``disableAllHooks``: the last layer that states it wins, as in Claude.
         disabled = False
         enabled_plugins: dict[str, Any] = {}
@@ -235,13 +266,9 @@ def load_hook_commands(
                 commands.extend(_commands_from(data, source))
             for plugin_root in _enabled_plugin_roots(claude_dir, enabled_plugins, root):
                 data = _read_json(Path(plugin_root) / "hooks" / "hooks.json")
-                commands.extend(
-                    _commands_from(data, f"claude:plugin:{plugin_root}", plugin_root)
-                )
+                commands.extend(_commands_from(data, f"claude:plugin:{plugin_root}", plugin_root))
     if codex:
-        commands.extend(
-            _commands_from(_read_json(home / ".codex" / "hooks.json"), "codex")
-        )
+        commands.extend(_commands_from(_read_json(home / ".codex" / "hooks.json"), "codex"))
     return commands
 
 
@@ -264,15 +291,23 @@ def matcher_matches(matcher: str | None, value: str) -> bool:
         return False
 
 
+def matcher_names(tool_name: str, mapped: str) -> tuple[str, ...]:
+    """Every name this call may be matched against: canonical first, then aliases.
+
+    The candidate set lives at the call site rather than inside
+    ``matcher_matches`` because it depends on which lop tool ran; that function
+    keeps comparing one name at a time.
+    """
+    return (mapped, *TOOL_MATCHER_ALIASES.get(tool_name, ()))
+
+
 def _absolute(path: Any, cwd: str) -> Any:
     if not isinstance(path, str) or not path:
         return path
     return str((Path(cwd) / os.path.expanduser(path)).resolve())
 
 
-def claude_tool(
-    tool_name: str, args: Mapping[str, Any], cwd: str
-) -> tuple[str, dict[str, Any]]:
+def claude_tool(tool_name: str, args: Mapping[str, Any], cwd: str) -> tuple[str, dict[str, Any]]:
     """The Claude-shaped ``(tool_name, tool_input)`` for one lop call."""
     if tool_name == "bash":
         tool_input: dict[str, Any] = {"command": args.get("command", "")}
@@ -289,8 +324,16 @@ def claude_tool(
         file_path = _absolute(args.get("path"), cwd)
         hunks = args.get("edits")
         if isinstance(hunks, list) and len(hunks) != 1:
-            return "MultiEdit", {
+            # Claude Code has no ``MultiEdit`` (its ``Edit`` edits one string at
+            # a time), so a multi-hunk edit is reported as ``Edit`` — the
+            # standard ``Edit``/``Edit|Write`` matchers must fire — carrying the
+            # first hunk's fields plus the whole list.
+            first = hunks[0] if hunks and isinstance(hunks[0], Mapping) else {}
+            return "Edit", {
                 "file_path": file_path,
+                "old_string": first.get("old_text", ""),
+                "new_string": first.get("new_text", ""),
+                "replace_all": bool(first.get("replace_all", False)),
                 "edits": [
                     {
                         "old_string": h.get("old_text", ""),
@@ -301,11 +344,7 @@ def claude_tool(
                     if isinstance(h, Mapping)
                 ],
             }
-        hunk = (
-            hunks[0]
-            if isinstance(hunks, list) and isinstance(hunks[0], Mapping)
-            else args
-        )
+        hunk = hunks[0] if isinstance(hunks, list) and isinstance(hunks[0], Mapping) else args
         return "Edit", {
             "file_path": file_path,
             "old_string": hunk.get("old_text", ""),
@@ -376,12 +415,18 @@ class HookRun:
 
 
 def _kill_group(proc: asyncio.subprocess.Process) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-        os.killpg(proc.pid, signal.SIGKILL)
+    """Stop the hook and everything it spawned; never raises.
+
+    ``terminate_process_tree`` owns the platform split: a leader-checked
+    ``killpg`` of the group a ``start_new_session`` child leads on POSIX, a
+    ``taskkill /T /F`` tree kill on Windows — so this module never touches
+    the POSIX-only ``os.killpg``/``signal.SIGKILL`` attributes itself.
+    """
+    terminate_process_tree(proc.pid, force=True)
 
 
 async def run_hook(hook: HookCommand, payload: Mapping[str, Any], cwd: str) -> HookRun:
-    """Run one hook in its own process group; reap the group on timeout or cancel."""
+    """Run one hook in its own process group; reap the whole tree on timeout or cancel."""
     env = dict(os.environ)
     env["CLAUDE_PROJECT_DIR"] = str(_project_root(cwd))
     if hook.plugin_root:
@@ -393,13 +438,14 @@ async def run_hook(hook: HookCommand, payload: Mapping[str, Any], cwd: str) -> H
         stderr=subprocess.PIPE,
         cwd=cwd,
         env=env,
+        # POSIX-only: makes the child a process-group leader so a timeout or a
+        # cancelled turn can reap its whole tree (ignored on Windows, where
+        # ``_kill_group`` falls back to a ``taskkill /T`` tree kill).
         start_new_session=True,
     )
     data = json.dumps(payload).encode()
     try:
-        out, err = await asyncio.wait_for(
-            proc.communicate(data), timeout=hook.timeout_s
-        )
+        out, err = await asyncio.wait_for(proc.communicate(data), timeout=hook.timeout_s)
     except TimeoutError:
         _kill_group(proc)
         with contextlib.suppress(Exception):
@@ -419,9 +465,7 @@ async def run_hook(hook: HookCommand, payload: Mapping[str, Any], cwd: str) -> H
 
 def _cap(text: str) -> str:
     text = text.strip()
-    return (
-        text if len(text) <= CONTEXT_CAP else text[:CONTEXT_CAP] + "\n[... truncated]"
-    )
+    return text if len(text) <= CONTEXT_CAP else text[:CONTEXT_CAP] + "\n[... truncated]"
 
 
 def interpret(run: HookRun, event: str) -> list[str]:
@@ -448,11 +492,7 @@ def interpret(run: HookRun, event: str) -> list[str]:
             reason = parsed.get("reason")
             if isinstance(reason, str) and reason.strip():
                 notes.append(_cap(reason))
-    if (
-        run.exit_code == 2
-        and run.stderr.strip()
-        and not (parsed and parsed.get("reason"))
-    ):
+    if run.exit_code == 2 and run.stderr.strip() and not (parsed and parsed.get("reason")):
         notes.append(_cap(run.stderr))
     return notes
 
@@ -471,7 +511,7 @@ async def forward_post_tool(
     """Run every matching Post hook for one finished call; return context notes.
 
     Never raises for a hook's own failure; cancellation still propagates (and
-    reaps the hook's process group) so an aborted turn stops promptly.
+    reaps the hook's process tree) so an aborted turn stops promptly.
     """
     claude, codex = forwarding_enabled()
     if not (claude or codex):
@@ -480,15 +520,14 @@ async def forward_post_tool(
     try:
         hooks = [
             h
-            for h in load_hook_commands(
-                identity.cwd, claude=claude, codex=codex, home=home
-            )
+            for h in load_hook_commands(identity.cwd, claude=claude, codex=codex, home=home)
             if h.event == event
         ]
         if not hooks:
             return []
         mapped, tool_input = claude_tool(tool_name, args, identity.cwd)
-        hooks = [h for h in hooks if matcher_matches(h.matcher, mapped)]
+        names = matcher_names(tool_name, mapped)
+        hooks = [h for h in hooks if any(matcher_matches(h.matcher, n) for n in names)]
         if not hooks:
             return []
         payload = build_payload(
@@ -501,9 +540,7 @@ async def forward_post_tool(
             duration_s=duration_s,
         )
     except Exception:
-        logger.warning(
-            "hook forwarding: could not prepare %s hooks", event, exc_info=True
-        )
+        logger.warning("hook forwarding: could not prepare %s hooks", event, exc_info=True)
         return []
 
     async def one(hook: HookCommand) -> list[str]:
@@ -520,9 +557,7 @@ async def forward_post_tool(
             )
             return []
         if run.timed_out:
-            logger.warning(
-                "hook forwarding: %s hook timed out: %s", event, hook.command
-            )
+            logger.warning("hook forwarding: %s hook timed out: %s", event, hook.command)
         elif run.exit_code not in (0, 2):
             logger.warning(
                 "hook forwarding: %s hook exited %s: %s",
@@ -537,8 +572,11 @@ async def forward_post_tool(
     return [note for notes in results for note in notes]
 
 
-def format_notes(event_notes: list[str]) -> str:
-    """The block appended to the tool result, one per note."""
-    return "\n\n".join(
-        f'<hook-context event="PostToolUse">\n{n}\n</hook-context>' for n in event_notes
-    )
+def format_notes(event_notes: list[str], event: str) -> str:
+    """The block appended to the tool result, one per note.
+
+    ``event`` is the event the notes came from: the caller knows whether the
+    tool call failed, and a failure note labelled ``PostToolUse`` would report
+    the wrong event to whatever reads the tag.
+    """
+    return "\n\n".join(f'<hook-context event="{event}">\n{n}\n</hook-context>' for n in event_notes)

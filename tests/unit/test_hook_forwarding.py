@@ -52,9 +52,7 @@ def _settings(path: Path, hooks: dict[str, Any], **extra: Any) -> None:
     path.write_text(json.dumps({"hooks": hooks, **extra}))
 
 
-def _cmd(
-    command: str, matcher: str | None = None, timeout: float | None = None
-) -> dict[str, Any]:
+def _cmd(command: str, matcher: str | None = None, timeout: float | None = None) -> dict[str, Any]:
     entry: dict[str, Any] = {"type": "command", "command": command}
     if timeout is not None:
         entry["timeout"] = timeout
@@ -69,9 +67,7 @@ def _cmd(
 # ---------------------------------------------------------------------------
 
 
-def test_sources_merge_user_project_local_plugin_and_codex(
-    home: Path, tmp_path: Path
-) -> None:
+def test_sources_merge_user_project_local_plugin_and_codex(home: Path, tmp_path: Path) -> None:
     project = tmp_path / "proj"
     (project / ".git").mkdir(parents=True)
     sub = project / "pkg"
@@ -98,9 +94,7 @@ def test_sources_merge_user_project_local_plugin_and_codex(
         enabledPlugins={"p@m": True, "off@m": False},
     )
     _settings(project / ".claude" / "settings.json", {"PostToolUse": [_cmd("project")]})
-    _settings(
-        project / ".claude" / "settings.local.json", {"PostToolUse": [_cmd("local")]}
-    )
+    _settings(project / ".claude" / "settings.local.json", {"PostToolUse": [_cmd("local")]})
     _settings(home / ".codex" / "hooks.json", {"PostToolUse": [_cmd("codex")]})
 
     hooks = hf.load_hook_commands(str(sub), claude=True, codex=True, home=home)
@@ -118,24 +112,16 @@ def test_sources_merge_user_project_local_plugin_and_codex(
     assert [h.command for h in only_codex] == ["codex"]
 
 
-def test_disable_all_hooks_and_bad_files_are_tolerated(
-    home: Path, tmp_path: Path
-) -> None:
+def test_disable_all_hooks_and_bad_files_are_tolerated(home: Path, tmp_path: Path) -> None:
     (home / ".claude" / "settings.json").write_text("{not json")
-    _settings(
-        home / ".codex" / "hooks.json", {"PostToolUse": [{"hooks": [{"type": "http"}]}]}
-    )
-    assert (
-        hf.load_hook_commands(str(tmp_path), claude=True, codex=True, home=home) == []
-    )
+    _settings(home / ".codex" / "hooks.json", {"PostToolUse": [{"hooks": [{"type": "http"}]}]})
+    assert hf.load_hook_commands(str(tmp_path), claude=True, codex=True, home=home) == []
     _settings(
         home / ".claude" / "settings.json",
         {"PostToolUse": [_cmd("x")]},
         disableAllHooks=True,
     )
-    assert (
-        hf.load_hook_commands(str(tmp_path), claude=True, codex=False, home=home) == []
-    )
+    assert hf.load_hook_commands(str(tmp_path), claude=True, codex=False, home=home) == []
 
 
 def test_timeout_defaults_to_claudes_600_seconds(home: Path, tmp_path: Path) -> None:
@@ -145,6 +131,27 @@ def test_timeout_defaults_to_claudes_600_seconds(home: Path, tmp_path: Path) -> 
     )
     hooks = hf.load_hook_commands(str(tmp_path), claude=True, codex=False, home=home)
     assert [h.timeout_s for h in hooks] == [600.0, 7.0]
+
+
+def test_a_cwd_under_home_does_not_load_the_user_settings_twice(home: Path) -> None:
+    """``~/.claude`` exists for every Claude Code user, so a cwd under $HOME
+    used to resolve its "project root" to $HOME and run the user layer twice."""
+    _settings(home / ".claude" / "settings.json", {"PostToolUse": [_cmd("once")]})
+    workspace = home / "workspace"
+    workspace.mkdir()
+    hooks = hf.load_hook_commands(str(workspace), claude=True, codex=False, home=home)
+    assert [(h.source, h.command) for h in hooks] == [("claude:user", "once")]
+
+
+def test_a_settings_file_reached_twice_is_loaded_once(home: Path, tmp_path: Path) -> None:
+    """Dedupe is by RESOLVED path: a project file that resolves onto an
+    already-loaded layer (here via symlink) is not a second load."""
+    _settings(home / ".claude" / "settings.json", {"PostToolUse": [_cmd("once")]})
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.json").symlink_to(home / ".claude" / "settings.json")
+    hooks = hf.load_hook_commands(str(project), claude=True, codex=False, home=home)
+    assert [(h.source, h.command) for h in hooks] == [("claude:user", "once")]
 
 
 # ---------------------------------------------------------------------------
@@ -168,9 +175,7 @@ def test_timeout_defaults_to_claudes_600_seconds(home: Path, tmp_path: Path) -> 
         ("[", "Bash", False),
     ],
 )
-def test_matcher_semantics_mirror_claude(
-    matcher: str | None, value: str, expected: bool
-) -> None:
+def test_matcher_semantics_mirror_claude(matcher: str | None, value: str, expected: bool) -> None:
     assert hf.matcher_matches(matcher, value) is expected
 
 
@@ -180,18 +185,82 @@ def test_lop_tools_map_to_claude_names_and_inputs(tmp_path: Path) -> None:
         "Bash",
         {"command": "ls", "timeout": 5000, "run_in_background": False},
     )
-    name, tool_input = hf.claude_tool(
-        "write", {"path": "a.txt", "content": "x"}, str(tmp_path)
-    )
+    name, tool_input = hf.claude_tool("write", {"path": "a.txt", "content": "x"}, str(tmp_path))
     assert name == "Write"
     assert tool_input == {"file_path": str(tmp_path / "a.txt"), "content": "x"}
-    one = hf.claude_tool(
-        "edit", {"path": "a", "old_text": "o", "new_text": "n"}, str(tmp_path)
-    )
-    assert (
-        one[0] == "Edit" and one[1]["old_string"] == "o" and one[1]["new_string"] == "n"
-    )
+    one = hf.claude_tool("edit", {"path": "a", "old_text": "o", "new_text": "n"}, str(tmp_path))
+    assert one[0] == "Edit" and one[1]["old_string"] == "o" and one[1]["new_string"] == "n"
     many = hf.claude_tool(
+        "edit",
+        {
+            "path": "a",
+            "edits": [
+                {"old_text": "1", "new_text": "2"},
+                {"old_text": "3", "new_text": "4", "replace_all": True},
+            ],
+        },
+        str(tmp_path),
+    )
+    # No ``MultiEdit`` in Claude Code: a multi-hunk edit reports ``Edit`` with
+    # the first hunk's fields plus the full list, so ``Edit`` matchers fire.
+    assert many[0] == "Edit" and len(many[1]["edits"]) == 2
+    assert many[1]["old_string"] == "1" and many[1]["new_string"] == "2"
+    assert many[1]["replace_all"] is False
+    assert many[1]["edits"][1]["replace_all"] is True
+    assert hf.claude_tool("task", {"description": "d"}, str(tmp_path)) == (
+        "Agent",
+        {"description": "d"},
+    )
+    assert hf.claude_tool("mcp__x__y", {"a": 1}, str(tmp_path)) == (
+        "mcp__x__y",
+        {"a": 1},
+    )
+
+
+@pytest.mark.asyncio
+async def test_alias_matchers_fire_for_the_same_call(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex's ``apply_patch`` matches file edits, ``Task`` still matches the
+    subagent tool now reported as ``Agent``, and a multi-hunk edit fires the
+    ``Edit`` matcher (the prettier-after-edit pattern)."""
+    _settings(
+        home / ".claude" / "settings.json",
+        {
+            "PostToolUse": [
+                _cmd("ap", "apply_patch"),
+                _cmd("taskold", "Task"),
+                _cmd("editmatcher", "Edit"),
+            ]
+        },
+    )
+    seen: list[str] = []
+
+    async def fake_run(hook: hf.HookCommand, payload: Any, cwd: str) -> hf.HookRun:
+        seen.append(hook.command)
+        return hf.HookRun(exit_code=0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf, "run_hook", fake_run)
+    identity = hf.HookIdentity(session_id="s", cwd=str(tmp_path))
+
+    async def call(tool: str, args: dict[str, Any]) -> None:
+        seen.clear()
+        await hf.forward_post_tool(
+            identity,
+            tool_name=tool,
+            args=args,
+            tool_use_id="c",
+            output="",
+            is_error=False,
+            duration_s=None,
+            home=home,
+        )
+
+    await call("write", {"path": "a.txt", "content": "x"})
+    assert seen == ["ap"]
+    await call("edit", {"path": "a", "old_text": "o", "new_text": "n"})
+    assert sorted(seen) == ["ap", "editmatcher"]
+    await call(
         "edit",
         {
             "path": "a",
@@ -200,20 +269,15 @@ def test_lop_tools_map_to_claude_names_and_inputs(tmp_path: Path) -> None:
                 {"old_text": "3", "new_text": "4"},
             ],
         },
-        str(tmp_path),
     )
-    assert many[0] == "MultiEdit" and len(many[1]["edits"]) == 2
-    assert hf.claude_tool("mcp__x__y", {"a": 1}, str(tmp_path)) == (
-        "mcp__x__y",
-        {"a": 1},
-    )
+    assert sorted(seen) == ["ap", "editmatcher"]
+    await call("task", {"description": "d", "prompt": "p"})
+    assert seen == ["taskold"]
 
 
 def test_payload_carries_agent_fields_only_for_subagents(tmp_path: Path) -> None:
     main = hf.HookIdentity(session_id="s", cwd=str(tmp_path))
-    child = hf.HookIdentity(
-        session_id="s", cwd=str(tmp_path), agent_id="job1", agent_type="coder"
-    )
+    child = hf.HookIdentity(session_id="s", cwd=str(tmp_path), agent_id="job1", agent_type="coder")
 
     def payload(event: str, who: hf.HookIdentity) -> dict[str, Any]:
         return hf.build_payload(
@@ -260,9 +324,7 @@ def test_output_contract() -> None:
     assert hf.interpret(_run(stderr="warn", code=2), hf.POST_TOOL_USE) == ["warn"]
     assert hf.interpret(_run(stderr="boom", code=1), hf.POST_TOOL_USE) == []
     assert hf.interpret(_run("{broken}"), hf.POST_TOOL_USE) == []
-    assert (
-        hf.interpret(hf.HookRun(None, "", "", timed_out=True), hf.POST_TOOL_USE) == []
-    )
+    assert hf.interpret(hf.HookRun(None, "", "", timed_out=True), hf.POST_TOOL_USE) == []
     long = json.dumps({"hookSpecificOutput": {"additionalContext": "x" * 20_000}})
     assert len(hf.interpret(_run(long), hf.POST_TOOL_USE)[0]) < 10_100
 
@@ -393,17 +455,13 @@ async def _turn(home: Path, cwd: Path, command: str, identity: hf.HookIdentity) 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="the operator's hook needs jq")
 @pytest.mark.asyncio
-async def test_real_pr_hook_reaches_the_next_model_request(
-    home: Path, tmp_path: Path
-) -> None:
+async def test_real_pr_hook_reaches_the_next_model_request(home: Path, tmp_path: Path) -> None:
     _settings(
         home / ".claude" / "settings.json",
         {"PostToolUse": [_cmd(str(FIXTURE), "Bash")]},
     )
     main = hf.HookIdentity(session_id="s", cwd=str(tmp_path))
-    child = hf.HookIdentity(
-        session_id="s", cwd=str(tmp_path), agent_id="job", agent_type="coder"
-    )
+    child = hf.HookIdentity(session_id="s", cwd=str(tmp_path), agent_id="job", agent_type="coder")
     needle = "Invoke the fix-pr-reviews skill"
 
     opened = await _turn(home, tmp_path, "gh pr create --title t --body b", main)
@@ -412,16 +470,12 @@ async def test_real_pr_hook_reaches_the_next_model_request(
     # The script's own subagent guard (agent_id) still works under lop.
     assert needle not in await _turn(home, tmp_path, "gh pr create --title t", child)
     # Drafts and unrelated commands stay silent.
-    assert needle not in await _turn(
-        home, tmp_path, "gh pr create --draft --title t", main
-    )
+    assert needle not in await _turn(home, tmp_path, "gh pr create --draft --title t", main)
     assert needle not in await _turn(home, tmp_path, "git status", main)
 
 
 @pytest.mark.asyncio
-async def test_forwarding_off_runs_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_forwarding_off_runs_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(hf, "forwarding_enabled", lambda: (False, False))
     marker = tmp_path / "ran"
 
@@ -452,10 +506,34 @@ async def test_a_raising_hook_callback_leaves_the_result_unchanged() -> None:
         stream_fn=_Scripted([]),
         post_tool_hooks=broken,
     )
-    original = ToolResult(
-        tool_call_id="c", tool_name="bash", content=[TextContent(text="ok")]
+    original = ToolResult(tool_call_id="c", tool_name="bash", content=[TextContent(text="ok")])
+    assert await AgentLoop._apply_post_tool_hooks(config, "bash", {}, "c", original) is original
+
+
+@pytest.mark.asyncio
+async def test_failure_notes_carry_the_failure_event_label() -> None:
+    """A note from a failed tool call must not be labelled ``PostToolUse``."""
+
+    async def hook(*_a: Any) -> list[str]:
+        return ["note"]
+
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=_Scripted([]),
+        post_tool_hooks=hook,
     )
-    assert (
-        await AgentLoop._apply_post_tool_hooks(config, "bash", {}, "c", original)
-        is original
+    failed = ToolResult(
+        tool_call_id="c",
+        tool_name="bash",
+        is_error=True,
+        content=[TextContent(text="boom")],
     )
+    ok = ToolResult(tool_call_id="c", tool_name="bash", content=[TextContent(text="ok")])
+    rendered_failed = await AgentLoop._apply_post_tool_hooks(config, "bash", {}, "c", failed)
+    rendered_ok = await AgentLoop._apply_post_tool_hooks(config, "bash", {}, "c", ok)
+    failure_note = rendered_failed.content[-1]
+    ok_note = rendered_ok.content[-1]
+    assert isinstance(failure_note, TextContent) and isinstance(ok_note, TextContent)
+    assert 'event="PostToolUseFailure"' in failure_note.text
+    assert 'event="PostToolUse"' in ok_note.text

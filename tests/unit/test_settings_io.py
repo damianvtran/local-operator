@@ -45,6 +45,10 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
+    from local_operator.hook_forwarding import (
+        FORWARD_CLAUDE_DEFAULT,
+        FORWARD_CODEX_DEFAULT,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -103,7 +107,6 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
     )
-    from local_operator.hook_forwarding import FORWARD_CLAUDE_DEFAULT, FORWARD_CODEX_DEFAULT
     from local_operator.tools import shell_env
     from local_operator.tools.builtin import (
         BASH_SHELL_DEFAULT,
