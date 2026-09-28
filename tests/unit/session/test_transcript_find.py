@@ -141,6 +141,28 @@ def test_injected_docs_rank_after_genuine_within_a_tier():
     assert [h.id for h in hits] == ["g1", "i0"]
 
 
+def test_injected_docs_carry_their_text_into_find_results():
+    """A peer message is a find result like any other injected doc.
+
+    Injected rows are conversation INPUTS — an incoming peer message is text
+    the reader may well want to find again — so the pipeline must never treat
+    "injected" as "empty". Pinned at this seam because the SCANNER's extraction
+    of the real row shape (``peer_message`` carries its body under
+    ``details.body``; BE-1's remediation) is upstream of this module; what the
+    extracted text must satisfy is pinned here: exact tier, a real snippet, and
+    the demotion below genuine docs.
+    """
+    peer = doc("p1", 1, "peer says the deploy is green", injected=True)
+    genuine = doc("g1", 2, "a genuine note about the deploy")
+    hits, _ = tf.search_messages([peer, genuine], "deploy", 10)
+    assert [h.id for h in hits] == ["g1", "p1"]  # genuine first: D3's demotion
+    peer_hit = hits[1]
+    assert peer_hit.tier == "exact"
+    assert peer_hit.snippet == "peer says the deploy is green"
+    start, end = peer_hit.ranges[0]
+    assert peer_hit.snippet[start:end] == "deploy"
+
+
 def test_journal_order_is_oldest_first_within_a_tier():
     docs = [doc("c", 5, "needle"), doc("a", 1, "needle again"), doc("b", 3, "needle more")]
     hits, _ = tf.search_messages(docs, "needle", 10)
