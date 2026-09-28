@@ -197,6 +197,14 @@ def network_subcommand_rows() -> tuple[tuple[str, str], ...]:
 #: slash verb: that is tool/API/UI work, so the vocabulary stays six words.
 PROJECT_SUBCOMMANDS: tuple[str, ...] = ("list", "show", "new", "delete", "link", "unlink")
 
+#: ``/aida``'s reserved subcommand words. Parsed by the TUI handler, exactly
+#: like ``/team``'s ``chart`` and ``/project``'s verbs — except these are NOT
+#: a published `argument_shape` vocabulary, because ``/aida <anything else>``
+#: is a REQUEST (arbitrary text she is given), and a SUBCOMMAND shape would
+#: make the command route refuse one (the ``/team ops fix this`` precedent).
+#: One escape covers all three: ``/aida =pause ...`` is a message.
+AIDA_SUBCOMMANDS: tuple[str, ...] = ("pause", "resume", "status")
+
 #: The verbs whose SECOND argument slot is an existing project NAME (so the
 #: editor offers name rows there). ``list`` takes nothing, ``new`` takes a name
 #: that does not exist yet, and the rest resolve an existing row.
@@ -802,6 +810,28 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # or name, one token; a sentence after the word is prose.
         argument_shape=ArgumentShape.WORD,
         desktop_destination="sessions.resume",
+    ),
+    # Aida: opens her one long conversation, and a trailing request is a
+    # prompt she is given — so like `/team`, `_submit_prompt` writes the user
+    # row the request reaches the model as, and echoing the slash line above
+    # it would restate it. Bare `/aida` prints no row either: the transition
+    # (resuming session …) is the receipt.
+    #
+    # `pause`/`resume`/`status` are RESERVED words (AIDA_SUBCOMMANDS) parsed
+    # by the handler, the `/team chart` / `/project` precedent; a message that
+    # merely starts with one is escaped with `=`. ANY, not SUBCOMMAND, for the
+    # reason `AIDA_SUBCOMMANDS` documents: everything else after the word is
+    # the request, and the `/team` shape (`consumes_prompt` + `prefixes_text`)
+    # is what makes an inline engage reassemble the draft as that request
+    # rather than splice mid-sentence.
+    SlashCommand(
+        "aida",
+        "Open your chief of staff, or send her a request",
+        arguments=ArgumentMode.OPTIONAL,
+        consumes_prompt=True,
+        prefixes_text=True,
+        argument_shape=ArgumentShape.ANY,
+        desktop_destination="aida.open",
     ),
     # Beside the session-transition family because it changes the same session
     # rather than replacing it: `/new` discards the conversation, `/resume`

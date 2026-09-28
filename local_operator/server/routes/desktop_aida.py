@@ -1,0 +1,211 @@
+"""Aida's desktop surface: her state, and the five verbs that move it.
+
+The frozen contract (design §4), which both repos were written against:
+
+    GET  /v1/desktop/aida
+        200 { enabled, session_id, paused, greeted }
+    POST /v1/desktop/aida   body {"op": open|pause|resume|greet|status}
+        200 { session_id, paused, greeted }
+        409 when disabled (``aida_disabled``)
+
+``GET`` never creates: ``session_id`` is ``null`` until something ensures her
+(``open``/``greet``, the TUI's ``/aida``, either boot hook). ``open`` and
+``greet`` ensure the session; ``greet`` is idempotent through the
+``onboarding.json`` ledger; ``pause``/``resume`` flip ``aida.cadence.paused``
+and the supervisor's hold marker.
+
+WHY EVERY OP IS AVAILABLE WITH NO LIVE RUNTIME. Nothing here writes session or
+wake files directly: each op delegates to ``local_operator.aida``, whose writers
+already own the one-writer invariants (``ensure_session`` for her session;
+``proactive`` for the cadence, its holds and the escalation budget;
+``onboarding.greet`` for the greeting). With no runtime open, those writers use
+``wakes/arm.py`` — the documented external arm path, transcript first, install
+hook last — and with a runtime open they refuse the file write and the live
+session reconciles through the config watcher instead. A route that wrote files
+itself would be the second writer this subsystem keeps removing.
+
+WHY 409 RATHER THAN A SILENT 200 FOR DISABLED. ``aida.enabled = false`` (or
+``LOCAL_OPERATOR_NO_AIDA``) is a supported steady state, and the UI reads
+``GET`` first — a disabled install answers ``enabled: false`` and the renderer
+hides the row. The 409 is for the OTHER ordering: a client that cached a
+previous ``true``, or that raced the switch, must be told its op did not run
+rather than receive a session id that will never exist. The code is part of the
+contract because a renderer can only tell "disabled" from "your request was
+malformed" by the code, not the sentence.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Literal
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
+
+from local_operator.server.desktop import require_desktop
+from local_operator.server.models.schemas import CRUDResponse
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["Aida"], dependencies=[Depends(require_desktop)])
+
+#: The five verbs the frozen contract names. A ``Literal`` rather than a free
+#: string so an unknown op is a 422 from FastAPI's own validation (the shape
+#: this file never has to invent sentences for) and the generated schema
+#: publishes the vocabulary to the renderer.
+AidaOpName = Literal["open", "pause", "resume", "greet", "status"]
+
+
+class AidaOp(BaseModel):
+    """The POST body. ``extra="forbid"`` so a misspelled field is a 422 rather
+    than a silently ignored no-op — the same rule the wake bodies use."""
+
+    model_config = {"extra": "forbid"}
+
+    op: AidaOpName
+
+
+class AidaState(BaseModel):
+    """The frozen answer shape, shared by GET and every successful POST."""
+
+    enabled: bool
+    session_id: str | None = None
+    paused: bool
+    greeted: bool
+
+
+def _config_dir(request: Request):
+    return request.app.state.config_manager.config_dir
+
+
+def _refuse_disabled(op: str) -> HTTPException:
+    return HTTPException(
+        409,
+        {
+            "code": "aida_disabled",
+            "message": (
+                f"Aida is disabled on this backend, so {op!r} did nothing. "
+                "Enable her with aida.enabled (or unset LOCAL_OPERATOR_NO_AIDA) "
+                "and try again."
+            ),
+        },
+    )
+
+
+def _state(root: Any) -> AidaState:
+    from local_operator.aida import enabled, onboarding, proactive
+    from local_operator.aida import state as aida_state
+
+    policy = proactive.policy(root)
+    return AidaState(
+        enabled=enabled(root),
+        session_id=aida_state.session_id_of(root),
+        paused=policy.paused,
+        greeted=onboarding.greeted_at(root) is not None,
+    )
+
+
+def _reply(state: AidaState, message: str) -> CRUDResponse[AidaState]:
+    return CRUDResponse(status=200, message=message, result=state)
+
+
+@router.get("/v1/desktop/aida", response_model=CRUDResponse[AidaState])
+async def get_aida(request: Request) -> CRUDResponse[AidaState]:
+    """Her state. Never creates: a caller that wants her to exist POSTs ``open``."""
+    from local_operator import aida
+
+    root = _config_dir(request)
+    if not aida.enabled(root):
+        # NOT a 409 here: the GET is how a renderer DISCOVERS the switch, so it
+        # must answer. \u00a73.4 of the design: new UI x disabled backend renders
+        # the row hidden and answers a typed /aida with a receipt.
+        policy_state = _state(root)
+        return _reply(policy_state, "Aida is disabled on this backend.")
+    return _reply(_state(root), "Aida state retrieved.")
+
+
+@router.post("/v1/desktop/aida", response_model=CRUDResponse[AidaState])
+async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaState]:
+    """Run one op. Refuses with 409 ``aida_disabled`` on a disabled install."""
+    from local_operator import aida
+    from local_operator.aida import onboarding, proactive
+    from local_operator.aida import state as aida_state
+
+    root = _config_dir(request)
+    if not aida.enabled(root):
+        raise _refuse_disabled(body.op)
+
+    if body.op == "status":
+        return _reply(_state(root), "Aida state retrieved.")
+
+    if body.op in ("open", "greet"):
+        # BOTH ENSURE, per the contract: greet is a first-run conversation, and
+        # a client that greets without opening first must not need a second
+        # call. Disabled was refused above; a bootstrap failure answers 500 so
+        # the client can retry rather than silently getting a session id that
+        # does not exist.
+        session_id = await aida.ensure_session(root)
+        if session_id is None:
+            raise HTTPException(
+                500,
+                {
+                    "code": "aida_bootstrap_failed",
+                    "message": "Aida's session could not be created; try again (see the logs).",
+                },
+            )
+        if body.op == "greet":
+            outcome = await onboarding.greet(root, session_id)
+            state = _state(root)
+            if outcome == "no-provider":
+                # THE ONE REFUSAL THE CONTRACT NAMES: nothing is stamped, so
+                # the greeting fires after setup completes.
+                raise HTTPException(
+                    409,
+                    {
+                        "code": "aida_no_provider",
+                        "message": (
+                            "No provider is configured yet, so Aida has nothing to greet "
+                            "you with. Connect a provider, then try again."
+                        ),
+                    },
+                )
+            if outcome == "paused":
+                return _reply(
+                    state,
+                    "Aida is paused, so the greeting is being held; /aida resume delivers it.",
+                )
+            if outcome == "owner":
+                return _reply(
+                    state,
+                    "Aida is open in another window; it will say hello there.",
+                )
+            if outcome == "failed":
+                raise HTTPException(
+                    500,
+                    {
+                        "code": "aida_greet_failed",
+                        "message": "The greeting could not be scheduled; try again (see the logs).",
+                    },
+                )
+            return _reply(state, "Aida is introducing herself in her conversation.")
+        return _reply(_state(root), "Aida's conversation is ready.")
+
+    session_id = aida_state.session_id_of(root) or ""
+    if body.op == "pause":
+        outcome = await proactive.pause(root, session_id)
+        state = _state(root)
+        message = "Aida is paused; she will not check in proactively."
+        if outcome.owner_blocked:
+            message += " Her open session applies the hold within a moment."
+        return _reply(state, message)
+
+    # resume
+    arm = await proactive.resume(root, session_id)
+    state = _state(root)
+    if arm == "owner":
+        # Correct and expected, not a failure: a live session owns its rows and
+        # arms the next occurrence on its own watcher tick.
+        return _reply(state, "Aida is active again; her open session will arm the next check-in.")
+    if arm == "no-session":
+        return _reply(state, "Aida is active again; her next conversation arms the check-in.")
+    return _reply(state, "Aida is active again; the next check-in is armed.")

@@ -48,6 +48,10 @@ def test_the_catalogue_carries_prefixes_text_on_every_row(monkeypatch):
         "btw",
         "fork",
         "team",
+        # Aida's request: text after the word is a prompt SHE is given, the
+        # same claim `/team` makes (its reserved verbs are handled before this
+        # question is asked, and escape with `=`).
+        "aida",
         "agent",
         "model",
         "effort",
@@ -116,6 +120,7 @@ def test_the_catalogue_carries_the_argument_shape_and_its_vocabulary(monkeypatch
         "btw",
         "fork",
         "team",
+        "aida",
         "agent",
         "model",
         "effort",

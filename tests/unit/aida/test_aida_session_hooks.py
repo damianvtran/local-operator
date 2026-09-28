@@ -1,0 +1,206 @@
+"""The session-side hooks: load hold, persist reconcile, fire-time guard.
+
+These build a REAL ``Session`` over the aida session directory — the same
+construction the resume path performs — so what is pinned is the behaviour of
+the three seams production relies on, not a private helper's contract.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+
+from local_operator.aida import proactive, state
+from local_operator.harness.types import ModelSpec
+from local_operator.harness.wake_types import DueWake, WakeSchedule
+from local_operator.session.session import Session
+from local_operator.session.transcript import Transcript
+from local_operator.wakes import store as wake_store
+from tests.e2e.harness import ScriptedStream, text_turn
+from tests.unit.aida.conftest import write_config
+
+MODEL = ModelSpec(provider="test", model_id="aida-model", context_window=100_000)
+
+
+def make_session(root: Path, session_id: str) -> Session:
+    """A real session over ``root/sessions/<id>``, pointed at ``root``."""
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return Session(
+        model=MODEL,
+        model_source="config",
+        stream_fn=ScriptedStream([text_turn("ok") for _ in range(4)]),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        cwd=str(directory.parent),
+    )
+
+
+async def seed_rows(root: Path, session_id: str, rows: list[WakeSchedule]) -> None:
+    """Seed schedule state through BOTH stores production writes together.
+
+    The transcript entry is the authority the session loads from; the derived
+    index is what the supervisor reads. Seeding only one would describe a store
+    no real writer can produce.
+    """
+    from local_operator.session.session import WAKE_SCHEDULES_CUSTOM_TYPE
+
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    await Transcript(directory).append_custom(
+        WAKE_SCHEDULES_CUSTOM_TYPE, {"schedules": [row.model_dump() for row in rows]}
+    )
+    wake_store.write_entry(root, session_id, cwd=str(directory), schedules=rows)
+
+
+@pytest.mark.asyncio
+async def test_load_hold_drops_aida_rows_while_paused(isolated_root: Path) -> None:
+    session_id = "aaaa11112222"
+    state.update_state(isolated_root, session_id=session_id)
+    now = int(time.time() * 1000)
+    await seed_rows(
+        isolated_root,
+        session_id,
+        [
+            WakeSchedule(id="w1", message="user", next_due_at=now + 3_600_000),
+            WakeSchedule(id="aida-cadence", message="cadence", next_due_at=now + 60_000),
+        ],
+    )
+    write_config(isolated_root, {"aida": {"cadence": {"paused": True}}})
+
+    session = make_session(isolated_root, session_id)
+    try:
+        assert session._aida_duty is True
+        assert [row.id for row in session._wake.schedules] == ["w1"]
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_other_sessions_are_not_aida_sessions(isolated_root: Path) -> None:
+    state.update_state(isolated_root, session_id="aaaa11112222")
+    session = make_session(isolated_root, "bbbb33334444")
+    try:
+        assert session._aida_duty is False
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_persist_reconcile_rearms_the_cadence_and_drops_while_paused(
+    isolated_root: Path,
+) -> None:
+    session_id = "cccc55556666"
+    state.update_state(isolated_root, session_id=session_id)
+    session = make_session(isolated_root, session_id)
+    try:
+        assert session._aida_duty is True
+        # Active: a persist with no aida rows gains the next cadence row (this
+        # is how a fired one-shot is re-armed for tomorrow — the pump persists
+        # the advanced list right after a delivery).
+        await session._persist_wake_schedules([])
+        entry = wake_store.read_entry(isolated_root, session_id) or {}
+        assert [row["id"] for row in entry.get("schedules") or []] == [proactive.CADENCE_ID]
+
+        # Paused: the same persist drops them again.
+        write_config(isolated_root, {"aida": {"cadence": {"paused": True}}})
+        await session._persist_wake_schedules(
+            [
+                WakeSchedule(
+                    id=proactive.CADENCE_ID,
+                    message="x",
+                    next_due_at=int(time.time() * 1000) + 1000,
+                )
+            ]
+        )
+        entry = wake_store.read_entry(isolated_root, session_id)
+        assert not (entry or {}).get("schedules")
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fire_time_guard_drops_a_held_wake(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "dddd77778888"
+    state.update_state(isolated_root, session_id=session_id)
+    session = make_session(isolated_root, session_id)
+    prompts = AsyncMock()
+    monkeypatch.setattr(session, "_prompt_messages", prompts)
+    try:
+        row = WakeSchedule(id=proactive.CADENCE_ID, message="cadence", next_due_at=1)
+        due = DueWake(schedule=row, occurrence=1)
+
+        # Active: the hook proceeds to the prompt path.
+        await session._deliver_wake(due)
+        assert prompts.called
+
+        # Held: dropped at the door, so a pause that lands between a due time
+        # and its delivery cannot send one last proactive turn.
+        prompts.reset_mock()
+        write_config(isolated_root, {"aida": {"cadence": {"paused": True}}})
+        session._wake_fired_since_persist = False
+        await session._deliver_wake(due)
+        assert not prompts.called
+
+        # A non-Aida row is never suppressed by her pause.
+        other = WakeSchedule(id="w1", message="user", next_due_at=1)
+        await session._deliver_wake(DueWake(schedule=other, occurrence=1))
+        assert prompts.called
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_config_write_reaches_her_live_session(isolated_root: Path) -> None:
+    """The live-apply proof the LIVE scope label promises, on HER session.
+
+    A pause written through another ``ConfigManager`` must reach a session that
+    is already running — that is the mechanism ``/aida pause`` relies on when
+    her session lives in a different process (the desktop, a second terminal),
+    and the reason the settings scope label is not a painted lie. The delivery
+    goes through the platform's own registry-key diff
+    (``ConfigWatcher`` -> ``Session._apply_config_change``), whose spawned
+    reconcile is awaited here on a bounded loop of event-loop turns — a turn
+    count, not a sleep-for, so contention cannot make it flaky.
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import ConfigWatcher
+
+    session_id = "eeee99990000"
+    state.update_state(isolated_root, session_id=session_id)
+    now = int(time.time() * 1000)
+    await seed_rows(
+        isolated_root,
+        session_id,
+        [WakeSchedule(id=proactive.CADENCE_ID, message="cadence", next_due_at=now + 60_000)],
+    )
+    session = make_session(isolated_root, session_id)
+    watcher = ConfigWatcher(isolated_root)
+    unsubscribe = watcher.subscribe(session._apply_config_change)
+    try:
+        assert [row.id for row in session._wake.schedules] == [proactive.CADENCE_ID]
+
+        setting = settings_io.BY_KEY["aida.cadence.paused"]
+        settings_io.write_setting(ConfigManager(config_dir=isolated_root), setting, True)
+        change = watcher.poll_now()
+        assert change is not None and "aida.cadence.paused" in change.changed_keys
+
+        for _ in range(200):
+            if not any(proactive.is_aida_row(row.id) for row in session._wake.schedules):
+                break
+            await asyncio.sleep(0.01)
+        assert [row.id for row in session._wake.schedules] == []
+        # ...and the drop is durable: the persist that followed the reconcile
+        # wrote the empty list to the index, so a restart keeps the hold.
+        assert not (wake_store.read_entry(isolated_root, session_id) or {}).get("schedules")
+    finally:
+        unsubscribe()
+        await session.dispose()

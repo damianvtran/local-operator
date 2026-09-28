@@ -175,8 +175,19 @@ class WakeWriteLock:
     lease's own recovery lock documents.
     """
 
-    def __init__(self, session_dir: Path, *, timeout_s: float = LOCK_WAIT_S) -> None:
-        self.path = Path(session_dir) / WAKE_LOCK_NAME
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        timeout_s: float = LOCK_WAIT_S,
+        name: str = WAKE_LOCK_NAME,
+    ) -> None:
+        # ``name`` is injectable for the ONE other lock that reuses this class
+        # rather than copying its platform handling: Aida's root-level
+        # ``ensure.lock`` (``local_operator.aida.state``), which guards her
+        # state files rather than a session's wakes. Every existing caller
+        # keeps the default and the session-directory location.
+        self.path = Path(directory) / name
         self.timeout_s = timeout_s
         self._fd: int | None = None
 

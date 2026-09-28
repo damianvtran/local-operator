@@ -5,6 +5,25 @@
   "source": "https://github.com/damianvtran/local-operator",
   "seeds": [
     {
+      "name": "aida",
+      "description": "Your chief of staff: orchestrates agents and teams on your behalf, keeps an eye on everything in flight, and reports back.",
+      "when_to_use": "Handing a request to a team or specialist, starting parallel work across agents, or asking for a status roll-up of everything in flight.",
+      "version": "1.0.0",
+      "instructions_sha256": "77accc42a6d5f52d13e1d690bef0a4216adbf1818f9a33cfdddf9c648bd0e6ba",
+      "instructions_chars": 4855,
+      "tools": null,
+      "effort": null,
+      "delegate": true,
+      "tags": [
+        "role",
+        "delegate:yes"
+      ],
+      "categories": [
+        "role"
+      ],
+      "source_url": "https://raw.githubusercontent.com/damianvtran/local-operator/main/local_operator/agent_seeds/aida.md"
+    },
+    {
       "name": "architect",
       "description": "Explores a codebase and produces a design or technical proposal with trade-offs; may draft documents but never modifies existing source.",
       "when_to_use": "Deciding HOW to build something before writing it: comparing approaches or architectures, weighing trade-offs, planning a refactor, or writing an RFC or design document.",
