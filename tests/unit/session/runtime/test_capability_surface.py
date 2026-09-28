@@ -507,7 +507,7 @@ def test_project_slash_runs_the_verbs_with_the_shared_receipts(
     from types import SimpleNamespace
 
     from local_operator import slash_commands as sc
-    from local_operator.projects import ProjectRegistry
+    from local_operator.projects import ProjectEdit, ProjectRegistry
     from local_operator.session.frontend_state import SlashResult
     from local_operator.session.runtime.serving import ServingSessionHandle
 
@@ -534,9 +534,28 @@ def test_project_slash_runs_the_verbs_with_the_shared_receipts(
     duplicate = handle._project_slash(session, "new alpha", SlashResult)
     assert duplicate.style == "warning" and "already exists" in duplicate.text
 
-    # list: one shared row per project.
+    registry.create_project(ProjectEdit(name="beta"))
+
+    # S3b: `show` with NO name prefers the calling session's own projects —
+    # the page's mirror — and never answers the old name refusal.
+    scoped = handle._project_slash(session, "show", SlashResult)
+    assert scoped.style == "info"
+    assert scoped.text.splitlines()[0] == sc.project_associated_heading_text(1)
+    assert scoped.text.splitlines()[1].startswith("- alpha")
+    # `board`/`timeline` are the all-projects entries, footer included.
+    for entry in ("board", "timeline"):
+        overview = handle._project_slash(session, entry, SlashResult)
+        lines = overview.text.splitlines()
+        assert lines[0].startswith("- alpha") and "- beta" in overview.text
+        assert lines[-1] == sc.project_listing_hint_text()
+
+    # list: one shared row per project, then the page-entry footer.
     listing = handle._project_slash(session, "list", SlashResult)
-    assert listing.text.splitlines() == ["- alpha [active] · 1 session (0 live) · no progress"]
+    assert listing.text.splitlines() == [
+        "- alpha [active] · 1 session (0 live) · no progress",
+        "- beta [active] · 0 sessions (0 live) · no progress",
+        sc.project_listing_hint_text(),
+    ]
 
     # link/unlink round-trip with the resulting link set in the receipt.
     unlinked = handle._project_slash(session, "unlink alpha", SlashResult)

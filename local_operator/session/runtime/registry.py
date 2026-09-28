@@ -103,9 +103,38 @@ logger = logging.getLogger(__name__)
 
 
 def run_dir(root: Path | None = None, dirname: str = RUN_DIRNAME) -> Path:
-    """The record directory, created 0700 on first use. The daemon creates it
-    at startup too, so the very first session on a fresh machine is caught."""
-    path = (root or config_dir()) / dirname
+    """The record directory AS A PATH — creates NOTHING; see :func:`ensure_run_dir`.
+
+    A READ MUST NOT BE THE REASON A NAMESPACE EXISTS. This used to mkdir, which
+    made every reader that only wanted to NAME a path - or to LIST one - the thing
+    that brought ``run/`` and its namespaces into being. Measured on a fresh
+    isolated root against the desktop plane (review round 1, R1-1 on #1666): five
+    GET routes created it - ``/v1/desktop/info``, ``/networks``, ``/runtimes``,
+    ``/sessions`` and ``/sessions/{id}`` produced ``run/mobile``, ``run/peers``
+    and ``run/viewers`` - because each reached a SCAN, and ``scan`` opened with
+    this call.
+
+    ``server/utils/desktop_feed.py`` had already ruled on this exact shape twice
+    (its review round 1, MAJOR 1 / QA Q2) and compensated by SKIPPING THE SCAN
+    while the directory is absent. This is that rule applied at the source, so
+    every scanner inherits it instead of each caller re-deriving the guard.
+
+    The mode behaviour of the creating spelling is unchanged, including the
+    pre-existing detail that a NESTED ``dirname`` (``run/peers``) leaves its
+    implied parent at the umask's mode: tightening that is a separate change to
+    the run plane's permissions, not part of closing this class.
+    """
+    return (root or config_dir()) / dirname
+
+
+def ensure_run_dir(root: Path | None = None, dirname: str = RUN_DIRNAME) -> Path:
+    """``run_dir``, created 0700 on first use — the WRITERS' spelling.
+
+    The daemon creates it at startup too, so the very first session on a fresh
+    machine is caught. The split exists so a writer has to SAY that it is creating
+    and a reader cannot do it by accident.
+    """
+    path = run_dir(root, dirname)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -121,8 +150,12 @@ def record_path(pid: int, root: Path | None = None, dirname: str = RUN_DIRNAME) 
     on stderr so the supervisor can pick the control key out of a file only
     the owning account can open, rather than being handed the key in a log.
 
-    Creating the directory is :func:`run_dir`'s job and happens here too, so
-    the returned path's parent always exists with the right mode.
+    Creating the directory is :func:`ensure_run_dir`'s job, and it is deliberately
+    NOT done here: this is a RESOLVER, and the readers that only want to name or
+    read a record (``network/store.run_record_path``, ``journal.read_boot_record``,
+    ``info.collect``, ``unpublish``, ``exec_mode``'s printed path) must not bring
+    the namespace into being. :func:`publish` — the writer — asks for the
+    directory itself.
     """
     return run_dir(root, dirname) / f"{pid}.json"
 
@@ -130,7 +163,7 @@ def record_path(pid: int, root: Path | None = None, dirname: str = RUN_DIRNAME) 
 def publish(record: DiscoveryRecord, root: Path | None = None, dirname: str = RUN_DIRNAME) -> Path:
     """Write (or refresh) a process's record, staged so scanners see either
     the old file or the new one, never a half-written one."""
-    directory = run_dir(root, dirname)
+    directory = ensure_run_dir(root, dirname)
     record.heartbeat_at = time.time()
     target = directory / f"{record.pid}.json"
     _staged_write(target, record.to_json(), prefix=f".{record.pid}.")
@@ -644,6 +677,13 @@ def scan(
       "incomplete", and the same reaper clears it once the window is out.
     """
     directory = run_dir(root, dirname)
+    if not directory.is_dir():
+        # A READ MUST NOT CREATE THE NAMESPACE IT READS (see :func:`run_dir`).
+        # ``glob`` over an absent directory yields nothing, so this answers what
+        # the caller would have got from an empty one, minus the mkdir — and it is
+        # the rule ``server/utils/desktop_feed.py`` applied by hand (review round
+        # 1, MAJOR 1 / QA Q2) now enforced where every scanner inherits it.
+        return []
     out: list[tuple[T, str]] = []
     now = time.time()
     # PARSE FIRST, CLASSIFY AFTER, so the derived policy can ask about every
@@ -732,7 +772,7 @@ def reaped_dir(root: Path | None = None, dirname: str = RUN_DIRNAME) -> Path:
     beneath it, because a READ must never create a directory on a machine whose
     only problem is that something died.
     """
-    path = run_dir(root, dirname) / REAPED_DIRNAME
+    path = ensure_run_dir(root, dirname) / REAPED_DIRNAME
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
