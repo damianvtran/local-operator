@@ -162,7 +162,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     # AIDA'S BOOT ENSURE — SCHEDULED, NEVER AWAITED HERE. A headless install
     # (no TUI ever opened) must still have her session, pinned and with the
-    # cadence armed, so the wake supervisor can start her at 09:00 and the
+    # cadence armed, so the wake supervisor can start her at 08:30 and the
     # desktop finds her already there. What that takes on a first run is real
     # work — a session is built and files are written, and the wake supervisor
     # is installed through a subprocess — and awaiting it parked the whole

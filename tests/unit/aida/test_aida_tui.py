@@ -423,3 +423,110 @@ async def test_a_reserved_word_counts_only_as_the_whole_argument(tmp_path, monke
         await send("/aida =pause", wait_for_prompt=True)
         assert paused() is True, "the escape must not run the control"
         assert built[-1].prompts == ["pause and think", "pause"], built[-1].prompts
+
+
+@pytest.mark.asyncio
+async def test_the_rename_verb_updates_both_stores(tmp_path, monkeypatch) -> None:
+    """``/aida rename <name>``: config, her stored title, and a receipt.
+
+    The entry point the operator asked for, through the real handler: the
+    config key (what every surface reads) and her session's stored title
+    (what the picker, the sidebar and a resume read) must move TOGETHER, the
+    receipt must name the stored value, and the escape must still reach her
+    as a message without renaming anything.
+    """
+    from local_operator import aida as aida_pkg
+    from local_operator.config import ConfigManager
+    from local_operator.resume import stored_session_title
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    built: list[FakeSession] = []
+
+    class HerSession(FakeSession):
+        def __init__(self, sid: str) -> None:
+            super().__init__()
+            self._sid = sid
+
+        @property
+        def session_id(self) -> str:  # type: ignore[override]
+            return self._sid
+
+    async def resume_factory(session_id):
+        session = HerSession(session_id or "")
+        built.append(session)
+        return session
+
+    # The real config-dir resolution, like ``_boot`` sets up: the rename
+    # worker and the receipts resolve THROUGH ``paths.config_dir()``, so the
+    # env must point at this test's root or the write lands elsewhere.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from local_operator.tui.app import OperatorApp
+
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+
+        async def send(command: str) -> str:
+            editor.focus()
+            editor.text = command
+            editor.move_cursor(editor._end_of_buffer())
+            await pilot.pause()
+            await pilot.press("enter")
+            for _ in range(120):
+                await pilot.pause()
+            return _transcript_text(app)
+
+        # Bare `rename` reports; the word WITH a name renames.
+        body = await send("/aida rename")
+        assert "Aida: /aida rename <name> renames her everywhere." in body, body
+        body = await send("/aida rename Sovereign")
+        assert "renamed: Sovereign" in body, body
+
+        # A receipt minted AFTER the rename speaks the new name...
+        body = await send("/aida status")
+        assert "\u21c8 Sovereign: active" in body, body
+
+        # ...and the escape still sends her the literal words, unparsed.
+        await send("/aida =rename nope")
+        assert built and built[-1].prompts and "rename nope" in built[-1].prompts[-1]
+        body = await send("/aida rename")
+        assert "Sovereign: /aida rename <name> renames her everywhere." in body, body
+
+    # BOTH stores moved: the config key every surface reads, and the stored
+    # title the picker/sidebar/resume read.
+    assert ConfigManager(config_dir=tmp_path).get_nested_value(("aida", "name")) == "Sovereign"
+    assert stored_session_title(tmp_path / "sessions" / her_id) == "Sovereign"
+
+
+@pytest.mark.asyncio
+async def test_the_rename_verb_refuses_a_bad_name(tmp_path, monkeypatch) -> None:
+    """An invalid name is refused with the registry's own sentence, and
+    nothing is written — neither the config nor her title."""
+    from local_operator import aida as aida_pkg
+    from local_operator.config import ConfigManager
+    from local_operator.resume import stored_session_title
+
+    her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
+
+    app = _boot(tmp_path, monkeypatch)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        editor = app.query_one(Editor)
+        editor.focus()
+        editor.text = "/aida rename " + "x" * 81
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(120):
+            await pilot.pause()
+        body = _transcript_text(app)
+        assert "not renamed: at most 80 characters" in body, body
+
+    assert ConfigManager(config_dir=tmp_path).get_nested_value(("aida", "name"), None) is None
+    assert stored_session_title(tmp_path / "sessions" / her_id) == "Aida"

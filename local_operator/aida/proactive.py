@@ -2,7 +2,7 @@
 
 WHAT THE ENGINE OWNS. Exactly one internal cadence row, id ``aida-cadence``,
 armed as a one-shot due at the next local wall-clock occurrence of
-``aida.cadence.at`` (default 09:00); plus the bounded ``aida-extra-N`` one-shots
+``aida.cadence.at`` (default 08:30); plus the bounded ``aida-extra-N`` one-shots
 she requests through her escalation tray. Every row the engine owns has an id
 under the ``aida-`` prefix, and that prefix is the ownership boundary: pause,
 disable and re-arm all work by dropping or rewriting those ids and never touch
@@ -96,7 +96,7 @@ ROW_PREFIX = "aida-"
 #: like the refusal it records.
 CUSTOM_ENTRY_TYPE = "aida_proactive"
 
-DEFAULT_CADENCE_AT = "09:00"
+DEFAULT_CADENCE_AT = "08:30"
 DEFAULT_MAX_EXTRA_PER_DAY = 2
 DEFAULT_MIN_GAP_MINUTES = 90
 #: The two boolean defaults this engine reads. ``DEFAULT_ENABLED`` is also the
@@ -545,7 +545,7 @@ def reconcile(
             kept.append(
                 WakeSchedule(
                     id=GREETING_WAKE_ID,
-                    message=_onboarding.GREETING_MESSAGE,
+                    message=_onboarding.greeting_message(config_dir),
                     next_due_at=now,
                     every_ms=None,
                     created_at=now,

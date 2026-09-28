@@ -5,7 +5,8 @@ way the renderer does — ASGI transport, bearer token, JSON bodies — against 
 isolated config root, and pins each clause the UI was written against:
 ``GET`` never creates, ``open``/``greet`` ensure, ``greet`` is idempotent,
 ``pause``/``resume`` move the flag, a disabled install answers ``enabled: false``
-on GET and 409 ``aida_disabled`` on POST.
+on GET and 409 ``aida_disabled`` on POST, and the read payload carries her
+configured ``name`` (the renameable-chief-of-staff contract, 2026-09-28).
 """
 
 from __future__ import annotations
@@ -52,7 +53,15 @@ async def test_get_never_creates_the_session(client, isolated_root: Path) -> Non
         response = await http.get("/v1/desktop/aida")
     assert response.status_code == 200
     result = response.json()["result"]
-    assert result == {"enabled": True, "session_id": None, "paused": False, "greeted": False}
+    assert result == {
+        "enabled": True,
+        "session_id": None,
+        "paused": False,
+        "greeted": False,
+        # The rename contract's field rides the read shape and defaults to the
+        # packaged name; a renderer never needs a null branch for it.
+        "name": "Aida",
+    }
 
 
 @pytest.mark.asyncio
@@ -92,6 +101,35 @@ async def test_greet_refuses_without_a_provider_and_stamps_nothing(
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "aida_no_provider"
     assert not (isolated_root / "aida" / "onboarding.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_read_payload_carries_the_configured_name(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``name`` is read LIVE from ``aida.name`` — the cross-repo contract.
+
+    The UI slice labels her row with ``aida.data?.name ?? "Aida"``, so the
+    field must exist, be a plain string, and change the moment the config
+    key changes — with no restart and with no session of hers even existing
+    (a rename made in a terminal or the desktop is visible to every other
+    renderer on its next GET).
+    """
+    write_config(isolated_root, {"aida": {"name": "Sovereign"}})
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", TOKEN)
+    app.state.config_manager = ConfigManager(config_dir=isolated_root)
+    transport = httpx.ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers=headers
+    ) as http:
+        response = await http.get("/v1/desktop/aida")
+        opened = await http.post("/v1/desktop/aida", json={"op": "open"})
+    assert response.status_code == 200
+    assert response.json()["result"]["name"] == "Sovereign"
+    # The receipts speak the configured name too, not the packaged string.
+    assert opened.status_code == 200
+    assert "Sovereign" in opened.json()["message"]
 
 
 @pytest.mark.asyncio
