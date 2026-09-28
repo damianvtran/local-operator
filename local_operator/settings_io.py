@@ -3240,13 +3240,14 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.TEXT,
         default="0.0.0.0",
         help=(
-            # 49 CELLS, and the number is a constraint rather than a style: the detail
+            # 53 CELLS, and the number is a constraint rather than a style: the detail
             # line is ONE row that sheds (help · clause · key → help · clause → …), and
             # the rung that matters is `help · clause` at 80 columns — 74 cells of
-            # budget, less this row's 16-cell `default: 0.0.0.0` and the 3-cell joiner.
-            # The old 132-cell sentence was dropped WHOLE off-default, so the reader who
-            # had set a mesh address got the key path and no explanation of the field
-            # (design review round 1, D1).
+            # budget, less this row's 16-cell `default: 0.0.0.0` and the 3-cell joiner,
+            # so the room is 55 and this string leaves 2 cells of it. The old 132-cell
+            # sentence was dropped WHOLE off-default, so the reader who had set a mesh
+            # address got the key path and no explanation of the field (design review
+            # round 1, D1).
             "127.0.0.1 = dial-only; 0.0.0.0 = all; or one address."
         ),
     ),
@@ -3263,9 +3264,10 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=1,
         maximum=65535,
         help=(
-            # 48 cells: same rung and the same reason as `listen_address` above — this
-            # row's clause is 13 cells (`default: 4097`), so anything past ~55 sheds the
-            # help whole at 80 columns.
+            # 50 cells: same rung and the same reason as `listen_address` above — this
+            # row's clause is 13 cells (`default: 4097`) against the 74-cell budget and
+            # the 3-cell joiner, so the room is 58 and this string leaves 8 of it.
+            # Anything past the room sheds the help whole at 80 columns.
             "The port peers dial; endpoints without one use it."
         ),
     ),
