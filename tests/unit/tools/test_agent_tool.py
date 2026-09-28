@@ -1565,7 +1565,10 @@ async def test_a_bad_class_spelling_is_refused_by_the_schema(context) -> None:
     # than tripping the type checker on a literal it exists to reject.
     with pytest.raises(ValidationError):
         AgentParams(
-            **{"op": "create", "name": "x", "instructions": "i", "action_class": "sideways"}
+            op="create",
+            name="x",
+            instructions="i",
+            action_class="sideways",  # type: ignore[arg-type]
         )
 
 

@@ -19671,8 +19671,8 @@ class OperatorApp(App[None]):
         # rows now, and — for Aida — the cadence reconciled against the new
         # class. Other sessions self-correct at their next delivery-time read.
         clause = ""
-        cleanup: Any = getattr(session, "cleanup_after_class_switch", None)
-        if callable(cleanup):
+        cleanup = getattr(session, "cleanup_after_class_switch", None)
+        if cleanup is not None:
             try:
                 outcome = await cleanup(resolved)
                 bits: list[str] = []
