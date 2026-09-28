@@ -515,3 +515,48 @@ async def test_attachment_sizes_print_one_decimal_across_the_unit(context, tmp_p
     await call(context, op="update", name="alpha", progress="kb line", attach=[str(frame)])
     shown = await call(context, op="show", name="alpha")
     assert "attachment: frame.png [image, 4.0 KB]" in shown
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_statuses_are_accepted_and_shown(context) -> None:
+    created = await call(context, op="create", name="alpha", status="planning")
+    assert "[planning]" in created
+    moved = await call(context, op="update", name="alpha", status="qa")
+    assert "status qa" in moved
+
+
+@pytest.mark.asyncio
+async def test_done_refusal_teaches_and_force_done_closes(context) -> None:
+    await call(context, op="create", name="alpha", milestones=[{"name": "beta cut"}])
+    refused = await call(context, op="update", name="alpha", status="done")
+    assert "cannot set status 'done'" in refused
+    assert "'beta cut'" in refused and "force_done=true" in refused
+    forced = await call(context, op="update", name="alpha", status="done", force_done=True)
+    assert "[done]" in forced
+    # The receipt names the deliberate close (the M1 rule), not just the state.
+    assert "force_done=true" in forced
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_status_refusal_lists_the_vocabulary(context) -> None:
+    await call(context, op="create", name="alpha")
+    refused = await call(context, op="update", name="alpha", status="shipped")
+    assert "planning" in refused and "validation" in refused and "archived" in refused
+
+
+@pytest.mark.asyncio
+async def test_a_forced_create_names_the_deliberate_close(context) -> None:
+    """N2: the update path's deliberate-act rule applies to create too."""
+    forced = await call(
+        context,
+        op="create",
+        name="alpha",
+        status="done",
+        milestones=[{"name": "open"}],
+        force_done=True,
+    )
+    assert "[done]" in forced
+    assert "status 'done' forced with milestones incomplete (force_done=true)" in forced
+    # An ordinary create claims nothing: no force clause without the force.
+    plain = await call(context, op="create", name="beta", status="done")
+    assert "force_done" not in plain

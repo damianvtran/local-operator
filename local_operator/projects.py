@@ -130,7 +130,8 @@ _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"})
 #: the nudge can never disagree about a record: a work turn yielding within this
 #: window of the last report is not asked to re-report; anything older is. Four
 #: hours is the operator's window ("stale only when not updated in more than 4
-#: hours"), and only ``active`` records are ever stale at all (see
+#: hours"), and only the LIVE statuses (``planning``/``active``/``qa``/
+#: ``validation`` — :data:`PROJECT_LIVE_STATUSES`) are ever stale at all (see
 #: :func:`progress_is_stale`: settled rows never read stale).
 PROJECT_PROGRESS_STALE_S: float = 14400.0
 
@@ -144,8 +145,32 @@ _LOCK_RETRY_S = 0.01
 #: bounded.
 _MAX_ROWS = 500
 
-ProjectStatus = Literal["active", "paused", "done", "archived"]
+ProjectStatus = Literal["planning", "active", "qa", "validation", "paused", "done", "archived"]
 EstimateUnit = Literal["points", "days"]
+
+#: The status lifecycle, in the order the guide teaches it: planning (RFC or
+#: research) → active (implementation) → qa (review/QA/design/copy cycles) →
+#: validation (deployed and being validated, observation and fix-forward
+#: included) → done (fully validated: requirements closed, todos addressed,
+#: milestones complete), with ``paused`` a side-state and ``archived`` the end
+#: of the drawer. The model literal above is the ONE source; a test pins it to
+#: this tuple so a word can never exist in one surface and not another.
+PROJECT_STATUSES: tuple[str, ...] = (
+    "planning",
+    "active",
+    "qa",
+    "validation",
+    "paused",
+    "done",
+    "archived",
+)
+
+#: The statuses that are WORK IN FLIGHT: only these can read stale. ``paused``,
+#: ``done`` and ``archived`` are deliberate statements that the record is
+#: settled — the guard in :func:`progress_is_stale` and the filter in
+#: :func:`stale_projects_for_session` both read this ONE set, so a badge and
+#: the completion check cannot disagree about which rows can nag.
+PROJECT_LIVE_STATUSES: frozenset[str] = frozenset({"planning", "active", "qa", "validation"})
 
 
 class ProjectRegistryLockTimeout(TimeoutError):
@@ -478,6 +503,29 @@ def _coerce_updates(value: object) -> list[ProjectUpdateEntry]:
     return entries[-UPDATES_MAX:]
 
 
+def _refuse_done_if_incomplete(milestones: Sequence[ProjectMilestone]) -> None:
+    """The ``done`` gate's one refusal: what is incomplete, and the way through.
+
+    Setting ``status='done'`` promises the plan is finished — requirements
+    closed, milestones complete. An incomplete milestone is exactly the
+    contradiction the gate exists for, so the refusal NAMES them and carries
+    the deliberate escape hatch (``force_done=true``) rather than letting a
+    false statement through. A plan with no milestones has nothing to prove
+    and closes normally: the gate blocks an unfinished plan, not a plan-less
+    row. Raises ``ValueError`` so every ``except ValueError`` arm (the tool,
+    the routes) renders the same sentence.
+    """
+    incomplete = [milestone.name for milestone in milestones if milestone.completed_at is None]
+    if not incomplete:
+        return
+    names = ", ".join(repr(name) for name in incomplete)
+    raise ValueError(
+        f"cannot set status 'done': {len(incomplete)} milestone"
+        f"{'' if len(incomplete) == 1 else 's'} still incomplete ({names}) — "
+        "complete them, or pass force_done=true to close with them open"
+    )
+
+
 def milestone_status(
     milestone: ProjectMilestone, *, today: date | None = None
 ) -> Literal["completed", "overdue", "upcoming"]:
@@ -551,7 +599,14 @@ class Project(BaseModel):
     #: listings show it first with the key as secondary. Optional by design —
     #: absent falls back to ``name`` on every surface (:func:`display_name`).
     title: str | None = None
-    status: ProjectStatus = "active"
+    #: NOT typed as the strict ``ProjectStatus`` literal: a row written by a
+    #: NEWER build must still LOAD (QA round 1, Q1) — the word is preserved
+    #: verbatim and rendered everywhere (the board's leading column, a
+    #: ``[? word]`` chip). The WRITE surfaces constrain the vocabulary instead
+    #: (``ProjectEdit``, the tool params and the routes all type it
+    #: ``ProjectStatus``), so an unknown word can never be SET — only carried
+    #: through untouched.
+    status: str = "active"
     progress: str = Field(default="", max_length=PROGRESS_MAX)
     progress_updated_at: float | None = None
     #: Session id, ``"operator"`` (a surface with no session), or ``""``.
@@ -796,14 +851,15 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     :data:`PROJECT_PROGRESS_STALE_S` is stale. Computed here so the tool, the
     routes and the completion check cannot disagree about one record.
 
-    ONLY ``active`` RECORDS CAN READ STALE. Paused, done and archived are
-    deliberate statements that the record is settled — the same active-only
-    filter ``stale_projects_for_session`` applies before it can name a project
-    — so a settled row's badge must not nag about a snippet that is simply old.
-    The guard lives HERE, in the one derivation every payload renders, rather
-    than in each surface.
+    ONLY ``planning``, ``active``, ``qa`` AND ``validation`` RECORDS CAN READ
+    STALE — the statuses that are work in flight. Paused, done and archived are
+    deliberate statements that the record is settled — the same filter
+    ``stale_projects_for_session`` applies before it can name a project — so a
+    settled row's badge must not nag about a snippet that is simply old. The
+    set lives in :data:`PROJECT_LIVE_STATUSES`, and the guard HERE, in the one
+    derivation every payload renders, rather than in each surface.
     """
-    if project.status != "active":
+    if project.status not in PROJECT_LIVE_STATUSES:
         return False
     if not project.progress:
         return True
@@ -1000,16 +1056,17 @@ def stale_projects_for_session(
     (``Session._project_continuation``) and the expiry scan
     (``Session._live_project_reminders``) compute their set through here, so
     the nudge and the check that retires it can never disagree about which
-    projects are stale. Only ``active`` projects can be named — paused, done
-    and archived are deliberate statements that the record is settled, and a
-    reminder about one would nag the session to revive it — and a project with
-    no progress yet is stale by construction, because the first honest line is
-    still owed.
+    projects are stale. Only the LIVE statuses (``planning``/``active``/
+    ``qa``/``validation`` — :data:`PROJECT_LIVE_STATUSES`) can be named —
+    paused, done and archived are deliberate statements that the record is
+    settled, and a reminder about one would nag the session to revive it — and
+    a project with no progress yet is stale by construction, because the first
+    honest line is still owed.
     """
     return [
         project
         for project in registry.projects_for_session(session_id)
-        if project.status == "active" and progress_is_stale(project, now=now)
+        if project.status in PROJECT_LIVE_STATUSES and progress_is_stale(project, now=now)
     ]
 
 
@@ -1222,6 +1279,17 @@ class ProjectRegistry:
                         project.id,
                     )
                     continue
+                if project.status not in PROJECT_STATUSES:
+                    # QA round 1, Q1: an unknown status is a row from a NEWER
+                    # build — it loads (the field is intentionally permissive)
+                    # and renders in the board's leading column, but the drift
+                    # is ANNOUNCED, because a silent load is how a vocabulary
+                    # gap goes unnoticed until a surface misbehaves.
+                    logger.warning(
+                        "project row %s carries unknown status %r; loading it as-is",
+                        child.name,
+                        project.status,
+                    )
                 loaded[project.id] = project
             except FileNotFoundError:
                 # The row was replaced between the scan and this open — the
@@ -1497,6 +1565,7 @@ class ProjectRegistry:
         *,
         sessions: Sequence[str] = (),
         progress_reported_by: str = "",
+        force_done: bool = False,
     ) -> Project:
         """Create one project from ``fields``; the name must be free.
 
@@ -1515,6 +1584,10 @@ class ProjectRegistry:
                 raise ProjectNameConflictError(f"project {name!r} already exists")
             supplied = fields.model_fields_set
             status = fields.status or "active"
+            if status == "done" and not force_done:
+                # The done gate, same rule as update: a create that declares
+                # the plan finished must have finished milestones, or say so.
+                _refuse_done_if_incomplete(fields.milestones or [])
             if "completed_at" in supplied:
                 completed_at = None if not fields.completed_at else fields.completed_at
             elif status == "done":
@@ -1567,6 +1640,7 @@ class ProjectRegistry:
         *,
         reporter: str = "",
         attachments: Sequence[str | Path] = (),
+        force_done: bool = False,
     ) -> ProjectUpdate:
         """Merge ``fields`` into one project under the store lock.
 
@@ -1625,6 +1699,13 @@ class ProjectRegistry:
             if "completed_at" in supplied:
                 candidate.completed_at = fields.completed_at or None
             if "status" in supplied and fields.status is not None:
+                if fields.status == "done" and not force_done:
+                    # The done gate: a plan closes when its milestones do, or
+                    # when the caller says so explicitly. Checked against the
+                    # MERGED list, so a deliberate same-call replace to a
+                    # complete set can close the plan in one move; no
+                    # milestones means nothing to prove (see the helper).
+                    _refuse_done_if_incomplete(candidate.milestones)
                 was_done = current.status == "done"
                 candidate.status = fields.status
                 if fields.status == "done" and not was_done and "completed_at" not in supplied:
