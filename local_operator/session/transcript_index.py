@@ -1250,10 +1250,10 @@ async def checkpoints_view(
     key = _key(config_dir, session_id)
     resident_index = _RESIDENT.get(key)
     if resident_index is not None:
-        st = await asyncio.to_thread(_stat_or_none, _journal_path(config_dir, session_id))
+        st, cache_st = await asyncio.to_thread(_freshness_pair, config_dir, session_id)
         if st is not None and _sig_matches(resident_index.sig, st):
             _RESIDENT.move_to_end(key)
-            return _manifest_state(session_id, "ready", resident_index, None)
+            return _manifest_state(session_id, "ready", resident_index, _mtime_or_none(cache_st))
     probe = await asyncio.to_thread(probe_index, config_dir, session_id)
     if probe.state == "missing":
         # No journal: a draft or a session with nothing written yet. An empty
@@ -1275,7 +1275,8 @@ async def checkpoints_view(
             return _manifest_state(session_id, "error", probe.index, probe.built_at)
         built = task.result()
         if built is not None:
-            return _manifest_state(session_id, "ready", built, None)
+            cache_st = await asyncio.to_thread(_stat_or_none, index_path(config_dir, session_id))
+            return _manifest_state(session_id, "ready", built, _mtime_or_none(cache_st))
         return _manifest_state(session_id, "ready", None, None)
     return _manifest_state(session_id, "building", probe.index, probe.built_at)
 
@@ -1285,6 +1286,20 @@ def _stat_or_none(path: Path) -> os.stat_result | None:
         return path.stat()
     except OSError:
         return None
+
+
+def _freshness_pair(
+    config_dir: str | Path, session_id: str
+) -> tuple[os.stat_result | None, os.stat_result | None]:
+    """The journal and cache stats the resident ready path needs, ONE hop."""
+    return (
+        _stat_or_none(_journal_path(config_dir, session_id)),
+        _stat_or_none(index_path(config_dir, session_id)),
+    )
+
+
+def _mtime_or_none(st: os.stat_result | None) -> float | None:
+    return st.st_mtime if st is not None else None
 
 
 def _reset_for_tests() -> None:
