@@ -146,8 +146,18 @@ async def test_pause_unstamps_an_undelivered_greeting_and_resume_rearms_it(
 
 
 def _user_session(root: Path, session_id: str) -> None:
-    """A bare session directory — no origin.json, so a HUMAN's conversation."""
-    (root / "sessions" / session_id).mkdir(parents=True)
+    """A session with a conversation HAD — a real turn in its transcript.
+
+    The transcript row is the engagement marker the scan reads (see
+    ``onboarding._counts_as_operator_conversation``); a bare directory is the
+    boot's own materialisation and deliberately does not count (UX round 2,
+    U4).
+    """
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True)
+    (directory / "transcript.jsonl").write_text(
+        '{"type": "message", "payload": {"kind": "message"}}\n', encoding="utf-8"
+    )
 
 
 def test_the_predicate_is_no_human_conversations_plus_a_provider(
@@ -159,6 +169,62 @@ def test_the_predicate_is_no_human_conversations_plus_a_provider(
     _user_session(isolated_root, "aaaaaaaabbbb")
     assert onboarding.fresh_install(isolated_root) is False
     assert onboarding.other_user_sessions(isolated_root) == ["aaaaaaaabbbb"]
+
+
+def test_a_boot_materialised_session_directory_does_not_make_an_install_look_used(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boot's own directory — lease + pid, no transcript — is not a conversation.
+
+    Reproduces the shipped shape: every normal launch materialises one session
+    directory before any first contact, and counting it as "the operator has
+    conversations" turned the predicate false on a fresh install's FIRST
+    boot, so a provider-present first contact never greeted (UX review round
+    2, U4).
+    """
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    booted = isolated_root / "sessions" / "0b7011cccbee"
+    booted.mkdir(parents=True)
+    (booted / ".execution-lease").write_text('{"pid": 1}', encoding="utf-8")
+    (booted / ".session.pid").write_text("1", encoding="utf-8")
+
+    assert onboarding.other_user_sessions(isolated_root) == []
+    assert onboarding.fresh_install(isolated_root) is True
+    assert onboarding.first_run_pending(isolated_root) is True
+
+
+def test_an_empty_transcript_file_is_also_not_a_conversation(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A touched-but-unused session's size-0 journal says nothing was said."""
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    touched = isolated_root / "sessions" / "ffff00001111"
+    touched.mkdir(parents=True)
+    (touched / "transcript.jsonl").write_text("", encoding="utf-8")
+
+    assert onboarding.other_user_sessions(isolated_root) == []
+    assert onboarding.fresh_install(isolated_root) is True
+
+
+def test_a_transcript_with_any_unreadable_content_fails_closed(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anything on disk the reader will not call history counts as the operator's.
+
+    R22's direction: "never re-route somebody with conversations" outranks a
+    missed first-run greeting. Pinned with the custom-row shape (wake prompts
+    and quiet-dial peer notes persist without a turn) so the conservative arm
+    cannot be narrowed to "only message rows" by a later refactor.
+    """
+    monkeypatch.setattr(onboarding, "provider_configured", lambda root: True)
+    custom_only = isolated_root / "sessions" / "222233334444"
+    custom_only.mkdir(parents=True)
+    (custom_only / "transcript.jsonl").write_text(
+        '{"type": "message", "payload": {"kind": "custom"}}\n', encoding="utf-8"
+    )
+
+    assert onboarding.other_user_sessions(isolated_root) == ["222233334444"]
+    assert onboarding.fresh_install(isolated_root) is False
 
 
 def test_a_subagent_run_does_not_make_an_install_look_used(

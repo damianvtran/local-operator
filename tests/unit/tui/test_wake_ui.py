@@ -120,6 +120,28 @@ class TestWakeBlock:
         assert "check the backup" in expanded
         assert "- w1" in expanded
 
+    def test_catchup_line_labels_engine_armed_ids(self) -> None:
+        """A folded Aida row reads as hers, not as the raw schedule id.
+
+        The catch-up branch composes its own headline from the bullet ids, so
+        it never went through ``wake_receipt_headline``'s label map: a fresh
+        install's first receipt read ``catch-up — 1 missed wake
+        (aida-greeting)`` while the live seat beside it already said ``Aida's
+        introduction`` (UX review round 2, U5 / QA Q3). One shared lookup now
+        covers both shapes; a user-made wake keeps naming itself.
+        """
+        text = (
+            "(alarm) The session resumed after being closed; the following "
+            "scheduled wake(s) came due while it was down.\n\n"
+            "- aida-greeting (due 09:00): missed while the session was down.\n"
+            "- w2 (due 10:00): next"
+        )
+        block = WakeBlock(text, catchup=True)
+        rendered = block._build_row(120).plain
+        assert "Aida's introduction" in rendered
+        assert "aida-greeting" not in rendered
+        assert "w2" in rendered
+
     def test_activate_toggles_like_the_tool_ledger(self) -> None:
         """``activate`` returns True when it toggled, matching ToolCard —
         both expand and collapse are the row's one action, so both report

@@ -2474,7 +2474,7 @@ class WakeBlock(ExpandableActionBlock):
         the dim single-line the user could not find. The body is the
         verbatim prompt, shown only once the row is opened.
         """
-        from local_operator.harness.rows import wake_receipt_headline
+        from local_operator.harness.rows import wake_display_name, wake_receipt_headline
 
         _, _, message = self._text.partition("\n\n")
         if self._catchup:
@@ -2494,7 +2494,13 @@ class WakeBlock(ExpandableActionBlock):
             label = f"{count} missed wake{'s' if count != 1 else ''}"
             headline = f"catch-up — {label}"
             if ids:
-                headline += f" ({', '.join(ids)})"
+                # The same label treatment the single-delivery fold applies
+                # (UX review round 2, U5 / QA Q3): this branch composes its
+                # own headline, and a fresh install's FIRST receipt read
+                # ``catch-up — 1 missed wake (aida-greeting)`` while the live
+                # seat beside it already said ``Aida's introduction``. One
+                # shared lookup, so the two shapes cannot drift.
+                headline += f" ({', '.join(wake_display_name(i) for i in ids)})"
             return headline, message
         # The envelope strip is shared with the phone fold
         # (``harness.rows.wake_receipt_headline``): while it lived only here,
