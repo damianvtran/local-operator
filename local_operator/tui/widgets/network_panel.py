@@ -57,6 +57,12 @@ from local_operator.tui.widgets.aside_panel import ASIDE_COPY_KEY
 #: narrow terminal, where it keeps the columns from being computed to zero.
 _MIN_CARD_WIDTH = 40
 
+#: Cells :func:`_hanging_row` keeps clear at the end of a row, because the vertical
+#: scrollbar is painted in a column of the body it lays rows out in: the card is 39
+#: and the body 38 at 50x18, so a row that fills the card exactly comes back
+#: re-wrapped by Rich. A measurement, not a taste call.
+_SCROLLBAR_RESERVE_CELLS = 1
+
 
 #: How much of an id the panel shows, and WHY ONE NUMBER FOR ALL THREE.
 #:
@@ -147,6 +153,24 @@ class NetworkLocal:
     networks: list[NetworkEntry] = field(default_factory=list)
     peers: list[PeerEntry] = field(default_factory=list)
 
+    @property
+    def unpaired(self) -> bool:
+        """Whether this device is in NO mesh at all — the first-run state.
+
+        BOTH HALVES ARE THE GATE, and they are the two facts :func:`capture_local`
+        already reads off disk. No identity file means no pairing has ever
+        completed here (``init`` writes one too, so a device that created a
+        network is not this population), and no network records means the LEFT-a-
+        mesh case — ``disconnect``, ``rm`` — is not pitched a first step it has
+        already taken.
+
+        It lives on the model rather than at each reader because two surfaces now
+        ask it (this panel's empty state, and the splash's opening tip, which
+        pins on it) and a second definition of "never paired" is one edit away
+        from disagreeing with this one.
+        """
+        return not self.identity_present and not self.networks
+
 
 def _one_row_value(prefix: str, value: str, width: int) -> str:
     """A ``label: value`` line that NEVER takes a second row, elided if it must be.
@@ -231,6 +255,48 @@ def _cut_to_cells(text: str, budget: int) -> str:
             return text[:start]
         used += cells
     return text
+
+
+def _hanging_row(lead: str, value: str, width: int) -> str:
+    """A prose row whose WRAP keeps the row's own indent (UX round 1, U5).
+
+    The body is ONE ``Text`` and the wrap happens in Rich at the widget's edge,
+    where no hanging indent can be asked for — so a teaching row that wrapped
+    resumed at column 0 and read as a new row at section level. Measured on the
+    real frame at 56x20 and 60x20: ``mints it`` and ``@<file> on the peer`` both
+    landed flush left under a two-cell indented row. The row is therefore broken
+    HERE, against the same ``width`` the caller already measures its rows in, and
+    every continuation carries ``lead``.
+
+    WORDS, NOT CELLS, and that is the one thing this does not share with
+    :func:`_indented_value`: that helper cuts on exact cell boundaries because a
+    VALUE has to re-join to the string it came from (its test asserts exactly that
+    of a log path). A sentence owes the reader no such reconstruction — breaking
+    ``creates`` across two rows is a worse frame than breaking after it — so the
+    break lands on the last word that fits. A single word wider than the row is
+    the only hard break, and it overflows rather than being cut: this is prose,
+    not a column a neighbouring row aligns to.
+
+    ONE CELL INSIDE ``width``, because that is what can be PAINTED. ``width`` is
+    :meth:`NetworkScreen._card_width`, measured off the title's box, and the body
+    it lays its rows out in can be one cell narrower: when the block is long
+    enough for the vertical scrollbar, the bar takes a column (card 39 against
+    body 38 at 50x18, measured). A row that stops exactly at ``width`` is then
+    re-wrapped by Rich at the edge — the defect this helper exists to remove, at
+    the one size where it would come back.
+    """
+    available = max(1, width - cell_len(lead) - _SCROLLBAR_RESERVE_CELLS)
+    lines: list[str] = []
+    current = ""
+    for word in value.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if cell_len(candidate) <= available or not current:
+            current = candidate
+            continue
+        lines.append(current)
+        current = word
+    lines.append(current)
+    return "\n".join(lead + line for line in lines)
 
 
 def _indented_value(prefix: str, value: str, width: int) -> str:
@@ -865,7 +931,25 @@ class NetworkScreen(ModalScreen[None]):
             # did before. What is left is the half that is this section's subject,
             # and it keeps its own verb (`mints`, not the Networks row's `creates`)
             # so the two rows read as two facts rather than one instruction twice.
-            body.append("  no identity yet — /network new <name> mints it\n", style="yellow")
+            #
+            # AND IT NOW FITS THE NARROWEST CARD (UX round 1, U5), so the `<name>`
+            # placeholder went: at 43 cells — what the card holds at 56x20 — this
+            # sentence is 48, and a row that wraps costs a row of an eight-row
+            # viewport on the frame where the pairing sequence has to be legible.
+            # The argument it named is not lost: the Networks row one block down IS
+            # `/network new <name>`, and the arm refuses a bare `/network new` with
+            # its own usage line rather than doing something the reader did not ask
+            # for. What stayed is the verb — the half that makes this row a
+            # different fact from the one below it.
+            #
+            # HUNG as well, for the sizes below the band's floor (40x20 lays the
+            # body out in ~36 cells, where nothing can fit it): a continuation at
+            # column 0 read as a new row at section level — measured on the real
+            # frame as `mints it` flush left under the row it belongs to.
+            body.append(
+                _hanging_row("  ", "no identity yet — /network new mints it", width) + "\n",
+                style="yellow",
+            )
         else:
             # LABEL FIRST, then the abbreviated id (design round 1, D6). The line
             # used to lead with the full 34-cell id, putting the longest token on
@@ -1010,11 +1094,34 @@ class NetworkScreen(ModalScreen[None]):
             # row one block down already says `/network invite mints a token`, so
             # repeating it here would spend this row's cells on a duplicate,
             # while WHICH DEVICE runs the join is said nowhere else on the frame.
+            #
+            # AND WHAT SETTLED THE LENGTH IS THE FOLD, NOT THE WRAP (UX round 1,
+            # U5). "No new wrapping threshold" was the right answer while the
+            # worry was a scrollbar appearing at 84x16 — but at 56x20 the
+            # viewport is EIGHT rows, and 62 + 60 cells wrapped to four lines
+            # inside it: the two teaching rows alone spent half the viewport, and
+            # the device cue — this pair's load-bearing half — was painted one
+            # row PAST the fold, on a frame whose body had nothing saying it
+            # scrolled. Both rows are now inside the 43 cells the card holds at
+            # 56x20 (39 and 40), so the sequence costs two rows instead of four
+            # and `join on the peer` is on the screen at every size in
+            # `_BAND_SIZES` where the card is 43 cells or wider.
+            #
+            # WHAT THAT COST is the CLI spelling of the join (`lop network join
+            # @<file>`), which no longer fits beside the device cue: the phrase
+            # that carries WHICH DEVICE had to win, because the command is
+            # printed for the reader by the side that runs it — ``invite``'s own
+            # receipt ends `then, on the other device: lop network join
+            # @<token-file>` — while nothing else on any frame says the join is
+            # not run here. The three commands' ORDER is unchanged and still
+            # asserted; the third one is now named by the receipt that hands it
+            # over rather than by this row.
             body.append(
-                "  no networks on this device — /network new <name> creates one\n", style="dim"
+                _hanging_row("  ", "no networks yet — /network new <name>", width) + "\n",
+                style="dim",
             )
             body.append(
-                "  then /network invite; lop network join @<file> on the peer\n",
+                _hanging_row("  ", "then /network invite; join on the peer", width) + "\n",
                 style="dim",
             )
             return
@@ -1144,10 +1251,24 @@ class NetworkScreen(ModalScreen[None]):
             # shape this PR's own test files as a defect one block away. What this
             # section can say that no other row does is what the reader will see
             # here once it works.
-            body.append(
-                "  no peers yet — a device you pair appears here\n",
-                style="dim",
+            #
+            # …UNTIL THE NETWORKS BLOCK IS NO LONGER AN EMPTY STATE (UX round 1,
+            # U3). D1 was answering a frame where BOTH blocks were empty and the
+            # path above had just named `invite`; one command later the Networks
+            # block holds the network, this row states a consequence, and the
+            # surface that taught step one is silent at the moment step two is
+            # next. Pre-PR this row named the command — the row that replaced it
+            # is a NET REMOVAL for exactly one state, so the consequence wording
+            # keeps the state it was written for (both blocks empty) and the
+            # command comes back where the duplication D1 objected to cannot
+            # happen: a device that HAS a network and no peers. Both facts are
+            # already computed for this same render.
+            wording = (
+                "no peers yet — /network invite mints a token"
+                if self._entries()
+                else "no peers yet — a device you pair appears here"
             )
+            body.append(_hanging_row("  ", wording, width) + "\n", style="dim")
             return
         for peer in self.local.peers:
             self._row(

@@ -292,6 +292,27 @@ def hermetic_tui_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # (review round 1, F1). Tests that exercise the Apple_Terminal pin set
     # this themselves.
     monkeypatch.delenv("TERM_PROGRAM", raising=False)
+    # `WelcomeView` also pins its opening tip on whether this device is in a mesh
+    # at all (the mesh tip, `TIP_MESH`), and it reads that off DISK — an identity
+    # file and the network records under this HOME. Every TUI test runs with an
+    # isolated root, which is "never paired" by construction, so left alone the
+    # whole suite would open on the mesh tip and fail the tests that assert the
+    # still frame is `TIPS[0]` (the same shape the TERM_PROGRAM pin above has, one
+    # rung down: a fact about the installation rather than about the code). What is
+    # pinned is the READER — a device that has already paired — rather than the
+    # gate, so the code under test stays real and the tests that exercise the gate
+    # override this with their own state.
+    from local_operator.tui.widgets.network_panel import NetworkLocal
+
+    monkeypatch.setattr(
+        "local_operator.tui.widgets.network_panel.capture_local",
+        lambda root=None: NetworkLocal(
+            device_id="d_00000000000000000000000000000000",
+            device_name="this-device",
+            identity_present=True,
+            relay_state="",
+        ),
+    )
     # The splash starts a one-shot PyPI probe on mount. Unit tests must not
     # pay a 5 s timeout (or a real GET) for news they are not asserting.
     # Patch the worker, not ``check_latest``: ``/update`` needs the real

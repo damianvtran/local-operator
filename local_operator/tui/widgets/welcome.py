@@ -412,6 +412,15 @@ KEYED_TIPS: tuple[tuple[str, str | None], ...] = tuple(
 #: comment on :data:`TIP_SETUP` for why a Terminal.app launch opens on this.
 TIP_PASTE = "ctrl+v attaches an image from the system clipboard"
 
+#: The mesh's own sentence — the FIRST step of the pairing path.
+#:
+#: Defined above the pool for the reason :data:`TIP_PASTE` is: the pin and the
+#: ring entry are then the same string, so the row a never-paired device opens on
+#: cannot drift from the row the rotation reaches later, and pinning it cannot
+#: change the tip row's width budget (:data:`TIP_MIN_WIDTH` measures the pool, and
+#: this entry is the pool's).
+TIP_MESH = "/network new <name> makes a mesh other devices can join"
+
 TIPS: tuple[str, ...] = (
     "/resume picks up a recent session where you left off",
     "/team <name> <message> sends work to the manager",
@@ -516,7 +525,20 @@ TIPS: tuple[str, ...] = (
     # WIDTH: 55 cells of content, 57 painted — under the 57-cell content budget
     # the two 59-painted entries set, so the threshold does not move (measured,
     # not estimated).
-    "/network new <name> makes a mesh other devices can join",
+    #
+    # AND IT IS THE PINNED OPENING TIP ON A DEVICE THAT HAS NEVER PAIRED (UX
+    # round 1, U1). As the pool's entry alone it was not discoverable: the ring
+    # opens on `TIPS[0]`, this sentence sits at index 13 of 17, and the first tick
+    # jumps to a DRAWN resume point — measured on the real splash, the mesh's only
+    # passive advertisement arrived at 72.1 s of a focused idle frame, worst case
+    # 204 s, and a user who submits their first prompt sees exactly one tip and
+    # never reaches it at all. The remedy is the mechanism that already exists
+    # twice: :data:`TIP_SETUP` for first-run and :data:`TIP_PASTE` for the
+    # Terminal.app population (`ctrl+v` there, which is the same "reaches ~100% of
+    # a stranded population on their first frame, 0% of everyone else" rule).
+    # A device in NO mesh is the third stranded population, and the only one whose
+    # feature nothing else in the app states.
+    TIP_MESH,
     # The KEYED entries. Held as templates in the pool and substituted at
     # render (`_resolve_tip`), which is what keeps them true after a remap —
     # a literal chord here would become a lie the moment the user changed it,
@@ -1015,8 +1037,33 @@ def _resolve_tip(body: str) -> str:
     return body.format(key=keymap_mod.format_key_display(key))
 
 
+def _mesh_unpaired() -> bool:
+    """Whether this device is in NO mesh at all — the membership gate on the tip.
+
+    Read through ``capture_local()``, the panel's own disk-only reader, and on
+    :attr:`NetworkLocal.unpaired`, the one place that state is defined, so the
+    splash and the ``/network`` screen cannot come to different answers about what
+    "unpaired" means. Both halves are deliberate: ``network_panel`` documents that
+    call as safe to make synchronously on the loop (an identity file, a relay
+    record, the member lists), which is what lets this row's opening frame be
+    decided here rather than pushed in through the app.
+
+    A FAILED READ IS NOT "UNPAIRED". Taking down the very first render is one
+    reason — the same one the reads in :func:`session_welcome_info` are defended
+    for — and the other is that the two errors are not equal: staying quiet costs
+    a rotation slot, while telling a PAIRED user the mesh does not exist is
+    exactly what the membership gate is for.
+    """
+    try:
+        from local_operator.tui.widgets.network_panel import capture_local
+
+        return capture_local().unpaired
+    except Exception:  # noqa: BLE001 — an unreadable store is not "never paired"
+        return False
+
+
 def _tip_lines(
-    width: int, index: int, *, setup: bool = False, pin_paste: bool = False
+    width: int, index: int, *, setup: bool = False, pin_paste: bool = False, pin_mesh: bool = False
 ) -> list[Text]:
     """The tip at ``index``, as ONE row — or no row at all when ``width`` is tight.
 
@@ -1033,10 +1080,23 @@ def _tip_lines(
     lands on) for :data:`TIP_SETUP`, so a first-run user is not pitched
     ``/resume`` with nothing to resume (D4). ``pin_paste`` does the same for
     :data:`TIP_PASTE` on a Terminal.app launch (#430): that population has no
-    other ambient discovery path for ``ctrl+v``. Setup wins when both apply —
-    a first-run user needs ``/login`` more than they need paste. Later rotation
-    frames keep the normal ring — by the time the row has turned over there is
-    a session, and the paste entry is still in the pool.
+    other ambient discovery path for ``ctrl+v``. ``pin_mesh`` does the same for
+    :data:`TIP_MESH` on a device that is in NO mesh (UX round 1, U1) — the third
+    stranded population, and the only one whose feature has no second route to
+    discovery at all.
+
+    THE PRECEDENCE IS SETUP, THEN MESH, THEN PASTE, and the order is a claim about
+    which reader has nowhere else to go rather than about which sentence is more
+    interesting. Setup wins outright: a first-run user cannot create a network
+    before ``/login``. Mesh beats paste because the two pins fire on disjoint
+    populations and only one of them is stranded on the frame: the paste pin's
+    reader is a WORKING user — someone who pasted a screenshot into a session
+    (#430) — and a device that has never paired has no session to paste into,
+    while a paired Terminal.app user keeps the paste pin exactly as it was. The
+    paste sentence is also the one of the three that is already IN the ring at a
+    front position, so the rotation reaches it soon either way. Setup, mesh and
+    paste are all one row at every width, so no pin can move the layout. Later
+    rotation frames keep the normal ring.
     """
     if width < TIP_MIN_WIDTH:
         return []
@@ -1051,6 +1111,8 @@ def _tip_lines(
     opening = index % len(TIPS) == 0
     if opening and setup:
         body = TIP_SETUP
+    elif opening and pin_mesh:
+        body = TIP_MESH
     elif opening and pin_paste:
         body = TIP_PASTE
     else:
@@ -1069,6 +1131,7 @@ def build_welcome_lines(
     mark_color: str | None = None,
     tip_index: int = 0,
     pin_paste: bool = False,
+    pin_mesh: bool = False,
 ) -> list[Text]:
     """Render the welcome block as exactly the lines it occupies.
 
@@ -1104,6 +1167,9 @@ def build_welcome_lines(
     ``pin_paste`` swaps the opening tip for :data:`TIP_PASTE` on a Terminal.app
     launch (#430). Same shape contract as ``tip_index``: the paste sentence is
     already in the pool, so pinning it cannot change the row count.
+
+    ``pin_mesh`` swaps it for :data:`TIP_MESH` on a device that is in no mesh
+    (UX round 1, U1), and rests on the same contract for the same reason.
     """
     if width <= 0 or height <= 0:
         return []
@@ -1134,7 +1200,7 @@ def build_welcome_lines(
     status_without_version = [row for row in status_full if row[0] != _PRIORITY_VERSION]
     status = list(status_without_version)
     hints = _hint_lines(width, setup=info.setup)
-    tip = _tip_lines(width, tip_index, setup=info.setup, pin_paste=pin_paste)
+    tip = _tip_lines(width, tip_index, setup=info.setup, pin_paste=pin_paste, pin_mesh=pin_mesh)
     show_hints = False
     show_tip = False
     show_wordmark = False
@@ -1306,6 +1372,14 @@ class WelcomeView(Static):
         # TERM_PROGRAM (F1) so a developer running tests inside Terminal.app
         # still gets TIPS[0]; the Apple_Terminal test sets it itself.
         self._pin_paste_tip = terminals.is_apple_terminal()
+        # Pin :data:`TIP_MESH` as the opening tip on a device that is in no mesh
+        # at all (UX round 1, U1). SAME SHAPE AS THE PASTE PIN with the one
+        # difference membership forces: TERM_PROGRAM cannot change under a
+        # running process, this can — `/clear` brings the splash back and the
+        # device may have paired by then — so it is re-read wherever the opening
+        # frame is re-PINNED rather than once here. That first read is what makes
+        # the field exist before any paint; see `_sync_tip_timer` for the rest.
+        self._pin_mesh_tip = _mesh_unpaired()
 
     def on_mount(self) -> None:
         self._poll()
@@ -1373,6 +1447,7 @@ class WelcomeView(Static):
             max(0, region_height - taken),
             tip_index=self._tip_index,
             pin_paste=self._pin_paste_tip,
+            pin_mesh=self._pin_mesh_tip,
         )
         return len(lines), taken
 
@@ -1418,6 +1493,7 @@ class WelcomeView(Static):
             mark_color=self._mark_color,
             tip_index=self._tip_index,
             pin_paste=self._pin_paste_tip,
+            pin_mesh=self._pin_mesh_tip,
         )
         # A Group of one Text per row: the lines are already padded and
         # truncated to the widget, so nothing here may re-wrap them.
@@ -1613,6 +1689,14 @@ class WelcomeView(Static):
             # same sentence, which reads as a broken rotation.
             self._tip_index = 0
             self._tip_resume = random.randrange(1, len(TIPS))
+            # RE-READ the mesh pin here rather than only at construction, because
+            # this is the branch that pins the opening frame and it runs again
+            # every time the splash comes back. A `/clear` after pairing would
+            # otherwise re-pin the mesh tip on a device that is IN a mesh, which
+            # is the membership gate this pin has to keep — and the repaint is
+            # scheduled from this same branch, so the new answer is what the next
+            # frame is built from.
+            self._pin_mesh_tip = _mesh_unpaired()
             self._tip_timer = self.set_interval(TIP_ROTATE_INTERVAL_S, self._tip_tick)
         elif not wanted and self._tip_timer is not None:
             self._stop_tip_timer()
