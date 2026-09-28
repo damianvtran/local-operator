@@ -13,10 +13,11 @@ the implementation:
   are the move's own, ``engagement.engaged`` is ``False`` with the engage's own
   sentence, and the conversation is on the destination's disk with its journal
   settled — nothing half-applied, nothing rolled back.
-* **It does not fight the lease.** Two engagements that genuinely contend (a real
-  rendezvous on ``threading.Barrier``, two threads: the arrival engage and the
-  destination's own) end with one winner, and the MOVE whose engage lost is still a
-  successful move.
+* **It does not fight the lease.** Two engagements that genuinely contend — the
+  arrival engage and the destination's own, both driven through the REAL
+  ``launch.engage_runtime`` and the real transcript lease — end with ONE runtime, and
+  the contender that came second is JOINED onto it rather than refused. The MOVE is a
+  successful move whichever of the two won.
 * **The busy refusal is untouched.** A source with a turn in flight refuses ``busy``
   with the ``--wait`` remedy whether or not the flag is set, and nothing moves — the
   operator kept that refusal deliberately.
@@ -28,6 +29,8 @@ identities, real loopback TCP, real control sockets, real protocol frames.
 
 from __future__ import annotations
 
+import logging
+import os
 import threading
 import time
 from dataclasses import replace
@@ -36,9 +39,12 @@ from typing import Any
 
 import pytest
 
+import local_operator.session.runtime.launch as launch_module
 from local_operator.mobile import attach_client
 from local_operator.network import mobility
 from local_operator.session.runtime.launch import RuntimeStartupError
+from local_operator.session.runtime.types import SessionRecord
+from local_operator.session_lease import SessionLeaseHeldError, acquire_session_lease
 from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures and helpers
     SESSION,
     Devices,
@@ -56,11 +62,20 @@ from tests.unit.network.test_relay_e2e import (  # noqa: F401 — the fixture `p
 )
 from tests.unit.session.runtime.test_server import FakeHandle
 
-#: The sentence a runtime's own arbitration gives an engage that arrived second. A
-#: LITERAL, not the module under test's own renderer: this stands in for the runtime
-#: layer's refusal, and a stub that called into the code under test would make a
-#: red-on-old run fail for the wrong reason.
-LOST_THE_LEASE = "another runtime already holds this conversation, so nothing was started"
+#: A REFUSAL THE ENGAGE LAYER REALLY PRODUCES, as a literal: the curated sentence a
+#: ``RuntimeStartupError`` carries when no candidate for the conversation could be
+#: started, which ``_engage_locally`` turns into ``engaged: False``.
+#:
+#: IT IS NOT WHAT LOSING A LEASE RACE LOOKS LIKE, and the name it used to carry
+#: (``LOST_THE_LEASE``) said it was — which made the file's contention cell assert a
+#: sentence the product never emits for that event (review round 1, R1-1). Contention
+#: JOINS; the cell that covers it drives the real arbitration, and this literal is used
+#: only where the subject is the refusal's CONSEQUENCE (a failed engage is not a failed
+#: move), never its cause.
+#:
+#: A literal rather than the module's own renderer, because a stub that called into the
+#: code under test would make a red-on-old run fail for the wrong reason.
+ENGAGE_REFUSED = "the runtime for this conversation could not be started, so nothing was started"
 
 
 class _Handle(FakeHandle):
@@ -110,10 +125,13 @@ class _Arrivals:
     that publishes a real registry record, so everything downstream of the engage is
     the production path.
 
-    ``fail_with`` makes every call lose the way a refused engage loses, and
-    ``contenders`` makes two callers MEET inside the call — a genuine rendezvous rather
-    than one arriving after the other has finished — after which only the first is
-    allowed to win, which is the shape a lease produces.
+    ``fail_with`` makes every call lose the way a refused engage loses.
+
+    IT CANNOT STAND IN FOR THE ARBITRATION, and must not be asked to. A stub owns the
+    winner/loser answer, so a cell built on one passes whatever the real lease does —
+    the defect review round 1 found in this file's contention cell (R1-1), whose fix is
+    ``_LeasedFleet`` below. What this is for is the SPAWNED PROCESS: everything
+    downstream of an engage that has already been decided.
     """
 
     def __init__(
@@ -122,17 +140,10 @@ class _Arrivals:
         monkeypatch: pytest.MonkeyPatch,
         *,
         fail_with: str = "",
-        contenders: threading.Barrier | None = None,
-        arrived: threading.Event | None = None,
     ) -> None:
         self.root = root
         self.monkeypatch = monkeypatch
         self.fail_with = fail_with
-        self.contenders = contenders
-        #: Set by the FIRST call, for a contending thread that must not start until the
-        #: conversation is on this device — an engage asked for before the promote answers
-        #: "does not hold a session", which is a different cell's subject.
-        self.arrived = arrived
         self.calls: list[str] = []
         self.served: list[tuple[str, Any]] = []
         self._lock = threading.Lock()
@@ -163,21 +174,14 @@ class _Arrivals:
         self.monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(self.root))
         with self._lock:
             self.calls.append(session_id)
-            arrival = len(self.calls)
-        if self.arrived is not None:
-            self.arrived.set()
-        if self.contenders is not None:
-            # BOTH CONTENDERS WAIT HERE. Without this the second call would start after
-            # the first had answered, which is a queue, not a race.
-            self.contenders.wait(timeout=45)
-        if self.fail_with or (self.contenders is not None and arrival > 1):
+        if self.fail_with:
             raise RuntimeStartupError(
-                self.fail_with or LOST_THE_LEASE,
+                self.fail_with,
                 # ``actionable`` is the channel a curated runtime sentence reaches a user
                 # through (``_engage_failure_detail`` prefers it over the raw message),
                 # and this stands in for exactly such a refusal — so the cell can assert
-                # that the loser's OWN words reach the receipt.
-                actionable=self.fail_with or LOST_THE_LEASE,
+                # that the refusal's OWN words reach the receipt.
+                actionable=self.fail_with,
             )
         self._start(session_id)
         return None
@@ -364,7 +368,7 @@ def test_a_refused_engage_leaves_a_successful_move(
 ) -> None:
     """THE HONESTY REQUIREMENT, with the move's own guarantees re-asserted after it."""
     server_a, server_b, _host, _port = _pair_and_own(request, monkeypatch)
-    _arrivals(request, root=server_b.root, monkeypatch=monkeypatch, fail_with=LOST_THE_LEASE)
+    _arrivals(request, root=server_b.root, monkeypatch=monkeypatch, fail_with=ENGAGE_REFUSED)
 
     result = _move(server_b, SESSION, monkeypatch=monkeypatch, engage_on_arrival=True)
 
@@ -378,7 +382,7 @@ def test_a_refused_engage_leaves_a_successful_move(
     ]
     engagement = result["engagement"]
     assert engagement["engaged"] is False, engagement
-    assert LOST_THE_LEASE in engagement["detail"], engagement
+    assert ENGAGE_REFUSED in engagement["detail"], engagement
     # NOTHING HALF-APPLIED: the conversation is here, whole, and the journal that
     # named it in transit is settled.
     assert (server_b.root / "sessions" / SESSION).is_dir()
@@ -426,68 +430,211 @@ def test_an_unexpected_engage_failure_cannot_break_the_move(
 # ---------------------------------------------------------------------------
 
 
-def test_two_engagements_contend_and_the_loser_does_not_touch_the_move(
+class _LeasedFleet:
+    """``launch._spawn_runtime`` as the arrival path reaches it — THE LEASE IS REAL.
+
+    THE SPAWNED PROCESS IS THE ONLY THING STOOD IN FOR, and that is the whole reason
+    this exists beside ``_Arrivals`` (review round 1, R1-1). Who runs is decided HERE by
+    the REAL transcript lease, contended for exactly as ``process.py`` contends for it:
+    ``acquire_session_lease`` admits one writer and raises for every other candidate,
+    which is what ``process.py`` logs and turns into ``return 0``. What stays production
+    is everything that READS that decision — ``engage_runtime``'s loop, its
+    ``_lease_holder`` probe, the record scan, and the single entry point both routes
+    reach an engage through (``RelayServer.engage_session``).
+
+    THAT IS THE DIFFERENCE THAT MATTERS. A stub owns the winner/loser answer, so a cell
+    built on one stays green whatever the real lease does — measured on the previous
+    round's cell, which passed 4/4 with the real ``engage_runtime`` replaced by a raise.
+    A cell built on this goes red the moment the lease stops deciding.
+
+    ``hold`` PARKS THE WINNER BETWEEN ITS LEASE AND ITS RECORD. That window is real —
+    construction takes time — and it is exactly the window a second contender must wait
+    THROUGH rather than spawn into, which is the case the contention claim is about.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: Set by the test once the winner holds the lease — an event rather than a
+        #: sleep, because the fact it waits for is a file's content, not a duration.
+        self.hold = threading.Event()
+        #: Set the instant a candidate HAS the lease, so the cell can start the second
+        #: contender at the one moment that makes it a contender (the lease is taken)
+        #: rather than at a moment in time.
+        self.taken = threading.Event()
+        self.spawns = 0
+        self.winners = 0
+        self.losers = 0
+        self.records = 0
+        self._lease: Any = None
+
+    def spawn(
+        self,
+        session_id: str,
+        cwd: str,
+        *,
+        defer_materialise: bool,
+        warm: bool = False,
+        initial_model: Any = None,
+        model_selection_override: bool = False,
+    ) -> None:
+        """``launch._spawn_runtime``'s own signature, so the real caller is unchanged."""
+        self.spawns += 1
+        directory = self.config_dir / "sessions" / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        try:
+            self._lease = acquire_session_lease(directory)
+        except SessionLeaseHeldError:
+            # The designed outcome for every candidate but one.
+            self.losers += 1
+            return
+        self.winners += 1
+        self.taken.set()
+        self.hold.wait(timeout=90)
+        self.publish(session_id)
+
+    def publish(self, session_id: str) -> None:
+        """The record a runtime publishes once it is through construction."""
+        from local_operator.session.runtime import registry
+
+        registry.publish(
+            SessionRecord(
+                pid=os.getpid(),
+                kind="daemon",
+                session_id=session_id,
+                conversation_name="fake",
+                cwd=str(self.config_dir),
+                model_label="test/model",
+                control_port=1,
+                control_key="k" * 16,
+            ),
+            self.config_dir,
+        )
+        # The liveness marker every owner lookup reads (``resume.live_runtime_pid``),
+        # written by the runtime itself in production.
+        (self.config_dir / "sessions" / session_id / ".session.pid").write_text(
+            str(os.getpid()), encoding="utf-8"
+        )
+        self.records += 1
+
+    def close(self) -> None:
+        """Release everything this fake took, in either order of arrival."""
+        self.hold.set()
+        if self._lease is not None:
+            self._lease.release()
+            self._lease = None
+
+
+def test_two_engagements_contend_on_the_real_lease_and_both_join(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The loser of the lease race loses CLEANLY, and the move is not its casualty.
+    """Two real engagements, one real lease: ONE runtime, and both callers are JOINED.
 
-    The two contenders are the arrival engage and the destination's own first use —
-    the pair the design's single-entry-point rule exists for. They meet inside
-    ``engage_runtime`` (a real barrier, so both are in flight at once), the arrival wins
-    and publishes a live record, and the second gets the runtime layer's own refusal.
+    The two contenders are the arrival engage (inside the move) and the destination's
+    own first use — the pair the design's single-entry-point rule exists for. Both go
+    through ``RelayServer.engage_session`` and the REAL ``launch.engage_runtime``; only
+    the spawned process is a fake, so the lease decides who runs.
 
-    THE CONTENDER IS RELEASED BY THE ARRIVAL ITSELF (``arrived``), not by a sleep: a
-    first use that runs BEFORE the promote answers "does not hold a session", which is
-    a different refusal — what this cell is about is two engagements of a conversation
-    that IS here. So the loser is deterministically second, and the assertions can be
-    about WHICH answer each caller got rather than about the set of them.
+    WHAT THE SECOND CONTENDER GETS IS A JOIN, NOT A REFUSAL (review round 1, R1-1). The
+    loop probes ``_lease_holder`` before spawning precisely so a doomed candidate is
+    never created: it waits for the winner's record and then delivers to it, so both
+    callers are answered with the layer's own join state and exactly one runtime exists.
+    A refusal is the OTHER event this layer produces — "no candidate could be started" —
+    and asserting it here asserted a sentence the runtime layer never emits for losing a
+    race.
+
+    THE SECOND CONTENDER IS HELD OUT OF ITS OWN SPAWN BY THE WINNER'S LEASE, and the
+    cell waits for the loop to SAY SO (``is starting under pid …; waiting``, emitted on
+    exactly the branch that found the lease held) rather than for a sleep to elapse. A
+    release on a clock would be a race this test won by accident — and a cell that wins
+    by accident cannot fail when the arbitration breaks, which is what went wrong here.
     """
     _server_a, server_b, _host, _port = _pair_and_own(request, monkeypatch)
-    contenders = threading.Barrier(2)
-    arrived = threading.Event()
-    _arrivals(
-        request,
-        root=server_b.root,
-        monkeypatch=monkeypatch,
-        contenders=contenders,
-        arrived=arrived,
-    )
+    fleet = _LeasedFleet(server_b.root)
+    request.addfinalizer(fleet.close)
+    monkeypatch.setattr("local_operator.session.runtime.launch._spawn_runtime", fleet.spawn)
+
+    # THE LOOP'S OWN SENTENCE, TAKEN FROM THE LOOP'S OWN LOGGER. Seeing it is evidence
+    # the second contender reached the LEASE rather than the winner's record — the
+    # difference between contending and queueing — and it is the product's observable,
+    # so nothing in the arbitration is patched to produce it.
+    waiting = threading.Event()
+
+    class _Waiting(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:  # noqa: D102 — one hook
+            if record.getMessage().startswith(f"engage: {SESSION} is starting under pid"):
+                waiting.set()
+
+    launch_logger = logging.getLogger(launch_module.__name__)
+    handler = _Waiting()
+    launch_logger.addHandler(handler)
+    previous_level = launch_logger.level
+    launch_logger.setLevel(logging.DEBUG)
+
+    def _restore_logger() -> None:
+        launch_logger.removeHandler(handler)
+        launch_logger.setLevel(previous_level)
+
+    request.addfinalizer(_restore_logger)
 
     theirs: list[dict[str, Any]] = []
+    moves: list[dict[str, Any]] = []
     failures: list[BaseException] = []
 
     def _their_engage() -> None:
         # THE DESTINATION'S OWN FIRST USE, on another thread, over the same id: a
         # viewer's first message reaches this method by the same route.
-        if not arrived.wait(timeout=60):
-            failures.append(AssertionError("the arrival never engaged, so nothing contended"))
-            return
         try:
             theirs.append(server_b.engage_session(SESSION))
         except BaseException as exc:  # noqa: BLE001 — asserted below, not swallowed
             failures.append(exc)
 
-    thread = threading.Thread(target=_their_engage, daemon=True)
-    thread.start()
+    def _the_move() -> None:
+        try:
+            moves.append(_move(server_b, SESSION, monkeypatch=monkeypatch, engage_on_arrival=True))
+        except BaseException as exc:  # noqa: BLE001 — asserted below, not swallowed
+            failures.append(exc)
+
+    mover = threading.Thread(target=_the_move, daemon=True)
+    contender = threading.Thread(target=_their_engage, daemon=True)
+    mover.start()
+    # The arrival's own candidate must have TAKEN THE LEASE before a second contender can
+    # be told it lost — a file fact, waited on as one.
+    assert fleet.taken.wait(timeout=60), "the arrival engage never took the lease"
+    contender.start()
     try:
-        result = _move(server_b, SESSION, monkeypatch=monkeypatch, engage_on_arrival=True)
+        assert waiting.wait(timeout=45), (
+            "the second engage never reached the lease probe, so nothing contended: the "
+            "arrival's engage is the only actor this cell drove"
+        )
     finally:
-        thread.join(timeout=90)
+        # ALWAYS RELEASED, even on that assertion: the winner is parked inside the spawn
+        # and the two threads below would otherwise be joined against a standing still.
+        fleet.hold.set()
+    contender.join(timeout=120)
+    mover.join(timeout=120)
 
     assert failures == [], failures
+    assert len(moves) == 1, moves
+    result = moves[0]
     assert result["ok"] is True, result
     assert result["phase"] == "done", result
     assert len(theirs) == 1, theirs
     mine, ours = result["engagement"], theirs[0]
-    # THE MOVE'S ENGAGE WON and the other one lost — the ordering the arrival release
-    # above makes deterministic, and the loser lost with the engage path's own sentence
-    # rather than with an exception of its own.
+    # BOTH WERE JOINED. ``runtime joining`` is ``RelayServer.engage_session``'s own state
+    # for a contended engage — the single entry point both routes reach — so neither
+    # caller is handed a story the layer did not tell.
     assert mine["engaged"] is True, mine
     assert mine["session_id"] == SESSION, mine
-    assert ours["engaged"] is False, ours
+    assert mine["detail"] == "runtime joining", mine
+    assert ours["engaged"] is True, ours
     assert ours["session_id"] == SESSION, ours
-    assert LOST_THE_LEASE in ours["detail"], ours
-    # AND ONE RUNTIME, because one lease: the winner's.
+    assert ours["detail"] == "runtime joining", ours
+    # ONE RUNTIME, BECAUSE ONE LEASE — and the contender that lost never spawned a
+    # candidate to lose, which is what the probe before the spawn is for.
+    assert fleet.winners == 1, fleet.winners
+    assert fleet.records == 1, fleet.records
+    assert fleet.spawns == 1, "the second contender spawned instead of waiting on the lease"
+    assert fleet.losers == 0, fleet.losers
     from local_operator.session.runtime import registry
 
     live = [

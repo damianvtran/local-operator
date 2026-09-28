@@ -1424,9 +1424,14 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
       ``net_session_engage`` answers with — and so through ``launch.engage_runtime``,
       the single point where the LEASE decides who runs. ``_promote`` leaves the
       lease unclaimed on purpose (§6.3 step 17), which makes this a first-engager
-      racing any other first-engager: a runtime that already holds the lease is
-      JOINED, and a loser gets that layer's own sentence back rather than a victory
-      this function invented. There is deliberately no retry and no "did anything
+      racing any other first-engager, and LOSING THAT RACE IS A JOIN rather than a
+      refusal: the engage loop probes the lease BEFORE it spawns, waits for the
+      winner's record and delivers to it, so the contender that came second is joined
+      onto the runtime that won and this function reports that layer's own state —
+      never a victory, and never a defeat, of its own invention. (The refusal shape on
+      this route is the OTHER event: no runtime reachable within the deadline, or every
+      candidate the engage was allowed to start died. ``RelayServer.engage_session``
+      owns both spellings.) There is deliberately no retry and no "did anything
       beat me" check here: both would be a second opinion about a decision the
       lease already made, and the second defeat the first one's honesty.
 
@@ -1444,7 +1449,7 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
     outermost frame of the move, where there is no later reader to hand it to.
     """
     try:
-        return cast(MoveEngagement, server.engage_session(session_id))
+        engagement = cast(MoveEngagement, server.engage_session(session_id))
     except Exception:  # noqa: BLE001 — see the docstring: reported, never swallowed
         logger.exception("mobility: engaging %s on arrival failed", session_id)
         return {
@@ -1456,6 +1461,22 @@ def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagemen
             ),
             "session_id": session_id,
         }
+    if not engagement.get("engaged"):
+        # A REFUSAL IS AN ANSWER, NOT AN EXCEPTION, so the handler above never sees it —
+        # and on the OFFLOAD route nothing else does either: the inviter's receipt is the
+        # SOURCE's, because that device settles on its OWN durable progress and drops this
+        # block when it arrives (``_destination_invite._run``), so a destination that could
+        # not start the runtime left no trace anywhere without this line (review round 1,
+        # R1-2; QA round 1, Q-1 — one asymmetry seen from its two sides). INFO rather than
+        # DEBUG because this log IS the surface: the words the CLI gives an operator point
+        # at "that device's own log" by name, and a DEBUG line is not what that promise
+        # means at the default level.
+        logger.info(
+            "mobility: could not engage %s on arrival: %s",
+            session_id,
+            engagement.get("detail") or "no reason given",
+        )
+    return engagement
 
 
 def _finish_from_tombstone(
@@ -3338,9 +3359,10 @@ def _offload(
                 "wait_s": wait_s,
                 # ... AND SO DOES THE ENGAGE, for exactly the same reason: the runtime
                 # is started by the device that adopts the conversation, which is the
-                # one this frame is addressed to. Omitted when false rather than sent
-                # as ``False`` only because the frame's shape is built here either
-                # way; either spelling reads as off on the receiving side.
+                # one this frame is addressed to. SENT ON EVERY INVITE, never only when
+                # true: the key is present whatever its value, and a MISSING key reads as
+                # off — the older-peer half of the contract, which is what
+                # ``request_move`` sends the same field for on the way in.
                 "engage_on_arrival": engage_on_arrival,
                 "to_device": target_device,
             }
