@@ -3997,7 +3997,12 @@ _PARTIAL_MASK_RESIDUAL = {
     # case. They still all fall in the "a quote cannot occur here in real output" class.
     "pem-private-key": 119,
     "gcp-service-account-value": 42,
-    "credential-url-value": 10,
+    # 10 → 8 with the bare-identifier refusal (weak names only): two corpus cases
+    # place a URL-shaped value under a WEAK credential name whose value is a bare
+    # identifier, so the rule no longer runs on them at all and the synthetic
+    # partial mask they used to expose cannot occur. The remaining 8 are the
+    # by-design host-and-path case, unchanged.
+    "credential-url-value": 8,
 }
 
 
