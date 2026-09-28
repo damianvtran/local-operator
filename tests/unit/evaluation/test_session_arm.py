@@ -36,6 +36,11 @@ import pytest
 
 from local_operator import agent_shell, sdk
 from local_operator.compaction.png import encode_grayscale_png
+from local_operator.evaluation.action_server import (
+    WIRE_READ_LIMIT_BYTES,
+    decode_response,
+    encode_call,
+)
 from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.adapters.api import (
     ExecuteResult,
@@ -584,3 +589,67 @@ class TestActionToolGate:
 
         # No receipts is the dead-worker case: "attempted" is never evidence.
         assert _cleanup_forces_rescue(None, ()) is True  # type: ignore[arg-type]
+
+
+class TestWireReadLimits:
+    """Both ends of the socket must carry the wire's read limit, not the default.
+
+    Added after the 2026-09-28 paid probe: a 476 KiB observation frame made
+    ``forward_call``'s read raise "Separator is not found, and chunk exceed the
+    limit" (asyncio's 64 KiB default), so every EXECUTED batch was answered to
+    the model as unreachable while the desktop had already acted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_call_frame_larger_than_the_stream_default_is_served(
+        self, tmp_path: Path
+    ) -> None:
+        # The request direction carries the same limit: a paste action may
+        # legally carry ``max_type_chars`` characters in one frame, larger
+        # than the default read limit.
+        surface = ActionSurface(paste_text=True, max_type_chars=100_000)
+        executed: list[Any] = []
+        obs_in = _observation()
+        obs_out = _observation(sequence=1, text="screen B")
+
+        async def execute(batch: Any) -> ExecuteResult:
+            executed.append(batch)
+            return _result(input_observation=obs_in, output_observation=obs_out)
+
+        bridge = ActionBridge(
+            endpoint=tmp_path / "big-call.sock",
+            surface=surface,
+            render=lambda observation: [TextContent(text="seen")],
+            execute=execute,
+            max_steps=3,
+        )
+        bridge.arm(obs_in)
+        await bridge.start()
+        writer: asyncio.StreamWriter | None = None
+        try:
+            reader, writer = await asyncio.open_unix_connection(
+                str(bridge.endpoint), limit=WIRE_READ_LIMIT_BYTES
+            )
+            writer.write(
+                encode_call(
+                    {
+                        "actions": [
+                            {
+                                "kind": "paste_text",
+                                "keys": ["META", "v"],
+                                "clipboard_policy": "overwrite",
+                                "text": "x" * 90_000,
+                            }
+                        ]
+                    }
+                )
+            )
+            await writer.drain()
+            reply = decode_response(await reader.readline())
+        finally:
+            if writer is not None:
+                writer.close()
+            await bridge.stop()
+        assert reply.get("is_error") is False
+        assert bridge.steps == 1
+        assert len(executed) == 1

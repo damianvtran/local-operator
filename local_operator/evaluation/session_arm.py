@@ -55,6 +55,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 from local_operator import sdk
 from local_operator.evaluation.action_server import (
     SERVER_NAME,
+    WIRE_READ_LIMIT_BYTES,
     decode_call,
     encode_response,
     surface_to_json,
@@ -471,7 +472,9 @@ class ActionBridge:
                 f"action bridge endpoint {self.endpoint} is too long for a UNIX socket; "
                 "put the episode scratch on a shorter path"
             )
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self.endpoint))
+        self._server = await asyncio.start_unix_server(
+            self._handle, path=str(self.endpoint), limit=WIRE_READ_LIMIT_BYTES
+        )
 
     async def stop(self) -> None:
         self._closed = True

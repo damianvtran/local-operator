@@ -47,6 +47,7 @@ from dataclasses import asdict, fields
 from typing import Any, Mapping, Sequence
 
 from local_operator.evaluation.action_surface import ActionSurface
+from local_operator.evaluation.protocol import MAX_ENVELOPE_BYTES
 from local_operator.evaluation.runner.action_tool import (
     ACTION_TOOL_DESCRIPTION,
     ACTION_TOOL_NAME,
@@ -64,6 +65,20 @@ SERVER_NAME = "episode-actions"
 #: first frame rather than behave plausibly; the checks live in
 #: :func:`decode_call` / :func:`decode_response` and are shared by the bridge.
 WIRE_PROTOCOL = 1
+
+#: Read limit for one wire frame, on BOTH ends of the socket. A reply carries
+#: the observation's images base64-encoded, so one reply routinely exceeds
+#: asyncio's 64 KiB default line limit: measured on the paid session arm
+#: 2026-09-28 (task_017), a 476 KiB frame produced a reply whose read raised
+#: "Separator is not found, and chunk exceed the limit", and every EXECUTED
+#: batch was answered to the model as unreachable -- while the desktop had
+#: already acted. A policy ceiling far above the largest frame measured
+#: (~26x that ~640 KiB reply), not a derived invariant: the cap it is sized
+#: off (the protocol envelope) bounds frame REFERENCES, while this wire
+#: inlines the images themselves. Still bounded, so a rogue reply cannot
+#: read unbounded; the client opens its connection with it and the bridge
+#: binds its server with it.
+WIRE_READ_LIMIT_BYTES = MAX_ENVELOPE_BYTES + 4096
 
 #: How long one forwarded call may wait for its reply. Deliberately generous:
 #: an executed batch is funded by the adapter's own per-call deadlines (a batch
@@ -232,7 +247,7 @@ async def forward_call(
     """One call, one connection, one reply: the whole client half of the wire."""
 
     try:
-        reader, writer = await asyncio.open_unix_connection(endpoint)
+        reader, writer = await asyncio.open_unix_connection(endpoint, limit=WIRE_READ_LIMIT_BYTES)
     except OSError as error:
         raise ActionBridgeUnreachable(
             f"the episode's action bridge is not reachable at {endpoint!r} ({error})"
@@ -266,15 +281,23 @@ async def forward_call(
 
 
 def format_forward_error(error: BaseException) -> tuple[list[dict[str, Any]], bool]:
-    """The model-facing tool result for a call that never reached the driver.
+    """The model-facing tool result for a failed call to the action bridge.
 
     A transport failure is reported, never raised into the session: a raised
     call would read to the loop as a broken tool, while a reported one lets the
     episode driver's own state (which the model cannot see) decide whether the
     run continues.
+
+    The sentence deliberately does NOT claim the call never reached the driver:
+    it is used for every reply-side fault too -- a read-limit overrun, a bad
+    reply, a timeout after the driver may already have executed -- and the paid
+    session-arm episode that motivated ``WIRE_READ_LIMIT_BYTES`` was taught
+    "the channel is dead" by exactly that false claim while its batches had
+    already acted. Non-reachability is stated by the cause itself ("not
+    reachable at ..."), never asserted here.
     """
 
-    text = f"Action call failed before it reached the environment: {error}"
+    text = f"Action call failed while talking to the episode's action bridge: {error}"
     return [{"type": _TEXT, "text": text}], True
 
 
