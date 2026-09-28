@@ -681,7 +681,20 @@ async def test_a_durable_session_read_answers_200_for_a_silent_owner(
         _publish_live(tmp_path, owner, session_id=harness.session_id)
         url = template.format(session=harness.session_id)
 
-        status, elapsed, body = await _get(harness.client, url)
+        # WAIT FOR THE CLASSIFICATION, THEN READ. The first frame does not wait
+        # for the read attempt: the registry read that decides ``owner-silent``
+        # runs in a worker thread that can outlast the read's 50 ms grace, and
+        # the token until then is the unclassified default ``no-runtime`` --
+        # which this route answers with the observed/empty payload (CI read
+        # exactly that once, run 36388525606: 'observed' where 'busy' is
+        # expected). ``_classified`` waits on the event that produces the
+        # token; the GET's own acquire reuses this bridge, so its answer is the
+        # classified one — the state every later read, and a mounted panel's
+        # variables read, always sees.
+        async with harness.pool.session(harness.session_id, read=True) as bridge:
+            await _classified(bridge)
+
+            status, elapsed, body = await _get(harness.client, url)
 
         assert status == 200, body
         assert elapsed < READ_ATTACH_BUDGET_S + 1.0, f"{url} waited {elapsed:.2f}s"
