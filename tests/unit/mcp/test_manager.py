@@ -683,6 +683,41 @@ class TestToolCallHygieneAndRetry:
         await manager.disconnect_all()
 
 
+class TestOwnTurnOnlyGate:
+    @pytest.mark.asyncio
+    async def test_delegated_calls_are_refused_before_any_connection(
+        self, project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``ownTurnOnly`` gates by CALLER: a call carrying a child job id is
+        refused before connecting, while the session's own turn is not."""
+        manager = McpManager(str(project))
+        session = FakeSession()
+
+        async def fake_connect(name: str, cfg: Any, **_: Any) -> ServerConnection:
+            return _make_conn(name, cfg, session if name == "fast" else None)
+
+        monkeypatch.setattr(manager, "_connect_server", fake_connect)
+        await manager.discover_and_connect()
+        cfg = manager.get_server_config("fast")
+        assert isinstance(cfg, MCPStdioServerConfig)
+        manager._configs["fast"] = cfg.model_copy(update={"own_turn_only": True})
+        session.calls.clear()
+
+        tool = next(t for t in manager.get_tools() if t.name == "mcp__fast_search")
+        refused = await tool.execute(
+            "c1", {"q": "x"}, None, None, ToolContext(job_id="job-child-1")
+        )
+        assert refused.is_error is True
+        assert "ownTurnOnly" in refused.text
+        assert "job-child-1" in refused.text
+        assert session.calls == []  # nothing was sent to the server
+
+        own_turn = await tool.execute("c2", {"q": "x"}, None, None, ToolContext())
+        assert own_turn.is_error is False
+        assert session.calls == [("search", {"q": "x"})]
+        await manager.disconnect_all()
+
+
 class TestStdioHardening:
     def test_start_new_session_platform_rule(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import local_operator.mcp.manager as manager_mod

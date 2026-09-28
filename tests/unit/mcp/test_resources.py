@@ -278,6 +278,52 @@ def test_server_read_lists_tools_without_activation_then_detail_enables_one() ->
     assert activated == [("linear", "get_user")]
 
 
+def test_an_own_turn_only_server_refuses_its_tool_url_without_activating() -> None:
+    """A per-server denial: the child may browse, but the tool URL refuses it.
+
+    The rule's execution half lives in ``McpManager._execute_tool_call`` and its
+    inheritance half in ``harness.subagent``; this pins the read half, so a
+    child reading the URL gets the rule's words rather than an activation
+    promise its inventory would never honour.
+    """
+    manager = FakeManager()
+    activated: list[tuple[str, str]] = []
+
+    def deny(server_name: str) -> str | None:
+        if server_name == "linear":
+            return "This MCP server is reserved for the owning session's own turn."
+        return None
+
+    resolve = make_mcp_resolver(
+        manager,
+        lambda server, tool: activated.append((server, tool)),
+        deny_server_reason=deny,
+    )
+
+    detail = resolve("mcp://linear/get_user")
+    assert detail is not None
+    assert "# MCP tool not enabled: linear/get_user" in detail
+    assert "reserved for the owning session's own turn." in detail
+    assert activated == []
+    # Discovery stays readable; only enabling is refused.
+    listing = resolve("mcp://linear")
+    assert listing is not None
+    assert "mcp://linear/get_user" in listing
+    assert activated == []
+
+    # A server the denial lets through behaves exactly as before: the callable
+    # returning ``None`` is transparent.
+    open_ = make_mcp_resolver(
+        manager,
+        lambda server, tool: activated.append((server, tool)),
+        deny_server_reason=lambda name: None,
+    )
+    opened = open_("mcp://linear/get_user")
+    assert opened is not None
+    assert "# Enabled MCP tool: mcp__linear_get_user" in opened
+    assert activated == [("linear", "get_user")]
+
+
 def test_unknown_resource_errors_are_actionable_and_namespaces_do_not_leak() -> None:
     manager = FakeManager()
     resolver = make_mcp_resolver(manager, lambda server, tool: None)
