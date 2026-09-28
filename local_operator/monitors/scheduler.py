@@ -384,7 +384,14 @@ class MonitorScheduler:
                 entry.generation += 1
                 self._write_counters(entry)
                 await self.update(list(self.monitors))
-                return {"reactivated": True, "spec": entry.spec}
+                return {
+                    "reactivated": True,
+                    "spec": entry.spec,
+                    # §4.5: the instant rides the outcome as structured
+                    # details — the receipt's next_due_at is never null
+                    # (round-1 review F4).
+                    "next_due_at": entry.counters.get("next_due_at"),
+                }
             return {"duplicate": True, "spec": entry.spec}
 
         if len(entries) >= self._settings.max_monitors:
@@ -411,7 +418,13 @@ class MonitorScheduler:
         self._entries[spec.id] = entry
         self._next_seq += 1
         await self.update(list(self.monitors))
-        return {"created": True, "spec": spec}
+        return {
+            "created": True,
+            "spec": spec,
+            # The first check's instant, for the receipt's structured
+            # details (§4.5; round-1 review F4).
+            "next_due_at": entry.counters.get("next_due_at"),
+        }
 
     async def cancel(self, monitor_id: str) -> dict[str, Any]:
         """Remove one monitor; the shared update persists the shrunken list."""
@@ -635,6 +648,11 @@ class MonitorScheduler:
         if failures >= self._settings.max_consecutive_failures:
             counters["disabled"] = True
             counters["disabled_reason"] = counters["last_error"]
+            # No next check is due for a disabled monitor (§10.3): the
+            # counters file states that instead of keeping a stale instant
+            # that every tick gate would have to second-guess (§11.3;
+            # QA round-1 observation 2).
+            counters["next_due_at"] = None
             logger.warning(
                 "monitor %s disabled after %d consecutive failures: %s",
                 entry.spec.id,

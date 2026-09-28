@@ -2039,6 +2039,56 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # bound — never a session-store entry.
         "removes the episode's own bridge socket, by the exact path it bound",
     ),
+    # -- monitors: the derived index and the per-monitor state (the wakes twins) --
+    # Every path in these two modules is the config dir plus FIXED literal
+    # segments: ``monitors/<session_id>.json`` is the index beside ``sessions/``
+    # (the ``wakes/store.py`` layout), and ``monitors/state/<session_id>/`` is
+    # its per-session state directory under the CONFIG root — never a session
+    # directory itself. The session id reaches either path only as a single
+    # filename segment (a session's own id, or an id minted ``m<N>`` by this
+    # session's scheduler), so no call here can name a directory under
+    # ``sessions/``. The rmdir's receiver is that FIXED-suffix state directory
+    # after its own files have been unlinked (the ``remove_entry`` twin).
+    (
+        "local_operator/monitors/store.py::write_entry",
+        "os.replace",
+        "temp FILE -> <config>/monitors/<session_id>.json",
+    ),
+    (
+        "local_operator/monitors/store.py::write_entry",
+        "os.unlink",
+        "temp FILE -> <config>/monitors/<session_id>.json",
+    ),
+    (
+        "local_operator/monitors/store.py::remove_entry",
+        "<path>.unlink",
+        "<config>/monitors/<session_id>.json FILE",
+    ),
+    (
+        "local_operator/monitors/state.py::_atomic_write_json",
+        "os.replace",
+        "temp FILE -> <config>/monitors/state/<session_id>/<id>.json|.snap",
+    ),
+    (
+        "local_operator/monitors/state.py::_atomic_write_json",
+        "os.unlink",
+        "temp FILE -> <config>/monitors/state/<session_id>/<id>.json|.snap",
+    ),
+    (
+        "local_operator/monitors/state.py::remove_monitor_state",
+        "<path>.unlink",
+        "<config>/monitors/state/<session_id>/<id>.json|.snap FILEs",
+    ),
+    (
+        "local_operator/monitors/state.py::remove_session_state",
+        "<path>.unlink",
+        "<config>/monitors/state/<session_id>/ FILEs",
+    ),
+    (
+        "local_operator/monitors/state.py::remove_session_state",
+        "<path>.rmdir",
+        "the <config>/monitors/state/<session_id> dir AFTER its own files",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}

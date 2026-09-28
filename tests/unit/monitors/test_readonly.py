@@ -99,11 +99,26 @@ def test_mcp_tool_with_read_only_hint_true_is_monitorable() -> None:
         "gh pr view 1710 --json state,reviews",
         "git status --porcelain",
         "git branch -vv",
+        "git branch --merged main",
+        "git branch --no-merged main",
+        "git branch --format '%(refname)'",
         "git log --oneline -n 5",
+        "git log --pretty",
+        "git log --pretty=%H -n 1",
+        "git log --pretty --oneline -n1",
         "git diff --stat --cached",
+        "git diff -U",
+        "git diff -U3",
+        "git diff --color",
+        "git diff --color=never --stat",
         "git show --stat HEAD",
+        "git show --pretty=%H",
+        "git status -u --short",
+        "git status --untracked-files=no --short",
         "git blame -L 1,5 f.py",
         "git rev-parse --verify HEAD",
+        "git rev-parse --short HEAD",
+        "git rev-parse --short=7 HEAD",
         "git ls-files --stage",
         "git grep -n pattern",
         "ls -la",
@@ -256,6 +271,35 @@ def test_mcp_hint_must_be_literally_true() -> None:
         ("git fetch --all", "git allow-list"),
         ("git log --output=/tmp/x", "not an allowed flag"),
         ("git log --output /tmp/x", "not an allowed flag"),
+        # Round-1 review F1: an OPTIONAL-value flag (git OPTARG) does not
+        # consume the next token, so the refused flag after it is judged as
+        # its own word — before the fix these six smuggled a real write
+        # (--output) or a real program run (--ext-diff) past the evaluator.
+        ("git log --pretty --output=/tmp/x", '"--output" is not an allowed flag'),
+        ("git log --pretty --output /tmp/x", '"--output" is not an allowed flag'),
+        ("git diff --color --output=FILE", '"--output" is not an allowed flag'),
+        ("git diff -U --output=FILE", '"--output" is not an allowed flag'),
+        ("git show --pretty --output=FILE", '"--output" is not an allowed flag'),
+        ("git log --pretty --ext-diff -p -n 1 HEAD", '"--ext-diff" is not an allowed flag'),
+        # Siblings in the same class: the glued-only --format has no separate
+        # form, and the other optional-value spellings never swallow either.
+        ("git log --format --output=/tmp/x", "glued"),
+        ("git show --format --output=/tmp/x", "glued"),
+        ("git status -u --show-signature", "not an allowed flag"),
+        ("git status --untracked-files --output=/tmp/x", "not an allowed flag"),
+        ("git rev-parse --short --output=/tmp/x", "not an allowed flag"),
+        # Round-1 review F2: the accidental value-taking shorts are denied and
+        # the real short --short is allowed (accept rows above).
+        ("git rev-parse -s HEAD", "not an allowed flag"),
+        ("git rev-parse -h", "not an allowed flag"),
+        # Round-1 review F5: a dangling required value is refused at arm time
+        # (every allow-listed tool errors on one; the fail-closed posture
+        # names the flag instead of counting a mystery check failure).
+        ("head -n", "expects a value"),
+        ("git log -n", "expects a value"),
+        ("git log --date", "expects a value"),
+        ("git log --since", "expects a value"),
+        ("git blame -L", "expects a value"),
         ("git diff --ext-diff", "not an allowed flag"),
         ("git show --textconv", "not an allowed flag"),
         ("git log --show-signature", "not an allowed flag"),
@@ -312,6 +356,46 @@ def test_refused_bash_commands_name_their_rule(command: str, phrase: str) -> Non
     assert reason is not None, command
     assert phrase in reason, f"{command!r}: {reason!r} lacks {phrase!r}"
     assert command.split("\n")[0][:40] in reason  # the command is quoted
+
+
+def test_git_optional_value_flags_do_not_swallow_a_following_flag() -> None:
+    """Round-1 review F1, pinned end to end.
+
+    ``git log --pretty oneline`` was probed against git 2.55.0: git did NOT
+    consume ``oneline`` (it errored \"ambiguous argument\"), so a model that
+    fed the next token to ``--pretty`` was lying — and the lie let
+    ``--output=/tmp/x`` (a real write) and ``--ext-diff`` (a real program run)
+    ride through as \"data\". Every smuggled spelling must refuse, naming the
+    smuggled flag; every genuine spelling must accept.
+    """
+    tool = fake_tool("bash", tier="exec")
+    smuggled = [
+        "git log --pretty --output=/tmp/x",
+        "git log --pretty --output /tmp/x",
+        "git diff --color --output=FILE",
+        "git diff -U --output=FILE",
+        "git show --pretty --output=FILE",
+        "git log --pretty --ext-diff -p -n 1 HEAD",
+    ]
+    for command in smuggled:
+        reason = verdict(tool, {"command": command})
+        assert reason is not None, command
+        smuggled_flag = "--ext-diff" if "--ext-diff" in command else "--output"
+        assert f'"{smuggled_flag}" is not an allowed flag' in reason, f"{command!r}: {reason!r}"
+    genuine = [
+        "git log --pretty=%H -n 1",
+        "git log --pretty",
+        "git log --pretty --oneline -n1",
+        "git log --oneline",
+        "git diff -U3",
+        "git diff -U",
+        "git diff --color=never",
+        "git show --pretty=%H",
+        "git status -u --short",
+        "git rev-parse --short HEAD",
+    ]
+    for command in genuine:
+        assert verdict(tool, {"command": command}) is None, command
 
 
 def test_a_multiline_command_is_refused_naming_the_newline() -> None:

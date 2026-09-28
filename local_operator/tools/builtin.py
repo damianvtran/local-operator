@@ -11971,12 +11971,18 @@ def _describe_monitor_approval(args: dict[str, Any], cwd: str) -> str:
 
 
 def _monitor_row_text(row: dict[str, Any], now: int) -> str:
-    """One list row: id, name, tool, cadence, and health."""
+    """One list row: id, name, watched call, cadence, and health.
+
+    The watched call is rendered with the same :func:`_monitor_call_repr` the
+    receipts use (QA round-1 observation 1): two monitors of one tool are
+    told apart by what they watch, not only by their names.
+    """
     from local_operator.wakes.display import format_age
 
     mid = str(row.get("id") or "?")
     name = str(row.get("name") or "")
     tool = str(row.get("tool") or "")
+    call = _monitor_call_repr(tool, row.get("arguments"))
     every = row.get("every_ms")
     every_txt = f" every {format_duration(int(every))}" if isinstance(every, int) else ""
     if row.get("disabled"):
@@ -11984,12 +11990,12 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
         reason_txt = f" (last: {_clip_monitor_text(reason, 80)})" if reason else ""
         failures = row.get("consecutive_failures", 0)
         return (
-            f"{mid}: '{name}' {tool}{every_txt} — DISABLED after {failures} "
+            f"{mid}: '{name}' {tool} {call}{every_txt} — DISABLED after {failures} "
             f"failures{reason_txt} — re-arm to reactivate."
         )
     until = row.get("until_at")
     if isinstance(until, int) and not isinstance(until, bool) and until <= now:
-        return f"{mid}: '{name}' {tool}{every_txt} — expired."
+        return f"{mid}: '{name}' {tool} {call}{every_txt} — expired."
     bits: list[str] = []
     last = row.get("last_check_at")
     if isinstance(last, int) and last > 0:
@@ -12002,7 +12008,7 @@ def _monitor_row_text(row: dict[str, Any], now: int) -> str:
             bits.append(f"next due in {format_age((due - now) / 1000)}")
         else:
             bits.append("next due now")
-    return f"{mid}: '{name}' {tool}{every_txt} — " + ", ".join(bits) + "."
+    return f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits) + "."
 
 
 async def _monitor_list(tool_call_id: str, scheduler: MonitorSchedulerProtocol) -> ToolResult:

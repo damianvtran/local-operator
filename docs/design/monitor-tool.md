@@ -639,6 +639,27 @@ operators — refused at the scan); accept `ls x|grep foo` (two allowed read
 stages), `rg 'a|b' f` (the pipe is quoted — a literal pattern character),
 and the spaced `cat f | grep x | wc -l` (spacing is irrelevant to the
 split).
+Reject — flag argument models (round-5 review F1/F2/F5): each value-flag
+now models its program's REAL argument semantics — an optional-value flag
+(git OPTARG: `--pretty`, `--color`, `-U`, `-u`, `--short`) never consumes
+the next token, a glued-only flag (`--format`) has no bare or separate
+form, a required value consumes the separate spelling and a dangling one is
+refused at arm time. Rows: the six smuggled spellings
+`git log --pretty --output=/tmp/x`, `git log --pretty --output /tmp/x`,
+`git diff --color --output=FILE`, `git diff -U --output=FILE`,
+`git show --pretty --output=FILE`,
+`git log --pretty --ext-diff -p -n 1 HEAD` (before the fix, live git 2.55.0
+wrote the file / ran the external diff); the glued-only sibling
+`git log --format --output=/tmp/x`; the dangling required values `head -n`,
+`git log -n`, `git log --date`, `git log --since`, `git blame -L`; and
+`git rev-parse -s`/`-h` (the accidental value-taking shorts — F2). Accept
+rows proving the fix did not over-refuse: `git log --pretty`,
+`git log --pretty=%H -n 1`, `git log --pretty --oneline -n1`,
+`git diff -U3`, `git diff -U`, `git diff --color=never`,
+`git status -u --short`, `git rev-parse --short HEAD`,
+`git rev-parse --short=7 HEAD`, `git branch --merged main`, and
+`git branch --format '%(refname)'` (F3: the flags' own values, skipped by
+the branch operand scan).
 Each case asserts the exact refusal sentence's discriminating phrase, so a
 reordered message fails a test rather than drifting.
 

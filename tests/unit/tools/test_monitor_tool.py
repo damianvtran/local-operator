@@ -129,6 +129,10 @@ async def test_create_list_cancel_round_trip(tmp_path: Any) -> None:
         listed = await monitor.execute("c", {"op": "list"}, None, None, context)
         assert listed.text is not None and "date-watch" in listed.text
         assert "m1" in listed.text and "every 1m30s" in listed.text
+        # QA round-1 observation 1: the row names the watched call, not only
+        # the tool, so two same-tool monitors are told apart by what they
+        # watch.
+        assert "`date -u`" in listed.text
 
         cancelled = await monitor.execute("c", {"op": "cancel", "id": "m1"}, None, None, context)
         assert cancelled.is_error is False and cancelled.text == "Cancelled monitor 'm1'."
