@@ -48,6 +48,7 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.hook_forwarding import (
         FORWARD_CLAUDE_DEFAULT,
         FORWARD_CODEX_DEFAULT,
+        NATIVE_DEFAULT,
     )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
@@ -151,6 +152,7 @@ def _consumer_defaults() -> dict[str, object]:
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
+        "hooks.native": NATIVE_DEFAULT,
         "hooks.forward_claude": FORWARD_CLAUDE_DEFAULT,
         "hooks.forward_codex": FORWARD_CODEX_DEFAULT,
         # The four memory_guard keys. The consumer constants live next to the
