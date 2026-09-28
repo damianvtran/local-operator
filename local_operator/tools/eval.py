@@ -61,6 +61,8 @@ from local_operator import procstate
 from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
 from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
 from local_operator.harness.types import (
+    FAULT_ABORTED,
+    FAULT_KEY,
     AbortSignal,
     AgentTool,
     AgentToolUpdate,
@@ -1220,18 +1222,25 @@ def _background_summary(response: dict[str, Any], context: ToolContext | None) -
     return text
 
 
-def _lost_state_error(tool_call_id: str, reason: str) -> ToolResult:
+def _lost_state_error(
+    tool_call_id: str, reason: str, *, details: dict[str, Any] | None = None
+) -> ToolResult:
     """The honest result for every path that had to kill the kernel.
 
     The model must not believe the namespace survived: the next call's
     ``NameError`` would otherwise read as a tool bug rather than the
     documented consequence, and the model would start avoiding the tool.
+
+    ``details`` rides through to the result for the same reason every other
+    ``_error`` caller's does: the abort arms MARK the result ``aborted`` (see
+    ``FAULT_ABORTED``), while the crash and timeout arms leave it unmarked.
     """
     return _error(
         tool_call_id,
         "eval",
         f"{reason}\nALL session state (variables, imports) was lost — "
         "the kernel restarts fresh on the next call.",
+        details=details,
     )
 
 
@@ -1268,12 +1277,16 @@ async def execute_eval(
         )
 
     # Pre-aborted signal: never spawn (or disturb a resident kernel) for a
-    # call there is no intention to run.
+    # call there is no intention to run. MARKED `aborted`, not merely
+    # error-shaped: a marked abort settles as ``interrupted`` on the
+    # frontends and stays out of the ledger's execution-fault rate, where the
+    # user's own stop would otherwise count as a tool failure.
     if signal is not None and signal.aborted:
         return _error(
             tool_call_id,
             "eval",
             f"aborted ({signal.reason or 'aborted'}): code not run",
+            details={FAULT_KEY: FAULT_ABORTED},
         )
 
     # Refuse a cell in which a retrieved secret would be PRINTED, before the
@@ -1427,9 +1440,13 @@ async def execute_eval(
         # The code may be mid-run inside the kernel: reuse is not an option.
         _retire(kernel)
         if aborted:
+            # Marked like the pre-aborted arm above; the receipt text stays the
+            # harness's own (case not run / kernel killed mid-run), so nothing
+            # about what the MODEL reads changes.
             return _lost_state_error(
                 tool_call_id,
                 f"aborted ({signal.reason if signal else 'aborted'}): kernel killed mid-run",
+                details={FAULT_KEY: FAULT_ABORTED},
             )
         return _lost_state_error(
             tool_call_id, f"TIMEOUT after {params.timeout}s: kernel killed mid-run"

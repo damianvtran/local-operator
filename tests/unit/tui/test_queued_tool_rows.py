@@ -432,6 +432,160 @@ async def test_a_never_run_call_settles_when_the_verdict_exists() -> None:
         assert [row for row in _rows_for(app, "wake") if "never sent" in row] == wake_rows
 
 
+@pytest.mark.asyncio
+async def test_a_skipped_verdict_settles_the_row_as_interrupted() -> None:
+    """THE operator's case: a steering skip is not a red failure.
+
+    The terminal frame for a call steering redirected away carries
+    ``not_run_kind="skipped"``, and the row settles as the same dim ⊘ tier the
+    turn-death pass already paints — ``never sent · N composed`` kept, the
+    outcome column blank, and the harness's reason ("Tool call skipped:
+    interrupted by steering.") REACHABLE behind a tap instead of riding the
+    collapsed row in danger red, which is the report this pins shut.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        controller = EventController(session, app)
+        app._controller = controller
+
+        controller._on_event(
+            ToolCallComposeEvent(
+                tool_call_id="call_skip", tool_name="view_project", argument_bytes=12700
+            )
+        )
+        await _parked(pilot)
+        card = app._composing_cards["call_skip"]
+
+        controller._on_event(
+            ToolCallComposeEvent(
+                tool_call_id="call_skip",
+                tool_name="view_project",
+                argument_bytes=12700,
+                dictation_complete=True,
+                not_run_reason="Tool call skipped: interrupted by steering.",
+                not_run_kind="skipped",
+            )
+        )
+        await _parked(pilot)
+
+        assert app._composing_cards == {}
+        assert card.state == "interrupted"
+        assert "tool-interrupted" in card.classes
+        assert (
+            "tool-error" not in card.classes
+        ), "an interruption must not wear the failure dressing"
+        row = [r for r in _rows(app) if "never sent" in r]
+        assert len(row) == 1, _rows(app)
+        assert "12.4 KB composed" in row[0], row
+        assert "⊘" in row[0] and "interrupted" in row[0], row
+        # The reason is NOT on the collapsed row any more...
+        assert "Tool call skipped" not in row[0], row
+        # ...but it is not lost: the expansion carries the harness sentence.
+        assert card.can_expand(), "the reason must stay reachable"
+        assert any("interrupted by steering" in line for line in card._output), card._output
+        # Nothing executed, so the outcome column stays blank — the same rule
+        # the turn-death retirement row above pins.
+        assert card._duration is None
+        assert re.search(r"\d+(?:\.\d+)?s\b", row[0]) is None, row
+
+
+# ---------------------------------------------------------------------------
+# The END event: cancelled mid-flight, versus a genuine failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_marked_abort_settles_interrupted_and_a_failure_stays_failed() -> None:
+    """The live end-event pair: one call stopped, one genuinely failed.
+
+    A user stop reaches `on_tool_ended` as an error-shaped result MARKED
+    ``{skipped, aborted}``; it must settle as the dim ⊘ interruption (duration
+    column KEPT — the end event carries the measured interval — and the abort
+    receipt reachable), while an unmarked error result is untouched and keeps
+    the red failure. The two rows are driven side by side because the whole
+    change is a discrimination between them.
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(110, 34)) as pilot:
+        await _boot(pilot, app)
+        controller = EventController(session, app)
+        app._controller = controller
+
+        controller._on_event(
+            ToolExecutionStartEvent(
+                tool_call_id="call_stop", tool_name="bash", args={"command": "sleep 300"}
+            )
+        )
+        await _parked(pilot)
+        stopped = app._tool_cards["call_stop"]
+        controller._on_event(
+            ToolExecutionEndEvent(
+                tool_call_id="call_stop",
+                tool_name="bash",
+                result=ToolResult(
+                    tool_call_id="call_stop",
+                    tool_name="bash",
+                    is_error=True,
+                    content=[
+                        TextContent(
+                            text=(
+                                "aborted (stop): sleep 300\n" "partial output: still running at 2s"
+                            )
+                        )
+                    ],
+                    details={"__fault": "aborted"},
+                    duration_s=2.4,
+                ),
+                duration_s=2.4,
+            )
+        )
+        await _parked(pilot)
+
+        assert stopped.state == "interrupted"
+        assert "tool-interrupted" in stopped.classes
+        assert "tool-error" not in stopped.classes
+        # The column stays POPULATED: this settle knows the interval (its own
+        # clock here), and `measured_s` is the same number for an adopted row.
+        assert stopped._duration is not None
+        # The receipt — reason and the partial output — is one tap away.
+        assert stopped.can_expand()
+        assert any("still running at 2s" in line for line in stopped._output), stopped._output
+        stop_rows = [r for r in _rows(app) if "sleep 300" in r]
+        assert stop_rows and "⊘" in stop_rows[0], stop_rows
+
+        controller._on_event(
+            ToolExecutionStartEvent(
+                tool_call_id="call_fail", tool_name="read", args={"path": "missing.txt"}
+            )
+        )
+        await _parked(pilot)
+        failing = app._tool_cards["call_fail"]
+        controller._on_event(
+            ToolExecutionEndEvent(
+                tool_call_id="call_fail",
+                tool_name="read",
+                result=ToolResult(
+                    tool_call_id="call_fail",
+                    tool_name="read",
+                    is_error=True,
+                    content=[TextContent(text="File not found: missing.txt")],
+                    details={},
+                    duration_s=0.1,
+                ),
+                duration_s=0.1,
+            )
+        )
+        await _parked(pilot)
+
+        # The negative control: identical wire shape, no marker, unchanged
+        # failure — the red row and the danger dressing both stay.
+        assert failing.state == "error"
+        assert "tool-error" in failing.classes and "tool-interrupted" not in failing.classes
+
+
 # ---------------------------------------------------------------------------
 # One card per call id — the adoption rule
 # ---------------------------------------------------------------------------
@@ -553,6 +707,10 @@ async def test_a_never_run_verdict_is_undone_when_the_twin_of_a_duplicate_id_run
                 argument_bytes=9,
                 dictation_complete=True,
                 not_run_reason="Duplicate call id 'call_dup' skipped.",
+                # The verdict's real class, and it must still settle as an
+                # ERROR: only `{skipped, aborted}` is an interruption, and a
+                # duplicate id is a model fault the row is right to paint red.
+                not_run_kind="duplicate_id",
             )
         )
         await _parked(pilot)
@@ -652,6 +810,10 @@ async def test_a_frame_without_the_new_fields_still_mounts_and_composes() -> Non
                 "argument_bytes": 14079,
             }
         )
+        # The new key is genuinely ABSENT from the dump, not present-and-null:
+        # that is the byte shape an older owner relays, and the absence is
+        # exactly the legacy reading (`None` ⇒ today's behaviour).
+        assert "not_run_kind" not in legacy.model_dump(mode="json")
         controller._on_event(legacy)
         await _parked(pilot)
 
@@ -771,6 +933,11 @@ async def test_a_verdict_that_is_the_only_frame_keeps_the_size_it_carried() -> N
                 argument_bytes=12,
                 dictation_complete=True,
                 not_run_reason="Tool not found: mystery",
+                # A real planning verdict carries a class too, and the class
+                # must NOT reroute it: `unknown_tool` is a failure, so the row
+                # keeps the error settle the frame above would get with no kind
+                # at all.
+                not_run_kind="unknown_tool",
             )
         )
         await _parked(pilot)
@@ -824,6 +991,12 @@ async def test_a_joiner_replaying_a_never_run_verdict_keeps_the_size_too() -> No
         assert not [
             item for item in seeded if item.get("type") == "tool_execution_start"
         ], "nothing has started it: that is the fact the row must render"
+        # The verdict's class rides the seed with the reason (model_dump is how
+        # the seed retains it), and for THIS verdict — an unknown tool — the
+        # replayed row must keep the error settle: a `unknown_tool` row that
+        # repainted as an interruption because it went through the seed would
+        # be the live/replay disagreement this pin exists to catch.
+        assert any(item.get("not_run_kind") == "unknown_tool" for item in seeded), seeded
 
         controller.restore_live_projection(
             SimpleNamespace(streaming=True, generation=1, live_events=live), set(), set()
@@ -834,6 +1007,9 @@ async def test_a_joiner_replaying_a_never_run_verdict_keeps_the_size_too() -> No
         assert rows, _rows(app)
         assert "14 B composed" in rows[0], rows
         assert "nothing composed" not in rows[0], rows
+        wake_cards = [card for card in _tool_cards(app) if card.tool_call_id == WAKE_ID]
+        assert len(wake_cards) == 1
+        assert wake_cards[0].state == "error", "a planning fault stays a failure through the seed"
 
         turn.release.set()
         await turn.finish()

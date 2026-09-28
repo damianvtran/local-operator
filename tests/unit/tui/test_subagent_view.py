@@ -266,6 +266,81 @@ def test_fold_produces_prose_and_tool_rows_in_call_order() -> None:
     assert entries[2].result_text == "2 failed"
 
 
+def test_both_folds_read_the_childs_fault_class_before_is_error() -> None:
+    """A child's MARKED abort/skip is `interrupted`, not `failed`, on both folds.
+
+    The parent transcript settles these dim; the child page must agree, or a
+    killed child batch keeps counting `N failed` in the page's own chrome
+    (`_title_row` counts `outcome == "error"`) for calls the operator ended.
+    Two folds, two shapes: the live trajectory (event dicts) and the durable
+    transcript (message rows). The unmarked error in each is the control — the
+    change is a discrimination, and it must not wash out real failures.
+    """
+
+    def marked(call_id: str, name: str, text: str, fault: str) -> dict[str, Any]:
+        event = _result(call_id, name, text, is_error=True)
+        event["result"]["details"] = {"__fault": fault}  # type: ignore[index]
+        return event
+
+    live = fold_trajectory(
+        [
+            _call("c1", "bash", **{"command": "sleep 300"}),
+            marked("c1", "bash", "aborted (stop): sleep 300", "aborted"),
+            _call("c2", "false", **{"command": "exit 3"}),
+            _result("c2", "false", "exit code 3", is_error=True),
+        ],
+        settled=True,
+    )
+    assert [entry.outcome for entry in live] == ["interrupted", "error"]
+
+    def row(entry_id: str, payload: dict[str, Any]) -> TranscriptEntry:
+        return TranscriptEntry(id=entry_id, ts=1.0, type=ENTRY_MESSAGE, payload=payload)
+
+    durable = fold_transcript_entries(
+        [
+            row(
+                "a1",
+                {
+                    "kind": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "tool_calls": [
+                        {"id": "d1", "name": "bash", "arguments": {"command": "sleep 300"}},
+                        {"id": "d2", "name": "read", "arguments": {"path": "p.py"}},
+                    ],
+                },
+            ),
+            row(
+                "t1",
+                {
+                    "kind": "message",
+                    "role": "tool",
+                    "tool_call_id": "d1",
+                    "is_error": True,
+                    "content": [{"type": "text", "text": "aborted (stop): sleep 300"}],
+                    "provider_payload": {
+                        "details": {"__fault": "aborted"},
+                        "duration_s": 2.4,
+                    },
+                },
+            ),
+            row(
+                "t2",
+                {
+                    "kind": "message",
+                    "role": "tool",
+                    "tool_call_id": "d2",
+                    "is_error": True,
+                    "content": [{"type": "text", "text": "File not found"}],
+                },
+            ),
+        ]
+    )
+    assert [entry.outcome for entry in durable] == ["interrupted", "error"]
+    # The grep-able fact the chrome counts on: exactly one failure here.
+    assert sum(1 for entry in durable if entry.outcome == "error") == 1
+
+
 def test_both_folds_classify_a_progress_row_from_the_messages_own_calls() -> None:
     """The page's rail marks the ANSWER, so a row has to know which one it is.
 

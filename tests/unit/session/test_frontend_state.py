@@ -1205,6 +1205,54 @@ def test_compose_event_tolerates_a_payload_without_the_field() -> None:
         {"type": "tool_call_compose", "tool_call_id": "c1", "tool_name": "bash"}
     )
     assert event.supersedes_tool_call_id is None
+    # Both additive fields, and the None is MEANINGFUL on this one: "no
+    # verdict" is what an older producer says, and every consumer keeps
+    # today's behaviour for it (the reason, if any, decides the failure
+    # class alone).
+    assert event.not_run_kind is None
+
+
+def test_the_seed_retains_the_verdict_class_with_the_reason() -> None:
+    """A reconnecting viewer gets the class the verdict carried, not just words.
+
+    The seed is `model_dump`-based, so the field rides it with no code of its
+    own — which is exactly why it needs a pin: an additive field dropped from
+    the dump (or renamed) would silently regress every reconnect to the
+    wording-parsing this workstream removes, and nothing else here would fail.
+    """
+    store = FrontendStateStore(_state())
+    session = _live_session()
+    store.observe_event(session, AgentStartEvent(generation=1))
+    store.observe_event(
+        session,
+        ToolCallComposeEvent(
+            tool_call_id="skip_1",
+            tool_name="view_project",
+            argument_bytes=12700,
+            dictation_complete=True,
+            not_run_reason="Tool call skipped: interrupted by steering.",
+            not_run_kind="skipped",
+        ),
+    )
+    rows = {row["tool_call_id"]: row for row in store.state.live_events}
+    assert rows["skip_1"]["not_run_kind"] == "skipped"
+    assert rows["skip_1"]["not_run_reason"] == "Tool call skipped: interrupted by steering."
+
+    # And the older producer's frame keeps the key ABSENT of a class: the dump
+    # of a payload built without it carries `None`, which consumers read as
+    # "no verdict" and settle exactly as they did before the field existed.
+    legacy = AgentEvent.model_validate(
+        {
+            "type": "tool_call_compose",
+            "tool_call_id": "legacy_1",
+            "tool_name": "bash",
+            "argument_bytes": 5,
+            "not_run_reason": "Tool call not run: planning failure",
+        }
+    )
+    store.observe_event(session, legacy)
+    rows = {row["tool_call_id"]: row for row in store.state.live_events}
+    assert rows["legacy_1"].get("not_run_kind") is None
 
 
 def test_a_repeated_supersession_is_idempotent_in_the_seed() -> None:

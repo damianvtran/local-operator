@@ -1568,6 +1568,7 @@ def replay_tool_call(
     exactly as before.
     """
     from local_operator.harness.rows import output_limit_call_receipt
+    from local_operator.harness.types import FAULT_KEY, INTERRUPTED_FAULTS
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
 
@@ -1646,7 +1647,24 @@ def replay_tool_call(
     # unknown. Replay must not fail on a bad value, and must not invent a
     # ``0.0s`` that says the tool returned instantly.
     duration_s = parse_duration(payload.get("duration_s")) if is_dict else None
+    # The result's own FAULT class, when its emitter marked one, settles the
+    # row FIRST and by MARKER rather than by wording: `{skipped, aborted}` is
+    # an interruption — the user's Esc, a steering skip — so the row takes the
+    # dim `interrupted ⊘` presentation the live frame gave it, with the
+    # receipt kept reachable in the expansion. Same rule as `on_tool_ended`
+    # and `_settle_painted_tool_card`, so one call cannot read one way live
+    # and another on `/resume`.
+    fault = details.get(FAULT_KEY) if isinstance(details, dict) else None
+    if getattr(result, "is_error", False) and fault in INTERRUPTED_FAULTS:
+        card.restore(state="interrupted", result_text=result_text, duration_s=duration_s)
+        return
     if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
+        # LEGACY FALLBACK, kept forever because old journals are read forever.
+        # It classifies by TEXT, which is all a row written before the abort
+        # markers has; a transcript this build wrote reaches the marker arm
+        # above and never this sniff. Delete it and every historical replay
+        # re-reddens the user's own Esc.
+        #
         # An aborted call persists as an error result (the model-facing
         # shape), but the LIVE frame it came from was the dim shut
         # `interrupted ⊘` row. Replaying it through the error branch would
@@ -1658,33 +1676,41 @@ def replay_tool_call(
         # `harness/loop.py`'s synthetic abort is `ABORTED_RESULT_TEXT =
         # "aborted"` with NO parenthesis, so every result the loop parks a
         # duration onto fails this guard and takes the plain error arm below.
+        # (Those line numbers predate this workstream's own edits to both
+        # files; the arms they name are the pre-aborted and mid-run abort
+        # receipts, which now also carry the abort MARKER, so new rows
+        # classify above.)
         #
-        # So `duration_s` is passed for faithfulness, not for a population we
-        # can point at today. `_error(...)` sets no `duration_s`, and the only
+        # `duration_s` is passed for faithfulness, not for a population we can
+        # point at today. `_error(...)` sets no `duration_s`, and the only
         # producer that MEASURES one is the agent loop (`loop.py::park`, which
-        # stamps `result.duration_s` from its own `time.monotonic()` span)
-        # — review round 2 swept 37 real aborted runs (model-issued bash,
+        # stamps `result.duration_s` from its own `time.monotonic()` span) —
+        # review round 2 swept 37 real aborted runs (model-issued bash,
         # parallel-batch races, eval kernel aborts) and produced the
         # `aborted (` + `duration_s` conjunction zero times. The arm is
-        # therefore inert but correct: `park()` stamps any NORMALLY returned
-        # result, so the moment a producer returns this text with a measured
-        # interval the row shows it instead of silently dropping it.
-        # `tools/eval.py:1004` (`aborted (…): kernel killed mid-run`) is the
-        # plausible future one — it returns normally rather than by
+        # therefore inert on the COLUMN but correct: `park()` stamps any
+        # NORMALLY returned result, so the moment a producer returns this
+        # text with a measured interval the row shows it instead of silently
+        # dropping it. `tools/eval.py`'s `aborted (…): kernel killed mid-run`
+        # is the plausible future one — it returns normally rather than by
         # cancellation — but neither reviewer could drive a turn into that
         # branch or prove it unreachable, so its status is unsettled.
         #
+        # The RECEIPT is passed on this arm too, so the legacy and marked
+        # paths differ in nothing the operator can read: before this the arm
+        # stored no output, and a row that had said `⊘` said only that.
+        #
         # Not covered here: a bang-mode `! cmd` the user stopped. That row
-        # persists through `session/shell_record.py` →
-        # `Message.tool_result`, which DOES carry a `provider_payload` when
-        # the result has one (a spilled capture writes `details['spill']`).
-        # It still replays blank, for a different reason: nothing measures a
-        # bang command, so `duration_s` is `None`. The terminal runs it
-        # outside a turn, so the loop's `park()` — the only caller that
-        # stamps an interval — never sees it, and `execute_bash` reports no
-        # duration of its own. A successful `! echo hi` replays blank for the
-        # same reason. The producer gap is upstream and out of scope.
-        card.restore(state="interrupted", duration_s=duration_s)
+        # persists through `session/shell_record.py` → `Message.tool_result`,
+        # which DOES carry a `provider_payload` when the result has one (a
+        # spilled capture writes `details['spill']`). It still replays blank,
+        # for a different reason: nothing measures a bang command, so
+        # `duration_s` is `None`. The terminal runs it outside a turn, so the
+        # loop's `park()` — the only caller that stamps an interval — never
+        # sees it, and `execute_bash` reports no duration of its own. A
+        # successful `! echo hi` replays blank for the same reason. The
+        # producer gap is upstream and out of scope.
+        card.restore(state="interrupted", result_text=result_text, duration_s=duration_s)
         return
     if getattr(result, "is_error", False):
         # A call the OUTPUT LIMIT kept from running carries a SYNTHETIC result,
