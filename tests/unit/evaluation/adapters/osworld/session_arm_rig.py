@@ -58,10 +58,18 @@ def _tool_names(request: Any) -> list[str]:
 class ScriptedClient:
     """Deterministic wire client for the session arm (see module docstring)."""
 
-    def __init__(self, *, log_path: Path, child_acts: str | None) -> None:
+    def __init__(
+        self, *, log_path: Path, child_acts: str | None, challenge_reply: str = "refinish"
+    ) -> None:
         self.log_path = Path(log_path)
         self.calls = 0
         self.child_acts = child_acts
+        #: How the script answers the completion challenge that the first
+        #: ``done`` claim earns (the session-path gate): ``refinish`` re-sends
+        #: the SAME finish declaration (one of the two replies the challenge
+        #: names), ``act`` models the task_013 rescue -- one corrective action
+        #: first, then the re-declaration.
+        self.challenge_reply = challenge_reply
 
     # -- logging -----------------------------------------------------------
 
@@ -186,6 +194,28 @@ class ScriptedClient:
                     ]
                 },
             )
+        # The first `done` claim above earns the completion challenge; these
+        # stages answer it. Both are legitimate replies the challenge names.
+        if action_stage == 2 and self.challenge_reply == "act":
+            # The rescue shape (task_013's): after the challenge, one more
+            # action -- the corrective move -- before the re-declaration.
+            return self._tool_call(
+                stage, ACTION_TOOL, {"actions": [{"kind": "wait", "duration_ms": 50}]}
+            )
+        if action_stage in (2, 3):
+            return self._tool_call(
+                stage,
+                ACTION_TOOL,
+                {
+                    "actions": [
+                        {
+                            "kind": "finish",
+                            "status": "done",
+                            "reason": "session-arm rig: episode complete, re-checked",
+                        }
+                    ]
+                },
+            )
         return self._text_stop("Episode complete.")
 
     def _child_call(self, tool_rows: list[Any]) -> list[Any]:
@@ -226,7 +256,9 @@ def _bootstrap(worktree: Path) -> None:
     print(f"[rig] local_operator -> {resolved}", file=sys.stderr, flush=True)
 
 
-def patch_clients(log_path: Path, child_acts: str | None) -> None:
+def patch_clients(
+    log_path: Path, child_acts: str | None, challenge_reply: str = "refinish"
+) -> None:
     import local_operator.providers.clients as clients_mod
 
     original = clients_mod.client_for_spec
@@ -234,7 +266,9 @@ def patch_clients(log_path: Path, child_acts: str | None) -> None:
     def patched(spec: Any, **kwargs: Any) -> Any:
         client = original(spec, **kwargs)
         if getattr(spec, "provider", None) == "test":
-            return ScriptedClient(log_path=log_path, child_acts=child_acts)
+            return ScriptedClient(
+                log_path=log_path, child_acts=child_acts, challenge_reply=challenge_reply
+            )
         return client
 
     clients_mod.client_for_spec = patched
@@ -248,11 +282,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", required=True, type=Path)
     parser.add_argument("--episode-id", required=True)
     parser.add_argument("--child-acts", choices=("finish", "wait"), default=None)
+    parser.add_argument("--challenge-reply", choices=("refinish", "act"), default="refinish")
     args = parser.parse_args(argv)
 
     worktree = args.worktree.resolve()
     _bootstrap(worktree)
-    patch_clients(args.log, args.child_acts)
+    patch_clients(args.log, args.child_acts, args.challenge_reply)
 
     import scripts.run_episode as run_episode
 

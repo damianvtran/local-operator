@@ -169,6 +169,7 @@ from local_operator.scratchpad import (
 )
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import group_reaper, search_guard, shell_env, sleep_guard
+from local_operator.tools.confinement import ToolConfinement, confinement_of
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -1018,6 +1019,25 @@ def _spill_detail(meta: SpillMeta) -> dict[str, Any]:
 
 def _safe_cwd(context: ToolContext | None) -> str:
     return context.cwd if context and context.cwd else "."
+
+
+def _confinement_denial(
+    path: Path, context: ToolContext | None, *, resolvable: bool = True
+) -> str | None:
+    """The refusal for a path a confined session's tools cannot reach.
+
+    ``path`` is the RESOLVED path the calling tool's own resolution already
+    computed (``_resolve_workspace_path``); this never resolves a second time
+    -- a symlink moved between two resolutions would decide the verdict for
+    bytes the reader has already taken from a file the confinement does not
+    cover. ``resolvable=False`` denies for the same reason: a path that cannot
+    be resolved cannot be shown to be inside.
+    """
+
+    confinement = confinement_of(context)
+    if confinement is None:
+        return None
+    return confinement.path_denial(path, resolvable=resolvable)
 
 
 def normalise_path_argument(raw: str) -> str:
@@ -3799,6 +3819,19 @@ async def execute_bash(
     # above are worth keeping in EITHER mode, so they ride the policy as
     # intentional injections rather than around it — see
     # local_operator.tools.shell_env, the one place this decision is made.
+    # A confined session's shell runs inside the host's kernel sandbox; the
+    # boundary is the syscall, not this command's text, so absolute paths,
+    # ``cd`` and constructed strings are all the same case (see
+    # ``local_operator.tools.confinement``). The temp redirection rides the
+    # same env the child already receives: tools that honour ``TMPDIR`` keep
+    # working, and a temp file they leave behind sits inside the same boundary
+    # as everything else the session writes. Hosts with no mechanism refuse
+    # the command below rather than run it unwrapped.
+    confinement = confinement_of(context)
+    if confinement is not None:
+        temp = confinement.temp_dir()
+        injections["TMPDIR"] = str(temp)
+        injections["TMP"] = str(temp)
     env = shell_env.child_environment(injections=injections)
 
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
@@ -3818,11 +3851,18 @@ async def execute_bash(
         # path they never asked for. See WINDOWS_NO_BASH_MESSAGE.
         return _error(tool_call_id, "bash", WINDOWS_NO_BASH_MESSAGE)
     cwd = _safe_cwd(context)
+    shell_argv = [shell, "-c", params.command]
+    if confinement is not None:
+        cwd_denial = confinement.cwd_denial(cwd)
+        if cwd_denial is not None:
+            return _error(tool_call_id, "bash", cwd_denial)
+        wrapped = confinement.wrap(shell_argv)
+        if wrapped is None:
+            return _error(tool_call_id, "bash", confinement.spawn_refusal())
+        shell_argv = wrapped
     try:
         process = await asyncio.create_subprocess_exec(
-            shell,
-            "-c",
-            params.command,
+            *shell_argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
@@ -6009,6 +6049,9 @@ async def execute_read(
     # answer the guard-area exemption may consume (see
     # ``_record_resolved_path``). Before ``_read_path``, which opens ``path``.
     _record_resolved_path(context, path, resolvable)
+    denial = _confinement_denial(path, context, resolvable=resolvable)
+    if denial is not None:
+        return _error(tool_call_id, "read", denial)
     return await _read_path(
         tool_call_id, params, context, path=path, inside=inside, resolvable=resolvable
     )
@@ -8784,6 +8827,9 @@ async def execute_edit(
         path = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
+        denial = _confinement_denial(path, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "edit", denial)
     if not path.is_file():
         # Name the URL when the caller used one: the raw string is what the
         # model typed, and echoing the mangled filesystem path the scheme would
@@ -9160,6 +9206,9 @@ async def execute_write(
         path = scratchpad_target
     else:
         path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
+        denial = _confinement_denial(path, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "write", denial)
 
     # The read-modify-write-diff block runs in a thread: the loop this
     # coroutine rides is the SAME loop that renders the TUI, and a previous
@@ -9934,7 +9983,36 @@ class _GlobBudget:
             yield item
 
 
-def _bounded_glob(root: Path, pattern: str, budget: _GlobBudget) -> Iterator[Path]:
+def _contained(path: Path, confinement: ToolConfinement | None) -> bool:
+    """Whether a walked path stays inside the confinement root, at its
+    RESOLVED target.
+
+    WHY RESOLUTION AND NOT ``lstat``: a symlink is a name INSIDE the root whose
+    target is somewhere else, and every sibling reader (``read``, ``write``,
+    ``edit``, ``grep``, the shell) judges the [redacted] target -- so this must
+    too, or ``glob`` becomes the one reader with a different rule (review
+    round 1, R-1: ``linkapp/**/*`` through a root symlink listed 500 of 1335
+    entries of the gated apparatus tree; ``linkapp/*`` listed its three top
+    directories). Fail-closed: a path that cannot be [redacted] cannot be shown
+    to be inside. ``confinement is None`` is the free-session default and keeps
+    the old behaviour byte for byte.
+    """
+
+    if confinement is None:
+        return True
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return confinement.contains(resolved)
+
+
+def _bounded_glob(
+    root: Path,
+    pattern: str,
+    budget: _GlobBudget,
+    confinement: ToolConfinement | None = None,
+) -> Iterator[Path]:
     """pathlib's glob, with its traversal supervised by ``budget``.
 
     WHY A DECOMPOSITION rather than a plain ``root.glob(pattern)`` call: the
@@ -9969,19 +10047,36 @@ def _bounded_glob(root: Path, pattern: str, budget: _GlobBudget) -> Iterator[Pat
     head = "/".join(parts[:head_end])
     tail = parts[head_end + 1 :]
     for directory in budget.consume(root.glob(f"{head}/**" if head else "**")):
+        # A confined walk drops an escaping DIRECTORY here, before it can
+        # contribute a match or be recursed into: ``**`` is the one shape
+        # whose traversal grows with depth, and pathlib's own ``**`` follows
+        # symlinks -- so a link in the root pointing at an outside tree used
+        # to list that tree (review round 1, R-1: ``linkapp/**/*`` returned
+        # 500 of 1335 matches of the apparatus's gated tree). pathlib may
+        # still scan such a directory before this drop (its iterator is the
+        # budget's checkpoint); the guarantee bought here is the one the
+        # contract makes -- no path ever reaches the model through a target
+        # the confinement refuses, the same resolution rule the sibling
+        # readers apply.
+        if not _contained(directory, confinement):
+            continue
         if not tail:
             yield directory
         elif "**" in tail:
             # A second ``**`` (e.g. '**/x/**'): recurse so the supervision is
             # re-established inside it rather than handing pathlib an unbounded
             # sub-pattern. The tail shrinks every time, so this terminates.
-            yield from _bounded_glob(directory, "/".join(tail), budget)
+            yield from _bounded_glob(directory, "/".join(tail), budget, confinement)
         else:
             yield from budget.consume(directory.glob("/".join(tail)))
 
 
 def _glob_walk(
-    root: Path, pattern: str, *, stop_requested: Callable[[], bool] | None = None
+    root: Path,
+    pattern: str,
+    *,
+    stop_requested: Callable[[], bool] | None = None,
+    confinement: ToolConfinement | None = None,
 ) -> _GlobWalk:
     """The walk half of execute_glob, run in a worker thread.
 
@@ -10000,13 +10095,33 @@ def _glob_walk(
     leaving this thread walking while the tool has answered (QA Q-4), and a
     stopped walk reports itself through ``_GlobWalk.truncated`` so the caller
     can never render a partial listing as "no paths matched".
+
+    CONFINED: ``confinement`` is the same root the session's other tools
+    enforce, and it is applied at the RESOLUTION level -- a symlink is a name
+    inside the root whose target is elsewhere, and this walker must judge the
+    target exactly as ``read``/``grep``/the shell do, or it becomes the one
+    reader with a different rule. Every path this walk would emit is dropped
+    when it resolves outside (fail-closed when it cannot resolve), and the
+    ``**`` enumeration prunes escaping directories before recursing into them.
+    Found by review round 1, R-1: a model-created symlink in the root let
+    ``glob`` enumerate the apparatus's gated tree (``linkapp/*`` listed its
+    three top directories; ``linkapp/**/*`` returned 500 of 1335 matches) while
+    every sibling reader denied it. A free session (``confinement is None``)
+    walks byte-for-byte as before.
     """
     prefix = _literal_prefix(pattern)
     cache = _IgnoreWalk(root)
     budget = _GlobBudget(time.monotonic() + SEARCH_WALK_DEADLINE_S, stop_requested=stop_requested)
     out: set[str] = set()
     try:
-        for path in _bounded_glob(root, pattern, budget):
+        for path in _bounded_glob(root, pattern, budget, confinement):
+            # EVERY walked path is re-judged against the confinement root, at
+            # the resolution level the sibling readers use: a match reached
+            # through a symlink resolves outside and is dropped here even where
+            # pathlib's own traversal followed the link. The ``**`` prune in
+            # _bounded_glob stops the DESCENT; this stops the NAME.
+            if not _contained(path, confinement):
+                continue
             rel = path.relative_to(root).as_posix()
             explicitly_named = bool(prefix) and (rel == prefix or rel.startswith(prefix + "/"))
             if not explicitly_named and cache.ignores(path):
@@ -10084,6 +10199,14 @@ async def execute_glob(
         return _error(tool_call_id, "glob", message)
 
     root = Path(_safe_cwd(context))
+    # A confined session's glob walks are judged against the confinement root
+    # at every step (see _glob_walk); the cwd itself must be inside it, or the
+    # walk starts outside the boundary it is supposed to enforce.
+    confinement = confinement_of(context)
+    if confinement is not None:
+        cwd_denial = confinement.cwd_denial(str(root))
+        if cwd_denial is not None:
+            return _error(tool_call_id, "glob", cwd_denial)
     # An unbounded ``**`` walk is filesystem work that can freeze the session;
     # off the event loop and raced against abort like the grep scan, and under
     # the same wall-clock budget as every other search walk. ``stop_requested``
@@ -10095,6 +10218,7 @@ async def execute_glob(
             root,
             pattern,
             stop_requested=lambda: signal is not None and signal.aborted,
+            confinement=confinement,
         ),
         signal,
         lambda: None,
@@ -10645,6 +10769,9 @@ async def execute_grep(
     # ``execute_read`` uses, so the guard-area verdict is the reader's at both
     # readers and never a second resolution at a second moment.
     _record_resolved_path(context, target, resolvable)
+    denial = _confinement_denial(target, context, resolvable=resolvable)
+    if denial is not None:
+        return _error(tool_call_id, "grep", denial)
     if not target.exists():
         # Deliberately NOT a model fault: a well-formed path that does not
         # exist is unsatisfiable, not malformed, and the file may have vanished
@@ -13421,6 +13548,9 @@ async def _browser_screenshot(
             return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(raw_path, _safe_cwd(context))
         target = str(resolved)
+        denial = _confinement_denial(resolved, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "browser", denial)
     else:
         import tempfile
 
@@ -16299,6 +16429,9 @@ async def _bridge_action(
             return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
         target = str(resolved)
+        denial = _confinement_denial(resolved, context, resolvable=_resolvable)
+        if denial is not None:
+            return _error(tool_call_id, "browser", denial)
     else:
         import tempfile
 

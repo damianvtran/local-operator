@@ -97,6 +97,7 @@ from local_operator.evaluation.runner.action_tool import (
     _no_pending_refusal,
     _refusal,
 )
+from local_operator.evaluation.runner.completion import finish_claim
 from local_operator.evaluation.runner.episode import (
     _PROVISIONAL_CLEANUP_ACTION,
     EpisodeConfig,
@@ -110,6 +111,7 @@ from local_operator.evaluation.runner.provider_client import (
     DEFAULT_KEEP_RECENT_FRAMES,
     DEFAULT_REBUILD_EVERY_FRAMES,
     _ContextBuilder,
+    build_completion_challenge,
 )
 from local_operator.harness.types import AgentEvent, ImageContent, TextContent
 from local_operator.headless_print import printable_event
@@ -160,6 +162,19 @@ BUDGET_ACK = (
     "Episode step budget reached: the environment will not accept further "
     "actions and the run will be scored on the state reached. Do not call this "
     "tool again."
+)
+
+#: The completion challenge's channel sentence -- the ONE part of the shared
+#: challenge text (``provider_client.build_completion_challenge``) that states
+#: HOW to answer. The reply channel's answer is a JSON batch bound to an
+#: observation id; a session's answer is another call to the action tool, so
+#: this is the sentence that changes. Everything above it -- the claim named
+#: as a CLAIM, the task restated, the end state named as the only evidence --
+#: is byte-identical across the two channels, which is what keeps their
+#: challenges comparable.
+CHALLENGE_REPLY_GUIDANCE = (
+    "Reply with a single `{tool_name}` call carrying either the same finish "
+    "action, unchanged, or your corrective batch -- and nothing else."
 )
 
 
@@ -407,6 +422,13 @@ class ActionBridge:
     WHERE it lives -- behind an MCP tool call instead of a loop-injected tool
     -- because a session cannot have tools injected into its LoopContext by a
     consumer (that would be exactly the harness coupling the design forbids).
+
+    One deliberate ADDITION to that state machine: the completion gate
+    (:attr:`completion_gate`, the runner's own contract), because the first
+    real-task run measured what its absence costs -- a session that filled a
+    form correctly, claimed ``finish`` without submitting, and scored binary 0
+    where the reply channel's identical answers scored 1.0 through its
+    challenge.
     """
 
     endpoint: Path
@@ -416,6 +438,22 @@ class ActionBridge:
     max_steps: int
     record: RecordBatch | None = None
     ask: Callable[[ActionBatch], Awaitable[str | None]] | None = None
+    #: The task as it was stated -- the reset observation's text -- restated by
+    #: the completion challenge (the same source the runner's gate uses).
+    instruction: str = ""
+    #: The runner's completion-gate controls, carried here so the session path
+    #: has the IDENTICAL contract (see ``runner/completion.py``): at the default
+    #: ON, the first ``done`` claim is challenged once and the second is always
+    #: accepted, so the gate can never trap an episode in a challenge loop. A
+    #: control arm flips the gate rather than the code path: the driver's
+    #: ``--no-completion-gate`` disables the gate for BOTH channels, and the
+    #: ``completion_challenges`` config bound applies to both (it has no CLI
+    #: flag).
+    completion_gate: bool = True
+    completion_challenges: int = 1
+    #: The channel sentence appended to the challenge -- see
+    #: :data:`CHALLENGE_REPLY_GUIDANCE`.
+    reply_guidance: str | None = None
 
     #: Set when the bridge has decided the episode should end (``finish``, the
     #: step budget). The driver reads it after the turn: a reason here is the
@@ -433,13 +471,40 @@ class ActionBridge:
         self._lock = asyncio.Lock()
         self._server: asyncio.AbstractServer | None = None
         self._closed = False
+        #: How many completion challenges this episode has made; bounded by
+        #: ``completion_challenges``. The counter lives HERE, not on the record,
+        #: for the runner's reason: the bound is a property of the episode's
+        #: protocol, not of any writer.
+        self._completion_fired = 0
+        #: ``(observation_id, rendered blocks)`` for every screen this bridge
+        #: has shown: observation zero in ``arm``, each executed result in
+        #: ``call``. The completion challenge re-attaches the state the model is
+        #: looking at from HERE instead of calling the renderer again -- the
+        #: renderer is stateful and a second render would append a duplicate
+        #: turn to the transcript the model is shown.
+        self._initial_shown: tuple[str, list[Any]] | None = None
+        self._last_shown: tuple[str, list[Any]] | None = None
 
     def arm(self, observation: Observation) -> None:
-        """Arm the token with the episode's first observation."""
+        """Arm the token with the episode's first observation.
+
+        The first screen is rendered here, ONCE, and kept: the prompt is built
+        from :attr:`initial_blocks`, and the completion challenge re-attaches
+        the same blocks when the episode's first call is a finish.
+        """
 
         if self._token is not None:
             raise SessionArmError("the action bridge was already armed with an observation")
         self._token = PendingObservationToken(observation)
+        self._initial_shown = (observation.observation_id, list(self.render(observation)))
+
+    @property
+    def initial_blocks(self) -> list[Any]:
+        """The first screen's rendered content, as the prompt shows it."""
+
+        if self._initial_shown is None:
+            raise SessionArmError("the action bridge has no first screen; arm it first")
+        return self._initial_shown[1]
 
     @property
     def steps(self) -> int:
@@ -448,6 +513,21 @@ class ActionBridge:
     @property
     def terminal(self) -> bool:
         return self._token is not None and self._token.terminal
+
+    def _shown_blocks(self, observation: Observation) -> list[Any]:
+        """The rendered state a finish can bind to, for the challenge.
+
+        Every observation a finish can bind to was rendered once -- observation
+        zero by ``arm``, each executed result by ``call`` -- so the match is
+        total by construction. The empty fallback exists only so a future
+        arming path cannot make the bridge raise inside a socket handler; it is
+        not a state either shipped path can produce.
+        """
+
+        for shown in (self._last_shown, self._initial_shown):
+            if shown is not None and shown[0] == observation.observation_id:
+                return shown[1]
+        return []
 
     def fold(self, event: AgentEvent) -> None:
         """Fold session events; the turn boundary re-arms the token.
@@ -596,13 +676,70 @@ class ActionBridge:
 
             terminal = _terminal_kind(batch)
             if terminal == "finish":
+                claim = finish_claim(batch)
+                if (
+                    self.completion_gate
+                    and self._completion_fired < self.completion_challenges
+                    and claim.status == "done"
+                ):
+                    # The runner's completion gate (``runner/completion.py``),
+                    # enforced on this channel: the FIRST ``done`` claim is
+                    # refused once and re-asked, and every later finish -- the
+                    # same declaration or a corrected one -- is accepted, so the
+                    # gate can never drive an episode into a challenge loop.
+                    # NOTHING MOVES: the token stays armed and unspent, no
+                    # ``action_batch`` is written, and no step is counted -- the
+                    # claim is a decision about the screen the model already has,
+                    # exactly as the runner's challenge is. A ``failed`` claim is
+                    # NOT challenged (there is no completion to confirm; the
+                    # runner's rule), and a claim is only ever challenged if the
+                    # shared text can name the task back, which is why the
+                    # instruction rides on the bridge.
+                    self._completion_fired += 1
+                    challenge = build_completion_challenge(
+                        claim=claim,
+                        instruction=self.instruction,
+                        observation=pending,
+                        reply_guidance=self.reply_guidance,
+                    )
+                    if self.record is not None:
+                        self.record(
+                            "completion_challenged",
+                            {
+                                "status": claim.status,
+                                "reason": claim.reason,
+                                "challenge": challenge,
+                                "observation_id": pending.observation_id,
+                            },
+                        )
+                    # Evidence first, re-prompt second (the runner's ordering):
+                    # on this channel the challenge IS the re-prompt, and the
+                    # state it names rides WITH it -- the same rendered blocks
+                    # the model already has for this observation, never a
+                    # re-render.
+                    return {
+                        "content": [TextContent(text=challenge), *self._shown_blocks(pending)],
+                        "is_error": False,
+                        "details": {"terminal": "completion-challenged"},
+                    }
                 # Mirrors the runner: a finish batch is recorded and ends the
                 # episode; it is never sent to the adapter (no action in it
-                # mutates the environment).
+                # mutates the environment). The record carries the CLAIM -- its
+                # status and reason -- because that is what the challenge (and
+                # any reader grading a finish) reasons about; an action count
+                # alone cannot answer "what did it claim".
                 token.mark_terminal()
                 self.end_requested = "finish"
                 if self.record is not None:
-                    self.record("finish", {"actions": len(batch.actions)})
+                    self.record(
+                        "finish",
+                        {
+                            "status": claim.status,
+                            "reason": claim.reason,
+                            "actions": len(batch.actions),
+                            "completion_challenged": self._completion_fired > 0,
+                        },
+                    )
                 return {
                     "content": [TextContent(text=FINISH_ACK)],
                     "is_error": False,
@@ -637,8 +774,10 @@ class ActionBridge:
             token.record_in_flight(result.observation)
             if self.record is not None:
                 self.record("batch", {"batch": batch, "result": result})
+            rendered = self.render(result.observation)
+            self._last_shown = (result.observation.observation_id, rendered)
             return {
-                "content": self.render(result.observation),
+                "content": rendered,
                 "is_error": False,
                 "details": {"receipt": result.receipt.model_dump(mode="json")},
             }
@@ -713,6 +852,7 @@ async def open_episode_session(
     roots: SessionRoots,
     on_event: Callable[[AgentEvent], Any] | None = None,
     session_opener: Callable[..., Any] | None = None,
+    confinement_root: Path | None = None,
 ) -> EpisodeSession:
     """Open the session an episode runs, subscribing the event sink first.
 
@@ -722,11 +862,25 @@ async def open_episode_session(
     same job as iteration over ``sdk.events``; subscribing instead keeps the
     fold on the engine's own dispatch order rather than one queue behind it,
     which is what the token's turn-boundary arming requires.
+
+    ``confinement_root`` confines the session's local tools to the episode
+    scratch (see ``Session.set_tool_confinement`` and
+    ``local_operator.tools.confinement``). Installed BEFORE the sink and the
+    first prompt, because the session rebuilds its tool context per turn: a
+    tool call served in the first turn must already run against the confined
+    context, and there is no later point that is as early.
     """
 
     opener = session_opener or sdk.open_session
     context = opener(spec, roots=roots, mode="own")
-    session = await context.__aenter__()
+    # ``Any`` on purpose, the same idiom ``sdk._build_session`` uses for its
+    # post-open attachment calls: the declared session type is
+    # ``SessionProtocol``, and confinement is installed through a concrete
+    # ``Session`` member the protocol deliberately does not carry (the one
+    # caller that needs it is this arm, not a host surface).
+    session: Any = await context.__aenter__()
+    if confinement_root is not None:
+        session.set_tool_confinement(confinement_root)
     unsubscribe = session.subscribe(on_event) if on_event is not None else None
     return EpisodeSession(
         session=session,
@@ -803,6 +957,7 @@ async def run_session_episode(
     max_wall_s: float | None = None,
     launch: Any = AdapterSupervisor.launch,
     rescue: Any = run_rescue,
+    confinement_root: Path | None = None,
 ) -> SessionArmOutcome:
     """Run ONE episode as a session: launch, reset, prompt, score, clean up.
 
@@ -955,6 +1110,14 @@ async def run_session_episode(
                 },
             ),
             ask=_make_ask(adapter_session, config, answer_owner),
+            # The completion challenge's inputs: the task as the reset published
+            # it (the same text the runner's gate restates), the runner's own
+            # gate controls (one channel-agnostic switch), and this channel's
+            # reply sentence.
+            instruction=observation.text or "",
+            completion_gate=config.completion_gate,
+            completion_challenges=config.completion_challenges,
+            reply_guidance=CHALLENGE_REPLY_GUIDANCE.format(tool_name=declaration.tool_name),
         )
         bridge.arm(observation)
         await bridge.start()
@@ -977,7 +1140,12 @@ async def run_session_episode(
                 if not record_errors:
                     record_errors.append(error)
 
-        handle = await open_episode_session(spec=episode_session, roots=roots, on_event=_sink)
+        handle = await open_episode_session(
+            spec=episode_session,
+            roots=roots,
+            on_event=_sink,
+            confinement_root=confinement_root,
+        )
         try:
             if not await _await_action_tool(handle, declaration, record):
                 raise SessionArmError(
@@ -987,7 +1155,11 @@ async def run_session_episode(
                 )
             tool_names = handle.tool_names
             record.write("tools", {"names": list(tool_names)})
-            text, images = split_prompt_content(renderer.render(observation))
+            # The first screen's blocks come from the bridge: ``arm`` rendered
+            # it once and the completion challenge re-attaches the same blocks,
+            # so rendering again here would append a duplicate turn to the
+            # transcript the model is shown.
+            text, images = split_prompt_content(bridge.initial_blocks)
             prompt = PROMPT_HEADER.format(tool_name=declaration.tool_name) + "\n" + text
             wall_timer: asyncio.TimerHandle | None = None
             if max_wall_s is not None:
