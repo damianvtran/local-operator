@@ -49,6 +49,7 @@ from local_operator.mobile import install as mobile_install
 from local_operator.paths import CONFIG_DIR_ENV
 from local_operator.tunnels import config as tunnel_config
 from local_operator.tunnels import install as tunnel_install
+from local_operator.tunnels import state as tunnel_state
 from local_operator.update import InstallKind
 from local_operator.wakes import install as wakes_install
 
@@ -95,6 +96,7 @@ def _patch_launcher(
     *,
     fail: bool = False,
     pid: int | None = None,
+    stopped_pid: int | None = None,
     kickstart_fails: bool = False,
     kickstart_comes_back: bool = True,
 ) -> None:
@@ -112,8 +114,12 @@ def _patch_launcher(
 
     ``pid`` adds the other half of what ``print`` really answers: a RUNNING job
     prints a ``pid = <n>`` line (:func:`local_operator.launchd.job_pid`), which is
-    the only handle the build probe has on the process. Without it the stand-in
-    answers the stopped-job shape.
+    the only handle the build probe has on the process. ``stopped_pid`` is the
+    THIRD answer — the label is registered and NOT running (exit 0, no ``pid =``
+    line, the shape the 2026-09-27 incident was found in), and it is also the pid
+    a successful ``kickstart`` brings up for that job. With neither, ``print``
+    answers NOT REGISTERED (exit non-zero), which is a third decline on purpose:
+    the stopped arm owns only a job launchd still HAS.
 
     TWO KICKSTART ANSWERS, because launchd has two: ``kickstart_fails`` is launchctl
     REFUSING the request (non-zero, nothing asked to happen), and
@@ -135,7 +141,7 @@ def _patch_launcher(
     # TWO AXES, because launchd has two: `loaded` is whether the label is registered
     # at all, and `live` is the pid behind it (None for a registered-but-stopped job).
     # Collapsing them makes the bootstrap's own verification read as a failure.
-    loaded = [pid is not None]
+    loaded = [pid is not None or stopped_pid is not None]
     live = [pid]
 
     def fake(*args: str):
@@ -155,11 +161,17 @@ def _patch_launcher(
         if verb == "kickstart":
             if kickstart_fails:
                 return _Completed(list(args), 1)
-            # Accepted: launchd kills the process and starts another one, which is a
-            # pid that differs from the one the repair recorded.
-            # ``kickstart_comes_back=False`` models the daemon that exits immediately:
-            # the kick succeeded and the label keeps no process.
-            live[0] = None if not kickstart_comes_back or live[0] is None else live[0] + 1
+            # Accepted: launchd kills the process and starts another one — a pid that
+            # differs from the one the repair recorded, or the FIRST pid when there
+            # was none (``stopped_pid``). ``kickstart_comes_back=False`` models the
+            # daemon that exits immediately: the kick succeeded and the label keeps
+            # no process.
+            if not kickstart_comes_back:
+                live[0] = None
+            elif live[0] is None:
+                live[0] = stopped_pid
+            else:
+                live[0] = live[0] + 1
             return _Completed(list(args), 0)
         if verb == "bootstrap" and fail:
             return _Completed(list(args), 1)
@@ -514,6 +526,11 @@ def test_the_port_is_taken_from_the_plist_being_replaced(
 #: repair that probed the wrong daemon's pid would still "work" with one shared value.
 _PIDS = {"mobile": 111, "browser bridge": 222, "tunnel": 333, "wakes supervisor": 444}
 
+#: The pid a successful REVIVAL brings up for a loaded-but-stopped job. Distinct
+#: from every ``_PIDS`` value, so a cell that revived the wrong daemon — or a
+#: confirmation that read an old pid as a new one — fails loudly.
+_REVIVED_PID = 999
+
 
 def _layout(
     tmp_path: Path,
@@ -556,6 +573,7 @@ def _rig(
     kickstart_fails: bool = False,
     kickstart_comes_back: bool = True,
     daemon_pids: bool = True,
+    stopped_pids: dict[str, int] | None = None,
 ) -> dict[str, list[tuple[str, ...]]]:
     """The shipped refresh step with the runner and the build probe injected.
 
@@ -564,6 +582,12 @@ def _rig(
     ``moved_pid`` is the one daemon whose probe answers "a generation other than
     ``current``"; every other pid answers ``None``, which is what the shipped probe
     answers for a daemon that is current AND for one it could not read.
+
+    ``stopped_pids`` marks daemons that are REGISTERED AND NOT RUNNING — the
+    loaded-but-stopped state, each with the pid its revival brings up. Only the
+    tunnel has an arm for that state (2026-09-27); the other daemons are handed
+    it too where a story needs them, because "the arm must not fire for them" is
+    part of what the revival cells pin.
 
     THE MOBILE DAEMON IS NEVER ASKED (review round 1, R4): its own step bounces it
     unconditionally right after this one, so ``refresh_plist_if_stale`` returns before
@@ -577,11 +601,13 @@ def _rig(
 
     calls: dict[str, list[tuple[str, ...]]] = {name: [] for name in targets}
     for name, (module, _path, _render, _label) in targets.items():
+        stopped_pid = (stopped_pids or {}).get(name)
         _patch_launcher(
             monkeypatch,
             module,
             calls[name],
-            pid=_PIDS[name] if daemon_pids else None,
+            pid=_PIDS[name] if daemon_pids and stopped_pid is None else None,
+            stopped_pid=stopped_pid,
             kickstart_fails=kickstart_fails,
             kickstart_comes_back=kickstart_comes_back,
         )
@@ -697,8 +723,8 @@ def test_a_current_plist_on_a_current_build_is_only_read_not_bounced(
 ) -> None:
     """The control case, and the one this repair could most easily break.
 
-    The reading IS made — one ``launchctl print`` per daemon, which is the only cost
-    this adds to an upgrade with nothing to do — and nothing else: no write, no
+    The reading IS made — one ``launchctl print`` per daemon (two for the tunnel,
+    which also asks the stopped question) — and nothing else: no write, no
     ``kickstart``, no summary line. The probe answering ``None`` here is what the
     shipped probe answers for a daemon that IS current (pinned in
     tests/unit/test_daemon_build_probe.py).
@@ -715,11 +741,21 @@ def test_a_current_plist_on_a_current_build_is_only_read_not_bounced(
     assert update_mod.daemons_refresh_command() == 0
 
     domain = launchd.job_domain()
-    for name in ("browser bridge", "tunnel", "wakes supervisor"):
+    for name in ("browser bridge", "wakes supervisor"):
         assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
+    # THE TUNNEL READS TWICE, and that is the stopped question's cost on a healthy
+    # machine: the build question reads the pid and finds the build current, and
+    # the stopped arm — which cannot see that reading and must establish "not
+    # running" itself — reads once more and declines. One extra bounded ``print``
+    # per upgrade, no write, no kick.
+    assert calls["tunnel"] == [
+        ("print", f"{domain}/{targets['tunnel'][3]}"),
+        ("print", f"{domain}/{targets['tunnel'][3]}"),
+    ], calls["tunnel"]
     assert calls["mobile"] == [], calls["mobile"]
     captured = capsys.readouterr()
     assert "restarted onto the new build" not in captured.out
+    assert "restarted after stopping silently" not in captured.out
     assert captured.err == ""
 
 
@@ -790,12 +826,15 @@ def test_a_daemon_that_is_not_running_is_never_kicked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stopped daemon has no build to compare, so the repair declines.
+    """A label launchd does not have is never kicked, by anyone.
 
-    This is the deliberate non-goal stated in `launchd.restart_if_build_moved`: the
-    repair for a stopped-but-loaded job is the installers' own `kickstart` path,
-    which resumes a job whose PLIST is correct, and this question must not start a
-    daemon nobody asked it to start.
+    ``daemon_pids=False`` models the job NOT BEING REGISTERED (``print`` exits
+    non-zero) — the booted-out shape, whose repair is the installers' reload.
+    The build question declines for it, and so does the tunnel's stopped arm: a
+    kickstart needs a label launchd still HAS, and the arm's own read is the one
+    extra ``print`` the tunnel pays for asking. The REGISTERED-but-stopped
+    shape, where the new arm does act, is
+    ``test_a_silently_stopped_tunnel_is_started_again_by_the_refresh``.
     """
     calls = _rig(
         targets,
@@ -809,11 +848,16 @@ def test_a_daemon_that_is_not_running_is_never_kicked(
 
     assert update_mod.daemons_refresh_command() == 0
 
-    for name in ("browser bridge", "tunnel", "wakes supervisor"):
-        assert calls[name] == [("print", f"{launchd.job_domain()}/{targets[name][3]}")], (
-            name,
-            calls[name],
-        )
+    domain = launchd.job_domain()
+    for name in ("browser bridge", "wakes supervisor"):
+        assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
+    # THE TUNNEL READS TWICE and no kick: the build question reads and declines
+    # (no pid), then the stopped arm reads again — finding the label gone, which
+    # is not a state it owns — and the refresh walks on.
+    assert calls["tunnel"] == [
+        ("print", f"{domain}/{targets['tunnel'][3]}"),
+        ("print", f"{domain}/{targets['tunnel'][3]}"),
+    ], calls["tunnel"]
     assert calls["mobile"] == [], calls["mobile"]
 
 
@@ -943,3 +987,305 @@ def test_a_probe_that_raises_is_reported_and_never_escapes(
     assert calls["mobile"] == [], calls["mobile"]
     captured = capsys.readouterr()
     assert "warning: tunnel daemon was not refreshed: ps exploded" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# THE STRANDED STATE: the job launchd has, and is not running.
+#
+# WHY, MEASURED. A daemon that exits CLEANLY is not retried by launchd
+# (`KeepAlive{SuccessfulExit: false}` is deliberate: a park, and a deliberate
+# stop, must not be re-run), and BOTH questions the refresh already had decline
+# for it — the plist rewrite cannot see it (content-identical), and the build
+# question has no pid to read. Measured on the operator's machine 2026-09-27:
+# the Radient tunnel connector was found loaded and stopped at 14:47 local,
+# ~12 hours down, with no park record (`state.json` absent) and
+# `config.stopped: false` — and five `lop update` installs in the window had
+# walked the refresh path and printed nothing for it. What brought it back was
+# the manual `lop tunnel install`, whose own `install()` has always had a
+# kickstart arm for a dead job; that arm was simply unreachable from the
+# refresh (`launchd.start_if_stopped` is it, wired in
+# `tunnels/install.refresh_plist_if_stale`).
+#
+# WHAT IS PINNED. The tunnel is the one daemon with a caller that can state the
+# stop policy — a park and `config.stopped` are people's decisions; a silent
+# stop is nobody's — so it is the one daemon whose refresh now STARTS a
+# loaded-but-stopped job (once, confirmed by a new pid, with its own summary
+# line), and its gates are pinned because the wrong answer in either direction
+# is expensive: reviving a deliberate stop restores remote access against the
+# operator, and leaving a silent stop down is the incident. The other daemons
+# are observed walking past the same state, which is the sibling check in test
+# form: a second daemon growing the arm has to move a cell here.
+# ---------------------------------------------------------------------------
+
+
+def _stopped_tunnel(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, ...]],
+) -> tuple[ModuleType, Path, str]:
+    """The tunnel with a CURRENT plist and a LOADED-BUT-STOPPED job.
+
+    The incident's exact shape: the generation layout exists (so the stopped arm
+    is reachable), the plist is byte-identical (so the rewrite has nothing to
+    do), and ``print`` answers the registered-no-pid shape — with the pid a
+    successful revival brings up. Only the tunnel's launcher is replaced; the
+    other daemons are the wider cells' business, not this helper's.
+    """
+    module, path, render, label = targets["tunnel"]
+    _layout(tmp_path, monkeypatch, running="g1", current="g1")
+    path.write_bytes(plistlib.dumps(render()))
+    _patch_launcher(monkeypatch, module, calls, stopped_pid=_REVIVED_PID)
+    return module, path, label
+
+
+def test_a_silently_stopped_tunnel_is_started_again_by_the_refresh(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """THE INCIDENT, and the cell this change exists to make pass.
+
+    A connector that had stopped silently — no park, no ``config.stopped`` —
+    must be kickstarted by the refresh, once, and only after a pid that had not
+    been there before proves the start, and the upgrade summary must say so:
+    until that line, the stop was invisible (twelve hours of one). Also pinned
+    here: the sibling daemons read and walk past the same state, and the next
+    refresh sees the revived connector RUNNING and does not kick it again.
+    """
+    calls = _rig(
+        targets,
+        tmp_path,
+        monkeypatch,
+        running="g1",
+        current="g1",
+        stopped_pids={"tunnel": _REVIVED_PID},
+    )
+    tunnel_config.save({"stopped": False})
+
+    assert update_mod.daemons_refresh_command() == 0
+
+    domain = launchd.job_domain()
+    label = targets["tunnel"][3]
+    # THE SHAPE, in order: the build question reads and declines (no pid to
+    # compare), the stopped question reads and finds the state it owns, the ONE
+    # kick, and the confirmation read that sees the new pid.
+    assert calls["tunnel"] == [
+        ("print", f"{domain}/{label}"),
+        ("print", f"{domain}/{label}"),
+        ("kickstart", "-k", f"{domain}/{label}"),
+        ("print", f"{domain}/{label}"),
+    ], calls["tunnel"]
+    for name in ("browser bridge", "wakes supervisor"):
+        assert calls[name] == [("print", f"{domain}/{targets[name][3]}")], (name, calls[name])
+    assert calls["mobile"] == [], calls["mobile"]
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert [line for line in captured.out.splitlines() if "daemon:" in line] == [
+        "tunnel daemon: restarted after stopping silently — remote access should return"
+    ], captured.out
+
+    # IDEMPOTENT: the second refresh sees it running — two reads, no kick, no line.
+    for recorded in calls.values():
+        recorded.clear()
+    assert update_mod.daemons_refresh_command() == 0
+    assert [call[0] for call in calls["tunnel"]] == ["print", "print"], calls["tunnel"]
+    assert "restarted after stopping silently" not in capsys.readouterr().out
+
+
+def test_a_parked_tunnel_is_left_stopped(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A park waits on a PERSON — ``rearm_if_parked`` owns the start.
+
+    It fires off the credential write when the login is fixed. A refresh that
+    kickstarted a parked connector would re-run the failed login before the
+    person has done anything, park it again, and put that noise in the log
+    whose whole design is to stay quiet until the person acts.
+    """
+    calls: list[tuple[str, ...]] = []
+    module, _path, label = _stopped_tunnel(targets, tmp_path, monkeypatch, calls)
+    tunnel_config.save({"stopped": False})
+    tunnel_state.mark_parked(reason="login_required", detail="sign-in expired")
+
+    outcome = module.refresh_plist_if_stale()
+
+    assert outcome.kind == "left-stopped", outcome
+    assert outcome.summary() == "" and outcome.warning() == ""
+    assert calls == [
+        ("print", f"{launchd.job_domain()}/{label}"),
+        ("print", f"{launchd.job_domain()}/{label}"),
+    ], calls
+
+
+def test_a_deliberately_stopped_tunnel_is_left_stopped(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``lop tunnel stop`` is a decision, and a refresh may not undo it.
+
+    ``stopped: true`` is written by ``stop``, ``revoke`` and ``uninstall``.
+    Starting the connector would restore remote access the operator turned off
+    — the one outcome an automatic repair must never produce.
+    """
+    calls: list[tuple[str, ...]] = []
+    module, _path, label = _stopped_tunnel(targets, tmp_path, monkeypatch, calls)
+    tunnel_config.save({"stopped": True})
+
+    outcome = module.refresh_plist_if_stale()
+
+    assert outcome.kind == "left-stopped", outcome
+    assert outcome.summary() == "" and outcome.warning() == ""
+    assert calls == [
+        ("print", f"{launchd.job_domain()}/{label}"),
+        ("print", f"{launchd.job_domain()}/{label}"),
+    ], calls
+
+
+def test_a_stopped_tunnel_with_no_readable_configuration_is_left_stopped(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unverifiable is not the same as stopped, and takes the same answer.
+
+    No ``config.json`` (or an unreadable one) means ``stopped`` cannot be
+    checked — the same direction ``rearm_if_parked`` takes on its own
+    ``ValueError``: the conservative answer is the one that cannot undo a
+    decision the operator may have made by deleting the file (which is what
+    ``revoke`` does, and its intent was removal, not revival).
+    """
+    calls: list[tuple[str, ...]] = []
+    module, _path, label = _stopped_tunnel(targets, tmp_path, monkeypatch, calls)
+
+    outcome = module.refresh_plist_if_stale()
+
+    assert outcome.kind == "left-stopped", outcome
+    assert "kickstart" not in [call[0] for call in calls], calls
+    assert calls == [
+        ("print", f"{launchd.job_domain()}/{label}"),
+        ("print", f"{launchd.job_domain()}/{label}"),
+    ], calls
+
+
+def test_a_stopped_tunnel_is_not_read_on_a_machine_without_the_layout(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """No layout, no question — held for the stopped arm too.
+
+    The arm must not become a second refresh contract with different guards: a
+    machine the generation layout has not reached gets no ``launchctl`` call
+    from this refresh at all, exactly as the build question already promised.
+    """
+    calls = _rig(
+        targets,
+        tmp_path,
+        monkeypatch,
+        running="g1",
+        current="g2",
+        moved_pid=_PIDS["tunnel"],
+        pointer=False,
+        stopped_pids={"tunnel": _REVIVED_PID},
+    )
+
+    assert update_mod.daemons_refresh_command() == 0
+
+    for name in targets:
+        assert calls[name] == [], (name, calls[name])
+    captured = capsys.readouterr()
+    assert [line for line in captured.out.splitlines() if "daemon:" in line] == []
+    assert captured.err == ""
+
+
+def test_a_refused_revival_is_reported_with_the_recovery_command(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """A kickstart launchd refuses leaves the connector down — say so, and how to fix it.
+
+    The daemon was already stopped, so nothing this refresh did put it there;
+    what the operator needs is the truth (it is still down) and the command that
+    brings it back. ONE attempt: a retry loop against a refusing launchd is the
+    reload-loop the refresh contract forbids.
+    """
+    calls = _rig(
+        targets,
+        tmp_path,
+        monkeypatch,
+        running="g1",
+        current="g1",
+        stopped_pids={"tunnel": _REVIVED_PID},
+        kickstart_fails=True,
+    )
+    tunnel_config.save({"stopped": False})
+
+    assert update_mod.daemons_refresh_command() == 0
+
+    domain = launchd.job_domain()
+    label = targets["tunnel"][3]
+    assert calls["tunnel"] == [
+        ("print", f"{domain}/{label}"),
+        ("print", f"{domain}/{label}"),
+        ("kickstart", "-k", f"{domain}/{label}"),
+    ], calls["tunnel"]
+    captured = capsys.readouterr()
+    assert [line for line in captured.out.splitlines() if "daemon:" in line] == []
+    assert "warning: tunnel daemon was not refreshed:" in captured.err
+    assert "it had stopped and launchctl would not restart it" in captured.err
+    assert "`lop tunnel install`" in captured.err
+
+
+def test_a_revival_that_brought_nothing_up_is_not_announced(
+    targets: dict[str, Target],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    """THE EXIT CODE IS NOT EVIDENCE, held for the revival too (R3's rule).
+
+    ``kickstart`` exits 0 when launchd ACCEPTS the request, and a daemon that
+    dies instantly (a bad build, the port already taken, a shim that cannot
+    resolve the pointer) still answers 0. Claiming "restarted after stopping
+    silently" from that would tell the operator their remote access was back
+    when it is not. No confirmed start, no announcement — and no "STOPPED"
+    either: the arm cannot see a state change it did not produce.
+    """
+    calls = _rig(
+        targets,
+        tmp_path,
+        monkeypatch,
+        running="g1",
+        current="g1",
+        stopped_pids={"tunnel": _REVIVED_PID},
+        kickstart_comes_back=False,
+    )
+    tunnel_config.save({"stopped": False})
+
+    assert update_mod.daemons_refresh_command() == 0
+
+    domain = launchd.job_domain()
+    label = targets["tunnel"][3]
+    assert calls["tunnel"][:3] == [
+        ("print", f"{domain}/{label}"),
+        ("print", f"{domain}/{label}"),
+        ("kickstart", "-k", f"{domain}/{label}"),
+    ], calls["tunnel"]
+    # BOUNDED WAIT, not a retry: every call after the kick is the confirmation
+    # loop reading for a pid that never appears, and there is no second kick.
+    tail = [call[0] for call in calls["tunnel"][3:]]
+    assert tail and tail == ["print"] * len(tail), calls["tunnel"]
+    captured = capsys.readouterr()
+    assert "restarted after stopping silently" not in captured.out
+    assert "warning: tunnel daemon was not refreshed:" in captured.err
+    assert "did not report a new process within" in captured.err
+    assert "`lop tunnel install`" in captured.err
+    assert "STOPPED" not in captured.err, captured.err

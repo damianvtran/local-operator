@@ -179,15 +179,18 @@ from local_operator.slash_commands import (
     NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
     PROJECT_NAME_VERBS,
+    PROJECT_PAGE_VERBS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
     network_subcommand_rows,
     primary_slash_name,
-    project_needs_name_text,
+    project_jump_already_text,
+    project_jump_no_live_text,
     project_show_refusal_text,
     project_store_unreadable_text,
     project_subcommand_rows,
     project_unavailable_text,
+    project_unexpected_argument_text,
     refresh_project_store,
     run_project_slash_op,
     slash_command_for,
@@ -369,6 +372,7 @@ from local_operator.tui.widgets.org_chart_view import (
 from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewDismissed,
+    ProjectsViewJumpRequested,
     ProjectsViewRefreshRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
@@ -18685,9 +18689,12 @@ class OperatorApp(App[None]):
     def _cmd_project(self, arg: str, notice: NoticeFn) -> None:
         """``/project`` — the operator's own verbs over THIS machine's store.
 
-        Slice 3's real handler. Bare / ``list`` prints the listing receipt;
-        ``show <name>`` opens the full-page :class:`ProjectsView` on that
-        project; ``new``/``delete``/``link``/``unlink`` mutate the store, with
+        Slice 3's real handler, extended by S3b. Bare / ``list`` prints the
+        listing receipt (with the page-entry footer); ``show <name>`` opens the
+        full-page :class:`ProjectsView` on that project, while NAMELESS
+        ``show`` opens the calling session's own set on the board and
+        ``board``/``timeline`` open the all-projects canvases;
+        ``new``/``delete``/``link``/``unlink`` mutate the store, with
         ``delete`` keeping ``/delete``'s typed-``yes`` two-step shape
         (``/project delete <name>`` rehearses, ``/project delete <name> yes``
         removes). Every other form — including the unknown-word refusal — is
@@ -18703,9 +18710,6 @@ class OperatorApp(App[None]):
         limitation the design states).
         """
         session = self._session
-        if session is None:
-            self._system_notice(*self._no_session_notice())
-            return
         registry = self._project_registry()
         if registry is None:
             self._system_notice(project_unavailable_text(), "warning")
@@ -18713,21 +18717,33 @@ class OperatorApp(App[None]):
         parts = arg.split(maxsplit=1)
         word = parts[0].casefold() if parts else ""
         rest = parts[1].strip() if len(parts) > 1 else ""
-        if word == "show":
-            name = rest.strip()
-            if not name:
-                notice(project_needs_name_text("show"), "warning")
-                return
+        if word in ("new", "link", "unlink") and session is None:
+            # The write verbs act ON the calling session (the auto-link, the
+            # link itself): with none there is nothing to act on, and the
+            # no-session notice is the honest answer. Every READ works without
+            # one — the board opens on a bare terminal (S3b).
+            self._system_notice(*self._no_session_notice())
+            return
+        if word in PROJECT_PAGE_VERBS:
+            # ONE unreadable-store rule for every page entry (Q4/Q5): re-read
+            # once, then refuse in the shared words rather than paint an empty
+            # canvas over a store that is merely broken.
             if getattr(registry, "load_error", None) is not None:
-                # The page reads the same store the receipt does: an unreadable
-                # one must refuse in the same words rather than resolve every
-                # name to "no project named" (QA round 1, Q4) — and the
-                # refusal must not be STICKY: this check runs before the read
-                # that would refresh the snapshot, so re-read once first
-                # (QA round 2, Q5).
                 refresh_project_store(registry)
             if getattr(registry, "load_error", None) is not None:
                 notice(project_store_unreadable_text(), "warning")
+                return
+        if word == "show":
+            name = rest.strip()
+            if not name:
+                # The NAMELESS form (S3b, operator refinement): the calling
+                # session's own set on the board. The WIDGET seeds the cursor
+                # onto the set (a member, or the kept cursor when the reader is
+                # already inside it — UX round 1, U1); no links is the plain
+                # all-projects board. Never the old name refusal.
+                session_id = str(getattr(session, "session_id", "") or "") if session else ""
+                associated = self._associated_project_ids(registry, session_id)
+                self._open_projects_view(view="board", associated=associated)
                 return
             try:
                 project = registry.get_project_by_name(name)
@@ -18740,6 +18756,16 @@ class OperatorApp(App[None]):
                 notice(project_show_refusal_text(name), "warning")
                 return
             self._open_projects_view(highlight=project.id)
+            return
+        if word in ("board", "timeline"):
+            # The all-projects canvases (S3b): no highlight, no marker set —
+            # the page opens on every project. A trailing word is REFUSED
+            # rather than silently dropped (review r1 NIT 4 / UX r1 U5), the
+            # same sentence the routed mirror answers.
+            if rest:
+                notice(project_unexpected_argument_text(word), "warning")
+                return
+            self._open_projects_view(view=word)
             return
         from local_operator.paths import config_dir
 
@@ -18759,18 +18785,44 @@ class OperatorApp(App[None]):
     def _project_registry(self) -> Any | None:
         """This machine's project registry, or ``None`` when there is none.
 
-        A READER's resolution, through the session facade: for an attached
-        session ``AttachedSession.project_registry`` builds the registry from
-        ITS OWN config dir, which is exactly the local-first rule this page
-        follows. The shape check (``list_projects``) mirrors the slice-1
-        handlers' guard, so a reduced facade degrades to the same sentence
-        rather than an AttributeError.
+        A READER's resolution: through the session facade when there is one
+        (``AttachedSession.project_registry`` builds the registry from ITS OWN
+        config dir, which is exactly the local-first rule this page follows),
+        and DIRECTLY off ``config_dir()`` when there is not — a bare terminal,
+        a viewer between attaches and a daemon-held front end all read the
+        SAME store this machine's sessions use, and reading a project must not
+        require a chat session (S3b, operator refinement). The shape check
+        (``list_projects``) mirrors the slice-1 handlers' guard, so a reduced
+        facade degrades to the same sentence rather than an AttributeError.
         """
         session = self._session
         registry = getattr(session, "project_registry", None) if session is not None else None
         if registry is None or not hasattr(registry, "list_projects"):
-            return None
+            from local_operator.paths import config_dir
+            from local_operator.projects import ProjectRegistry
+
+            try:
+                registry = ProjectRegistry(config_dir())
+            except Exception:  # noqa: BLE001 — no registry, one sentence
+                logger.debug("projects: could not open the local store", exc_info=True)
+                return None
         return registry
+
+    def _associated_project_ids(self, registry: Any, session_id: str) -> frozenset[str]:
+        """The projects THIS session is linked to, by id (S3b).
+
+        The nameless ``/project show`` resolves the caller's own set here so
+        the page can mark it (`◆`) and the title can name it. Empty when there
+        is no session, no links, or no readable store — the callers turn that
+        into the all-projects board, never a refusal.
+        """
+        if not session_id:
+            return frozenset()
+        try:
+            return frozenset(project.id for project in registry.projects_for_session(session_id))
+        except Exception:  # noqa: BLE001 — the page degrades, it does not crash
+            logger.debug("projects: associated set failed", exc_info=True)
+            return frozenset()
 
     def _projects_payload(self) -> list[Any]:
         """Compose every project's view ONCE — the page's whole data input.
@@ -28781,12 +28833,14 @@ class OperatorApp(App[None]):
                     )
                     attach_send.failed()
                 else:
-                    # THROUGH the same helper the `agent_end` path uses. This
-                    # branch printed a bare `str(error)` while the event path
-                    # appended a recovery hint, so one failure got instructions
-                    # and the other did not purely by route — and this is the
-                    # route the reported incident took, because an MCP auth
-                    # failure is what makes `prompt()` raise.
+                    # THROUGH the same recovery pipeline the `agent_end` path
+                    # uses — the AWAITED twin, because this runs as a worker and
+                    # a cold Radient probe must yield rather than freeze the app
+                    # (review R1). This branch printed a bare `str(error)` while
+                    # the event path appended a recovery hint, so one failure got
+                    # instructions and the other did not purely by route — and
+                    # this is the route the reported incident took, because an
+                    # MCP auth failure is what makes `prompt()` raise.
                     #
                     # THE ONE CLASS THAT IS NOT PROVABLY NOT-DELIVERED: a
                     # generic transport error on an attached session may have
@@ -28795,7 +28849,7 @@ class OperatorApp(App[None]):
                     # design OQ2) and its row survives `edit` as the message's
                     # fate statement.
                     unknown_delivery = self._send_failure_unknown_delivery(session, error)
-                    sentence = self._with_recovery_hint(str(error))
+                    sentence = await self._with_recovery_hint_async(str(error))
                     if unknown_delivery:
                         # THE RISK THE RESEND CARRIES, stated (UX round 1, U3):
                         # for the one class where a copy may already have
@@ -31639,14 +31693,22 @@ class OperatorApp(App[None]):
         self._close_settings_view()
 
     # -- the projects page (``/project show``) ------------------------------
-    def _open_projects_view(self, *, highlight: str | None = None) -> None:
+    def _open_projects_view(
+        self,
+        *,
+        highlight: str | None = None,
+        view: str | None = None,
+        associated: frozenset[str] | None = None,
+    ) -> None:
         """Enter the full-page projects view, optionally on one project.
 
         A MODE of this screen, cloned from :meth:`_open_settings_view`: the
         transcript region is replaced by the page while the dock stays put and
         greyed (``Screen.projects``). Opening it again RETARGETS the cursor
         rather than remounting, so a second ``show`` leaves the reader where
-        they were.
+        they were; a second open that names a ``view`` or an ``associated``
+        set RE-TARGETS the page instead — fresh composition, requested canvas,
+        new marker set (S3b).
 
         The composed views are gathered HERE (registry + one runtime scan +
         per-session rollups) and handed to the widget; the widget re-renders on
@@ -31654,17 +31716,31 @@ class OperatorApp(App[None]):
         repaint costs no registry or filesystem I/O.
         """
         if self._projects_view is not None:
-            if highlight:
+            if view is not None or associated is not None:
+                import time as _time
+
+                # Every open SPECIFIES its own marker set: an entry that names
+                # none clears the previous one instead of leaving the old `◆`
+                # rows and the `this session (N)` title under an all-projects
+                # entry (agent review r1 MINOR 2 / QA r1 Q3).
+                self._projects_view.load(
+                    views=self._projects_payload(),
+                    highlight=highlight,
+                    view=view,
+                    associated=associated if associated is not None else frozenset(),
+                    updated_at=_time.time(),
+                )
+            elif highlight:
                 self._projects_view.focus_project(highlight)
             return
         payload = self._projects_payload()
         # Captured before anything is blurred: this is where Esc puts the user
         # back, almost always the composer.
         self._projects_focus_restore = self.focused
-        view = ProjectsView()
-        self._projects_view = view
+        page = ProjectsView()
+        self._projects_view = page
         self._transcript_view().display = False
-        self.screen.mount(view, before=self.query_one("#input-dock"))
+        self.screen.mount(page, before=self.query_one("#input-dock"))
         self.screen.add_class(PROJECTS_LAYOUT_CLASS)
         # See ``_sync_boot_layout_class``: this mode replaces the transcript
         # region, so the boot layout's centred card and reserved rows have to
@@ -31677,7 +31753,13 @@ class OperatorApp(App[None]):
         # (the same seed-before-mount rule ``_open_org_chart_view`` records).
         import time as _time
 
-        view.load(views=payload, highlight=highlight, updated_at=_time.time())
+        page.load(
+            views=payload,
+            highlight=highlight,
+            view=view,
+            associated=associated if associated is not None else frozenset(),
+            updated_at=_time.time(),
+        )
 
     def _close_projects_view(self) -> bool:
         """Leave the projects mode and put the conversation back. True if open.
@@ -31719,6 +31801,37 @@ class OperatorApp(App[None]):
         """The page's ``esc`` hint was clicked — same exit as the key itself."""
         message.stop()
         self._close_projects_view()
+
+    def on_projects_view_jump_requested(self, message: ProjectsViewJumpRequested) -> None:
+        """``↵`` on the page: open the selected project's conversation (S3b).
+
+        A LIVE linked session is switched to through the SAME machinery
+        ``/resume`` and the sidebar's pick use (:meth:`_resume_session`: the
+        remote-owner guard, the local attach, the full reboot), so the page
+        adds no second way to change sessions. Anything else is answered
+        honestly — the states that exist, and the command that starts one —
+        never a silent no-op. The page closes first in both cases: the notice
+        lands in the transcript that the mode was hiding.
+        """
+        message.stop()
+        live = [session_id for session_id, state in message.sessions if state == "live"]
+        current = str(getattr(self._session, "session_id", "") or "") if self._session else ""
+        self._close_projects_view()
+        if live:
+            # The terminal's OWN session is checked FIRST (review r1 NIT 6):
+            # when it is one of several live links, whether `↵` says "already
+            # in" or switches to a sibling must not depend on the store's link
+            # order.
+            if current and current in live:
+                self._system_notice(
+                    project_jump_already_text(message.project_name, current), "info"
+                )
+                return
+            self._resume_session(live[0], self._notice)
+            return
+        self._system_notice(
+            project_jump_no_live_text(message.project_name, message.sessions), "info"
+        )
 
     def on_projects_view_refresh_requested(self, message: ProjectsViewRefreshRequested) -> None:
         """``r`` on the page — recompose HERE and hand the widget fresh data.
@@ -38241,14 +38354,19 @@ class OperatorApp(App[None]):
                     await self._prompt_loop_turn(session, LOOP_PROMPT, **echo.prompt_kwargs())
                 except Exception as error:  # surface and stop; never spin
                     loop_error = str(error)
-                    # THROUGH the same helper the composer's turn uses. A loop
+                    # Same pipeline, same reason as the composer's turn — the
+                    # awaited twin, so the unattended loop worker never freezes
+                    # the app on a cold probe. A loop
                     # runs UNATTENDED by definition — `/loop 20` overnight — so
                     # this is the surface where a remedy is worth most and the
                     # one where the user is least able to ask for it: they come
                     # back to a naked 401 with no way to tell what to run
                     # (review U6). Same asymmetry U2 was raised about, one
                     # surface over.
-                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
+                    notice(
+                        f"loop stopped: {await self._with_recovery_hint_async(str(error))}",
+                        "error",
+                    )
                     # Same stale-entry hazard as `_start_turn`: a failed
                     # prompt never announces, so take the entry back out.
                     self._discard_user_echo_for(source, echo)
@@ -38634,10 +38752,15 @@ class OperatorApp(App[None]):
                 except Exception as error:  # surface and stop; never spin
                     if self._is_current(source):
                         self._retire_turn_band(session)
-                    # Same helper, same reason as the numeric worker: a held
+                    # Same pipeline, same reason as the numeric worker — the
+                    # awaited twin keeps this worker from freezing the app on a
+                    # cold probe: a held
                     # goal loop is the MOST unattended surface in the app, and
                     # it was printing a bare `str(error)` (review U6).
-                    notice(f"loop stopped: {self._with_recovery_hint(str(error))}", "error")
+                    notice(
+                        f"loop stopped: {await self._with_recovery_hint_async(str(error))}",
+                        "error",
+                    )
                     # A failed prompt never announces, so take the stale echo
                     # entry back out (same hazard as numeric mode / `_start_turn`).
                     self._discard_user_echo_for(source, echo)
@@ -46349,6 +46472,11 @@ class OperatorApp(App[None]):
             # the same mechanism the aborted branch already used.
             self._own_interrupt_notice = notice
             self._own_interrupt_kind = "error"
+            # The Radient usage-limit sentence is completed OFF the loop when
+            # only a probe could add it (review round 1, R1): `_with_recovery_hint`
+            # may not block this handler, so it renders what is already known and
+            # the worker extends the notice when the probe lands.
+            self._schedule_recovery_notice(notice, message.error)
         # NOT `elif`: `_finalize_turn` owns the "interrupted" notice now, so
         # this handler's chain ends at the error notice.
         self._finalize_turn(
@@ -46430,17 +46558,17 @@ class OperatorApp(App[None]):
             outcome_known=message.outcome_known,
         )
 
-    def _with_recovery_hint(self, error: str) -> str:
-        """``error`` plus the local remedy for it, when there is one to name.
+    def _provider_recovery_hints(self, error: str) -> tuple[str, str]:
+        """The two SYNC remedies for ``error``, and the provider they resolved.
 
-        ONE helper because there are TWO surfaces that print a turn's error —
-        `on_turn_ended` for a turn that reported one, and the turn worker's
-        `except` for a `prompt()` that raised — and the user cannot tell them
-        apart. They had drifted: only the event path appended a hint, so the
-        IDENTICAL failure came with instructions or without depending on which
-        internal route it took. The motivating incident took the bare route,
-        because an MCP auth failure is what makes `prompt()` raise in the first
-        place.
+        The shared front of the recovery twins below — ONE pipeline because
+        there are TWO surfaces that print a turn's error, `on_turn_ended` for a
+        turn that reported one and the turn worker's `except` for a `prompt()`
+        that raised — and the user cannot tell them apart. They had drifted:
+        only the event path appended a hint, so the IDENTICAL failure came with
+        instructions or without depending on which internal route it took. The
+        motivating incident took the bare route, because an MCP auth failure is
+        what makes `prompt()` raise in the first place.
 
         MCP IS ASKED FIRST, and the order is the point rather than an
         optimisation. Both hints answer "which credential do I fix?", and for an
@@ -46451,6 +46579,11 @@ class OperatorApp(App[None]):
         `ProviderError` form, which no MCP failure produces), so this is a
         tie-break that should never fire — stated explicitly because a silent
         dependence on that would be one refactor from breaking.
+
+        Returns ``(text, provider)``. When the MCP hint fires it already IS the
+        final remedy for this error, so the provider comes back blank and the
+        usage arm (whose gate requires a provider) stays off — the same
+        early-return semantics the single helper had.
 
         Best-effort throughout: a hint is an ADDITION to an error the user is
         already being shown, so anything that raises while deriving one leaves
@@ -46481,7 +46614,7 @@ class OperatorApp(App[None]):
             remedy = derive(error) if callable(derive) else None
             hint = mcp_auth_recovery_hint(error, remedy if isinstance(remedy, str) else None)
             if hint:
-                return f"{error}\n{hint}"
+                return f"{error}\n{hint}", ""
         except Exception:  # noqa: BLE001 — a hint must never replace the error
             logger.debug("MCP recovery hint could not be derived", exc_info=True)
         try:
@@ -46492,10 +46625,115 @@ class OperatorApp(App[None]):
             provider = ""
             if self._session is not None:
                 provider = (self._session.model_label or "").partition("/")[0]
-            return append_auth_recovery(error, provider or None)
+            # TWO additive remedies, each keyed off the RENDERED string so a
+            # kind this app cannot classify stays untouched: the auth hint
+            # (whose own gate leaves a quota error alone — a login cannot fix
+            # it) and the Radient usage-limit remedy (whose gate leaves every
+            # other kind and provider alone). The kinds are disjoint, so
+            # neither can double-fire the other's sentence.
+            return append_auth_recovery(error, provider or None), provider
         except Exception:  # noqa: BLE001 — same contract as above
             logger.debug("provider recovery hint could not be derived", exc_info=True)
-        return error
+        return error, ""
+
+    def _with_recovery_hint(self, error: str) -> str:
+        """``error`` plus every remedy already knowable, probing nothing.
+
+        THE SYNC TWIN, signature frozen because its one caller — the
+        `on_turn_ended` message handler — is a plain sync method that existing
+        tests invoke directly. It must therefore also be NON-BLOCKING: review
+        round 1 (R1) measured its previous shape running the Radient probe
+        inline, freezing input/repaint for 5.04s on a blackholed connect and
+        heading toward ~10s in the worst case. The usage arm now renders from
+        the module's cache-only entry point, and when only a probe could add
+        its sentence the caller completes the notice through
+        `_schedule_recovery_notice`. Every site that can await uses the
+        awaited twin below instead.
+        """
+        hinted, provider = self._provider_recovery_hints(error)
+        from local_operator.providers.radient_recovery import (
+            append_usage_limit_recovery_cached,
+        )
+
+        return append_usage_limit_recovery_cached(hinted, provider or None)
+
+    async def _with_recovery_hint_async(self, error: str) -> str:
+        """``error`` plus every remedy, probing a cold cache while yielding.
+
+        THE AWAITED TWIN, for the three call sites that run as async workers
+        (the send-failure path in `run_prompt` and both `/loop` noticers): the
+        probe is awaited rather than blocking, so its bounded wait always
+        yields to the app instead of freezing it. That difference in access
+        pattern is the ONLY difference from the sync twin, which is why both
+        are thin shells over `_provider_recovery_hints`.
+        """
+        hinted, provider = self._provider_recovery_hints(error)
+        from local_operator.providers.radient_recovery import (
+            append_usage_limit_recovery_async,
+        )
+
+        return await append_usage_limit_recovery_async(hinted, provider or None)
+
+    def _schedule_recovery_notice(self, notice: NoticeBlock, error: str) -> None:
+        """Complete ``notice`` with the account sentence, off the event loop.
+
+        WHY THIS EXISTS (review round 1, R1): the sync arm may not probe — it
+        runs on the app's event loop, where a cold probe would freeze input
+        and repaint for up to the probe envelope. So the notice is rendered
+        with what the process already knows, and when only a probe could add
+        the Radient sentence, one runs as an app worker and the notice is
+        EXTENDED in place (`NoticeBlock.restate`) the moment it lands. A miss
+        leaves the notice exactly as rendered; nothing here raises, and a bare
+        harness without a running worker degrades to the unextended notice.
+        """
+        try:
+            from local_operator.providers.radient_recovery import (
+                usage_limit_recovery_pending,
+            )
+
+            provider = ""
+            if self._session is not None:
+                provider = (self._session.model_label or "").partition("/")[0]
+            if not usage_limit_recovery_pending(error, provider or None):
+                return
+        except Exception:  # noqa: BLE001 — a hint must never replace the notice
+            logger.debug("Radient recovery notice could not be scheduled", exc_info=True)
+            return
+        rendered = notice.text()
+        try:
+            self.run_worker(
+                self._finish_recovery_notice(notice, rendered),
+                thread=False,
+                exit_on_error=False,
+            )
+        except Exception:  # noqa: BLE001 — a bare harness (no running app) keeps the base text
+            logger.debug("Radient recovery notice worker could not start", exc_info=True)
+
+    async def _finish_recovery_notice(self, notice: NoticeBlock, rendered: str) -> None:
+        """The worker half of `_schedule_recovery_notice`: probe, then extend.
+
+        ``rendered`` is the text the notice was created with, held by the
+        closure rather than read back off the widget: the update is monotonic
+        (that text plus ONE line), and the module's append guard keeps a
+        retried render from stacking even if something else touched the row.
+        """
+        try:
+            from local_operator.providers.radient_recovery import (
+                append_recovery_line_once,
+                usage_limit_recovery_line,
+            )
+
+            line = await usage_limit_recovery_line()
+        except Exception:  # noqa: BLE001 — the module's contract, kept local
+            logger.debug("Radient recovery line could not be derived", exc_info=True)
+            return
+        updated = append_recovery_line_once(rendered, line)
+        if updated == rendered:
+            return
+        try:
+            notice.restate(updated, "error")
+        except Exception:  # noqa: BLE001 — a settled notice must survive this
+            logger.debug("Radient recovery notice could not be restated", exc_info=True)
 
     def _finalize_turn(
         self,

@@ -52,7 +52,7 @@ def test_scan_classifies_live_wedged_and_stale(tmp_path: Path) -> None:
 def test_scan_marks_a_stale_heartbeat_wedged(tmp_path: Path) -> None:
     record = make_record()
     record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     import json
 
     # Written directly rather than through publish(), which stamps a fresh
@@ -97,7 +97,7 @@ def test_scan_reader_mode_moves_nothing(tmp_path: Path) -> None:
     """
     dead = make_record(pid=2**22 - 3)  # a pid that does not exist
     path = registry.publish(dead, root=tmp_path)
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     torn = directory / "999998.json"
     torn.write_text("{not json", encoding="utf-8")
 
@@ -119,7 +119,7 @@ def test_scan_names_the_unparseable_record_it_removes(
     which file went or why. The file and the exception type are named now; the level is
     ``debug`` because the readers that can see the condition already warn about it.
     """
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     torn = directory / "999997.json"
     torn.write_text("{not json", encoding="utf-8")
 
@@ -142,7 +142,7 @@ def test_scan_can_hold_unparseable_evidence_for_a_window(tmp_path: Path) -> None
     after it lands"). All three arms are asserted on the one function, plus the mtime
     shape that neither bound caught before (MINOR 1): a stamp in the future.
     """
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     torn = directory / "999996.json"
     torn.write_text("{not json", encoding="utf-8")
 
@@ -188,7 +188,7 @@ def test_scan_passes_the_zombie_policy_through(
     monkeypatch.setattr(registry, "zombie_states", spy)
     record = make_record()  # this process: alive, so the zombie branch is reachable
     record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     (directory / f"{record.pid}.json").write_text(json.dumps(record.to_json()), encoding="utf-8")
 
     assert [state for _record, state in registry.scan(root=tmp_path, check_zombie=False)] == [
@@ -253,7 +253,7 @@ def test_a_scan_probes_for_the_whole_quiet_population_in_one_fork(
     # answers EPERM, i.e. "alive, not mine"), and a child we spawn so the set has
     # a pid whose liveness is not an assumption.
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     try:
         pids = [os.getpid(), 1, child.pid]
         for index, pid in enumerate(pids):
@@ -356,7 +356,7 @@ def test_a_zombie_population_costs_one_probe_not_one_per_corpse(
 
     monkeypatch.setattr(registry, "is_zombie", counted_single)
     monkeypatch.setattr(registry, "zombie_states", counted_batch)
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     try:
         for index, child in enumerate(children):
             record = make_record(pid=child.pid)
@@ -402,7 +402,7 @@ def test_a_batch_that_answers_nothing_falls_back_to_the_probe(
         return real_is_zombie(pid)
 
     monkeypatch.setattr(registry, "is_zombie", counted_single)
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
 
     def write_record(pid: int, session_id: str) -> None:
         record = make_record(pid=pid)
@@ -435,7 +435,7 @@ def test_a_batch_that_answers_nothing_falls_back_to_the_probe(
 
 
 def test_scan_tolerates_torn_records(tmp_path: Path) -> None:
-    directory = registry.run_dir(tmp_path)
+    directory = registry.ensure_run_dir(tmp_path)
     (directory / "999999.json").write_text("{not json")
     assert registry.scan(root=tmp_path) == []
     assert not (directory / "999999.json").exists()
@@ -617,7 +617,7 @@ def test_the_publisher_rewrites_the_file_it_created(
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(started_in))
     record = make_record()
     publisher = registry.RecordPublisher(record)
-    own = registry.run_dir(started_in) / f"{record.pid}.json"
+    own = registry.ensure_run_dir(started_in) / f"{record.pid}.json"
     try:
         assert publisher.path == own, "the publisher's own record is the one it names"
         # The config dir moves under a live runtime. Every test boundary in this
@@ -626,7 +626,7 @@ def test_the_publisher_rewrites_the_file_it_created(
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
         publisher.heartbeat(conversation_name="renamed")
         assert own.exists(), "the record must stay where this publisher put it"
-        stray = registry.run_dir(moved_to) / f"{record.pid}.json"
+        stray = registry.ensure_run_dir(moved_to) / f"{record.pid}.json"
         assert not stray.exists(), (
             "a heartbeat must not write into a directory this publisher never "
             "published into — that filename belongs to another session"
@@ -656,7 +656,7 @@ def test_the_publisher_removes_only_the_file_it_created(
     # rather than a missing-file one.
     other = make_record()
     registry.publish(other, root=moved_to)
-    other_path = registry.run_dir(moved_to) / f"{other.pid}.json"
+    other_path = registry.ensure_run_dir(moved_to) / f"{other.pid}.json"
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
     try:
         publisher.close()

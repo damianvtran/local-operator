@@ -1232,18 +1232,25 @@ def project_settled_rows(
                     self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
                     appended = True
                 continue
-            # The credential-SHAPE notice, which now carries its OWN type rather
-            # than ``session_incident``: the record is operator-facing and stopped
-            # entering the model's context (see ``harness/message_types.py``), but
-            # the OPERATOR's row is unchanged, and its own type needs its own
-            # branch for exactly the reason the incident branch above exists — a
-            # custom message with no branch falls past every one of them and past
-            # the role-based handling below, so an unbranched record paints NOWHERE.
+            # The credential-SHAPE notice, which carries its OWN type rather than
+            # ``session_incident``: the record is operator-facing and stopped
+            # entering the model's context (see ``harness/message_types.py``), and
+            # its own type needs its own branch for exactly the reason the incident
+            # branch above exists — a custom message with no branch falls past every
+            # one of them and past the role-based handling below, so an unbranched
+            # record paints NOWHERE.
             #
-            # Same `warning` ink and the same text as before the split, because
-            # what the operator asked to see did not change; only the model stopped
-            # being told. Do not merge this back into the incident branch: the two
-            # types are separate so that the renderer can exclude one of them.
+            # NO NEW ROW OF THIS TYPE IS WRITTEN (2026-09-27): the operator ruled
+            # the notice false-positive noise — "Remove the operator-facing
+            # information too, it's false positive so it would confuse users" — and
+            # ``Session.journal_shape_incident`` is now silent. This branch is KEPT
+            # because a transcript written before that date still carries the rows,
+            # and a resumed session replays them from the journal through this fold:
+            # deleting the branch would turn every stored notice into a row that
+            # paints nowhere, which is the defect the branch was added to fix (the
+            # live fold had no receipt for it either). Same `warning` ink as before
+            # the notice was retired, because what the row shows on REPLAY has not
+            # changed — only whether a live session still produces one.
             if getattr(message, "custom_type", None) == SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()

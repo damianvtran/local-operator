@@ -3029,6 +3029,14 @@ class Session:
         #: ``assistant(tool_use) -> user -> tool_result`` and brick the session
         #: (see ``_append_or_park_journal``). The flush is at the turn boundary,
         #: next to the other parked notices.
+        #:
+        #: NO NOTICE IS EMITTED FROM THIS QUEUE ANY MORE (``journal_shape_incident``
+        #: is the emitter and now writes nothing) — the operator's ruling is quoted
+        #: there. The queue, its dedupe and its exposure gate are KEPT intact rather
+        #: than torn out: they are the funnel every masking surface already reports
+        #: through, and gutting them here would mean re-plumbing the pipe filter and
+        #: the live-text path for no observable change. What they feed now files
+        #: nothing, which is the whole point.
         self._pending_shape_incidents: list[tuple[str, list[str], str, bool]] = []
         # The sink for shape hits observed by layers that mask BEFORE a result
         # exists — the live pipe filter and the live/peek/abort text path. The
@@ -11050,6 +11058,33 @@ class Session:
         if self._disposed or not raw:
             return
         text = rendered or format_incident_message(raw, self._model.provider, self._model.model_id)
+        if not rendered:
+            # THE DESKTOP/SSE COPY of the Radient usage-limit remedy. The
+            # incident text is what the desktop renders as its
+            # `[session incident …]` row (and what the next turn's model
+            # context replays), so guidance a user must see has to live in
+            # THIS string rather than only in the TUI's error line. Gated on
+            # the RAW error's rendered form and the session's provider; a
+            # no-op for every other failure. Bounded and swallowing — see the
+            # module — and the append is idempotent, so a reappearing incident
+            # cannot stack a second remedy.
+            #
+            # The local guard is explicit even though the module's contract
+            # already covers the await: the property this method relies on
+            # (nothing here can raise) must be LOCAL, not borrowed, or an
+            # import-time failure would escape and take the incident's own
+            # write with it (review round 1, R4).
+            try:
+                from local_operator.providers.radient_recovery import (
+                    append_recovery_line_once,
+                    usage_limit_recovery_applies,
+                    usage_limit_recovery_line,
+                )
+
+                if usage_limit_recovery_applies(raw, self._model.provider):
+                    text = append_recovery_line_once(text, await usage_limit_recovery_line())
+            except Exception:  # noqa: BLE001 — a remedy must never replace the incident
+                logger.debug("Radient usage-limit remedy could not be derived", exc_info=True)
         details: dict[str, Any] = {"text": text, "raw": raw[:1000]}
         if token:
             details["token"] = token
@@ -11361,7 +11396,16 @@ class Session:
             logger.debug("shape incident queue failed", exc_info=True)
 
     async def _flush_shape_incidents(self) -> None:
-        """Journal the queued shape reports. Called at the turn boundary."""
+        """Drain the queued shape reports at the turn boundary. Files NOTHING.
+
+        The drain is kept — and the queue with it — so the funnel every masking
+        surface already reports through still exists and still empties itself, and
+        so a reader tracing "what happens to a queued hit" arrives at
+        :meth:`journal_shape_incident` and finds the operator's ruling rather than
+        a dangling field. What it does NOT do is emit: the emitter it calls is
+        silent (see its docstring). Called at the turn boundary like the other
+        parked notices.
+        """
         pending, self._pending_shape_incidents = self._pending_shape_incidents, []
         for tool, labels, summary, reached_model in pending:
             try:
@@ -11369,94 +11413,73 @@ class Session:
                     tool, labels, summary, reached_model=reached_model
                 )
             except Exception:  # noqa: BLE001 — a notice is not worth a turn
-                logger.warning("could not journal a credential-shape incident", exc_info=True)
+                logger.warning("could not flush a credential-shape report", exc_info=True)
 
     async def journal_shape_incident(
         self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
     ) -> None:
-        """Tell the OPERATOR (transcript, live receipt) that READABLE material was masked.
+        """The credential-shape NOTICE's emitter, and it is deliberately SILENT.
 
-        Rendered rather than classified: this is not a FAILURE, and running it
-        through :func:`~local_operator.incidents.classify_incident` would attach
-        a failure category and a "this is why the previous turn ended" tail to a
-        turn that ended for its own reasons — the same reason a credential
-        change and a model switch carry their own formatter.
+        THE OPERATOR'S RULING, verbatim, and it is the requirement:
 
-        **The MODEL is deliberately NOT told**, which is where this record now
-        differs from every other notice in :mod:`local_operator.incidents`: it
-        carries :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`, a type the
-        renderer's allow-list excludes, so the row reaches the transcript and the
-        live operator receipt and never enters the model's context. It rode
-        ``session_incident`` until 2026-09-24, which injected it as a user turn —
-        measured at 1,493 unnamed notices across 1,080 sessions on this machine,
-        plus the named ones. The notice names a value the guard ALREADY masked out
-        of the text the model received, so the model never held it, cannot rotate
-        it, and the guard's own false positives (a usage counter, a DSN whose
-        username is its password) had agents ending turns over leaks that had not
-        happened. See ``harness/message_types.py`` for the full argument and
-        ``harness/render.py`` for the exclusion, which is load-bearing.
+            "Remove the operator-facing information too, it's false positive so it
+            would confuse users."
 
-        ``reached_model`` is the severity, and its default is the ESCALATED one so
-        that a caller which does not know cannot make the quieter claim. In-tree it
-        is now always True: both producers (the session result hook and
-        ``harness.redaction.report_shape_hits``, which every other surface goes
-        through) gate on it, because a credential masked WHOLE was never leaked to
-        the transcript and so is no incident at all. The quieter wording is kept in
-        the formatter rather than deleted — it is the formatter's own contract, and
-        a caller that deliberately has something to say about a contained hit
-        should not have to invent the words — and what the operator asked for is
-        silence on the contained case, not the deletion of the sentence.
+        and the same instruction the day before, on the same class of noise:
 
-        Persisted, unlike an MCP recovery: what it records (a credential reached a
-        tool result, and either it was contained there or it is readable in this
-        context) is still true in a resumed session, and the value stays contained
-        because the store re-registers it from the transcript's own redaction.
+            "remove anything that is flagging incidents or injecting any sort of
+            credential detection context so that we stop confusing/tripping up
+            agents".
+
+        So this method reaches no surface at all: no transcript row, no live
+        receipt, no ``hub peek`` heading, nothing to the model. It is kept as a
+        method — and kept on the flush path — rather than deleted, so the one
+        place every surface funnels through remains visible and NAMEABLE: a reader
+        asking "where would a shape notice be filed?" finds this method and its
+        answer, instead of finding no trace of the mechanism and rebuilding one.
+
+        WHY THE NOTICE GOES, in the operator's own evidence: four rows in a single
+        session, on ``read``, ``write``, ``eval`` and ``edit``. Three read "a
+        credential the shape table could not name" (an ESCALATION naming nothing —
+        the empty-labels case), and the ``read`` one named its call as a workflow
+        YAML file being opened. A credential-SHAPE guard firing on a CI workflow
+        being read is the false positive the operator ruled noise, and the notice
+        told the operator to rotate a credential that was never leaked while
+        costing every agent that saw one a turn spent chasing it.
+
+        WHAT IS NOT REMOVED, and must never become conditional here because it does
+        not live here: the MASKing on every surface (including the bash pipe
+        filter), the CONTAINMENT registration on both paths
+        (``VariableStore.redact_with_report`` and the pipe filter's
+        ``register_shape_hits_for_containment``), the high-confidence shape table,
+        and the unsafe-command safeguards. The notice was the INDICATOR; those are
+        the PROTECTION, and only the indicator was asked to go. Every one of them
+        runs UPSTREAM of this method — masking and registration are complete before
+        a hit is ever queued — so silencing the notice cannot weaken them.
+
+        WHAT ALREADY-PERSISTED ROWS DO, since the just-stored transcript of an older
+        build still carries them and a resume replays them: they render EXACTLY as
+        they did before. The record keeps its own
+        :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`, the TUI's fold keeps its
+        branch for that type, ``harness/comms.py`` keeps its peek heading, and the
+        renderer's exclusion in ``harness/render.py`` keeps it out of the model.
+        Nothing here touches those, deliberately: the row is a fact of history, and
+        a change that hid it would make an old session show a hole where it used to
+        show a row. Only NEW rows stop being written.
+
+        ``tool``, ``labels``, ``summary`` and ``reached_model`` are still accepted
+        so the call site and its signature are unchanged; they are now unused. The
+        signature is kept rather than narrowed because the arguments ARE the
+        record's shape, and a future reader comparing this method to
+        ``format_shape_incident_message`` (which is kept, unchanged, for the same
+        reason the wording is kept — see ``incidents.py``) should see them agree.
         """
-        from local_operator.incidents import format_shape_incident_message
-
-        if self._disposed:
-            return
-        text = format_shape_incident_message(tool, labels, summary, reached_model=reached_model)
-        message = CustomMessage(
-            custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
-            attribution="system",
-            details={
-                "text": text,
-                "tool": tool,
-                "shapes": list(labels),
-                "summary": summary,
-                # Recorded, and NOTHING reads it today (agent review R1, nit): it
-                # is there so the classification is a field on the record rather
-                # than something a future reader has to re-derive by matching the
-                # prose, which is the fragile thing this change exists to remove.
-                "reached_model": reached_model,
-            },
-        )
-        try:
-            async with self._journal_lock:
-                await self._transcript.append_message(message, preserve_mtime=True)
-                self._append_or_park_journal(message)
-        except OSError:
-            logger.warning("could not journal a credential-shape incident", exc_info=True)
-            return
-        # THE LIVE RECEIPT, and the reason this method exists in the shape it
-        # does: a row written to the transcript — and, until this change, to the
-        # model's context — is not
-        # a ticket — the operator has to SEE it. Measured before this
-        # emit: the row reached the model, persisted, and painted on no operator
-        # surface at all, live or on replay.
-        #
-        # `warning` ink for whichever classification reaches this method, and
-        # in-tree today that is only the escalated one: the contained hit is
-        # dropped at `_queue_shape_incident`, the single gate, so this comment is
-        # about the INK of a severity this path still carries by text. The
-        # severity difference lives in the wording rather than in the ink, because
-        # a quieter ink for the contained case is a DESIGN decision on the notice
-        # row rather than something this change should make by the back door.
-        try:
-            await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
-        except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
-            logger.debug("could not emit the shape-incident receipt", exc_info=True)
+        # NO EMISSION, on purpose. See the docstring for the operator's ruling, the
+        # false-positive evidence, and the list of what this deliberately does not
+        # touch. Explicitly NOT a `raise` or a `del`: the method is on the flush
+        # path for every queued hit, and an exception here would turn a silenced
+        # notice into a failed turn boundary.
+        return
 
     async def journal_mcp_unavailable(self, server: str, reason: str) -> None:
         """Tell the MODEL an MCP server's tools are gone — a WARNING, not a failure.

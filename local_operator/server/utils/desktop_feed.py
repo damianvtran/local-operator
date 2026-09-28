@@ -88,16 +88,15 @@ status_dedupe_key``), because one label carries a live age and would otherwise
 tick once a second on its own.
 
 AND IT IS A READER, INCLUDING WHEN NOTHING HAS EVER RUN. The run directory is
-resolved as a plain path and neither status read calls ``registry.run_dir`` — the
-probe and the connection baseline decline to scan when the directory is absent —
-so THE FEED creates nothing under ``run/``. Stated that narrowly on purpose
-(review round 2, MINOR 1): it is not true of the backend, because the sibling
-LIST read reaches the same helper — ``load_catalog`` → ``decorate_rows`` →
-``registry.scan`` → ``run_dir()`` — so the desktop app's first ``GET
-/v1/desktop/sessions`` creates ``run/mobile`` 0700 on a machine that has never
-run a session. That is pre-existing at the base commit and unchanged here; the
-point of saying so is that an operator must not read this paragraph as "an absent
-run directory means no runtime has ever published".
+resolved as a plain path, neither status read calls ``registry.run_dir``, and
+the probe and the connection baseline decline to scan when the directory is
+absent — so THE FEED creates nothing under ``run/``. Since #1666's review round 1
+(R1-1) that promise no longer depends on this module's guards at all:
+``registry.scan`` resolves without creating and returns ``[]`` for an absent
+directory, so ``load_catalog`` → ``decorate_rows`` → ``registry.scan`` — the
+sibling LIST read this paragraph used to name as the counter-example — creates
+nothing either, and neither does the first ``GET /v1/desktop/sessions`` that
+reaches it. The guards below remain as defence in depth, not as the mechanism.
 """
 
 from __future__ import annotations
@@ -546,14 +545,15 @@ class DesktopFeed:
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
-        #: plain path rather than through ``registry.run_dir``, which mkdirs and
-        #: chmods, and the resolution is only half the promise: ``registry.scan``
-        #: opens with its own ``run_dir`` call, so the two reads below decline to
-        #: SCAN while the directory is absent (review round 1, MAJOR 1 / QA Q2 —
-        #: ``_probe_status`` and ``_prime_status``). Absent therefore stays absent:
-        #: ``_fingerprint`` answers ``None``, the doorbell is silent, and the
-        #: directory is created by the runtime that publishes the first record —
-        #: through ``registry.publish``, i.e. by a WRITER, never by this reader.
+        #: plain path, and since #1666's review round 1 (R1-1)
+        #: ``registry.scan`` resolves without creating too — so BOTH halves of the
+        #: promise hold: the resolution creates nothing, and the two reads below
+        #: additionally decline to SCAN while the directory is absent (review round
+        #: 1, MAJOR 1 / QA Q2 — ``_probe_status`` and ``_prime_status``). Absent
+        #: therefore stays absent: ``_fingerprint`` answers ``None``, the doorbell
+        #: is silent, and the directory is created by the runtime that publishes the
+        #: first record — through ``registry.publish``, i.e. by a WRITER, never by
+        #: this reader.
         self._registry_dir = root / RUN_DIRNAME
         #: ``(st_ino, st_size, st_mtime_ns)`` of that directory. EVERY record
         #: write is a staged write + rename IN it (``registry._staged_write``),
@@ -915,12 +915,14 @@ class DesktopFeed:
         one on the first edge for every row.
 
         A MACHINE THAT HAS NEVER RUN A SESSION IS NOT ONE THIS CREATES THE RUN
-        DIRECTORY FOR (review round 1, MAJOR 1). ``registry.scan`` opens with
-        ``run_dir()``, which mkdirs and chmods, so the scan is skipped while the
-        directory is absent — the rest of the prime still runs, because a session
-        with no record has a status (``recent``) whether or not the directory
-        exists, and a status the client's list already shows must not be
-        announced as news when the first record does appear.
+        DIRECTORY FOR (review round 1, MAJOR 1), and since #1666's review round 1
+        (R1-1) that holds at the SOURCE as well: ``registry.scan`` creates nothing
+        and returns ``[]`` for an absent directory, so the ``is_dir`` guard below is
+        defence in depth rather than the mechanism. The rest of the prime still
+        runs either way, because a session with no record has a status
+        (``recent``) whether or not the directory exists, and a status the client's
+        list already shows must not be announced as news when the first record does
+        appear.
 
         PRIMED OVER EVERY USER SESSION, not only over the candidates an event
         could name. A session with no record, no wake and no attention has a
@@ -1862,10 +1864,11 @@ class DesktopFeed:
         consumes the same one-second slot: an early probe is a probe.
 
         A MACHINE THAT HAS NEVER RUN A SESSION KEEPS IT THAT WAY (review round
-        1, MAJOR 1 / QA Q2). ``registry.scan`` opens with ``run_dir()``, which
-        mkdirs and chmods, so the scan is asked for only while the directory is
-        there — this reader must not be the thing that creates ``run/mobile``
-        0700, and on a machine with no runtime there is nothing in it to read.
+        1, MAJOR 1 / QA Q2). ``registry.scan`` resolves without creating and
+        answers ``[]`` when the directory is absent, so this reader cannot create
+        ``run/mobile`` 0700 by any route; the ``is_dir`` guard below is therefore
+        defence in depth (and the arm that keeps the two reads
+        symmetric). On a machine with no runtime there is nothing in it to read.
         The wake index is read either way: it lives OUTSIDE ``run/mobile``, and a
         wake armed for a session with no record at all is exactly the cold-row
         case this clock exists for.

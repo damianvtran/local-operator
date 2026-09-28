@@ -938,7 +938,12 @@ so a relay restart mid-pairing cannot be used to replay an invite.
   `{"invite_id", "path", "expires_at", "role", "hosts", "expires_in_s"}` — never
   the token.
 - `lop network join` accepts a token inline, `@<path>`, or no argument (it reads
-  the newest file in the outbox directory).
+  the newest file in the outbox directory). `--host host:port` overrides where it
+  DIALS; `--advertise-host host:port` (repeatable) declares where peers should
+  reach *this* device, and leads the list the inviter copies onto its member row
+  — the joiner's half of §10.4's "declared hosts, then detected ones", for the
+  device that most often has no dialable address of its own. `--name` sets the
+  name that row carries.
 
 **No flag anywhere accepts the SAS.** §5.3 is why.
 
@@ -2114,7 +2119,18 @@ advertised endpoint, and the link is then bidirectional. Concretely:
      port through it and put that hostname in `network.advertise_hosts`. This is
      the sanctioned WAN path: the tunnel gives reachability, and the peer link's
      own authentication gives access control, so a public endpoint grants an
-     attacker nothing but a handshake attempt.
+     attacker nothing but a handshake attempt. **Where that key actually lives,
+     because spelling it in dots is how an operator ends up beside it:** the
+     nested path is `values.network.advertise_hosts` in `config.yml`, and the key
+     has a row in `/settings` (section *Mesh network*, *Advertised endpoints*).
+     `lop config edit network.advertise_hosts "tunnel.example.com:4100"` writes it
+     too — a LIST value, so it takes a comma-separated list and refuses anything
+     the key cannot carry. For a device that is JOINING, `lop network join
+     --advertise-host host:port` declares the same list for that pairing, so a
+     joiner behind a tunnel does not have to edit `config.yml` at all. A
+     top-level `network:` block is not this key and never was: the store reads
+     `values` only, and it now says so — naming the key and its `values.` home —
+     instead of leaving the edit to be discovered as erased.
   2. One member with a public address (an EC2 peer, the spine's §10 topology).
   3. A future hub/forwarding capability (§14) — **not built here**.
 - **Never** UPnP/NAT-PMP (silently changes the operator's router configuration),
@@ -2219,8 +2235,11 @@ its `_consumer_defaults()` entry (`AGENTS.md`, "Adding a configuration key").
 Audit retention keys are `mesh-incident-response.md`'s. Nothing here is a secret,
 so every key is `--json`-safe. **The registry half is a SECTION-WIDE GAP, and this
 table must not be read as "all of these are in `/settings`":** the keys in the
-registry today are `network.max_handshakes` (added by the round that introduced it)
-and the audit retention keys; the transport and link keys above are read out of
+registry today are `network.max_handshakes` (added by the round that introduced it),
+the three of §10.4's own "where can peers reach us" set — `network.listen_address`,
+`network.port`, `network.advertise_hosts`, registered with the rows that made that
+section's sanctioned remedy reachable from a surface — and the audit retention keys.
+The rest of the transport and link keys above are read out of
 `config.yml` by `NetworkSettings.from_config`, which is a different mechanism from
 the registry and does not appear on the page. Recorded here rather than papered
 over, because a table whose closing line claims visibility is how an operator

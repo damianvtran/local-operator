@@ -1104,6 +1104,17 @@ def format_shape_incident_message(
     notices across 1,080 sessions were injected as user turns, telling the model
     about a value the guard had already masked out of the text it received.
 
+    **NO IN-TREE CALLER REACHES THIS ANY MORE (2026-09-27), and that is the
+    point of keeping it.** The operator ruled the whole operator-facing notice
+    false-positive noise — "Remove the operator-facing information too, it's false
+    positive so it would confuse users" — and the emitter,
+    ``Session.journal_shape_incident``, is now silent, so nothing renders this
+    text into a live session. It is kept rather than deleted for two reasons: it
+    IS this formatter's contract, and the wording is what a reader of an OLD
+    transcript is still looking at on replay (a stored row is replayed verbatim by
+    the surfaces that fold it). A future consumer with something non-confusing to
+    say would render the true words from here rather than invent them.
+
     The counterpart to the shape pass in :mod:`local_operator.redaction_shapes`,
     and the reason it is its own formatter rather than a
     :func:`classify_incident` category: nothing FAILED. A tool carried a

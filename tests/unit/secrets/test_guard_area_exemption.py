@@ -529,12 +529,14 @@ async def test_a_result_that_prints_the_path_inside_credential_text_still_escala
 async def test_a_registered_credential_still_escalates_loudly_outside_the_guard_area(
     tmp_path: Path,
 ) -> None:
-    """Registration changes nothing about escalation, and the demand is audible.
+    """Registration changes nothing about escalation; the QUEUE still hears it.
 
     Driven outside the exempt area with a registered session value in the same
-    result: the value is masked (registration still works), and the rotated
-    demand still reaches the JOURNAL — the operator-facing surface — rather than
-    stopping at the queue.
+    result: the value is masked (registration still works), and the escalating
+    read still reaches the QUEUE — which is the exemption's own predicate, and the
+    live half of this test. What it does NOT reach any more is the JOURNAL: the
+    operator ruled the notice false-positive noise (2026-09-27), so the demand
+    that used to land on the operator-facing surface now stops at the queue.
     """
     session = _session(tmp_path)
     store = session.variables
@@ -544,12 +546,22 @@ async def test_a_registered_credential_still_escalates_loudly_outside_the_guard_
     stream = _OneCallStream("read", json.dumps({"path": str(notes)}))
 
     rows = await _drive(session, _read_tool(), stream)
+    # Read the queue BEFORE flushing: the flush drains it, so an assertion after
+    # would read an empty list and pass for the wrong reason.
+    flags = _escalation_flags(session)
     await session._flush_shape_incidents()
 
-    body = (tmp_path / "session" / "transcript.jsonl").read_text(encoding="utf-8")
+    # Lazily written — on a turn, not by the flush — and NOTHING is written for a
+    # report now, so the file may not exist at all. Reading defensively is the
+    # honest form of "no row was written": an unconditional read would turn this
+    # into a FileNotFoundError that passes for the wrong reason if it were caught,
+    # and the alternative (asserting the file absent) would pin the wrong thing.
+    journal = tmp_path / "session" / "transcript.jsonl"
+    body = journal.read_text(encoding="utf-8") if journal.exists() else ""
     assert REGISTERED_VALUE not in rows[0], "a registered credential was not masked"
     assert ESCALATING_TEXT not in rows[0], "the escalating case reached the model"
-    assert "rotate" in body, "the escalated notice no longer reaches the transcript"
+    assert flags == [True], "the escalating read no longer reached the queue"
+    assert "rotate" not in body, "the retired notice still reached the transcript"
 
 
 def test_publishing_a_call_identity_alone_confers_nothing() -> None:
@@ -673,17 +685,24 @@ async def test_a_decoy_at_the_exempt_spelling_still_escalates_from_another_root(
 
 
 @pytest.mark.asyncio
-async def test_a_laundered_value_in_that_decoy_reaches_the_operator(
+async def test_a_laundered_value_in_that_decoy_reaches_no_operator_surface(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """THE LAUNDERING CASE. ``write`` a real value into the decoy, ``read`` it relatively.
+    """THE LAUNDERING CASE, inverted at the JOURNAL (2026-09-27).
 
     The reviewer's sharpest vector: an agent writes an escalating value into a
     file it names with the exempt relative spelling and reads it back. Masking
-    still applies (the value never reaches the model), but the rotation demand
-    is the thing that tells the operator a real secret was handled -- and the
-    union of roots is what silenced it. Asserted on all three surfaces the
-    requirement names: the model's text, the pending queue, and the JOURNAL.
+    still applies (the value never reaches the model) — that half is unchanged and
+    still asserted. What changed is the SURFACE: the rotation demand used to be
+    the journal row that told the operator a real secret was handled, and the
+    operator ruled that notice false-positive noise ("Remove the operator-facing
+    information too..."), so its absence is asserted here rather than its
+    presence.
+
+    The QUEUE half is kept and is the live half of this test: the exemption's own
+    predicate still decides here, so a regression that let an escalating value
+    past the guard's area would still be caught — but it now decides whether a hit
+    is queued, and nothing downstream of the queue is written.
     """
     session_dir = tmp_path / "session"
     (session_dir / "local_operator").mkdir(parents=True)
@@ -696,16 +715,18 @@ async def test_a_laundered_value_in_that_decoy_reaches_the_operator(
         "read", json.dumps({"path": "local_operator/redaction_shapes.py", "raw": True})
     )
     rows = await _drive(session, _read_tool(), stream, str(session_dir))
-    # Read the queue BEFORE flushing: ``_flush_shape_incidents`` drains it into
-    # the journal, so an assertion on the flags afterwards would read an empty
-    # list and pass for the wrong reason.
+    # Read the queue BEFORE flushing: ``_flush_shape_incidents`` drains it, so an
+    # assertion on the flags afterwards would read an empty list and pass for the
+    # wrong reason.
     flags = _escalation_flags(session)
     await session._flush_shape_incidents()
 
-    body = (tmp_path / "session" / "transcript.jsonl").read_text(encoding="utf-8")
+    journal = tmp_path / "session" / "transcript.jsonl"
+    body = journal.read_text(encoding="utf-8") if journal.exists() else ""
     assert ESCALATING_TEXT not in rows[0], "the laundered value reached the model"
     assert flags == [True], "the laundering vector was not escalated"
-    assert "rotate" in body, "the demand never reached the journal"
+    assert "rotate" not in body, "the retired notice still reached the journal"
+    assert "session_credential_redaction" not in body, "the retired notice was journaled"
 
 
 # --- R2-1: the whitespace spelling ------------------------------------------

@@ -39,6 +39,8 @@ from local_operator.session.runtime.presence import (
     desktop_delivery_present,
     desktop_presence,
     desktop_viewing_session,
+    ensure_delivery_dir,
+    ensure_desktop_run_dir,
     read_delivery,
     reset_cache,
 )
@@ -53,6 +55,18 @@ def _record(publisher: DesktopDeliveryPublisher, root) -> Path:
     so where they do it.
     """
     return delivery_record_path(publisher.instance_id, root)
+
+
+def _write_legacy_lease(root, payload: str) -> None:
+    """Write the legacy machine-wide lease, asking for its directory first.
+
+    ``presence.delivery_path`` is a PURE RESOLVER since #1666's review round 1
+    (R1-1) — it used to mkdir through ``desktop_run_dir``, so writing through it
+    created ``run/desktop`` as a side effect. A test standing in for an older
+    sibling is a WRITER, so it says so the way the product does.
+    """
+    ensure_desktop_run_dir(root)
+    delivery_path(root).write_text(payload)
 
 
 @pytest.fixture(autouse=True)
@@ -174,7 +188,7 @@ def test_a_dead_pid_is_reaped(tmp_path):
         "session_id": "b" * 12,
         "heartbeat_at": time.time(),
     }
-    delivery_path(tmp_path).write_text(json.dumps(payload))
+    _write_legacy_lease(tmp_path, json.dumps(payload))
     reset_cache()
 
     assert read_delivery(tmp_path).present is False
@@ -192,7 +206,7 @@ def test_a_stale_heartbeat_is_reaped(tmp_path):
         "session_id": "c" * 12,
         "heartbeat_at": time.time() - PRESENCE_TTL_S - 1.0,
     }
-    delivery_path(tmp_path).write_text(json.dumps(payload))
+    _write_legacy_lease(tmp_path, json.dumps(payload))
     reset_cache()
 
     assert desktop_delivery_present(tmp_path, "complete") is False
@@ -200,10 +214,10 @@ def test_a_stale_heartbeat_is_reaped(tmp_path):
 
 def test_a_corrupt_file_is_the_absent_answer_not_an_exception(tmp_path):
     """This is read on a turn's announce path; a raise would cost a turn."""
-    delivery_path(tmp_path).write_text("{not json")
+    _write_legacy_lease(tmp_path, "{not json")
     reset_cache()
     assert read_delivery(tmp_path).present is False
-    delivery_path(tmp_path).write_text("[]")
+    _write_legacy_lease(tmp_path, "[]")
     reset_cache()
     assert read_delivery(tmp_path).present is False
 
@@ -342,8 +356,11 @@ def _sibling_record(root: Path, instance_id: str, *, pid: int, heartbeat_at: flo
     inside a test — which is exactly the state R15 is about — so this stands in
     for the process that was killed before it reached ``close()``. It is written
     through ``delivery_record_path``, the same path a publisher owns, so the
-    layout under test is production's.
+    layout under test is production's — and the DIRECTORY is asked for explicitly,
+    because that resolver stopped creating ``run/desktop/delivery`` as a side
+    effect of being written through (#1666's review round 1, R1-1).
     """
+    ensure_delivery_dir(root)
     path = delivery_record_path(instance_id, root)
     path.write_text(
         json.dumps(

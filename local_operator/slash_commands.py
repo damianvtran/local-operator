@@ -194,8 +194,25 @@ def network_subcommand_rows() -> tuple[tuple[str, str], ...]:
 #: handler (which refuses an unknown word), the picker (which offers the rows)
 #: and :func:`command_argument_words` (which publishes the words to the desktop
 #: catalogue and the command route's validator). Milestone editing is NOT a
-#: slash verb: that is tool/API/UI work, so the vocabulary stays six words.
-PROJECT_SUBCOMMANDS: tuple[str, ...] = ("list", "show", "new", "delete", "link", "unlink")
+#: slash verb: that is tool/API/UI work. ``board`` and ``timeline`` are the two
+#: page entries beside the verbs — the all-projects subjects, so the operator
+#: can open the views without naming a project first (S3b).
+PROJECT_SUBCOMMANDS: tuple[str, ...] = (
+    "list",
+    "show",
+    "new",
+    "delete",
+    "link",
+    "unlink",
+    "board",
+    "timeline",
+)
+
+#: The verbs whose TUI form is the FULL-PAGE view: the app intercepts these and
+#: opens the page, while the routed mirror answers text. ``show`` is here in
+#: both its forms — nameless it opens the calling session's set on the board,
+#: named it lands on that project's row.
+PROJECT_PAGE_VERBS: tuple[str, ...] = ("show", "board", "timeline")
 
 #: The verbs whose SECOND argument slot is an existing project NAME (so the
 #: editor offers name rows there). ``list`` takes nothing, ``new`` takes a name
@@ -212,6 +229,8 @@ PROJECT_SUBCOMMAND_HELP: dict[str, str] = {
     "delete": "Remove a project permanently",
     "link": "Link this session to a project",
     "unlink": "Detach this session from a project",
+    "board": "Every project as a status board",
+    "timeline": "Every project on one time axis",
 }
 
 
@@ -351,6 +370,101 @@ def project_needs_name_text(word: str) -> str:
 def project_show_refusal_text(name: str) -> str:
     """``no project named …`` — names ``list``; never a silent no-op (design §5.3)."""
     return f"no project named {name!r} — /project list shows every tracked project."
+
+
+def project_listing_hint_text() -> str:
+    """The listing's FOOTER: the two page entries, named (S3b).
+
+    One short line at the END of a non-empty listing — the last thing in the
+    receipt and the first a narrow surface can lose. It is omitted entirely on
+    an empty store, where the empty sentence stands alone, and it never
+    precedes a row.
+    """
+    return "open the board: /project board · the timeline: /project timeline"
+
+
+def project_associated_heading_text(count: int) -> str:
+    """The nameless ``show`` receipt's heading when the session HAS links (S3b)."""
+    return f"this session's projects ({count}) — /project board opens them on the board:"
+
+
+def project_jump_no_live_text(name: str, sessions: Sequence[tuple[str, str]]) -> str:
+    """``↵`` on a project with no live session: what exists, and the way in (S3b).
+
+    Never a bare refusal: a linked-but-stopped session is named with its state
+    and ``/resume <id>`` is the command that starts one, and a project with no
+    links at all is told how to get one. With exactly ONE linked session the
+    spelling is the concrete command — ``/resume cd34ef56ab12 starts it`` — the
+    same shape the redial verdict uses (UX round 1, U4); the placeholder stays
+    for the multi-id case, where no single command is right.
+    """
+    if not sessions:
+        return (
+            f"{name!r} has no linked sessions — /project link {name} links this one, "
+            "or ask an agent to link a session."
+        )
+    listed = ", ".join(f"{session_id} [{state}]" for session_id, state in sessions[:3])
+    more = f" (+{len(sessions) - 3} more)" if len(sessions) > 3 else ""
+    if len(sessions) == 1:
+        return (
+            f"no live session to open for {name!r} — linked: {listed}{more}. "
+            f"/resume {sessions[0][0]} starts it."
+        )
+    return (
+        f"no live session to open for {name!r} — linked: {listed}{more}. "
+        "/resume <id> starts one."
+    )
+
+
+def project_unexpected_argument_text(word: str) -> str:
+    """``/project board extra`` — the page entries take no argument (review r1, NIT 4)."""
+    return f"/project {word} takes no argument — it opens every project."
+
+
+def project_jump_already_text(name: str, session_id: str) -> str:
+    """``↵`` on the project THIS terminal is already in (S3b)."""
+    return f"already in {name!r} — this terminal is its live session ({session_id})."
+
+
+def project_overview_receipt(
+    registry: Any,
+    *,
+    config_dir: Any,
+    session_id: str | None,
+    now: float | None = None,
+) -> tuple[str, str]:
+    """The text mirror of the page's nameless entries (S3b).
+
+    ``session_id`` (when the caller has one) selects the associated set first:
+    the page opens the board with exactly those rows marked, and this receipt
+    names and lists the same set. No links — or no session at all — falls back
+    to the all-projects listing, because NEITHER state is a refusal: a reader
+    with no project of their own still gets the overview.
+    """
+    from local_operator.projects import scan_runtime_states, store_error_text
+
+    associated: list[Any] = []
+    if session_id:
+        try:
+            associated = list(registry.projects_for_session(session_id))
+        except Exception:  # noqa: BLE001 — an unreadable store answered above
+            associated = []
+    if associated:
+        states = scan_runtime_states(config_dir)
+        rows = project_listing_rows(associated, states=states, now=now)
+        return (
+            "\n".join([project_associated_heading_text(len(associated)), *rows]),
+            "info",
+        )
+    try:
+        projects = list(registry.list_projects())
+    except Exception as exc:  # noqa: BLE001 — an overview is never worth an error
+        return (f"could not list projects: {store_error_text(exc)}", "warning")
+    if not projects:
+        return (project_empty_text(), "info")
+    states = scan_runtime_states(config_dir)
+    rows = project_listing_rows(projects, states=states, now=now)
+    return ("\n".join([*rows, project_listing_hint_text()]), "info")
 
 
 def project_delete_rehearsal_text(name: str) -> str:
@@ -537,7 +651,7 @@ def run_project_slash_op(
     word = (word or "list").casefold()
     linkable = session_id if session_id and _SESSION_ID_RE.fullmatch(session_id) else None
 
-    if word in ("list", "show", "delete", "link", "unlink"):
+    if word in ("list", "show", "delete", "link", "unlink", "board", "timeline"):
         # An UNREADABLE store must not answer with the empty-store sentence or
         # the no-such-project refusal: the row may exist and simply not be
         # readable, and a reader told otherwise is being lied to by the
@@ -559,12 +673,39 @@ def run_project_slash_op(
         if not projects:
             return (project_empty_text(), "info")
         states = scan_runtime_states(config_dir)
-        return ("\n".join(project_listing_rows(projects, states=states, now=now)), "info")
+        rows = project_listing_rows(projects, states=states, now=now)
+        # The listing's footer (S3b): the two page entries, named. A FOOTER —
+        # after every row, absent on an empty store.
+        return ("\n".join([*rows, project_listing_hint_text()]), "info")
+
+    if word in PROJECT_PAGE_VERBS:
+        name = rest.strip()
+        if word == "show" and not name:
+            # Nameless `show`: the calling session's own projects first, else
+            # the all-projects overview (S3b) — never the old name refusal.
+            return project_overview_receipt(
+                registry,
+                config_dir=config_dir,
+                session_id=linkable,
+                now=now,
+            )
+        if word in ("board", "timeline"):
+            # The all-projects entries take NO argument: silently ignoring a
+            # trailing word made `/project board alpha` open everything with
+            # no acknowledgement (review round 1, NIT 4 / UX round 1, U5).
+            if rest:
+                return (project_unexpected_argument_text(word), "warning")
+            # A caller with no page gets the overview and the hint names the
+            # page verb they asked for.
+            return project_overview_receipt(
+                registry,
+                config_dir=config_dir,
+                session_id=None,
+                now=now,
+            )
 
     if word == "show":
         name = rest.strip()
-        if not name:
-            return (project_needs_name_text("show"), "warning")
         try:
             project = registry.get_project_by_name(name)
         except Exception as exc:  # noqa: BLE001

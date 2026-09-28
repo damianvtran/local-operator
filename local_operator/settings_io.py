@@ -604,9 +604,10 @@ SECTIONS: tuple[Section, ...] = (
         "network",
         "Mesh network",
         Scope.NEW_LAUNCH,
-        "Bounds for `lop network`: audit retention, how many unauthenticated "
-        "connections the relay will hold at once, session-copy cadence and how long "
-        "a borrowed login lives. All take effect when the relay restarts.",
+        "Where this device listens, what it tells peers to dial, and the bounds for "
+        "`lop network`: audit retention, how many unauthenticated connections the "
+        "relay will hold at once, session-copy cadence and how long a borrowed login "
+        "lives. All take effect when the relay restarts.",
     ),
     Section(
         "retired",
@@ -1039,6 +1040,30 @@ def _bash_shell_help(windows: bool) -> str:
 
 #: This host's spelling, baked into the row below at import.
 _BASH_SHELL_HELP = _bash_shell_help(_IS_WINDOWS)
+
+
+def _validate_advertise_hosts(value: object) -> object:
+    """Every entry is ``host:port`` — the shape this row's help already promises.
+
+    Enforced at the WRITE facade rather than at the relay because this is the only place
+    a person types an endpoint, and every writer funnels through :func:`validate` (the
+    page, `lop config edit`, the server's `PATCH /v1/settings`). An entry with no port
+    (``203.0.113.7``) or an impossible one (``tunnel.example.com:70000``) was accepted,
+    persisted into ``listen.advertised``, and then carried into every invite — where it
+    reads as an address a joiner can dial and is not, which is the class of lie the rest
+    of this change is about (review round 1, M1).
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Advertised endpoints must be a list of host:port entries.")
+    for entry in value:
+        text = str(entry).strip()
+        host, _, port = text.rpartition(":")
+        if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ValueError(
+                f"not a dialable host:port: {text} — every entry needs a port, "
+                "for example tunnel.example.com:4100"
+            )
+    return value
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -3190,6 +3215,92 @@ SETTINGS: tuple[Setting, ...] = (
         # every click into a terminal with nothing on screen or in the log
         # saying why. Rejecting it here keeps the user in front of the field.
         validate_value=_validate_desktop_launch_command,
+    ),
+    # -- network: where peers reach this device -------------------------------
+    # THE TRIO THE DESIGN'S OWN TABLE NAMES. mesh-transport-identity.md §10.4 lists
+    # `network.listen_address`, `network.port` and `network.advertise_hosts` among
+    # the keys every one of which "needs its Setting, its module-level default
+    # beside the reader, and its _consumer_defaults() entry". They were the three
+    # that never got one, and the cost was not cosmetic: with no row, no surface in
+    # the product could show or write them, so the only documented way to declare
+    # an address was to hand-edit `config.yml` — and that edit went nowhere. A
+    # top-level `network:` block (beside `values:`, which is how a dotted key reads)
+    # is invisible to `get_nested_value`, which walks `values`, AND is deleted by
+    # the next launch's cleanup migration, whose rewrite serialises only
+    # metadata/values/version. So the operator's spelling was silently ignored and
+    # then silently destroyed, while `init --advertise-host` looked like an
+    # alternative that only worked once, at creation. Registering them is what
+    # makes the canonical location `values.network.*` the one /settings shows and
+    # writes, i.e. the one `get_nested_value` reads back.
+    Setting(
+        key="network.listen_address",
+        path=("network", "listen_address"),
+        section="network",
+        label="Listen address",
+        kind=Kind.TEXT,
+        default="0.0.0.0",
+        help=(
+            # 53 CELLS, and the number is a constraint rather than a style: the detail
+            # line is ONE row that sheds (help · clause · key → help · clause → …), and
+            # the rung that matters is `help · clause` at 80 columns — 74 cells of
+            # budget, less this row's 16-cell `default: 0.0.0.0` and the 3-cell joiner,
+            # so the room is 55 and this string leaves 2 cells of it. The old 132-cell
+            # sentence was dropped WHOLE off-default, so the reader who had set a mesh
+            # address got the key path and no explanation of the field (design review
+            # round 1, D1).
+            "127.0.0.1 = dial-only; 0.0.0.0 = all; or one address."
+        ),
+    ),
+    # INT with the port range enforced, because the value is a socket bind and a
+    # typo stored here would surface later as a relay that will not start — the
+    # page and `lop config edit` both reach this, so the bound belongs on the row.
+    Setting(
+        key="network.port",
+        path=("network", "port"),
+        section="network",
+        label="Mesh port",
+        kind=Kind.INT,
+        default=4097,
+        minimum=1,
+        maximum=65535,
+        help=(
+            # 50 cells: same rung and the same reason as `listen_address` above — this
+            # row's clause is 13 cells (`default: 4097`) against the 74-cell budget and
+            # the 3-cell joiner, so the room is 58 and this string leaves 8 of it.
+            # Anything past the room sheds the help whole at 80 columns.
+            "The port peers dial; endpoints without one use it."
+        ),
+    ),
+    # LIST over an OPEN namespace — deliberately no `members`. The vocabulary is
+    # hostnames, addresses and ports, which are the operator's and not this repo's;
+    # a closed list would reject every address that matters. Empty means "no
+    # opinion" (publish whatever the interface table shows), so the row clears
+    # rather than failing, exactly as `NetworkSettings.from_config` reads an absent
+    # key.
+    Setting(
+        key="network.advertise_hosts",
+        path=("network", "advertise_hosts"),
+        section="network",
+        label="Advertised endpoints",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            # 58 cells, the tightest of the three rows: its clause is `default: —` (10)
+            # and the joiner is 3, against 74 at 80 columns — 3 cells of slack, and no
+            # more, because the rung below (`clause · key`) drops the help ENTIRELY.
+            # THE PORT RULE IS THE PART THAT MUST SURVIVE: `config edit` refuses a bare
+            # address with exactly that rule, so a reader who never sees the help learns
+            # it only by failing. The 204-cell sentence it replaces never rendered its
+            # last sentence at ANY usable width, not even 200 columns (design review
+            # round 1, D1).
+            "Empty = detected. Others: host:port, e.g. 203.0.113.7:4097"
+        ),
+        # THE BARE ADDRESS LEADS. The ghost clips rather than wraps, and the example a
+        # reader most needs is the one that shows an address WITH its port; the hostname
+        # example it used to lead with ate the row and hid this one (design round 1, D4).
+        placeholder="203.0.113.7:4097, tunnel.example.com:4100",
+        empty_unsets=True,
+        validate_value=_validate_advertise_hosts,
     ),
     # -- network (the mesh audit log) ---------------------------------------
     # Defaults mirror ``local_operator/network/audit.py``'s module constants, which
