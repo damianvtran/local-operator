@@ -77,6 +77,26 @@ COMPACT_CLIENT_CREDENTIALS_REPR = _compact(
 COMPACT_API_KEY = _compact(("api_key", "realAccessKeyId1234"), ("region", "ca-central-1"))
 COMPACT_PASSWORD_PAIR = _compact(("password", "hunter2hunter2"), ("user", "svc"))
 
+#: The KEBAB-case IDENTIFIER class, as NAMED values: what a flag read carries in
+#: its ``key`` field, and the class the weak-name value proof releases on the
+#: hyphen join (``_is_readable_hyphen_phrase``). The three bands of the class: a
+#: plain digit-free phrase; the same class at four segments and twenty-six
+#: characters; and one carrying a single digit, the spelling a real flag name
+#: with a version number has.
+#:
+#: Assembled from their words rather than written out: this file is read by
+#: agents through the very pass it describes, and a literal here is exactly the
+#: maskable spelling whose transcript damage these rows exist to pin (the
+#: ``_arm_spelling`` / ``IDENTIFIER_ARM_VALUES`` convention above).
+KEBAB_IDENTIFIER = "-".join(["this", "is", "a", "plain", "kebab", "slug"])
+KEBAB_IDENTIFIER_FOUR_SEGMENT = "-".join(["feature", "flag", "check", "enabled"])
+KEBAB_IDENTIFIER_WITH_DIGIT = "-".join(["is", "clm", "2", "enabled"])
+
+#: An opaque value for the query rows: a UUID — its first character is a digit
+#: and its digit count is far past the class's cap, so ``?key=`` must keep
+#: masking it. Assembled like the identifiers above, for the same reason.
+OPAQUE_UUID_VALUE = "-".join(["550e8400", "e29b", "41d4", "a716", "446655440000"])
+
 #: The Bedrock evidence file's own line, as the operator's ``write`` carried it: a
 #: counter under a qualified name, with the whitespace that kept THIS spelling quiet
 #: while the compact one fired.
@@ -1047,6 +1067,46 @@ POSITIVE_CASES: tuple[Case, ...] = (
     # a REAL credential spelled in a way that resembles a type, so the type clause
     # releasing one would be the fix eating the thing it protects.
     *TYPE_ANNOTATION_POSITIVES,
+    # --- 2026-09-28: the keep-masking controls for the kebab-case release ------
+    # The release is weak-name only and query-name scoped; each row is a name
+    # that KEEPS masking the readable phrase, so a later widening past the
+    # release's own boundary fails here rather than shipping.
+    Case(
+        _compact(("api_key", KEBAB_IDENTIFIER)),
+        "a strong assignment name still masks the readable hyphen phrase",
+    ),
+    Case(
+        "https://h/v1?token=" + KEBAB_IDENTIFIER,
+        "?token= has no reading but a credential: the readable phrase stays masked",
+    ),
+    Case(
+        "https://h/v1?key=" + OPAQUE_UUID_VALUE,
+        "?key= still masks an opaque value: the release is the readable class only",
+    ),
+    # --- 2026-09-28, round 1: the boundary cases that must KEEP masking --------
+    # The OPAQUE control: the value keeps its mask (and its registration) while
+    # the trailing parameter stays readable — the release is the readable
+    # class's alone.
+    Case(
+        "https://h/v1/flags?key=" + "abcdef0123456789" + "abcdef0123456789" + "&page=2",
+        "an opaque value keeps its mask; the trailing parameter is not swallowed",
+    ),
+    # ...and the issuer-prefixed values: ``key=glpat-<name>`` / ``key=sk-<name>``
+    # moved masked->released when the release judged spelling alone (R1-2); the
+    # vendor prefixes keep their mask on both spellings, and an unbroken tail
+    # keeps the label it had at base (pinned in the secrets tests).
+    Case(
+        "key=glpat-" + KEBAB_IDENTIFIER,
+        "an issuer-prefixed value under a weak name keeps its mask",
+    ),
+    Case(
+        "https://h/v1/flags?key=sk-" + KEBAB_IDENTIFIER,
+        "the same under the query spelling",
+    ),
+    Case(
+        "key=sk-" + "abcdefghijklmnopqrstuvwxyz",
+        "an unbroken issuer tail keeps its mask (and the base label)",
+    ),
 )
 
 
@@ -1651,6 +1711,58 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         "DB" + "_PASSWORD=" + _generic("Correcthorse", "Battery"),
         "the accepted residual: Ident<Ident>, underscore removed, still digit-free",
+    ),
+    # --- 2026-09-28: the kebab-case identifier under an AMBIGUOUS name ---------
+    # The operator-reported harm: a flag read arrives as a compact JSON result
+    # whose ``key`` field carries a readable kebab-case identifier. ``key`` is a
+    # (weak) credential name, so the assignment rule masked the VALUE — and a
+    # mask REGISTERS what it matched, so every later occurrence in the session
+    # was contained too: the agent sent the marker as the flag key and the next
+    # operation failed on it. The class is the underscore spelling's other join
+    # (``_is_readable_hyphen_phrase``); these rows pin the surfaces the read
+    # arrives on and the neighbours that must keep masking.
+    Case(
+        _compact(("key", KEBAB_IDENTIFIER), ("name", "Example flag")),
+        "a kebab-case identifier in a compact flag read's key field",
+    ),
+    Case(
+        _compact(("key", KEBAB_IDENTIFIER_FOUR_SEGMENT)),
+        "the same class at four segments and twenty-six characters",
+    ),
+    Case(
+        _compact(("key", KEBAB_IDENTIFIER_WITH_DIGIT)),
+        "a digit inside a kebab-case identifier: inside the class's digit cap",
+    ),
+    Case(
+        "https://h/v1/flags?key=" + KEBAB_IDENTIFIER,
+        "a ?key= query parameter carrying a readable identifier",
+    ),
+    Case(
+        _compact(("flagKey", KEBAB_IDENTIFIER)),
+        "flagKey is not a credential name: the argument is never its own match",
+    ),
+    # --- 2026-09-28, round 1: the boundary the greedy run crossed -------------
+    # R1-1: with the ambiguous parameter not last, the assignment rule's run
+    # (``[^\s]{4,200}``) crossed the query entry's own value boundary, so the
+    # phrase was judged as one compound, the release was missed, and the mask
+    # swallowed ``&env=prod``, which ``origin/main`` kept. These rows pin the
+    # fixed reading: the phrase is the query entry's value, and everything after
+    # the boundary stays outside every match.
+    Case(
+        "https://h/v1/flags?key=" + KEBAB_IDENTIFIER + "&env=prod",
+        "the readable phrase with a trailing &env=prod: released, boundary kept",
+    ),
+    Case(
+        "https://h/v1/flags?key=" + KEBAB_IDENTIFIER + "&page=2",
+        "the same with a trailing &page=2",
+    ),
+    Case(
+        "https://h/v1/flags?key=" + KEBAB_IDENTIFIER + "#section",
+        "the same with a trailing #section",
+    ),
+    Case(
+        "https://h/v1/flags?api_key=" + KEBAB_IDENTIFIER + "&page=2",
+        "the api_key spelling of the same boundary",
     ),
 )
 
