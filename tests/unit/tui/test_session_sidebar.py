@@ -3540,7 +3540,15 @@ async def test_a_landed_jump_still_leaves_the_cursor_on_a_real_row():
         sidebar.cursor_id = "a1"
 
         await pilot.press("ctrl+o")
-        await pilot.pause()
+        # The rows arrive on the NEXT statement, with no beat between: the
+        # jump window is one second (`PENDING_SUBAGENT_JUMP_S`) and any
+        # `await` here is a bet on load — measured at 1.037 s between the
+        # chord and `set_entries` in a CI-shaped run, which expired the
+        # window before the rows existed and dropped the very intent this
+        # test exists to land. The sidebar's own re-poll returns in
+        # milliseconds by design, so "the rows are already here when the
+        # chord returns" is the shape being pinned, not a shortcut.
+        assert sidebar._pending_jump_until > 0.0, "the chord did not arm the jump"
         sidebar.set_entries(layer_off + [_sub("s1", label="one", agent="qa")])
         await pilot.pause()
 
