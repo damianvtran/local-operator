@@ -7424,12 +7424,17 @@ def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
 #: the assignment rule, so the probe is the same call the pipeline makes (`KEY=<value>`
 #: through a real store) rather than a table of strings someone maintains by hand.
 _RELEASE_PROBE_VALUES = (
-    # BOUNDARY PROBES. Each sits just outside the refusal and is MASKED on this
-    # head, so widening any one cap releases it and moves the measurement.
-    # Without these the ratchet has no teeth: agent review round 3 (R3-1) widened
-    # the digit cap and the length cap and the module stayed green.
-    "quick_brown_fox_123",  # 3 digits  -> digit cap
-    "bucketv4",  # no "_"    -> underscore rule
+    # BOUNDARY PROBES — one inside each rule's own band, and each is MASKED on this
+    # head, so loosening its rule releases it and moves the measurement. They are
+    # the only corpus entries that can discriminate, and the lesson is recorded
+    # because it cost two review rounds: a probe that does not sit INSIDE the band
+    # guards nothing. Round 3 (R3-1) widened the digit cap with the module green;
+    # round 4 (R4-1) did the same to the length cap, because every probe then in
+    # the corpus was shorter than the cap it was supposed to be testing.
+    "quick_brown_fox_123",  # 3 digits -> the digit cap
+    "bucketv4",  # no underscore -> the underscore rule
+    "mongo_primary_admin_passphrase_01",  # 33 chars -> the length cap
+    "primary_replica_connection_string_01",  # 36 chars -> the length cap
     "bucket_v4",
     "bucket_v6",
     "schema_registry",
@@ -7478,6 +7483,9 @@ def _released_values() -> set[str]:
     """
     released: set[str] = set()
     for value in _RELEASE_PROBE_VALUES:
+        # A fresh store per value on purpose: registration is sticky WITHIN a store,
+        # so reusing one would let an earlier value's registration decide a later
+        # value's reading and the corpus would stop measuring single values.
         store = VariableStore(cwd=".")
         scrubbed, _ = store.redact_with_report("KEY=" + value)
         if value in scrubbed and store.redact(value) == value:
@@ -7485,11 +7493,15 @@ def _released_values() -> set[str]:
     return released
 
 
-#: FROZEN, in both directions, and this is a RATCHET rather than a list: `origin/main`
-#: masks and contains every value in the corpus below that is not in this set, so a
-#: WIDENING of the refusal (a bigger digit cap, a longer length cap, a looser shape)
-#: adds names here and reds, and a NARROWING removes them and reds. Both have to come
-#: through an edit to this set with a reason in the commit.
+#: FROZEN, in both directions, and this is a RATCHET rather than a list: every corpus
+#: value outside this set is masked and contained on this head, so a WIDENING of the
+#: refusal (a bigger digit cap, a longer length cap, a looser shape) releases one and
+#: reds, and a NARROWING masks one and reds. Both have to come through an edit to this
+#: set with a reason in the commit.
+#:
+#: It reds only for the rules a probe actually straddles, which is why the boundary
+#: probes exist and why each one names its rule. A rule with no probe inside its band
+#: is unguarded however wide the rest of the corpus looks.
 #:
 #: The first cut of this froze a hand-picked three values and agent review round 3
 #: (R3-1) showed exactly what that was worth: it caught a SHRINK and nothing else, so

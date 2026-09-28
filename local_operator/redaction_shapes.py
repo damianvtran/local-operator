@@ -1597,8 +1597,9 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
     #
     # The released class is MEASURED, not listed — `_RELEASED_WORD_SHAPED` in the
     # secrets tests freezes it over a declared corpus in both directions, so a
-    # widening of this clause adds names and reds, and a narrowing removes them and
-    # reds. Do not add an example of a released credential to this comment: agent
+    # widening of this clause releases a probe and reds and a narrowing masks one and
+    # reds. It reds only for the rules a probe straddles, so the corpus carries one
+    # inside each cap's own band rather than values merely near it. Do not add an example of a released credential to this comment: agent
     # review round 3 (R3-2) caught the first version of it publishing a
     # realistic-looking passphrase in the clear, and the point can be made without
     # one.
