@@ -1377,13 +1377,19 @@ async def checkpoints_view(
     if resident_index is not None:
         st, cache_st = await asyncio.to_thread(_freshness_pair, config_dir, session_id)
         stamp = _RESIDENT_STAMP.get(key)
-        if (
-            st is not None
-            and _sig_matches(resident_index.sig, st)
-            and stamp is not None
-            and cache_st is not None
-            and stamp == cache_st.st_mtime
-        ):
+        cache_stable = (
+            # No cache file at all: an unwritable root never held one, so
+            # nothing on disk could have moved — serve the resident rather
+            # than rescanning on every poll (measured 1,2,3 scans across
+            # successive calls before this clause; 1,1,1 with it, and the
+            # module's promise is that an unwritable cache costs the SPEED of
+            # the next read, never the read).
+            (stamp is None and cache_st is None)
+            # A file exists: it may only be served from when it is the same
+            # one the entry was remembered under (patch_naming rewrites it).
+            or (stamp is not None and cache_st is not None and stamp == cache_st.st_mtime)
+        )
+        if st is not None and _sig_matches(resident_index.sig, st) and cache_stable:
             _RESIDENT.move_to_end(key)
             return _manifest_state(session_id, "ready", resident_index, _mtime_or_none(cache_st))
     probe = await asyncio.to_thread(probe_index, config_dir, session_id)

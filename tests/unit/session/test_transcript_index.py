@@ -807,6 +807,28 @@ def test_a_same_size_same_mtime_replacement_is_detected_by_inode(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_an_unwritable_cache_still_serves_the_resident(tmp_path, monkeypatch):
+    """MINOR-A: a cache that can never be written costs speed, not the read.
+
+    With the stamp requirement and no cache file on disk, no stamp can ever
+    match — before this clause every view fell through to probe -> stale -> a
+    fresh full scan (measured 1,2,3 scans on successive calls; a writable root
+    runs 1,1,1). An unwritable cache must not degrade into a rescan per poll.
+    """
+    write_rows(tmp_path, [user("u1", 1.0, "one"), assistant("a1", 1.1, "answer")])
+    monkeypatch.setattr(ti, "write_index", lambda *args, **kwargs: None)
+    calls = _scanners(monkeypatch)
+
+    first = await ti.checkpoints_view(tmp_path, SID, wait_s=5.0)
+    assert first["index"]["state"] == "ready"
+    assert [c["id"] for c in first["checkpoints"]] == ["u1", "a1"]
+    for _ in range(3):
+        view = await ti.checkpoints_view(tmp_path, SID)
+        assert view["index"]["state"] == "ready"
+    assert calls == {"full": 1, "incremental": 0}
+
+
+@pytest.mark.asyncio
 async def test_a_fold_after_the_recorded_tail_still_rescans(tmp_path, monkeypatch):
     """R3: a fold strictly past the recorded tail is invisible to size+bytes.
 
