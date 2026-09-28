@@ -381,6 +381,14 @@ leave the composer:
 /network log           the recent mesh event trail
 ```
 
+The pairing verbs are here too — `/network new <name>` creates the network and
+`/network invite` mints the token — and on a device that has never paired,
+`/network` on its own opens a screen whose empty state names the whole path in
+order: create, invite, join. **The joining half is the one step a TUI cannot
+host.** Pairing shows a code on each device for a person to check across, so it
+runs in a terminal, and `/network join` typed into the composer says exactly
+that instead of half-starting a pairing that cannot finish.
+
 **Running a session on another device.** `/new remote` creates the session on
 the peer, with a trailing sentence as its first prompt:
 

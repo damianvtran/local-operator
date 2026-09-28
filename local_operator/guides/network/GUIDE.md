@@ -429,6 +429,25 @@ requested from the device that owns the credential, which lends a short-lived
 access token and never its refresh token (`lop network credential share|revoke`,
 `lop network credentials`).
 
+A granted share is learned by PULLING, never pushed. The owner's document changes
+when `lop network credential share` runs there; this device reads it on its next
+`lop network credentials`, and a key it has not read yet is a key it has never
+heard of — so the provider reports `No API key configured for provider '…'`
+rather than the refusal that names the owner. When a peer's operator has just
+shared something and it still looks absent, run `lop network credentials` before
+asking them to share it again.
+
+Brokering needs a link the BORROWER opens: the session's device dials the device
+that owns the credential and runs `net_broker` over it. An owner behind NAT with
+no reverse path to it — the laptop that owns the key, reached from a cloud peer —
+is therefore the topology this does not survive on its own, and it does not
+report itself as a link failure: with the key present in this device's document
+the borrow says `No credential for '…' is reachable: <owner> owns it and was last
+seen …`, and without it, the unconfigured-provider sentence above. Neither is a
+broken login, and re-authenticating does not change either.
+`lop network doctor --json` on the borrower is what names the endpoint and why it
+did not answer.
+
 Revocation is not instant, and an incident response must not assume it is.
 `credential revoke` refuses new borrows at once; a grant already lent is dropped
 by the borrower within `network.credentials.grant_ttl_s` (900 s by default); and

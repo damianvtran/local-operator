@@ -275,6 +275,7 @@ from local_operator.tui.network_cli import (
     NetworkRun,
     created_session_id,
     run_network,
+    tui_spelling,
 )
 from local_operator.tui.notify import Notifier, notifications_enabled
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
@@ -42507,8 +42508,92 @@ class OperatorApp(App[None]):
             )
             return
         if verb == "invite":
-            argv = ["invite", "--role", "drive"] + (["--network", rest[0]] if rest else [])
-            self._dispatch_network_cli(rest[:1], argv, notice, verb="invite")
+            # THE TAIL MAY BE THE RECEIPT'S OWN LINE (UX round 1, U2). The `next:`
+            # receipt after `/network new` prints `/network invite --role drive`,
+            # and this arm read `rest[0]` as the network name — so pasting the
+            # advice this family had just printed handed argparse `--network
+            # --role` and answered `argument --network: expected one argument`:
+            # the step the receipt names did not run, and its failure was
+            # argparse's own sentence, developer vocabulary and all, on the
+            # surface this family exists to keep plain. The `--role <value>` pair
+            # is CONSUMED and passed through — it is the CLI's own flag and
+            # `drive` is its default, so the line the receipt prints is the line
+            # that runs — and what is left is the network name, which is what the
+            # bare form has always meant.
+            #
+            # A PAIR WITH NO VALUE IS REFUSED HERE, in this family's words. Left
+            # to the CLI it would be one more argparse sentence, and a caller who
+            # typed half a command should read the surface's own usage line
+            # (`_dispatch_network_cli` [redacted] the same way for a missing
+            # token). Any OTHER flag is refused rather than handed on: a leading
+            # one would reach the CLI as the NETWORK NAME (`--network --expires`
+            # is the same argparse failure this branch was filed for) and a
+            # trailing one would be silently dropped, which is the
+            # accepted-and-then-dropped class `network/cli.py` refuses
+            # `--force`-style flags for. `--role` is the one flag this arm takes,
+            # and only in the position the CLI's own help prints it.
+            #
+            # AND A SURPLUS WORD IS REFUSED FOR THE SAME REASON (review round 2,
+            # R2-2): `/network invite devmesh extra` ran the `devmesh` invite and
+            # said nothing about `extra`, because this arm — like the one it
+            # replaced, which read `rest[0]` outright — only ever looks at the
+            # first word. The half that was closed here was the FLAG; a word is
+            # the same silence one branch up, and the reader who mistyped a name
+            # is the reader least able to tell that the invite went to one they
+            # did not mean.
+            #
+            # AND THE NAME IS RESOLVED, LIKE THE FOUR SIBLINGS THAT ADDRESS ONE
+            # (UX round 2, U2-1): `new` takes the WHOLE tail as a name, so
+            # `/network new My Fancy Net` makes a mesh a space wide — and this arm
+            # read the space as a surplus word and answered *My Fancy Net is more
+            # than one name*, a sentence that is false about a name this same
+            # surface creates, lists and renames. `rename`, `rm`, `disconnect` and
+            # `member rm` each resolve a longest-prefix target (`_network_split`)
+            # precisely so a name `new` has already accepted stays addressable;
+            # this arm was the fifth and the only one that could not, leaving the
+            # bare form (refused the moment the device is in two networks) and a
+            # 26-character id copied out of a DIFFERENT refusal as the only routes
+            # to a mesh the user had just named. Not a regression — the pre-fix arm
+            # failed on this input too (`this device is not in a network called
+            # 'My'`) — so what is fixed is the false sentence and the missing
+            # route.
+            #
+            # THE LEFTOVER IS WHAT REFUSES, NOT THE WORD COUNT, and that is what
+            # keeps R2-2 whole: a surplus that resolves to nothing still refuses,
+            # because nothing may be accepted and then dropped (`/network invite
+            # devmesh extra` resolves `devmesh` and refuses on `extra`, which is the
+            # sentence that made the drop visible in the first place). An
+            # unresolvable prefix degrades exactly as `_network_split` documents,
+            # passing its first token on so the CLI refuses it in the words that
+            # name the networks this device is in.
+            role = "drive"
+            words = list(rest)
+            if words[:1] == ["--role"]:
+                if len(words) < 2:
+                    self._system_notice(
+                        "That is not a complete /network invite command: --role needs a value",
+                        "warning",
+                    )
+                    return
+                role, words = words[1], words[2:]
+            surplus = [token for token in words if token.startswith("--")]
+            if surplus:
+                self._system_notice(
+                    "/network invite takes one network name and a leading --role <role>; "
+                    f"{surplus[0]} is neither",
+                    "warning",
+                )
+                return
+            target, tail = self._network_split(words)
+            if tail:
+                self._system_notice(
+                    "/network invite takes one network name and a leading --role <role>; "
+                    f"{' '.join(words)} is more than one name",
+                    "warning",
+                )
+                return
+            argv = ["invite", "--role", role] + (["--network", target] if target else [])
+            self._dispatch_network_cli(words[:1], argv, notice, verb="invite")
             return
         if verb == "show":
             self._dispatch_network_cli(rest[:1], ["show", *rest[:1]], notice, verb="show")
@@ -42967,13 +43052,27 @@ class OperatorApp(App[None]):
         if result.ok:
             text = Text()
             for line in lines:
-                text.append(line + "\n")
+                # THE COMPOSER'S SPELLING, not the shell's (design round 1, D2):
+                # `next: lop network invite --role drive` after `/network new` was
+                # the CLI's dialect on the surface that had just accepted the
+                # family's own. `tui_spelling` translates only the verbs this front
+                # end carries, so `lop network start` keeps the spelling that works
+                # for the reader whose next step is a shell.
+                text.append(tui_spelling(line) + "\n")
             self._append_block(RichBlock(text))
             return
         # A refusal prints its sentence on stderr with the coloured wrapper the
         # CLI strips for us (``network_cli``); the LAST line is the sentence, and
         # the earlier ones are argparse's own usage text for a bad flag.
-        self._system_notice(lines[-1], "error")
+        #
+        # TRANSLATED LIKE A RECEIPT, because the reader is the same reader: a
+        # refusal is where the remedy is named (design doctrine: every refusal in
+        # this family says what to do next), so leaving it in the shell's spelling
+        # would hand the composer a command belonging to another surface — the D2
+        # defect, one branch over, at the moment the user is looking for the way
+        # out. `tui_spelling` rewrites only the verbs this front end carries, so
+        # `lop network start` in a refusal still reads as the shell's.
+        self._system_notice(tui_spelling(lines[-1]), "error")
 
     # -- login / logout -----------------------------------------------------
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:

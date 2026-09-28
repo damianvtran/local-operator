@@ -910,8 +910,12 @@ changes as the reel turns, which is the invariant `welcome.py:420-423` and
 `welcome.py:812-816` both rest on.
 
 **Measured cost: zero, for the proposed templates.** Current `TIP_MIN_WIDTH` is
-**59** (set by `"lop detects terminal or multiplexer, then picks placement"`, 57
-cells + glyph). The three keyed templates at a 25-cell worst-case key measure
+**59**, and it is TIED between two entries rather than owned by one — both
+measure 57 cells + glyph: `/login <provider> sets up a provider (e.g. /login
+openai)` (the setup tip) and `lop config edit classification.auto false turns
+hints off`. A third, `lop detects terminal or multiplexer, then picks placement`,
+held it as well until the mesh tip took its slot (the retirement and its cost are
+recorded on `welcome.py`'s own pool note). The three keyed templates at a 25-cell worst-case key measure
 **53, 57 and 40** cells respectively — all under 59. So `TIP_MIN_WIDTH` does
 **not** move, no terminal loses the tip row, and risk R4 does not materialise.
 

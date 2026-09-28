@@ -57,6 +57,12 @@ from local_operator.tui.widgets.aside_panel import ASIDE_COPY_KEY
 #: narrow terminal, where it keeps the columns from being computed to zero.
 _MIN_CARD_WIDTH = 40
 
+#: Cells :func:`_hanging_row` keeps clear at the end of a row, because the vertical
+#: scrollbar is painted in a column of the body it lays rows out in: the card is 39
+#: and the body 38 at 50x18, so a row that fills the card exactly comes back
+#: re-wrapped by Rich. A measurement, not a taste call.
+_SCROLLBAR_RESERVE_CELLS = 1
+
 
 #: How much of an id the panel shows, and WHY ONE NUMBER FOR ALL THREE.
 #:
@@ -147,6 +153,24 @@ class NetworkLocal:
     networks: list[NetworkEntry] = field(default_factory=list)
     peers: list[PeerEntry] = field(default_factory=list)
 
+    @property
+    def unpaired(self) -> bool:
+        """Whether this device is in NO mesh at all — the first-run state.
+
+        BOTH HALVES ARE THE GATE, and they are the two facts :func:`capture_local`
+        already reads off disk. No identity file means no pairing has ever
+        completed here (``init`` writes one too, so a device that created a
+        network is not this population), and no network records means the LEFT-a-
+        mesh case — ``disconnect``, ``rm`` — is not pitched a first step it has
+        already taken.
+
+        It lives on the model rather than at each reader because two surfaces now
+        ask it (this panel's empty state, and the splash's opening tip, which
+        pins on it) and a second definition of "never paired" is one edit away
+        from disagreeing with this one.
+        """
+        return not self.identity_present and not self.networks
+
 
 def _one_row_value(prefix: str, value: str, width: int) -> str:
     """A ``label: value`` line that NEVER takes a second row, elided if it must be.
@@ -231,6 +255,48 @@ def _cut_to_cells(text: str, budget: int) -> str:
             return text[:start]
         used += cells
     return text
+
+
+def _hanging_row(lead: str, value: str, width: int) -> str:
+    """A prose row whose WRAP keeps the row's own indent (UX round 1, U5).
+
+    The body is ONE ``Text`` and the wrap happens in Rich at the widget's edge,
+    where no hanging indent can be asked for — so a teaching row that wrapped
+    resumed at column 0 and read as a new row at section level. Measured on the
+    real frame at 56x20 and 60x20: ``mints it`` and ``@<file> on the peer`` both
+    landed flush left under a two-cell indented row. The row is therefore broken
+    HERE, against the same ``width`` the caller already measures its rows in, and
+    every continuation carries ``lead``.
+
+    WORDS, NOT CELLS, and that is the one thing this does not share with
+    :func:`_indented_value`: that helper cuts on exact cell boundaries because a
+    VALUE has to re-join to the string it came from (its test asserts exactly that
+    of a log path). A sentence owes the reader no such reconstruction — breaking
+    ``creates`` across two rows is a worse frame than breaking after it — so the
+    break lands on the last word that fits. A single word wider than the row is
+    the only hard break, and it overflows rather than being cut: this is prose,
+    not a column a neighbouring row aligns to.
+
+    ONE CELL INSIDE ``width``, because that is what can be PAINTED. ``width`` is
+    :meth:`NetworkScreen._card_width`, measured off the title's box, and the body
+    it lays its rows out in can be one cell narrower: when the block is long
+    enough for the vertical scrollbar, the bar takes a column (card 39 against
+    body 38 at 50x18, measured). A row that stops exactly at ``width`` is then
+    re-wrapped by Rich at the edge — the defect this helper exists to remove, at
+    the one size where it would come back.
+    """
+    available = max(1, width - cell_len(lead) - _SCROLLBAR_RESERVE_CELLS)
+    lines: list[str] = []
+    current = ""
+    for word in value.split(" "):
+        candidate = f"{current} {word}" if current else word
+        if cell_len(candidate) <= available or not current:
+            current = candidate
+            continue
+        lines.append(current)
+        current = word
+    lines.append(current)
+    return "\n".join(lead + line for line in lines)
 
 
 def _indented_value(prefix: str, value: str, width: int) -> str:
@@ -855,7 +921,46 @@ class NetworkScreen(ModalScreen[None]):
     def _device_section(self, body: Text, width: int) -> None:
         self._header(body, "This device")
         if not self.local.identity_present:
-            body.append("  no identity yet — /network new <name> creates one\n", style="yellow")
+            # WHY THIS LINE NAMES ONLY THE IDENTITY, and lost the relay clause it
+            # briefly carried: the row WIDTH, measured (review round 1, MAJOR). The
+            # version with `and starts the relay` was 69 cells, which wraps at 84x16
+            # where the card is 68 — a size inside `_BAND_SIZES` where the row it
+            # replaced (62 cells) did not wrap. No phrasing carrying both facts fits
+            # the 62 cells that keep this block at ONE wrapping threshold, so the
+            # clause went and the Relay block's own rows carry the state, as they
+            # did before. What is left is the half that is this section's subject:
+            # the state, and the command that clears it.
+            #
+            # AND THAT COMMAND IS COMPLETE AS PRINTED (review round 2, R2-1). U5
+            # took the `<name>` placeholder off this row to fit the narrowest card,
+            # which left it naming `/network new` — a step whose arm is `needs=1`,
+            # so the reader who follows the row literally reads `That is not a
+            # complete /network new command`. That is the U2 defect one row up: a
+            # row that names a step, where typing the step as written does not run
+            # it. The placeholder is back, and the clause that paid for it is the
+            # verb (`mints it`), never the argument.
+            #
+            # THE BUDGET IT HAD TO FIT, measured — the window is 37..40 cells and
+            # this sentence is 37. At 56x20 the card is 43 and `_hanging_row` keeps
+            # the scrollbar's cell clear, so 40 cells are usable; a row longer than
+            # that wraps and costs a row of an eight-row viewport on the frame where
+            # the pairing sequence has to be legible (the U5 fault). At 50x18 and
+            # 40x20 the card is 39 and 30, so anything from 37 up already breaks on
+            # words there and every continuation carries the lead. Spelling the row
+            # out WITH its verb is 46 — it wraps at 56x20 — so the verb went: two
+            # `state — <command>` rows read as the one step they are, where two
+            # different verbs (`mints it` beside the Networks row's `creates one`)
+            # read as two steps. What the command MAKES is still on the frame, in
+            # the mesh tip pinned on exactly this device (`TIP_MESH`).
+            #
+            # HUNG as well, for the sizes below the band's floor (40x20 lays the
+            # body out in ~36 cells, where nothing can fit it): a continuation at
+            # column 0 read as a new row at section level — measured on the real
+            # frame as `mints it` flush left under the row it belongs to.
+            body.append(
+                _hanging_row("  ", "no identity yet — /network new <name>", width) + "\n",
+                style="yellow",
+            )
         else:
             # LABEL FIRST, then the abbreviated id (design round 1, D6). The line
             # used to lead with the full 34-cell id, putting the longest token on
@@ -948,8 +1053,87 @@ class NetworkScreen(ModalScreen[None]):
             note = ""
         self._header(body, "Networks", note)
         if not entries:
+            # THE EMPTY STATE IS WHERE THE PAIRING PATH IS TAUGHT, and it is
+            # ORDERED because the commands are: on a device with no network,
+            # `/network invite` is refused (`name a network: this device is in
+            # none`) — so an empty state that names only `invite` hands the
+            # reader a command that fails, and one that names `invite` BELOW
+            # `new` with nothing marking the order relies on the reader
+            # guessing which comes first. Both were true of the frame this
+            # replaces, which is the state every device starts in.
+            #
+            # WHY HERE AND NOT IN THE PEERS BLOCK, which is where pairing is
+            # otherwise discussed: a peer is what a SECOND device becomes, so
+            # the three commands only make sense once a network exists, and
+            # this is the one block that is empty exactly while they are the
+            # next thing to do. The Peers block keeps its one-line remedy,
+            # which now reads as the second step of the path above it rather
+            # than as an instruction that arrives before its own first step.
+            #
+            # ONE ROW, NOT THREE, and that is a measured budget rather than a
+            # taste call: at 100x30 this frame had exactly one row of slack in
+            # the scroll viewport (a 15-row body in a 16-row viewport), and the
+            # three-row draft of this sequence pushed the body to 17 — which
+            # raised `network-scroll`'s virtual size past its real one, put a
+            # vertical scrollbar on the screen, and clipped the Relay block's
+            # `log:` path, the one row a support request needs. The frame checks
+            # in `mesh-ui.md` §4.1 read a scrollbar appearing as a defect for
+            # exactly this reason.
+            #
+            # WHAT THAT COST is the trade review round 1 accepted: the clause
+            # that went was also the pool's one statement that placement is not
+            # cmux-only (`lop detects terminal or multiplexer`), and it is
+            # recorded as gone rather than defended.
+            # THE ROW WIDTH IS BOUNDED BY THE CARD, NOT BY THE 100-COLUMN FRAME,
+            # and the first cut of this row got that wrong (review round 1,
+            # MAJOR). This block is drawn across `_BAND_SIZES`, and the body is
+            # 83 cells only at 100x30: MEASURED 81 at 98x30, 79 at 96x30, 68 at
+            # 84x16, 65 at 80x24, 43 at 56x20. An 82-cell row therefore wrapped
+            # at two sizes inside that list, grew the body to 17 rows in a
+            # 16-row viewport and put the scrollbar back on — which is the same
+            # defect the three-row draft below was dropped for, one size down.
+            #
+            # So the invariant is not "one row", it is "no new wrapping
+            # threshold": this row is no LONGER than the line above it (62
+            # cells), so the two wrap together at 56x20 and below and never at
+            # 84x16 or above. It measures 60. The width is pinned by
+            # `test_the_unpaired_empty_state_fits_its_card_at_every_band_size`,
+            # which is the assertion whose absence let the 82-cell row reach
+            # review (review round 1, MINOR 3).
+            #
+            # WHY THE DEVICE CUE SURVIVED AND THE TOKEN CLAUSE DID NOT: the Peers
+            # row one block down already says `/network invite mints a token`, so
+            # repeating it here would spend this row's cells on a duplicate,
+            # while WHICH DEVICE runs the join is said nowhere else on the frame.
+            #
+            # AND WHAT SETTLED THE LENGTH IS THE FOLD, NOT THE WRAP (UX round 1,
+            # U5). "No new wrapping threshold" was the right answer while the
+            # worry was a scrollbar appearing at 84x16 — but at 56x20 the
+            # viewport is EIGHT rows, and 62 + 60 cells wrapped to four lines
+            # inside it: the two teaching rows alone spent half the viewport, and
+            # the device cue — this pair's load-bearing half — was painted one
+            # row PAST the fold, on a frame whose body had nothing saying it
+            # scrolled. Both rows are now inside the 43 cells the card holds at
+            # 56x20 (39 and 40), so the sequence costs two rows instead of four
+            # and `join on the peer` is on the screen at every size in
+            # `_BAND_SIZES` where the card is 43 cells or wider.
+            #
+            # WHAT THAT COST is the CLI spelling of the join (`lop network join
+            # @<file>`), which no longer fits beside the device cue: the phrase
+            # that carries WHICH DEVICE had to win, because the command is
+            # printed for the reader by the side that runs it — ``invite``'s own
+            # receipt ends `then, on the other device: lop network join
+            # @<token-file>` — while nothing else on any frame says the join is
+            # not run here. The three commands' ORDER is unchanged and still
+            # asserted; the third one is now named by the receipt that hands it
+            # over rather than by this row.
             body.append(
-                "  no networks on this device — /network new <name> creates one\n", style="dim"
+                _hanging_row("  ", "no networks yet — /network new <name>", width) + "\n",
+                style="dim",
+            )
+            body.append(
+                _hanging_row("  ", "then /network invite; join on the peer", width) + "\n",
+                style="dim",
             )
             return
         for index, entry in enumerate(entries):
@@ -1072,10 +1256,30 @@ class NetworkScreen(ModalScreen[None]):
             # (this device's own member lists) are what the frame actually holds.
             return
         if not self.local.peers:
-            body.append(
-                "  no peers yet — /network invite mints a token\n",
-                style="dim",
+            # THE CONSEQUENCE, NOT THE COMMAND (design round 1, D1): `invite` is
+            # the step the Networks block above already names, and this row named
+            # it a second time — the same remedy under two headings, which is the
+            # shape this PR's own test files as a defect one block away. What this
+            # section can say that no other row does is what the reader will see
+            # here once it works.
+            #
+            # …UNTIL THE NETWORKS BLOCK IS NO LONGER AN EMPTY STATE (UX round 1,
+            # U3). D1 was answering a frame where BOTH blocks were empty and the
+            # path above had just named `invite`; one command later the Networks
+            # block holds the network, this row states a consequence, and the
+            # surface that taught step one is silent at the moment step two is
+            # next. Pre-PR this row named the command — the row that replaced it
+            # is a NET REMOVAL for exactly one state, so the consequence wording
+            # keeps the state it was written for (both blocks empty) and the
+            # command comes back where the duplication D1 objected to cannot
+            # happen: a device that HAS a network and no peers. Both facts are
+            # already computed for this same render.
+            wording = (
+                "no peers yet — /network invite mints a token"
+                if self._entries()
+                else "no peers yet — a device you pair appears here"
             )
+            body.append(_hanging_row("  ", wording, width) + "\n", style="dim")
             return
         for peer in self.local.peers:
             self._row(
