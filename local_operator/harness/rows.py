@@ -623,6 +623,23 @@ def wake_receipt_headline(text: str) -> str:
     prefix = "Scheduled wake "
     if head.startswith(prefix):
         head = head[len(prefix) :]
+    # Engine-armed rows carry ids a person never chose (`aida-greeting`), and a
+    # raw schedule id where a greeting goes reads as instrumentation on the
+    # first frame of a fresh install's first conversation (design review round
+    # 1, D2). The labels live WITH the ids (`aida/proactive.py`) and are read
+    # lazily — the same reason the clause above is imported rather than
+    # re-spelled: ONE copy, and this module stays host-free. Every
+    # user-created wake passes through unchanged.
+    ident, sep, rest = head.partition(" ")
+    if ident:
+        try:
+            from local_operator.aida import proactive as aida_proactive
+
+            label = aida_proactive.wake_display_label(ident)
+            if label != ident:
+                head = f"{label}{sep}{rest}"
+        except Exception:  # noqa: BLE001 — a label is never worth a receipt
+            pass
     return head.strip()
 
 

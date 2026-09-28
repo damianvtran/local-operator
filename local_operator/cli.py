@@ -10991,7 +10991,10 @@ def main() -> int:
                     AttachedSession,
                     frontend_attach_refusal,
                 )
-                from local_operator.session_factory import resolve_hosting_model
+                from local_operator.session_factory import (
+                    HostingNotConfiguredError,
+                    resolve_hosting_model,
+                )
 
                 config_directory = config_manager.config_dir
                 # Same expression session_factory uses for a new session's
@@ -11019,8 +11022,22 @@ def main() -> int:
                 try:
                     provider, model_id = await asyncio.to_thread(resolve_birth)
                     initial_model = ModelSpec(provider=provider, model_id=model_id)
+                except HostingNotConfiguredError:
+                    # The recoverable family (nothing configured / unknown
+                    # provider / no model) is NOT swallowed here: the app's
+                    # boot-failure handler turns it into the guided setup
+                    # state, and the setup state is the gate every first-run
+                    # surface hangs off — the splash's `/login` cue, her R28
+                    # view and the R26 routing. Swallowing it built a COLD
+                    # viewer instead, which left all of them unreachable on a
+                    # real fresh install (review round 1, U1/Q1 — the unit
+                    # tests drove a factory that raises, which shipping never
+                    # did).
+                    raise
                 except ValueError:
-                    # Setup mode must still open without a configured model.
+                    # Any OTHER resolution failure keeps the legacy shape: a
+                    # boot must still open without a configured model, and a
+                    # cold viewer reaches `/login` / `/model` from there.
                     pass
 
                 async def take_over():

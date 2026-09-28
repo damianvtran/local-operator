@@ -104,6 +104,23 @@ def test_a_symlink_out_of_the_root_is_refused_and_the_target_untouched(
     assert outside.read_text(encoding="utf-8") == "not lop's file\n"
 
 
+def test_a_symlink_to_a_MISSING_out_of_root_target_is_also_refused(
+    isolated_root: Path,
+) -> None:
+    """The dangling arm (review round 1, F2).
+
+    ``path.exists()`` follows the link, so a link whose out-of-root target did
+    not exist YET read as "nothing there": the guard was skipped and the write
+    then created the target through the link. The existing-target arm above
+    was the only one pinned.
+    """
+    outside = isolated_root.parent / "not-yet.md"
+    (isolated_root / "system_prompt.md").symlink_to(outside)
+
+    assert profile.record_profile_note("Name: sneaky", config_dir=isolated_root) == "unsafe"
+    assert not outside.exists(), "the refusal must not create the target"
+
+
 def test_a_symlink_inside_the_root_is_followed(isolated_root: Path) -> None:
     """The guard is about the ROOT boundary, not about refusing symlinks."""
     target = isolated_root / "real_prompt.md"

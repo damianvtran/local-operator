@@ -402,6 +402,26 @@ class TestDeliveryText:
         assert wake_receipt_headline(f"{final}\n\nCheck the deploy") == "w-9 (1)."
         assert "scratchpad" not in wake_receipt_headline(f"{final}\n\nCheck the deploy")
 
+    def test_engine_armed_rows_read_as_hers_not_as_raw_ids(self):
+        """D2: the greeting's first frame must not be a schedule id.
+
+        ``aida-greeting`` is the engine's handle, not words a person chose;
+        the label map lives beside the ids (``aida/proactive.py``) and this
+        function reads it lazily, so the two cannot drift. Everything the
+        user created still names itself — pinned so the substitution can never
+        earn the label onto somebody else's wake.
+        """
+        from local_operator.harness.rows import wake_receipt_headline
+
+        greeting = f"(alarm) Scheduled wake aida-greeting (1/1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{greeting}\n\nFirst-run greeting.") == (
+            "Aida's introduction (1/1)."
+        )
+        extra = f"(alarm) Scheduled wake aida-extra-2 (1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{extra}\n\nFollow up") == "Aida's follow-up (1)."
+        mine = f"(alarm) Scheduled wake w-9 (1). {WAKE_SCRATCH_CLAUSE}"
+        assert wake_receipt_headline(f"{mine}\n\nCheck the deploy") == "w-9 (1)."
+
 
 # ---------------------------------------------------------------------------
 # Live scheduler

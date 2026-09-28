@@ -1524,20 +1524,31 @@ def test_setup_mode_with_a_model_flag_claims_no_override_it_cannot_apply(
 ) -> None:
     """`lop --model <id>` on an unconfigured machine (review round 2, F3).
 
-    The birth resolution raises, so setup mode reaches the viewer with no
-    resolved spec. Claiming an override there left a pending intent nothing
-    could satisfy, which refused every later call including the `/model` the
-    refusal invited. Asserted on what `main()` really passes to `cold`.
+    The birth resolution raises, so there is no resolved spec — and an
+    unresolved model must not be claimed as a deliberate override. That
+    requirement is unchanged; what changed (slice B review round 1, U1/Q1) is
+    the mechanism: the factory now RE-RAISES the recoverable family into the
+    host's boot path, whose setup state is what makes the claim impossible by
+    construction — the cold viewer, where the override flag lived, is never
+    built at all. Before this, the swallow built that cold viewer and left
+    every first-run surface (the splash cue, `/aida`'s view, the R26 routing)
+    unreachable on a real fresh install; the fake host below models the app's
+    own catch (`OperatorApp._boot_session` -> `_on_boot_failed`), which is
+    what keeps `main()` at 0.
     """
     seen: dict[str, Any] = {}
 
     async def fake_cold(*args, **kwargs):
-        seen["initial_model"] = kwargs.get("initial_model")
-        seen["override"] = kwargs.get("model_selection_override")
+        seen["cold"] = kwargs
         return object()
 
     async def run_tui(session_factory, session_registry=None, **kwargs):
-        await session_factory()
+        from local_operator.session_factory import HostingNotConfiguredError
+
+        try:
+            await session_factory()
+        except HostingNotConfiguredError as error:
+            seen["setup_error"] = str(error)
         return 0
 
     def unconfigured(*args, **kwargs):
@@ -1560,10 +1571,11 @@ def test_setup_mode_with_a_model_flag_claims_no_override_it_cannot_apply(
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     with patch("sys.argv", ["program", "--model", "some-model"]):
         assert main() == 0
-    assert seen["initial_model"] is None
-    assert (
-        seen["override"] is False
-    ), "an unresolved model must not be claimed as a deliberate override"
+    assert seen.get("setup_error"), "the recoverable family must reach the host's setup path"
+    assert "cold" not in seen, (
+        "no cold viewer may be built for the no-hosting arm — it is where the "
+        "override flag lived, and the setup state owns this case now"
+    )
 
 
 def test_main_interactive_tty_uses_tui(

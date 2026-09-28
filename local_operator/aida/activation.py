@@ -41,6 +41,12 @@ the operator's own framing was "agent-runtime-svc installs would set it off (or
 we detect their runtime profile)", and profile detection needs deployer
 cooperation that does not exist yet.
 
+THE PERMISSIVE RESIDUAL, stated for the same reason: an orchestrator that
+allocates a PTY for ``lop serve`` satisfies both tty checks and is classified
+interactive. That direction cannot be detected from inside the process — a pty
+is what the check IS — so the signal is best-effort in both directions and the
+explicit off switches above are the guarantee (review round 1, F5).
+
 IMPORT-LIGHT by the package's contract: stdlib only at module scope; the
 desktop read is a lazy import behind a try/except (the TUI and the daemon load
 this on boot paths, and a failure to read the posture must answer "no surface",
