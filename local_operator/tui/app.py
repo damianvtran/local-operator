@@ -42517,6 +42517,15 @@ class OperatorApp(App[None]):
             # accepted-and-then-dropped class `network/cli.py` refuses
             # `--force`-style flags for. `--role` is the one flag this arm takes,
             # and only in the position the CLI's own help prints it.
+            #
+            # AND A SURPLUS WORD IS REFUSED FOR THE SAME REASON (review round 2,
+            # R2-2): `/network invite devmesh extra` ran the `devmesh` invite and
+            # said nothing about `extra`, because this arm — like the one it
+            # replaced, which read `rest[0]` outright — only ever looks at the
+            # first word. The half that was closed here was the FLAG; a word is
+            # the same silence one branch up, and the reader who mistyped a name
+            # is the reader least able to tell that the invite went to one they
+            # did not mean.
             role = "drive"
             words = list(rest)
             if words[:1] == ["--role"]:
@@ -42532,6 +42541,13 @@ class OperatorApp(App[None]):
                 self._system_notice(
                     "/network invite takes one network name and a leading --role <role>; "
                     f"{surplus[0]} is neither",
+                    "warning",
+                )
+                return
+            if len(words) > 1:
+                self._system_notice(
+                    "/network invite takes one network name and a leading --role <role>; "
+                    f"{' '.join(words)} is more than one name",
                     "warning",
                 )
                 return
