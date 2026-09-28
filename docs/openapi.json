@@ -3735,6 +3735,130 @@
           }
         }
       }
+    },
+    "/v1/desktop/sessions/{session_id}/history": {
+      "get": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "History",
+        "operationId": "history_v1_desktop_sessions__session_id__history_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "before_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before Id"
+            }
+          },
+          {
+            "name": "around_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Around Id"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 500,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Before"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 500,
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_HistoryPage_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -7288,6 +7412,100 @@
         "type": "object",
         "title": "ProjectPatch",
         "description": "``PATCH`` body \u2014 every field optional; omitted fields are untouched.\n\n``\"\"`` CLEARS a date (or the progress snippet); omitting the key leaves it\nalone. That tri-state is why the route forwards only the keys the caller\nactually sent (``model_fields_set``) into :class:`ProjectEdit`."
+      },
+      "CRUDResponse_HistoryPage_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryPage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[HistoryPage]"
+      },
+      "HistoryEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "ts": {
+            "type": "number",
+            "title": "Ts"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "type",
+          "payload"
+        ],
+        "title": "HistoryEntry"
+      },
+      "HistoryPage": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          },
+          "cursor_missing": {
+            "type": "boolean",
+            "title": "Cursor Missing"
+          },
+          "has_newer": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Has Newer"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entries",
+          "has_more",
+          "cursor_missing"
+        ],
+        "title": "HistoryPage"
       }
     }
   },
