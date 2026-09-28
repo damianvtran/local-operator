@@ -607,14 +607,15 @@ class CheckpointNaming(BaseModel):
 class CheckpointEntry(BaseModel):
     """One rail tick: a user message or a completed agent turn (D1).
 
-    ``id`` is a REAL journal entry id — the user row, or the turn's last
-    ``message``-type row (the row a jump lands on; the collapse branch's
-    ``closingAnswerId`` semantics) — so click-to-jump needs no translation and
-    forks keep their checkpoints. ``seq`` is the journal row ordinal (0-based),
-    which places ticks proportionally in the rail; ``turn`` is 1-based.
-    ``outcome`` is null unless the turn's own completion marker carried a kind,
-    and ``open`` on the live unsettled tail. ``naming`` is present on
-    completions only — user ticks have nothing to name.
+    ``id`` is a REAL journal entry id — the user row, or the turn's closing
+    ANSWER row (its last assistant message row with non-empty content; the
+    collapse branch's ``closingAnswerId`` semantics — falling back to the last
+    message row only when the turn has no answer) — so click-to-jump needs no
+    translation and forks keep their checkpoints. ``seq`` is the journal row
+    ordinal (0-based), which places ticks proportionally in the rail; ``turn``
+    is 1-based. ``outcome`` is null unless the turn's own completion marker
+    carried a kind, and ``open`` on the live unsettled tail. ``naming`` is
+    present on completions only — user ticks have nothing to name.
     """
 
     id: str

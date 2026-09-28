@@ -5680,7 +5680,7 @@
           "text"
         ],
         "title": "CheckpointEntry",
-        "description": "One rail tick: a user message or a completed agent turn (D1).\n\n``id`` is a REAL journal entry id \u2014 the user row, or the turn's last\n``message``-type row (the row a jump lands on; the collapse branch's\n``closingAnswerId`` semantics) \u2014 so click-to-jump needs no translation and\nforks keep their checkpoints. ``seq`` is the journal row ordinal (0-based),\nwhich places ticks proportionally in the rail; ``turn`` is 1-based.\n``outcome`` is null unless the turn's own completion marker carried a kind,\nand ``open`` on the live unsettled tail. ``naming`` is present on\ncompletions only \u2014 user ticks have nothing to name."
+        "description": "One rail tick: a user message or a completed agent turn (D1).\n\n``id`` is a REAL journal entry id \u2014 the user row, or the turn's closing\nANSWER row (its last assistant message row with non-empty content; the\ncollapse branch's ``closingAnswerId`` semantics \u2014 falling back to the last\nmessage row only when the turn has no answer) \u2014 so click-to-jump needs no\ntranslation and forks keep their checkpoints. ``seq`` is the journal row\nordinal (0-based), which places ticks proportionally in the rail; ``turn``\nis 1-based. ``outcome`` is null unless the turn's own completion marker\ncarried a kind, and ``open`` on the live unsettled tail. ``naming`` is\npresent on completions only \u2014 user ticks have nothing to name."
       },
       "CheckpointNaming": {
         "properties": {
