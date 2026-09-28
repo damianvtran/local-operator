@@ -546,6 +546,13 @@ class HistoryPage(BaseModel):
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool
+    #: Anchored reads only (design §D4): a row newer than this page's newest
+    #: exists beyond it. ``None`` on every other read, whose contract does not
+    #: bound the newer side — a ``before_id`` page has newer rows above it by
+    #: construction, so a ``False`` there would be a claim the reader never
+    #: made. The frozen wire (design §D9) draws the field as optional for
+    #: exactly this reason, and an older client ignores a key it does not know.
+    has_newer: bool | None = None
 
 
 #: How a child's transcript read ended, when the absence of rows needs naming.

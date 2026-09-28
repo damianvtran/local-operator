@@ -3132,7 +3132,14 @@ class DesktopSessionBridge:
         }
 
     async def history(
-        self, *, before_id: str | None = None, through_id: str | None = None, limit: int = 100
+        self,
+        *,
+        before_id: str | None = None,
+        through_id: str | None = None,
+        around_id: str | None = None,
+        before: int | None = None,
+        after: int | None = None,
+        limit: int = 100,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -3146,6 +3153,14 @@ class DesktopSessionBridge:
         ``read_transcript_page`` cannot report them missing. ``before_id``
         backward paging and this cut's direct use by
         ``read_transcript_page``'s own tests are what keep the parameter alive.
+
+        ``around_id`` is the anchored mode (design §D4): one page centred on an
+        entry id, ``before`` rows older and ``after`` newer, for the renderer's
+        far jump. It is the READER's mode, not a second implementation here —
+        the same page cache, the same single-flight, the same reconciliation
+        rules — and the response gains ``has_newer`` with it, because the
+        anchored page is the only read whose contract bounds its newer edge
+        (see ``HistoryPage``).
 
         Through ``load_transcript_page`` rather than a bare ``to_thread`` around
         the reader: the SSE open frame asks for THIS read seconds after this
@@ -3163,6 +3178,24 @@ class DesktopSessionBridge:
         on both, so no caller changes.
         """
         if self.remote_row is not None:
+            if around_id is not None:
+                # V1 CANNOT ANCHOR A PEER'S WINDOW (design §D4; the exact remote
+                # behaviour is pinned by spike S2). The wire carries messages,
+                # not journal rows, so there is no row to locate by id and no
+                # forward half to read — and the empty page is the contract's
+                # existing word for "this request cannot be satisfied here" (the
+                # same answer ``_remote_history`` gives a ``before_id`` the
+                # window no longer holds). Serving some OTHER window instead is
+                # the one thing forbidden. ``cursor_missing`` is True rather than
+                # the remote reader's usual False so an empty page cannot be
+                # misread as "the conversation is empty"; ``has_newer`` stays
+                # None — the question was never answered.
+                return {
+                    "entries": [],
+                    "has_more": False,
+                    "cursor_missing": True,
+                    "has_newer": None,
+                }
             return await self._remote_history(
                 before_id=before_id, through_id=through_id, limit=limit
             )
@@ -3171,18 +3204,22 @@ class DesktopSessionBridge:
                 self.root / "sessions" / self.session_id,
                 before_id=before_id,
                 through_id=through_id,
+                around_id=around_id,
+                before=before,
+                after=after,
                 limit=limit,
             )
         except FileNotFoundError:
             return {
                 "entries": [],
                 "has_more": False,
-                "cursor_missing": bool(before_id or through_id),
+                "cursor_missing": bool(before_id or through_id or around_id),
             }
         return {
             "entries": [json.loads(row.to_json()) for row in page.entries],
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
+            "has_newer": page.has_newer,
         }
 
     async def _remote_history(
