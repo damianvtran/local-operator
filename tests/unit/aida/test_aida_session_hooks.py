@@ -193,8 +193,16 @@ async def test_a_config_write_reaches_her_live_session(isolated_root: Path) -> N
         change = watcher.poll_now()
         assert change is not None and "aida.cadence.paused" in change.changed_keys
 
-        for _ in range(200):
-            if not any(proactive.is_aida_row(row.id) for row in session._wake.schedules):
+        # WAIT ON THE DURABLE FACT, not on its in-memory shadow. The live
+        # list empties first and the persist is the task's very next await, so
+        # a loop that watches only the live list can be satisfied a turn
+        # before the index write lands — which is exactly how this test read
+        # red in a loaded batch run while passing in isolation. The subject of
+        # this seam is the durable hold, so the loop waits for both.
+        for _ in range(400):
+            in_memory = not any(proactive.is_aida_row(row.id) for row in session._wake.schedules)
+            index = wake_store.read_entry(isolated_root, session_id) or {}
+            if in_memory and not index.get("schedules"):
                 break
             await asyncio.sleep(0.01)
         assert [row.id for row in session._wake.schedules] == []

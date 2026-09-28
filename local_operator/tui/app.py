@@ -5217,6 +5217,12 @@ class OperatorApp(App[None]):
         # remain discoverable wherever the user navigated while it was copying.
         self._pending_fork_outcome: tuple[str, NoticeKind] | None = None
         #: A ``/aida <request>`` typed BEFORE her conversation is on screen:
+        #: The scheduled first-run Aida ensure `run_tui` starts — never awaited
+        #: there (see the hook's comment: the first run builds a session and
+        #: installs the wake supervisor through a subprocess, and neither
+        #: belongs on the first paint). Held so the task cannot be
+        #: garbage-collected mid-flight; ``None`` until a CLI boot starts it.
+        self._aida_boot_task: asyncio.Task[None] | None = None
         #: ``(session_id, text, attachments)``, spent by ``_submit_aida_prompt``
         #: at the same adoption seams as the boot prompt and dropped — rather
         #: than misdelivered — when the transition lands elsewhere. Initialised

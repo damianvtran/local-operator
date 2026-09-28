@@ -7,6 +7,7 @@ Import hygiene: ``cli.py`` imports this module ONLY in interactive mode, and
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
@@ -252,19 +253,26 @@ async def run_tui(
         # and the store is an optional capability rather than a boot dependency
         # (§13).
         registration = _register_secret_session(app)
-        # AIDA'S BOOT ENSURE, beside this process's other always-on hooks: on a
-        # install that has never run her, this creates her session, pins it and
-        # arms the cadence (installing the wake supervisor in the same breath),
-        # so the supervisor can start her at 09:00 whether or not any terminal
-        # is open then. Best-effort by the same rule the registration above
-        # follows — her bootstrap is worth a log line, never a failed boot —
-        # and a cheap no-op on every later boot (one state read + one stat).
-        try:
-            from local_operator.aida import ensure_session
+        # AIDA'S BOOT ENSURE — SCHEDULED, NEVER AWAITED HERE. On an install
+        # that has never run her this creates her session, pins it and arms
+        # the cadence (installing the wake supervisor in the same breath), so
+        # the supervisor can start her at 09:00 whether or not any terminal is
+        # open then. None of that belongs on the terminal's first paint: the
+        # first run builds a session and shells out to install the supervisor,
+        # and awaiting it held the UI behind all of it. The task is kept on the
+        # app so it cannot be garbage-collected mid-flight; BEST-EFFORT by the
+        # same rule the registration above follows — her bootstrap is worth a
+        # log line, never a failed boot — and a cheap no-op on later boots.
 
-            await ensure_session()
-        except Exception:  # noqa: BLE001 — never the boot's failure
-            logger.warning("aida: boot ensure failed", exc_info=True)
+        async def _aida_boot_ensure() -> None:
+            try:
+                from local_operator.aida import ensure_session
+
+                await ensure_session()
+            except Exception:  # noqa: BLE001 — never the boot's failure
+                logger.warning("aida: boot ensure failed", exc_info=True)
+
+        app._aida_boot_task = asyncio.create_task(_aida_boot_ensure())
         try:
             await app.run_async()
         except KeyboardInterrupt:
