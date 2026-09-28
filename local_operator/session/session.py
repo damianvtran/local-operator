@@ -146,6 +146,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     ModelSpec,
+    MonitorDeltaEvent,
     NoticeEvent,
     PeerMessageDeliveredEvent,
     ReasoningDeltaEvent,
@@ -185,6 +186,18 @@ from local_operator.incidents import (
     render_cut_off_reason,
 )
 from local_operator.model.effort import cheapest_real_rung
+from local_operator.monitors.delivery import (
+    MonitorDelivery,
+    format_monitor_delivery_text,
+)
+from local_operator.monitors.readonly import readonly_verdict
+from local_operator.monitors.scheduler import CheckOutcome, MonitorScheduler
+from local_operator.monitors.settings import read_monitor_settings
+from local_operator.monitors.spec import (
+    MONITOR_PROMPT_MESSAGE_TYPE,
+    MONITOR_SCHEDULES_CUSTOM_TYPE,
+    MonitorSpec,
+)
 from local_operator.projects import (
     Project,
     reported_age,
@@ -541,7 +554,15 @@ _PER_TOKEN_EVENT_TYPES = (
 #: the merge added, and ``set_ask_handler`` re-runs one entry of it. A tool
 #: added to the registry with a session-gated builder and not added here is
 #: advertised to nobody.
-SESSION_CAPABILITY_TOOLS: tuple[str, ...] = ("task", "wait", "jobs", "wake", "hub", "ask")
+SESSION_CAPABILITY_TOOLS: tuple[str, ...] = (
+    "task",
+    "wait",
+    "jobs",
+    "wake",
+    "monitor",
+    "hub",
+    "ask",
+)
 
 
 def _splice_in_registry_order(existing: Sequence[Any], fresh: Sequence[Any]) -> list[Any]:
@@ -3119,6 +3140,30 @@ class Session:
             ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        # The monitor scheduler is the wake scheduler's twin (design
+        # monitor-tool.md §5.1): in-process, one timer, a persist callback and
+        # a deliver callback — plus the check runner, which executes the
+        # watched call through this session's own tool executor, and the
+        # read-only validator, which is also the run-time re-check (§6.8).
+        from local_operator.paths import config_dir as _resolve_config_dir
+
+        #: Set when the last monitors-INDEX write failed. The index is
+        #: derived and best-effort (the transcript is the truth), but §11.4
+        #: makes an ARM during a failing index a refusal rather than a silent
+        #: loss — the create flow reads this through ``index_writable``.
+        self._monitor_index_write_failed = False
+        self._monitors = MonitorScheduler(
+            now=lambda: int(time.time() * 1000),
+            settings=read_monitor_settings(),
+            config_dir=_resolve_config_dir(),
+            session_id=self._session_id,
+            validate=self._validate_monitor_call,
+            run_check=self._run_monitor_check,
+            deliver=self._deliver_monitor,
+            persist=self._persist_monitor_schedules,
+            on_change=self._on_monitor_change,
+            index_writable=lambda: not self._monitor_index_write_failed,
+        )
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of
         #: ``<config>/aida/state.json`` on every session that is not hers, and
@@ -3153,6 +3198,12 @@ class Session:
         # so what lands on disk is the post-load truth.
         self._rebuild_wake_index_entry()
         self._prepare_missed_wake_catchup()
+        # Monitors load and rebuild their own derived index on EVERY open,
+        # exactly like the wake pair above: the transcript is the source of
+        # truth, and the open-time rewrite is what heals a deleted, stale or
+        # corrupt index entry (§10.2).
+        self._load_monitor_schedules()
+        self._rebuild_monitor_index_entry()
         # The conversation's title is restored from the SAME transcript the
         # history came from, and for the same reason: a resumed session is the
         # same conversation, so the band and the terminal tab must name it the
@@ -4170,6 +4221,9 @@ class Session:
             self._tg_stack = stack
         self._handle_missed_wakes()
         await self._wake.pump()
+        # The same re-arm for monitors: adopted rows whose first check lands
+        # inside the grace window start here rather than waiting for a turn.
+        await self._monitors.pump()
         # Narrate a cut-off this boot repaired BEFORE anything can open a turn,
         # so the notice is in the live context the first turn reads. Deduped on
         # the token, so a second open of the same session is silent.
@@ -6488,6 +6542,11 @@ class Session:
     def wake_scheduler(self) -> WakeScheduler:
         """Exposed so the wake tool can list/create/cancel schedules."""
         return self._wake
+
+    @property
+    def monitor_scheduler(self) -> MonitorScheduler:
+        """Exposed so the monitor tool can list/create/cancel monitors."""
+        return self._monitors
 
     async def preflight_usage(self, *, consume_boundary: bool = True) -> None:
         """Run the stream's message-boundary quota check without starting a turn.
@@ -10074,6 +10133,11 @@ class Session:
             # construction; the first turn (with a loop) re-arms via pump().
             self._handle_missed_wakes()
             await self._wake.pump()
+        if self._monitors.needs_rearm:
+            # The monitor twin of HC-20: constructed without a running loop,
+            # re-armed by the first turn's pump (a separate condition — one
+            # scheduler being armed says nothing about the other).
+            await self._monitors.pump()
         self._is_streaming = True
         self._generation += 1  # monotonic; stamped on start AND end events
         self._last_activity_ms = int(time.time() * 1000)
@@ -10828,6 +10892,7 @@ class Session:
             # attached).
             attached_probe=self._goal_state.is_interactive,
             wake_scheduler=self._wake,
+            monitor_scheduler=self._monitors,
             on_todos_changed=self.refresh_frontend_state,
             browser=self._browser,
             web_io=self._web_io,
@@ -15414,6 +15479,35 @@ class Session:
             schedules = self._aida_filter_rows(schedules)
         self._wake.load(schedules)
 
+    def _load_monitor_schedules(self) -> None:
+        """Adopt the transcript's ``monitor_schedules`` rows, latest entry wins.
+
+        The wake loader's twin, including the fork rule: a monitor is active
+        ownership, not conversation history, so a fork declines only rows
+        copied at its creation boundary. Counters and the snapshot baseline
+        are NOT read here — they live in the per-monitor state files, which
+        the scheduler reads lazily (a missing counters file is a fresh
+        monitor; a missing blob re-establishes the baseline silently, §7.2).
+        """
+        from local_operator.fork import fork_instant
+
+        entry = self._transcript.latest_custom_entry(MONITOR_SCHEDULES_CUSTOM_TYPE)
+        if entry is None:
+            return
+        forked_at = fork_instant(self._transcript.directory)
+        if forked_at is not None and not entry.ts > forked_at:
+            return
+        details = dict(entry.payload.get("details", {}))
+        if not details:
+            return
+        monitors: list[MonitorSpec] = []
+        for raw in details.get("monitors", []):
+            try:
+                monitors.append(MonitorSpec.model_validate(raw))
+            except Exception:
+                logger.warning("dropping malformed persisted monitor spec: %r", raw)
+        self._monitors.load(monitors, next_seq=details.get("next_seq"))
+
     # -- aida engine attachment ---------------------------------------------
 
     def _aida_is_hers(self) -> bool:
@@ -15985,6 +16079,92 @@ class Session:
             )
         except Exception:  # noqa: BLE001 — the index is derived; the transcript already has it
             logger.warning("could not update the wake index entry", exc_info=True)
+
+    # -- monitors: persist, index, delivery ---------------------------------
+
+    async def _persist_monitor_schedules(self, schedules: list[MonitorSpec]) -> None:
+        """The ONE writer of monitor schedule state: transcript first, then
+        the derived index.
+
+        Order is the contract (the ``_persist_wake_schedules`` shape): the
+        transcript ``monitor_schedules`` entry is the source of truth and the
+        only step allowed to fail this coroutine — the scheduler awaits it
+        before re-arming, so a failed append means the in-memory rows never
+        silently diverge from disk. The index write runs after it and is
+        wrapped so it can never turn a persisted monitor into a raised
+        exception; the index is rebuilt on the next open regardless.
+
+        The never-reused id sequence rides the same entry (``next_seq``):
+        persisting it BESIDE the rows is what lets a later arm tell a
+        cancelled ``m3`` from one that was never issued.
+        """
+        await self._transcript.append_custom(
+            MONITOR_SCHEDULES_CUSTOM_TYPE,
+            {
+                "monitors": [monitor.model_dump() for monitor in schedules],
+                "next_seq": self._monitors.next_seq,
+            },
+        )
+        self._write_monitor_index_entry(schedules)
+
+    def _rebuild_monitor_index_entry(self) -> None:
+        """Open-time rewrite of the index from the scheduler's adopted rows.
+
+        Clears ``stopped_at``: a stopped session's monitors are dormant only
+        until someone opens it again, and opening is exactly this. Runs on
+        EVERY open, which is the self-healing property for the derived file a
+        cold reader (cleanup guard, picker, ``lop monitor status``) sees.
+        """
+        self._write_monitor_index_entry(list(self._monitors.monitors), clear=("stopped_at",))
+
+    def _write_monitor_index_entry(
+        self, schedules: list[MonitorSpec], *, clear: tuple[str, ...] = ()
+    ) -> None:
+        """Best-effort index write; swallows everything (see the wake twin).
+
+        The failure flag feeds §11.4's arm guard: while the index cannot be
+        written, creating a monitor is refused rather than silently lost.
+        """
+        try:
+            from local_operator.monitors import store as monitor_store
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+            # READ-BEFORE-WRITE only when there is something to preserve: the
+            # open path for every session without monitors must not touch the
+            # directory twice for a file that almost never exists.
+            existing = monitor_store.read_entry(root, self._session_id) if schedules else None
+            monitor_store.write_entry(
+                root,
+                self._session_id,
+                cwd=self._cwd,
+                monitors=self._monitors.index_rows(),
+                preserve=existing,
+                clear=clear,
+            )
+            self._monitor_index_write_failed = False
+        except Exception:  # noqa: BLE001 — the index is derived;
+            # the transcript already has it
+            self._monitor_index_write_failed = True
+            logger.warning("could not update the monitor index entry", exc_info=True)
+
+    def _on_monitor_change(self) -> None:
+        """A scheduler-visible change: refresh the index and any front end.
+
+        Fired on arm/cancel/re-activate/delivery/disable — NOT on quiet ticks
+        (a 30 s monitor would rewrite the index 2,880×/day for no reader,
+        §10.2; the counters file alone moves). Never raises: observation
+        cannot break scheduling.
+        """
+        try:
+            self._write_monitor_index_entry(list(self._monitors.monitors))
+        except Exception:  # noqa: BLE001 — write already swallows; belt and braces
+            logger.debug("monitor index refresh failed", exc_info=True)
+        if hasattr(self, "_frontend_state_store"):
+            try:
+                self.refresh_frontend_state()
+            except Exception:  # noqa: BLE001 — a paint must not break a tick
+                logger.debug("monitor frontend refresh failed", exc_info=True)
 
     def _ensure_wake_supervisor(self) -> None:
         """Install-on-demand chokepoint (design §4.2a). Best-effort; the hook
@@ -16561,6 +16741,10 @@ class Session:
         """Full-list update from the wake tool: persists then re-arms."""
         await self._wake.update(schedules)
 
+    async def set_monitor_schedules(self, schedules: list[MonitorSpec]) -> None:
+        """Full-list update from the monitor tool: persists then re-arms."""
+        await self._monitors.update(schedules)
+
     async def _deliver_wake(self, due: DueWake) -> None:
         """Deliver one fired wake through the prompt path as a user-attributed
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
@@ -16637,17 +16821,132 @@ class Session:
             return
         self._spawn_background(self._prompt_messages([wake_message]))
 
+    # -- monitor checks and delivery ----------------------------------------
+
+    def _resolve_monitor_tool(self, name: str) -> AgentTool | None:
+        """One tool from this session's LIVE inventory, by name.
+
+        The inventory is read at call time (not latched) so a tool a
+        settings flip or a prune removed is seen as gone — which is exactly
+        what the run-time re-check must detect (§6.8).
+        """
+        for tool in self._tools:
+            if tool.name == name:
+                return tool
+        return None
+
+    def _validate_monitor_call(self, tool_name: str, arguments: Mapping[str, Any]) -> str | None:
+        """The read-only gate, shared by arm-time validation and the
+        run-time re-check (§6.1/§6.8): tool present in this session's set and
+        the harness's effective tier still ``read``.
+        """
+        tool = self._resolve_monitor_tool(tool_name)
+        if tool is None:
+            return f"monitor can't watch \"{tool_name}\": it is not in this session's tool set."
+        return readonly_verdict(
+            tool,
+            arguments,
+            mcp_annotations=getattr(tool, "mcp_annotations", None),
+        )
+
+    async def _run_monitor_check(self, spec: MonitorSpec) -> CheckOutcome:
+        """Execute one monitor check through this session's own tool executor.
+
+        The same ``AgentTool.execute`` the loop calls, under
+        ``values.monitor.runTimeoutMs`` and with the spec's captured cwd. The
+        check is re-validated here, not only at arm time (§6.8): a call that
+        lost its qualification (a settings change moved a dynamic tier, a
+        ``createIf`` tool vanished) skips the tick and counts a failure with
+        the reason. A timeout aborts the call's own signal so a wedged
+        subprocess is reaped by the tool's normal paths (§5.4).
+        """
+        reason = self._validate_monitor_call(spec.tool, spec.arguments)
+        if reason is not None:
+            return {"error": reason}
+        tool = self._resolve_monitor_tool(spec.tool)
+        if tool is None:  # pragma: no cover — validate() above covers this
+            return {"error": "call is no longer read-only"}
+        signal = AbortSignal()
+        context = self._build_tool_context()
+        if spec.cwd:
+            context = context.model_copy(update={"cwd": spec.cwd})
+        timeout_s = self._monitors.settings.run_timeout_ms / 1000.0
+        try:
+            result = await asyncio.wait_for(
+                tool.execute(f"monitor-{spec.id}", dict(spec.arguments), signal, None, context),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            signal.abort("monitor check timed out")
+            return {"error": f"check timed out after {int(timeout_s)}s"}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — one failure feeds the ladder
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        if result.is_error:
+            text = (result.text or "").strip()
+            return {"error": text or "the tool returned an error"}
+        return {"text": result.text, "error": None}
+
+    async def _deliver_monitor(self, delivery: MonitorDelivery) -> None:
+        """Deliver one material monitor delta as a user-attributed
+        ``monitor_prompt`` custom message — the ``_deliver_wake`` shape:
+        idle opens a turn; busy rides the next tool boundary, courtesy-marked
+        so nothing in flight is interrupted; the receipt event is emitted
+        before the turn spawn (a front end paints the receipt ahead of the
+        work it triggered). One message per material monitor — a fold could
+        not name one id or one cancel hint, and each message carries its own
+        delta budget (§9.1).
+        """
+        text = format_monitor_delivery_text(delivery)
+        busy = self._is_streaming
+        if busy:
+            text = self._append_busy_resume_note(text, kind="monitor")
+        message = CustomMessage(
+            custom_type=MONITOR_PROMPT_MESSAGE_TYPE,
+            attribution="user",
+            details={
+                "monitor_id": delivery.monitor_id,
+                "name": delivery.name,
+                "checks": delivery.checks,
+                "skipped": delivery.skipped,
+                "text": text,
+            },
+        )
+        await self._emit(
+            MonitorDeltaEvent(
+                text=text,
+                monitor_id=delivery.monitor_id,
+                name=delivery.name,
+                changes=delivery.changes,
+                skipped=delivery.skipped,
+            )
+        )
+        if busy:
+            self._courtesy_wake_count += 1
+            self._steering_queue.put_nowait(message)
+            # AFTER the put, for the lost-wakeup reason the wake path records:
+            # the woken tool returns into a drain, and the drain must find the
+            # message already queued.
+            self._peer_arrival.mark(MONITOR_PROMPT_MESSAGE_TYPE)
+            return
+        self._spawn_background(self._prompt_messages([message]))
+
     @staticmethod
-    def _append_busy_resume_note(text: str, *, continue_what: str | None = None) -> str:
+    def _append_busy_resume_note(
+        text: str, *, continue_what: str | None = None, kind: str = "wake"
+    ) -> str:
         """The busy-path suffix: what to do after the wake's task is handled.
 
-        A wake that lands mid-turn interrupts NOTHING (courtesy delivery), so
-        the turn's own work is still owed when the wake is done — the note
-        names that obligation, because the alarm envelope alone reads as a
-        fresh instruction and 'do the wake task, then go back' is exactly the
-        behaviour a wake firing mid-task used to lose. Idle-path deliveries
-        stay clean: they open their own turn, so there is no prior work to
-        resume.
+        A wake (or monitor delta) that lands mid-turn interrupts NOTHING
+        (courtesy delivery), so the turn's own work is still owed when it is
+        done — the note names that obligation, because the envelope alone
+        reads as a fresh instruction and 'do the wake task, then go back' is
+        exactly the behaviour a wake firing mid-task used to lose. Idle-path
+        deliveries stay clean: they open their own turn, so there is no prior
+        work to resume. ``kind`` names the delivery for the sentence
+        ("wake"/"monitor"); the default keeps every existing caller
+        byte-identical.
 
         ``continue_what`` names the interrupted work when "the work you were
         doing" is not literally true — a catch-up folded ahead of a FRESH
@@ -16656,9 +16955,9 @@ class Session:
         continuation = continue_what or "resume the work you were doing when it fired"
         return (
             f"{text}\n\n"
-            "(This wake fired while you were already working. It was held for a "
+            f"(This {kind} fired while you were already working. It was held for a "
             "tool boundary so nothing in flight was interrupted: handle the "
-            f"wake's task now, then {continuation} unless this wake makes it "
+            f"{kind}'s task now, then {continuation} unless this {kind} makes it "
             "obsolete.)"
         )
 
@@ -17421,6 +17720,7 @@ class Session:
                     logger.warning("final roster/todo snapshot did not land", exc_info=True)
             await self.jobs.dispose()
             self._wake.dispose()
+            self._monitors.dispose()
             # A shell receipt can be queued behind a turn that was just aborted.
             # Its normal turn-finally flush should already have run, but this
             # last-resort pass keeps disposal durable if teardown reached here

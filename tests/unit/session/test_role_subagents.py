@@ -413,7 +413,10 @@ async def test_restricted_tool_construction_matches_legacy_inventory(
     if agent_name == "scout" or not may_delegate:
         drop = merged_in
     else:
-        drop = {name for name in merged_in if name == "wake"}
+        # The descendant-boundary prune, verbatim: a child session ends after
+        # one prompt, so neither a wake nor a monitor armed there could be
+        # honoured (harness/subagent.py).
+        drop = {name for name in merged_in if name in ("wake", "monitor")}
     if subagent_mod._can_background(legacy_tools):
         drop = drop - {"jobs", "wait"}
     expected_names = [tool.name for tool in merged if tool.name not in drop]

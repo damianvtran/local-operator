@@ -36,6 +36,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "failover",
         "mcp",
         "mobile",
+        "monitor",
         "network",
         "peer-messaging",
         "projects",
@@ -98,6 +99,11 @@ def test_guide_listing_never_contains_guide_body() -> None:
         # LLM roster is the path that carries those, and overstating the router
         # in a test would pin a claim it cannot keep.
         ("ffmpeg: command not found, I need to install it", "system-tools"),
+        (
+            "watch this thread and tell me when someone replies — a monitor "
+            "that reports only changes",
+            "monitor",
+        ),
     ],
 )
 async def test_each_guide_routes_from_representative_task(

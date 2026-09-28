@@ -396,14 +396,33 @@ def build_agent_tool(
     raw_name: str
     description: str
     input_schema: dict[str, Any] | None
+    annotations: dict[str, Any] | None
     if isinstance(mcp_tool, dict):
         raw_name = mcp_tool.get("name", "")
         description = mcp_tool.get("description", "") or ""
         input_schema = mcp_tool.get("inputSchema") or mcp_tool.get("input_schema") or {}
+        raw_annotations = mcp_tool.get("annotations")
     else:
         raw_name = mcp_tool.name
         description = mcp_tool.description or ""
         input_schema = mcp_tool.input_schema
+        raw_annotations = getattr(mcp_tool, "annotations", None)
+    # The annotations ride onto the AgentTool for ONE consumer: the monitor
+    # read-only evaluator, whose rule is ``annotations.readOnlyHint is True``
+    # (contract §6.5). The SDK model dumps by ALIAS — the wire spelling is
+    # ``readOnlyHint``; its snake-case field name would read as "no hint" and
+    # refuse every monitorable tool. Absent/false stays absent/false: nothing
+    # else in the harness reads the hint, and the bridge's own exec tier for
+    # MCP tools is unchanged.
+    if raw_annotations is None:
+        annotations = None
+    elif isinstance(raw_annotations, dict):
+        annotations = dict(raw_annotations)
+    else:
+        try:
+            annotations = dict(raw_annotations.model_dump(by_alias=True, exclude_none=True))
+        except Exception:  # noqa: BLE001 — an unreadable hint is "no hint"
+            annotations = None
 
     return AgentTool(
         name=create_mcp_tool_name(server_name, raw_name),
@@ -420,5 +439,6 @@ def build_agent_tool(
         parameters=apply_intent_schema(normalize_input_schema(input_schema)),
         approval_tier="exec",  # unknown external side effects default to exec
         interruptible=True,
+        mcp_annotations=annotations,
         execute=call_fn,
     )

@@ -1599,6 +1599,27 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001
             logger.debug("pristine probe: wake index unreadable", exc_info=True)
             return False
+        # Monitors join the probe on the same two legs as wakes (§10.5): the
+        # live scheduler, then the on-disk index a cold resume re-arms from.
+        # Present-or-index, because a scheduler that reports "none" once
+        # disposed or absent on a reduced host must not out-vote the durable
+        # row a reopen would resurrect.
+        try:
+            if self.next_monitor_due_at() is not None:
+                return False
+        except Exception:  # noqa: BLE001
+            logger.debug("pristine probe: monitor scheduler unreadable", exc_info=True)
+            return False
+        try:
+            from local_operator.monitors.store import read_entry as read_monitor_entry
+            from local_operator.paths import config_dir
+
+            entry = read_monitor_entry(config_dir(), str(getattr(session, "session_id", "") or ""))
+            if entry and (entry.get("monitors") or []):
+                return False
+        except Exception:  # noqa: BLE001
+            logger.debug("pristine probe: monitor index unreadable", exc_info=True)
+            return False
         try:
             if session.history():
                 return False
@@ -2301,6 +2322,25 @@ class ServingSessionHandle(SessionHandle):
             return None
         due = [s.next_due_at for s in schedules if isinstance(s.next_due_at, int)]
         return min(due) if due else None
+
+    def next_monitor_due_at(self) -> int | None:
+        """Epoch-ms of the earliest due monitor, or ``None`` when none can fire.
+
+        The pristine probe's monitor leg (§10.5): a session whose scheduler
+        still holds a monitor that can check is not pristine. Read from the
+        live scheduler — the index row is the probe's OTHER leg, so a cold
+        resume's durable row is consulted where this one reports nothing. A
+        disposed scheduler reports none; uncertainty follows the wake
+        accessor's direction (``None``) because the probe trusts the index
+        for the durable half and a raise here would be a second policy.
+        """
+        scheduler = getattr(self._session, "monitor_scheduler", None)
+        if scheduler is None or getattr(scheduler, "disposed", False):
+            return None
+        try:
+            return scheduler.next_monitor_due_at()
+        except Exception:  # noqa: BLE001 — uncertainty must not pin the runtime
+            return None
 
     def request_stop(self) -> None:
         """The graceful rung of the kill switch (``control.stop_session``).

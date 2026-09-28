@@ -81,6 +81,14 @@ from local_operator.harness.approval import ApprovalGate
 # them, so both import paths give back the same class object.
 from local_operator.harness.wake_types import WakeSchedule
 
+# ``monitors.spec``, NOT ``monitors.scheduler`` or the package's other modules:
+# ``spec`` is the monitor DTO leaf (pydantic + stdlib only, exactly like
+# ``wake_types`` above) and the protocol below annotates its members with
+# ``MonitorSpec``. Importing the scheduler here would put asyncio and the live
+# loop on this module's path for every entry point — the same mistake the
+# ``wake_types`` split above records.
+from local_operator.monitors.spec import MonitorSpec
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -665,6 +673,39 @@ class WakeSchedulerProtocol(Protocol):
 
 
 @runtime_checkable
+class MonitorSchedulerProtocol(Protocol):
+    """The slice of a monitor scheduler the ``monitor`` tool drives.
+
+    Implemented by :class:`local_operator.monitors.scheduler.MonitorScheduler`.
+    The tool reads the list and calls ``create``/``cancel``; the create path
+    lives on the SCHEDULER rather than in the tool because it needs state the
+    tool cannot see — the live counters (a disabled row reactivates), the
+    dedupe identities, the never-reused id sequence, and the read-only
+    validator backed by the session's own tool inventory. Keeping it there is
+    also what lets the run-time re-check and the arm-time gate share one
+    implementation.
+    """
+
+    @property
+    def monitors(self) -> Sequence[MonitorSpec]: ...
+
+    async def update(self, monitors: list[MonitorSpec]) -> None: ...
+
+    async def create(self, request: Mapping[str, Any], *, cwd: str) -> dict[str, Any]: ...
+
+    async def cancel(self, monitor_id: str) -> dict[str, Any]: ...
+
+    def index_rows(self) -> list[dict[str, Any]]:
+        """Spec fields plus runtime health, the shape the index and list share.
+
+        One producer for the session's derived index entry, the ``monitor
+        list`` rendering and (later) the TUI band, so those cannot disagree
+        about what a row says.
+        """
+        ...
+
+
+@runtime_checkable
 class PeerArrivalProtocol(Protocol):
     """A wakeable signal that a message FOR THE MODEL landed mid-turn.
 
@@ -1175,6 +1216,9 @@ class ToolContext(BaseModel):
     # tool is then not advertised at all (createIf) rather than advertised and
     # always failing.
     wake_scheduler: WakeSchedulerProtocol | None = None
+    # Monitor scheduling — the wake field's twin. ``None`` means the host has
+    # no monitor scheduler; the monitor tool is then not advertised at all.
+    monitor_scheduler: MonitorSchedulerProtocol | None = None
     # Durable todo lists keyed by session id. A host that attaches one gets
     # todo state it can persist alongside the transcript; otherwise the tool
     # falls back to a process-local table.
@@ -1377,6 +1421,12 @@ class AgentTool(BaseModel):
     hidden: bool = False
     execute: ToolExecuteFn = Field(exclude=True)
     describe_approval: ApprovalDescribeFn | None = Field(default=None, exclude=True)
+    #: The MCP server's ``tools/list`` annotations for this tool, when one
+    #: built it: ``{readOnlyHint: True, …}``. Read by exactly one consumer —
+    #: the monitor read-only evaluator, whose §6.5 rule is
+    #: ``annotations.readOnlyHint is True`` — and `exclude=True` like the other
+    #: plumbing fields so it never reaches a provider wire object.
+    mcp_annotations: dict[str, Any] | None = Field(default=None, exclude=True)
     #: Per-CALL tier override. A tool whose tier is the highest of its ops
     #: (``hub``: resume starts a session, so the tool is write-tier) still has
     #: read-only ops (``list``, ``peek``) that must not prompt; this hook lets
@@ -1873,6 +1923,26 @@ class WakeDeliveredEvent(AgentEvent[Literal["wake_delivered"]]):
     #: for a catch-up (it folds several wakes and is never replayed).
     wake_id: str = ""
     occurrence: int = 0
+
+
+class MonitorDeltaEvent(AgentEvent[Literal["monitor_delta"]]):
+    """A material monitor delta was handed to the session for delivery.
+
+    Modeled on :class:`WakeDeliveredEvent`: it carries the FULL formatted
+    text so a front end can render an expandable receipt (the collapsed line
+    names the monitor; the expansion is the envelope plus the bounded delta),
+    and it is emitted BEFORE the turn spawn so the receipt paints ahead of
+    the work it triggered. ``monitor_id`` is the cancel handle an agent needs
+    to stop its own watch; the counts ride as fields so a surface can render
+    them without re-parsing the sentence.
+    """
+
+    type: Literal["monitor_delta"] = "monitor_delta"
+    text: str
+    monitor_id: str = ""
+    name: str = ""
+    changes: int = 0
+    skipped: int = 0
 
 
 class PeerMessageDeliveredEvent(AgentEvent[Literal["peer_message_delivered"]]):
