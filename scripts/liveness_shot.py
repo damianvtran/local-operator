@@ -82,7 +82,7 @@ def _write(pid: int, session_id: str, name: str, age_s: float, *, busy: bool) ->
         busy=busy,
     )
     record.heartbeat_at = time.time() - age_s
-    directory = registry.run_dir()
+    directory = registry.ensure_run_dir()
     path = directory / f"{pid}.json"
     path.write_text(json.dumps(record.to_json()))
     os.chmod(path, 0o600)

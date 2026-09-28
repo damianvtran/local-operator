@@ -39,6 +39,7 @@ from local_operator.tui import glyphs as glyph_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import _first_line
 from local_operator.tui.glyphs import (
+    NERD_ICON_DEFAULT,
     NERD_TOOL_ICONS,
     PLAIN_ICON_DEFAULT,
     PLAIN_ICON_MCP,
@@ -1620,11 +1621,17 @@ def test_every_builtin_tool_has_a_glyph_in_both_sets() -> None:
         "glob",
         "grep",
         "todo",
+        "project",
+        "project_delete",
         "wake",
         "list_variables",
         "read_variable",
         "browser",
         "console",
+        "web_search",
+        "web_fetch",
+        "task",
+        "agent",
         "send",
     }
     assert builtins <= set(NERD_TOOL_ICONS)
@@ -1705,6 +1712,37 @@ def test_the_console_icon_is_a_different_noun_from_the_shell() -> None:
     """
     assert NERD_TOOL_ICONS["console"] != NERD_TOOL_ICONS["bash"]
     assert PLAIN_TOOL_ICONS["console"] != PLAIN_TOOL_ICONS["bash"]
+
+
+def test_the_project_pair_reads_as_a_board_and_never_as_the_wrench(monkeypatch) -> None:
+    """The operator's report: a `project` call led with the generic wrench.
+
+    Both tables must resolve the pair by name, and `project_delete` must not
+    share `project`'s glyph: its act is the irreversible one (see
+    `tools/project_tool.py`), so it cannot ride the board's quiet mark. Both
+    file under `tool.row.name_meta`, matching the desktop UI's own category,
+    and neither takes the tables' default mark.
+    """
+    assert NERD_TOOL_ICONS["project"] != NERD_TOOL_ICONS["project_delete"]
+    assert PLAIN_TOOL_ICONS["project"] != PLAIN_TOOL_ICONS["project_delete"]
+
+    # And the operator's report itself: neither row may take the fallback
+    # mark — the wrench in the nerd table, `▸` in the plain one.
+    assert NERD_TOOL_ICONS["project"] != NERD_ICON_DEFAULT
+    assert NERD_TOOL_ICONS["project_delete"] != NERD_ICON_DEFAULT
+    assert PLAIN_TOOL_ICONS["project"] != PLAIN_ICON_DEFAULT
+    assert PLAIN_TOOL_ICONS["project_delete"] != PLAIN_ICON_DEFAULT
+
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: True)
+    assert tool_icon("project") == NERD_TOOL_ICONS["project"]
+    assert tool_icon("project_delete") == NERD_TOOL_ICONS["project_delete"]
+
+    monkeypatch.setattr(glyph_mod, "settings_get", lambda key, default=None: False)
+    assert tool_icon("project") == PLAIN_TOOL_ICONS["project"]
+    assert tool_icon("project_delete") == PLAIN_TOOL_ICONS["project_delete"]
+
+    assert _category_element("project") == "tool.row.name_meta"
+    assert _category_element("project_delete") == "tool.row.name_meta"
 
 
 def test_the_console_marker_is_a_fact_about_the_process_not_a_forgery() -> None:

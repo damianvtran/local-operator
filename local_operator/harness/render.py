@@ -179,8 +179,18 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # meant agents ended turns investigating leaks that had not
             # happened. Unlisted custom types are dropped here as bookkeeping,
             # which is exactly the intended treatment; the transcript row and
-            # the live operator receipt are unaffected and are asserted by
-            # ``tests/unit/secrets/test_credential_shapes.py``.
+            # the live operator receipt were asserted by
+            # ``tests/unit/secrets/test_credential_shapes.py`` at the time.
+            #
+            # THE NOTICE ITSELF IS GONE NOW (2026-09-27) and THIS EXCLUSION STAYS,
+            # deliberately: no in-tree path writes a new row of this type, so on
+            # the live path the exclusion is belt-and-braces — and it is
+            # load-bearing on the REPLAY path, where a transcript written before
+            # that date rehydrates a stored row through ``build_llm_history`` and
+            # this is what keeps it out of the model's context. A guard whose
+            # symptom disappears is exactly the one not to delete while stored
+            # rows still exist; it becomes dead only once no transcript anywhere
+            # carries the type, which is a migration decision and not this one.
             out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the

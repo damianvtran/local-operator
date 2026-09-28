@@ -301,12 +301,36 @@ def auto_timeline_tier(
 # ---------------------------------------------------------------------------
 
 
+def _marker_cells(*, selected: bool, associated: bool) -> tuple[tuple[str, str], ...]:
+    """The two-cell marker column: ``▸`` the selection, ``◆`` the session's set.
+
+    BOTH stay visible when a row is both: the reader opened this page to find
+    their own projects, and the answer must not vanish because the cursor
+    happens to sit on one of them (design round 1, D3 — the title count and
+    the painted diamonds disagreed). The column is always exactly two cells
+    wide, so no canvas moves.
+    """
+    if selected and associated:
+        return (("▸", "cursor"), ("◆", "session"))
+    if selected:
+        return (("▸", "cursor"), (" ", "dim"))
+    if associated:
+        return (("◆", "session"), (" ", "dim"))
+    return ((" ", "dim"), (" ", "dim"))
+
+
 def _list_row(
-    view: dict[str, Any], *, selected: bool, now: float | None, style_for: StyleFor
+    view: dict[str, Any],
+    *,
+    selected: bool,
+    associated: bool,
+    now: float | None,
+    style_for: StyleFor,
 ) -> Text:
     project = _row(view)
     row = Text(no_wrap=True)
-    row.append("▸ " if selected else "  ", style=style_for("cursor") if selected else Style())
+    for glyph, key in _marker_cells(selected=selected, associated=associated):
+        row.append(glyph, style=style_for(key) if key != "dim" else Style())
     row.append(display_name(project) or "(unnamed)", style=style_for("name"))
     if project.get("title"):
         # Title-first, key secondary (muted): the key is how the project is
@@ -353,15 +377,31 @@ def render_project_list(
     views: list[dict[str, Any]],
     *,
     cursor: int | None = None,
+    associated: frozenset[str] | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
 ) -> RenderResult:
-    """One line per project; the selected row carries the cursor marker."""
+    """One line per project; the selected row carries the cursor marker.
+
+    ``cursor`` is the page's ONE selection (an index into ``views``), and
+    ``associated`` names the project ids the calling session is linked to,
+    whose rows carry the `◆` marker (S3b) — the same selection and the same
+    marker set the board and the timeline read.
+    """
     resolver = _styles(style_for)
+    mine = associated or frozenset()
     lines: list[Text] = []
     rendered = views[:PROJECTS_MAX]
     for index, view in enumerate(rendered):
-        lines.append(_list_row(view, selected=index == cursor, now=now, style_for=resolver))
+        lines.append(
+            _list_row(
+                view,
+                selected=index == cursor,
+                associated=str(_row(view).get("id") or "") in mine,
+                now=now,
+                style_for=resolver,
+            )
+        )
     if len(views) > PROJECTS_MAX:
         lines.append(
             Text(
@@ -383,10 +423,24 @@ def render_project_list(
 # ---------------------------------------------------------------------------
 
 
-def _card_lines(view: dict[str, Any], *, now: float | None, style_for: StyleFor) -> list[Text]:
-    """One board card: name / facts / freshness — three lines."""
+def _card_lines(
+    view: dict[str, Any],
+    *,
+    selected: bool,
+    associated: bool,
+    now: float | None,
+    style_for: StyleFor,
+) -> list[Text]:
+    """One board card: name / facts / freshness — three lines.
+
+    The name line carries the same two-cell marker column the list rows do
+    (``▸`` the selection, ``◆`` the calling session's own set), so which card
+    ``↵`` would open is legible in every view without shifting the card grid.
+    """
     project = _row(view)
     name = Text(no_wrap=True, style=style_for("name"))
+    for glyph, key in _marker_cells(selected=selected, associated=associated):
+        name.append(glyph, style=style_for(key) if key != "dim" else style_for("dim"))
     label = display_name(project) or "(unnamed)"
     name.append(label)
     key = str(project.get("name") or "")
@@ -436,15 +490,48 @@ def _columns_of(views: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, A
     return columns
 
 
+def _painted_cards(
+    rows: list[dict[str, Any]], selected_id: str | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+    """``(visible, hidden, extra)`` for one board column.
+
+    ``extra`` is the SELECTED card when it would fall past ``BOARD_CARDS_MAX``:
+    the selection is what `↵` acts on, and a column that clamps the reader onto
+    a card it never paints is a silent clamp (UX round 1, U3). The overflow
+    note counts only what is still hidden, so its number stays honest.
+    """
+    visible = list(rows[:BOARD_CARDS_MAX])
+    hidden = list(rows[BOARD_CARDS_MAX:])
+    extra = None
+    if selected_id is not None:
+        for index, view in enumerate(hidden):
+            if str(_row(view).get("id") or "") == selected_id:
+                extra = hidden.pop(index)
+                break
+    return visible, hidden, extra
+
+
 def render_project_board(
     views: list[dict[str, Any]],
     *,
+    cursor: int | None = None,
+    associated: frozenset[str] | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
 ) -> RenderResult:
-    """Status columns painted side by side; cards of three lines, fixed width."""
+    """Status columns painted side by side; cards of three lines, fixed width.
+
+    ``cursor`` selects the ONE card the page's selection points at (an index
+    into ``views``; the cards are grouped by status, so the index is resolved
+    to an id) and ``associated`` marks the calling session's own set — both
+    painted in the card's marker column (S3b), never shifting the grid.
+    """
     resolver = _styles(style_for)
+    mine = associated or frozenset()
     rendered = views[:PROJECTS_MAX]
+    selected_id: str | None = None
+    if cursor is not None and 0 <= cursor < len(rendered):
+        selected_id = str(_row(rendered[cursor]).get("id") or "")
     columns = _columns_of(rendered)
     blocks: list[list[Text]] = []
     for status, rows in columns:
@@ -453,12 +540,47 @@ def render_project_board(
         header.append(status, style=resolver("status"))
         header.append(f" · {len(rows)}", style=resolver("dim"))
         block.append(header)
-        for view in rows[:BOARD_CARDS_MAX]:
+        visible, hidden, extra = _painted_cards(rows, selected_id)
+        for view in visible:
+            row_id = str(_row(view).get("id") or "")
             block.append(Text(""))
-            block.extend(_card_lines(view, now=now, style_for=resolver))
-        if len(rows) > BOARD_CARDS_MAX:
+            block.extend(
+                _card_lines(
+                    view,
+                    selected=selected_id is not None and row_id == selected_id,
+                    associated=row_id in mine,
+                    now=now,
+                    style_for=resolver,
+                )
+            )
+        if hidden or extra is not None:
+            # The note names the hidden remainder — and, when the session's own
+            # set is in it, how many of those are theirs, so a marker the
+            # column cannot paint is at least COUNTED where the reader looks
+            # for it (UX round 1, U3). When nothing is hidden (the selected
+            # card was the only one past the cap) there is no remainder to
+            # name: a `… +0 more` reads as leftovers (review round 2, R2-1).
+            if hidden:
+                note = f"… +{len(hidden)} more"
+                yours = sum(1 for view in hidden if str(_row(view).get("id") or "") in mine)
+                if yours:
+                    note += f" ({yours} yours)"
+                block.append(Text(""))
+                block.append(Text(note, style=resolver("dim")))
+        if extra is not None:
+            # The selected card is painted even past the cap: `↵` acts on it,
+            # and an action must have a visible object (UX round 1, U2/U3).
+            extra_id = str(_row(extra).get("id") or "")
             block.append(Text(""))
-            block.append(Text(f"… +{len(rows) - BOARD_CARDS_MAX} more", style=resolver("dim")))
+            block.extend(
+                _card_lines(
+                    extra,
+                    selected=True,
+                    associated=extra_id in mine,
+                    now=now,
+                    style_for=resolver,
+                )
+            )
         blocks.append(block)
     if len(views) > PROJECTS_MAX:
         blocks[0].append(Text(""))
@@ -504,18 +626,26 @@ def _timeline_row(
     axis_cells: int,
     tier: str,
     today: date,
+    selected: bool = False,
+    associated: bool = False,
     style_for: StyleFor,
 ) -> Text:
     project = _row(view)
     row = Text(no_wrap=True)
+    # The marker column rides INSIDE the fixed name field — two cells off the
+    # name, never a wider row — so the timeline's grid arithmetic (and every
+    # frame measured against it) does not move (S3b).
+    for glyph, key in _marker_cells(selected=selected, associated=associated):
+        row.append(glyph, style=style_for(key) if key != "dim" else style_for("dim"))
     label = display_name(project) or "(unnamed)"
     key = str(project.get("name") or "")
     name = Text(label, style=style_for("name"))
-    if project.get("title") and key and cell_len(f"{label} ({key})") <= TIMELINE_NAME_WIDTH:
+    if project.get("title") and key and cell_len(f"{label} ({key})") <= TIMELINE_NAME_WIDTH - 2:
         # Same rule as the board card: both only when the fixed name column
-        # holds them; the title wins a tight fit.
+        # holds them (here minus the two marker cells); the title wins a tight
+        # fit.
         name.append(f" ({key})", style=style_for("dim"))
-    name.truncate(TIMELINE_NAME_WIDTH, overflow="ellipsis", pad=True)
+    name.truncate(TIMELINE_NAME_WIDTH - 2, overflow="ellipsis", pad=True)
     row.append_text(name)
     row.append(" ", style=style_for("dim"))
 
@@ -636,10 +766,36 @@ def _timeline_axis(
     return text
 
 
+def _split_dated(
+    views: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """``(dated, undated)`` — the renderer's own split, shared with the reveal.
+
+    A project is DATED when it carries a date of its own or a milestone target:
+    otherwise it lands in the trailing ``no dates`` tail rather than on a
+    fabricated schedule. The timeline canvas and :func:`timeline_position`
+    read this ONE split, so a reveal cannot land on a row the chart did not
+    paint.
+    """
+    dated: list[dict[str, Any]] = []
+    undated: list[dict[str, Any]] = []
+    for view in views:
+        project = _row(view)
+        if any(project.get(key) for key in ("start_date", "target_date", "completed_at")) or any(
+            isinstance(m, dict) and m.get("target_date") for m in project.get("milestones") or []
+        ):
+            dated.append(view)
+        else:
+            undated.append(view)
+    return dated, undated
+
+
 def render_project_timeline(
     views: list[dict[str, Any]],
     *,
     tier: str = "month",
+    cursor: int | None = None,
+    associated: frozenset[str] | None = None,
     today: date | None = None,
     now: float | None = None,
     style_for: StyleFor | None = None,
@@ -648,24 +804,21 @@ def render_project_timeline(
 
     Projects with no dates are NOT silently dropped and not drawn on a
     fabricated schedule: they land in the trailing ``no dates`` section, which
-    is the honest degradation the design asks for.
+    is the honest degradation the design asks for. ``cursor`` marks the page's
+    selection in the name column and ``associated`` the calling session's own
+    rows (S3b), both inside the fixed name field.
     """
     resolver = _styles(style_for)
     moment = today or date.today()
     rendered = views[:PROJECTS_MAX]
     if tier not in TIMELINE_TIERS:
         tier = "month"
+    mine = associated or frozenset()
+    selected_id: str | None = None
+    if cursor is not None and 0 <= cursor < len(rendered):
+        selected_id = str(_row(rendered[cursor]).get("id") or "")
     span = timeline_span(rendered, today=moment)
-    dated: list[dict[str, Any]] = []
-    undated: list[dict[str, Any]] = []
-    for view in rendered:
-        project = _row(view)
-        if any(project.get(key) for key in ("start_date", "target_date", "completed_at")) or any(
-            isinstance(m, dict) and m.get("target_date") for m in project.get("milestones") or []
-        ):
-            dated.append(view)
-        else:
-            undated.append(view)
+    dated, undated = _split_dated(rendered)
 
     lines: list[Text] = []
     if span is not None and dated:
@@ -684,25 +837,107 @@ def render_project_timeline(
                     axis_cells=axis_cells,
                     tier=tier,
                     today=moment,
+                    selected=selected_id is not None
+                    and str(_row(view).get("id") or "") == selected_id,
+                    associated=str(_row(view).get("id") or "") in mine,
                     style_for=resolver,
                 )
             )
     if undated:
         if lines:
             lines.append(Text(""))
-        names = ", ".join(display_name(_row(view)) or "(unnamed)" for view in undated)
-        lines.append(
-            Text(
-                f"no dates ({len(undated)}): {names}",
-                style=resolver("dim"),
+        # The tail is ONE line, and the markers live ON it: an undated project
+        # is still selectable and still part of the session's set, so both
+        # glyphs are painted beside its name — otherwise `↵` would aim at a
+        # row with no visible selection at all (agent review round 1, F1).
+        tail = Text()
+        tail.append(f"no dates ({len(undated)}): ", style=resolver("dim"))
+        for index, view in enumerate(undated):
+            if index:
+                tail.append(", ", style=resolver("dim"))
+            row_id = str(_row(view).get("id") or "")
+            marked = (selected_id is not None and row_id == selected_id) or row_id in mine
+            if marked:
+                # The tail is free-form (no fixed name column to align), so a
+                # marked name carries its cells and an unmarked one stays bare.
+                for glyph, key in _marker_cells(
+                    selected=selected_id is not None and row_id == selected_id,
+                    associated=row_id in mine,
+                ):
+                    tail.append(glyph, style=resolver(key) if key != "dim" else resolver("dim"))
+            tail.append(
+                display_name(_row(view)) or "(unnamed)",
+                style=resolver("name") if marked else resolver("dim"),
             )
-        )
+        lines.append(tail)
     if not lines:
         from local_operator.slash_commands import project_empty_text
 
         lines.append(Text(project_empty_text(), style=resolver("dim")))
     width = max(cell_len(line.plain) for line in lines)
     return RenderResult(text=Text("\n").join(lines), width=width, height=len(lines))
+
+
+def board_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] | None:
+    """The board-canvas ``(x, y)`` of ``views[cursor]``'s card, or ``None``.
+
+    ``None`` means the card is NOT painted — past ``PROJECTS_MAX`` or its
+    column's ``BOARD_CARDS_MAX`` — which is what keeps the page's selection off
+    a cell no reader can see (design round 1, D2's rule, applied to the board).
+    The point is the card's NAME line, where the marker column lives, so a
+    reveal that lands there shows the selection itself and not just its card.
+    """
+    rendered = views[:PROJECTS_MAX]
+    if not (0 <= cursor < len(rendered)):
+        return None
+    target = str(_row(rendered[cursor]).get("id") or "")
+    x = 0
+    for _status, rows in _columns_of(rendered):
+        visible, hidden, extra = _painted_cards(rows, target)
+        for index, view in enumerate(visible):
+            if str(_row(view).get("id") or "") == target:
+                # Each card is a blank line and three content lines under the
+                # column header: its name line sits at 2 + index * 4.
+                return (x * BOARD_COLUMN_WIDTH, 2 + index * 4)
+        if extra is not None and str(_row(extra).get("id") or "") == target:
+            # Past the cap the selected card is painted after the overflow
+            # note (or straight after the last card, when nothing is hidden):
+            # 4 lines per visible card, then the note's blank + line when one
+            # is painted, then this card's blank — its NAME line lands at
+            # 4 + 4 * V with a note and 2 + 4 * V without one.
+            y = (4 if hidden else 2) + 4 * len(visible)
+            return (x * BOARD_COLUMN_WIDTH, y)
+        x += 1
+    return None
+
+
+def timeline_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] | None:
+    """The timeline-canvas ``(x, y)`` of ``views[cursor]``'s row, or ``None``.
+
+    Dated projects are one row each under the axis; the undated tail is ONE
+    line naming them all, so an undated selection answers with THAT line's
+    ``y`` — its name is on it. ``None`` means the index is past
+    ``PROJECTS_MAX`` or its project has no painted line at all.
+    """
+    rendered = views[:PROJECTS_MAX]
+    if not (0 <= cursor < len(rendered)):
+        return None
+    target = str(_row(rendered[cursor]).get("id") or "")
+    dated, undated = _split_dated(rendered)
+    span = timeline_span(rendered)
+    y = 0
+    if span is not None and dated:
+        y = 1  # the axis line; the rows follow it one per dated project
+        for view in dated:
+            if str(_row(view).get("id") or "") == target:
+                return (0, y)
+            y += 1
+    if undated:
+        if y:
+            y += 1  # the blank line between the chart and the tail
+        if any(str(_row(view).get("id") or "") == target for view in undated):
+            return (0, y)
+    return None
 
 
 # ---------------------------------------------------------------------------

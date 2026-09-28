@@ -1976,6 +1976,17 @@ def config_edit_command(args: argparse.Namespace) -> int:
     try:
         # Parse the value to the appropriate type
         value = args.value
+        if setting.empty_unsets and not str(value).strip():
+            # An empty argument UNSETS, which is the page's clear-to-unset gesture and
+            # the server's `PATCH /v1/settings` branch of the same name. Without it the
+            # empty string reached the LIST parse, which turns it into `[]` and STORED
+            # that: the key stayed present carrying an explicit "none", so
+            # `settings_get` reported a deliberate choice where the user had asked for
+            # the automatic one — the state `reset_setting` exists to avoid, and the
+            # reason the flag is on the rows that carry it (review round 1, M4).
+            settings_io.reset_setting(config_manager, setting)
+            print(f"Cleared {args.key}: it reads as its default again")
+            return 0
         # An ENUM's displayed LABEL is not always its stored VALUE (D11).
         # `model_effort auto` means the stored ``""``, and the guessed parse
         # below would hand the literal string ``auto`` to ``validate`` and have
@@ -1998,16 +2009,27 @@ def config_edit_command(args: argparse.Namespace) -> int:
             )
         if matched_choice is not None:
             value = matched_choice.value
-        elif setting.kind is settings_io.Kind.CASCADE:
+        elif setting.kind in (settings_io.Kind.CASCADE, settings_io.Kind.LIST):
             # The guessing ladder below knows int/float/bool/null and nothing
-            # structured, so a cascade's JSON fell through it as a plain
-            # string and was stored verbatim. ``coerce`` owns the CASCADE
-            # parse — one definition shared with the page — and raises a
-            # ``ValueError`` written for the user, which this function's
-            # existing ``except ValueError`` reports in the same words, on the
-            # same stream, with the same exit code as every other refusal
-            # here. Catching it again at this call site would be a second copy
-            # of that format to keep in sync.
+            # structured in EITHER sense:
+            #
+            # * a cascade's JSON fell through it as a plain string and was stored
+            #   verbatim;
+            # * a LIST's comma-separated text did too, and `validate` then refused
+            #   it with "expected a comma-separated list" — the message a user sees
+            #   immediately after typing a comma-separated list. Every
+            #   list-valued key was unreachable from this command because of it
+            #   (`providers.openrouter.order`, `web_search.providers`, and the mesh's
+            #   `network.advertise_hosts`, where the list is the whole setting), while
+            #   the /settings page could set them, because the page calls the parser
+            #   this branch was skipping.
+            #
+            # ``coerce`` owns both parses — one definition shared with the page — and
+            # raises a ``ValueError`` written for the user, which this function's
+            # existing ``except ValueError`` reports in the same words, on the same
+            # stream, with the same exit code as every other refusal here. Catching it
+            # again at this call site would be a second copy of that format to keep in
+            # sync.
             value = settings_io.coerce(setting, value)
         else:
             # Try to convert to int

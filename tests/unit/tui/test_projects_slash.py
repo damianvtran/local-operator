@@ -23,7 +23,6 @@ from local_operator.slash_commands import (
     project_empty_text,
     project_show_refusal_text,
     project_subcommand_rows,
-    project_unavailable_text,
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.command_picker import ArgumentChoice, PickerMode
@@ -251,14 +250,20 @@ async def test_unknown_word_is_refused_with_the_vocabulary(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_registry_less_session_names_the_surfaces() -> None:
+async def test_registry_less_session_reads_the_local_store(tmp_path: Path) -> None:
+    """S3b: a facade without a registry falls back to this machine's store.
+
+    Reading a project no longer requires the facade — or a session — so the
+    answer is the store's own (here: empty), not the unavailable sentence; that
+    sentence is kept for a store that cannot be opened at all.
+    """
     session = _ProjectSession()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(120, 32)) as pilot:
         await _boot(pilot, app)
         app._run_slash_command("/project list")
         await pilot.pause()
-        assert _notices(app)[-1] == project_unavailable_text()
+        assert _notices(app)[-1] == project_empty_text()
 
 
 # -- dispatch parity with the routed mirror ----------------------------------
@@ -357,12 +362,13 @@ def test_the_tui_show_page_and_the_mirror_receipt_read_one_composition(
 
 
 @pytest.mark.asyncio
-async def test_first_slot_offers_the_six_words_with_their_help(tmp_path: Path) -> None:
+async def test_first_slot_offers_every_word_with_its_help(tmp_path: Path) -> None:
     """The rows come from the vocabulary, help included, pinned equal here.
 
     A word the picker offers that the handler refuses (or the reverse) is the
     drift ``PROJECT_SUBCOMMANDS`` exists to prevent, and this is the test that
-    reads both through the one table.
+    reads both through the one table — eight words since S3b added the two page
+    entries (`board`, `timeline`), each with its own help line.
     """
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path, "alpha")
@@ -690,3 +696,276 @@ def test_show_receipt_states_title_key_owner_team_and_history() -> None:
     assert "history (2):" in receipt
     assert "  - 2026-09-27T21:05:00Z: second" in receipt  # no reporter → no ` by`
     assert "attachment: shot.png [image, 2.0 KB] /tmp/x/shot.png" in receipt
+
+
+# -- S3b: the nameless entries, the session-optional read, the page footer ----
+
+
+@pytest.mark.asyncio
+async def test_nameless_show_opens_the_sessions_board(tmp_path: Path) -> None:
+    """Operator refinement: `show` with no name is the session's own board.
+
+    One link is ALSO the highlight; the row carries the `◆` marker and the
+    title names the set. The explicit `board` entry is the all-projects one:
+    no marker, no title suffix.
+    """
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="beta"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="gamma"))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None, "nameless show must open the page, never refuse"
+        assert view._view == "board"
+        assert "this session" in view.rendered_rows()[0]
+        assert view._last is not None
+        canvas = view._last.text.plain
+        # TWO links: the cursor SEEDS onto the set's first member (UX r1,
+        # U1 — it used to sit on row 0, a stranger, while `↵` aimed there),
+        # and a selected associated row carries BOTH markers (D3).
+        assert "▸◆alpha" in canvas
+        assert "◆ beta" in canvas
+        assert "  gamma" in canvas
+        assert view._cursor == 0  # alpha is the set's first member
+
+        await pilot.press("escape")
+        await pilot.pause()
+        app._run_slash_command("/project board")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._view == "board"
+        assert "this session" not in view.rendered_rows()[0]
+        assert "◆" not in view._last.text.plain
+        assert "▸ alpha" in view._last.text.plain  # the selection stays put
+
+
+@pytest.mark.asyncio
+async def test_nameless_show_without_links_opens_the_all_projects_board(
+    tmp_path: Path,
+) -> None:
+    """Refinement (c): zero links is the plain all-projects board, not a refusal."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._view == "board"
+        assert "◆" not in view._last.text.plain
+        assert "this session" not in view.rendered_rows()[0]
+
+
+@pytest.mark.asyncio
+async def test_timeline_entry_opens_the_all_projects_timeline(tmp_path: Path) -> None:
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project timeline")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._view == "timeline"
+
+
+@pytest.mark.asyncio
+async def test_board_opens_with_no_session_at_all(tmp_path: Path) -> None:
+    """Refinement (a), hard requirement: reading needs NO session.
+
+    The store is this machine's (`config_dir()/projects`), so a front end with
+    no session — a bare terminal, a viewer between attaches — still opens the
+    board. The page composes without the this-process live overlay.
+    """
+    _registry(tmp_path, "alpha", "beta")
+
+    async def _failed_boot() -> _ProjectSession:
+        # Declared to return the session it never builds, like test_app_pilot's
+        # `flaky_factory`: the factory's type is the SUCCESS shape.
+        raise RuntimeError("provider is down")
+
+    app = OperatorApp(_failed_boot)
+    async with app.run_test(size=(140, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+        assert app._session is None
+        app._run_slash_command("/project board")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None, "no-session board must open"
+        assert view._last is not None
+        assert "alpha" in view._last.text.plain
+        assert "beta" in view._last.text.plain
+        # And the same for the nameless show (no session → all-projects board).
+        await pilot.press("escape")
+        await pilot.pause()
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        assert app._projects_view is not None
+
+
+@pytest.mark.asyncio
+async def test_board_on_an_empty_store_paints_the_shared_sentence(tmp_path: Path) -> None:
+    """Refinement (d): zero projects keeps the one-empty-sentence rule."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project board")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None
+        assert view._last is not None
+        assert view._last.text.plain == project_empty_text()
+
+
+def test_nameless_show_receipts_are_the_page_s_mirror(tmp_path: Path) -> None:
+    """The routed mirror (phone/mobile) answers the nameless entries in text.
+
+    `show` prefers the calling session's own projects; `board`/`timeline` are
+    the all-projects set; the listing carries the page-entry footer.
+    """
+    from local_operator.slash_commands import (
+        project_associated_heading_text,
+        project_listing_hint_text,
+        run_project_slash_op,
+    )
+
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"))
+    registry.create_project(ProjectEdit(name="beta"), sessions=[SESSION_ID])
+
+    text, style = run_project_slash_op(
+        "show", "", registry=registry, config_dir=tmp_path, session_id=SESSION_ID
+    )
+    assert style == "info"
+    assert text.startswith(project_associated_heading_text(1))
+    assert "- beta" in text and "- alpha" not in text
+
+    text, _style = run_project_slash_op(
+        "show", "", registry=registry, config_dir=tmp_path, session_id=None
+    )
+    assert text.splitlines()[-1] == project_listing_hint_text()
+    assert "- alpha" in text and "- beta" in text
+
+    for entry in ("board", "timeline"):
+        text, _style = run_project_slash_op(
+            entry, "", registry=registry, config_dir=tmp_path, session_id=None
+        )
+        assert "- alpha" in text and text.endswith(project_listing_hint_text())
+
+
+# -- round 1 remediation: refusals, copy, the `↵` rung ------------------------
+
+
+@pytest.mark.asyncio
+async def test_board_and_timeline_refuse_a_trailing_word(tmp_path: Path) -> None:
+    """Review r1 NIT 4 / UX r1 U5: the page entries take no argument."""
+    from local_operator.slash_commands import (
+        project_unexpected_argument_text,
+        run_project_slash_op,
+    )
+
+    session = _ProjectSession()
+    registry = _registry(tmp_path, "alpha")
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project board extra")
+        await pilot.pause()
+        assert _notices(app)[-1] == project_unexpected_argument_text("board")
+        assert app._projects_view is None, "a refused entry must not open the page"
+    text, style = run_project_slash_op(
+        "timeline", "extra", registry=registry, config_dir=tmp_path, session_id=None
+    )
+    assert (text, style) == (project_unexpected_argument_text("timeline"), "warning")
+
+
+def test_no_live_notice_spells_the_single_id() -> None:
+    """UX r1 U4: one link spells the concrete command; several keep the placeholder."""
+    from local_operator.slash_commands import project_jump_no_live_text
+
+    one = project_jump_no_live_text("beta", (("cd34ef56ab12", "stopped"),))
+    assert one.endswith("/resume cd34ef56ab12 starts it.")
+    many = project_jump_no_live_text(
+        "beta", (("111111111111", "stopped"), ("222222222222", "stopped"))
+    )
+    assert many.endswith("/resume <id> starts one.")
+
+
+@pytest.mark.asyncio
+async def test_the_open_hint_joins_the_ladder_and_sheds_at_60(tmp_path: Path) -> None:
+    """Design r1 D1: `↵ open` is visible at 100 columns and sheds at 60."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    for size, expected in (((100, 30), True), ((60, 20), False)):
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=size) as pilot:
+            await _boot(pilot, app)
+            app._run_slash_command("/project board")
+            await pilot.pause()
+            await pilot.pause()
+            view = app._projects_view
+            assert view is not None
+            assert view._open_hint.display is expected, size
+
+
+@pytest.mark.asyncio
+async def test_an_in_page_retarget_clears_the_stale_set(tmp_path: Path) -> None:
+    """Review r1 MINOR 2 / QA r1 Q3: the all-projects entry clears the markers."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="beta"), sessions=[SESSION_ID])
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._associated
+        # Retarget WITHOUT leaving the page.
+        app._run_slash_command("/project board")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None
+        assert not view._associated
+        assert "this session" not in view.rendered_rows()[0]
+        assert "◆" not in view._last.text.plain
+
+
+@pytest.mark.asyncio
+async def test_the_open_hint_paints_its_word_once(tmp_path: Path) -> None:
+    """Q4 / D5 / U6: the key is `↵` and the label ` open` — one word painted."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project board")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._open_hint.display
+        painted = view._open_hint.preview(" open", lead=True)
+        assert painted.count("open") == 1, painted
+        assert "↵  open" in painted  # key `↵`, then the label's two-space seam

@@ -25,14 +25,23 @@ WHAT IS AT RISK HERE, and therefore what these tests pin:
 
 The end-to-end behaviour (a stale plist really being rewritten and the daemon
 restarted on the operator's machine) is on the PR as live ``ps``/``plutil``
-captures: it cannot be asserted here without touching a real launchd session.
+captures: it cannot be asserted as a unit cell. The ONE exception is the
+scratch-label integration cell at the bottom of this file
+(``test_a_stopped_scratch_job_is_revived_against_real_launchd``), added for the
+2026-09-27 stranded-tunnel fix: it registers, stops and revives a real job under
+a scratch label with its own teardown, and skips rather than fails where the
+machine has no session to register into.
 """
 
 from __future__ import annotations
 
 import os
 import plistlib
+import secrets
+import shutil
 import subprocess
+import sys
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
@@ -40,6 +49,7 @@ from types import ModuleType
 import pytest
 
 from local_operator import launchd
+from local_operator import update as update_mod
 from local_operator.paths import CONFIG_DIR_ENV
 
 PLIST = "com.local-operator.mobile"
@@ -778,3 +788,406 @@ class TestRepairHelpers:
 
         assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is False
         assert launchd.kickstart(label=PLIST, path=self._own_path(), run=runner) is False
+
+
+class TestStartIfStopped:
+    """``start_if_stopped`` — the arm for a job launchd has and is not running.
+
+    The state no other question on the refresh path owned (2026-09-27: the
+    Radient tunnel connector spent ~12 hours there while five upgrades walked
+    past it): a daemon that exited cleanly is not retried by launchd, has no pid
+    for the build question to compare, and is content-identical for the rewrite.
+    These cells pin the three answers the arm can give — a confirmed start
+    (``revived``), a decided non-start (``left-stopped``, the caller's gate), and
+    an honest failure — plus the three declines it must make BEFORE asking
+    launchd anything, because each of those belongs to another repair.
+    """
+
+    def _own_path(self, label: str = PLIST) -> Path:
+        """The path the REAL passwd home owns — the arm's addressability guard.
+
+        The same helper ``TestRepairHelpers`` carries, and the runner is still a
+        fake, so nothing here reaches launchd (``is_own_plist`` answers True).
+        """
+        home = launchd.real_home()
+        assert home is not None
+        return home / "Library" / "LaunchAgents" / f"{label}.plist"
+
+    @staticmethod
+    def _layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A generation layout under this test's stable root (the arm asks FIRST)."""
+        root = tmp_path / "lop"
+        (root / "generations" / "g1").mkdir(parents=True)
+        (root / "current").symlink_to(root / "generations" / "g1")
+        monkeypatch.setattr(update_mod, "_STABLE_ROOT", str(root))
+
+    def test_a_running_job_is_declined_without_a_kick(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live pid means the build question owns this state, not this arm.
+
+        The gate is passed FAIL-LOUD (review round 1, finding 3): a running job
+        must never pay for the policy question, so consulting it here raises
+        this cell's own failure instead of passing quietly.
+        """
+        self._layout(tmp_path, monkeypatch)
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0, stdout="\tpid = 4242\n")
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=self._own_path(),
+            recovery="lop tunnel install",
+            run=runner,
+            may_start=lambda: pytest.fail("the gate was consulted for a running job"),
+        )
+
+        assert outcome is None
+        assert calls == [("print", f"gui/{os.getuid()}/{PLIST}")], calls
+
+    def test_a_label_launchd_does_not_have_is_declined(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A booted-out label wants the installers' reload, never a kickstart.
+
+        ``print`` exits non-zero for a job launchd does not have at all; kicking
+        that label would only fail, and a failure line about a job that was
+        never there is worse than walking on.
+        """
+        self._layout(tmp_path, monkeypatch)
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(113, stderr="Could not find service")
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=self._own_path(),
+            recovery="lop tunnel install",
+            run=runner,
+        )
+
+        assert outcome is None
+        assert calls == [("print", f"gui/{os.getuid()}/{PLIST}")], calls
+
+    def test_a_loaded_stopped_job_is_started_and_confirmed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The repair itself: one `print` to find the state, one kick, one confirm."""
+        self._layout(tmp_path, monkeypatch)
+        calls: list[tuple[str, ...]] = []
+        answers = iter(
+            [
+                # Registered, no `pid =` line: loaded but stopped — the incident.
+                _Result(0, stdout="\tstate = exited\n"),
+                # kickstart accepted.
+                _Result(0),
+                # A NEW process behind the label: the only evidence accepted.
+                _Result(0, stdout="\tpid = 4242\n"),
+            ]
+        )
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return next(answers)
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=self._own_path(),
+            recovery="lop tunnel install",
+            run=runner,
+            consequence="remote access should return",
+        )
+
+        assert outcome is not None and outcome.kind == "revived", outcome
+        assert outcome.summary() == (
+            "tunnel daemon: restarted after stopping silently — remote access should return"
+        )
+        assert calls == [
+            ("print", f"gui/{os.getuid()}/{PLIST}"),
+            ("kickstart", "-k", f"gui/{os.getuid()}/{PLIST}"),
+            ("print", f"gui/{os.getuid()}/{PLIST}"),
+        ], calls
+
+    def test_the_callers_gate_can_leave_a_stopped_job_stopped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A park or a deliberate stop is somebody's decision; the gate carries it.
+
+        The arm asks the gate ONLY once the stopped state is found, so a running
+        job never pays for the policy question, and the refusal is a silent
+        outcome: no kick, no line (the caller's own surfaces explain a park).
+        """
+        self._layout(tmp_path, monkeypatch)
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0, stdout="\tstate = exited\n")
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=self._own_path(),
+            recovery="lop tunnel install",
+            run=runner,
+            may_start=lambda: False,
+        )
+
+        assert outcome is not None and outcome.kind == "left-stopped", outcome
+        assert outcome.summary() == "" and outcome.warning() == ""
+        assert calls == [("print", f"gui/{os.getuid()}/{PLIST}")], calls
+
+    def test_a_refused_start_is_reported_with_the_recovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """launchctl refusing the kick is a failure line, once, naming the installer."""
+        self._layout(tmp_path, monkeypatch)
+        calls: list[tuple[str, ...]] = []
+        answers = iter(
+            [
+                _Result(0, stdout="\tstate = exited\n"),
+                _Result(113, stderr="Could not find service"),
+            ]
+        )
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return next(answers)
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=self._own_path(),
+            recovery="lop tunnel install",
+            run=runner,
+        )
+
+        assert outcome is not None and outcome.kind == "failed", outcome
+        assert "it had stopped and launchctl would not restart it" in outcome.warning()
+        assert "`lop tunnel install`" in outcome.warning()
+        assert calls == [
+            ("print", f"gui/{os.getuid()}/{PLIST}"),
+            ("kickstart", "-k", f"gui/{os.getuid()}/{PLIST}"),
+        ], calls
+
+    def test_a_start_that_brought_nothing_up_is_not_a_revival(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bound, not a burst: the confirmation waits, then reports honestly.
+
+        The clock is frozen so the deadline costs no wall time, and the sleeps
+        are asserted non-empty — a single read that happened to miss the pid
+        would be the "no new process is no move" rule applied too eagerly.
+        """
+        self._layout(tmp_path, monkeypatch)
+        clock = _FrozenClock()
+        monkeypatch.setattr(launchd, "_monotonic", clock.monotonic)
+        monkeypatch.setattr(launchd, "_sleep", clock.sleep)
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            if args[0] == "kickstart":
+                return _Result(0)
+            # The job never publishes a pid: the daemon died on start.
+            return _Result(0, stdout="\tstate = exited\n")
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=self._own_path(),
+            recovery="lop tunnel install",
+            run=runner,
+        )
+
+        assert outcome is not None and outcome.kind == "failed", outcome
+        assert "did not report a new process within" in outcome.warning()
+        assert [call[0] for call in calls] == ["print", "kickstart"] + ["print"] * (
+            len(calls) - 2
+        ), calls
+        assert clock.sleeps, "the confirmation must be a bounded wait, not one read"
+
+    def test_a_foreign_path_never_reaches_launchd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The identity guard runs before ANY launchctl call (R-1's rule)."""
+        self._layout(tmp_path, monkeypatch)
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0)
+
+        foreign = tmp_path / "Library" / "LaunchAgents" / f"{PLIST}.plist"
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=foreign,
+            recovery="lop tunnel install",
+            run=runner,
+        )
+
+        assert outcome is None
+        assert calls == [], f"a foreign path reached launchd: {calls}"
+
+    def test_a_machine_without_the_layout_is_not_asked_at_all(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No layout, no question — the arm leaves launchd alone entirely."""
+        monkeypatch.setattr(update_mod, "_STABLE_ROOT", str(tmp_path / "no-layout"))
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0)
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=PLIST,
+            path=self._own_path(),
+            recovery="lop tunnel install",
+            run=runner,
+        )
+
+        assert outcome is None
+        assert calls == [], f"a layout-less machine reached launchd: {calls}"
+
+
+# ---------------------------------------------------------------------------
+# THE SCRATCH-LABEL INTEGRATION CELL (the QA round reuses this one).
+#
+# Everything above runs against a stand-in runner; launchd itself is never
+# asked. This cell is the exception, deliberately: it registers a REAL
+# LaunchAgent under a scratch label in the caller's own domain, uses
+# ``launchctl stop`` to put it in the exact state the 2026-09-27 incident was
+# found in (loaded, not running), drives ``start_if_stopped`` against it, and
+# tears the label down. Three rules, because this is the one test here that
+# touches the operator's session:
+#
+# * the label is scratch (``lop-scratch.*``) and unique per process — NEVER
+#   ``com.local-operator.*``, whose jobs belong to the operator and are the
+#   product's own;
+# * the body is a bounded ``/bin/sleep``, so a leaked label reaps itself;
+# * teardown (bootout + the plist unlink) runs in a ``finally`` on every path,
+#   and the plist never overwrites an existing file.
+#
+# It is macOS-only (``launchctl``) and skips — never fails — where the machine
+# cannot provide a session to register into (no ``launchctl``, no passwd home,
+# a ``bootstrap`` the domain refuses): that is an environment answer, not a
+# product reading.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchctl is macOS's")
+def test_a_stopped_scratch_job_is_revived_against_real_launchd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGISTER → STOP → REVIVE, against the real launchd this product talks to.
+
+    The states, in order: ``bootstrap`` registers the job and it RUNS (a pid
+    appears); ``launchctl stop`` ends the process and leaves the LABEL — loaded
+    and not running, exactly the shape that had the tunnel connector down for
+    twelve hours; ``start_if_stopped`` kickstarts it, and a NEW pid is the only
+    evidence accepted, on the same terms the unit cells pin. Reused by the QA
+    round as the live half of its matrix; safe to re-run (the label is unique
+    per process and torn down either way).
+    """
+    if shutil.which("launchctl") is None:
+        pytest.skip("no launchctl on PATH")
+    home = launchd.real_home()
+    if home is None:
+        pytest.skip("no passwd home to own a LaunchAgent")
+
+    label = f"lop-scratch.revive-{os.getpid()}-{secrets.token_hex(3)}"
+    target = f"gui/{os.getuid()}/{label}"
+    plist = home / "Library" / "LaunchAgents" / f"{label}.plist"
+    assert not plist.exists(), f"label collision would clobber {plist}"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True, exist_ok=True)
+    plist.write_bytes(
+        plistlib.dumps(
+            {
+                # NO KeepAlive: the point is a job that STAYS stopped after
+                # `stop` — the state launchd's own SuccessfulExit contract
+                # leaves a cleanly-exited daemon in.
+                #
+                # ThrottleInterval 1, AND IT IS LOAD-BEARING FOR THE CELL'S
+                # SPEED, not for its story: this job is stopped ~0.8 s after it
+                # starts, and launchd's default anti-flap throttle makes the
+                # NEXT `kickstart -k` sit INSIDE the call for ~19 s waiting it
+                # out (measured 2026-09-27; with `ThrottleInterval: 1` the same
+                # kickstart answers in 0.27 s). The incident's connector had run
+                # for hours before it stopped, so a production revival never
+                # waits on this; the scratch job only would because this cell
+                # makes it short-lived on purpose.
+                "ThrottleInterval": 1,
+                "Label": label,
+                "ProgramArguments": ["/bin/sleep", "120"],
+                "RunAtLoad": True,
+            }
+        )
+    )
+    plist.chmod(0o600)
+
+    def launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=20)
+
+    def await_pid(want: bool) -> int | None:
+        """The pid once it (dis)appears, bounded; a wedged launchd reads None."""
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            found = launchd.job_pid(label=label, path=plist, run=launchctl)
+            if (found is not None) == want:
+                return found
+            time.sleep(0.1)
+        return launchd.job_pid(label=label, path=plist, run=launchctl)
+
+    # The arm's first question, answered off this test's own root.
+    root = tmp_path / "lop"
+    (root / "generations" / "g1").mkdir(parents=True)
+    (root / "current").symlink_to(root / "generations" / "g1")
+    monkeypatch.setattr(update_mod, "_STABLE_ROOT", str(root))
+
+    try:
+        bootstrapped = launchctl("bootstrap", f"gui/{os.getuid()}", str(plist))
+        if bootstrapped.returncode != 0:
+            pytest.skip(
+                "no usable launchd session here: "
+                f"bootstrap failed: {bootstrapped.stderr.strip()[:200]}"
+            )
+        started = await_pid(True)
+        assert started is not None, "the scratch job never came up"
+
+        # `stop` takes the BARE LABEL while `kickstart` takes the domain target
+        # (measured here 2026-09-27: `stop gui/501/<label>` answers rc 3 and
+        # changes nothing). The process ends; the LABEL stays loaded.
+        stopped = launchctl("stop", label)
+        assert stopped.returncode == 0, stopped.stderr
+        assert await_pid(False) is None, "the scratch job did not stop"
+        # AND IT IS STILL LOADED: `print` resolves with no pid — the incident's
+        # exact reading (`state = not running`, `job state = exited`).
+        assert launchctl("print", target).returncode == 0
+
+        outcome = launchd.start_if_stopped(
+            name="tunnel",
+            label=label,
+            path=plist,
+            recovery="lop tunnel install",
+            run=launchctl,
+            consequence="remote access should return",
+        )
+        assert outcome is not None and outcome.kind == "revived", outcome
+        assert "restarted after stopping silently" in outcome.summary()
+        revived = await_pid(True)
+        assert revived is not None and revived != started, (started, revived)
+    finally:
+        launchctl("bootout", target)
+        plist.unlink(missing_ok=True)

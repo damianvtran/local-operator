@@ -496,6 +496,29 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: while this branch was open: main's ceiling now sits 60 above main's head, and
 #: this change asks for +402 while costing +407, so five of those tokens net out.
 #: Still far inside the tighten band below, so the ratchet does not move.
+#: RAISED 33,193 -> 33,330 for the ``project`` tool's milestone full-replace
+#: guard: ``op='update'`` with ``milestones`` is refused unless
+#: ``replace_milestones=true``, naming the count at risk and both safe paths
+#: (the surgical ``op='milestone'`` upsert, or the deliberate replace). The
+#: guard exists because the bare "FULL replace" phrasing in the field
+#: description read as "update my milestones" to an agent that then wiped
+#: every sibling. Measured by running THIS script on the SAME host from two
+#: trees, one after the other (the network entry's method):
+#:
+#:   baseline (origin/main 9f4e9d8b2)      92,124 chars = ~33,138 billed
+#:   head (this branch)                    92,476 chars = ~33,265 billed
+#:     = +352 chars = +127 billed: the ``replace_milestones`` boolean and its
+#:       description, plus the ``milestones`` description rewrite that drops
+#:       the bare "FULL replace" phrasing and names the refusal and the safe
+#:       path.
+#:
+#: The raised ceiling lands 65 above the head — the band the entries above
+#: keep (49, 51, 71; 37-62 where CI binds). The trim alternative was measured
+#: and does not fit: the flag plus one honest sentence about when to pass it
+#: is the discoverable half of a data-loss fix (an agent that cannot see the
+#: flag cannot deliberately replace), and the earlier ``memory_mb`` entry
+#: records that no other schema clause in the prefix is spare. The tighten
+#: band below (1,200) is not in play.
 #:
 #: RAISED 33,193 -> 33,533 for the S6d PROJECT DATA slice (the ``project``
 #: tool's ``owner`` / ``team`` / ``title`` fields, the bounded history tail,
@@ -518,7 +541,22 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise lands the ceiling at head + 55 — the headroom band the entries
 #: above keep — so the next addition finds the ratchet as tight as this one
 #: did, and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 33_533
+#:
+#: MERGED (fold of main at bfc0bcf2a): the two raises above COMPOSE on this
+#: branch — main's ``replace_milestones`` guard and the S6d fields both live on
+#: the merged head — so the ceiling is re-measured on the merged trees rather
+#: than summed (some schema text both changes carried deduplicates through the
+#: fold):
+#:
+#:   baseline (origin/main bfc0bcf2a)      92,476 chars = ~33,265 billed
+#:   head (merged)                         93,421 chars = ~33,605 billed
+#:     = +945 chars = +340 billed — exactly the S6d delta its own entry above
+#:       records, because main's guard is IN the baseline; the fold adds no
+#:       surface of its own, only the merge.
+#:
+#: The merged ceiling lands at head + 55 — the band this file keeps — and the
+#: tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 33_660
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

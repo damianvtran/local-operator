@@ -320,10 +320,15 @@ def _publish_wedged(root: Path, owner: _FakeOwner, *, session_id: str = SESSION_
     """A record in the registry's THIRD state: pid alive, heartbeat stale.
 
     Written by hand rather than through :func:`registry.publish`, which stamps
-    ``heartbeat_at`` with now — the staleness IS the state under test.
+    ``heartbeat_at`` with now — the staleness IS the state under test. The
+    directory is asked for EXPLICITLY because ``registry.record_path`` is a pure
+    resolver: writing through it was how this fixture used to create
+    ``run/mobile`` as a side effect, and the split that stopped a READ doing that
+    (round 1, R1-1) means a fixture that WRITES has to say so.
     """
     record = _record(session_id, owner.port, cwd=root)
     record.heartbeat_at = time.time() - (registry.HEARTBEAT_TIMEOUT_S + 5.0)
+    registry.ensure_run_dir(root)
     registry.record_path(OWNER_PID, root).write_text(json.dumps(record.to_json()), encoding="utf-8")
     (root / "sessions" / session_id / ".session.pid").write_text(str(OWNER_PID))
 

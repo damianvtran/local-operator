@@ -222,7 +222,7 @@ def session_record_pids() -> list[int]:
     ``registry.scan`` unlinks stale records, so using it here would perturb the
     recovery under observation.
     """
-    run = registry.run_dir(CONFIG)
+    run = registry.ensure_run_dir(CONFIG)
     pids = []
     for path in sorted(run.glob("*.json")):
         try:

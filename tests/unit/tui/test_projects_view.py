@@ -17,9 +17,12 @@ import pytest
 
 from local_operator.projects import ProjectEdit, ProjectRegistry
 from local_operator.tui.app import PROJECTS_LAYOUT_CLASS, OperatorApp
-from local_operator.tui.widgets.projects_view import ProjectsView
+from local_operator.tui.widgets.projects_view import (
+    ProjectsView,
+    ProjectsViewJumpRequested,
+)
 from local_operator.tui.widgets.subagent_view import HintButton
-from local_operator.tui.widgets.transcript import UserBlock
+from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 SESSION_ID = "ab12cd34ef56"
@@ -42,6 +45,15 @@ def _registry(tmp_path: Path, *names: str) -> ProjectRegistry:
     for name in names:
         registry.create_project(ProjectEdit(name=name))
     return registry
+
+
+def _notices(app: OperatorApp) -> list[str]:
+    """The transcript's notice texts, oldest first."""
+    return [
+        block._text
+        for block in app.query_one(TranscriptView).blocks()
+        if isinstance(block, NoticeBlock)
+    ]
 
 
 async def _boot(pilot: Any, app: OperatorApp) -> None:
@@ -526,3 +538,313 @@ async def test_hint_row_has_no_leading_seam_when_scroll_sheds(tmp_path: Path) ->
             if isinstance(hint, HintButton) and hint.display
         ]
         assert painted[0].startswith("↔↕")
+
+
+# -- S3b: the selection's jump, in the view that owns the cursor --------------
+
+
+@pytest.mark.asyncio
+async def test_enter_asks_the_host_to_open_the_selected_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`↵` posts ONE message naming the selection and its linked sessions (S3b)."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="beta"))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    seen: list[Any] = []
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        # `post_message` is the WRONG seam: Textual delivers the key TO the
+        # focused widget through it (and posts its shutdown handshake through
+        # it), so an instance patch of it swallows the very press under test —
+        # measured here as three captured posts (Key, Callback, Callback) and a
+        # hung `run_test` exit. Recording the message at construction leaves
+        # the machinery intact, and the real handler still receives it.
+        original_init = ProjectsViewJumpRequested.__init__
+
+        def _record(recorded_self: Any, **kwargs: Any) -> None:
+            original_init(recorded_self, **kwargs)
+            seen.append(recorded_self)
+
+        monkeypatch.setattr(ProjectsViewJumpRequested, "__init__", _record)
+        await pilot.press("enter")
+        await pilot.pause()
+    assert len(seen) == 1
+    message = seen[0]
+    assert message.project_name == "alpha"
+    # The link's directory does not exist in this fixture and the receipt says
+    # `missing` for exactly that state — the message carries the RECEIPT's word
+    # (QA round 1, Q2), not the composed row's default `stopped`.
+    assert message.sessions == ((SESSION_ID, "missing"),)
+
+
+@pytest.mark.asyncio
+async def test_jump_with_no_live_session_names_what_exists(tmp_path: Path) -> None:
+    """`↵` on a stopped link: the page closes and the notice says what exists."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=((SESSION_ID, "stopped"),),
+            )
+        )
+        await pilot.pause()
+        assert app._projects_view is None
+        notice = _notices(app)[-1]
+        assert "no live session to open for 'alpha'" in notice
+        assert f"{SESSION_ID} [stopped]" in notice
+        # ONE linked session: the notice spells the concrete command (UX r1, U4).
+        assert f"/resume {SESSION_ID} starts it." in notice
+
+
+@pytest.mark.asyncio
+async def test_jump_with_a_live_session_switches_through_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live link goes through `_resume_session` — the one switch machinery."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    switched: list[str] = []
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        monkeypatch.setattr(
+            app,
+            "_resume_session",
+            lambda resume_id, notice, **kw: switched.append(resume_id),
+        )
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=(("live-session-1", "live"),),
+            )
+        )
+        await pilot.pause()
+    assert switched == ["live-session-1"]
+    assert app._projects_view is None
+
+
+@pytest.mark.asyncio
+async def test_jump_on_the_current_session_says_so(tmp_path: Path) -> None:
+    """`↵` on the project THIS terminal is already in is answered, not rebooted."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=((SESSION_ID, "live"),),
+            )
+        )
+        await pilot.pause()
+        assert "already in 'alpha'" in _notices(app)[-1]
+        assert app._projects_view is None
+
+
+# -- round 1 remediation: seeding, reveal-on-switch, clamp repaint, hint -----
+
+
+@pytest.mark.asyncio
+async def test_nameless_show_seeds_the_cursor_onto_the_set(tmp_path: Path) -> None:
+    """UX r1 U1: with links on p01/p02 the cursor must NOT stay on row 0."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="p00"))
+    registry.create_project(ProjectEdit(name="p01"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="p02"), sessions=[SESSION_ID])
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view._view == "board"
+        found = registry.get_project_by_name("p01")
+        assert found is not None
+        assert view.current_project_id() == str(found.id)
+        canvas = view._last.text.plain
+        assert "▸◆p01" in canvas and "◆ p02" in canvas and "  p00" in canvas
+
+
+@pytest.mark.asyncio
+async def test_switching_to_board_reveals_the_selection(tmp_path: Path) -> None:
+    """QA r1 Q1: the reveal re-runs once the new canvas's layout has landed."""
+    from local_operator.tui.projects_render import board_position
+
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    for index in range(20):
+        registry.create_project(ProjectEdit(name=f"p{index:02d}"))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "p14")
+        await pilot.press("2")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None
+        position = board_position(view._views, view._cursor)
+        assert position is not None
+        offset = view._body.scroll_offset.y
+        assert offset <= position[1] <= offset + max(view._usable_height() - 1, 0), (
+            offset,
+            position,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_clamp_repaints_the_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review r1 MINOR 3: clamping the cursor to a painted cell repaints."""
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha", "beta", "gamma")
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "gamma")
+        # Force the clamp: the position helper answers None for the cursor and a
+        # real cell for index 1 (the shape a truncated canvas produces).
+        from local_operator.tui.projects_render import board_position
+
+        real = board_position
+
+        def fake_position(index):  # noqa: ANN001 - test seam
+            if index == view._cursor:
+                return None
+            return real(view._views, index)
+
+        monkeypatch.setattr(view, "_position_for", fake_position)
+        view._view = "board"
+        view._cursor = 2
+        view._scroll_cursor_into_view()
+        assert view._cursor == 1  # clamped to the last painted project
+        canvas = view._last.text.plain if view._last else ""
+        assert "▸" in canvas, "the clamp must repaint the moved selection"
+
+
+# -- round 2 remediation: refresh keeps the reader, the live pick, the title --
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_never_re_seeds_the_reader(tmp_path: Path) -> None:
+    """R2-3: the U1 seed rides an ENTRY; `r` must not move the reader back."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="p00"))
+    registry.create_project(ProjectEdit(name="p01"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="p02"), sessions=[SESSION_ID])
+    session.project_registry = registry
+    p00 = registry.get_project_by_name("p00")
+    p01 = registry.get_project_by_name("p01")
+    assert p00 is not None and p01 is not None
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None and view.current_project_id() == str(p01.id)
+        await pilot.press("up")  # onto p00, outside the caller's set
+        await pilot.pause()
+        assert view.current_project_id() == str(p00.id)
+        await pilot.press("r")
+        await pilot.pause()
+        await pilot.pause()
+        # The refresh keeps the reader where they put themselves — re-seeding
+        # here would contradict `load`'s own "a refresh must not move the
+        # reader" contract (and the set itself is kept).
+        assert view.current_project_id() == str(p00.id)
+        assert "this session (2)" in view.rendered_rows()[0]
+
+
+@pytest.mark.asyncio
+async def test_the_terminals_own_session_wins_the_live_pick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NIT 6: with a sibling live FIRST in link order, `↵` on this terminal's
+    own live project answers `already in` instead of switching away."""
+    sibling = "cd" * 6
+    session = _ProjectSession()
+    session.project_registry = _registry(tmp_path, "alpha")
+    app = OperatorApp(lambda: _factory(session))
+
+    async def _noop_resume(*_args: Any, **_kwargs: Any) -> None:  # pragma: no cover
+        return None
+
+    async with app.run_test(size=(120, 32)) as pilot:
+        await _boot(pilot, app)
+        await _open(pilot, app, "alpha")
+        monkeypatch.setattr(app, "_resume_session", _noop_resume, raising=False)
+        # The SIBLING is first: `live[0]` would switch to it without the rule.
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=((sibling, "live"), (SESSION_ID, "live")),
+            )
+        )
+        await pilot.pause()
+        assert "already in 'alpha'" in _notices(app)[-1]
+        assert SESSION_ID in _notices(app)[-1]
+        # …and a sibling-only live set still switches (the fallback survives).
+        app.on_projects_view_jump_requested(
+            ProjectsViewJumpRequested(
+                project_id="alpha-id",
+                project_name="alpha",
+                sessions=((sibling, "live"),),
+            )
+        )
+        await pilot.pause()
+        assert app._projects_view is None
+
+
+@pytest.mark.asyncio
+async def test_the_title_sheds_before_clipping(tmp_path: Path) -> None:
+    """D2/D6: at 60 columns the set clause (board) and `zoom:` (timeline) shed
+    instead of the row clipping mid-clause."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="p00"), sessions=[SESSION_ID])
+    registry.create_project(ProjectEdit(name="p01"), sessions=[SESSION_ID])
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(60, 20)) as pilot:
+        await _boot(pilot, app)
+        app._run_slash_command("/project show")
+        await pilot.pause()
+        await pilot.pause()
+        view = app._projects_view
+        assert view is not None
+        board_title = view.rendered_rows()[0]
+        assert "this session" not in board_title, board_title
+        assert "tracked" in board_title and "updated" in board_title
+        app._run_slash_command("/project timeline")
+        await pilot.pause()
+        await pilot.pause()
+        timeline_view = app._projects_view
+        assert timeline_view is not None
+        timeline_title = timeline_view.rendered_rows()[0]
+        assert "zoom:" not in timeline_title, timeline_title
+        assert "tracked" in timeline_title and "updated" in timeline_title

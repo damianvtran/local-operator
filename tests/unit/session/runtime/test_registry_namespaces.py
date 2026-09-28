@@ -124,7 +124,7 @@ def test_scan_parses_with_the_callers_deserializer(tmp_path: Path) -> None:
             record.heartbeat_at = float(str(data["heartbeat_at"]))
             return record
 
-    registry.run_dir(tmp_path, "run/other")
+    registry.ensure_run_dir(tmp_path, "run/other")
     registry.publish(Other(), root=tmp_path, dirname="run/other")
     results = registry.scan(tmp_path, "run/other", Other.from_json)
 
@@ -140,7 +140,7 @@ def test_a_wedged_record_is_classified_for_any_namespace(tmp_path: Path) -> None
     stopped arriving.
     """
     record = make_session_record()
-    directory = registry.run_dir(tmp_path, SERVE_RUN_DIRNAME)
+    directory = registry.ensure_run_dir(tmp_path, SERVE_RUN_DIRNAME)
     record.heartbeat_at = time.time() - HEARTBEAT_TIMEOUT_S - 1
     (directory / f"{record.pid}.json").write_text(json.dumps(record.to_json()))
 
