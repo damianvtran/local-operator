@@ -71,6 +71,17 @@ RETIRED_CALLS = ("dump_traceback_later", "cancel_dump_traceback_later")
 #: a wedge rather than a slow host. A backstop, never the assertion.
 PUBLISHED_S = 10.0
 
+#: How long the fire search waits for the child's first dump. The child must BOOT
+#: (import this tree, start its threads) before it arms its timer, and the fire is
+#: then 0.05 s behind that, so the binding term is the boot, not the timer. Dataset:
+#: a replication of the spawn under this fleet's load measured the first fire at
+#: t+7.94 s (reviewer round 1), where the whole cell costs 0.26-0.44 s in CI (40
+#: junit samples); the previous 10 s bound sat only 1.26x above that measurement.
+#: 60 s is ~7.5x the measured worst and ~136x the healthy cell. What it stops
+#: catching: a child that never arms its timer surfaces after 60 s rather than
+#: 10 s, and one that DIES is named at once by the liveness arm inside the wait.
+FIRE_S = 60.0
+
 #: How long the child in P2 gets to reach its sentinel. Generous on purpose: the
 #: child's own output is what says whether Python is still running.
 CHILD_BOUND_S = 25.0
@@ -463,18 +474,30 @@ class _ArmPathChild:
 
         The fire is published on the channel itself, so this is an event rather than a
         guess: the child must not touch the arm path until a dump is demonstrably in
-        flight, and only the parent can see that.
+        flight, and only the parent can see that. The bound (``FIRE_S``) only decides
+        how long "never" is waited out — and a child that EXITED ends the wait at
+        once, its reader joined (bounded) so the failure message its caller builds
+        carries everything the child wrote (the same discipline as ``wait_for``).
         """
         seen = b""
-        deadline = time.monotonic() + PUBLISHED_S
+        deadline = time.monotonic() + FIRE_S
         self.read_end.settimeout(0.5)
         while b"Timeout (" not in seen and time.monotonic() < deadline:
             try:
-                seen += self.read_end.recv(65536)
+                chunk = self.read_end.recv(65536)
             except TimeoutError:
+                if self.process.poll() is not None:
+                    self.reader.join(timeout=2.0)
+                    break
                 continue
             except OSError:
                 break
+            if not chunk:
+                # EOF: the child's end of the channel is closed, so no fire can
+                # arrive however long this waits.
+                self.reader.join(timeout=2.0)
+                break
+            seen += chunk
         fired = b"Timeout (" in seen
         if fired and self.keep_draining:
             threading.Thread(target=self._drain_forever, name="drain", daemon=True).start()
@@ -575,7 +598,8 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
     try:
         assert control.wait_for_fire_then_release(), (
             "the control child never produced a fired dump on its channel, so this rig "
-            f"is not measuring what it claims; output was {control.wait_for('TICK', 1.0)!r}"
+            f"is not measuring what it claims; {control.death_report()}; output was "
+            f"{control.wait_for('TICK', 1.0)!r}"
         )
         control_output = control.wait_for("LOOP-SURVIVED", CHILD_BOUND_S)
         assert "LOOP-SURVIVED" in control_output, (
@@ -590,15 +614,20 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
     try:
         assert rig.wait_for_fire_then_release(), (
             "no dump was ever seen in flight, so this cell proved nothing about an arm "
-            f"path taken while one is; output was {rig.wait_for('TICK', 1.0)!r}"
+            f"path taken while one is; {rig.death_report()}; output was "
+            f"{rig.wait_for('TICK', 1.0)!r}"
         )
         output = rig.wait_for("LOOP-SURVIVED", CHILD_BOUND_S)
     finally:
         pid = rig.process.pid
+        # Snapshot BEFORE the reap: close() SIGKILLs the child, so a report taken
+        # after it can only ever say rc=-9 — the one reading that cannot tell a
+        # parked arm path (still running) from a child that died on its own (R1-F2).
+        pre_close = rig.death_report()
         rig.close()
     assert "ARM-PATH-RETURNED" in output, (
         f"the arm path never returned while a dump was in flight (child pid {pid} was "
-        f"killed after {CHILD_BOUND_S}s). {rig.death_report()}. The child stopped after: "
+        f"killed after {CHILD_BOUND_S}s). {pre_close}. The child stopped after: "
         f"{output.splitlines()[-4:]!r} — a ticker that goes silent at GO is the field "
         f"signature: the caller parked inside the C timer call holding the GIL, so no "
         f"Python thread in the process could run"
