@@ -271,6 +271,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "from a filename",
     ),
     "local_operator/references.py": (1, "a THREAD name for reference reads"),
+    # Aida's own store lives at the CONFIG root (``<config>/aida/``), beside
+    # ``sessions/`` rather than inside one: her state, onboarding stamp,
+    # escalation tray and ensure lock are this INSTALL's records, and a session
+    # directory travelling between devices carries none of them.
+    "local_operator/aida/state.py": (
+        5,
+        "``AIDA_DIRNAME``/``STATE_NAME``/``ONBOARDING_NAME``/``ESCALATE_NAME``/"
+        "``LOCK_NAME``: her store under the config root, never an entry of a session",
+    ),
+    "local_operator/aida/bootstrap.py": (
+        1,
+        "``ROLE_NAME``: the packaged seed's NAME (an identifier resolved through the "
+        "agent registry), not a file in a session directory",
+    ),
     "local_operator/providers/oauth/zai.py": (1, "a keychain entry's name, not a path"),
     "local_operator/providers/oauth/kimi.py": (
         1,

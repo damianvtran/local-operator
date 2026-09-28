@@ -1238,7 +1238,10 @@ def test_every_consumes_prompt_command_is_accounted_for() -> None:
 #:   ``resolve_markers`` has walked the request: that walk orders images by
 #:   where the citation sits, so a payload spliced in ahead of one would send
 #:   the pictures in the wrong order.
-_SPLICED = {"fork", "goal", "loop", "btw", "team", "agent"}
+# ``aida`` joins the set the ordinary way: ``/aida <request>`` reaches
+# ``_submit_command_prompt`` — the same door ``/team`` and ``/agent`` use — so
+# the generic splice covers it, and this line is the register of that fact.
+_SPLICED = {"fork", "goal", "loop", "btw", "team", "agent", "aida"}
 
 
 @pytest.mark.asyncio

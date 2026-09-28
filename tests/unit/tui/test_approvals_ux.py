@@ -694,6 +694,10 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         if command.arguments is not ArgumentMode.NONE
     }
     assert modes == {
+        # OPTIONAL like `/effort`: bare `/aida` opens her conversation (or
+        # answers with a receipt for pause/resume/status), and the space is
+        # where a request begins.
+        "aida": ArgumentMode.OPTIONAL,
         "effort": ArgumentMode.OPTIONAL,
         # OPTIONAL like `/effort`: bare `/fast` TOGGLES the dial, and the space
         # offers on/off/status for a user who would rather name the resulting
