@@ -1,0 +1,1767 @@
+"""Peer readiness: can this peer COMPLETE work this device offloads to it?
+
+Slice 1 of the mesh remote-offload workstream. The question this answers is NOT
+doctor's: ``lop network doctor`` answers "is the link healthy", and it answered
+``ok: true`` on 2026-09-28 while every offloaded write/exec PARKED on the far
+side — a peer with no operator authority, no git identity, no user-scope MCP
+servers, a stale build and no local model credential. Readiness asks that
+second question, per peer, and every finding carries the command that fixes it.
+
+WIRE. A viewer's relay runs the LOCAL op ``peer_readiness`` (the ``peer_*``
+boundary rule, ``types.LOCAL_OPS``): it probes the peer's endpoints, builds a
+link, and — only when the peer advertises :data:`wire.PEER_READINESS_V1` —
+asks the peer-scope op ``net_readiness`` (capability ``list``) for the peer's
+own facts. The viewer composes rows from both halves and derives each row's
+verdict. An old peer degrades to ``peer_too_old`` rows; a peer that does not
+answer degrades to ``not_asked`` rows. An absent answer is never a pass.
+
+READ-ONLY, AND PROVEN SO. Nothing in this module writes. The peer handler only
+reads files (config.yml, mcp.json, the git config, the operator anchor, the
+credential tables), and the one store that would CREATE a database in its
+constructor (``AuthStore``) is only reached after its file is confirmed to
+exist — see :func:`_open_store`. The unit suite pins that a report over a
+fresh root leaves the tree byte-identical (the ``test_reads_create_nothing``
+discipline, applied to this verb).
+
+NAMES ONLY, NO MATERIAL. The peer's payload carries credential NAMES and
+placement facts, never values: ``has_local``/``has_row`` are booleans, the
+placement entry is owner/holders (the placement document has no material by
+its own writer's guard), and any text that merely LOOKS like a credential is
+withheld and named rather than sent (the definitions rule, through the one
+shape table in ``redaction_shapes``).
+"""
+
+from __future__ import annotations
+
+import configparser
+import json
+import os
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+
+from local_operator.network import wire
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from local_operator.network.relay import PeerLink, RelayServer
+
+#: The peer payload's integer schema, matching the transport's whole-file
+#: convention. Purely informational today (the op is additive and per-field
+#: absence is handled), but a future breaking change reads it.
+READINESS_SCHEMA = 1
+
+#: How long a viewer waits for the peer's answer. The peer handler is local
+#: reads only (no dials, no network), so 5 s is generous; a timeout renders
+#: unknown rows rather than hanging the report (design §8.8).
+READINESS_OP_TIMEOUT_S = 5.0
+
+#: The capability ids a readiness row can carry — the design's checks (a)-(f).
+CAPABILITY_OPERATOR_AUTHORITY = "operator_authority"
+CAPABILITY_BUILD = "build"
+CAPABILITY_GIT = "git_identity"
+CAPABILITY_MCP_SERVERS = "mcp_servers"
+CAPABILITY_MODEL_CREDENTIAL = "model_credential"
+CAPABILITY_MCP_CREDENTIAL = "mcp_credential"
+
+#: The fixed set of peer-side checks that exist even when no answer arrived —
+#: the rows a ``peer_too_old`` / ``not_asked`` peer still gets, one per check,
+#: so a consumer's checklist does not lose its shape when a peer goes dark.
+#: The bare ``build`` row is NOT in this set: the build stamp rides the
+#: handshake, so it is composed per link (and only joins this set when there is
+#: no link at all).
+PEER_SIDE_CHECKS: tuple[str, ...] = (
+    CAPABILITY_OPERATOR_AUTHORITY,
+    CAPABILITY_GIT,
+    CAPABILITY_MCP_SERVERS,
+    CAPABILITY_MODEL_CREDENTIAL,
+)
+
+#: Failure codes. OK rows carry no code; a code is a machine token for a
+#: failure a consumer can branch on without reading the sentence.
+CODE_NOT_INSTALLED = "not_installed"
+CODE_ANCHOR_UNPINNED = "anchor_unpinned"
+CODE_UNUSABLE = "unusable"
+CODE_NO_GIT_IDENTITY = "no_git_identity"
+CODE_NO_MCP_SERVERS = "no_mcp_servers"
+CODE_NOT_CONFIGURED = "not_configured"
+CODE_NOT_ASKED = "not_asked"
+CODE_PEER_TOO_OLD = "peer_too_old"
+CODE_UNKNOWN = "unknown"
+CODE_BEHIND = "behind"
+CODE_AHEAD = "ahead"
+CODE_NO_CREDENTIAL = "no_credential"
+CODE_NOT_SHARED = "not_shared"
+CODE_OBSERVED_FAILURE = "observed_failure"
+
+#: Rows read from the peer's own state carry ``source: "peer"``; rows about a
+#: fact that could not be established carry ``"unknown"``. ``"local"`` is kept
+#: for this side's own facts (the build comparison is composed here).
+SOURCE_PEER = "peer"
+SOURCE_LOCAL = "local"
+SOURCE_UNKNOWN = "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Small shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _bounded(value: Any, limit: int) -> str:
+    return str(value or "")[:limit]
+
+
+def _credential_shape(text: Any) -> str:
+    """The credential shape ``text`` is spelled like, through the ONE table.
+
+    Reuses the definitions module's guard rather than a second pattern: the
+    shape table in ``redaction_shapes`` is what every export, tool result and
+    transcript is scanned with, and a payload guarded by a different copy of it
+    would eventually disagree with the rest of the product about what a
+    credential looks like.
+    """
+    from local_operator.network.definitions import credential_shape
+
+    return credential_shape(text)
+
+
+def _safe_text(value: Any, *, limit: int = 300) -> str:
+    """A bounded string — or ``""`` when it LOOKS like a credential."""
+    text = _bounded(value, limit)
+    if text and _credential_shape(text):
+        return ""
+    return text
+
+
+# ---------------------------------------------------------------------------
+# This device's own facts (the peer handler's half)
+# ---------------------------------------------------------------------------
+
+
+def _open_store(root: Path) -> Any | None:
+    """An ``AuthStore`` for ``root``, or ``None`` when no database exists yet.
+
+    THE GUARD IS THE READ-ONLY PROMISE: ``AuthStore.__init__`` CREATES its
+    database (mkdir, a 0600 file, then the schema), so constructing one on a
+    device that has never signed in would make this report a WRITER — exactly
+    the class ``test_reads_create_nothing`` exists to prevent. The database's
+    absence is also the definite answer ("no store at all is a definite
+    False", ``has_stored_row``), so nothing is lost by checking first.
+
+    ``db_path`` is passed explicitly: the store derives its default database
+    from ``config_dir()`` (ambient), and a report about ROOT A must read A's
+    database even when the process's ambient root is B's.
+    """
+    database = root / "auth.db"
+    if not database.exists():
+        return None
+    from local_operator.providers.auth_store import AuthStore
+
+    return AuthStore(db_path=database, config_dir=root)
+
+
+def operator_fact() -> dict[str, Any]:
+    """The operator-authority level and what it rests on. Never raises."""
+    try:
+        from local_operator.operator import operator_authority_report
+
+        report = operator_authority_report()
+    except Exception:  # noqa: BLE001 — an unreadable anchor is a fact, not a crash
+        return {
+            "level": "unreported",
+            "reason": "the authority report could not be built",
+            "anchor_installed": False,
+            "anchor_root_owned": False,
+            "presence": False,
+        }
+    return {
+        "level": _bounded(report.get("level") or "unreported", 60),
+        "reason": _bounded(report.get("reason") or "", 200),
+        "anchor_installed": bool(report.get("anchor_installed")),
+        "anchor_root_owned": bool(report.get("anchor_root_owned")),
+        "presence": bool(report.get("presence")),
+    }
+
+
+def git_identity_fact(home: Path | None = None) -> dict[str, Any]:
+    """``user.name``/``user.email`` from the GLOBAL git config files.
+
+    Read as FILES (configparser), never a ``git config`` subprocess: this runs
+    inside a peer's relay on a request path, where a process spawn per check
+    would be paid on every report, and the question v1 asks — are the values
+    SET at global scope — needs no include/env resolution (design §8.5 defers
+    those, with the credential-helper and ssh posture).
+
+    Precedence matches git's own: ``~/.config/git/config`` is read first and
+    ``~/.gitconfig`` overrides it (git's documented order — a single-valued
+    variable in the XDG file is overwritten by whatever is in ``~/.gitconfig``).
+
+    A missing file is the ordinary state; an unparsable one is skipped rather
+    than fatal — this is a report, and the next file may still carry the
+    answer.
+    """
+    root = home if home is not None else Path.home()
+    parser = configparser.ConfigParser(interpolation=None)
+    # ``interpolation=None`` is load-bearing: git config values are literal
+    # text, and the default BasicInterpolation raises on a bare '%'.
+    for path in (root / ".config" / "git" / "config", root / ".gitconfig"):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                parser.read_file(handle)
+        except (OSError, UnicodeDecodeError, configparser.Error):
+            continue
+    # Section names are case-sensitive in configparser and case-INsensitive in
+    # git, so the section is found case-insensitively ('[User]' counts).
+    section = next((name for name in parser.sections() if name.strip().lower() == "user"), "")
+
+    def value(option: str) -> str:
+        if not section:
+            return ""
+        try:
+            return _safe_text(parser.get(section, option, raw=True).strip(), limit=200)
+        except (configparser.Error, ValueError):
+            return ""
+
+    return {"user_name": value("name"), "user_email": value("email")}
+
+
+def _transport_of(raw: Mapping[str, Any]) -> str:
+    """The transport the entry spells, with mcp/config.py's own inference.
+
+    Mirrors ``_coerce_server_config``: an explicit ``type`` wins; otherwise a
+    ``command`` implies stdio and a ``url`` implies http. Kept as a mirror
+    rather than an import because that helper is private to the config module
+    and this is a read of ONE file, not the merged discovery list.
+    """
+    declared = raw.get("type")
+    if declared in ("stdio", "http", "sse"):
+        return str(declared)
+    if raw.get("command"):
+        return "stdio"
+    if raw.get("url"):
+        return "http"
+    return "stdio"
+
+
+def _mcp_row_exists(store: Any | None, url: str) -> bool | None:
+    """Whether a credential row exists for ``url``; ``None`` = unreadable store."""
+    try:
+        from local_operator.mcp.auth import McpTokenStorage
+
+        return McpTokenStorage(url, store=store).has_stored_row()
+    except Exception:  # noqa: BLE001 — an unreadable store is "not known"
+        return None
+
+
+def mcp_servers_fact(root: Path) -> dict[str, Any]:
+    """The USER-SCOPE MCP servers, and per HTTP/SSE server whether a login row exists.
+
+    Reads the file the WRITERS target (``<root>/mcp.json``), not the merged
+    discovery list: a project-scope server is cwd-dependent and says nothing
+    about what an offload — whose cwd the sender picks — will see (design §8.6).
+    A missing or unreadable file reads as "no servers"; the sentence for that
+    state already says "missing or empty".
+    """
+    path = root / "mcp.json"
+    withheld: list[str] = []
+    servers: list[dict[str, Any]] = []
+    document: Any = None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        document = None
+    except (OSError, UnicodeDecodeError, ValueError):
+        document = None
+    entries = document.get("mcpServers") if isinstance(document, dict) else None
+    if not isinstance(entries, Mapping):
+        entries = {}
+    store = _open_store(root)
+    try:
+        for name, raw in sorted(entries.items(), key=lambda pair: str(pair[0])):
+            if not isinstance(raw, Mapping):
+                continue
+            transport = _transport_of(raw)
+            url = _safe_text(raw.get("url"), limit=300)
+            shape = _credential_shape(str(name)) or _credential_shape(raw.get("url"))
+            if shape:
+                # THE DEFINITIONS RULE: a row whose text looks like a credential
+                # is withheld and NAMED rather than sent. The name goes in the
+                # withheld list (or the shape label when even the name is the
+                # credential-shaped thing); the value never travels.
+                held_name = str(name)
+                withheld.append(
+                    held_name if not _credential_shape(held_name) else f"a {shape} value"
+                )
+                continue
+            has_row: bool | None = None
+            if transport in ("http", "sse") and url:
+                has_row = _mcp_row_exists(store, url)
+            servers.append(
+                {
+                    "name": _safe_text(name, limit=120),
+                    "url": url,
+                    "transport": transport,
+                    # The config declared an auth block of its own: a hint for the
+                    # credential verdict's copy, never a claim about the server.
+                    "auth_declared": bool(raw.get("oauth") or raw.get("auth")),
+                    "has_row": has_row,
+                }
+            )
+    finally:
+        if store is not None:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001 — a close failure must not fail the report
+                pass
+    return {"servers": servers, "withheld": withheld, "config_path": str(path)}
+
+
+def default_model_fact(root: Path) -> dict[str, Any]:
+    """The configured default model pair, resolved through the product's own resolver.
+
+    ``bootstrap.resolve_hosting_model`` is the exact resolver
+    ``resolve_model_configuration`` delegates the pair to (bootstrap.py:141);
+    the latter additionally BUILDS a ``ModelConfiguration`` — provider client
+    metadata and a best-effort static key read out of the credential store —
+    that this fact never reads, and building it on a report path would drag
+    the credential store into a question that is only about the pair. Same
+    resolution, none of the surface.
+
+    ``config.yml`` is checked for existence BEFORE ``ConfigManager`` is
+    constructed: that constructor creates the config root on a device that has
+    none, and a report must not be the reason a directory exists.
+    """
+    config_file = root / "config.yml"
+    if not config_file.exists():
+        return {"hosting": "", "model_name": "", "resolved": False, "reason": "no config.yml"}
+    try:
+        from local_operator.bootstrap import resolve_hosting_model
+        from local_operator.config import ConfigManager
+
+        hosting, model_name = resolve_hosting_model(ConfigManager(root), None, None, None)
+    except ValueError as exc:
+        # The product's own not-configured messages (hosting unset, no default for
+        # the provider): a config that PARSES and names no usable pair.
+        return {
+            "hosting": "",
+            "model_name": "",
+            "resolved": False,
+            "reason": _bounded(str(exc), 200),
+        }
+    except Exception as exc:  # noqa: BLE001 — a config that cannot be read is a fact
+        # A DIFFERENT sentence, because it is a different problem: a corrupt or
+        # partial file is not "no default configured", and a row that said so
+        # would send someone to set a model that is already set.
+        return {
+            "hosting": "",
+            "model_name": "",
+            "resolved": False,
+            "reason": f"its config could not be read ({exc.__class__.__name__})",
+        }
+    return {
+        "hosting": _bounded(hosting, 120),
+        "model_name": _bounded(model_name, 200),
+        "resolved": True,
+        "reason": "",
+    }
+
+
+def has_local_provider_credential(root: Path, provider: str) -> bool | None:
+    """Whether this device holds a credential row for ``provider``.
+
+    Three-valued like ``has_stored_row``: ``None`` is "the store could not be
+    read", which must never read as "no login here" (that answer sends the
+    operator to a login they may already have). An absent store file is a
+    definite ``False`` — see :func:`_open_store`.
+    """
+    if not provider:
+        return False
+    store = _open_store(root)
+    if store is None:
+        return False
+    try:
+        return bool(list(store.list_credentials(provider)))
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def placement_fact(*, provider: str = "", mcp_url: str = "", root: Path) -> dict[str, Any]:
+    """The placement entry for a key (owner + holders) and this device's observation.
+
+    ``{}`` when there is no entry — absence is a refusal (nobody may borrow)
+    and the viewer reads it as such, never as "unknown". The observation rides
+    the same lookup: it is the borrower-side memory of the last borrow attempt,
+    which is what lets the verdict say ``owner_offline`` with a last-seen stamp
+    instead of guessing from reachability.
+    """
+    from local_operator.network.credentials import placement as placement_mod
+
+    found = placement_mod.placement_entries_for(provider=provider, mcp_url=mcp_url, root=root)
+    if found is None:
+        return {}
+    network_id, entry = found
+    observation = placement_mod.PlacementState.load(network_id, root=root).observation(entry.key)
+    return {
+        "owner_device": entry.owner_device,
+        "owner_device_name": entry.owner_device_name,
+        "holders": [{"device": holder.device, "scope": holder.scope} for holder in entry.holders],
+        "observation": _bounded_observation(observation),
+    }
+
+
+def _bounded_observation(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The observation fields a verdict reads, and nothing else.
+
+    The stored row also carries ``key`` (the credential's NAME) and
+    ``last_grant_id``; neither is needed to word the sentence, and "names
+    only" is cheaper to keep true by construction than to audit later.
+    """
+    if not isinstance(row, Mapping):
+        return {}
+    return {
+        "status": _bounded(row.get("status") or "", 40),
+        "reason": _bounded(row.get("reason") or "", 200),
+        "owner_device": _bounded(row.get("owner_device") or "", 80),
+        "observed_at": row.get("observed_at"),
+        "retry_after_ms": row.get("retry_after_ms"),
+        "last_grant_at": row.get("last_grant_at"),
+    }
+
+
+def collect_peer_facts(root: Path, *, home: Path | None = None) -> dict[str, Any]:
+    """Everything the viewer needs from THIS device, as facts. Names only."""
+    model = default_model_fact(root)
+    provider = str(model.get("hosting") or "")
+    return {
+        "schema": READINESS_SCHEMA,
+        "default_model": {
+            "hosting": model["hosting"],
+            "model_name": model["model_name"],
+            "resolved": model["resolved"],
+            "reason": model["reason"],
+        },
+        "provider": provider,
+        # The provider is the ``provider`` key above; the fact is three-valued
+        # (True / False / None = the store could not be read).
+        "has_local": has_local_provider_credential(root, provider),
+        "credential_placement": placement_fact(provider=provider, root=root),
+        "mcp": mcp_servers_fact(root),
+        "git": git_identity_fact(home),
+        "operator": operator_fact(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# This side's own credential facts (the composer's half)
+# ---------------------------------------------------------------------------
+
+
+class ViewerFacts:
+    """This device's credential facts, resolved lazily and closed in one place.
+
+    One SQLite handle is reused across the provider row and every MCP server in
+    one report (the ``_provider_rows``/``McpTokenStorage`` pattern), and closed
+    by the composer's ``finally`` — a store left open per request is a handle
+    leak on a path a listing can hit several times a minute.
+    """
+
+    def __init__(self, root: Path, *, device_id: str = "") -> None:
+        self.root = root
+        self.device_id = device_id
+        self._store: Any = None
+        self._opened = False
+
+    def _open(self) -> Any:
+        if not self._opened:
+            self._store = _open_store(self.root)
+            self._opened = True
+        return self._store
+
+    def provider_rows(self, provider: str) -> list[Any] | None:
+        """This device's rows for ``provider``: ``[]`` none, ``None`` unreadable."""
+        if not provider:
+            return []
+        store = self._open()
+        if store is None:
+            return []
+        try:
+            return list(store.list_credentials(provider))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def holds_mcp_login(self, url: str) -> bool | None:
+        store = self._open()
+        if store is None:
+            return False
+        return _mcp_row_exists(store, url)
+
+    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
+        return placement_fact(provider=provider, mcp_url=mcp_url, root=self.root)
+
+    def close(self) -> None:
+        if self._store is not None:
+            try:
+                self._store.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._store = None
+
+
+# ---------------------------------------------------------------------------
+# Row builders (verdicts composed on the viewing side)
+# ---------------------------------------------------------------------------
+
+
+def _capability_row(
+    *,
+    device_id: str,
+    device_name: str,
+    capability: str,
+    ok: bool,
+    detail: str,
+    code: str = "",
+    remedies: Iterable[str] = (),
+    source: str,
+    observed: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "check": "readiness",
+        "capability": capability,
+        "device_id": device_id,
+        "device_name": device_name,
+        "ok": bool(ok),
+        "detail": detail,
+        "remedies": [str(item) for item in remedies],
+        "source": source,
+    }
+    if code:
+        row["code"] = code
+    if observed:
+        row["observed"] = dict(observed)
+    return row
+
+
+def _label(member: Any) -> str:
+    return str(getattr(member, "name", "") or "") or str(getattr(member, "device_id", ""))
+
+
+def _peer_too_old_rows(member: Any) -> list[dict[str, Any]]:
+    """One row per peer-side check for a peer that predates this report."""
+    detail = "the peer predates readiness reporting, so its answer is not available"
+    remedy = f"`lop-update` on {_label(member)}, then `lop network restart` there and re-check"
+    return [
+        _capability_row(
+            device_id=member.device_id,
+            device_name=_label(member),
+            capability=capability,
+            ok=False,
+            code=CODE_PEER_TOO_OLD,
+            detail=detail,
+            remedies=[remedy],
+            source=SOURCE_UNKNOWN,
+        )
+        for capability in PEER_SIDE_CHECKS
+    ]
+
+
+def not_asked_rows(
+    member: Any,
+    *,
+    detail: str,
+    remedies: Iterable[str] = (),
+    capabilities: Sequence[str] = PEER_SIDE_CHECKS,
+) -> list[dict[str, Any]]:
+    """One ``not_asked`` row per capability for a peer nothing could be asked of.
+
+    TWO CALLERS, one shape: the composer uses it for a peer that did not answer
+    (or answered too late), and ``cli._ready_locally`` uses it for the no-relay
+    fallback — a row that was never dialled says so and is ``ok: false``, the
+    same discipline the doctor's endpoint rows follow.
+    """
+    return [
+        _capability_row(
+            device_id=member.device_id,
+            device_name=_label(member),
+            capability=capability,
+            ok=False,
+            code=CODE_NOT_ASKED,
+            detail=detail,
+            remedies=remedies,
+            source=SOURCE_UNKNOWN,
+        )
+        for capability in capabilities
+    ]
+
+
+def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(a) Can an approval that needs the operator be ALLOWED there?"""
+    fact = facts.get("operator")
+    if not isinstance(fact, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_OPERATOR_AUTHORITY,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            source=SOURCE_UNKNOWN,
+        )
+    level = str(fact.get("level") or "")
+    reason = _bounded(fact.get("reason") or "", 200)
+    if level == "operator-presence":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_OPERATOR_AUTHORITY,
+            ok=True,
+            detail=f"operator authority is installed on {peer_label}, with a presence check",
+            source=SOURCE_PEER,
+        )
+    if level == "operator-file-only":
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_OPERATOR_AUTHORITY,
+            ok=True,
+            detail=(
+                f"operator authority is installed on {peer_label}, but its key is a 0600 "
+                "file: any process running as this user can sign for the operator — "
+                "presence is not enforced there"
+            ),
+            source=SOURCE_PEER,
+        )
+    if level == "anchor-unpinned":
+        code = CODE_ANCHOR_UNPINNED
+        staged = ""
+    elif level == "unreported":
+        code = CODE_UNUSABLE
+        staged = ""
+    else:
+        code = CODE_NOT_INSTALLED
+        staged = " (an anchor is staged but not installed)" if fact.get("anchor_installed") else ""
+    sentence = (
+        f"operator authority is not installed on {peer_label}{staged}"
+        + (f" ({reason})" if reason and reason != "ok" else "")
+        + ": an approval that needs the operator — a write or command offloaded there — "
+        "parks until someone installs it"
+    )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_OPERATOR_AUTHORITY,
+        ok=False,
+        code=code,
+        detail=sentence,
+        remedies=[
+            f"run `lop operator install` on {peer_label} (one privileged step), then "
+            "approvals for offloaded work can be answered from this device or your "
+            "paired phone"
+        ],
+        source=SOURCE_PEER,
+    )
+
+
+def build_row(
+    member: Any,
+    *,
+    peer_build: Mapping[str, Any],
+    own_build: Mapping[str, Any],
+    peer_label: str,
+) -> dict[str, Any]:
+    """(b) Is the peer on the same build? Composed here, works for old peers."""
+    peer_version = (
+        _bounded(peer_build.get("version") or "", 40) if isinstance(peer_build, Mapping) else ""
+    )
+    own_version = (
+        _bounded(own_build.get("version") or "", 40) if isinstance(own_build, Mapping) else ""
+    )
+    observed = {
+        "this": own_version,
+        "peer": peer_version,
+        "peer_source_ref": _bounded(
+            (peer_build.get("source_ref") if isinstance(peer_build, Mapping) else "") or "", 80
+        ),
+    }
+    if not peer_version:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BUILD,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"the build stamp {peer_label} runs did not arrive (it predates build "
+                "reporting, or sent none), so build parity is not known"
+            ),
+            remedies=[
+                f"`lop-update` on {peer_label}, then `lop network restart` there and re-check"
+            ],
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    from local_operator.update import parse_version
+
+    mine = parse_version(own_version)
+    theirs = parse_version(peer_version)
+    if mine is None or theirs is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BUILD,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"the build versions are not comparable (this device {own_version or 'unknown'}, "
+                f"{peer_label} {peer_version}), so build parity is not known"
+            ),
+            remedies=["`lop-update` on both devices, then re-check"],
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    if theirs == mine:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BUILD,
+            ok=True,
+            detail=f"{peer_label} runs the same build as this device ({peer_version})",
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    if theirs < mine:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_BUILD,
+            ok=False,
+            code=CODE_BEHIND,
+            detail=(
+                f"{peer_label} is behind this device: it runs {peer_version} and this device "
+                f"runs {own_version} — work offloaded there runs its older build"
+            ),
+            remedies=[
+                f"`lop-update` on {peer_label}, then `lop network restart` there and re-check"
+            ],
+            source=SOURCE_PEER,
+            observed=observed,
+        )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_BUILD,
+        ok=False,
+        code=CODE_AHEAD,
+        detail=(
+            f"{peer_label} is ahead ({peer_version} > {own_version}) — this side may lack "
+            "capabilities the peer expects"
+        ),
+        remedies=["`lop-update` on this device, then re-check"],
+        source=SOURCE_PEER,
+        observed=observed,
+    )
+
+
+def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(c) Will offloaded work that commits have an author?"""
+    fact = facts.get("git")
+    if not isinstance(fact, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_GIT,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            source=SOURCE_UNKNOWN,
+        )
+    name = _bounded(fact.get("user_name") or "", 200).strip()
+    email = _bounded(fact.get("user_email") or "", 200).strip()
+    if name and email:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_GIT,
+            ok=True,
+            detail=(
+                f"{peer_label} commits as {name} <{email}> (push credentials are a "
+                "separate question this report does not cover yet)"
+            ),
+            source=SOURCE_PEER,
+        )
+    missing = " and ".join(
+        label for label, value in (("user.name", name), ("user.email", email)) if not value
+    )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_GIT,
+        ok=False,
+        code=CODE_NO_GIT_IDENTITY,
+        detail=(
+            f"{peer_label} has no git identity ({missing} unresolved in its global "
+            "config): offloaded work that commits will fail or commit under the wrong "
+            "author"
+        ),
+        remedies=[
+            f'on {peer_label} run `git config --global user.name "…"` and '
+            '`git config --global user.email "…"`'
+        ],
+        source=SOURCE_PEER,
+    )
+
+
+def mcp_servers_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[str, Any]:
+    """(d) Does the peer have any user-scope MCP surface at all?"""
+    fact = facts.get("mcp")
+    if not isinstance(fact, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_SERVERS,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            source=SOURCE_UNKNOWN,
+        )
+    servers = [row for row in fact.get("servers") or [] if isinstance(row, Mapping)]
+    withheld = [str(item) for item in fact.get("withheld") or []]
+    config_path = _bounded(fact.get("config_path") or "", 300) or "its mcp.json"
+    if servers:
+        detail = (
+            f"{peer_label} has {len(servers)} user-scope MCP server(s) declared in "
+            f"{config_path}"
+        )
+        if withheld:
+            shown = ", ".join(withheld[:5])
+            detail += f" ({len(withheld)} row(s) withheld from this report: {shown})"
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_SERVERS,
+            ok=True,
+            detail=detail,
+            source=SOURCE_PEER,
+        )
+    detail = (
+        f"{peer_label} has no user-scope MCP servers ({config_path} is missing or empty): "
+        "work that needs MCP tooling cannot run there"
+    )
+    if withheld:
+        detail += f" ({len(withheld)} row(s) withheld from this report as credential-shaped)"
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_MCP_SERVERS,
+        ok=False,
+        code=CODE_NO_MCP_SERVERS,
+        detail=detail,
+        remedies=[
+            f"add the servers it needs on {peer_label} (its own `/mcp add …`, or "
+            "`lop mcp add` from a shell there; server config is per device and is not "
+            "copied over the mesh)"
+        ],
+        source=SOURCE_PEER,
+    )
+
+
+def _holder_names(placement: Mapping[str, Any]) -> list[str]:
+    names: list[str] = []
+    for row in placement.get("holders") or []:
+        if isinstance(row, Mapping) and row.get("device"):
+            names.append(str(row["device"]))
+    return names
+
+
+def _owner_label(placement: Mapping[str, Any], *, fallback: str = "") -> str:
+    return (
+        str(placement.get("owner_device_name") or "")
+        or str(placement.get("owner_device") or "")
+        or fallback
+    )
+
+
+def _observation_failure(observation: Mapping[str, Any]) -> str:
+    """The rendered sentence for a refused borrow memory, or ``""``.
+
+    ``render_broker_error`` is the credentials slice's ONE sentence builder for
+    a refused grant, so the observation's wording cannot drift from what the
+    operator reads when the same refusal happens for real.
+    """
+    status = str(observation.get("status") or "")
+    if status not in ("owner_offline", "grant_invalid"):
+        return ""
+    from local_operator.network.credentials.messages import render_broker_error
+    from local_operator.network.credentials.types import BrokerError
+
+    last_seen_s: float | None = None
+    stamp = observation.get("last_grant_at")
+    try:
+        if stamp:
+            last_seen_s = max(0.0, time.time() - float(stamp))
+    except (TypeError, ValueError):
+        last_seen_s = None
+    error = BrokerError(
+        code=status,
+        message=_bounded(observation.get("reason") or "", 200),
+        owner_device=_bounded(observation.get("owner_device") or "", 80),
+        owner_device_name="",
+    )
+    return render_broker_error(
+        error,
+        owner_name=str(observation.get("owner_device") or "the owner device"),
+        last_seen_s=last_seen_s,
+    )
+
+
+def model_credential_row(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    viewer: ViewerFacts,
+    peer_label: str,
+) -> dict[str, Any]:
+    """(e) Can the peer's default model be served — own login or a borrow?"""
+    model = facts.get("default_model")
+    if not isinstance(model, Mapping):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail="the peer's answer did not carry this check",
+            source=SOURCE_UNKNOWN,
+        )
+    hosting = _bounded(model.get("hosting") or "", 120)
+    resolved = bool(model.get("resolved"))
+    if not hosting or not resolved:
+        reason = _bounded(model.get("reason") or "", 200)
+        if reason.startswith("its config could not be read"):
+            sentence = (
+                f"{peer_label}'s config could not be read, so its default model is "
+                "unknown — work offloaded there cannot start"
+            )
+        else:
+            sentence = (
+                f"{peer_label} has no default model configured"
+                + (f" ({reason})" if reason else "")
+                + ": work offloaded there cannot start"
+            )
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_NOT_CONFIGURED,
+            detail=sentence,
+            remedies=[
+                "set the peer's default (`/model default` in its window, or "
+                "`local-operator config edit model_name <model>` there), then its "
+                "provider needs a login or a share"
+            ],
+            source=SOURCE_PEER,
+        )
+    provider = _bounded(facts.get("provider") or hosting, 120)
+    held = facts.get("has_local")
+    placement = facts.get("credential_placement")
+    placement = placement if isinstance(placement, Mapping) else {}
+    observation = placement.get("observation")
+    observation = observation if isinstance(observation, Mapping) else {}
+    if held is True:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=True,
+            detail=f"{peer_label} serves {provider} from its own login",
+            source=SOURCE_PEER,
+        )
+    owner = str(placement.get("owner_device") or "")
+    peer_is_holder = member.device_id in _holder_names(placement)
+    if owner and peer_is_holder:
+        observed_failure = _observation_failure(observation)
+        if observed_failure:
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_MODEL_CREDENTIAL,
+                ok=False,
+                code=CODE_OBSERVED_FAILURE,
+                detail=(
+                    f"the credential {peer_label} would borrow for {provider} is not "
+                    f"reachable. {observed_failure}"
+                ),
+                remedies=[
+                    f"re-check after the owner is reachable, or run `lop login {provider}` on "
+                    f"{peer_label}"
+                ],
+                source=SOURCE_PEER,
+            )
+        if owner == viewer.device_id:
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_MODEL_CREDENTIAL,
+                ok=True,
+                detail=(
+                    f"{peer_label} borrows {provider} from this device (a grant is issued "
+                    "per request; nothing to copy)"
+                ),
+                source=SOURCE_PEER,
+            )
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=True,
+            detail=(
+                f"{peer_label} borrows {provider} from "
+                f"{_owner_label(placement, fallback='another device')} (not verified from here)"
+            ),
+            source=SOURCE_PEER,
+        )
+    if owner and owner == member.device_id:
+        # The placement says the PEER owns this key, yet no local row was found
+        # on it (``held`` is not True, or this branch was reached first). The
+        # two documents disagree; report the disagreement rather than pick one.
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"the placement entry for {provider} names {peer_label} as its owner, but "
+                "no credential row was found there — the two do not agree yet"
+            ),
+            remedies=[f"sign in on {peer_label} (`lop login {provider}` there) and re-check"],
+            source=SOURCE_PEER,
+        )
+    if owner and not peer_is_holder:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_NOT_SHARED,
+            detail=(
+                f"{provider} is shared in this network, but {peer_label} is not among its "
+                "holders: a borrow there would be refused"
+            ),
+            remedies=[
+                (
+                    f"share it: `lop network credential share {provider} --with "
+                    f"{peer_label}` (run here)"
+                    if owner == viewer.device_id
+                    else f"ask the device that owns {provider} to add {peer_label} as a holder"
+                )
+            ],
+            source=SOURCE_PEER,
+        )
+    mine = viewer.provider_rows(provider)
+    if mine:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_NOT_SHARED,
+            detail=(
+                f"this device is signed in to {provider} but does not share it with "
+                f"{peer_label}, so nothing would reach it"
+            ),
+            remedies=[
+                f"share it: `lop network credential share {provider} --with {peer_label}` "
+                "(run here)"
+            ],
+            source=SOURCE_LOCAL,
+        )
+    if held is None or mine is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MODEL_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                "a credential store could not be read (this side or the peer's), so "
+                "whether this provider can be served is not known"
+            ),
+            remedies=[f"check the credential store on {peer_label} and here, then re-check"],
+            source=SOURCE_UNKNOWN,
+        )
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_MODEL_CREDENTIAL,
+        ok=False,
+        code=CODE_NO_CREDENTIAL,
+        detail=(
+            f"neither {peer_label} nor this device holds a credential for {provider}: "
+            "offloaded work on that model cannot start"
+        ),
+        remedies=[
+            f"run `lop login {provider}` here and share it, or run it on {peer_label} "
+            "to use its own account"
+        ],
+        source=SOURCE_LOCAL,
+    )
+
+
+def mcp_credential_rows(
+    member: Any,
+    facts: Mapping[str, Any],
+    *,
+    viewer: ViewerFacts,
+    peer_label: str,
+) -> list[dict[str, Any]]:
+    """(f) Per user-scope HTTP/SSE server: does a login path exist for the peer?"""
+    fact = facts.get("mcp")
+    if not isinstance(fact, Mapping):
+        return []
+    rows: list[dict[str, Any]] = []
+    for server in fact.get("servers") or []:
+        if not isinstance(server, Mapping):
+            continue
+        if str(server.get("transport") or "") not in ("http", "sse"):
+            # Stdio servers are listed, not credential-checked (deferral §7):
+            # their secrets live in the spawn environment, a different question.
+            continue
+        url = _bounded(server.get("url") or "", 300)
+        name = _bounded(server.get("name") or "", 120) or url
+        if not url:
+            continue
+        rows.append(
+            _mcp_credential_row(
+                member,
+                url=url,
+                name=name,
+                server=server,
+                viewer=viewer,
+                peer_label=peer_label,
+            )
+        )
+    return rows
+
+
+def _mcp_credential_row(
+    member: Any,
+    *,
+    url: str,
+    name: str,
+    server: Mapping[str, Any],
+    viewer: ViewerFacts,
+    peer_label: str,
+) -> dict[str, Any]:
+    has_row = server.get("has_row")
+    key = f"mcp:{url}"
+    if has_row is True:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=True,
+            detail=f"{peer_label} holds its own login for {name} ({url})",
+            source=SOURCE_PEER,
+            observed={"server": name, "url": url},
+        )
+    placement = viewer.placement(mcp_url=url)
+    owner = str(placement.get("owner_device") or "")
+    peer_is_holder = member.device_id in _holder_names(placement)
+    if owner and peer_is_holder:
+        if owner == viewer.device_id:
+            return _capability_row(
+                device_id=member.device_id,
+                device_name=peer_label,
+                capability=CAPABILITY_MCP_CREDENTIAL,
+                ok=True,
+                detail=(
+                    f"{peer_label} borrows the login for {name} from this device (a grant "
+                    "is issued per request; nothing to copy)"
+                ),
+                source=SOURCE_PEER,
+                observed={"server": name, "url": url},
+            )
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=True,
+            detail=(
+                f"{peer_label} borrows the login for {name} from "
+                f"{_owner_label(placement, fallback='another device')} (not verified from here)"
+            ),
+            source=SOURCE_PEER,
+            observed={"server": name, "url": url},
+        )
+    if owner and not peer_is_holder:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_NOT_SHARED,
+            detail=(
+                f"a login for {name} is shared in this network, but {peer_label} is not "
+                "among its holders: a borrow there would be refused"
+            ),
+            remedies=[
+                (
+                    f"share it: `lop network credential share {key} --with {peer_label}` (run here)"
+                    if owner == viewer.device_id
+                    else (
+                        f"ask the device that owns the login for {name} to add "
+                        f"{peer_label} as a holder"
+                    )
+                )
+            ],
+            source=SOURCE_PEER,
+            observed={"server": name, "url": url},
+        )
+    if viewer.holds_mcp_login(url):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_NOT_SHARED,
+            detail=(
+                f"this device holds a login for {name} but does not share it with "
+                f"{peer_label}, so nothing would reach it"
+            ),
+            remedies=[
+                f"share it: `lop network credential share {key} --with {peer_label}` (run here)"
+            ],
+            source=SOURCE_LOCAL,
+            observed={"server": name, "url": url},
+        )
+    if has_row is None:
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_UNKNOWN,
+            detail=(
+                f"{peer_label}'s credential store could not be read, so whether it holds "
+                f"a login for {name} is not known"
+            ),
+            remedies=[f"check the credential store on {peer_label}, then re-check"],
+            source=SOURCE_UNKNOWN,
+            observed={"server": name, "url": url},
+        )
+    if server.get("auth_declared"):
+        return _capability_row(
+            device_id=member.device_id,
+            device_name=peer_label,
+            capability=CAPABILITY_MCP_CREDENTIAL,
+            ok=False,
+            code=CODE_NO_CREDENTIAL,
+            detail=(
+                f"this device has no MCP login for {url}; run '/mcp login {url}' here " "first"
+            ),
+            remedies=[
+                f"run '/mcp login {url}' here, then "
+                f"`lop network credential share {key} --with {peer_label}`"
+            ],
+            source=SOURCE_LOCAL,
+            observed={"server": name, "url": url},
+        )
+    # NEITHER SIDE HOLDS A ROW AND THE CONFIG DECLARES NO AUTH BLOCK. The copy
+    # must not claim certainty about the server's auth — plenty of servers need
+    # no sign-in at all — so it opens with "if" and keeps the same command the
+    # certain case names.
+    return _capability_row(
+        device_id=member.device_id,
+        device_name=peer_label,
+        capability=CAPABILITY_MCP_CREDENTIAL,
+        ok=False,
+        code=CODE_NO_CREDENTIAL,
+        detail=(
+            f"if {name} needs a sign-in, this device has no MCP login for {url} — run "
+            f"'/mcp login {url}' here first"
+        ),
+        remedies=[
+            f"run '/mcp login {url}' here, then "
+            f"`lop network credential share {key} --with {peer_label}`"
+        ],
+        source=SOURCE_LOCAL,
+        observed={"server": name, "url": url},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reachability (this side; observed facts, never inference)
+# ---------------------------------------------------------------------------
+
+
+def _route_observation(host: str, port: int) -> dict[str, Any]:
+    from local_operator.network import addresses as addresses_mod
+
+    try:
+        return dict(addresses_mod.route_observation(host, port))
+    except Exception:  # noqa: BLE001 — an unobservable route is `null`, not an error
+        return {"source_address": None, "interface": None, "error": ""}
+
+
+def _observed_route_text(observed: Mapping[str, Any]) -> str:
+    source = observed.get("source_address")
+    interface = observed.get("interface")
+    if source and interface:
+        return f" (this device routes to it from {source} via {interface})"
+    if source:
+        return f" (this device routes to it from {source})"
+    return ""
+
+
+def reachability_reading(row: Mapping[str, Any]) -> str:
+    """The human sentence for a reachability row — this verb's own register.
+
+    Kept HERE rather than routed through ``resume.doctor_detail_words``, and the
+    reason is the whole point of this report: doctor's renderer maps every
+    ``connect_failed:`` stage — including ``ConnectionRefusedError`` — to
+    "nothing answered at that address", which is exactly the conflation this
+    slice exists to end. A refused connection means the host is UP and nothing
+    is listening on that port; an operator told "nothing answered" goes to check
+    a machine that already answered. Doctor's own output and tables are
+    deliberately untouched (their pins stay exactly as they were); this function
+    reads doctor's CODES (``detail``) plus the observed facts and composes the
+    sentence this report owes.
+    """
+    observed = row.get("observed")
+    observed = observed if isinstance(observed, Mapping) else {}
+    outcome = str(observed.get("outcome") or "")
+    detail = str(row.get("detail") or "")
+    winner = str(observed.get("winner") or "")
+    if row.get("probed") is False:
+        # The no-relay fallback: nothing was dialled, and its ``detail`` is
+        # already a sentence for a person ("not probed: no relay is running …").
+        return detail or "not probed"
+    if outcome == "connected":
+        return "the peer answered at this address"
+    if outcome == "refused":
+        return (
+            "something answered this address and refused the connection — the host is up; "
+            "nothing is listening on that port"
+        )
+    if outcome == "no_answer_elsewhere":
+        return f"the peer is up (it answered {winner}); this address did not answer"
+    if outcome == "no_answer":
+        return "nothing answered this address before the budget ran out" + _observed_route_text(
+            observed
+        )
+    if outcome == "no_route":
+        return "this device's own routing said the address is unreachable from here"
+    if outcome == "resolve_failed":
+        return "the address does not resolve from this device"
+    if outcome == "handshake_failed":
+        return f"the address answered, but no link came up ({detail})"
+    if outcome == "bad_endpoint":
+        return "the address it publishes cannot be dialled"
+    if outcome == "not_attempted":
+        return "the report ran out of time before this address was tried"
+    if outcome == "connected_elsewhere":
+        return f"the peer answered on {winner or 'another endpoint'}"
+    return detail or "no reading for this row"
+
+
+def _classify_outcome(detail: str, *, route_ok: bool, winner_elsewhere: bool) -> str:
+    from local_operator.network import relay as relay_mod
+
+    if detail == relay_mod.DETAIL_NO_ANSWER:
+        return "no_answer_elsewhere" if winner_elsewhere else "no_answer"
+    if detail == relay_mod.DETAIL_NOT_ATTEMPTED:
+        return "not_attempted"
+    if detail == relay_mod.DETAIL_BAD_ENDPOINT:
+        return "bad_endpoint"
+    if detail.startswith(relay_mod.CONNECT_FAILED_PREFIX):
+        klass = detail.split(":", 1)[1]
+        if klass == "ConnectionRefusedError":
+            return "refused"
+        if klass in ("TimeoutError", "socket.timeout"):
+            return "no_answer_elsewhere" if winner_elsewhere else "no_answer"
+        if klass == "gaierror":
+            return "resolve_failed"
+        if not route_ok:
+            # The kernel could not resolve a route at all: that is this side's
+            # own routing talking, and it is a different remedy from a black
+            # hole on the path.
+            return "no_route"
+        return "no_answer_elsewhere" if winner_elsewhere else "no_answer"
+    return "no_answer_elsewhere" if winner_elsewhere else "no_answer"
+
+
+def _reachability_remedies(
+    outcome: str, *, peer_label: str, observed: Mapping[str, Any]
+) -> list[str]:
+    if outcome == "refused":
+        winner = str(observed.get("winner") or "")
+        if winner:
+            # The peer IS up — it answered on another endpoint — so "start the
+            # relay" would be the wrong advice about THIS address; the address
+            # is what needs fixing.
+            return [f"point {peer_label} at the working address: it answered on {winner}"]
+        return [f"start {peer_label}'s relay (`lop network start` there), then re-check"]
+    if outcome == "no_answer":
+        admits = ""
+        source = observed.get("source_address")
+        interface = observed.get("interface")
+        if source and interface:
+            admits = f"this device's address ({source}, via {interface})"
+        elif source:
+            admits = f"this device's address ({source})"
+        else:
+            admits = "this device's address"
+        return [
+            f"on {peer_label} check it is up (`lop network status --json` there), then "
+            f"check that any firewall or security group on the path admits {admits}"
+        ]
+    if outcome == "no_answer_elsewhere":
+        winner = str(observed.get("winner") or "")
+        if not winner:
+            return ["re-check from the address that answered"]
+        return [f"point the peer at the working address: it answered on {winner}"]
+    if outcome == "no_route":
+        return ["fix this device's routing or VPN for this address, then re-check"]
+    if outcome == "resolve_failed":
+        return [
+            "have the peer publish an address that resolves from here (or fix DNS on this device)"
+        ]
+    if outcome == "handshake_failed":
+        return [f"re-check once {peer_label}'s relay answers a handshake again"]
+    return []
+
+
+def _reachability_rows(
+    member: Any,
+    *,
+    record: Any,
+    server: "RelayServer",
+    deadline: float | None,
+    since: float,
+) -> tuple[list[dict[str, Any]], Any]:
+    """Probe every declared endpoint; return the rows and whatever link we hold.
+
+    THE PROBE ALWAYS RUNS, even when a link exists: the observed per-endpoint
+    facts are this report's product, and having the link is not evidence about
+    which of the peer's addresses answers from HERE. When a link already
+    exists the probed winner socket is closed rather than dialled again —
+    dialling would EVICT the live link (newest wins), and a read-only report
+    must not churn the operator's link to learn what it already knows.
+    """
+    from local_operator.network import relay as relay_mod
+
+    peer_label = _label(member)
+    link = server._link_for(member.device_id)  # noqa: SLF001 — the one link seam
+    endpoints = list(member.endpoints)
+    if not endpoints:
+        # NOTHING WAS DECLARED, so nothing was dialled — doctor's ``no_endpoint``
+        # vocabulary (the renderer is this verb's, see ``reachability_reading``).
+        row = {
+            "check": "reachability",
+            "device_id": member.device_id,
+            "device_name": peer_label,
+            "endpoint": "",
+            "ok": False,
+            "detail": "no_endpoint",
+            "observed": {
+                "outcome": "no_endpoint",
+                "source_address": None,
+                "interface": None,
+                "elapsed_ms": None,
+                "budget_s": None,
+                "attempted": False,
+                "last_seen_at": member.last_seen_at,
+            },
+            "remedies": [
+                f"have {peer_label} publish an address (its own `lop network init "
+                "--advertise-host` / `join --advertise-host`), then re-check"
+            ],
+        }
+        return [row], link
+    probe = relay_mod.probe_candidates(
+        endpoints,
+        deadline=deadline,
+        connect_cap=relay_mod.PROBE_CONNECT_TIMEOUT_S,
+        wait_all=True,
+    )
+    elapsed_ms = round((time.monotonic() - since) * 1000, 1)
+    winner = probe.winner if probe.sock is not None else ""
+    dial_failed = ""
+    if probe.sock is not None:
+        if link is not None:
+            relay_mod._close_quietly(probe.sock)  # noqa: SLF001 — see the docstring
+        else:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if remaining is not None and remaining <= 0:
+                # The probe ANSWERED inside its cap, but the report's own budget
+                # ran out before the handshake could start. Mirror doctor: close
+                # the socket and say which clock ran out rather than start a
+                # dial with no budget (or, worse, with no bound at all).
+                relay_mod._close_quietly(probe.sock)  # noqa: SLF001
+                dial_failed = relay_mod.handshake_not_attempted_reason(winner, budget="report")
+            else:
+                try:
+                    link, reason = server.dial(
+                        record.network_id,
+                        host=winner,
+                        epoch=record.epoch,
+                        timeout_s=remaining,
+                        connected=probe.sock,
+                        expected_device=member.device_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 — a refused handshake is a row
+                    from local_operator.network.types import MeshRefusal
+
+                    link, reason = None, exc.code if isinstance(exc, MeshRefusal) else str(exc)
+                if link is None:
+                    dial_failed = reason or "unreachable"
+    rows: list[dict[str, Any]] = []
+    for attempt in probe.attempts:
+        route = _route_observation(*_split_endpoint(attempt.endpoint))
+        route_ok = not route.get("error")
+        winner_elsewhere = bool(winner) and attempt.endpoint != winner
+        if attempt.endpoint == winner:
+            if link is not None:
+                outcome = "connected"
+                detail = relay_mod.DETAIL_OK
+                ok = True
+            else:
+                outcome = "handshake_failed"
+                detail = dial_failed or "unreachable"
+                ok = False
+        elif attempt.connected:
+            outcome = "connected_elsewhere"
+            detail = relay_mod.doctor_link_elsewhere_detail(winner)
+            ok = True
+        else:
+            outcome = _classify_outcome(
+                attempt.detail, route_ok=route_ok, winner_elsewhere=winner_elsewhere
+            )
+            detail = attempt.detail
+            ok = False
+        observed = {
+            "outcome": outcome,
+            "source_address": route.get("source_address"),
+            "interface": route.get("interface"),
+            "elapsed_ms": attempt.latency_ms if attempt.latency_ms else elapsed_ms,
+            "budget_s": relay_mod.PROBE_CONNECT_TIMEOUT_S,
+            "attempted": attempt.detail != relay_mod.DETAIL_NOT_ATTEMPTED,
+            "last_seen_at": member.last_seen_at,
+        }
+        if winner_elsewhere and winner:
+            observed["winner"] = winner
+        rows.append(
+            {
+                "check": "reachability",
+                "device_id": member.device_id,
+                "device_name": peer_label,
+                "endpoint": attempt.endpoint,
+                "ok": bool(ok),
+                "detail": detail,
+                "observed": observed,
+                "remedies": _reachability_remedies(
+                    outcome, peer_label=peer_label, observed=observed
+                ),
+            }
+        )
+    return rows, link
+
+
+def _split_endpoint(endpoint: str) -> tuple[str, int]:
+    """``host:port`` from an endpoint string, with a dial-meaningful default."""
+    address, _, port_text = endpoint.rpartition(":")
+    try:
+        return (address or endpoint), int(port_text)
+    except ValueError:
+        return (address or endpoint), 0
+
+
+# ---------------------------------------------------------------------------
+# The composer (runs on the viewing side) and the ops
+# ---------------------------------------------------------------------------
+
+
+def _ask_readiness(
+    server: "RelayServer", link: Any, *, timeout: float = READINESS_OP_TIMEOUT_S
+) -> tuple[dict[str, Any] | None, str]:
+    """Ask the peer for its facts. Returns ``(facts, "")`` or ``(None, reason)``."""
+    request = {
+        "op": "net_readiness",
+        "req": server._next_relay_req(),  # noqa: SLF001
+        "locality": "remote",
+    }
+    reply = link.request(request, timeout=timeout)
+    if reply is None:
+        return None, "the readiness request did not arrive before the bound"
+    if reply.get("op") != "ack":
+        return None, _bounded(reply.get("message") or "the peer refused the readiness request", 200)
+    detail = reply.get("detail")
+    if not isinstance(detail, Mapping):
+        return None, "the peer's answer carried nothing this build can read"
+    return dict(detail), ""
+
+
+def _peer_checks(
+    member: Any,
+    *,
+    record: Any,
+    server: "RelayServer",
+    viewer: ViewerFacts,
+    deadline: float | None,
+) -> list[dict[str, Any]]:
+    """Every readiness row for ONE member: reachability, then capabilities."""
+    peer_label = _label(member)
+    since = time.monotonic()
+    rows, link = _reachability_rows(
+        member, record=record, server=server, deadline=deadline, since=since
+    )
+    if link is None:
+        # NO LINK, SO NOTHING WAS ASKED — and the build row degrades with the
+        # rest: its source is the handshake, and there was no handshake.
+        rows.extend(
+            not_asked_rows(
+                member,
+                detail="not asked: the peer did not answer",
+                capabilities=(CAPABILITY_BUILD, *PEER_SIDE_CHECKS),
+            )
+        )
+        return rows
+    rows.append(
+        build_row(
+            member,
+            peer_build=link.peer_build,
+            own_build=getattr(server, "build", {}) or {},
+            peer_label=peer_label,
+        )
+    )
+    if wire.PEER_READINESS_V1 not in link.capabilities:
+        rows.extend(_peer_too_old_rows(member))
+        return rows
+    # THE ASK SPENDS THE REPORT'S OWN BUDGET, never more: every wait inside one
+    # run shares the deadline the composer opened, so the whole op stays inside
+    # the CLI's client guard (the listing budget plus its margin) — a report
+    # that outlives its reader is one nobody reads. A peer reached too late in
+    # the run degrades like any other unanswered ask.
+    remaining = None if deadline is None else deadline - time.monotonic()
+    if remaining is not None and remaining <= 0.5:
+        rows.extend(
+            not_asked_rows(
+                member, detail="not asked: the report's budget ran out before the request"
+            )
+        )
+        return rows
+    timeout = READINESS_OP_TIMEOUT_S if remaining is None else min(READINESS_OP_TIMEOUT_S, remaining)
+    facts, problem = _ask_readiness(server, link, timeout=timeout)
+    if facts is None:
+        rows.extend(not_asked_rows(member, detail=f"not asked: {problem}", remedies=()))
+        return rows
+    rows.append(operator_row(member, facts, peer_label=peer_label))
+    rows.append(git_row(member, facts, peer_label=peer_label))
+    rows.append(mcp_servers_row(member, facts, peer_label=peer_label))
+    rows.append(model_credential_row(member, facts, viewer=viewer, peer_label=peer_label))
+    rows.extend(mcp_credential_rows(member, facts, viewer=viewer, peer_label=peer_label))
+    return rows
+
+
+def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
+    """The ``peer_readiness`` local op's body: the readiness report.
+
+    Row order is doctor's (identity → network → membership → per member:
+    reachability → capability rows). ``peer`` names one device by id OR name —
+    resolved through the relay's one name resolver rather than string-compared,
+    because the verb is typed by a person (``--peer cloud-node-1``).
+    """
+    from local_operator.network import relay as relay_mod
+    from local_operator.network import store as store_mod
+
+    deadline = time.monotonic() + relay_mod.LISTING_PROBE_BUDGET_S
+    device_id = server._resolve_peer(peer) if peer else ""  # noqa: SLF001
+    identity_missing = server.identity is None or not server.identity.device_id
+    checks: list[dict[str, Any]] = []
+    if identity_missing:
+        checks.append({"check": "identity", "ok": False, "detail": "identity_missing"})
+    viewer = ViewerFacts(
+        server.root, device_id=server.identity.device_id if server.identity else ""
+    )
+    try:
+        for record in store_mod.list_networks(server.root):
+            if record.stale:
+                checks.append(
+                    {
+                        "check": "network",
+                        "network_id": record.network_id,
+                        "ok": False,
+                        "detail": record.stale,
+                    }
+                )
+            standing = relay_mod.membership_state(record)
+            if standing["state"] != "active":
+                checks.append(
+                    {
+                        "check": "membership",
+                        "network_id": record.network_id,
+                        "ok": False,
+                        "code": standing["state"],
+                        "detail": standing["sentence"],
+                        "remedies": standing["remedies"],
+                    }
+                )
+            for member in record.active_members():
+                if member.device_id == record.self_device_id:
+                    continue
+                if device_id and member.device_id != device_id:
+                    continue
+                checks.extend(
+                    _peer_checks(
+                        member, record=record, server=server, viewer=viewer, deadline=deadline
+                    )
+                )
+    finally:
+        viewer.close()
+    return {
+        "checks": checks,
+        "identity_present": not identity_missing,
+        "identity_dir": str(store_mod.network_root(server.root)),
+        "relay": f"running, pid {os.getpid()}",
+    }
+
+
+def make_handler(server: "RelayServer") -> Any:
+    """The ``net_readiness`` peer-op handler: THIS device's facts, read-only."""
+
+    def _handle(link: "PeerLink", frame: dict[str, Any]) -> dict[str, Any]:
+        # The link is unused: every fact is this device's own, and the handler
+        # never sends a request over the link it is serving (the deadlock guard
+        # ``PeerLink.request`` states).
+        del link, frame
+        return collect_peer_facts(server.root)
+
+    return _handle
+
+
+def local_handler(server: "RelayServer") -> Any:
+    """The ``peer_readiness`` local op: compose the report for one or every peer."""
+
+    def _handle(frame: dict[str, Any]) -> dict[str, Any]:
+        return compose(server, peer=str(frame.get("peer") or ""))
+
+    return _handle
+
+
+def install(server: "RelayServer") -> None:
+    """Register this slice's ops on ``server`` (relay construction calls this).
+
+    NOT ``slow``: the peer handler is local file reads. The LOCAL op dials and
+    asks, bounded internally by the listing budget the composer starts with,
+    exactly like ``net_doctor`` — a control call that can outlast its caller is
+    the defect both verbs avoid by holding one budget.
+    """
+    server.register_ops(
+        {"net_readiness": make_handler(server)},
+        local_handlers={"peer_readiness": local_handler(server)},
+    )
