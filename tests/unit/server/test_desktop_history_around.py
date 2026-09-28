@@ -231,4 +231,39 @@ async def test_history_around_on_a_peer_session_is_an_unsupported_empty_page(
     }
 
     plain = await bridge.history(limit=10)
-    assert plain == {"entries": [], "has_more": False, "cursor_missing": False}
+    assert plain == {
+        "entries": [],
+        "has_more": False,
+        "cursor_missing": False,
+        "has_newer": None,
+    }
+
+    # Peer parity (remediation round 1, R1-1): a malformed request must refuse
+    # the SAME way here as on a local session — the remote branch is reached
+    # only by requests that pass the shared validator first.
+    with pytest.raises(ValueError, match="only meaningful with around_id"):
+        await bridge.history(before=2)
+    with pytest.raises(ValueError, match="choose at most one"):
+        await bridge.history(around_id="deadbeef", before_id="deadbeef")
+
+
+@pytest.mark.asyncio
+async def test_history_before_id_keeps_has_newer_null(tmp_path: Path) -> None:
+    """The unchanged reads carry the null on the wire: an unasked question
+    is not answered False (remediation round 1, R1-3).
+
+    The anchored read is the only one whose contract bounds its newer side, so
+    a paging read must serialize ``has_newer: null`` — a client that branches
+    on the key must see "not asked", never a claim.
+    """
+    async with _Harness(tmp_path) as harness:
+        assert harness.client is not None
+        response = await harness.client.get(
+            f"/v1/desktop/sessions/{harness.session_id}/history",
+            params={"before_id": harness.ids[4], "limit": 2},
+        )
+        assert response.status_code == 200, response.text
+        page = response.json()["result"]
+        assert [row["id"] for row in page["entries"]] == harness.ids[2:4]
+        assert page["has_newer"] is None
+        assert page["cursor_missing"] is False

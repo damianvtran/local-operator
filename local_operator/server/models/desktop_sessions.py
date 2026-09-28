@@ -577,6 +577,16 @@ class ChildTranscriptPage(HistoryPage):
     """
 
     state: ChildTranscriptState
+    #: EXCLUDED rather than defaulted (remediation round 1, Q1). A child read
+    #: has no anchored mode — the route takes no ``around_id`` — so the
+    #: newer-side question is never asked here, and the inherited default would
+    #: otherwise serialize as a ``null`` on every child page: a shape change to
+    #: an envelope that predates this field and is not part of §D9's extension.
+    #: The child shape has its own pins asserting the four keys exactly (unit:
+    #: ready/pending/gone; e2e: a real subagent's transcript), and keeping them
+    #: green is the point — an absent key and a null key are different
+    #: contracts, and only the parent page's contract gained this question.
+    has_newer: bool | None = Field(default=None, exclude=True)
 
 
 #: Why a child job's live window could not be handed over, when its absence
