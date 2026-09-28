@@ -1095,6 +1095,15 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
     # it takes a bridge, so the door is its gate and this row is what proves it
     # rather than only that the route exists.
     _DoorRoute("checkpoints", "GET", "/v1/desktop/sessions/{session_id}/checkpoints"),
+    # In-thread find: also a READ under the door. ``q`` is required by the
+    # route, so the row carries one — without it the request would be a 422
+    # that proves nothing about the door.
+    _DoorRoute(
+        "find",
+        "GET",
+        "/v1/desktop/sessions/{session_id}/find",
+        query="q=deploy",
+    ),
     # The session's code memory (added upstream while this branch was in review:
     # the completeness test below is what reported it, which is the property the
     # round-2 MAJOR asked for — a route added under the door fails HERE).
