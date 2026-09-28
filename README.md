@@ -165,10 +165,10 @@ application for macOS, Windows, and Linux that drives the same sessions, teams,
 schedules, and configuration, and adds the surfaces a terminal cannot draw.
 
 <p align="center">
-  <img src="./static/ui-desktop-app.png" alt="The desktop app: the chats, agents and teams sidebar; tool receipts with durations; two subagents running; open to-dos; composer." width="720">
+  <img src="./static/ui-desktop-app.png" alt="The desktop app on the Invoices workspace session: the rail (New chat, Search, Aida, Agents, Projects, Schedules, Browser, Agent hub, Mesh) above the Agents and Teams sections; the transcript's reconcile request, Read invoices/march.csv and Ran python reconcile.py receipts, and the streamed write-up; the Run details pane with two subagents running (one drafting the summary, one auditing) and the shared to-do list; and the composer holding a draft." width="720">
 </p>
 
-<p align="center"><i>The desktop app on a real session: the sidebar, the transcript's tool receipts, two subagents running, and the composer's working directory, model, effort, context, and cost readouts.</i></p>
+<p align="center"><i>The desktop app on a real session: the rail with its chats, agents, teams, and mesh; the transcript's tool receipts and streamed write-up; two subagents running beside the shared to-do list; and the composer holding a draft.</i></p>
 
 What the app adds:
 
@@ -187,6 +187,12 @@ What the app adds:
   capture visually, and type into. That is what makes end-to-end testing of
   interactive TUIs, and of other commands that need a live terminal, possible
   for an agent where `bash` alone cannot.
+
+<p align="center">
+  <img src="./static/ui-media-in-conversation.png" alt="A desktop app conversation carrying images: a chart card at the top ('March invoices — who still owes us?'), the assistant noting it is plotting the amounts, a Ran python plot_outstanding.py receipt, the bar chart it rendered ('Outstanding at the end of March': Contoso 4,820, Fabrikam 1,150), and the closing write-up." width="720">
+</p>
+
+<p align="center"><i>A conversation where images are part of the turn: a chart pasted into the session, and the bar chart the agent plotted and showed inline beside its write-up.</i></p>
 
 **Easiest install — the desktop build.** Download the installer for your
 platform from the [downloads page](https://local-operator.com/download)
@@ -218,6 +224,12 @@ each worker's status, spend, and progress live, and you can open any of them to
 read its transcript and plan (the reader's keys and limits are in
 [docs/subagent-reader.md](./docs/subagent-reader.md)).
 
+<p align="center">
+  <img src="./static/ui-subagents.png" alt="The desktop app's run pane mid-fan-out: two subagents running — 'Summarise the findings' (writer, drafting the summary) and an audit running pytest (reviewer) — each with elapsed time, context use, and spend, above the shared to-do list; beside them, the conversation shows the reconcile request and a Read invoices/march.csv receipt." width="720">
+</p>
+
+<p align="center"><i>Two workers mid-run in the run pane — one drafting, one auditing — each with its role, elapsed time, context use, and spend, above the to-do list they share.</i></p>
+
 **Roles are capability boundaries.** A subagent launched as `reviewer` carries
 vetted review guidance *and loses the tools to edit code*. It can read and run
 tests, but it has no way to alter what it reviews. A restricted role cannot
@@ -241,6 +253,12 @@ a different product. A roster slot can name another team (`team:<name>`), so a
 team becomes an org of teams; `/team chart <name>` draws it as an org chart
 (nested teams show as `(declared)` until a manager can actually delegate into
 them). `lop teams list` is empty until you create one.
+
+<p align="center">
+  <img src="./static/ui-teams.png" alt="The desktop app's Agents and teams page with the release-crew team open: its name and description, manager agent (architect), members (coder ×2, reviewer ×1), collaboration instructions, and project brief; the page's own list shows the release-crew and docs-pod teams." width="720">
+</p>
+
+<p align="center"><i>A team in the desktop app: the roster — manager plus members and counts — and its two briefs, how the group works together and what it ships.</i></p>
 
 <p align="center">
   <img src="./static/tui-teams.png" alt="The /team picker listing a saved team" width="720">
@@ -500,6 +518,13 @@ Work keeps moving after you walk away.
   `lop config edit display.time_format 24h` for a 24-hour clock (`12h` restores
   the default). This changes display only; stored timestamps and JSON output
   remain epoch milliseconds, and existing transcript confirmations are not rewritten.
+
+<p align="center">
+  <img src="./static/ui-schedules.png" alt="The desktop app's Schedules page listing recurring wakes by conversation — Invoices workspace (a nightly ledger sync and a morning report), Release crew ops (a nightly CI queue check), Standup notes, and Weekly finance digest — each with its cadence, run count, and next fire time, above the page's note that wakes fire whether or not the window is open." width="720">
+</p>
+
+<p align="center"><i>The Schedules page: the recurring wakes a workspace runs, and the desktop app's reminder that they fire whether or not the window is open.</i></p>
+
 - **Background jobs that report back on their own.** `task` always runs in
   the background and `bash` can (`background=true`); a long command
   interrupted by a steer detaches instead of dying; and every settled job
