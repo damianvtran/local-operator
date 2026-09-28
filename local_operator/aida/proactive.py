@@ -765,7 +765,13 @@ async def _drain_tray_external(
             and isinstance(raw.get("next_due_at"), int)
         ]
         cadence_due = next_cadence_ms(now, pol.at)
-        for request in requests:
+        # ``enumerate``, not ``requests.index(request)`` (review round 2,
+        # NIT-1): ``list.index`` resolves to the FIRST EQUAL item, so a tray
+        # holding duplicate entries would re-restore an already-processed one
+        # when a later duplicate was refused mid-drain. The position in this
+        # loop is the exact remainder boundary; a value-search only guesses at
+        # it.
+        for index, request in enumerate(requests):
             if pol.max_extra_per_day <= 0:
                 notes.append("escalation request refused: escalation is disabled (0/day).")
                 continue
@@ -812,7 +818,7 @@ async def _drain_tray_external(
                 # named in the notes so the outcome is observable rather than
                 # inferred from a later row count.
                 logger.debug("aida: external extra arm refused: %s", exc)
-                remaining = list(requests[requests.index(request) :])
+                remaining = list(requests[index:])
                 state.restore_escalations(root, remaining)
                 notes.append(f"escalation request(s) left for her live session: {len(remaining)}")
                 break
@@ -829,8 +835,15 @@ async def _drain_tray_external(
             taken += 1
         if taken:
             state.update_state(root, extras=dict(ledger, armed=armed + taken))
+    # WARNING, not info (QA round 2, Q3): every note here is an operation the
+    # operator asked for that did NOT take effect (a refusal) or was handed to
+    # another writer — and `lop serve` configures its console logging at the
+    # platform default (WARNING), so info-level lines were exactly the lines
+    # nobody could see on a default server. The README's "observable rather
+    # than silent" is about these events; they ride the level the default
+    # surfaces.
     for note in notes:
-        logger.info("aida: %s", note)
+        logger.warning("aida: %s", note)
     return notes
 
 

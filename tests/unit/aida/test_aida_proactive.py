@@ -9,6 +9,7 @@ production uses rather than private helpers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timedelta
@@ -392,3 +393,88 @@ async def test_extras_armed_in_one_drain_respect_the_spacing_floor(
     assert ids.count("aida-extra-1") == 1
     assert "aida-extra-2" not in ids, "a second extra inside the floor must be refused"
     assert any("spacing" in note for note in notes), notes
+
+
+@pytest.mark.asyncio
+async def test_drain_notes_surface_at_the_default_log_level(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q3: the drain's notes must be visible on a DEFAULT server.
+
+    ``lop serve`` configures its console logging at the platform default
+    (WARNING), so an INFO-emitting drain answered "the bound is observable
+    rather than silent" with lines nobody could see. Pinned at the LEVEL, not
+    the text: a record below WARNING would pass a naive capture and still be
+    filtered by the default daemon — the exact round-2 miss.
+    """
+    _root_with_session(isolated_root)
+    _pin_cadence_away_from_now(isolated_root)
+    now = int(time.time() * 1000)
+    _entry(isolated_root, [_row(proactive.CADENCE_ID, now + 60_000)])
+    state.write_json(state.escalate_path(isolated_root), {"wakes": ["bogus"]})
+    monkeypatch.setattr("local_operator.wakes.supervisor.wedged_runtime", lambda *a: None)
+    monkeypatch.setattr(
+        "local_operator.mobile.attach_client.find_runtime_record", lambda *a: (None, None)
+    )
+
+    with caplog.at_level(logging.NOTSET, logger="local_operator.aida.proactive"):
+        notes = await proactive._drain_tray_external(
+            isolated_root, SESSION_ID, proactive.policy(isolated_root), now
+        )
+
+    assert notes and "invalid" in notes[0], notes
+    matching = [
+        record
+        for record in caplog.records
+        if record.name == "local_operator.aida.proactive" and "invalid" in record.getMessage()
+    ]
+    assert matching, [record.name for record in caplog.records]
+    assert all(record.levelno >= logging.WARNING for record in matching), [
+        record.levelno for record in matching
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_mid_drain_refusal_restores_from_the_exact_position(
+    isolated_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NIT-1: duplicates in one tray batch must not re-restore a processed one.
+
+    ``requests.index(request)`` resolves to the FIRST EQUAL item, so a tray
+    holding two identical requests would put back BOTH when the second one's
+    arm was refused mid-drain — a redundant re-arm of one already handled.
+    ``enumerate`` keeps the loop position as the remainder boundary. The
+    spacing floor is pinned to 0 so the duplicate reaches its arm attempt
+    (with the default 90-minute gap the floor refuses equal-due duplicates
+    before any arm, which is why this needed its own test).
+    """
+    from local_operator.wakes.arm import WakeWriteError
+
+    _root_with_session(isolated_root)
+    _pin_cadence_away_from_now(isolated_root)
+    write_config(isolated_root, {"aida": {"cadence": {"min_gap_minutes": 0}}})
+    now = int(time.time() * 1000)
+    _entry(isolated_root, [_row(proactive.CADENCE_ID, now + 60_000)])
+    duplicate = {"in": "5m", "message": "the same request twice"}
+    state.write_json(state.escalate_path(isolated_root), {"wakes": [duplicate, dict(duplicate)]})
+
+    attempted: list[str] = []
+
+    async def fake_arm(_root, _session_id, _payload, *, wake_id=None, now_ms=None):
+        attempted.append(str(wake_id))
+        if len(attempted) == 1:
+            return None
+        raise WakeWriteError("an owner appeared", status=503, code="wake_owner_busy")
+
+    monkeypatch.setattr("local_operator.wakes.arm.arm_wake", fake_arm)
+
+    notes = await proactive._drain_tray_external(
+        isolated_root, SESSION_ID, proactive.policy(isolated_root), now
+    )
+
+    assert attempted == ["aida-extra-1", "aida-extra-2"], attempted
+    assert any("live session" in note for note in notes), notes
+    restored = json.loads(state.escalate_path(isolated_root).read_text())
+    assert restored["wakes"] == [
+        duplicate
+    ], "exactly the refused second entry goes back — not the processed first one too"
