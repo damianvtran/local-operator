@@ -277,7 +277,12 @@ from local_operator.tui.network_cli import (
     run_network,
     tui_spelling,
 )
-from local_operator.tui.notify import Notifier, notifications_enabled
+from local_operator.tui.notify import (
+    Notifier,
+    notifications_enabled,
+    remote_park_banner,
+    remote_park_card,
+)
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
 from local_operator.tui.session_interaction import (
@@ -472,6 +477,8 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.notifications import ComposedNotification, NotificationKind
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
+    from local_operator.resume import SessionRow
+    from local_operator.session.peer_rows import RemotePark
     from local_operator.session.store_failures import StoreFailure
     from local_operator.skills.discovery import Skill
     from local_operator.tui.widgets.info_panel import InfoScreen
@@ -1479,6 +1486,20 @@ TUNNEL_PARK_POLL_S = 5.0
 #: what keeps the mention of remote access from pulling an MCP failure out from
 #: under the user (see the rationale on `Toast.withdraw`).
 TUNNEL_PARK_NOTICE = object()
+
+
+def remote_park_notice_owner(device_id: str, session_id: str) -> tuple[str, str, str]:
+    """One remote park EPISODE's toast-owner tag: ``("remote-park", d, s)``.
+
+    A helper rather than a constant because the tag is per episode, and it
+    carries the identity caveat because ``Toast.withdraw`` retires by OWNER
+    IDENTITY (``self._owner is owner``): whoever raised the card must keep
+    THIS object and hand it back at withdrawal — a tuple rebuilt from the same
+    three strings compares equal and retires nothing. The per-episode storage
+    lives on the app (``_remote_park_owners``; see ``_note_remote_parks``).
+    """
+    return ("remote-park", device_id, session_id)
+
 
 #: The in-app spelling of the remedies the park file carries, as a shell command
 #: would be un-runnable here.
@@ -4558,6 +4579,19 @@ class OperatorApp(App[None]):
         #: card's is "has this park been announced?", the rung's is "is remote
         #: access off right now?" — and only the second must survive a dismissal.
         self._tunnel_parked = False
+        #: `(device id, session id) -> parked kind` for parks on PEER devices
+        #: this app has seen. The edge rule is `session.peer_rows.park_edges`:
+        #: a key that appears, or whose kind changed, is a new episode; a key
+        #: that leaves re-arms (and withdraws the card that announced it).
+        #: Per PROCESS on purpose — a restart re-announces a live park, which
+        #: is deliberate: the alternative is a park that began before the
+        #: restart staying silent forever (design note §2).
+        self._remote_park_episodes: dict[tuple[str, str], str] = {}
+        #: `(device id, session id) -> the toast OWNER OBJECT` for episodes
+        #: whose card was raised. Kept because `Toast.withdraw` retires by
+        #: identity (`remote_park_notice_owner`): the object shown is the only
+        #: one that can take the card back down.
+        self._remote_park_owners: dict[tuple[str, str], object] = {}
         #: Unsubscribes this app from the process config watcher (see
         #: :meth:`_watch_config`). ``None`` until the first session is adopted.
         self._unsubscribe_config_watch: Callable[[], None] | None = None
@@ -10538,7 +10572,13 @@ class OperatorApp(App[None]):
         generation = self._sidebar_refresh_generation
         self._sidebar_refresh_pending = True
 
-        def collect() -> tuple[list[CatalogEntry], list[str], int | None, list[tuple[str, str]]]:
+        def collect() -> tuple[
+            list[CatalogEntry],
+            list[str],
+            int | None,
+            list[tuple[str, str]],
+            tuple[SessionRow, ...],
+        ]:
             from local_operator.paths import config_dir
             from local_operator.session.peer_rows import (
                 peer_session_rows,
@@ -10566,7 +10606,12 @@ class OperatorApp(App[None]):
             # device with no relay) — this poll runs every two seconds, so an
             # uncached listing here would be the one thing on the sidebar's
             # path that talks to the network. A device in no mesh adds no rows.
-            entries = [*entries, *(CatalogEntry(row) for row in peer_session_rows(root))]
+            #
+            # The tuple is returned WHOLE as well as painted: the app's park
+            # detector (`_note_remote_parks`) reads edges off these same rows,
+            # which is what makes the notice cost no second read (design note §1).
+            peer_rows = peer_session_rows(root)
+            entries = [*entries, *(CatalogEntry(row) for row in peer_rows)]
             # AND THE PEERS THAT SAID NOTHING (UX round 3, U16). The relay names
             # them in the same answer the rows came from — `unanswered_peers`
             # reads the cache entry `peer_session_rows` just filled, so this is
@@ -10584,11 +10629,11 @@ class OperatorApp(App[None]):
             if self._subagent_population_poll % SUBAGENT_POLL_EVERY == 0:
                 total = subagent_population(root)
             self._subagent_population_poll += 1
-            return entries, pins, total, silent
+            return entries, pins, total, silent, peer_rows
 
         async def refresh() -> None:
             try:
-                entries, pins, total, silent = await asyncio.to_thread(collect)
+                entries, pins, total, silent, peer_rows = await asyncio.to_thread(collect)
                 if (
                     generation != self._sidebar_refresh_generation
                     or not self._session_sidebar.display
@@ -10602,6 +10647,13 @@ class OperatorApp(App[None]):
                 if total is not None:
                     self._session_sidebar.set_subagent_total(total)
                 self._prewarm_sidebar(list(self._session_sidebar.visible_entries))
+                # THE SAME READ THAT PAINTS THE PEER TIER IS THE PARK DETECTOR
+                # (design note §1 A1): edges off rows this poll already holds,
+                # no wire change and no new timer. After the paints, so the list
+                # is never delayed by a notice about it, and never raising (see
+                # the method's own contract) because this runs in the sidebar's
+                # refresh worker where an exception reads as a failed catalog.
+                self._note_remote_parks(peer_rows)
             except Exception:
                 if generation == self._sidebar_refresh_generation and self._session_sidebar.display:
                     self._session_sidebar.show_error("Could not refresh conversations")
@@ -17449,6 +17501,25 @@ class OperatorApp(App[None]):
             device_id,
             str(getattr(facts, "device_name", "") or ""),
         )
+
+    def _mark_remote_gate(self, card: AskPickerScreen) -> None:
+        """Give a gate card the peer-device hint when THIS session is a peer's.
+
+        Shared by both card sites (``ApprovalPrompt`` IS an ``AskPickerScreen``)
+        so the two cannot disagree about when the hint appears: the predicate
+        is :meth:`_remote_owner_facts` — the same one the lifecycle router
+        acts on — and the label is ``device_name or device_id``, the router's
+        own fallback, because a device id is not something a user recognises
+        their own laptop by.
+
+        A local session marks nothing, which is what keeps every local card's
+        frame byte-identical to before the hint existed.
+        """
+        owner = self._remote_owner_facts()
+        if owner is None:
+            return
+        _session_id, device_id, device_name = owner
+        card.set_remote_device(device_name or device_id)
 
     def _route_lifecycle_to_peer(self, action: str, confirmed: bool) -> bool:
         """Run ``/archive``, ``/unarchive`` or ``/delete`` ON THE PEER for a remote session.
@@ -24337,6 +24408,11 @@ class OperatorApp(App[None]):
                 self._latch_source_approval_answer, source, gate_key, view_generation
             ),
         )
+        # A gate on a PEER's session carries the hint that says where an allow
+        # happens: an allow from THIS origin would be refused by the owner's
+        # runtime by design (design note §3), and the reader must learn that
+        # from the card rather than from a refusal notice after the fact.
+        self._mark_remote_gate(prompt)
         prompt.source_binding = (source.token, gate_key, view_generation)
         self._restore_gate_draft(source, prompt)
         self._approval = prompt
@@ -24490,6 +24566,10 @@ class OperatorApp(App[None]):
         self._close_projects_view()
         self._close_aside()
         card = AskPickerScreen(questions, answered)
+        # Same hint as the approval card, for the same reason — the copy
+        # differs by kind because an ask is answerable from here (see
+        # `AskPickerScreen.set_remote_device`).
+        self._mark_remote_gate(card)
         card.source_binding = (source.token, self._sidebar_gate_identity(source), view_generation)
         self._restore_gate_draft(source, card)
         self._ask_screen = card
@@ -30542,6 +30622,102 @@ class OperatorApp(App[None]):
         status = self._status
         if status is not None:
             status.update(tunnel_parked=parked)
+
+    def _note_remote_parks(self, rows: Sequence[SessionRow]) -> None:
+        """Announce parks on PEER devices, once per episode (design note §1-§2).
+
+        Fired from the sidebar poll on the rows it already reads — no wire
+        change, no new timer — so a park reaches this origin within the poll's
+        own bounds (2 s tick plus the row cache's TTL) instead of waiting for a
+        listing somebody happens to ask for. `peer_rows.park_edges` owns the
+        episode rule; this method owns the surfaces:
+
+        * a NEW episode raises one toast — the shared slot, `TOAST_FAILURE_MS`
+          because this is the app's one marker for "the user has to act on
+          this" — and one OS banner. Both belong to the same episode, and the
+          card is withdrawn by its own owner tag the moment the park clears,
+          so a card never contradicts the answer that ended it;
+        * the toast is the surface that works on every machine (no delivery
+          path, no focus gate), and it is why the banner is best-effort on top
+          rather than the thing the feature rests on;
+        * while THIS app is attached to the very session that parked, NEITHER
+          fires: the gate card is on screen with the device hint on it, and a
+          toast over the app's own dock card would be the app interrupting
+          itself. The episode is consumed anyway — the user is looking at the
+          surface the notice would point them to.
+
+        The OS banner is deliberately NOT `self._notify(...)`: that funnel
+        composes the body from THIS session's transcript, and the body here is
+        about a session on another machine (the device-named copy is the whole
+        point). The gates it would have applied are the notifier's own, and it
+        applies them (`enabled` reads the kill switch live; a focused terminal
+        suppresses the OS leg, where the toast is visible anyway).
+
+        Never raises: a notice is chrome, and this runs inside the sidebar's
+        refresh worker, where a raise would be reported as a failed catalog.
+        The poll itself is paused while the sidebar is CLOSED (its timer pauses
+        with it), so a park arriving with no list open is announced when the
+        list is opened — the first moment there is a list to see it beside.
+        """
+        try:
+            from local_operator.session.peer_rows import park_edges
+
+            edges, state = park_edges(self._remote_park_episodes, rows)
+            cleared = [key for key in self._remote_park_episodes if key not in state]
+            self._remote_park_episodes = state
+            toast = self.query_one(Toast)
+            for key in cleared:
+                owner = self._remote_park_owners.pop(key, None)
+                if owner is not None:
+                    toast.withdraw(owner)
+            for park in edges:
+                if self._remote_park_is_attached(park):
+                    continue
+                self._show_remote_park(park, toast)
+        except Exception:  # pragma: no cover - defensive; chrome must not raise
+            logger.debug("remote park notice failed", exc_info=True)
+
+    def _remote_park_is_attached(self, park: RemotePark) -> bool:
+        """Is THIS app attached to the session ``park`` describes?
+
+        True when the app's current session IS the peer session that parked —
+        the viewer case the notice deliberately yields to, because the gate
+        card is already on screen there, wearing the hint that says where an
+        allow happens. Read from `_remote_owner_facts`, the same predicate the
+        lifecycle router acts on, so the two cannot disagree about which device
+        a session is on; a local session answers False (it can never be a
+        peer's park) and a cold app answers False too.
+        """
+        owner = self._remote_owner_facts()
+        if owner is None:
+            return False
+        session_id, device_id, _ = owner
+        return session_id == park.session_id and device_id == park.device_id
+
+    def _show_remote_park(self, park: RemotePark, toast: Toast) -> None:
+        """Raise the one card and the one banner for ``park``.
+
+        Card FIRST, banner second: the card needs no OS delivery path, so a
+        machine with notifications off still learns about the park, and a
+        suppressed banner is not re-queued — the toast is the delivery. Both
+        name the DEVICE (`device_name`, falling back to its id exactly as the
+        lifecycle router's label does), because a device id is not something a
+        user recognises their own laptop by.
+        """
+        label = park.device_name or park.device_id
+        key = (park.device_id, park.session_id)
+        owner = self._remote_park_owners.setdefault(key, remote_park_notice_owner(*key))
+        toast.show(
+            remote_park_card(label, park.kind),
+            duration_ms=TOAST_FAILURE_MS,
+            owner=owner,
+        )
+        notifier = self._notifier
+        if notifier is None:
+            return
+        kind = "approval" if park.kind == "approval" else "ask"
+        notifier.set_label(park.name or label)
+        notifier.notify_waiting(kind, body=remote_park_banner(label, park.kind))
 
     def _sync_band_inset(self) -> None:
         """Give the band its top inset only while it actually holds a slot.

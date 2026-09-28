@@ -1,0 +1,265 @@
+"""A park on ANOTHER device reaches this origin — once per episode.
+
+The peer's runtime owns the park; nothing is pushed to this machine, so the
+origin's notice is edge-detected off the sidebar poll's own rows
+(``session/peer_rows.park_edges``). These tests drive the REAL app (the one
+that loads ``local_operator.tcss``) because the questions are what a user sees
+and what a machine hears:
+
+* one card per EPISODE, withdrawn when the park clears — a card left standing
+  after the answer lands contradicts the very thing that ended the park;
+* the OS banner goes through the app's existing notifier, naming the DEVICE,
+  and stays quiet while the user is looking at the terminal (the notifier's own
+  focus gate, unchanged);
+* while THIS app is attached to the parked session neither fires: the gate card
+  is already on screen with the device hint on it, and the app must not toast
+  over its own dock card;
+* nothing is written to the attention store — a park has no token, and the
+  store's rule is that no automatic path acknowledges (design note §2).
+
+``test_tunnel_park_notice.py`` is the sibling suite (a park of THIS machine's
+connector); this one is the mesh half.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from local_operator.resume import SessionRow
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.notify import remote_park_banner, remote_park_card
+from local_operator.tui.widgets.toast import Toast
+from tests.unit.tui.test_app_pilot import FakeSession, _factory
+from tests.unit.tui.test_notify_wiring import RecordingNotifier
+
+
+@pytest.fixture(autouse=True)
+def isolate_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A headless pilot that inherits the operator's CMUX_* variables can rename
+    # their real cmux workspaces; HOME is redirected too because the config dir
+    # alone leaves the cache pointed at the real home (AGENTS.md, "Isolating a
+    # run").
+    for key in tuple(os.environ):
+        if key.startswith("CMUX_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_TERMINAL_TITLE", "1")
+    monkeypatch.setattr(OperatorApp, "_check_for_update", lambda self: None)
+
+
+def _parked(
+    session_id: str = "s_parked",
+    device_id: str = "d_bb",
+    *,
+    name: str = "Backfill the audit log",
+    kind: str | None = "approval",
+    device_name: str = "demo-laptop",
+    live_state: str = "busy",
+) -> SessionRow:
+    """One live parked peer row — the shape ``peer_session_rows`` hands the app."""
+    return SessionRow(
+        id=session_id,
+        mtime=0.0,
+        name=name,
+        pending=kind,
+        live_state=live_state,
+        locality="remote",
+        owner_device=device_id,
+        owner_device_name=device_name,
+    )
+
+
+class AttachedFake(FakeSession):
+    """A fake whose session is a PEER's — the attached origin viewer."""
+
+    runtime_locality = "another-machine"
+
+    def __init__(
+        self, *, session_id: str = "s_parked", device_id: str = "d_bb", device_name: str = "demo-laptop"
+    ) -> None:
+        super().__init__()
+        self._session_id = session_id
+        self._owner = SimpleNamespace(
+            facts=SimpleNamespace(device_id=device_id, device_name=device_name)
+        )
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+
+async def _boot(pilot: Any, app: OperatorApp) -> None:
+    for _ in range(40):
+        await pilot.pause()
+        if app._session is not None:
+            return
+
+
+def _toast(app: OperatorApp) -> Toast:
+    return app.query_one(Toast)
+
+
+@pytest.mark.asyncio
+async def test_a_park_is_announced_once_and_withdrawn_when_it_clears() -> None:
+    """One card, the device-named remedy, and it leaves when the park does."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        toast = _toast(app)
+        rows = (_parked(),)
+
+        app._note_remote_parks(rows)
+        await pilot.pause()
+        assert toast.display, "a park on a peer must say so"
+        assert toast.message == remote_park_card("demo-laptop", "approval")
+        assert "Waiting for approval on demo-laptop" in toast.message
+        assert "lop network ready --peer demo-laptop" in toast.message
+
+        # The same episode, polled again: `show` re-arms its own dismissal
+        # timer, so re-raising on every tick would hold the card forever.
+        generation = toast.generation
+        app._note_remote_parks(rows)
+        await pilot.pause()
+        assert toast.generation == generation, "a second poll re-raised the card"
+
+        # The park clears (answered): the card leaves with it.
+        app._note_remote_parks(())
+        await pilot.pause()
+        assert not toast.display, "an answered park left its card standing"
+
+        # A SECOND park is a second episode.
+        app._note_remote_parks(rows)
+        await pilot.pause()
+        assert toast.display and toast.generation > generation
+
+
+@pytest.mark.asyncio
+async def test_the_banner_names_the_device_and_the_conversation() -> None:
+    """The OS leg rides the app's notifier, with the device in the body."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        notifier = RecordingNotifier()
+        app._notifier = notifier  # type: ignore[assignment]
+
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+
+        assert notifier.kinds == ["approval"]
+        assert notifier.bodies == [remote_park_banner("demo-laptop", "approval")]
+        assert notifier.labels == ["Backfill the audit log"]
+
+
+@pytest.mark.asyncio
+async def test_an_attached_viewer_is_not_told_about_its_own_card() -> None:
+    """THIS app attached to the parked session: no card, no banner.
+
+    The gate card is on screen (with the device hint on it), so a toast would
+    be the app interrupting itself — and the peer's own ladder is what stops
+    ITS banner, because a viewer is watching. The episode is still consumed:
+    the user is looking at the surface the notice would point them to.
+    """
+    app = OperatorApp(lambda: _factory(AttachedFake()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        notifier = RecordingNotifier()
+        app._notifier = notifier  # type: ignore[assignment]
+        toast = _toast(app)
+
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+
+        assert not toast.display, "the app toasted over its own parked gate"
+        assert notifier.kinds == [], "the app notified about the session it is in"
+        assert app._remote_park_episodes, "the suppressed episode was not consumed"
+
+
+@pytest.mark.asyncio
+async def test_notifications_off_is_card_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The card needs no delivery path, so it survives the kill switch."""
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+        assert _toast(app).display, "the card is the surface, not the banner"
+
+
+@pytest.mark.asyncio
+async def test_a_park_writes_nothing_to_the_attention_store(tmp_path: Path) -> None:
+    """A park has no token, and no automatic path may acknowledge (design §2).
+
+    The store holds COMPLETION receipts, bound to explicit-ack watermarks; a
+    park is a transient notice plus the row's own durable ``pending``. Pinned
+    as an absence because the tempting shortcut — writing a receipt so the park
+    "survives a dismiss" — is real design work with its own ack semantics.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        app._note_remote_parks((_parked(),))
+        await pilot.pause()
+        assert _toast(app).display
+        assert not (tmp_path / "config" / "attention.db").exists()
+
+
+@pytest.mark.asyncio
+async def test_the_sidebar_poll_is_the_detector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The hook the whole feature rides: the poll's own rows, no second read.
+
+    ``peer_session_rows`` is what ``_refresh_sidebar`` already calls; the park
+    detector reads edges off its return value, so a listing that paints the
+    peer tier is also what announces its park. This cell drives the REAL
+    refresh (the method the 2 s timer calls) rather than ``_note_remote_parks``
+    directly, which is the wiring a rename or a return-shape change would
+    break silently.
+    """
+    from local_operator.session import peer_rows as peer_rows_module
+
+    rows = (_parked(),)
+    monkeypatch.setattr(
+        peer_rows_module, "peer_session_rows", lambda *a, **k: rows
+    )
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        # The poll pauses while the sidebar is closed; opening it is what
+        # starts the watch (the same resume the user's keybinding does).
+        app._session_sidebar.set_open(True)
+        app._refresh_sidebar()
+        for _ in range(60):
+            await pilot.pause()
+            if _toast(app).display:
+                break
+        assert _toast(app).display, "the poll never announced the park"
+        assert "Waiting for approval on demo-laptop" in _toast(app).message
+
+
+@pytest.mark.asyncio
+async def test_a_stored_unread_completion_raises_no_card() -> None:
+    """The §2 discriminator, end to end: a stored row is not a park.
+
+    The relay's stored half writes ``pending: "ask"`` for an unread completion
+    and paints ``live_state: ""``; treating it as a park would page a person
+    for a turn that finished hours ago and needs nobody.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        stored = _parked(kind="ask", live_state="")
+        app._note_remote_parks((stored,))
+        await pilot.pause()
+        assert not _toast(app).display
+        assert app._remote_park_episodes == {}

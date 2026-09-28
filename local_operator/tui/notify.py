@@ -250,6 +250,106 @@ BODIES: dict[str, str] = {
 #: ``Untitled conversation``.
 BACKGROUND_FALLBACK_TITLE = "A session finished"
 
+# --- a park on ANOTHER device ---------------------------------------------
+#
+# The one state this vocabulary could not say before: a session that runs on a
+# PEER and is parked on a person. It is told differently from a local park
+# because the two differ in what the reader can DO — an ALLOW given at the
+# origin is refused by the owner's runtime BY DESIGN (``operator_challenge``
+# never crosses the mesh; the origin holds no key a peer can verify), so the
+# copy exists to say WHERE the gesture happens and that the deny does not need
+# it. Every sentence that would otherwise read as an instruction for THIS
+# machine names the device instead, and nothing here may imply an allow from
+# the surface it is printed on. The strings are the design note's copy table
+# (§4); the designer round owns the final phrasing, so they live ONCE — a
+# later desktop lane composes from the same constants rather than a second
+# spelling (``mesh-ui`` §2.6's row contract is the seam).
+#
+# ``{device}`` is always the peer's human name where the relay reported one;
+# callers fall back to the device id exactly as the lifecycle router does, so
+# these functions take whatever label the caller resolved rather than looking
+# one up.
+REMOTE_PARK_APPROVAL_TITLE = "Waiting for approval on {device}"
+REMOTE_PARK_APPROVAL_BODY = (
+    "Deny it from here. Allowing it happens on {device} (Touch ID) or on a phone "
+    "paired with it. If nothing there can check a signature: lop operator install "
+    "on {device} (one privileged step) — lop network ready --peer {device} shows "
+    "the operator_authority row."
+)
+REMOTE_PARK_ASK_TITLE = "Waiting for your answer on {device}"
+REMOTE_PARK_ASK_BODY = "Open the session here to answer it."
+#: Banner bodies, ≤ ~110 characters for an ordinary device name — the budget
+#: is macOS Notification Centre's one-line body, and the two halves the reader
+#: needs there are WHERE the gesture happens and WHAT still works from here.
+REMOTE_PARK_APPROVAL_BANNER = (
+    "Waiting for approval on {device} — allow there or on its paired phone; deny after opening."
+)
+REMOTE_PARK_ASK_BANNER = "Waiting for your answer on {device} — open it to answer."
+#: The card hint's rungs, LONGEST FIRST: the attached viewer's one-line note
+#: that the gate it is looking at runs elsewhere. The card sheds WHOLE clauses
+#: down this ladder (the ``_hint_row`` discipline — never a mid-clause clamp),
+#: and the floor is the locality fact alone, which still implies nothing about
+#: an allow from here.
+REMOTE_PARK_APPROVAL_HINTS = (
+    "runs on {device} — allow there (Touch ID) / its paired phone; deny works here",
+    "runs on {device} — allow there (Touch ID); deny works here",
+    "runs on {device} — allow there; deny works here",
+    "runs on {device}",
+)
+#: Asks are ordinary from the origin (``ask_answer`` carries no authority
+#: check), so the ask hint says what is true — there is no deny on this card
+#: and no presence gesture behind an answer.
+REMOTE_PARK_ASK_HINTS = (
+    "runs on {device} — answer it from here",
+    "runs on {device}",
+)
+
+
+def remote_park_card(device: str, kind: str) -> str:
+    """The in-app card for a park on ``device``: title line, then the body.
+
+    TWO LINES because the title is the STATE the user reads in under a second
+    while the body is the one thing they need in order to act — the toast
+    wraps the body itself at its width, so a long remedy is not this string's
+    to pre-break.
+
+    ``kind`` other than ``"approval"`` takes the ask wording: the two are the
+    only kinds the vocabulary mints today (``normalise_pending`` translates a
+    boolean to ``ask``), and a future kind that reaches here reads as "someone
+    must open it", which is the honest generic.
+    """
+    if kind == "approval":
+        title = REMOTE_PARK_APPROVAL_TITLE.format(device=device)
+        body = REMOTE_PARK_APPROVAL_BODY.format(device=device)
+    else:
+        title = REMOTE_PARK_ASK_TITLE.format(device=device)
+        body = REMOTE_PARK_ASK_BODY.format(device=device)
+    return f"{title}\n{body}"
+
+
+def remote_park_banner(device: str, kind: str) -> str:
+    """The OS banner's BODY for a park on ``device`` (see the card helper).
+
+    The banner's TITLE stays the conversation name the notifier already
+    carries, for the same reason every other banner does: several sessions can
+    park at once and the name is what tells them apart.
+    """
+    if kind == "approval":
+        return REMOTE_PARK_APPROVAL_BANNER.format(device=device)
+    return REMOTE_PARK_ASK_BANNER.format(device=device)
+
+
+def remote_park_hints(device: str, kind: str) -> tuple[str, ...]:
+    """The card hint's rungs, longest first, for the caller to fit by width.
+
+    Fitting lives with the renderer because it is a fact about the CARD's
+    cells (``cell_len`` over the composition), and this module stays free of
+    the widget stack — ``notifications.compose`` and the desktop bridge import
+    it precisely because it pulls in no Textual.
+    """
+    rungs = REMOTE_PARK_APPROVAL_HINTS if kind == "approval" else REMOTE_PARK_ASK_HINTS
+    return tuple(rung.format(device=device) for rung in rungs)
+
 
 def background_digest_title(total: int) -> str:
     """``total`` sessions finished, as the DIGEST banner's title.
