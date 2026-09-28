@@ -72,10 +72,12 @@ WIRE_PROTOCOL = 1
 #: 2026-09-28 (task_017), a 476 KiB frame produced a reply whose read raised
 #: "Separator is not found, and chunk exceed the limit", and every EXECUTED
 #: batch was answered to the model as unreachable -- while the desktop had
-#: already acted. Sized off the protocol's own envelope cap (20x the measured
-#: frame, with room for base64 inflation), still bounded so a rogue reply
-#: cannot read unbounded: the client opens its connection with this and the
-#: bridge binds its server with it.
+#: already acted. A policy ceiling far above the largest frame measured
+#: (~26x that ~640 KiB reply), not a derived invariant: the cap it is sized
+#: off (the protocol envelope) bounds frame REFERENCES, while this wire
+#: inlines the images themselves. Still bounded, so a rogue reply cannot
+#: read unbounded; the client opens its connection with it and the bridge
+#: binds its server with it.
 WIRE_READ_LIMIT_BYTES = MAX_ENVELOPE_BYTES + 4096
 
 #: How long one forwarded call may wait for its reply. Deliberately generous:
@@ -279,15 +281,23 @@ async def forward_call(
 
 
 def format_forward_error(error: BaseException) -> tuple[list[dict[str, Any]], bool]:
-    """The model-facing tool result for a call that never reached the driver.
+    """The model-facing tool result for a failed call to the action bridge.
 
     A transport failure is reported, never raised into the session: a raised
     call would read to the loop as a broken tool, while a reported one lets the
     episode driver's own state (which the model cannot see) decide whether the
     run continues.
+
+    The sentence deliberately does NOT claim the call never reached the driver:
+    it is used for every reply-side fault too -- a read-limit overrun, a bad
+    reply, a timeout after the driver may already have executed -- and the paid
+    session-arm episode that motivated ``WIRE_READ_LIMIT_BYTES`` was taught
+    "the channel is dead" by exactly that false claim while its batches had
+    already acted. Non-reachability is stated by the cause itself ("not
+    reachable at ..."), never asserted here.
     """
 
-    text = f"Action call failed before it reached the environment: {error}"
+    text = f"Action call failed while talking to the episode's action bridge: {error}"
     return [{"type": _TEXT, "text": text}], True
 
 

@@ -259,8 +259,16 @@ class TestForwardCall:
 
     def test_the_read_limit_covers_a_full_protocol_envelope(self) -> None:
         # The sizing rule, pinned: the reader must not be a smaller contract
-        # than the protocol's own cap.
-        assert WIRE_READ_LIMIT_BYTES >= MAX_ENVELOPE_BYTES
+        # than the protocol's own cap, and must leave at least the framing
+        # headroom beyond it (== would pass while being wrong in spirit).
+        assert WIRE_READ_LIMIT_BYTES >= MAX_ENVELOPE_BYTES + 1
+
+    def test_format_forward_error_does_not_claim_non_reachability(self) -> None:
+        # F-1: the sentence is used for reply-side faults too (read-limit
+        # overruns after the driver may already have executed), so it must not
+        # assert the call never reached the environment.
+        blocks, _ = format_forward_error(ActionBridgeUnreachable("boom"))
+        assert "before it reached" not in blocks[0]["text"]
 
     @pytest.mark.asyncio
     async def test_missing_endpoint_raises_reachability(self, tmp_path: Path) -> None:
