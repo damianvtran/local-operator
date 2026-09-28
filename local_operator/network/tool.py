@@ -84,6 +84,10 @@ READ_ACTIONS = frozenset(
         "peers",
         "log",
         "doctor",
+        # Peer readiness: every fact comes from the peer's own relay (or from this
+        # device's records when no relay answers), and the verb writes nothing —
+        # the same discipline that keeps the listing reads on this side.
+        "ready",
         "credentials",
         "definitions_state",
         # Its BARE form is a listing, which is why it is on this side of the union the
@@ -146,6 +150,10 @@ NetworkAction = Literal[
     "panic",
     "log",
     "doctor",
+    # The readiness report (readiness.py): the install question ``doctor`` does not
+    # ask — can a peer COMPLETE work offloaded to it — with the fix for each
+    # blocker. A read of the peer's own state, or of this device's records.
+    "ready",
     # The session plane's client half (``mesh-session-mobility.md`` §9.3): one peer's
     # sessions, and the four verbs that act on one. Before this the tool could see a
     # peer and drive nothing it held.
@@ -352,6 +360,10 @@ def _argv_for(params: NetworkParams) -> tuple[list[str], str]:
         argv = ["network", "peers"]
     elif action == "doctor":
         argv = ["network", "doctor"]
+    elif action == "ready":
+        argv = ["network", "ready"]
+        if params.peer.strip():
+            argv += ["--peer", params.peer.strip()]
     elif action == "credentials":
         argv = ["network", "credentials"]
     elif action == "definitions_state":
@@ -769,6 +781,46 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                 "re-pair with a new invite"
             )
         return lines
+    if action == "ready":
+        # THE SAME ROWS THE CLI SHOWS ITS OWN READER, through the same reading for
+        # reachability (``readiness.reachability_reading``): a REFUSED connection
+        # must not read as "nothing answered" in an agent's digest any more than on
+        # a person's screen — that conflation is the finding this verb exists to
+        # surface. Capability sentences and remedies come from the payload as
+        # composed; the raw vocabulary stays in this tool's ``details``.
+        from local_operator.network import readiness as readiness_mod
+        from local_operator.resume import doctor_detail_words
+
+        ready_lines = []
+        for check in payload.get("checks") or []:
+            state = "ok  " if check.get("ok") else "FAIL"
+            kind = str(check.get("check") or "")
+            label = str(check.get("device_name") or check.get("device_id") or "")
+            if kind == "readiness":
+                ready_lines.append(
+                    f"{state} {kind} {check.get('capability', '')} {label}: "
+                    f"{check.get('detail', '')}".rstrip()
+                )
+            elif kind == "reachability":
+                ready_lines.append(
+                    f"{state} {kind} {label} {check.get('endpoint', '')}: "
+                    f"{readiness_mod.reachability_reading(check)}".rstrip()
+                )
+            else:
+                ready_lines.append(
+                    f"{state} {kind} {check.get('device_id', '')} "
+                    f"{doctor_detail_words(str(check.get('detail', '')))}".rstrip()
+                )
+            for remedy in check.get("remedies") or ():
+                ready_lines.append(f"  - {remedy}")
+        if not ready_lines:
+            ready_lines = ["nothing to check: no networks, or no other members yet"]
+        if not payload.get("identity_present", True):
+            ready_lines.append(
+                "this device has no mesh identity: run `lop network init`, or "
+                "re-pair with a new invite"
+            )
+        return ready_lines
     if action == "log":
         records = payload.get("records") or []
         if not records:
@@ -970,6 +1022,11 @@ def _hint(action: str) -> str:
         return (
             "`panic` and `disconnect` mark a network untrusted; `trust` is the only "
             "way back, and it does NOT restore a member that was removed."
+        )
+    if action == "ready":
+        return (
+            "Every FAIL row carries the command that clears it and the device to run it "
+            "on; pass 'peer' (a name or id) to narrow the report to one device."
         )
     return ""
 

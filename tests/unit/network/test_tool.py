@@ -46,6 +46,7 @@ _ALL_ACTIONS = (
     "panic",
     "log",
     "doctor",
+    "ready",
     "sessions",
     "trust",
     "credentials",
@@ -69,6 +70,7 @@ _SAMPLES: dict[str, dict[str, Any]] = {
     "panic": {"network": "devmesh"},
     "log": {"since": "15m"},
     "doctor": {},
+    "ready": {"peer": "device-b"},
     "sessions": {"peer": "device-b"},
     "trust": {"network": "devmesh"},
     "credentials": {},
@@ -919,6 +921,78 @@ def test_the_agent_digest_of_a_doctor_run_reads_in_words() -> None:
     # The row's own address is kept once, in its own column; the sentence that
     # repeated it does not.
     assert body.count("127.0.0.1:64994") == 1, body
+
+
+def test_the_agent_digest_of_a_ready_run_keeps_refused_and_silent_apart() -> None:
+    """The readiness digest reads like the CLI's, through the same reading.
+
+    The second half is the one a docstring cannot carry: a REFUSED connection
+    must not read as "nothing answered" on the agent's surface either, or the
+    model reports a sleeping machine for one whose relay is simply not running.
+    Remedies render under their row; the raw vocabulary stays in ``details``.
+    """
+    checks = [
+        {
+            "check": "reachability",
+            "device_id": "d_" + "c" * 32,
+            "device_name": "pi-box",
+            "endpoint": "10.0.0.9:7777",
+            "ok": False,
+            "detail": "connect_failed:ConnectionRefusedError",
+            "observed": {
+                "outcome": "refused",
+                "source_address": "10.0.0.2",
+                "interface": "en0",
+                "elapsed_ms": 12.0,
+                "budget_s": 3.0,
+                "attempted": True,
+                "last_seen_at": None,
+            },
+        },
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "54.1.2.3:7777",
+            "ok": False,
+            "detail": "connect_failed:TimeoutError",
+            "observed": {
+                "outcome": "no_answer",
+                "source_address": "203.0.113.7",
+                "interface": "utun4",
+                "elapsed_ms": 3000.0,
+                "budget_s": 3.0,
+                "attempted": True,
+                "last_seen_at": None,
+            },
+        },
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "not_installed",
+            "detail": (
+                "operator authority is not installed on cloud-node-1: an approval that "
+                "needs the operator parks until someone installs it"
+            ),
+            "remedies": ["run `lop operator install` on cloud-node-1 (one privileged step)"],
+        },
+    ]
+    lines = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "ready", {"ok": False, "identity_present": True, "checks": checks}
+    )
+    body = "\n".join(lines)
+    for token in ("ConnectionRefusedError", "TimeoutError", "connect_failed"):
+        assert token not in body, (token, body)
+    assert "something answered this address and refused the connection" in body
+    assert "nothing answered this address before the budget ran out" in body
+    assert (
+        "FAIL readiness operator_authority cloud-node-1: operator authority is not installed"
+        in body
+    )
+    assert "  - run `lop operator install` on cloud-node-1 (one privileged step)" in body
 
 
 def test_the_agent_digest_carries_the_audit_state_at_its_own_column() -> None:
