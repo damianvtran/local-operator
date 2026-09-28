@@ -8192,7 +8192,9 @@ async def test_checkpoints_adapter_answers_unsupported_for_a_peer(tmp_path) -> N
     calling the adapter on the minimal state it reads.
     """
     bridge = SimpleNamespace(remote_row=object(), remote=object(), session_id="aaaabbbb0001")
-    result = await DesktopSessionBridge.checkpoints(bridge)
+    # ``cast`` because the adapter reads exactly these three attributes; a real
+    # bridge is constructed by the pool and there is no cheaper honest fake.
+    result = await DesktopSessionBridge.checkpoints(cast(DesktopSessionBridge, bridge))
     assert result == {
         "session_id": "aaaabbbb0001",
         "index": {"state": "unsupported"},
