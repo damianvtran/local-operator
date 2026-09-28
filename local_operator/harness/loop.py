@@ -3552,10 +3552,22 @@ class AgentLoop:
             return result
         if not notes:
             return result
-        from local_operator.hook_forwarding import format_notes
+        # The notes may come from either event; the caller knows which one, so
+        # the tag reports it rather than labelling a failure note PostToolUse.
+        from local_operator.hook_forwarding import (
+            POST_TOOL_USE,
+            POST_TOOL_USE_FAILURE,
+            format_notes,
+        )
 
+        event = POST_TOOL_USE_FAILURE if result.is_error else POST_TOOL_USE
         return result.model_copy(
-            update={"content": [*result.content, TextContent(text="\n\n" + format_notes(notes))]}
+            update={
+                "content": [
+                    *result.content,
+                    TextContent(text="\n\n" + format_notes(notes, event)),
+                ]
+            }
         )
 
     async def _execute_batch(
