@@ -3328,6 +3328,49 @@
         }
       }
     },
+    "/v1/desktop/sessions/{session_id}/checkpoints": {
+      "get": {
+        "tags": [
+          "Desktop sessions"
+        ],
+        "summary": "Checkpoints",
+        "description": "The checkpoint rail's manifest: user ticks, completion ticks, outcomes.\n\nA READ like ``history`` beside it \u2014 and on a draft the empty manifest is\nthe correct answer rather than a 404: there is no journal to derive from,\nwhich is exactly why the rail renders nothing.\n\nThe manifest is derived and cached by ``session/transcript_index.py``. A\ncold or stale cache answers ``building`` while a background scan runs, so\nthe rail's first paint is immediate even on a 272 MB journal; the renderer\npolls until ``ready`` (design D2's poll discipline). For a peer\nconversation the answer is ``state: \"unsupported\"`` (D4) \u2014 v1 derives\ncheckpoints from this device's journal only.\n\n``naming`` on each completion rides the same manifest; its ``state`` is\nwhat tells the rail to keep polling while a name is being generated\n(``sessions.checkpoints.warm`` is BE-2's op and is not part of this\nroute).",
+        "operationId": "checkpoints_v1_desktop_sessions__session_id__checkpoints_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CRUDResponse_CheckpointManifest_"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/desktop/projects": {
       "get": {
         "tags": [
@@ -4928,6 +4971,34 @@
         ],
         "title": "CRUDResponse[ChatResponse]"
       },
+      "CRUDResponse_CheckpointManifest_": {
+        "properties": {
+          "status": {
+            "type": "integer",
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointManifest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "message"
+        ],
+        "title": "CRUDResponse[CheckpointManifest]"
+      },
       "CRUDResponse_ConfigResponse_": {
         "properties": {
           "status": {
@@ -5482,6 +5553,175 @@
         ],
         "title": "ChatStats",
         "description": "Statistics about token usage for the chat request.\n\nAttributes:\n    total_tokens: Total number of tokens used in prompt and completion\n    prompt_tokens: Number of tokens in the prompt\n    completion_tokens: Number of tokens in the completion"
+      },
+      "CheckpointManifest": {
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "index": {
+            "$ref": "#/components/schemas/CheckpointIndex"
+          },
+          "checkpoints": {
+            "items": {
+              "$ref": "#/components/schemas/CheckpointEntry"
+            },
+            "type": "array",
+            "title": "Checkpoints"
+          }
+        },
+        "type": "object",
+        "required": [
+          "session_id",
+          "index",
+          "checkpoints"
+        ],
+        "title": "CheckpointManifest",
+        "description": "``GET /v1/desktop/sessions/{session_id}/checkpoints`` (D9)."
+      },
+      "CheckpointIndex": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "building",
+              "stale",
+              "error",
+              "unsupported"
+            ],
+            "title": "State"
+          },
+          "built_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Built At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "CheckpointIndex",
+        "description": "The manifest's own state block (D9).\n\n``ready`` is a fresh cache; ``building`` means a refresh is in flight and\n``checkpoints`` carries the previous scan where one exists; ``error`` means\nthe last refresh failed and is inside its cooldown; ``stale`` is reserved\nfor a manifest deliberately served out of date (no caller emits it today);\n``unsupported`` is a peer conversation.\n\n``built_at`` is the index cache file's mtime \u2014 the moment the served scan\nwas written, not the moment this request read it."
+      },
+      "CheckpointEntry": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "user",
+              "completion"
+            ],
+            "title": "Kind"
+          },
+          "turn": {
+            "type": "integer",
+            "title": "Turn"
+          },
+          "ts": {
+            "type": "number",
+            "title": "Ts"
+          },
+          "seq": {
+            "type": "integer",
+            "title": "Seq"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "complete",
+                  "error",
+                  "interrupted",
+                  "open"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "naming": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointNaming"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "turn",
+          "ts",
+          "seq",
+          "text"
+        ],
+        "title": "CheckpointEntry",
+        "description": "One rail tick: a user message or a completed agent turn (D1).\n\n``id`` is a REAL journal entry id \u2014 the user row, or the turn's last\n``message``-type row (the row a jump lands on; the collapse branch's\n``closingAnswerId`` semantics) \u2014 so click-to-jump needs no translation and\nforks keep their checkpoints. ``seq`` is the journal row ordinal (0-based),\nwhich places ticks proportionally in the rail; ``turn`` is 1-based.\n``outcome`` is null unless the turn's own completion marker carried a kind,\nand ``open`` on the live unsettled tail. ``naming`` is present on\ncompletions only \u2014 user ticks have nothing to name."
+      },
+      "CheckpointNaming": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "pending",
+              "unavailable"
+            ],
+            "title": "State"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "CheckpointNaming",
+        "description": "The naming overlay for one completion checkpoint (D2/D9).\n\n``ready`` carries a generated name and summary; ``pending`` is the\npre-generation state the rail polls on; ``unavailable`` is the failure /\ncooldown state. Non-ready states carry null ``name``/``summary`` rather\nthan omitting the keys \u2014 this surface's nullable fields are all plain\nnulls (``cold_reason``, ``replayed``), and the UI contract ships in\nlockstep."
       },
       "CodeExecutionResult": {
         "properties": {
