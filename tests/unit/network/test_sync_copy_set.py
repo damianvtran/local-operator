@@ -388,6 +388,14 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/wakes/store.py": (1, "``wakes`` under the store root"),
     "local_operator/wakes/deliveries.py": (1, "``deliveries`` under ``wakes/``"),
     "local_operator/wakes/spooled.py": (1, "``spooled`` under ``wakes/``"),
+    "local_operator/monitors/store.py": (
+        1,
+        "``monitors`` under the store root: the derived index, the ``wakes`` twin",
+    ),
+    "local_operator/monitors/state.py": (
+        1,
+        "``state`` under ``monitors/``: the per-monitor counters/snapshot directory",
+    ),
     "local_operator/web_fetch/service.py": (1, "the fetched-page cache under the store root"),
     "local_operator/exec_mode.py": (1, "the exec job journal under the store root"),
     "local_operator/mcp/tool_cache.py": (1, "the MCP tool cache database"),

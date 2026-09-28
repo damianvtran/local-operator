@@ -90,6 +90,7 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         cwd=cwd,
         # Each of these is a createIf gate; see the module docstring.
         wake_scheduler=_stub_for(_types.WakeSchedulerProtocol),
+        monitor_scheduler=_stub_for(_types.MonitorSchedulerProtocol),
         subagent_launcher=_stub_for(_types.SubagentLauncher),
         jobs=_stub_for(_types.JobManagerProtocol),
         browser=_stub_for(_types.BrowserSurfaceProtocol, surface_id="stub"),

@@ -251,6 +251,7 @@ class StopOutcome:
     method: Method
     line: str
     wakes_dormant: int = 0
+    monitors_dormant: int = 0
 
 
 @dataclass
@@ -717,6 +718,46 @@ async def _park_wakes(record: SessionRecord, root: Path) -> int:
         return 0
 
 
+def _mark_monitors_dormant(record: SessionRecord, root: Path) -> int:
+    """Park a stopped session's monitors dormant by stamping ``stopped_at``.
+
+    The ``_mark_wakes_dormant`` twin (§10.5). Monitors are NEVER deleted by a
+    stop: the transcript is the authority, and a stop that edited the model's
+    watch state would silently change what the agent was asked to do. The
+    derived index entry gains ``stopped_at`` — the key
+    ``monitors/store.write_entry`` preserves across rewrites and clears on the
+    session's next open — so dormant means exactly "will not fire until
+    someone reopens the session".
+
+    Returns the number of monitors parked (the receipt's "N monitors
+    dormant"), or 0 when there is no entry.
+    """
+    from local_operator.monitors import store as monitor_store
+
+    entry = monitor_store.read_entry(root, record.session_id)
+    if entry is None:
+        return 0
+    monitors = entry.get("monitors") or []
+    if not monitors:
+        return 0
+    monitor_store.write_entry(
+        root,
+        record.session_id,
+        cwd=entry.get("cwd") or record.cwd,
+        monitors=monitors,
+        preserve=dict(entry, stopped_at=int(time.time() * 1000)),
+    )
+    return len(monitors)
+
+
+async def _park_monitors(record: SessionRecord, root: Path) -> int:
+    """``_mark_monitors_dormant`` off the loop; best-effort like its twin."""
+    try:
+        return await asyncio.to_thread(_mark_monitors_dormant, record, root)
+    except Exception:  # noqa: BLE001 — the index is derived; the stop is not
+        return 0
+
+
 def _record_retired(record: SessionRecord, root: Path) -> bool:
     """True once the record on disk no longer describes this session.
 
@@ -785,7 +826,7 @@ async def _await_pid_exit(pid: int, timeout_s: float) -> bool:
 
 
 def _stopped_line(
-    record: SessionRecord, method: Method, wakes: int, *, forced: bool = False
+    record: SessionRecord, method: Method, wakes: int, *, forced: bool = False, monitors: int = 0
 ) -> str:
     """The one human receipt line every front end paints for one stop.
 
@@ -799,15 +840,23 @@ def _stopped_line(
     the one outcome whose receipt has to say the socket proof was bypassed
     and identity came from the record instead, so the transcript records
     which evidence the kill rested on (round-3 D3-4).
+
+    ``wakes``/``monitors`` are the parked counts (§10.5): the dormant clause
+    reads ``— 1 wake and 2 monitors dormant until you reopen it``. With only
+    one family present the sentence is byte-identical to what it was before
+    monitors existed.
     """
     name = record.conversation_name or record.session_id
     verb = "killed" if method == "sigkill" else "stopped"
     rung = " (sigterm)" if method == "sigterm" else ""
     proof = " (--force: identity confirmed from its record)" if forced else ""
-    wakes_part = (
-        f" — {wakes} wake{'s' if wakes != 1 else ''} dormant until you reopen it" if wakes else ""
-    )
-    return f'{verb} "{name}"{rung}{proof}{wakes_part}'
+    items: list[str] = []
+    if wakes:
+        items.append(f"{wakes} wake{'s' if wakes != 1 else ''}")
+    if monitors:
+        items.append(f"{monitors} monitor{'s' if monitors != 1 else ''}")
+    dormant_part = f" — {' and '.join(items)} dormant until you reopen it" if items else ""
+    return f'{verb} "{name}"{rung}{proof}{dormant_part}'
 
 
 def _stop_marker_payload(
@@ -1393,6 +1442,7 @@ async def stop_session(
     # means an older runtime. Either way the ladder continues.
     if await _graceful_stop(record, timeout_s, root, command=_command):
         wakes = await _park_wakes(record, root)
+        monitors = await _park_monitors(record, root)
         _recover_record(record, root)
         method: Method = "socket"
         return StopOutcome(
@@ -1400,8 +1450,9 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=_stopped_line(record, method, wakes),
+            line=_stopped_line(record, method, wakes, monitors=monitors),
             wakes_dormant=wakes,
+            monitors_dormant=monitors,
         )
 
     # The pid is gone but the graceful op never acked: it died under us
@@ -1416,6 +1467,7 @@ async def stop_session(
     # a request the target never received is not a stop.
     if not registry.pid_alive(record.pid):
         wakes = await _park_wakes(record, root)
+        monitors = await _park_monitors(record, root)
         _recover_record(record, root)
         method = "gone"
         return StopOutcome(
@@ -1425,6 +1477,7 @@ async def stop_session(
             method=method,
             line=f'"{name}" already exited',
             wakes_dormant=wakes,
+            monitors_dormant=monitors,
         )
 
     # A SIGNAL MUST NOT CUT WORK IN FLIGHT — and this ladder is one of the
@@ -1579,6 +1632,7 @@ async def stop_session(
         SIGTERM_GRACE_S,
     ):
         wakes = await _park_wakes(record, root)
+        monitors = await _park_monitors(record, root)
         _recover_record(record, root)
         method = "sigterm"
         return StopOutcome(
@@ -1586,8 +1640,9 @@ async def stop_session(
             session_id=record.session_id,
             name=name,
             method=method,
-            line=_stopped_line(record, method, wakes, forced=forced),
+            line=_stopped_line(record, method, wakes, forced=forced, monitors=monitors),
             wakes_dormant=wakes,
+            monitors_dormant=monitors,
         )
 
     # Rung 3 — SIGKILL. State is orphaned by design; stale-record reaping
@@ -1606,6 +1661,7 @@ async def stop_session(
     # terminate-the-tree path above instead of raising AttributeError.
     await _signal_and_confirm(record, procstate.hard_kill_signal(), SIGKILL_CONFIRM_S)
     wakes = await _park_wakes(record, root)
+    monitors = await _park_monitors(record, root)
     _recover_record(record, root)
     method = "sigkill"
     return StopOutcome(
@@ -1613,8 +1669,9 @@ async def stop_session(
         session_id=record.session_id,
         name=name,
         method=method,
-        line=_stopped_line(record, method, wakes, forced=forced),
+        line=_stopped_line(record, method, wakes, forced=forced, monitors=monitors),
         wakes_dormant=wakes,
+        monitors_dormant=monitors,
     )
 
 

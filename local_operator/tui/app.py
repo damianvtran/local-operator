@@ -34474,6 +34474,7 @@ class OperatorApp(App[None]):
         self._adopted_session_id = ""
         name = getattr(session, "conversation_name", "") or resumable_id
         wakes = self._mark_own_wakes_dormant(session)
+        monitors = self._mark_own_monitors_dormant(session)
         # Retire any paint the dying session already queued: its
         # ``frontend_state.streaming`` is still True mid-turn, and a queued
         # ``_apply_pending_frontend_state`` landing after the receipt would
@@ -34546,10 +34547,45 @@ class OperatorApp(App[None]):
         # reopen affordance in front of them; here they do, so the resume
         # command IS the reopen and is named once rather than restated.
         reopen = f"/resume {resumable_id}" if resumable_id else "/resume"
-        wakes_part = (
-            f" — {wakes} wake{'s' if wakes != 1 else ''} dormant until then" if wakes else ""
-        )
-        self._system_notice(f'stopped "{name}" — {reopen} reopens it{wakes_part}')
+        parked: list[str] = []
+        if wakes:
+            parked.append(f"{wakes} wake{'s' if wakes != 1 else ''}")
+        if monitors:
+            parked.append(f"{monitors} monitor{'s' if monitors != 1 else ''}")
+        dormant_part = f" — {' and '.join(parked)} dormant until then" if parked else ""
+        self._system_notice(f'stopped "{name}" — {reopen} reopens it{dormant_part}')
+
+    def _mark_own_monitors_dormant(self, session: Any) -> int:
+        """Stamp ``stopped_at`` on THIS session's monitors index entry.
+
+        The ``_mark_own_wakes_dormant`` twin (§10.5): monitors are never
+        deleted by a stop; the derived index entry carries the marker and the
+        session's next open clears it. Returns the count for the receipt.
+        """
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.session.runtime.control import _mark_monitors_dormant
+            from local_operator.session.runtime.registry import SessionRecord
+
+            session_id = getattr(session, "session_id", "") or ""
+            scheduler = getattr(session, "monitor_scheduler", None)
+            monitors = list(getattr(scheduler, "monitors", []) or [])
+            if not session_id or not monitors:
+                return 0
+            record = SessionRecord(
+                pid=os.getpid(),
+                kind="tui",
+                session_id=session_id,
+                conversation_name=getattr(session, "conversation_name", "") or "",
+                cwd=str(getattr(session, "_cwd", "") or ""),
+                model_label="",
+                control_port=0,
+                control_key="",
+            )
+            return _mark_monitors_dormant(record, config_dir())
+        except Exception:  # noqa: BLE001 — the index is derived; the stop is not
+            logger.debug("could not stamp monitor dormancy", exc_info=True)
+            return 0
 
     def _mark_own_wakes_dormant(self, session: Any) -> int:
         """Stamp ``stopped_at`` on THIS session's wake index entry.

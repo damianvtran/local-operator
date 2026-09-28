@@ -458,6 +458,14 @@ _GUARD_REFUSALS: dict[str, str] = {
         "That conversation has unread messages waiting. Reopen it to read them "
         "before deleting it."
     ),
+    "has an armed monitor": (
+        # The wake sentence's twin, with the SAME two doors: the conversation
+        # (the model-facing ``monitor`` tool cancels by id) and the index entry
+        # file, resolved store-relative like ``{wake_file}``.
+        "That conversation has a monitor armed for it. Reopen it and ask it to "
+        "cancel the monitor, or delete its {monitor_file} entry, before "
+        "deleting it."
+    ),
 }
 
 #: Used for a guard reason with no sentence of its own, INCLUDING a guard that
@@ -739,6 +747,7 @@ def delete_session(
         # bypassed by hand. Same call the automatic path makes, for the same
         # reason.
         _forget_wake_entry(config_dir, session_id)
+        _forget_monitor_entry(config_dir, session_id)
     return DeleteOutcome(
         session_id=session_id,
         found=True,
@@ -983,6 +992,50 @@ def _has_armed_wake(config_dir: Path, session: str) -> bool:
         return True
 
 
+def _has_armed_monitor(config_dir: Path, session: str) -> bool:
+    """Whether a monitor for this session can still FIRE (§11.5).
+
+    The ``_has_armed_wake`` twin: asks about firing, not existence. A
+    DISABLED monitor is failed state and an EXPIRED one (`until_at` passed)
+    is finished — neither arms the refusal — while a durable or
+    future-bounded one does. A dormant entry (``stopped_at``) cannot fire
+    until reopened and does not refuse, exactly like a dormant wake.
+
+    FAIL-CLOSED ON ANYTHING UNREADABLE, like the wake check: an entry that
+    cannot be parsed may be armed, and the guard's contract is that every
+    path which does not positively clear is a refusal. ``store.read_entry``
+    is deliberately NOT used — it treats an unreadable file as absent, which
+    here would turn a corrupt entry into a delete.
+    """
+    try:
+        from local_operator.monitors.store import entry_path
+
+        path = entry_path(config_dir, session)
+        if not path.exists():
+            return False
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True  # present but unreadable: assume it fires
+        if not isinstance(entry, dict):
+            return True
+        if entry.get("stopped_at"):
+            return False  # dormant: cannot fire until the session is reopened
+        now_ms = int(time.time() * 1000)
+        for raw in entry.get("monitors") or ():
+            if not isinstance(raw, dict):
+                continue
+            if raw.get("disabled"):
+                continue
+            until = raw.get("until_at")
+            if isinstance(until, int) and not isinstance(until, bool) and until <= now_ms:
+                continue
+            return True
+        return False
+    except Exception:  # noqa: BLE001 — unprovable is "yes"
+        return True
+
+
 def _has_spooled_mail(directory: Path) -> bool:
     try:
         from local_operator.session.runtime.inbox import INBOX_NAME
@@ -1020,6 +1073,8 @@ def _guard(
                 return "leased by a live process"
         if _has_armed_wake(config_dir, directory.name):
             return "has an armed wake"
+        if _has_armed_monitor(config_dir, directory.name):
+            return "has an armed monitor"
         if _has_spooled_mail(directory):
             return "has unread spooled mail"
     except Exception as exc:  # noqa: BLE001 — a guard that cannot answer keeps
@@ -1048,7 +1103,9 @@ def _guard_refusal(reason: str, session_id: str) -> str:
     template = _GUARD_REFUSALS.get(reason)
     if template is None:
         return _GUARD_REFUSAL_FALLBACK
-    return template.replace("{wake_file}", f"wakes/{session_id}.json")
+    return template.replace("{wake_file}", f"wakes/{session_id}.json").replace(
+        "{monitor_file}", f"monitors/{session_id}.json"
+    )
 
 
 def _has_transcript(directory: Path) -> bool:
@@ -1456,6 +1513,7 @@ def apply_cleanup(
         if done:
             result.removed.append(candidate)
             _forget_wake_entry(config_dir, candidate.session)
+            _forget_monitor_entry(config_dir, candidate.session)
     return result
 
 
@@ -1471,6 +1529,26 @@ def _forget_wake_entry(config_dir: Path, session: str) -> None:
         from local_operator.wakes.store import remove_entry
 
         remove_entry(config_dir, session)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _forget_monitor_entry(config_dir: Path, session: str) -> None:
+    """A removed session cannot have a monitor fire for it: drop its index
+    entry AND its per-monitor state directory (§11.5).
+
+    The ``_forget_wake_entry`` twin — reachable for the same reason (a dormant,
+    disabled or expired entry no longer refuses the delete), best-effort for
+    the same reason: cleanup for the case the guard now lets through, not a
+    step the delete depends on. The state directory (counters + snapshot
+    blobs) goes with it; leaving it would be orphaned bytes no reader consults.
+    """
+    try:
+        from local_operator.monitors import store as monitor_store
+        from local_operator.monitors.state import remove_session_state
+
+        remove_session_state(config_dir, session)
+        monitor_store.remove_entry(config_dir, session)
     except Exception:  # noqa: BLE001
         pass
 

@@ -197,6 +197,14 @@ async def test_every_session_attribute_the_tui_reads_exists_on_the_viewer(
         # could not be re-resolved on resume. A viewer performs no restore, so
         # it has nothing to report; `app.py` reads it with a "" default.
         "attachment_restore_notice",
+        # The monitor scheduler is IN-PROCESS only (contract §10.4): a viewer
+        # holds no scheduler to project, and the stop-path reader
+        # (`_mark_own_monitors_dormant`) sits in `_stop_local_session`, which
+        # returns early unless the session owns its runtime — a viewer's
+        # `/stop` is a control op whose OWNER stamps the dormant marker on the
+        # control rung (`_mark_monitors_dormant`). Any projected scheduler is
+        # a slice-4 surface question, not a viewer-path degradation today.
+        "monitor_scheduler",
     }
 
     source = (Path(__file__).parents[3] / "local_operator" / "tui" / "app.py").read_text(

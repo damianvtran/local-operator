@@ -25,6 +25,32 @@ class _FakeScheduler:
         pass
 
 
+class _FakeMonitorScheduler:
+    """Just enough surface for build_monitor_tool's capability check.
+
+    ``ToolContext.monitor_scheduler`` is a runtime_checkable protocol, so
+    ToolContext validation requires every member to exist — presence only;
+    the monitor tool's ops are exercised against a real scheduler in
+    tests/unit/tools/test_monitor_tool.py.
+    """
+
+    @property
+    def monitors(self) -> list[Any]:
+        return []
+
+    async def update(self, monitors) -> None:
+        pass
+
+    async def create(self, request: Any, *, cwd: str) -> dict[str, Any]:
+        return {}
+
+    async def cancel(self, monitor_id: str) -> dict[str, Any]:
+        return {}
+
+    def index_rows(self) -> list[dict[str, Any]]:
+        return []
+
+
 class _FakeJobs:
     """Just enough surface for the job-tracking tools' capability check."""
 
@@ -61,6 +87,7 @@ def _engine_context(**kwargs) -> ToolContext:
     merely to describe a rich front end, not to satisfy that gate)."""
     base: dict[str, Any] = dict(
         wake_scheduler=_FakeScheduler(),
+        monitor_scheduler=_FakeMonitorScheduler(),
         subagent_launcher=_launcher,
         jobs=_FakeJobs(),
         subagent_comms=_FakeComms(),
@@ -110,6 +137,13 @@ def test_default_set_drops_wake_without_scheduler() -> None:
     tools = create_tools(_engine_context(wake_scheduler=None))
     names = [tool.name for tool in tools]
     assert names == [name for name in DEFAULT_TOOL_NAMES if name != "wake"]
+
+
+def test_default_set_drops_monitor_without_scheduler() -> None:
+    # The monitor twin of the wake case: no scheduler -> no monitor tool.
+    tools = create_tools(_engine_context(monitor_scheduler=None))
+    names = [tool.name for tool in tools]
+    assert names == [name for name in DEFAULT_TOOL_NAMES if name != "monitor"]
 
 
 def test_default_set_drops_ask_without_a_host_that_can_answer_it() -> None:

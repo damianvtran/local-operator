@@ -109,6 +109,7 @@ from local_operator.harness.types import (
     EnvironmentDependentRejectionError,
     ImageContent,
     InvalidToolArgumentsError,
+    MonitorSchedulerProtocol,
     TextContent,
     ToolContext,
     ToolResult,
@@ -11879,6 +11880,287 @@ async def execute_wake(
             return _error(tool_call_id, "wake", "'create' requires 'in' or 'at'")
         return await _wake_create(tool_call_id, params, scheduler, now_ms)
     return await _wake_cancel(tool_call_id, params, scheduler)
+
+
+# ---------------------------------------------------------------------------
+# monitor — delta-watch over repeated read-only calls
+# ---------------------------------------------------------------------------
+#
+# Why this is its own tool and not a wake op: `wake` = tell me at a time;
+# `monitor` = tell me when something changes (docs/design/monitor-tool.md §3).
+# The two vocabularies must stay separately teachable, and the parameter sets
+# share almost nothing (a call spec + diff knobs vs a message + schedule), so
+# the tool is createIf-gated on a monitor scheduler exactly like wake's.
+
+
+class MonitorParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["create", "list", "cancel"] = Field(
+        description="create: arm; list: show; cancel: remove."
+    )
+    name: str | None = Field(default=None, description="Short label, e.g. 'slack-thread-42'.")
+    tool: str | None = Field(
+        default=None,
+        description=(
+            "Read-only tool to re-run: bash, web_search/web_fetch, read, grep, an mcp__ tool."
+        ),
+    )
+    arguments: dict[str, Any] | None = Field(
+        default=None, description="Exact arguments for that tool call."
+    )
+    every: str | None = Field(
+        default=None,
+        description="Check interval: '30s'|'60s'|'5m'|'1h' (floor 30s, default 60s).",
+    )
+    until: str | None = Field(default=None, description="Stop time (ISO datetime); omit = durable.")
+    description: str | None = Field(
+        default=None, description="What to watch for — shown in list and on delivery."
+    )
+    notify: bool | None = Field(
+        default=None, description="Notify when a delivered change completes (default false)."
+    )
+    sort_lines: bool | None = Field(
+        default=None, description="Unordered line compare (default false)."
+    )
+    ignore: list[str] | None = Field(
+        default=None, description="Regexes dropping lines before diffing (max 8)."
+    )
+    id: str | None = Field(default=None, description="Monitor id (cancel; from list).")
+
+
+MONITOR_CALL_REPR_CHARS = 120
+
+
+def _clip_monitor_text(text: str, limit: int = MONITOR_CALL_REPR_CHARS) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def _monitor_call_repr(tool: str, arguments: Any) -> str:
+    """One-line rendering of the watched call, for approvals and results.
+
+    The SAME rendering feeds the approval prompt and the armed/cancel
+    receipts, so a user approving a monitor and the agent reading its receipt
+    see one sentence. bash renders its command (backticked); everything else
+    renders canonical JSON, clipped either way.
+    """
+    if tool == "bash" and isinstance(arguments, dict):
+        command = str(arguments.get("command") or "").strip()
+        if command:
+            return "`" + _clip_monitor_text(command) + "`"
+    try:
+        payload = json.dumps(arguments or {}, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        payload = repr(arguments)
+    return _clip_monitor_text(payload)
+
+
+def _describe_monitor_approval(args: dict[str, Any], cwd: str) -> str:
+    """``watch: <tool> <call> every <interval>`` (or the operation for list/cancel).
+
+    Monitor is the second tool that arms UNATTENDED future calls, so the
+    decision is what is being watched, how often, and until when — not the
+    parameter shape (the ``_describe_wake_approval`` rationale, verbatim).
+    Keys come from :class:`MonitorParams`, which is ``extra="forbid"``.
+    """
+    op = str(args.get("op") or "create").strip()
+    if op == "cancel":
+        identifier = str(args.get("id") or "").strip()
+        return f"cancel monitor: {identifier}" if identifier else "cancel monitor"
+    if op != "create":
+        return f"monitor: {op}"
+    tool = str(args.get("tool") or "").strip()
+    if not tool:
+        return "watch: (no tool named)"
+    interval = str(args.get("every") or "").strip() or "60s"
+    until = str(args.get("until") or "").strip()
+    until_part = f" until {until}" if until else ""
+    call = _monitor_call_repr(tool, args.get("arguments"))
+    return f"watch: {tool} {call} every {interval}{until_part}"
+
+
+def _monitor_row_text(row: dict[str, Any], now: int) -> str:
+    """One list row: id, name, watched call, cadence, and health.
+
+    The watched call is rendered with the same :func:`_monitor_call_repr` the
+    receipts use (QA round-1 observation 1): two monitors of one tool are
+    told apart by what they watch, not only by their names.
+    """
+    from local_operator.wakes.display import format_age
+
+    mid = str(row.get("id") or "?")
+    name = str(row.get("name") or "")
+    tool = str(row.get("tool") or "")
+    call = _monitor_call_repr(tool, row.get("arguments"))
+    every = row.get("every_ms")
+    every_txt = f" every {format_duration(int(every))}" if isinstance(every, int) else ""
+    if row.get("disabled"):
+        reason = str(row.get("disabled_reason") or "")
+        reason_txt = f" (last: {_clip_monitor_text(reason, 80)})" if reason else ""
+        failures = row.get("consecutive_failures", 0)
+        return (
+            f"{mid}: '{name}' {tool} {call}{every_txt} — DISABLED after {failures} "
+            f"failures{reason_txt} — re-arm to reactivate."
+        )
+    until = row.get("until_at")
+    if isinstance(until, int) and not isinstance(until, bool) and until <= now:
+        return f"{mid}: '{name}' {tool} {call}{every_txt} — expired."
+    bits: list[str] = []
+    last = row.get("last_check_at")
+    if isinstance(last, int) and last > 0:
+        bits.append(f"last check {format_age((now - last) / 1000)} ago")
+    else:
+        bits.append("not checked yet")
+    due = row.get("next_due_at")
+    if isinstance(due, int) and not isinstance(due, bool):
+        if due > now:
+            bits.append(f"next due in {format_age((due - now) / 1000)}")
+        else:
+            bits.append("next due now")
+    return f"{mid}: '{name}' {tool} {call}{every_txt} — " + ", ".join(bits) + "."
+
+
+async def _monitor_list(tool_call_id: str, scheduler: MonitorSchedulerProtocol) -> ToolResult:
+    rows = scheduler.index_rows()
+    if not rows:
+        return _text(
+            tool_call_id,
+            "monitor",
+            "No monitors.",
+            useless=True,
+            details={"useless": True},
+        )
+    now = int(time.time() * 1000)
+    lines = [f"- {_monitor_row_text(row, now)}" for row in rows]
+    return _text(tool_call_id, "monitor", f"{len(rows)} monitor(s):\n" + "\n".join(lines))
+
+
+async def _monitor_create(
+    tool_call_id: str, params: MonitorParams, scheduler: MonitorSchedulerProtocol, cwd: str
+) -> ToolResult:
+    request: dict[str, Any] = {
+        "name": params.name,
+        "tool": params.tool,
+        "arguments": params.arguments,
+        "every": params.every,
+        "until": params.until,
+        "description": params.description,
+        "notify": params.notify,
+        "sort_lines": params.sort_lines,
+        "ignore": params.ignore,
+    }
+    outcome = await scheduler.create(request, cwd=cwd)
+    if "error" in outcome:
+        if outcome.get("malformed"):
+            return _invalid_arguments(tool_call_id, "monitor", str(outcome["error"]))
+        return _error(tool_call_id, "monitor", str(outcome["error"]))
+    spec = outcome["spec"]
+    if outcome.get("duplicate"):
+        return _text(
+            tool_call_id,
+            "monitor",
+            f"Monitor '{spec.name}' ({spec.id}) already watches that call every "
+            f"{format_duration(spec.every_ms)}.",
+            details={"monitor_id": spec.id},
+        )
+    if outcome.get("reactivated"):
+        return _text(
+            tool_call_id,
+            "monitor",
+            f"Reactivated monitor '{spec.id}'.",
+            details={"monitor_id": spec.id},
+        )
+    from local_operator.wakes.display import format_wake_time
+
+    bound = f"until {format_wake_time(spec.until_at)}" if spec.until_at is not None else "durable"
+    call = _monitor_call_repr(spec.tool, spec.arguments)
+    return _text(
+        tool_call_id,
+        "monitor",
+        f"Armed monitor '{spec.name}' ({spec.id}): {spec.tool} {call} every "
+        f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
+        "baseline; you'll be told only what changes.",
+        details={"monitor_id": spec.id, "next_due_at": outcome.get("next_due_at")},
+    )
+
+
+async def _monitor_cancel(
+    tool_call_id: str, params: MonitorParams, scheduler: MonitorSchedulerProtocol
+) -> ToolResult:
+    if not params.id:
+        return _error(
+            tool_call_id, "monitor", "'cancel' requires the monitor id (see monitor list)"
+        )
+    outcome = await scheduler.cancel(params.id)
+    if "error" in outcome:
+        return _error(tool_call_id, "monitor", str(outcome["error"]))
+    return _text(
+        tool_call_id,
+        "monitor",
+        f"Cancelled monitor '{params.id}'.",
+        details={"monitor_id": params.id},
+    )
+
+
+def build_monitor_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf builder: the tool only exists when the context carries a
+    monitor scheduler. A session without monitors must not advertise a tool
+    whose every call errors (the createIf convention)."""
+    if context.monitor_scheduler is None:
+        return None
+    return AgentTool(
+        name="monitor",
+        label="Monitor",
+        describe_approval=_describe_monitor_approval,
+        description=(
+            "Watch a read-only call for changes (create/list/cancel): re-runs it every "
+            "interval and wakes you only when the output differs."
+        ),
+        parameters=MonitorParams.model_json_schema(),
+        # write tier: create persists monitors and arms unattended future
+        # calls, so it prompts like a mutation; listing the monitors is a read
+        # and must not prompt (the hub precedent, builtin.py:20988).
+        approval_tier="write",
+        call_approval_tier=lambda args: (
+            "read" if str(args.get("op") or "") == "list" else "write"
+        ),
+        # create/cancel rewrite the whole list; two concurrent calls would
+        # lose one, so the tool runs exclusive.
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_monitor,
+    )
+
+
+@_guard("monitor")
+async def execute_monitor(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Create, list, or cancel change-watching monitors via the scheduler."""
+    try:
+        params = MonitorParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "monitor", exc)
+    scheduler = context.monitor_scheduler if context else None
+    if scheduler is None:
+        return _error(
+            tool_call_id,
+            "monitor",
+            "Monitor scheduling is not available in this session (no scheduler attached).",
+        )
+    if params.op == "list":
+        return await _monitor_list(tool_call_id, scheduler)
+    if params.op == "create":
+        if not params.tool or not str(params.tool).strip():
+            return _error(tool_call_id, "monitor", "'create' requires 'tool' and 'arguments'")
+        cwd = str(getattr(context, "cwd", "") or "")
+        return await _monitor_create(tool_call_id, params, scheduler, cwd)
+    return await _monitor_cancel(tool_call_id, params, scheduler)
 
 
 # ---------------------------------------------------------------------------

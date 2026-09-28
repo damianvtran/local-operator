@@ -283,6 +283,7 @@ def _consumer_defaults() -> dict[str, object]:
         consumers[f"providers.{provider}.base_url"] = endpoint
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     consumers.update(_classification_consumer_defaults())
+    consumers.update(_monitor_consumer_defaults())
     # The Aida keys, asked of the package that reads them. The registry rows
     # above carry literals on purpose (``settings_io`` must stay off the aida
     # package's import path — it is loaded on every CLI start), and this block
@@ -344,6 +345,33 @@ def _classification_consumer_defaults() -> dict[str, object]:
         "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
         "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
         "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
+    }
+
+
+def _monitor_consumer_defaults() -> dict[str, object]:
+    """``values.monitor.*`` defaults, asked of the package that reads them.
+
+    Every §16 key's reader lives in ``local_operator.monitors.settings`` (the
+    snapshot module beside the code the scheduler and diff engine read), so
+    this imports THEM rather than restating the numbers beside the registry
+    rows — the rule the classification block above follows, and what catches a
+    registry default that drifted from the package's own fallback.
+    ``classifyMaxChars`` is registered in this slice for the next one; its
+    constant ships with the rest so the key exists from day one.
+    """
+    from local_operator.monitors import settings as monitor_settings
+
+    return {
+        "monitor.defaultIntervalS": monitor_settings.DEFAULT_DEFAULT_INTERVAL_S,
+        "monitor.maxMonitors": monitor_settings.DEFAULT_MAX_MONITORS,
+        "monitor.runTimeoutMs": monitor_settings.DEFAULT_RUN_TIMEOUT_MS,
+        "monitor.snapshotMaxChars": monitor_settings.DEFAULT_SNAPSHOT_MAX_CHARS,
+        "monitor.maxDeltaLines": monitor_settings.DEFAULT_MAX_DELTA_LINES,
+        "monitor.deltaMaxChars": monitor_settings.DEFAULT_DELTA_MAX_CHARS,
+        "monitor.classifyMaxChars": monitor_settings.DEFAULT_CLASSIFY_MAX_CHARS,
+        "monitor.maxConsecutiveFailures": monitor_settings.DEFAULT_MAX_CONSECUTIVE_FAILURES,
+        "monitor.maxDeliveriesPerHour": monitor_settings.DEFAULT_MAX_DELIVERIES_PER_HOUR,
+        "monitor.normalizeTimestamps": monitor_settings.DEFAULT_NORMALIZE_TIMESTAMPS,
     }
 
 

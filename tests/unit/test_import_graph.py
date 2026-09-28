@@ -397,6 +397,65 @@ def test_wake_delivery_ledger_import_is_stdlib_only() -> None:
     ], ours
 
 
+# --- The monitors index and state -------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def monitor_store_modules() -> set[str]:
+    """Modules loaded by importing the monitor index store."""
+    return _imported_modules("local_operator.monitors.store")
+
+
+def test_monitor_store_import_is_stdlib_only(monitor_store_modules: set[str]) -> None:
+    # ``local_operator.monitors.store`` is read by the session-cleanup guards,
+    # the park marker and the pristine probe — processes that must not carry
+    # the scheduler (design monitor-tool.md §10.2: "stdlib-only, pinned by
+    # tests/unit/test_import_graph.py"). The monitor package splits its pydantic
+    # spec and its asyncio scheduler into SIBLING modules for exactly this
+    # reason; an import of either from the store is the regression this cell
+    # catches, in a message that names it.
+    _assert_absent(monitor_store_modules, "asyncio", "the store is plain synchronous I/O")
+    _assert_absent(monitor_store_modules, "pydantic", "rows are plain dicts here")
+    _assert_absent(
+        monitor_store_modules, "local_operator.session", "the store never opens a session"
+    )
+    _assert_absent(monitor_store_modules, "local_operator.harness", "no spec model is imported")
+    _assert_absent(monitor_store_modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(monitor_store_modules, "local_operator.tui", "no front end")
+    _assert_absent(monitor_store_modules, "textual", "no front end")
+    _assert_absent(monitor_store_modules, "tiktoken", "no tokenizer")
+    ours = sorted(m for m in monitor_store_modules if m.startswith("local_operator"))
+    assert ours == [
+        "local_operator",
+        "local_operator.monitors",
+        "local_operator.monitors.store",
+    ], ours
+
+
+def test_monitor_state_import_is_stdlib_only() -> None:
+    """The state files' contract, for the same readers.
+
+    ``monitors/state`` (counters + snapshot blobs) is read by the same cold
+    processes as the index — and the scheduler itself reads it without
+    importing the package's heavier modules — so it carries the identical
+    stdlib-only contract, pinned separately so a future edit that reaches for
+    the spec model or a datetime helper fails a test that names the file.
+    """
+    modules = _imported_modules("local_operator.monitors.state")
+
+    _assert_absent(modules, "asyncio", "state files are plain synchronous I/O")
+    _assert_absent(modules, "pydantic", "records are plain dicts")
+    _assert_absent(modules, "local_operator.session", "the state never opens a session")
+    _assert_absent(modules, "local_operator.harness", "no spec model is imported")
+    _assert_absent(modules, "local_operator.tui", "no front end")
+    ours = sorted(m for m in modules if m.startswith("local_operator"))
+    assert ours == [
+        "local_operator",
+        "local_operator.monitors",
+        "local_operator.monitors.state",
+    ], ours
+
+
 # --- The two launch paths: `lop` (TUI) and `lop serve` ------------------------
 #
 # Backend load report B-F10: `import local_operator.tui.app` was 1.8-2.8 s and
