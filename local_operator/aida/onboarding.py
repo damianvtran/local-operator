@@ -145,6 +145,42 @@ def _sessions_root(config_dir: Path | str) -> Path:
     return Path(config_dir) / "sessions"
 
 
+def _counts_as_operator_conversation(entry: Path, root: Path) -> bool:
+    """Whether a user-classified session directory is a conversation HAD.
+
+    Existence alone cannot answer it: the TUI boot materialises a session
+    directory for every normal launch — the viewer's own id, holding only
+    ``.execution-lease`` + ``.session.pid``, no transcript — so on a fresh
+    install's FIRST boot the scan saw "a user session" and the predicate read
+    false, and a provider-present first contact never greeted (UX review
+    round 2, U4; the setup-exit path was unaffected because a setup-state boot
+    creates no conversation directory at all).
+
+    The discriminator is the engagement signal the runtime already answers
+    this question with (``session_has_durable_history``: a real ``Message``
+    row, never a custom one — wake prompts and quiet-dial peer notes persist
+    without a turn), so "never engaged" reads as "no conversation had".
+    Deliberately fail-closed around it, in R22's direction ("existing users
+    are never re-routed"): a transcript with ANY bytes the reader will not
+    call history — torn rows, a custom-only journal, a file it cannot open —
+    counts as the operator's. Only the two shapes that positively say nothing
+    was ever said here are discounted: no transcript at all, and an empty one.
+    """
+    from local_operator.session.runtime.engagement import (
+        TRANSCRIPT_FILENAME,
+        session_has_durable_history,
+    )
+
+    if session_has_durable_history(entry.name, root=root):
+        return True
+    try:
+        return (entry / TRANSCRIPT_FILENAME).stat().st_size > 0
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def other_user_sessions(config_dir: Path | str) -> list[str] | None:
     """Ids of the operator's conversations besides hers, or ``None`` when unknown.
 
@@ -154,6 +190,11 @@ def other_user_sessions(config_dir: Path | str) -> list[str] | None:
     agent-shell sessions) deliberately do not count — they are machines'
     conversations, and an install whose store holds only those is still a
     fresh one as far as a human's first-run experience goes.
+
+    Existence alone is not a conversation either: a directory counts only
+    once it shows engagement (:func:`_counts_as_operator_conversation`) — the
+    boot materialises one for every launch, and counting that made a fresh
+    install look used the moment it started once (UX review round 2, U4).
 
     FAIL-CLOSED, in both ways a read can fail: an unreadable store answers
     ``None`` and an entry that cannot be classified counts as the operator's.
@@ -182,7 +223,7 @@ def other_user_sessions(config_dir: Path | str) -> list[str] | None:
         except Exception:  # noqa: BLE001 — unclassifiable counts as the user's
             logger.warning("aida: could not classify session %s", entry.name, exc_info=True)
             is_users = True
-        if is_users:
+        if is_users and _counts_as_operator_conversation(entry, root):
             found.append(entry.name)
     return found
 

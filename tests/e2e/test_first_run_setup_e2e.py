@@ -42,6 +42,16 @@ def _decode(chunks: list[bytes]) -> str:
     return _CSI.sub("", _OSC.sub("", raw))
 
 
+#: Deadline for one painted fact, everywhere in this file. MEASURED on this
+#: host during the round-2 remediation: the no-provider boot's first paint
+#: takes 42-48 s under fleet load, on BOTH the delta head and its pre-delta
+#: sibling — the old 60 s ceiling sat inside that noise and failed the file
+#: while the product was correct (the same load-sensitivity class as Q2).
+#: These are ceilings, not sleeps: ``wait_for`` returns the moment the fact
+#: paints, so a generous window costs a healthy run nothing.
+_PAINT_DEADLINE = 120.0
+
+
 class _TuiChild:
     """The real CLI on its own pty: drain, read, send, reap by pid."""
 
@@ -143,17 +153,17 @@ def test_a_fresh_cli_boot_enters_setup_and_she_answers_at_the_cue(tmp_path: Path
     try:
         # 1. The setup state is REACHABLE: the splash carries the cue, and the
         #    band says `setup` rather than a model that does not exist.
-        assert child.wait_for("no provider configured", 60.0), child.screen()[-2500:]
+        assert child.wait_for("no provider configured", _PAINT_DEADLINE), child.screen()[-2500:]
         assert "setup" in child.screen()
 
         # 2. `/aida` opens HER view at the same cue.
         child.send("/aida\r")
-        assert child.wait_for("chief of staff", 30.0), child.screen()[-2500:]
+        assert child.wait_for("chief of staff", _PAINT_DEADLINE), child.screen()[-2500:]
 
         # 3. A typed message is refused with the shared cue — the message
         #    version says it was not sent — and never with the desktop copy.
         child.send("hello there\r")
-        assert child.wait_for("your message was not sent", 30.0), child.screen()[-2500:]
+        assert child.wait_for("your message was not sent", _PAINT_DEADLINE), child.screen()[-2500:]
         assert "can't reply yet" in child.screen()
         assert "Settings > Providers" not in child.screen()
         # D1: the no-provider block must not promise the first-run greeting on
@@ -176,14 +186,18 @@ def test_the_first_login_routes_to_her_and_arms_the_greeting(tmp_path: Path) -> 
     child = _TuiChild(tmp_path)
     root = tmp_path / ".local-operator"
     try:
-        assert child.wait_for("no provider configured", 60.0), child.screen()[-2500:]
+        assert child.wait_for("no provider configured", _PAINT_DEADLINE), child.screen()[-2500:]
         child.send("/login deepseek\r")
-        assert child.wait_for("Paste your DeepSeek API key", 30.0), child.screen()[-2500:]
+        assert child.wait_for("Paste your DeepSeek API key", _PAINT_DEADLINE), child.screen()[
+            -2500:
+        ]
         child.send("sk-test-not-a-real-key\r")
 
         state = root / "aida" / "state.json"
-        deadline = time.monotonic() + 40.0
+        ledger = root / "aida" / "onboarding.json"
+        deadline = time.monotonic() + _PAINT_DEADLINE
         armed = False
+        stamped = False
         while time.monotonic() < deadline:
             child.drain(0.5)
             if not state.exists():
@@ -192,8 +206,20 @@ def test_the_first_login_routes_to_her_and_arms_the_greeting(tmp_path: Path) -> 
             entry = root / "wakes" / f"{session_id}.json"
             if entry.exists() and "aida-greeting" in entry.read_text():
                 armed = True
+            # The stamp trails the row by ~2 ms measured, but the writer is the
+            # app's own arm sequence, not this test's, so BOTH facts are polled
+            # inside the deadline (QA round 2, Q2: a single-shot read here
+            # slipped inside that window under fleet load while the product was
+            # correct — row armed, stamp not yet written).
+            if ledger.exists():
+                try:
+                    if json.loads(ledger.read_text()).get("greeted_at") is not None:
+                        stamped = True
+                except ValueError:
+                    pass  # a torn read mid-write; the next lap re-reads
+            if armed and stamped:
                 break
         assert armed, child.screen()[-2500:]
-        assert "greeted_at" in (root / "aida" / "onboarding.json").read_text()
+        assert stamped, child.screen()[-2500:]
     finally:
         child.reap()

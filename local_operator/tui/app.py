@@ -18618,7 +18618,14 @@ class OperatorApp(App[None]):
                     f"{AIDA_MARKER} Aida can't reply yet{unsent_part}: {AIDA_NO_PROVIDER_CUE}",
                     starting,
                 )
-            return (f"no provider configured{unsent_part}: {AIDA_NO_PROVIDER_CUE}", starting)
+            # The shared cue already carries the diagnosis, so the splash arm
+            # does not repeat it in front of it (design review round 2, NIT):
+            # the line used to read "no provider configured — … — no provider
+            # configured (…)". The ONE-cue rule holds either way — this is the
+            # same string, without a second copy of its own opening words.
+            if unsent:
+                return (f"your message was not sent: {AIDA_NO_PROVIDER_CUE}", starting)
+            return (AIDA_NO_PROVIDER_CUE, starting)
         return ("session is still starting…", starting)
 
     def _retire_name_list_reserve(self) -> None:

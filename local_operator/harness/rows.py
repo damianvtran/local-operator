@@ -626,20 +626,13 @@ def wake_receipt_headline(text: str) -> str:
     # Engine-armed rows carry ids a person never chose (`aida-greeting`), and a
     # raw schedule id where a greeting goes reads as instrumentation on the
     # first frame of a fresh install's first conversation (design review round
-    # 1, D2). The labels live WITH the ids (`aida/proactive.py`) and are read
-    # lazily — the same reason the clause above is imported rather than
-    # re-spelled: ONE copy, and this module stays host-free. Every
-    # user-created wake passes through unchanged.
+    # 1, D2). The lookup is SHARED with the catch-up composition rather than
+    # re-spelled here, so both receipt shapes name a wake the same way.
     ident, sep, rest = head.partition(" ")
     if ident:
-        try:
-            from local_operator.aida import proactive as aida_proactive
-
-            label = aida_proactive.wake_display_label(ident)
-            if label != ident:
-                head = f"{label}{sep}{rest}"
-        except Exception:  # noqa: BLE001 — a label is never worth a receipt
-            pass
+        label = wake_display_name(ident)
+        if label != ident:
+            head = f"{label}{sep}{rest}"
     return head.strip()
 
 
@@ -695,6 +688,29 @@ def monitor_receipt_headline(text: str) -> str:
     while head.startswith(MONITOR_ENVELOPE_PREFIX):
         head = head[len(MONITOR_ENVELOPE_PREFIX) :]
     return head.strip()
+
+
+def wake_display_name(wake_id: str) -> str:
+    """A wake row's human name: its engine label, or the id itself.
+
+    ONE lookup for every human surface that names a wake row — the
+    single-delivery headline above and the catch-up composition in
+    ``tui/widgets/transcript.WakeBlock._summary``, which builds its own
+    headline from the per-schedule bullet ids and so never went through the
+    fold: a fresh install's first receipt read ``catch-up — 1 missed wake
+    (aida-greeting)`` while the live seat beside it already said ``Aida's
+    introduction`` (UX review round 2, U5 / QA Q3). The labels live WITH the
+    ids in ``aida/proactive.py`` and are read lazily — the same reason the
+    scratch clause above is imported rather than re-spelled: ONE copy, and
+    this module stays host-free. Every user-created wake answers with its own
+    id.
+    """
+    try:
+        from local_operator.aida import proactive as aida_proactive
+
+        return aida_proactive.wake_display_label(wake_id)
+    except Exception:  # noqa: BLE001 — a label is never worth a receipt
+        return wake_id
 
 
 #: Painted under a child's report that was HELD when it arrived — the delivery

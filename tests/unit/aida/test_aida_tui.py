@@ -892,6 +892,18 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
         await _await_setup_state(app, pilot)
         editor = app.query_one(Editor)
 
+        # The SPLASH arm's refusal (before `/aida` opens her view): the shared
+        # cue carries the diagnosis, so "no provider configured" appears
+        # exactly ONCE — the prefix this PR used to add put it at both ends of
+        # one line (design review round 2, NIT).
+        editor.focus()
+        editor.text = "hello"
+        editor.move_cursor(editor._end_of_buffer())
+        await pilot.pause()
+        await pilot.press("enter")
+        await _until(pilot, lambda: "your message was not sent" in _transcript_text(app))
+        assert _transcript_text(app).count("no provider configured") == 1
+
         async def send(line: str, until: object = None) -> None:
             editor.focus()
             editor.text = line
@@ -1056,12 +1068,24 @@ async def test_opening_her_conversation_arms_the_owed_greeting(tmp_path, monkeyp
     her from `/aida` (or the picker). Nothing armed the greeting on that path
     — first contact got no greeting, and the earliest natural fire was the
     next 09:00 cadence (review round 1, U2).
+
+    The boot-materialised directory below is the shipped shape this test host
+    originally could not see: a normal launch leaves one session directory
+    (lease + pid, no transcript) behind, and while existence alone counted as
+    "the operator has conversations" the predicate read false on a fresh
+    install's first boot — this test failed on that head and passes with the
+    engagement-discounting predicate (UX review round 2, U4).
     """
     from local_operator.config import ConfigManager
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
     ConfigManager(config_dir=tmp_path).update_config({"hosting": "test", "model_name": "mock"})
+
+    booted = tmp_path / "sessions" / "bootmaterialised0001"
+    booted.mkdir(parents=True)
+    (booted / ".execution-lease").write_text('{"pid": 1}', encoding="utf-8")
+    (booted / ".session.pid").write_text("1", encoding="utf-8")
 
     from local_operator import aida as aida_pkg
 
