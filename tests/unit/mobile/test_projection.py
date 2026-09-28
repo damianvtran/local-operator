@@ -2370,6 +2370,92 @@ def test_a_verdict_for_a_call_that_already_started_is_not_applied() -> None:
     assert row.error == ""
 
 
+def test_late_frames_cannot_touch_a_settled_interrupted_row() -> None:
+    """Review round 1, M1: `interrupted` is the fourth TERMINAL state.
+
+    Three late-frame orders leaked while it was missing from the guard, and
+    each is pinned here with the frame that walked it: a duplicate-id twin
+    verdict re-reddened a user-stopped row (`failed`), a skipped verdict
+    overwrote the abort receipt, and an older dictation frame walked a settled
+    skipped row back to `composing`. Every row state in the tuple must survive
+    the same frame classes the running-row test above covers — the phone's
+    states are `running`/`done`/`failed`/`interrupted`, so the guard reads the
+    same four.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="c1", tool_name="bash", args={"command": "sleep 30"})
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            result=ToolResult(
+                tool_call_id="c1",
+                tool_name="bash",
+                is_error=True,
+                content=[TextContent(text="aborted (stop): sleep 30")],
+                details={"__fault": "aborted"},
+                duration_s=2.4,
+            ),
+        )
+    )
+    row = [entry for entry in fold.projection.transcript if entry.kind == "tool"][0]
+    assert row.tool_state == "interrupted"
+    receipt = row.error
+    assert "aborted (stop)" in receipt
+
+    # (a) The twin-order the duplicate_id fault exists for: a late verdict for
+    # a re-used id must not re-redden the stopped call.
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            dictation_complete=True,
+            not_run_reason="Duplicate call id 'c1' skipped.",
+            not_run_kind="duplicate_id",
+        )
+    )
+    assert row.tool_state == "interrupted", "a stopped row is not re-reddened by a late twin"
+    assert row.error == receipt
+
+    # (b) A late skipped verdict must not overwrite the abort receipt.
+    fold.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="c1",
+            tool_name="bash",
+            dictation_complete=True,
+            not_run_reason="Tool call skipped: interrupted by steering.",
+            not_run_kind="skipped",
+        )
+    )
+    assert row.tool_state == "interrupted"
+    assert row.error == receipt, "the abort receipt is the row's, not the late frame's"
+
+    # (c) A settled skipped row + an OLDER dictation frame: once it has a
+    # verdict, the row cannot be walked back to `composing`.
+    settle = make_fold()
+    settle.fold_event(AgentStartEvent(generation=1))
+    settle.fold_event(ToolCallComposeEvent(tool_call_id="c9", tool_name="wake", argument_bytes=14))
+    settle.fold_event(
+        ToolCallComposeEvent(
+            tool_call_id="c9",
+            tool_name="wake",
+            argument_bytes=14,
+            dictation_complete=True,
+            not_run_reason="Tool call skipped: interrupted by steering.",
+            not_run_kind="skipped",
+        )
+    )
+    skipped = [entry for entry in settle.projection.transcript if entry.kind == "tool"][0]
+    assert skipped.tool_state == "interrupted"
+    was_summary = skipped.summary
+    settle.fold_event(ToolCallComposeEvent(tool_call_id="c9", tool_name="wake", argument_bytes=14))
+    assert skipped.tool_state == "interrupted", "a settled row is not walked back to composing"
+    assert skipped.summary == was_summary
+
+
 def test_a_duplicate_id_winner_clears_the_losers_failure_text() -> None:
     """The revive path drops the failure TEXT with the failure STATE.
 

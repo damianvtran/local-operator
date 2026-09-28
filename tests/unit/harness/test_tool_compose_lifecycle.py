@@ -433,6 +433,9 @@ async def test_a_steering_skip_settles_every_remaining_announcement() -> None:
                 tool_call_delta(0, id="call_a", name="a", args="{}"),
                 tool_call_delta(1, id="call_b", name="b", args="{}"),
                 tool_call_delta(2, id="call_c", name="c", args="{}"),
+                # A call with its OWN planning verdict, sitting in the tail the
+                # steering skip covers (Q-1, desktop QA round 1).
+                tool_call_delta(3, id="call_d", name="nickel", args="{}"),
                 StreamEndEvent(stop_reason="toolUse"),
             ],
             [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
@@ -474,6 +477,24 @@ async def test_a_steering_skip_settles_every_remaining_announcement() -> None:
         assert len([f for f in _terminal_frames(events, call_id) if f.not_run_reason]) == 1
         started, ended = _lifecycle(events, call_id)
         assert started == [] and ended == []
+
+    # Q-1 (desktop QA round 1 against the sibling UI PR, fixed here): a call
+    # that already HAS a planning verdict keeps it. `call_d` was parked with
+    # `unknown_tool` before any batch ran, and the skipped tail used to append
+    # a SECOND result for it — so the model read "Tool not found" and then
+    # "skipped" for one call, and a durable consumer keyed by call id takes
+    # the last result per id, relabelling the row as an interruption on every
+    # replay. The frames loop had carried this filter from the start; the
+    # results loop now does too.
+    failed_frames = [f for f in _terminal_frames(events, "call_d") if f.not_run_reason]
+    assert len(failed_frames) == 1, "one terminal frame per call, and it is the verdict's"
+    assert failed_frames[0].not_run_kind == "unknown_tool"
+    failed_results = [
+        m for m in context.messages if isinstance(m, Message) and m.tool_call_id == "call_d"
+    ]
+    assert len(failed_results) == 1, "the planning verdict is the call's ONLY result"
+    details = (failed_results[0].provider_payload or {}).get("details") or {}
+    assert details.get("__fault") == "unknown_tool", details
 
 
 @pytest.mark.asyncio

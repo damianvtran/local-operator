@@ -4007,6 +4007,11 @@ class ToolCard(ExpandableActionBlock):
         # width that holds the word whole it is dropped, and the glyph column
         # carries the state alone — which it can, being distinguishable from
         # ✓ and ✗ with no colour at all.
+        #
+        # `word_tint` is None for every arm except `interrupted`, whose word
+        # splits from the glyph's ink (see that arm): the reason run falls back
+        # to `tint` and the arms that never set it are untouched.
+        word_tint: Style | None = None
         if self._state == "success":
             if self._partial:
                 # PARTIAL: the tool answered, but not about the whole tree it was
@@ -4048,9 +4053,14 @@ class ToolCard(ExpandableActionBlock):
                 abbreviates = True
         elif self._state == "interrupted":
             # `bindings.BY_ELEMENT["tool.status.interrupted"]` deliberately
-            # keeps `dim`, not a hue: see its note.
+            # keeps `dim`, not a hue: see its note. The WORD splits from the
+            # glyph's ink (review round 1, D1): `dim` measured 4.18:1 on
+            # `surface` — under the 4.5:1 text floor — and the word is the
+            # state's carrier, so it takes `muted` (7.93:1) while the ⊘ keeps
+            # `dim` (the 3:1 icon floor).
             glyph, reason = ICON_INTERRUPTED, self._interrupt_label
             tint = bindings.style("tool.status.interrupted")
+            word_tint = bindings.style("tool.status.interrupted_word")
             abbreviates = False
         else:
             danger = bindings.style("tool.status.error_glyph")
@@ -4058,6 +4068,7 @@ class ToolCard(ExpandableActionBlock):
             abbreviates = True
 
         runs: list[tuple[str, Style]] = []
+        word_ink = word_tint or tint
         if not terse and reason:
             if cap:
                 # Uncapped, the caller clamps downstream and the reason rides
@@ -4071,7 +4082,7 @@ class ToolCard(ExpandableActionBlock):
             # "there were words here". Drop it and give the cell back to the
             # columns that still mean something.
             if reason and reason != "…":
-                runs.append((f"{reason} ", tint))
+                runs.append((f"{reason} ", word_ink))
         runs.append((f"{glyph} ", tint))
         runs.append((duration, dim))
         return runs
