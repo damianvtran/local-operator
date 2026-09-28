@@ -245,11 +245,12 @@ def search_messages(
         else:
             soft_ids = SoftSearchIndex().search(digests, query)
 
-    # Sort key: tier first (a literal match is stronger than a fuzzy one),
-    # then the injected demotion (D3), then the journal ordinal — ascending, so
-    # Enter walks the conversation forward. ``seq`` is unique per doc, so the
-    # order is total and deterministic.
-    ranked: list[tuple[tuple[int, int, int], FindHit]] = []
+    # Ranking is a property of ``(tier, injected, seq)`` alone, so the entries
+    # are keyed FIRST and only the survivors get a snippet: building a snippet
+    # for every match wastes the whole point of ``limit`` (a common word in a
+    # long conversation matches thousands of docs, each snippet ~a message long).
+    # ``seq`` is unique per doc, so the order is total and deterministic.
+    ranked: list[tuple[tuple[int, int, int], MessageDoc, list[tuple[int, int]]]] = []
     for doc in docs:
         found = occurrences.get(doc.id)
         if found is not None:
@@ -258,19 +259,24 @@ def search_messages(
             tier, spans = SOFT, []
         else:
             continue
-        snippet, ranges = _snippet_for(doc, spans)
-        hit = FindHit(
-            id=doc.id,
-            role=_WIRE_ROLE.get(doc.role, "user"),
-            ts=doc.ts,
-            snippet=snippet,
-            ranges=ranges,
-            tier=tier,
-        )
-        ranked.append(((0 if tier == EXACT else 1, 1 if doc.injected else 0, doc.seq), hit))
+        ranked.append(((0 if tier == EXACT else 1, 1 if doc.injected else 0, doc.seq), doc, spans))
 
     ranked.sort(key=lambda entry: entry[0])
-    return [hit for _key, hit in ranked[:limit]], len(ranked) > limit
+    truncated = len(ranked) > limit
+    hits: list[FindHit] = []
+    for _key, doc, spans in ranked[:limit]:
+        snippet, ranges = _snippet_for(doc, spans)
+        hits.append(
+            FindHit(
+                id=doc.id,
+                role=_WIRE_ROLE.get(doc.role, "user"),
+                ts=doc.ts,
+                snippet=snippet,
+                ranges=ranges,
+                tier=EXACT if spans else SOFT,
+            )
+        )
+    return hits, truncated
 
 
 #: Held soft-search state per conversation: the token-cache instance and the
