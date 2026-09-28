@@ -16,6 +16,9 @@ The package is split so each module stays importable where it is read:
   safety core).
 - :mod:`local_operator.monitors.diff` — normalization, hashing, bounded line
   deltas.
+- :mod:`local_operator.monitors.classify` — the §8 classifier gate: the typed
+  question, the bounded state, the fork mapping, and the adapter over the
+  session's shared classification seam.
 - :mod:`local_operator.monitors.state` — per-monitor counters + snapshot files.
 - :mod:`local_operator.monitors.store` — the derived per-session index.
 - :mod:`local_operator.monitors.scheduler` — the in-session scheduler.
