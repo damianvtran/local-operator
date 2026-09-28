@@ -107,9 +107,32 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # ("runtime joining", "nothing to stop"), carried verbatim exactly as the CLI's
     # receipt carries it, because a flag and its English translation on two lines is
     # the duplication UX round 3 removed.
-    ("local_operator/network/tool.py", "_render", "detail"): (
+    (
+        "local_operator/network/tool.py",
+        "_render",
+        "detail",
+    ): (
+        2,
+        "the peer's own sentence for a session op, rendered verbatim; the second read "
+        "is the readiness digest's row sentence, composed FOR a person in readiness.py",
+    ),
+    # The readiness report's own sentences. Capability rows are COMPOSED as prose in
+    # ``readiness.py`` (the machine token rides ``code``, which no surface here
+    # prints); the CLI renders those sentences and the summary fragments reuse them.
+    # The reading for reachability rows READS the stage code only to classify it —
+    # every sentence it returns is authored in one place — and the one verbatim arm
+    # is the no-relay fallback's own prose row.
+    ("local_operator/network/readiness.py", "reachability_reading", "detail"): (
         1,
-        "the peer's own sentence for a session op, rendered verbatim",
+        "classifier input; the returned sentences are authored here, never echoed",
+    ),
+    ("local_operator/network/cli.py", "_ready_lines", "detail"): (
+        1,
+        "the row's own composed sentence; the machine token stays in `code`",
+    ),
+    ("local_operator/network/cli.py", "_ready_failure", "detail"): (
+        2,
+        "the summary reuses the same composed sentence (readiness arm + fallback arm)",
     ),
     # The credential listing's `skipped` rows (review round 5, NIT 2). THIS VOCABULARY
     # IS THIS DEVICE'S OWN, which is why the token is shown rather than glossed or
