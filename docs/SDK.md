@@ -41,6 +41,9 @@ async def main() -> None:
         await session.prompt("Summarize the repository")  # awaited to the turn's outcome
         async for event in stream:
             print(event.type)
+            if event.type == "agent_end":  # this prompt's terminal event
+                break  # the stream itself never ends — end it explicitly
+        await stream.aclose()  # unsubscribe once you are done
 
 
 asyncio.run(main())
@@ -54,7 +57,7 @@ The event JSON projection for line-oriented consumers is
 
 | Entry point | What it does | Exec-parity reference |
 | --- | --- | --- |
-| `open_session(spec, roots=..., mode="own"\|"attach")` | `own`: builds the session in this process (like `lop exec` foreground) and yields it for use inside an `async with`. `attach`: the viewer path for an id whose runtime is **already live**; a cold id is refused with a remedy. | `session_factory.create_session` |
+| `open_session(spec, roots=..., mode="own"\|"attach")` | `own`: builds the session in this process (like `lop exec` foreground) and yields it for use inside an `async with`. `attach`: the viewer path for an id whose runtime is **already live**; a cold id is refused with a remedy. An attach spec carries `resume` only — owner-side fields (team/profile/tools/name/goal) and non-default `approvals` are refused, not silently inert. | `session_factory.create_session` |
 | `spawn_session(spec, roots=..., errand=...)` | Runtime-hosted and survives the caller: mints a viewer-style id (`uuid4().hex[:12]`), warms a detached runtime with the spec's birth sample, then delivers the errand over the one engagement router. | phone/TUI spawn (`engage_runtime`) |
 | `deliver(session_id, roots=..., errand=...)` | One engagement for an existing session (`id` or `@latest`), cold or live. | `lop send` / mobile engage |
 | `events(session)` | Async iterator over `session.subscribe()`; `aclose()` (or `async with`) unsubscribes. | `exec --json`'s stream |
