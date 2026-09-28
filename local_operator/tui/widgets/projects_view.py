@@ -246,9 +246,11 @@ class ProjectsView(Vertical):
         # `↵` opens the selected project's conversation (S3b). The rung is a
         # pure addition to the BOARD's ladder — ` · ↵  open` = 10 cells (key +
         # label + seam) — and sheds first, ahead of `r refresh`. On the
-        # TIMELINE it defers `+/- zoom`: measured, zoom returns at 110 columns
-        # where it returned at ~97 before open existed (open outranks zoom in
-        # `all_leads` — the recorded trade, review round 2 R2-2b).
+        # TIMELINE it defers `+/- zoom`: the with-open+zoom plan measures 101
+        # cells, so zoom flips back at 107 terminal columns (absent at 106,
+        # avail 100; present at 107, avail 101 — this harness) where it used to
+        # return at ~97 (open outranks zoom in `all_leads` — the recorded
+        # trade; review rounds 2 R2-2b and 3 R3-1).
         self._open_hint = HintButton("↵", lambda: self.action_jump())
         self._list_hint = HintButton("1", lambda: self.action_show_list())
         self._board_hint = HintButton("2", lambda: self.action_show_board())
