@@ -556,7 +556,23 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:
 #: The merged ceiling lands at head + 55 — the band this file keeps — and the
 #: tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 33_660
+#:
+#: RAISED 33,660 -> 33,760 for the project STATUS LIFECYCLE slice: the status
+#: vocabulary (planning|active|qa|validation|paused|done|archived) in the
+#: field description and the ``force_done`` switch that opens the done gate —
+#: both on the ONE ``project`` tool every surface reads. Measured same-host,
+#: one tree after the other:
+#:
+#:   baseline (origin/main c95d1ae01)      93,421 chars = ~33,605 billed
+#:   head (this branch)                    93,699 chars = ~33,705 billed
+#:     = +278 chars = +100 billed: the lengthened ``status`` description (the
+#:       seven words and the gate sentence) plus the ``force_done`` field; the
+#:       alternative was a status word set only the refusal knows, which
+#:       cannot teach the vocabulary before the model's first mistake.
+#:
+#: The raise lands at head + 55 — the band this file keeps — and the tighten
+#: band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 33_760
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

@@ -1006,3 +1006,110 @@ def test_a_post_replace_failure_keeps_the_rows_files(store, tmp_path, monkeypatc
     assert all(Path(path).exists() for path in stored_paths)
     # The store converges to the landed row on a fresh read.
     assert store.get_project(project.id).updates[-1].text == "newest"
+
+
+def test_the_status_vocabulary_is_one_source_and_round_trips(store) -> None:
+    from typing import get_args
+
+    from local_operator.projects import (
+        PROJECT_LIVE_STATUSES,
+        PROJECT_STATUSES,
+        ProjectStatus,
+    )
+
+    # ONE copy: the model literal, the tool's vocabulary and the refusal text
+    # all derive from PROJECT_STATUSES (and the tool's list is this tuple).
+    assert tuple(get_args(ProjectStatus)) == PROJECT_STATUSES
+    assert PROJECT_LIVE_STATUSES == {"planning", "active", "qa", "validation"}
+    for status in PROJECT_STATUSES:
+        project = create(store, name=f"st-{status}", status=status)
+        assert store.get_project(project.id).status == status
+
+
+@pytest.mark.parametrize("status", ["planning", "active", "qa", "validation"])
+def test_in_flight_statuses_can_read_stale(store, status) -> None:
+    project = create(store, name=f"live-{status}", status=status, progress="older line")
+    row = store.get_project(project.id)
+    stale_moment = row.progress_updated_at + PROJECT_PROGRESS_STALE_S + 60
+    assert progress_is_stale(row, now=stale_moment)
+
+
+def test_never_reported_is_stale_for_every_in_flight_status(store) -> None:
+    for status in ("planning", "active", "qa", "validation"):
+        project = create(store, name=f"nr-{status}", status=status)
+        assert progress_is_stale(project), status
+    for status in ("paused", "done", "archived"):
+        project = create(store, name=f"nr-settled-{status}", status=status)
+        assert not progress_is_stale(project), status
+
+
+def test_lifecycle_rows_written_before_the_extension_still_load(store) -> None:
+    # Back-compat: every status the OLD vocabulary could write is still valid,
+    # and a fresh reader loads each row unchanged.
+    project = create(store)
+    row = json.loads((store.projects_dir / f"{project.id}.json").read_text())
+    for legacy in ("active", "paused", "done", "archived"):
+        row["status"] = legacy
+        (store.projects_dir / f"{project.id}.json").write_text(json.dumps(row))
+        reader = ProjectRegistry(store.config_dir)
+        assert reader.get_project(project.id).status == legacy
+
+
+def test_done_needs_complete_milestones_or_force_done(store) -> None:
+    project = create(
+        store,
+        milestones=[
+            {"name": "beta cut"},
+            {"name": "gamma review", "completed_at": "2026-01-01"},
+        ],
+    )
+    with pytest.raises(ValueError) as excinfo:
+        store.update_project(project.id, ProjectEdit(status="done"), reporter=SESSION_A)
+    message = str(excinfo.value)
+    assert "cannot set status 'done'" in message
+    assert "'beta cut'" in message  # the incomplete one is named
+    assert "'gamma review'" not in message  # the complete one is not
+    assert "force_done=true" in message  # and the escape hatch is in the sentence
+    assert store.get_project(project.id).status != "done"
+
+    forced = store.update_project(
+        project.id, ProjectEdit(status="done"), reporter=SESSION_A, force_done=True
+    )
+    assert forced.project.status == "done"
+    assert forced.project.completed_at is not None  # the stamp still applies
+
+
+def test_done_is_allowed_when_the_plan_is_complete_or_empty(store) -> None:
+    complete = create(
+        store,
+        name="complete-plan",
+        milestones=[{"name": "one", "completed_at": "2026-01-01"}],
+    )
+    assert store.update_project(complete.id, ProjectEdit(status="done")).project.status == "done"
+    empty = create(store, name="plan-less")
+    assert store.update_project(empty.id, ProjectEdit(status="done")).project.status == "done"
+
+
+def test_a_same_call_replace_to_a_complete_list_passes_the_gate(store) -> None:
+    project = create(store, milestones=[{"name": "open"}])
+    outcome = store.update_project(
+        project.id,
+        ProjectEdit(status="done", milestones=[{"name": "closed", "completed_at": "2026-01-01"}]),
+        reporter=SESSION_A,
+    )
+    assert outcome.project.status == "done"
+
+
+def test_create_refuses_done_with_incomplete_milestones(store) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        store.create_project(
+            ProjectEdit(name="born-done", status="done", milestones=[{"name": "open"}]),
+            sessions=[SESSION_A],
+        )
+    assert "force_done=true" in str(excinfo.value)
+    made = store.create_project(
+        ProjectEdit(name="born-done-forced", status="done", milestones=[{"name": "open"}]),
+        sessions=[SESSION_A],
+        force_done=True,
+    )
+    assert made.status == "done"

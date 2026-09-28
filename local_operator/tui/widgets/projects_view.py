@@ -100,11 +100,18 @@ def _style_resolver() -> Callable[[str], Style]:
         "status": Style(color=color("accent")),
         # D4: per-status chips — `active` keeps the accent, `paused` warns,
         # `done`/`archived` recede. One mapping, read by the list rows, the
-        # footer chip and the board.
+        # footer chip and the board. The lifecycle statuses the board buckets
+        # still get their own chips: `planning` recedes (a plan not yet in
+        # motion), `qa` keeps the running accent, and `validation` takes the
+        # success tone — it is the status that reports a deployed artifact is
+        # proving itself.
         "status_active": Style(color=color("accent")),
         "status_paused": Style(color=color("warning")),
         "status_done": Style(color=color("muted")),
         "status_archived": Style(color=color("dim")),
+        "status_planning": Style(color=color("muted")),
+        "status_qa": Style(color=color("accent")),
+        "status_validation": Style(color=color("success")),
         "cursor": Style(color=color("accent"), bold=True),
         # The session's own projects carry `◆` in the row's leading column
         # (S3b): the accent without the cursor's bold, so `▸` still owns the

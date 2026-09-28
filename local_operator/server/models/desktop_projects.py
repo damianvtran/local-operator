@@ -188,7 +188,15 @@ class ProjectDeleted(BaseModel):
 #: phone's compile-time section order mirrors it (``STATUS_ORDER`` in
 #: ``mobile/web/src/components/projects-sheet.tsx``, which cannot import
 #: Python).
-STATUS_RANK = {"active": 0, "paused": 1, "done": 2, "archived": 3}
+STATUS_RANK = {
+    "planning": 0,
+    "active": 1,
+    "qa": 2,
+    "validation": 3,
+    "paused": 4,
+    "done": 5,
+    "archived": 6,
+}
 
 
 class _Request(BaseModel):
