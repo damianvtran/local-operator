@@ -323,10 +323,23 @@ def test_no_native_timer_call_survives_in_the_modules_executable_code() -> None:
 
 
 #: The child for P2. THE PRECONDITION IS FORCED, not waited for: a timer that fires
-#: repeatedly into a dump channel the parent stops draining the moment it has seen the
-#: fire, so the C thread's write cannot complete and that dump is in flight for good.
-#: Only then does the child touch the module's arm path — and the module's own dump
-#: goes to its own directory, so nothing here depends on the blocked channel.
+#: ONCE into a dump channel the parent stops draining the moment it has seen the
+#: fire, so the C thread's write cannot complete and that dump stays in flight for
+#: good. Only then does the child touch the module's arm path — and the module's own
+#: dump goes to its own directory, so nothing here depends on the blocked channel.
+#:
+#: ONE dump, not a stream, and the difference is load rather than mechanics. The
+#: property the rig measures is "one dump in flight while the arm path runs"; a
+#: ``repeat=True`` timer added nothing to it (the blocked write parks the C thread
+#: on its FIRST fire, and a completing control dump needs no successor) but made
+#: the control a perpetual all-thread dump storm — six 250-frame-deep threads
+#: walked every 50 ms, the rig's own load on a 4-vCPU CI runner. Measured on CI:
+#: the control child died inside ``arm()`` in 5 of the 45 CI executions of this
+#: cell (`TICK 1 / TIMER-ARMED control / GO`; 1.5-3.8 s where the healthy cell
+#: finishes in 0.26-0.44 s over 40 samples — runs 36361736833, 36364477180,
+#: 36367266758, 36389917865, 36466096472). Single-shot keeps the geometry — the
+#: write still cannot complete undrained and still completes drained — and
+#: removes the storm.
 _ARM_PATH_CHILD = """
 import faulthandler
 import pathlib
@@ -369,7 +382,7 @@ def ticker():
 
 threading.Thread(target=ticker, name="loop-proxy", daemon=True).start()
 
-faulthandler.dump_traceback_later(0.05, repeat=True, file=sink, exit=False)
+faulthandler.dump_traceback_later(0.05, repeat=False, file=sink, exit=False)
 print(f"TIMER-ARMED {mode}", flush=True)
 
 deadline = time.monotonic() + go_bound
@@ -470,21 +483,65 @@ class _ArmPathChild:
         return fired
 
     def _drain_forever(self) -> None:
-        try:
-            while self.read_end.recv(65536):
-                pass
-        except OSError:
-            pass
+        """Keep the control's channel drained for the child's whole life.
+
+        A quiet half-second is NOT an error, and it is the normal case under CI
+        load. ``read_end`` still carries the 0.5 s timeout the fire search set,
+        so the first gap longer than that raised ``TimeoutError`` — which the
+        previous version caught as ``OSError`` and exited the drain silently:
+        from then on the "control" was no longer draining, and the one property
+        that makes it a control (the only difference from the rig is the drain)
+        was gone without a word. Retry on timeout; only a hard ``OSError`` (the
+        socket closed by ``close()``) or EOF ends the drain.
+        """
+        while True:
+            try:
+                if not self.read_end.recv(65536):
+                    return
+            except TimeoutError:
+                continue
+            except OSError:
+                return
 
     def wait_for(self, marker: str, timeout: float) -> str:
+        """Wait up to ``timeout`` for ``marker``; return the child's output either way.
+
+        A child that has EXITED ends the wait at once, and its output is then what
+        a failure has to report — so the reader thread is joined (bounded) before
+        the output is read back. The child can be reaped before its last lines
+        have been consumed, and a message that races its own evidence hides the
+        difference between "the child died" (``rc`` names it) and "the child is
+        wedged". CI run 36466096472's control failure could show only
+        ``TICK 1 / TIMER-ARMED control / GO`` for a child that had exited seconds
+        earlier; both distinguishing facts were unavailable to it.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if any(marker in line for line in self.lines):
                 break
             if self.process.poll() is not None:
+                # EOF on the pipe arrives with the child's exit; bounded because
+                # a grandchild of the child could hold the write end open.
+                self.reader.join(timeout=2.0)
                 break
             time.sleep(0.05)
         return "\n".join(self.lines)
+
+    def death_report(self) -> str:
+        """One diagnostic line for a child whose sentinels are missing.
+
+        Read from artifacts, not from guesses: ``rc`` separates exited from
+        killed (negative = the signal number: -9 SIGKILL, -7 SIGBUS, -11
+        SIGSEGV) and from still running, and the child's OWN dump file says
+        whether ``arm`` got as far as its header write. Both facts survive a
+        dead reader, which is exactly what the message this supports could not
+        rely on when the control child died on CI.
+        """
+        rc = self.process.returncode
+        status = "still running" if rc is None else f"rc={rc}"
+        dump = stall_watchdog.dump_path(self.process.pid, self.dump_dir)
+        present = "present" if dump.exists() else "absent"
+        return f"child: {status}; its own dump file is {present}"
 
     def close(self) -> None:
         """Kill THIS pid and reap it; close the channel. Never a bare pgrep."""
@@ -523,8 +580,8 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
         control_output = control.wait_for("LOOP-SURVIVED", CHILD_BOUND_S)
         assert "LOOP-SURVIVED" in control_output, (
             "the CONTROL run did not survive with its dump channel drained, so the "
-            f"channel is not the difference this cell is about; output was "
-            f"{control_output!r}"
+            f"channel is not the difference this cell is about; {control.death_report()}; "
+            f"output was {control_output!r}"
         )
     finally:
         control.close()
@@ -541,7 +598,7 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
         rig.close()
     assert "ARM-PATH-RETURNED" in output, (
         f"the arm path never returned while a dump was in flight (child pid {pid} was "
-        f"killed after {CHILD_BOUND_S}s). The child stopped after: "
+        f"killed after {CHILD_BOUND_S}s). {rig.death_report()}. The child stopped after: "
         f"{output.splitlines()[-4:]!r} — a ticker that goes silent at GO is the field "
         f"signature: the caller parked inside the C timer call holding the GIL, so no "
         f"Python thread in the process could run"
@@ -631,7 +688,7 @@ def test_sigusr1_reaches_the_leg_on_a_real_armed_runtime_child(
             defer_materialise=False,
         )
         pid = child.pid
-        _wait_for_record(config_dir)
+        _wait_for_record(config_dir, child=child)
         dump = config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
         assert dump.is_file(), (
             f"the child never armed its bound:\n{_capture_text(child)}\n"
