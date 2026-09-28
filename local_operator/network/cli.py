@@ -1829,7 +1829,18 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     # filesystem. `@<token-file>` is the placeholder the rest of this module's receipts
     # already use, so the line keeps one spelling; the concrete path is in the line above,
     # where it is the inviter's own business.
-    command = "then, on the other device: lop network join @<token-file>"
+    #
+    # AND THE FILE DOES NOT TRAVEL BY ITSELF (design round 1, D3 again — the clause was
+    # lost when a fold of main re-wrote this line for the path above, which design round
+    # 2's D2-1 records). This line is read at the one moment the token file has to leave
+    # the machine: `--print` is the only other channel, and it is refused on a non-TTY
+    # stdout, which is every TUI front end of this family, so a line that names only the
+    # command describes ONE step where the trip is TWO. The clause rides on top of the
+    # placeholder rather than reverting it; the two fixes answer different halves of the
+    # same sentence.
+    command = (
+        "then, on the other device: carry that file over and run lop network join @<token-file>"
+    )
     if not payload.get("hosts"):
         command += " --host <this device's address:port>"
     return _emit(

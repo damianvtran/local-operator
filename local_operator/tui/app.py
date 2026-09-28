@@ -42526,6 +42526,31 @@ class OperatorApp(App[None]):
             # the same silence one branch up, and the reader who mistyped a name
             # is the reader least able to tell that the invite went to one they
             # did not mean.
+            #
+            # AND THE NAME IS RESOLVED, LIKE THE FOUR SIBLINGS THAT ADDRESS ONE
+            # (UX round 2, U2-1): `new` takes the WHOLE tail as a name, so
+            # `/network new My Fancy Net` makes a mesh a space wide — and this arm
+            # read the space as a surplus word and answered *My Fancy Net is more
+            # than one name*, a sentence that is false about a name this same
+            # surface creates, lists and renames. `rename`, `rm`, `disconnect` and
+            # `member rm` each resolve a longest-prefix target (`_network_split`)
+            # precisely so a name `new` has already accepted stays addressable;
+            # this arm was the fifth and the only one that could not, leaving the
+            # bare form (refused the moment the device is in two networks) and a
+            # 26-character id copied out of a DIFFERENT refusal as the only routes
+            # to a mesh the user had just named. Not a regression — the pre-fix arm
+            # failed on this input too (`this device is not in a network called
+            # 'My'`) — so what is fixed is the false sentence and the missing
+            # route.
+            #
+            # THE LEFTOVER IS WHAT REFUSES, NOT THE WORD COUNT, and that is what
+            # keeps R2-2 whole: a surplus that resolves to nothing still refuses,
+            # because nothing may be accepted and then dropped (`/network invite
+            # devmesh extra` resolves `devmesh` and refuses on `extra`, which is the
+            # sentence that made the drop visible in the first place). An
+            # unresolvable prefix degrades exactly as `_network_split` documents,
+            # passing its first token on so the CLI refuses it in the words that
+            # name the networks this device is in.
             role = "drive"
             words = list(rest)
             if words[:1] == ["--role"]:
@@ -42544,14 +42569,15 @@ class OperatorApp(App[None]):
                     "warning",
                 )
                 return
-            if len(words) > 1:
+            target, tail = self._network_split(words)
+            if tail:
                 self._system_notice(
                     "/network invite takes one network name and a leading --role <role>; "
                     f"{' '.join(words)} is more than one name",
                     "warning",
                 )
                 return
-            argv = ["invite", "--role", role] + (["--network", words[0]] if words else [])
+            argv = ["invite", "--role", role] + (["--network", target] if target else [])
             self._dispatch_network_cli(words[:1], argv, notice, verb="invite")
             return
         if verb == "show":
