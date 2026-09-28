@@ -1934,8 +1934,9 @@ def _is_a_name_in_the_store_grammar(token: str) -> bool:
     implied** (agent review R1-4). ``normalize_credential_key("prod")`` is ``PROD``: one
     word collapses to a single run of capitals, which is exactly the spelling the next
     paragraph refuses, so ``lop secret run`` with a one-word entry name is still masked,
-    and the
-    for. ``PROD`` is pinned in the corpus as that residual, in the half that asserts the
+    and the operator who names an entry with one word does not get the release this
+    change is for. ``PROD`` is pinned in the corpus as that residual, in the half that
+    asserts the
     MASK, so a later round narrowing or widening it has a row to argue against. Case
     does not rescue it: a lower-case ``prod`` is refused for the separate reason below,
     and admitting a bare run of capitals released the five real credential values in
@@ -4567,8 +4568,8 @@ _INCOMPLETE_MASK_RE = re.compile(
 
 
 #: The mirror case: a mask whose LEFT side is a readable run followed by a quote
-#: (``_authToken=`` then a readable run and a closing quote). The run is material
-#: could not see, and it is masked for the same reason as the tail.
+#: (``_authToken=`` then a readable run and a closing quote). The run is credential
+#: material the rule could not see, and it is masked for the same reason as the tail.
 _INCOMPLETE_MASK_LEFT_RE = re.compile(
     # `^` as well as a delimiter: a credential at the start of a line has nothing
     # before it, and that is where a prefix-orphaning split lands most often.
