@@ -47,7 +47,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 #: The default invite lifetime. A string flag parsed by :func:`_duration`, because
 #: ``--expires 10m`` is what a person types and ``600`` is what they would have to
@@ -78,6 +78,9 @@ _ACTIONS = (
     "trust",
     "log",
     "doctor",
+    # Peer READINESS (readiness.py): can the peers COMPLETE work offloaded to
+    # them — the install question, where `doctor` is the link question. A read.
+    "ready",
     "identity",
     "uninstall",
     # The credential broker's surfaces (mesh-credentials.md; build plan §2.2).
@@ -515,6 +518,18 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     doctor = actions.add_parser("doctor", help="Diagnose the mesh: reachability, epochs, identity")
     doctor.add_argument("--peer", default="")
     doctor.add_argument("--json", action="store_true")
+
+    # `lop network ready`: the READINESS report — what a peer's install is
+    # missing before work offloaded to it can complete (operator authority, git
+    # identity, MCP surface, model credential), each blocked row carrying the
+    # command that fixes it. `--peer` takes a name or a device id, like the
+    # session verbs; omitted, every member is reported on.
+    ready = actions.add_parser(
+        "ready",
+        help="Can peers complete offloaded work? Readiness with remedies",
+    )
+    ready.add_argument("--peer", default="", help="One device (a name or id), or every member")
+    ready.add_argument("--json", action="store_true")
 
     identity = actions.add_parser("identity", help="This device's key")
     identity_actions = identity.add_subparsers(dest="identity_command")
@@ -4800,6 +4815,92 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return _emit(args, answer, lines)
 
 
+def _ready_lines(checks: list[dict[str, Any]]) -> list[str]:
+    """The human rows for ``ready``, in this verb's own register.
+
+    Reachability rows keep doctor's vocabulary and get THIS verb's reading
+    (:func:`readiness.reachability_reading`): doctor's own renderer maps every
+    ``connect_failed:`` stage — including a REFUSED connection — to "nothing
+    answered", which is exactly the conflation this report exists to end (a
+    refusal means the host is up and nothing is listening). Doctor's output and
+    its tables are deliberately untouched. Capability rows carry complete
+    sentences already (composed in ``readiness``); remedies render under their
+    row the way the membership lines do.
+    """
+    from local_operator.network import readiness as readiness_mod
+    from local_operator.resume import doctor_detail_words
+
+    lines: list[str] = []
+    for check in checks:
+        state = "ok " if check.get("ok") else "FAIL"
+        kind = str(check.get("check", ""))
+        label = str(check.get("device_name") or check.get("device_id") or "")
+        if kind == "readiness":
+            # ``state check capability device: <sentence>`` — the design's row.
+            body = str(check.get("detail", ""))
+            lines.append(f"{state} {kind} {check.get('capability', '')} {label}: {body}".rstrip())
+        elif kind == "reachability":
+            reading = readiness_mod.reachability_reading(check)
+            lines.append(f"{state} {kind} {label} {check.get('endpoint', '')}: {reading}".rstrip())
+        else:
+            # identity / network / membership: doctor's grammar, doctor's words.
+            lines.append(
+                f"{state} {kind} {check.get('device_id', '')} "
+                f"{doctor_detail_words(str(check.get('detail', '')))}".rstrip()
+            )
+        for remedy in check.get("remedies") or ():
+            lines.append(f"    - {remedy}")
+    return lines
+
+
+def _ready_failure(check: Mapping[str, Any]) -> str:
+    """One failing row as a fragment of the summary sentence."""
+    from local_operator.network import readiness as readiness_mod
+
+    kind = str(check.get("check", ""))
+    if kind == "readiness":
+        return f"{check.get('capability', kind)}: {check.get('detail', '') or 'failed'}"
+    if kind == "reachability":
+        return f"{kind}: {readiness_mod.reachability_reading(check)}"
+    return f"{kind}: {check.get('detail', '') or 'failed'}"
+
+
+def _cmd_ready(args: argparse.Namespace) -> int:
+    """Report whether the peers can COMPLETE work offloaded to them.
+
+    The question ``doctor`` does not ask: readiness is an INSTALL question — can
+    the peer allow an approval, does it have an author for commits, any MCP
+    surface, a served default model — and every blocked row carries the command
+    that fixes it, on the side that has to run it. ``ok``/``code``/``message``
+    compose exactly as ``doctor``'s, so the refusal family keeps one shape and
+    an agent branches on the same keys.
+
+    The relay is given the LISTING budget because this op DIALS the peer and
+    asks it: with the 5 s default it would time out on its own work and the
+    fallback — which cannot dial — would answer instead.
+    """
+    live = _relay_call(
+        "peer_readiness", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
+    )
+    payload = live if live is not None else _ready_locally(args)
+    checks = list(payload.get("checks") or [])
+    lines = _ready_lines(checks)
+    if not lines:
+        lines.append("nothing to check: no networks, or no other members yet")
+    if not payload.get("identity_present", True):
+        lines.append(
+            "this device has no device identity (identity_missing): run `lop network init`, or "
+            "re-pair with a new invite"
+        )
+    failures = [_ready_failure(check) for check in checks if not check.get("ok")]
+    healthy = not failures and bool(payload.get("identity_present", True))
+    answer: dict[str, Any] = {**payload, "ok": healthy}
+    if not healthy:
+        answer["code"] = "unhealthy"
+        answer["message"] = "; ".join(failures) or "the device has no identity"
+    return _emit(args, answer, lines)
+
+
 def _unprobed_detail(has_endpoint: bool, relay_up: bool) -> str:
     """Why a row in the LOCAL doctor fallback carries no reachability answer.
 
@@ -4949,6 +5050,100 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
         "identity_present": identity_file.exists(),
         "identity_dir": str(identity_file.parent),
         "relay": relay_line,
+    }
+
+
+def _ready_locally(args: argparse.Namespace) -> dict[str, Any]:
+    """The readiness rows that need no relay: identity, records, then per member.
+
+    Same discipline as ``_doctor_locally``: with no relay answering there is
+    nothing here that can DIAL, so the member rows are ``ok: false`` with the
+    reason they were not dialled, and the capability checklist rides as
+    ``not_asked`` — a check that was never RUN did not PASS. ``--peer`` filters
+    by device id or by the NAME a person would have typed (the relay path
+    resolves names the same way; a fallback that ignored the filter would
+    answer about devices the caller did not ask about).
+    """
+    from local_operator.network import readiness as readiness_mod
+    from local_operator.network import store
+    from local_operator.network.identity import identity_path
+    from local_operator.network.relay import membership_state
+
+    relay_line, relay_up = _relay_state()
+    wanted = str(getattr(args, "peer", "") or "")
+    cap_detail = (
+        "not asked: this device's relay did not answer the readiness request"
+        if relay_up
+        else "not asked: no relay is running on this device, so nothing here can dial"
+    )
+    checks: list[dict[str, Any]] = []
+    identity_file = identity_path()
+    checks.append(
+        {
+            "check": "identity",
+            "ok": identity_file.exists(),
+            "detail": "present" if identity_file.exists() else "identity_missing",
+        }
+    )
+    for record in store.list_networks():
+        checks.append(
+            {
+                "check": "network",
+                "ok": not record.stale,
+                "detail": record.stale or "ok",
+                "network_id": record.network_id,
+            }
+        )
+        standing = membership_state(record)
+        if standing["state"] != "active":
+            checks.append(
+                {
+                    "check": "membership",
+                    "network_id": record.network_id,
+                    "ok": False,
+                    "code": standing["state"],
+                    "detail": standing["sentence"],
+                    "remedies": standing["remedies"],
+                }
+            )
+        for member in record.active_members():
+            if member.device_id == record.self_device_id:
+                continue
+            if wanted and wanted not in (member.device_id, member.name):
+                continue
+            checks.append(
+                {
+                    "check": "reachability",
+                    "device_id": member.device_id,
+                    "device_name": member.name,
+                    "endpoint": (member.endpoints or [""])[0],
+                    "ok": False,
+                    "probed": False,
+                    "detail": _unprobed_detail(bool(member.endpoints), relay_up),
+                    "observed": {
+                        "outcome": "not_attempted",
+                        "source_address": None,
+                        "interface": None,
+                        "elapsed_ms": None,
+                        "budget_s": None,
+                        "attempted": False,
+                        "last_seen_at": member.last_seen_at,
+                    },
+                }
+            )
+            checks.extend(
+                readiness_mod.not_asked_rows(
+                    member,
+                    detail=cap_detail,
+                    capabilities=(readiness_mod.CAPABILITY_BUILD, *readiness_mod.PEER_SIDE_CHECKS),
+                )
+            )
+    return {
+        "checks": checks,
+        "identity_present": identity_file.exists(),
+        "identity_dir": str(identity_file.parent),
+        "relay": relay_line,
+        "probed": False,
     }
 
 
@@ -5269,6 +5464,8 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "log": _cmd_log,
     "confirm": _cmd_confirm,
     "doctor": _cmd_doctor,
+    # The readiness report: `doctor`'s sibling, one question further out.
+    "ready": _cmd_ready,
     "identity": _guard_identity_subcommand,
     "uninstall": _cmd_uninstall,
     # ``credential`` has a sub-verb, so it needs the same "tell me what you meant"
