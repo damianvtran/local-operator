@@ -54,7 +54,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Literal, Sequence
+from typing import Any, Iterable, Iterator, Literal, Sequence
 
 from pydantic import (
     BaseModel,
@@ -881,11 +881,18 @@ def display_name(project: Project | Mapping[str, Any]) -> str:
 
 
 def file_size_text(size: int) -> str:
-    """Human size for refusals and attachment lines: ``12 B``/``82 KB``/``5.2 MB``."""
+    """Human size for refusals and attachment lines: ``12 B``/``4.0 KB``/``5.2 MB``.
+
+    ONE decimal place for both units, deliberately: the natural ``:g`` format
+    printed up to six significant digits (``4.00781 KB``, ``97.6562 KB``) —
+    false precision for a screenshot size (design review round 1, D2) — and a
+    conditional format (integer under 10, decimal above) would render the same
+    magnitude in two shapes.
+    """
     if size >= 1024 * 1024:
-        return f"{size / (1024 * 1024):g} MB"
+        return f"{size / (1024 * 1024):.1f} MB"
     if size >= 1024:
-        return f"{size / 1024:g} KB"
+        return f"{size / 1024:.1f} KB"
     return f"{size} B"
 
 
@@ -915,11 +922,14 @@ def history_lines(
     """
     raw_entries = project.get("updates") if isinstance(project, Mapping) else project.updates
     entries = list(raw_entries) if isinstance(raw_entries, list) else []
+    if tail <= 0:
+        # `0` OMITS the section — including the "none recorded" line, so the
+        # tool description's "0 omits the section" holds for an empty log too
+        # (agent review round 1, F2).
+        return []
     total = len(entries)
     if total == 0:
         return ["history: none recorded"]
-    if tail <= 0:
-        return []
     shown = entries[-tail:]
     if len(shown) == total:
         lines = [f"history ({total}):"]
@@ -1406,20 +1416,46 @@ class ProjectRegistry:
         target_dir.mkdir(parents=True, exist_ok=True)
         stamp = _utc_stamp(now)
         stored: list[ProjectAttachment] = []
-        for source in sources:
-            suffix = source.suffix.lower()
-            destination = target_dir / f"{uuid.uuid4().hex}{suffix}"
-            shutil.copyfile(source, destination)
-            stored.append(
-                ProjectAttachment(
-                    name=source.name,
-                    kind="image" if suffix in _IMAGE_SUFFIXES else "data",
-                    path=str(destination),
-                    bytes=destination.stat().st_size,
-                    added_at=stamp,
+        try:
+            for source in sources:
+                suffix = source.suffix.lower()
+                destination = target_dir / f"{uuid.uuid4().hex}{suffix}"
+                shutil.copyfile(source, destination)
+                stored.append(
+                    ProjectAttachment(
+                        name=source.name,
+                        kind="image" if suffix in _IMAGE_SUFFIXES else "data",
+                        path=str(destination),
+                        bytes=destination.stat().st_size,
+                        added_at=stamp,
+                    )
                 )
-            )
+        except BaseException:
+            # A copy that dies mid-loop (disk full, revoked read) must not
+            # leave earlier copies with no entry pointing at them; the
+            # caller's own guard covers everything after this returns
+            # (agent review round 1, F1).
+            self._reclaim_attachment_files(attachment.path for attachment in stored)
+            raise
         return stored
+
+    def _reclaim_attachment_files(self, paths: Iterable[str]) -> None:
+        """Best-effort unlink of stored attachment files; never raises.
+
+        Only paths UNDER this store's ``attachments/`` root are ever removed:
+        a row is a JSON file a human can edit, so a hand-written path must not
+        turn a reclaim into an arbitrary-file delete. Failures are ignored —
+        a leftover file is a leak, not corruption, and a reclaim error must
+        never fail the operation that triggered it (agent review round 1, F1).
+        """
+        root = (self.projects_dir / "attachments").resolve()
+        for raw in paths:
+            try:
+                target = Path(str(raw))
+                if target.resolve().is_relative_to(root):
+                    target.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover - best-effort reclaim
+                continue
 
     def create_project(
         self,
@@ -1570,23 +1606,32 @@ class ProjectRegistry:
                     "with attach in the same update (an identical re-send or a "
                     "clear appends no entry to carry them)"
                 )
+            stored_attachments: list[ProjectAttachment] = []
+            evicted_entries: list[ProjectUpdateEntry] = []
             if "progress" in supplied:
                 if new_text != candidate.progress:
                     candidate.progress = new_text
                     if new_text:
                         candidate.progress_updated_at = now
                         candidate.progress_reported_by = reporter
-                        candidate.updates = [
+                        stored_attachments = self._store_attachments(
+                            project_id, attachments, now=now
+                        )
+                        appended = [
                             *candidate.updates,
                             ProjectUpdateEntry(
                                 at=_utc_stamp(now),
                                 text=new_text,
                                 by=reporter,
-                                attachments=self._store_attachments(
-                                    project_id, attachments, now=now
-                                ),
+                                attachments=stored_attachments,
                             ),
-                        ][-UPDATES_MAX:]
+                        ]
+                        # The cap evicts oldest-first, and the evicted entries'
+                        # files are reclaimed only AFTER the save lands, so a
+                        # failed save can never leave the live row pointing at
+                        # files this call removed (agent review round 1, F1).
+                        evicted_entries = appended[:-UPDATES_MAX]
+                        candidate.updates = appended[-UPDATES_MAX:]
                     else:
                         # An empty snippet IS "no progress recorded": clearing
                         # the text clears the freshness pair with it, so a
@@ -1604,18 +1649,28 @@ class ProjectRegistry:
 
             # Re-validate the merged candidate through the model's own rules
             # before anything touches disk (dates order, caps, grammar).
-            candidate = Project.model_validate(candidate.model_dump(mode="json", by_alias=True))
-            if candidate == current:
-                # Pydantic equality covers every field, so "nothing moved" is
-                # provable rather than inferred from the changed flags.
-                return ProjectUpdate(current, changed=False, refreshed=refreshed)
-            if not changed:
-                # A merged value differs from the stored one only through
-                # equality above; reaching here with changed=False means the
-                # diff came from normalisation, which still deserves a write.
-                changed = True
-            candidate.updated_at = now
-            saved = self._save_project_locked(candidate)
+            try:
+                candidate = Project.model_validate(candidate.model_dump(mode="json", by_alias=True))
+                if candidate == current:
+                    # Pydantic equality covers every field, so "nothing moved" is
+                    # provable rather than inferred from the changed flags.
+                    return ProjectUpdate(current, changed=False, refreshed=refreshed)
+                if not changed:
+                    # A merged value differs from the stored one only through
+                    # equality above; reaching here with changed=False means the
+                    # diff came from normalisation, which still deserves a write.
+                    changed = True
+                candidate.updated_at = now
+                saved = self._save_project_locked(candidate)
+            except BaseException:
+                # A refusal on THIS call's path (name conflict, schema guard,
+                # validation) must take back the files it already copied: an
+                # orphaned copy has no entry to point at it (agent review
+                # round 1, F1).
+                self._reclaim_attachment_files(attachment.path for attachment in stored_attachments)
+                raise
+            for evicted in evicted_entries:
+                self._reclaim_attachment_files(a.path for a in evicted.attachments)
             return ProjectUpdate(saved, changed=changed, refreshed=refreshed)
 
     def link_session(self, project_id: str, session_id: str) -> tuple[Project, bool]:
@@ -1740,6 +1795,10 @@ class ProjectRegistry:
             if target.exists():
                 target.unlink()
                 _fsync_dir(self.projects_dir)
+            # The row is gone; reclaim its copied-in files. Best-effort — a
+            # leftover directory is a leak, never a reason to fail a delete
+            # that already happened (agent review round 1, F1).
+            shutil.rmtree(self.projects_dir / "attachments" / project_id, ignore_errors=True)
             self._projects.pop(project_id, None)
             self._dir_mtime_ns = self._dir_mtime()
 

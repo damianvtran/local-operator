@@ -637,3 +637,36 @@ def test_footer_keeps_the_status_chip_whole_when_the_name_overflows() -> None:
     assert "[p…" not in text
     assert cell_len(text) <= 56
     assert text.endswith("[paused]")  # the chip is the survivor, the name gives way
+
+
+def test_detail_footer_sheds_the_key_before_the_milestone_rollup() -> None:
+    """D1: the key has another home; the rollup does not — so the key goes first."""
+    view = _view(
+        "payments-migration",
+        title="Q4 Payments Migration",
+        milestones=[
+            {"name": "prototype", "target_date": None, "completed_at": "2026-01-01"},
+            {"name": "cutover", "target_date": "2026-10-01", "completed_at": None},
+        ],
+    )
+    # 96 cells is the 100x30 footer box (the D1 measurement): the rollup stays,
+    # the key sheds.
+    tight = detail_footer(view, width=96).plain
+    assert "Q4 Payments Migration [active]" in tight
+    assert "M 1/2" in tight and "[completed]" in tight
+    assert "(payments-migration)" not in tight
+    # Wide enough for identity-with-key plus the rollup, the key returns.
+    wide = detail_footer(view, width=140).plain
+    assert "Q4 Payments Migration (payments-migration) [active]" in wide
+    assert "M 1/2" in wide
+
+
+def test_detail_footer_marks_shed_content_down_to_the_bare_identity() -> None:
+    """D4: the marker now reaches the keyless rung; only the chip tight band stays bare."""
+    view = _view("payments-migration", title="Q4 Payments Migration")
+    marked = detail_footer(view, width=40).plain
+    assert marked == "Q4 Payments Migration [active] …"
+    # Below the bare identity the chip already spends the width (the tight
+    # rebuild) — the marker-less band is only 27-32 cells now (was 27-49).
+    bare = detail_footer(view, width=31).plain
+    assert bare == "Q4 Payments Migration [active]"

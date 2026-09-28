@@ -752,7 +752,7 @@ def test_attachment_refusals_name_the_remedy(store, tmp_path: Path) -> None:
         store.update_project(
             project.id, ProjectEdit(progress="big"), reporter=SESSION_A, attachments=[big]
         )
-    assert "limited to 5 MB each" in str(excinfo.value)
+    assert "limited to 5.0 MB each" in str(excinfo.value)
 
     with pytest.raises(ValueError) as excinfo:
         store.update_project(
@@ -834,3 +834,133 @@ def test_a_row_written_before_the_new_fields_loads_as_unknown(store) -> None:
     assert view["project"]["owner"] is None
     assert view["project"]["title"] is None
     assert view["project"]["updates"] == []
+
+
+def test_delete_reclaims_the_projects_attachment_files(store, tmp_path) -> None:
+    project = create(store)
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"x" * 64)
+    store.update_project(
+        project.id, ProjectEdit(progress="with evidence"), reporter=SESSION_A, attachments=[shot]
+    )
+    attached = Path(store.get_project(project.id).updates[-1].attachments[0].path)
+    assert attached.exists()
+
+    store.delete_project(project.id)
+    assert not (store.projects_dir / "attachments" / project.id).exists()
+    assert not attached.exists()
+
+
+def test_history_eviction_reclaims_the_evicted_entrys_files(store) -> None:
+    project = create(store)
+    folder = store.projects_dir / "attachments" / project.id
+    folder.mkdir(parents=True)
+    seeds = []
+    for index in range(UPDATES_MAX):
+        path = folder / f"seed-{index}.bin"
+        path.write_bytes(b"y")
+        seeds.append(path)
+    row = json.loads((store.projects_dir / f"{project.id}.json").read_text())
+    row["updates"] = [
+        {
+            "at": f"2026-01-01T00:00:{index % 60:02d}Z",
+            "text": f"seed {index}",
+            "by": "",
+            "attachments": [
+                {
+                    "name": seeds[index].name,
+                    "kind": "data",
+                    "path": str(seeds[index]),
+                    "bytes": 1,
+                }
+            ],
+        }
+        for index in range(UPDATES_MAX)
+    ]
+    (store.projects_dir / f"{project.id}.json").write_text(json.dumps(row))
+
+    reader = ProjectRegistry(store.config_dir)
+    outcome = reader.update_project(project.id, ProjectEdit(progress="newest"), reporter=SESSION_A)
+    assert len(outcome.project.updates) == UPDATES_MAX
+    assert outcome.project.updates[-1].text == "newest"
+    assert not seeds[0].exists()  # evicted oldest-first -> its file reclaimed
+    assert seeds[-1].exists()  # every entry still in the log keeps its file
+
+
+def test_eviction_never_deletes_files_outside_the_store(store, tmp_path) -> None:
+    # A hand-edited row must not be able to turn the reclaim into an
+    # arbitrary-file delete: only paths under the store's attachments root
+    # are ever unlinked (agent review round 1, F1's safety rule).
+    project = create(store)
+    outside = tmp_path / "keep.txt"
+    outside.write_text("keep me")
+    row = json.loads((store.projects_dir / f"{project.id}.json").read_text())
+    row["updates"] = [
+        {
+            "at": "2026-01-01T00:00:00Z",
+            "text": "outside path",
+            "by": "",
+            "attachments": [{"name": "keep.txt", "kind": "data", "path": str(outside), "bytes": 7}],
+        },
+        *[
+            {"at": f"2026-01-02T00:00:{index % 60:02d}Z", "text": f"filler {index}", "by": ""}
+            for index in range(UPDATES_MAX - 1)
+        ],
+    ]
+    (store.projects_dir / f"{project.id}.json").write_text(json.dumps(row))
+
+    reader = ProjectRegistry(store.config_dir)
+    outcome = reader.update_project(project.id, ProjectEdit(progress="newest"), reporter=SESSION_A)
+    assert outcome.project.updates[-1].text == "newest"  # the eviction ran
+    assert not outcome.project.updates[0].attachments  # ... past the outside path
+    assert outside.exists()
+
+
+def test_a_refused_update_leaves_no_copied_files(store, tmp_path) -> None:
+    alpha = create(store)
+    create(store, name="beta")
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"z")
+
+    with pytest.raises(ProjectNameConflictError):
+        store.update_project(
+            alpha.id,
+            ProjectEdit(name="beta", progress="rename me"),
+            reporter=SESSION_A,
+            attachments=[shot],
+        )
+
+    folder = store.projects_dir / "attachments" / alpha.id
+    assert not (folder.exists() and any(folder.iterdir()))
+    assert store.get_project(alpha.id).updates == []
+
+
+def test_a_midcopy_failure_reclaims_the_copies_already_made(store, tmp_path, monkeypatch) -> None:
+    import local_operator.projects as projects_module
+
+    project = create(store)
+    first = tmp_path / "first.png"
+    first.write_bytes(b"1")
+    second = tmp_path / "second.png"
+    second.write_bytes(b"2")
+    real = projects_module.shutil.copyfile
+    calls = {"count": 0}
+
+    def flaky(source, destination):
+        calls["count"] += 1
+        if calls["count"] == 2:
+            raise OSError("disk full")
+        return real(source, destination)
+
+    monkeypatch.setattr(projects_module.shutil, "copyfile", flaky)
+    with pytest.raises(OSError):
+        store.update_project(
+            project.id,
+            ProjectEdit(progress="two files"),
+            reporter=SESSION_A,
+            attachments=[first, second],
+        )
+
+    folder = store.projects_dir / "attachments" / project.id
+    assert not (folder.exists() and any(folder.iterdir()))
+    assert store.get_project(project.id).updates == []
