@@ -310,6 +310,13 @@ _OWNER_ONLY_CAPABILITY_PROBES = frozenset(
         "has_pending_fork",
         "journal_credential_change",
         "measure_preloaded_context",
+        # A viewer never holds a monitor scheduler — the scheduler is
+        # IN-PROCESS only (monitor contract §10.4) — and the read is
+        # owner-gated exactly as the deliberate-stop read below is:
+        # `_mark_own_monitors_dormant` is reached only through
+        # `_stop_local_session`'s owner branch, so a viewer's `/stop` never
+        # walks it (its owner stamps the dormant marker on the control rung).
+        "monitor_scheduler",
         # A viewer never owns a session to dispose, so it has no deliberate
         # stop to record: a viewer's `/stop` goes over the socket, where the
         # OWNER records the verdict. `_stop_local_session` returns before

@@ -485,21 +485,24 @@ def test_an_armed_wake_still_refuses_and_names_a_remedy_that_exists(tmp_path: Pa
 def test_every_refusal_names_the_conversation_and_never_a_host_path() -> None:
     """THE REFUSAL SET, READ AS A SET (desktop QA round 4, Q14).
 
-    Five sentences can stand in front of an irreversible act — claimed, leased, an
-    armed wake, unread mail, and the fallback for a guard that could not be
-    evaluated — and each is read by a user looking at one conversation. Two rules
-    bind all of them, and they were found one at a time rather than together: no
-    template placeholders (D8: the app holds the id, so ``<session-id>`` asked the
-    user to go and find a filename) and no machine-absolute paths (Q14: a dialog
-    is not the place to learn this host's directory layout). Every one names the
-    conversation, which is the thing the user has.
+    Six sentences can stand in front of an irreversible act — claimed, leased, an
+    armed wake, an armed monitor, unread mail, and the fallback for a guard that
+    could not be evaluated — and each is read by a user looking at one
+    conversation. Two rules bind all of them, and they were found one at a time
+    rather than together: no template placeholders (D8: the app holds the id, so
+    ``<session-id>`` asked the user to go and find a filename) and no
+    machine-absolute paths (Q14: a dialog is not the place to learn this host's
+    directory layout). Every one names the conversation, which is the thing the
+    user has.
     """
     import re
 
     from local_operator.session.cleanup import _GUARD_REFUSAL_FALLBACK, _GUARD_REFUSALS
 
     sentences = list(_GUARD_REFUSALS.values()) + [_GUARD_REFUSAL_FALLBACK]
-    assert len(sentences) == 5, "the set this rule is written for"
+    # 6, not 5: the monitor refusal ("has an armed monitor", the wake sentence's
+    # twin) joined the set with the monitor tool's slice — a deliberate bump.
+    assert len(sentences) == 6, "the set this rule is written for"
     for sentence in sentences:
         assert "conversation" in sentence, sentence
         assert "<" not in sentence and ">" not in sentence, sentence
