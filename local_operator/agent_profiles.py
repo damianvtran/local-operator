@@ -63,10 +63,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar
 
-from local_operator.action_class import class_from_tags
-from local_operator.action_class import normalize as normalize_action_class
 from local_operator.action_class import PROACTIVE as PROACTIVE_CLASS
 from local_operator.action_class import TAG_KEY as CLASS_TAG_KEY
+from local_operator.action_class import class_from_tags
+from local_operator.action_class import normalize as normalize_action_class
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.agents import AgentData, AgentRegistry

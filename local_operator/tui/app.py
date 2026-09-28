@@ -19446,11 +19446,8 @@ class OperatorApp(App[None]):
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
-        from local_operator.action_class import (
-            PROACTIVE,
-            class_from_tags,
-            normalize as normalize_action_class,
-        )
+        from local_operator.action_class import PROACTIVE, class_from_tags
+        from local_operator.action_class import normalize as normalize_action_class
 
         rows: list[tuple[str, str, str]] = []
         seen: set[str] = set()
@@ -19489,13 +19486,9 @@ class OperatorApp(App[None]):
                     elif is_specialist(agent):
                         summary = str(agent.description or "").strip()
                         class_fact = (
-                            " · proactive"
-                            if class_from_tags(agent.tags) == PROACTIVE
-                            else ""
+                            " · proactive" if class_from_tags(agent.tags) == PROACTIVE else ""
                         )
-                        specialists.append(
-                            (str(agent.name), f"specialist{class_fact}", summary)
-                        )
+                        specialists.append((str(agent.name), f"specialist{class_fact}", summary))
                         seen.add(str(agent.name).lower())
                 except Exception:
                     continue
@@ -19624,11 +19617,8 @@ class OperatorApp(App[None]):
         self.run_worker(self._agent_class_worker(rest, notice), thread=False, group="session")
 
     async def _agent_class_worker(self, rest: str, notice: NoticeFn) -> None:
-        from local_operator.action_class import (
-            PROACTIVE,
-            VALID_CLASSES,
-            normalize as normalize_action_class,
-        )
+        from local_operator.action_class import PROACTIVE, VALID_CLASSES
+        from local_operator.action_class import normalize as normalize_action_class
         from local_operator.agent_profiles import resolve_profile
 
         session = self._session
@@ -19637,10 +19627,7 @@ class OperatorApp(App[None]):
             return
         tokens = rest.split()
         if not tokens or len(tokens) > 2:
-            notice(
-                "usage: /agent class <name> [proactive|reactive] — "
-                "omit the class to show it"
-            )
+            notice("usage: /agent class <name> [proactive|reactive] — " "omit the class to show it")
             return
         name = tokens[0].lstrip("=").strip()
         target = tokens[1].strip().casefold() if len(tokens) > 1 else ""
@@ -19672,9 +19659,7 @@ class OperatorApp(App[None]):
         from local_operator.action_class import set_registered_action_class
 
         try:
-            resolved = await asyncio.to_thread(
-                set_registered_action_class, registry, name, target
-            )
+            resolved = await asyncio.to_thread(set_registered_action_class, registry, name, target)
         except ValueError as error:
             self._system_notice(str(error), "warning")
             return
@@ -19701,8 +19686,7 @@ class OperatorApp(App[None]):
                 logger.debug("agent class cleanup failed", exc_info=True)
         if target == PROACTIVE:
             notice(
-                f"agent {resolved} is now proactive — it may send proactive messages"
-                f"{clause}."
+                f"agent {resolved} is now proactive — it may send proactive messages" f"{clause}."
             )
         else:
             notice(f"agent {resolved} is now reactive — proactive behaviour stopped{clause}.")

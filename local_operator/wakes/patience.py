@@ -56,7 +56,7 @@ session's delivery guard — see ``Session._deliver_patience_wake``.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -190,7 +190,10 @@ def pending_rows(rows: Sequence[Any]) -> list[Any]:
 
 def next_patience_id(rows: Sequence[Any]) -> str:
     """The lowest free ``patience-<n>`` among the existing ids."""
-    used = {str(getattr(row, "id", "") or (row.get("id") if isinstance(row, Mapping) else "")) for row in rows}
+    used = {
+        str(getattr(row, "id", "") or (row.get("id") if isinstance(row, Mapping) else ""))
+        for row in rows
+    }
     n = 1
     while f"{ID_PREFIX}{n}" in used:
         n += 1
@@ -385,7 +388,9 @@ def scan_entries(entries: Iterable[Any], *, cutoff_ms: int | None = None) -> Epi
             # cadence/scheduled wake reopens; another patience fire does not).
         elif last_marker is None:
             last_marker = ts_ms
-    return EpisodeFacts(last_inbound_ms=last_inbound, last_fire=last_fire, last_marker_ms=last_marker)
+    return EpisodeFacts(
+        last_inbound_ms=last_inbound, last_fire=last_fire, last_marker_ms=last_marker
+    )
 
 
 def scan_transcript(session_dir: Path | str, *, now_ms: int, window_ms: int) -> EpisodeFacts:
@@ -471,7 +476,11 @@ def open_episode(
             pending = row
 
     fire = facts.last_fire
-    if fire is not None and facts.last_inbound_ms is not None and fire.ts_ms <= facts.last_inbound_ms:
+    if (
+        fire is not None
+        and facts.last_inbound_ms is not None
+        and fire.ts_ms <= facts.last_inbound_ms
+    ):
         fire = None  # a reply closed it
 
     if fire is not None and fire.attempt >= pol.max_attempts:
@@ -584,9 +593,7 @@ def plan_arm(
 
     if existing is None:
         if len(rows) >= MAX_WAKE_SCHEDULES:
-            return ArmOutcome(
-                error=f"at most {MAX_WAKE_SCHEDULES} wake schedules are allowed."
-            )
+            return ArmOutcome(error=f"at most {MAX_WAKE_SCHEDULES} wake schedules are allowed.")
         if len(pending) >= pol.max_pending:
             return ArmOutcome(
                 error=(
@@ -664,24 +671,22 @@ async def arm_patience(
         )
     pol = policy(config_dir)
     if facts is None:
-        facts = scan_transcript(
-            session_dir, now_ms=now_ms, window_ms=pol.ttl_ms + SCAN_SLACK_MS
-        )
+        facts = scan_transcript(session_dir, now_ms=now_ms, window_ms=pol.ttl_ms + SCAN_SLACK_MS)
     rows = list(scheduler.schedules)
     outcome = plan_arm(
         rows, facts, pol, now_ms=now_ms, requested_ms=requested_ms, note=note, after=after
     )
     if not outcome.ok:
         return outcome
-    updated = [r for r in rows if str(row_field(r, "id") or "") != str(row_field(outcome.row, "id"))]
+    updated = [
+        r for r in rows if str(row_field(r, "id") or "") != str(row_field(outcome.row, "id"))
+    ]
     updated.append(outcome.row)
     await scheduler.update(updated)
     return outcome
 
 
-async def cancel_patience(
-    scheduler: Any, *, row_id: str = ""
-) -> tuple[list[str], str]:
+async def cancel_patience(scheduler: Any, *, row_id: str = "") -> tuple[list[str], str]:
     """Retire one or all pending patience rows. Returns ``(cancelled_ids, error)``.
 
     ``row_id`` empty means ALL of the session's pending waits — the deliberate

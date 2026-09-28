@@ -1503,9 +1503,7 @@ async def test_sync_by_name_answers_every_requested_name(context, registry) -> N
 
 
 @pytest.mark.asyncio
-async def test_create_defaults_to_reactive_and_says_so_when_proactive(
-    context, registry
-) -> None:
+async def test_create_defaults_to_reactive_and_says_so_when_proactive(context, registry) -> None:
     from local_operator.action_class import PROACTIVE, class_from_tags
 
     # The default: no class word in the receipt, and the stored row reads

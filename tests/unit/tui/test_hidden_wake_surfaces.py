@@ -150,6 +150,16 @@ async def test_the_wake_panel_lists_scheduled_rows_and_never_patience_ones() -> 
     # Patience only: the panel collapses to its hidden state entirely — a
     # session with one internal timer has no wakes a user can see or manage.
     visible, text = await _paint(
-        [_schedule("patience-1", "internal", kind="patience", hidden=True, episode_id="patience-1", attempt=1, armed_at=1)]
+        [
+            _schedule(
+                "patience-1",
+                "internal",
+                kind="patience",
+                hidden=True,
+                episode_id="patience-1",
+                attempt=1,
+                armed_at=1,
+            )
+        ]
     )
     assert visible is False

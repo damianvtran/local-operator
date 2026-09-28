@@ -134,7 +134,9 @@ def session_action_class(session_dir: Path | str, *, registry: Any = None) -> st
             return REACTIVE
         return normalize(profile.action_class)
     except Exception:  # noqa: BLE001 — documented fail-closed, see docstring
-        logger.warning("could not resolve a session's action class; reading reactive", exc_info=True)
+        logger.warning(
+            "could not resolve a session's action class; reading reactive", exc_info=True
+        )
         return REACTIVE
 
 

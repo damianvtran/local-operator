@@ -951,9 +951,7 @@ def test_the_class_frontmatter_round_trips_through_seed_tags() -> None:
 
     plain = _profile_from_text("plain", "---\nname: plain\ndescription: d\n---\nhi")
     assert plain.action_class == REACTIVE
-    assert not any(
-        tag.strip().lower().startswith("class:") for tag in seed_tags(plain)
-    )
+    assert not any(tag.strip().lower().startswith("class:") for tag in seed_tags(plain))
 
 
 def test_profile_from_agent_reads_the_class_tag_back(tmp_path) -> None:
@@ -961,9 +959,7 @@ def test_profile_from_agent_reads_the_class_tag_back(tmp_path) -> None:
     from local_operator.agent_profiles import profile_from_agent
 
     registry = AgentRegistry(tmp_path)
-    registry.create_agent(
-        AgentEditFields(name="steward", tags=["role", "class:proactive"])
-    )
+    registry.create_agent(AgentEditFields(name="steward", tags=["role", "class:proactive"]))
     row = registry.get_agent_by_name("steward")
     assert row is not None
     profile = profile_from_agent(registry, row)

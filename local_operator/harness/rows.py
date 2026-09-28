@@ -43,7 +43,7 @@ one renderer is a decision the other will not make.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 #: The severity vocabulary shared by the surfaces. A superset is deliberately
 #: NOT used: these are the tiers a *replayed* row can carry, and the TUI's

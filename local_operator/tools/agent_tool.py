@@ -376,8 +376,8 @@ def _field_rows(profile: AgentProfile, seed: AgentProfile) -> list[tuple[str, st
 
 
 def _class_label(value: object) -> str:
-    """The class as the human reader meets it (``proactive`` ⇒ "proactive 
-    (may message unprompted)"). One spelling for ``show``'s header and the 
+    """The class as the human reader meets it (``proactive`` ⇒ "proactive
+    (may message unprompted)"). One spelling for ``show``'s header and the
     divergence rows, so a reader cannot get two names for the same field.
     """
     from local_operator.action_class import PROACTIVE, normalize

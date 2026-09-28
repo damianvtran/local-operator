@@ -11721,9 +11721,7 @@ async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> Too
     # 5): they are hidden internal timers, and the model manages them through
     # the ``perience`` tool instead — showing them here would be a second
     # listing to keep in sync for rows the agent did not create as wakes.
-    schedules = [
-        s for s in scheduler.schedules if getattr(s, "kind", "scheduled") != "patience"
-    ]
+    schedules = [s for s in scheduler.schedules if getattr(s, "kind", "scheduled") != "patience"]
     if not schedules:
         return _text(
             tool_call_id,

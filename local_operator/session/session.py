@@ -16628,7 +16628,9 @@ class Session:
             pol = patience_engine.policy(_config_dir())
             now_ms = int(time.time() * 1000)
             kept = [
-                row for row in schedules if not patience_engine.fire_past_ttl(row, pol, now_ms=now_ms)
+                row
+                for row in schedules
+                if not patience_engine.fire_past_ttl(row, pol, now_ms=now_ms)
             ]
             if len(kept) != len(schedules):
                 logger.info(
@@ -18197,7 +18199,9 @@ class Session:
             # if a row survived the pause's cancel — e.g. the pause landed with
             # a LIVE owner, whose external cancel was refused. A fire is output;
             # it must not slip past the hold just because the row outlived it.
-            logger.info("patience: %s fired while the proactive hold is on; retiring", due.schedule.id)
+            logger.info(
+                "patience: %s fired while the proactive hold is on; retiring", due.schedule.id
+            )
             return
         from local_operator.paths import config_dir
 
@@ -18280,9 +18284,10 @@ class Session:
         try:
             from local_operator.action_class import REACTIVE, session_action_class
 
-            return session_action_class(
-                self._transcript.directory, registry=self.agent_registry
-            ) or REACTIVE
+            return (
+                session_action_class(self._transcript.directory, registry=self.agent_registry)
+                or REACTIVE
+            )
         except Exception:  # noqa: BLE001 — fail closed, see the module docstring
             logger.warning("could not resolve the session action class", exc_info=True)
             return "reactive"
@@ -18422,9 +18427,7 @@ class Session:
             updated = [
                 (
                     row.model_copy(update={"armed_after": f"message:{message_id}"})
-                    if patience.is_patience_row(row)
-                    and str(row.id) in ids
-                    and not row.armed_after
+                    if patience.is_patience_row(row) and str(row.id) in ids and not row.armed_after
                     else row
                 )
                 for row in current

@@ -197,7 +197,9 @@ class TestCancelAndList:
             armed_at=now,
         )
         scheduler = FakeScheduler([row])
-        context = make_context(tmp_path, monkeypatch, session_dir=make_session_dir(tmp_path), scheduler=scheduler)
+        context = make_context(
+            tmp_path, monkeypatch, session_dir=make_session_dir(tmp_path), scheduler=scheduler
+        )
         tool = builtin.build_patience_tool(context)
         assert tool is not None
 
@@ -231,7 +233,10 @@ class TestCancelAndList:
             armed_at=now,
         )
         context = make_context(
-            tmp_path, monkeypatch, session_dir=make_session_dir(tmp_path), scheduler=FakeScheduler([row])
+            tmp_path,
+            monkeypatch,
+            session_dir=make_session_dir(tmp_path),
+            scheduler=FakeScheduler([row]),
         )
         tool = builtin.build_patience_tool(context)
         assert tool is not None

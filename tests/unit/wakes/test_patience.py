@@ -11,7 +11,6 @@ of these — delivery, cancel-on-reply, the turn-end flush — lives in
 
 from __future__ import annotations
 
-import asyncio
 import time
 
 import pytest
@@ -271,8 +270,14 @@ class TestScanTranscript:
                 CustomMessage(
                     custom_type=WAKE_PROMPT_MESSAGE_TYPE,
                     attribution="user",
-                    details={"text": "fire", "kind": "patience", "hidden": True, "attempt": 1,
-                             "episode_id": "patience-1", "episode_started_at": NOW},
+                    details={
+                        "text": "fire",
+                        "kind": "patience",
+                        "hidden": True,
+                        "attempt": 1,
+                        "episode_id": "patience-1",
+                        "episode_started_at": NOW,
+                    },
                 )
             ]
         )
@@ -296,7 +301,9 @@ class TestScanTranscript:
 
 class TestOpenEpisode:
     def test_no_pending_and_no_fire_means_no_episode(self) -> None:
-        assert P.open_episode([], P.EpisodeFacts(None, None, None), pol=policy(), now_ms=NOW) is None
+        assert (
+            P.open_episode([], P.EpisodeFacts(None, None, None), pol=policy(), now_ms=NOW) is None
+        )
 
     def test_a_live_pending_row_is_the_episode(self) -> None:
         state = P.open_episode(
@@ -311,25 +318,35 @@ class TestOpenEpisode:
         assert P.open_episode([patience_row()], facts, pol=policy(), now_ms=NOW + 2) is None
 
     def test_a_fire_reopens_the_episode_until_a_reply(self) -> None:
-        fire = P.FireFact(ts_ms=NOW + 300_000, episode_id="patience-1", attempt=1, episode_started_at_ms=NOW)
+        fire = P.FireFact(
+            ts_ms=NOW + 300_000, episode_id="patience-1", attempt=1, episode_started_at_ms=NOW
+        )
         state = P.open_episode(
             [], P.EpisodeFacts(None, fire, None), pol=policy(), now_ms=NOW + 300_000
         )
         assert state is not None and state.attempt == 1 and state.pending_row is None
 
     def test_a_terminal_fire_closes_the_cycle(self) -> None:
-        fire = P.FireFact(ts_ms=NOW, episode_id="patience-1", attempt=3, episode_started_at_ms=NOW - 3_600_000)
+        fire = P.FireFact(
+            ts_ms=NOW, episode_id="patience-1", attempt=3, episode_started_at_ms=NOW - 3_600_000
+        )
         state = P.open_episode([], P.EpisodeFacts(None, fire, None), pol=policy(), now_ms=NOW)
         assert state is not None and state.terminal is True
 
     def test_a_marker_after_the_terminal_fire_reopens_the_question(self) -> None:
-        fire = P.FireFact(ts_ms=NOW, episode_id="patience-1", attempt=3, episode_started_at_ms=NOW - 3_600_000)
+        fire = P.FireFact(
+            ts_ms=NOW, episode_id="patience-1", attempt=3, episode_started_at_ms=NOW - 3_600_000
+        )
         facts = P.EpisodeFacts(None, fire, NOW + 10)
         assert P.open_episode([], facts, pol=policy(), now_ms=NOW + 10) is None
 
     def test_a_fire_past_its_ttl_is_closed_by_age(self) -> None:
-        fire = P.FireFact(ts_ms=NOW, episode_id="patience-1", attempt=1, episode_started_at_ms=NOW - 8_000_000)
-        assert P.open_episode([], P.EpisodeFacts(None, fire, None), pol=policy(), now_ms=NOW) is None
+        fire = P.FireFact(
+            ts_ms=NOW, episode_id="patience-1", attempt=1, episode_started_at_ms=NOW - 8_000_000
+        )
+        assert (
+            P.open_episode([], P.EpisodeFacts(None, fire, None), pol=policy(), now_ms=NOW) is None
+        )
 
 
 class TestPlanArm:
@@ -341,7 +358,9 @@ class TestPlanArm:
         assert out.row.next_due_at == NOW + 300_000
 
     def test_a_continuation_while_pending_bumps_the_attempt_in_place(self) -> None:
-        out = P.plan_arm([patience_row()], P.EpisodeFacts(None, None, None), policy(), now_ms=NOW + 1000)
+        out = P.plan_arm(
+            [patience_row()], P.EpisodeFacts(None, None, None), policy(), now_ms=NOW + 1000
+        )
         assert out.ok and out.replaced_id == "patience-1"
         assert out.row.id == "patience-1" and out.row.attempt == 2
         # The TTL anchor is the EPISODE start, preserved across the re-arm.
@@ -349,7 +368,9 @@ class TestPlanArm:
         assert out.row.next_due_at == NOW + 1000 + 900_000
 
     def test_a_continuation_after_a_fire_resumes_the_same_episode(self) -> None:
-        fire = P.FireFact(ts_ms=NOW + 300_000, episode_id="patience-1", attempt=2, episode_started_at_ms=NOW)
+        fire = P.FireFact(
+            ts_ms=NOW + 300_000, episode_id="patience-1", attempt=2, episode_started_at_ms=NOW
+        )
         out = P.plan_arm([], P.EpisodeFacts(None, fire, None), policy(), now_ms=NOW + 300_000)
         assert out.ok
         assert out.row.id == "patience-1" and out.row.attempt == 3
@@ -357,7 +378,9 @@ class TestPlanArm:
         assert out.replaced_id == ""
 
     def test_the_attempt_bound_refuses_with_a_sentence(self) -> None:
-        fire = P.FireFact(ts_ms=NOW, episode_id="patience-1", attempt=3, episode_started_at_ms=NOW - 3_600_000)
+        fire = P.FireFact(
+            ts_ms=NOW, episode_id="patience-1", attempt=3, episode_started_at_ms=NOW - 3_600_000
+        )
         out = P.plan_arm([], P.EpisodeFacts(None, fire, None), policy(), now_ms=NOW)
         assert not out.ok
         assert "closed" in out.error
@@ -387,7 +410,9 @@ class TestPlanArm:
         # A fire whose episode id collides with a live foreign row: the plan
         # mints a fresh id rather than replacing the row.
         foreign = patience_row(id="patience-1", episode_id="patience-1", armed_after="peer:x")
-        fire = P.FireFact(ts_ms=NOW, episode_id="patience-1", attempt=1, episode_started_at_ms=NOW - 1000)
+        fire = P.FireFact(
+            ts_ms=NOW, episode_id="patience-1", attempt=1, episode_started_at_ms=NOW - 1000
+        )
         rows = [foreign, WakeSchedule(id="w1", message="m", next_due_at=NOW + 10)]
         out = P.plan_arm(rows, P.EpisodeFacts(None, fire, None), policy(), now_ms=NOW)
         # The pending foreign row wins the classification (it is newer than the
@@ -496,7 +521,9 @@ class TestArmPatience:
 class TestCancelPatience:
     @pytest.mark.asyncio
     async def test_cancel_all_retires_every_pending_wait(self) -> None:
-        scheduler = FakeScheduler([patience_row(), WakeSchedule(id="w1", message="m", next_due_at=NOW)])
+        scheduler = FakeScheduler(
+            [patience_row(), WakeSchedule(id="w1", message="m", next_due_at=NOW)]
+        )
         cancelled, error = await P.cancel_patience(scheduler)
         assert cancelled == ["patience-1"] and error == ""
         assert [r.id for r in scheduler.schedules] == ["w1"]
