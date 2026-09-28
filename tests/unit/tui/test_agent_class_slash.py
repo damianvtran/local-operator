@@ -10,6 +10,7 @@ slash tests are.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -106,6 +107,33 @@ async def test_a_bad_class_word_is_refused_before_any_write(tmp_path: Path) -> N
     assert AgentRegistry(tmp_path).get_agent_by_name("aida") is None
 
 
+def _fields(**overrides: Any):
+    """``AgentEditFields`` with every field spelled out (strict mode)."""
+    from local_operator.agents import AgentEditFields
+
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
+
+
 @pytest.mark.asyncio
 async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) -> None:
     """The browse surface is honest about the class (design §8.1.3).
@@ -117,11 +145,9 @@ async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) 
     ``role``/model/effort before this slice, and a regression there would be
     invisible: the pane is read-only and nothing else asserts its text.
     """
-    from local_operator.agents import AgentEditFields
-
     registry = AgentRegistry(tmp_path)
     registry.create_agent(
-        AgentEditFields(
+        _fields(
             name="steadier",
             description="Reaches out when something needs the operator.",
             tags=["role", "class:proactive"],
@@ -141,7 +167,7 @@ async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) 
     assert "proactive" in facts.get("steadier", ""), facts
     # The control: absence of the tag must NOT invent a marker.
     registry.create_agent(
-        AgentEditFields(
+        _fields(
             name="plainrole",
             description="A reactive role.",
             tags=["role"],
