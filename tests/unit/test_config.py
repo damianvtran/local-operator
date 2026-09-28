@@ -1,7 +1,9 @@
 import logging
 import tempfile
 from argparse import Namespace
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -598,9 +600,21 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
     """Round 5: the migration ran from ``_load_config`` and a mere
     ``ConfigManager()`` rewrote the operator's live config. The seam is
     ``cli.main`` and NOTHING else may call the migration; the store marker
-    is written only by session construction (its own store) and by the
-    migration (after it succeeds) — never by ConfigManager, never by
-    cleanup's read path."""
+    is written only by session construction (its own store), by the
+    migration (after it succeeds), and by mesh ADOPTION — never by
+    ConfigManager, never by cleanup's read path.
+
+    THE THIRD MARKER SITE, and why it is enumerated here rather than spelled
+    elsewhere: a session moved onto this device arrives as a directory in
+    ``sessions/``, and ``remove_session_dir`` refuses an unmarked store — so a
+    destination that had never created a session locally (a freshly paired
+    second machine, which is the case the mesh exists for) could not delete
+    anything it adopted. Measured on the two-device rig 2026-09-26: the recall
+    committed, wrote its tombstone, called ``remove_session_dir``, logged the
+    refusal and LEFT THE COPY — one id on two devices, which is INV-1. This list
+    is the inventory of every place that may write the marker, so a new one is a
+    reviewed act; ``local_operator/network/mobility.py`` is that act.
+    """
     import ast
 
     package = Path(__file__).resolve().parents[2] / "local_operator"
@@ -625,4 +639,249 @@ def test_the_migration_has_exactly_one_caller_and_marking_has_two():
     assert mark_callers == {
         "local_operator/session_factory.py",
         "local_operator/config_migrations.py",
+        "local_operator/network/mobility.py",
     }, mark_callers
+
+
+# ---------------------------------------------------------------------------
+# The key that was dropped on load and erased on save
+# ---------------------------------------------------------------------------
+
+
+def _write_config_with_extra(config_dir: Path, extra: Mapping[str, Any]) -> Path:
+    """``config.yml`` with ``extra`` at the TOP LEVEL, beside ``values``.
+
+    This is the spelling a person writes for a setting the docs name in dots
+    (``network.advertise_hosts``), and it is the exact file the mesh bug was
+    reported with: an operator declaring their public address so a peer could dial
+    it.
+    """
+    path = config_dir / "config.yml"
+    document = {
+        "version": "0.1.0",
+        "metadata": {"created_at": "x", "last_modified": "x", "description": "d"},
+        "values": {"conversation_length": 100},
+        **extra,
+    }
+    path.write_text(yaml.safe_dump(document))
+    return path
+
+
+@pytest.fixture
+def warned_fresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The once-per-process warning memo, emptied so each test sees its own first load.
+
+    ``config._UNMODELLED_WARNED`` is process-global on purpose (see there), which
+    makes a test that asserts on the warning order-dependent unless it starts from
+    an empty memo.
+    """
+    from local_operator import config as config_mod
+
+    monkeypatch.setattr(config_mod, "_UNMODELLED_WARNED", set())
+
+
+def test_a_top_level_key_the_store_does_not_model_is_never_erased(tmp_path: Path) -> None:
+    """THE ERASE half. A write used to delete every top-level key but the three it models.
+
+    ``_write_config`` serialises ``vars(self.config)``, which holds only
+    ``version``/``metadata``/``values``, so a hand-written ``network:`` block was gone
+    after the next write — and writes happen on ordinary paths: this is what the
+    startup cleanup migration does (it leaves a ``.pre-cleanup-migration`` backup
+    beside the file for that reason), and ``/settings`` writes on every Enter. An
+    operator's declared address therefore vanished with no error, the failure the
+    mesh lane reported as "any ``lop`` run rewrites the file without it".
+    """
+    declared = {"network": {"advertise_hosts": ["203.0.113.7:4097"]}}
+    path = _write_config_with_extra(tmp_path, declared)
+    manager = ConfigManager(tmp_path)
+
+    # The write the migration and the settings page both perform.
+    manager._write_config(vars(manager.config))
+
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert document["network"] == declared["network"], document.keys()
+    # ...and the write still did its OWN job: the modelled keys are all there.
+    assert document["values"]["conversation_length"] == 100
+    assert document["metadata"]["last_modified"]
+
+
+def test_the_startup_migration_keeps_a_key_it_does_not_model(tmp_path: Path) -> None:
+    """The same erase, through the REAL writer: the migration that rewrites the file.
+
+    Run end to end rather than by calling ``_write_config`` directly, because the
+    migration is the path the operator actually hits — one ``lop`` verb on a fresh
+    install is enough to trigger it and it is what left the backup behind.
+    """
+    from local_operator.config_migrations import migrate_session_cleanup
+
+    declared = ["203.0.113.7:4097"]
+    path = _write_config_with_extra(tmp_path, {"network": {"advertise_hosts": declared}})
+
+    changes = migrate_session_cleanup(tmp_path)
+
+    assert changes, "the migration must have done its own work for this to prove anything"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert document["network"]["advertise_hosts"] == declared
+    # Its own job, on the same file: the retired reapers' opt-out is pinned.
+    assert document["values"]["session"]["reap_unused"] is False
+
+
+def test_a_top_level_key_is_reported_rather_than_silently_ignored(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """THE DROP half. It is still not READ — and now it is not quiet either.
+
+    Every setting is read from ``values``, so this key does nothing for as long as
+    it sits there. That is a defensible schema; being silent about it is not, because
+    the file gives the operator no sign and the docs spell the path in dots. The
+    warning has to name BOTH the key and where a setting lives, or it is just noise.
+    """
+    _write_config_with_extra(tmp_path, {"network": {"advertise_hosts": ["203.0.113.7:4097"]}})
+
+    with caplog.at_level(logging.WARNING):
+        manager = ConfigManager(tmp_path)
+
+    assert manager.get_nested_value(("network", "advertise_hosts"), "DEFAULT") == "DEFAULT"
+    messages = [record.getMessage() for record in caplog.records]
+    reported = [message for message in messages if "top-level" in message]
+    assert len(reported) == 1, messages
+    assert "network" in reported[0]
+    assert "values.network" in reported[0]
+
+
+def test_a_modelled_config_reports_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """The mirror, so the warning is not simply always on: a normal file is silent."""
+    _write_config(tmp_path, {"conversation_length": 7})
+
+    with caplog.at_level(logging.WARNING):
+        ConfigManager(tmp_path)
+
+    assert not [r for r in caplog.records if "top-level" in r.getMessage()]
+
+
+def test_the_registry_writes_the_key_where_the_mesh_reads_it(tmp_path: Path) -> None:
+    """THE SANCTIONED ROUTE, end to end: /settings → the file → ``advertise_endpoints``.
+
+    The bug was not only that the natural spelling did nothing; there was no working
+    route at all for the three keys ``NetworkSettings.from_config`` reads, so no
+    surface could show or write them and the mesh docs' own remediation ("put that
+    hostname in `network.advertise_hosts`") pointed at a key with no writer. This
+    pins the path the fix adds: the registry's tuple is the reader's tuple, the
+    value lands where ``get_nested_value`` walks, and the relay publishes it.
+    """
+    from local_operator import settings_io
+    from local_operator.network import relay
+
+    setting = settings_io.BY_KEY["network.advertise_hosts"]
+    assert setting.path == ("network", "advertise_hosts")
+
+    manager = ConfigManager(tmp_path)
+    settings_io.write_setting(manager, setting, ["198.51.100.9:4100"])
+
+    reread = ConfigManager(tmp_path)
+    assert reread.get_nested_value(("network", "advertise_hosts")) == ["198.51.100.9:4100"]
+    settings = relay.NetworkSettings.from_config(tmp_path)
+    assert settings.advertise_hosts == ("198.51.100.9:4100",)
+    # And it is the FIRST candidate a peer is told to dial, before the detected
+    # addresses: only the operator knows about a tunnel or a public address.
+    assert relay.advertise_endpoints(settings)[0] == "198.51.100.9:4100"
+
+
+def test_the_port_and_listen_address_have_rows_too(tmp_path: Path) -> None:
+    """The other two keys ``from_config`` reads, which had no writer for the same reason.
+
+    An advertised ``host:port`` needs the port, and whether the relay accepts at all
+    is ``listen_address``: a page that offered the endpoints and hid these two would
+    be offering half of one setting's contract.
+    """
+    from local_operator import settings_io
+    from local_operator.network import relay
+
+    manager = ConfigManager(tmp_path)
+    for key, value in (("network.port", 4123), ("network.listen_address", "127.0.0.1")):
+        settings_io.write_setting(manager, settings_io.BY_KEY[key], value)
+
+    settings = relay.NetworkSettings.from_config(tmp_path)
+    assert settings.port == 4123
+    assert settings.listen_address == "127.0.0.1"
+    # The dial-only answer, which is what this pair of values means together.
+    assert relay.advertise_endpoints(settings) == ["127.0.0.1:4123"]
+
+
+def test_a_non_string_top_level_key_cannot_take_the_store_down(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """The report must SURVIVE the file it reports on, whatever YAML made of the keys.
+
+    YAML 1.1 resolves bare scalars by its own rules, so a hand-written ``config.yml`` can
+    carry top-level keys that are not strings: ``2024:`` is an int, ``on:``/``yes:`` a
+    bool, and dates, floats and null exist besides. Sorting a mix of those against a
+    string raised ``TypeError: '<' not supported between instances of 'int' and 'str'``
+    inside ``ConfigManager.__init__`` — so every ``lop`` verb died with a stack-trace
+    panel on exactly the file class this mechanism exists to make visible, and
+    ``lop config edit network.port 4098`` wrote nothing at all. The base commit loads that
+    file (it has no report to run), which is what made this a regression rather than a
+    pre-existing limit (review round 1, B1).
+
+    The decision, asserted here: a key this store cannot SPELL — it has no ``values.``
+    home to be moved to — is passed over in silence, and a string key beside it is still
+    reported.
+    """
+    (tmp_path / "config.yml").write_text(
+        "version: 0.1.0\n"
+        "metadata:\n  created_at: x\n  last_modified: x\n  description: d\n"
+        "values:\n  conversation_length: 100\n"
+        "network:\n  advertise_hosts:\n    - 203.0.113.7:4097\n"
+        "2024:\n  archived: true\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        manager = ConfigManager(tmp_path)  # TypeError here before the fix
+
+    reported = [r.getMessage() for r in caplog.records if "top-level" in r.getMessage()]
+    assert len(reported) == 1, reported
+    assert "network" in reported[0]
+    assert "values.network" in reported[0]
+    # The unnameable key is REPORTED but never given a `values.` home: naming one would
+    # send the operator to a path that cannot exist (review round 1, optional nit).
+    assert "2024" in reported[0]
+    assert "values.2024" not in reported[0], reported[0]
+    assert "cannot be a settings path at all" in reported[0]
+
+    # AND THE VERB THAT DIED NOW ROUND-TRIPS, with both keys still in the file.
+    manager._write_config(vars(manager.config))
+
+    document = yaml.safe_load((tmp_path / "config.yml").read_text(encoding="utf-8"))
+    assert document["network"]["advertise_hosts"] == ["203.0.113.7:4097"]
+    assert 2024 in document, sorted(map(repr, document))
+
+
+def test_a_file_whose_only_stray_keys_are_unnameable_is_still_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, warned_fresh: None
+) -> None:
+    """Every unmodelled key non-string is not the same as nothing to say.
+
+    The silence decision covers keys this store cannot SPELL — but a file whose ONLY stray
+    keys are those still has keys nobody reads, and reporting nothing there is the
+    original bug in miniature: the operator sees no sign at all (review round 1, optional
+    nit). They are named by ``repr`` with the advice that applies (delete, or re-spell as
+    a string), because there is no ``values.`` path to offer.
+    """
+    (tmp_path / "config.yml").write_text(
+        "version: 0.1.0\n"
+        "metadata:\n  created_at: x\n  last_modified: x\n  description: d\n"
+        "values:\n  conversation_length: 100\n"
+        "2024:\n  archived: true\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        ConfigManager(tmp_path)
+
+    reported = [r.getMessage() for r in caplog.records if "top-level" in r.getMessage()]
+    assert len(reported) == 1, reported
+    assert "2024" in reported[0]
+    assert "cannot be a settings path at all" in reported[0]

@@ -3167,11 +3167,14 @@ def test_the_incident_names_the_tool_and_carries_no_value() -> None:
     assert "sh4pedSentinelPw" not in text
 
 
-def test_an_exposed_hit_still_files_one_incident_per_tool_and_shape_set() -> None:
-    """A command that echoes the same credential ten times is one fact.
+def test_an_exposed_hit_is_one_queued_report_per_tool_and_shape_set() -> None:
+    """A command that echoes the same credential ten times is still one fact.
 
-    Driven with the EXPOSED case, which is the only one that reaches the queue now:
-    the dedupe has to keep working for the event that is still filed.
+    Driven with the EXPOSED case, which is the only one that reaches the queue: the
+    dedupe still has to work for the report the queue carries, even though nothing
+    downstream of the queue is written any more (2026-09-27). The queue is the
+    instrument, so this is the control that proves the pass still detects — the
+    absence assertions elsewhere would pass on a session that never ran it.
     """
     session = _session()
     session._pending_shape_incidents.clear()
@@ -3182,21 +3185,20 @@ def test_an_exposed_hit_still_files_one_incident_per_tool_and_shape_set() -> Non
 
 
 @pytest.mark.asyncio
-async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> None:
-    """Flushed at the boundary, and PERSISTED — on the OPERATOR's surface only.
+async def test_the_queued_incident_reaches_no_transcript_row(tmp_path: Path) -> None:
+    """A queued EXPOSURE reaches no operator surface either — the row is GONE.
 
-    Persisted rather than live-only because what it records is still true
-    tomorrow, which is the opposite of the MCP-recovery record's reason for not
-    persisting. Driven with the EXPOSED case, which is the only one that files
-    now: a contained hit has nothing to persist, and its own end-to-end absence
-    test is below.
+    INVERTED from the pin that used to assert the opposite (2026-09-27): the row
+    once reached the transcript on the operator's surface only, and the operator
+    ruled that surface noise — "Remove the operator-facing information too, it's
+    false positive so it would confuse users." Driven with the EXPOSED case, which
+    is the one that used to file, so this fails if only the contained path was
+    silenced: an exposure still reaches the QUEUE (asserted, so the run is live
+    rather than a no-op) and still writes nothing.
 
-    The row is asserted under its OWN type (``session_credential_redaction``),
-    which is the half this test has to keep proving now that the record left
-    ``session_incident``: a type that reached the transcript but no fold would
-    paint nowhere on a resume, and the operator's whole ticket would be lost.
-    The MODEL half of the split is
-    ``test_the_queued_incident_never_reaches_the_model`` below.
+    The MODEL half of the split is ``test_the_queued_incident_never_reaches_the_model``
+    below, and it still passes because the record keeps its own excluded type
+    even though it is no longer produced.
     """
     session = Session(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -3209,12 +3211,15 @@ async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> Non
         variables=VariableStore(cwd=str(tmp_path)),
     )
     session._redact_tool_result_text(_exposed_text())
+    # The instrument is not dead: the exposure really did reach the queue, so the
+    # absence below cannot mean the pass never ran.
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
     await session._flush_shape_incidents()
 
-    body = (tmp_path / "incident" / "transcript.jsonl").read_text()
-    assert "session_credential_redaction" in body
-    assert "rotate" in body
-    assert REDACTION_MARKER not in body
+    transcript = tmp_path / "incident" / "transcript.jsonl"
+    body = transcript.read_text() if transcript.exists() else ""
+    assert "session_credential_redaction" not in body, "an exposure was journaled"
+    assert "rotate" not in body, "an exposure still demanded a rotation on disk"
 
 
 @pytest.mark.asyncio
@@ -3227,21 +3232,25 @@ async def test_the_queued_incident_never_reaches_the_model(tmp_path: Path) -> No
     masked out of the text they received. The record now carries
     ``session_credential_redaction``, a type the renderer's allow-list excludes.
 
-    **Asserted on the render output rather than on the journal row**, because
-    that is the surface the defect was on: a journal assertion would pass while
-    the renderer still injected, which is exactly the state the old tests pinned
-    in the wrong direction. Both halves are checked here so the assertion cannot
-    go vacuous — the row IS on disk (the operator keeps it, see the test above),
-    and it is NOT in what the provider would be handed.
+    **Asserted on the render output rather than on a journal row**, because that is
+    the surface the defect was on: a journal assertion would pass while the
+    renderer still injected, which is exactly the state the old tests pinned in the
+    wrong direction. The exclusion is exercised on BOTH call sites, because they
+    are different code paths:
 
-    Both call sites are covered, because they are different code paths and only
-    one of them is live:
+    * the LIVE context render (``_render_history`` over a context that CARRIES a
+      record of this type), which is every subsequent request, and
+    * the RESUME replay (``Transcript.build_llm_history`` rehydrates a persisted
+      row, then the same renderer runs over it), which is the half a live-only
+      test would miss.
 
-    * the LIVE context render (``_render_history`` over the real context the
-      notice was just parked in), which is every subsequent request, and
-    * the RESUME replay (``Transcript.build_llm_history`` rehydrates the
-      persisted row, then the same renderer runs over it), which is the half a
-      live-only test would miss.
+    THE RECORD IS BUILT DIRECTLY RATHER THAN PRODUCED (2026-09-27). It used to be
+    written by ``journal_shape_incident``; that emitter is now silent by the
+    operator's ruling, so a test that produced it through the session would assert
+    nothing about an already-stored row. What the renderer's EXCLUSION protects is
+    exactly the STORED row — a transcript written before the retirement, replayed
+    on resume — so the record is placed in the live context and on disk the way
+    such a transcript has it, which is the input the guard actually has to survive.
     """
     session = Session(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -3253,23 +3262,37 @@ async def test_the_queued_incident_never_reaches_the_model(tmp_path: Path) -> No
         cwd=str(tmp_path),
         variables=VariableStore(cwd=str(tmp_path)),
     )
-    session._redact_tool_result_text(_exposed_text())
-    await session._flush_shape_incidents()
+    # The STORED record, exactly as an older build left it: text from the same
+    # formatter, on the record's own type, written to the transcript the resume
+    # path reads and parked in the live context the render path walks.
+    from local_operator.incidents import format_shape_incident_message
 
-    # The instrument is not dead: the live record really is in the context the
-    # renderer is about to be handed, so an empty render cannot mean "nothing
-    # was ever queued". ``isinstance`` rather than a ``getattr`` comparison: the
+    stored = CustomMessage(
+        custom_type="session_credential_redaction",
+        attribution="system",
+        details={
+            "text": format_shape_incident_message("bash", ["dsn-password"], "cmd"),
+            "tool": "bash",
+            "shapes": ["dsn-password"],
+            "summary": "cmd",
+            "reached_model": True,
+        },
+    )
+    session._context.messages.append(stored)
+    await session._transcript.append_message(stored, preserve_mtime=True)
+
+    # The instrument is not dead: the record really is in the context and on disk
+    # the renderer is about to be handed, so an empty render cannot mean "nothing
+    # was ever stored". ``isinstance`` rather than a ``getattr`` comparison: the
     # context holds ``Message``s too, and only a ``CustomMessage`` carries
-    # ``details`` — the runtime never had a Message here, but the type of the
-    # list says it might, and a type-checker cannot see the inequality the
-    # string test relies on.
+    # ``details``.
     parked = [
         message
         for message in session._context.messages
         if isinstance(message, CustomMessage)
         and message.custom_type == "session_credential_redaction"
     ]
-    assert parked, "the notice never reached the live context, so the render proves nothing"
+    assert parked, "the stored notice is not in the live context, so the render proves nothing"
     assert "rotate" in str(parked[-1].details.get("text", ""))
 
     # 1. The LIVE render: the notice is dropped as bookkeeping, like every other
@@ -3287,6 +3310,10 @@ async def test_the_queued_incident_never_reaches_the_model(tmp_path: Path) -> No
     resumed_text = "\n".join(str(getattr(message, "text", "")) for message in resumed)
     assert "[credential redaction]" not in resumed_text, resumed_text
     assert "rotate it" not in resumed_text
+    assert not any(
+        getattr(message, "custom_type", None) == "session_credential_redaction"
+        for message in resumed
+    ), "the stored record was rendered into the model's context on resume"
 
 
 def test_the_tool_identity_travels_with_the_redaction() -> None:
@@ -3826,24 +3853,29 @@ def test_a_hit_is_graded_before_it_is_announced() -> None:
     ids=["reached-the-model", "contained"],
 )
 @pytest.mark.asyncio
-async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
+async def test_the_notice_emits_no_receipt_but_a_stored_row_still_replays(
     tmp_path: Path, reached_model: bool, marker: str
 ) -> None:
-    """Both halves of "the operator sees it", which is the row's whole purpose.
+    """The LIVE half is inverted; the REPLAY half is unchanged, and that is the point.
 
-    Live: ``journal_shape_incident`` must emit a receipt an attached TUI paints.
-    Replay: the fold must have a branch for the record, or a resumed session
-    shows nothing (a custom message falls through every role-based branch).
-    Measured before this wiring: the row reached the model and painted nowhere.
+    LIVE (inverted 2026-09-27): ``journal_shape_incident`` no longer emits an
+    operator receipt — the operator's ruling — so an attached TUI gets nothing.
+    Asserting only the absence would pass on a no-op, so the record's own presence
+    is proven in the same run: the transcript row is written by the SAME call, so
+    a row landing while no receipt fires is why the emitter is a proven no-op
+    rather than a method that never ran.
 
-    Parametrised over the CLASSIFICATION, because the contained text is a second
-    new string on the same path and the failure mode this test exists for — a row
-    that paints nowhere — does not care which wording it is carrying.
+    REPLAY (kept): a transcript written BEFORE that date still folds through the
+    TUI's branch for this type, so the stored row still paints. That is what makes
+    the retirement safe for old sessions, and it is the half a lazy deletion of
+    the branch would break — hence it stays pinned, parametrised over both
+    wordings the old records can carry.
     """
     from local_operator.harness.message_types import (
         SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     )
     from local_operator.harness.types import NoticeEvent
+    from local_operator.incidents import format_shape_incident_message
 
     session = Session(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -3861,18 +3893,20 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
         "bash", ["dsn-password"], "kubectl exec api -- env", reached_model=reached_model
     )
 
-    notices = [event for event in events if isinstance(event, NoticeEvent)]
-    assert notices, "the incident emitted no live receipt"
-    assert notices[0].kind == "warning"
-    assert marker in notices[0].text
+    # LIVE: nothing is emitted, from either classification.
+    assert not [
+        event for event in events if isinstance(event, NoticeEvent)
+    ], "the retired notice still emitted a live receipt"
 
-    # Replay: the same record, folded through the real settlement path. The
-    # type is the record's OWN (``session_credential_redaction``, since
-    # 2026-09-24) — folding it as a ``session_incident`` would test a branch the
-    # shipped record no longer takes, and would leave the new type's own fold
-    # uncovered, which is the direction a resume breaks in.
-    rows = _fold_incident_row(SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE, notices[0].text)
-    assert rows, "the incident row folded to nothing"
+    # REPLAY: a row written by an older build still folds to a painted row. Built
+    # here from the same formatter the old emitter used, because that is exactly
+    # the text an existing transcript carries.
+    text = format_shape_incident_message(
+        "bash", ["dsn-password"], "kubectl exec api -- env", reached_model=reached_model
+    )
+    assert marker in text, text
+    rows = _fold_incident_row(SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE, text)
+    assert rows, "the stored incident row folded to nothing"
     assert any(marker in row for row in rows)
 
 
@@ -6063,7 +6097,7 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
     because the corpus holds no row that separates those bounds: measured, the grading is
     identical for every bound at or above four. The rows that WOULD separate them have to
     escalate, and the corpus holds exactly one escalating case by construction (the
-    reason ``test_a_genuinely_exposed_compact_credential_still_files_an_incident`` gives),
+    reason ``test_a_genuinely_exposed_compact_credential_still_escalates`` gives),
     so the boundary is pinned in ``test_the_flag_prose_refusal_stops_at_four_characters``
     instead, in both directions.
 
@@ -6335,8 +6369,8 @@ def test_a_below_floor_escalation_now_names_its_label_and_reads_contained() -> N
     ), f"the notice path lost the label: {report.labels}"
 
 
-def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:
-    """The OVER-REACH direction: narrowing the value grammar may not stop filing.
+def test_a_genuinely_exposed_compact_credential_still_escalates() -> None:
+    """The OVER-REACH direction: narrowing the value grammar may not stop the GRADE.
 
     The fix stops a fragment of a SWALLOWED neighbouring field grading as exposed.
     It must not stop the other case, which is the one the whole control exists for:
@@ -6351,6 +6385,12 @@ def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> Non
     ESCALATES, and the corpus holds exactly one escalating case by construction
     (``_ESCALATING_POSITIVE_CASES``); this is the test that pins the direction
     without widening that set.
+
+    Renamed (2026-09-27) from ``…_still_files_an_incident``: the GRADE is what this
+    test has always really been about — it asserts on ``shape_report``, not on any
+    row — and the row is gone, so the name now says what the assertions do. The
+    ESCALATION still exists as a classification and is still what the queue's gate
+    reads; it is the notice built from it that the operator retired.
     """
     obj = json.loads(COMPACT_TOKEN_PAIR)
     value = obj["access_token"]
@@ -6499,14 +6539,15 @@ async def test_a_contained_result_files_nothing_anywhere(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_an_exposure_with_no_contained_label_still_files_the_rotation(tmp_path: Path) -> None:
-    """The case that used to be silent, and the one a labels-only gate would drop.
+async def test_an_exposure_with_no_contained_label_files_no_receipt(tmp_path: Path) -> None:
+    """The empty-labels ESCALATION — the operator's own screenshot — is silent too.
 
-    A hit that left readable material has ``complete=False``, so it contributes no
-    LABEL — the labels mean "masked whole". A notice gated on labels alone therefore
-    goes quiet on the single event that must be raised, which is why the
-    classification travels beside the labels and why ``report_shape_hits`` files an
-    empty label list when the exposure flag is set.
+    INVERTED from the pin that asserted a receipt (2026-09-27). This is the exact
+    shape the operator sent: a hit that left readable material has
+    ``complete=False``, so it contributes no LABEL, and three of the four rows in
+    their screenshot read "a credential the shape table could not name". The row
+    IS still queued — asserted below, so this cannot pass by the queue never
+    filling — and it emits nothing: no live receipt, no notice text.
     """
     from local_operator.harness.redaction import (
         report_shape_hits,
@@ -6530,8 +6571,79 @@ async def test_an_exposure_with_no_contained_label_still_files_the_rotation(tmp_
     await session._flush_shape_incidents()
 
     notices = [event for event in events if isinstance(event, NoticeEvent)]
-    assert notices, "the exposure emitted no receipt"
-    assert "rotate" in notices[0].text
+    assert not notices, "the empty-labels escalation emitted a receipt"
+    assert not any(isinstance(event, NoticeEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_a_read_of_a_workflow_yaml_files_nothing(tmp_path: Path) -> None:
+    """THE OPERATOR'S EXACT FALSE POSITIVE: a CI workflow read as a shape hit.
+
+    Their screenshot's ``read`` row named its call as a workflow YAML — a file
+    that name-spells things the shape table reads as credential-shaped (an
+    ``env:`` block, a ``secrets`` reference, a ``${{ … }}`` interpolation). It is
+    the shape the operator ruled noise, and it is the reason this change exists
+    rather than a hypothetical. Driven through the reader with a REAL ``ToolContext``
+    (so the reader's own redaction seam is live) and then through the session's own
+    hook and flush — the path any hit the reader left behind would take to a row —
+    so nothing is journalled and nothing is emitted, while the read's own text is
+    still returned and the absence is a live read rather than a no-op.
+    """
+    from local_operator.harness.types import NoticeEvent
+    from local_operator.tools.builtin import execute_read
+
+    # The workflow carries BOTH spellings the operator's file had — a
+    # ``${{ secrets… }}`` interpolation (which the table leaves alone) and a line
+    # that genuinely ESCALATES. The escalating line is the corpus's own case,
+    # taken from ``_exposed_text()`` rather than spelled here, because a fixture
+    # carrying only values the table masks WHOLE would pass under a revert: the
+    # ESCALATED grade is the one that used to file, so it is the one this test
+    # must carry for its absence to mean anything.
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text(
+        "name: ci\n"
+        "on: [push]\n"
+        "jobs:\n"
+        "  test:\n"
+        "    steps:\n"
+        "      - run: echo ${{ secrets.TOKEN }}\n"
+        "      - run: deploy --dsn " + _exposed_text() + "\n",
+        encoding="utf-8",
+    )
+    # THE CONTROL, in the fixture itself: the file on disk really does carry an
+    # escalating hit, so the run below is a live pass over material that would have
+    # filed before the retirement. Without this the test could pass on a fixture
+    # that drifted to something the table never flagged.
+    _masked_fixture, _fixture_hits = scrub_shapes_with_hits(workflow.read_text())
+    assert redaction_shapes.shape_report(
+        _fixture_hits
+    ).reached_model, "the workflow fixture stopped escalating"
+
+    session = _session(tmp_path)
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    events: list[Any] = []
+    session.subscribe(events.append)
+
+    # A real read with a REAL ToolContext and a synthetic call id: the reader
+    # resolves the path and calls the context's recorder, which is the seam a
+    # dispatched call uses.
+    context = ToolContext(cwd=str(tmp_path), variables=session.variables)
+    result = await execute_read("call-workflow", {"path": str(workflow)}, None, None, context)
+    assert not result.is_error, result.text
+    # The read still happened and still returned its text — this is an ABSENCE
+    # test, so it has to prove the file was actually read.
+    assert "jobs:" in result.text, result.text
+
+    # Through the session's own hook, then drained at a turn boundary: the path a
+    # hit the reader's pass left behind would take to a row.
+    session._redact_tool_result_text(result.text)
+    await session._flush_shape_incidents()
+
+    assert not [event for event in events if isinstance(event, NoticeEvent)]
+    transcript = tmp_path / "session" / "transcript.jsonl"
+    body = transcript.read_text() if transcript.exists() else ""
+    assert "session_credential_redaction" not in body, "a workflow read was journaled"
 
 
 def test_the_live_stream_files_only_an_exposure() -> None:
@@ -7186,3 +7298,335 @@ def test_the_settled_cap_bounds_what_is_published_not_the_pass():
 
     assert builtin._REDACT_STREAM_LIMIT_CHARS == SPILL_ENTRY_LIMIT_BYTES
     assert builtin._REDACT_STREAM_LIMIT_CHARS > builtin.TOOL_OUTPUT_LIMIT_CHARS
+
+
+# ---------------------------------------------------------------------------
+# A weak credential name must not PROMOTE a bare identifier
+# ---------------------------------------------------------------------------
+#
+# Registration is a session-wide PROMOTION, so a false positive here outlives
+# the line that caused it. That is how a cosmetic redaction became committed
+# corruption: a read carrying ``BUCKET_KEY=bucket_v4`` registered ``bucket_v4``,
+# every later occurrence was masked — including inside a Go struct tag — and an
+# agent reading its own file back took the marker for a display quirk and wrote
+# it into source. Two DISTINCT field names came out byte-identical, index
+# creation failed at boot with no error, and only a byte hash showed it.
+
+
+def _promotes(line: str, value: str) -> bool:
+    """Whether ``line`` leaves ``value`` registered for the rest of the session.
+
+    The store is asked directly rather than through a rendered transcript: a
+    mask that happens to hide the value in place and a REGISTRATION that masks
+    it in every later result are different claims, and it is the second one that
+    damages a file the agent then writes.
+    """
+    store = VariableStore(cwd=".")
+    store.redact_with_report(line)
+    return store.redact(value) != value
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "BUCKET_KEY=bucket_v4",
+        '{"bucket_key": "bucket_v4"}',
+        "NETWORK_BUCKET_KEY=bucket_v4",
+    ],
+)
+def test_a_weak_credential_name_does_not_promote_a_bare_identifier(line: str) -> None:
+    """The reported false positive: an identifier under a weak name is not a secret.
+
+    ``key`` is a credential word, so the assignment rule reads
+    ``BUCKET_KEY=<value>`` as a credential — but the VALUE says none did. The
+    name only says one COULD sit there.
+    """
+    assert not _promotes(line, "bucket_v4"), (
+        f"{line!r} promoted 'bucket_v4' to a session-wide redaction; every later "
+        "occurrence of an ordinary identifier would be masked, which is the "
+        "damage mode this test exists to keep closed"
+    )
+
+
+def test_a_weak_name_leaves_the_bare_identifier_readable_in_place() -> None:
+    """Not promoted means not masked: the line a coding agent reads stays intact.
+
+    A mask in place would still corrupt the agent's next edit — the value it
+    copies back would be the marker — so the refusal has to cover the mask too,
+    not only the registration.
+    """
+    line = "BUCKET_KEY=bucket_v4"
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert scrubbed == line
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        ("SERVICE_TOKEN=" + "FAKE" + "TOKENVALUE1234567890", "FAKE" + "TOKENVALUE1234567890"),
+        ("GH_TOKEN=" + "ghp_" + "A" * 36, "ghp_" + "A" * 36),
+        (
+            "AWS_SECRET_ACCESS_KEY=" + "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+        ),
+        (
+            "mongodb://app:" + "FAKEPASSWORD" + "word@db.example.com/app",
+            "FAKEPASSWORD" + "word",
+        ),
+    ],
+)
+def test_a_strong_name_or_a_real_shape_still_promotes(line: str, value: str) -> None:
+    """The control: narrowing must not open a hole.
+
+    A STRONG name (``…_token``, ``secret``) must keep masking any opaque value,
+    and a DSN's password must keep being contained whatever its shape. Those are
+    the corpus positives the value proof was relaxed for; this test is what
+    stops the new refusal from being widened into them.
+    """
+    assert _promotes(line, value), f"{line!r} no longer contains {value!r}"
+
+
+@pytest.mark.parametrize(
+    "line, value",
+    [
+        # The clause keys off a snake_case WORD. Every value below is the same
+        # alphabet, so a rule that widened back to "identifier-shaped" would
+        # release them — which is exactly what agent review round 1 (R1-1)
+        # measured: a 32-character hex key under the WEAK name `AES_KEY` came
+        # back masked=False registered=False, i.e. a real credential in the
+        # clear, and whether it escaped depended on its first character.
+        (
+            "AES_KEY=" + "abcdef0123456789" + "abcdef0123456789",
+            "abcdef0123456789" + "abcdef0123456789",
+        ),
+        (
+            "HASH_KEY=" + "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+        ("SORT_KEY=" + "aB3kL9mN2pQ7Zr4", "aB3kL9mN2pQ7Zr4"),
+    ],
+)
+def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
+    """The control that the first cut of this fix FAILED.
+
+    A weak name plus a value that is opaque — a hex digest, a mixed-case token —
+    must keep being masked and contained. The refusal is for snake_case WORDS,
+    not for everything that happens to match an identifier's alphabet, and this
+    test is what holds that line: it reds if the clause is widened.
+    """
+    assert _promotes(line, value), f"{line!r} no longer contains {value!r}"
+    scrubbed, hits = scrub_shapes_with_hits(line)
+    assert value not in scrubbed, f"{line!r} left {value!r} readable"
+    assert hits, f"{line!r} produced no hit at all"
+
+
+#: The corpus the released class is MEASURED over — values already exercised through
+#: the assignment rule, so the probe is the same call the pipeline makes (`KEY=<value>`
+#: through a real store) rather than a table of strings someone maintains by hand.
+_RELEASE_PROBE_VALUES = (
+    # BOUNDARY PROBES — one inside each rule's own band, and each is MASKED on this
+    # head, so loosening its rule releases it and moves the measurement. They are the
+    # only corpus entries that can discriminate, and the lesson is recorded because it
+    # cost five review rounds: a probe that does not sit INSIDE the band guards
+    # nothing. Round 3 (R3-1) widened the digit cap with the module green; round 4
+    # (R4-1) did the same to the length cap, because every probe was shorter than the
+    # cap it was supposed to be testing; round 5 (R5-1) did the same to the alphabet,
+    # because the one uppercase-carrying probe also carried enough digits for the
+    # digit cap to refuse it first; round 6 (R6-1) did the same to the start anchor,
+    # with no corpus value leading with a digit or a capital. A probe has to fail the
+    # rule it guards and nothing else.
+    #
+    # Every arm of the refusal and the corpus value that DECIDES it. Keep this list
+    # and the probes together: an arm added without a probe here is the same failure
+    # again, and five rounds were spent rediscovering one arm at a time.
+    #   digit cap            -> "quick_brown_fox_123"
+    #   length cap           -> "mongo_primary_admin_passphrase_01" (33 chars)
+    #   alphabet             -> "us_East_1"
+    #   start anchor         -> "2fa_backup_codes"
+    #   underscore required  -> "bucketv4" (refused only by the missing "_")
+    #   end anchor           -> "us_East_1" (`fullmatch` -> `match` reds on it)
+    #   the `not strong` gate -> NO single-value probe can straddle it: the whole
+    #     corpus is measured under the weak name "KEY", so removing the gate
+    #     (`redaction_shapes.py`, the `and not strong` condition) leaves THIS test
+    #     green and reds 354 rows of
+    #     `test_a_credential_shape_is_masked_on_every_surface` instead. That sibling
+    #     test owns the condition — a green reading here is NOT coverage of it
+    #     (agent review R7-1).
+    #
+    # The hyphen is deliberately absent from the list: no masked corpus value
+    # contains one, and the hyphenated values are released through a separate
+    # clause, so no single-value probe can decide that arm (agent review round 7).
+    "quick_brown_fox_123",  # 3 digits -> the digit cap
+    "bucketv4",  # no underscore -> the underscore rule
+    "mongo_primary_admin_passphrase_01",  # 33 chars -> the length cap
+    "primary_replica_connection_string_01",  # 36 chars -> the length cap
+    "us_East_1",  # uppercase -> the alphabet
+    "2fa_backup_codes",  # digit-leading -> the start anchor
+    "bucket_v4",
+    "bucket_v6",
+    "schema_registry",
+    "service_account_name",
+    "prod_db_pass_01",
+    "user_1_pass",
+    "sec1_ret",
+    "db_password_1",
+    "vault_token_1",
+    "rabbit_pass_01",
+    "grafana_admin_pass",
+    "my_password",
+    "db_pass",
+    "hunter2",
+    "correct_horse_battery_staple",
+    "server_password_2",
+    "redis_auth_1",
+    "mq_secret_01",
+    "api_key_prod",
+    "admin_pw_01",
+    "network_bucket_v4",
+    "ca_central_1",
+    "us_east_1",
+    "internal_token_2",
+    "app_secret_key",
+    "staging_db_pass_02",
+    "smtp_pass_1",
+    "ldap_bind_pw",
+    "kafka_sasl_secret",
+    "db_user_name",
+    "cache_key_name",
+    "swordfish",
+    "correct-horse-battery",
+    "hunter2x",
+    "aB3kL9mN2pQ7Zr4",
+    "abcdef0123456789abcdef0123456789",
+)
+
+
+def _released_values() -> set[str]:
+    """The corpus values this head neither masks nor contains.
+
+    Asked of the STORE rather than a rendered transcript: a mask that hides the
+    value in place and a REGISTRATION that hides it in every later result are
+    different claims, and the released class is about both being gone.
+    """
+    released: set[str] = set()
+    for value in _RELEASE_PROBE_VALUES:
+        # A fresh store per value on purpose: registration is sticky WITHIN a store,
+        # so reusing one would let an earlier value's registration decide a later
+        # value's reading and the corpus would stop measuring single values.
+        store = VariableStore(cwd=".")
+        scrubbed, _ = store.redact_with_report("KEY=" + value)
+        if value in scrubbed and store.redact(value) == value:
+            released.add(value)
+    return released
+
+
+#: FROZEN, in both directions, and this is a RATCHET rather than a list: every corpus
+#: value outside this set is masked and contained on this head, so a WIDENING of the
+#: refusal (a bigger digit cap, a longer length cap, a looser shape) releases one and
+#: reds, and a NARROWING masks one and reds. Both have to come through an edit to this
+#: set with a reason in the commit.
+#:
+#: It reds only for the rules a probe actually straddles, which is why the boundary
+#: probes exist and why each one names its rule. A rule with no probe inside its band
+#: is unguarded however wide the rest of the corpus looks.
+#:
+#: The first cut of this froze a hand-picked three values and agent review round 3
+#: (R3-1) showed exactly what that was worth: it caught a SHRINK and nothing else, so
+#: the clause could be widened to three digits and release `db_password_1`-style
+#: values with the whole module still green. Measuring the class is the fix.
+_RELEASED_WORD_SHAPED = frozenset(
+    (
+        "admin_pw_01",
+        "api_key_prod",
+        "app_secret_key",
+        "bucket_v4",
+        "bucket_v6",
+        "ca_central_1",
+        "cache_key_name",
+        "correct_horse_battery_staple",
+        "db_pass",
+        "db_password_1",
+        "db_user_name",
+        "grafana_admin_pass",
+        "hunter2",
+        "internal_token_2",
+        "kafka_sasl_secret",
+        "ldap_bind_pw",
+        "mq_secret_01",
+        "my_password",
+        "network_bucket_v4",
+        "prod_db_pass_01",
+        "rabbit_pass_01",
+        "redis_auth_1",
+        "schema_registry",
+        "sec1_ret",
+        "server_password_2",
+        "service_account_name",
+        "smtp_pass_1",
+        "staging_db_pass_02",
+        "swordfish",
+        "us_east_1",
+        "user_1_pass",
+        "vault_token_1",
+    )
+)
+
+
+def test_the_released_word_shaped_class_is_measured_and_frozen() -> None:
+    """The cost of the fix, measured rather than listed.
+
+    These values are not oversights — the operator ruled that the narrowing stands
+    and the released class is recorded, on the principle that a value stored in
+    something credential-shaped is not thereby a secret and only keys and passwords
+    need masking. This test does not ask for them to be masked; it asks that the set
+    never move without someone deciding to, and it measures the set rather than
+    trusting this comment.
+    """
+    measured = _released_values()
+    newly_released = sorted(measured - _RELEASED_WORD_SHAPED)
+    newly_masked = sorted(_RELEASED_WORD_SHAPED - measured)
+    assert not newly_released and not newly_masked, (
+        "the released class moved — the refusal was widened or narrowed without "
+        f"declaring it. newly released: {newly_released}; newly masked: {newly_masked}. "
+        "If deliberate, update _RELEASED_WORD_SHAPED in the same commit and say why."
+    )
+
+
+def test_the_shape_table_never_matches_its_own_source() -> None:
+    """The defining file must not trip the scanner it defines.
+
+    WHY THIS EXISTS. ``redaction_shapes.py`` names the credential shapes it knows in
+    its own prose: the examples that explain a rule are written in the shape the rule
+    matches. Before this guard, reading the file therefore MASKED it — its docstrings
+    came back to an agent with the examples replaced by the marker and, worse, a
+    handful of the matched spans were graded ``exposed``. ``reached_model`` is
+    ``any(hit.exposed …)``, so an agent that merely READ this file filed a rotation
+    demand for a credential that does not exist; a reviewer subagent was stopped
+    mid-round by exactly that. A file that documents the shapes has to stay legible to
+    the reader it documents them for, and reading documentation may never be an
+    incident.
+
+    WHAT IT PINS, and why zero rather than only "zero exposed". The primary
+    requirement is that no hit be ``exposed`` — nothing may reach the model as
+    readable credential material, and no notice may fire. This holds the whole table
+    to ZERO hits: an ordinary reader has no reason to see this file masked at all, and
+    a residual hit — even a contained one — is a spot where the prose is written as a
+    live example rather than a description. If a genuinely unmovable hit is ever
+    reintroduced (a rule that cannot be described without instantiating itself),
+    narrow this to the ``exposed`` half and record the residual here, which is a
+    decision rather than a silent widening.
+
+    The source is read from the installed module rather than a repository-relative
+    path, so the assertion follows the file this test's own interpreter loads.
+    """
+    source = Path(redaction_shapes.__file__).read_text()
+    _masked, hits = scrub_shapes_with_hits(source)
+    exposed = [hit.label for hit in hits if hit.exposed]
+    assert not exposed, (
+        "the shape table matches its own source as EXPOSED credential material, so an "
+        f"agent reading this file would file a rotation demand. labels: {exposed}"
+    )
+    assert not hits, (
+        "the shape table masks its own prose, leaving the file that documents the "
+        f"shapes illegible: {[(hit.label, hit.window) for hit in hits]}"
+    )

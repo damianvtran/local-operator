@@ -1040,6 +1040,116 @@ def test_the_live_path_still_names_the_honest_classes() -> None:
     assert not isinstance(raised.value, ActionBatchRefused), "the decoder's own sentence"
 
 
+def test_a_repeated_key_names_the_repair_without_letting_the_payload_name_its_class() -> None:
+    """The duplicate-key refusal: actionable hint, unsteerable class.
+
+    Both halves are load-bearing together, which is why they are pinned in one
+    test. (1) The correction names the repeated key -- a reply that touched the
+    reserved envelope is replayed as a placeholder, so the model never sees
+    its own refused bytes again and cannot look up which key it repeated. (2)
+    The name travels as DATA on the exception, never inside the sentence
+    ``classify_rejection`` reads: a key is model-supplied text and ``unknown
+    key:`` / ``type=`` are legal JSON key names, so a sentence carrying one
+    could be steered into another class by the payload itself. The repeated
+    key below IS the phrase that would classify as ``unknown-key`` -- and the
+    class must not move.
+    """
+
+    current = observation()
+    crafted = "unknown key: NOSUCH"
+    reply = (
+        '{"actions": [{"kind": "key", "observation_id": "%s", "keys": ["ENTER"], '
+        '"%s": 1, "%s": 2}]}' % (current.observation_id, crafted, crafted)
+    )
+    with pytest.raises(DecisionParseError) as raised:
+        parse_decision(reply, current, route=_ROUTE)
+    refused = rejection_evidence(reply, raised.value, current, LEGACY_ACTION_SURFACE, None)
+
+    assert refused.class_key == "duplicate-key"
+    # The guard names it whole (it is short and renders as itself), so the
+    # correction carries the one fact the model needs to stop repeating it.
+    assert repr(crafted) in refused.hint
+    assert "input_value=" not in refused.hint
+
+
+def test_a_sealed_duplicate_key_sentence_classifies_and_degrades_without_the_name() -> None:
+    """The text-only generation: class from the sentence, no invented name.
+
+    A sealed artifact written before this split carries the decoder's sentence,
+    which names no key; the class must still derive from it alone (that is what
+    makes the corpus countable under the new name), and a hint rebuilt from
+    that sentence must state the rule without inventing a key it cannot see.
+    """
+
+    reason = "model reply must be one duplicate-free JSON object"
+    assert classify_rejection(reason) == "duplicate-key"
+
+    hint = rejection_hint(
+        "duplicate-key",
+        reason=reason,
+        observation=observation(),
+        surface=LEGACY_ACTION_SURFACE,
+    )
+
+    assert "at least one key of the object appears more than once" in hint
+    assert "input_value=" not in hint
+    assert '"actions"' in hint
+
+
+def test_the_decoder_carries_the_repeated_key_as_data_not_in_the_sentence() -> None:
+    """Where the name lives: beside the sentence, never inside it.
+
+    ``classify_rejection`` reads the sentence and the sentence only, so the
+    sentence is byte-stable across both generations of the refusal; the name is
+    a typed field for the hint to use. The unquotable half is pinned too: a key
+    the whole-or-nothing guard rejects is dropped at the DECODER, not merely at
+    the hint, so no unvetted rendering can exist on the exception at all.
+    """
+
+    raw = '{"actions": [{"kind": "click", "x": 1, "button": "left", "button": "left"}]}'
+    with pytest.raises(DecisionParseError) as raised:
+        _decode_leading_json(raw)
+    assert str(raised.value) == "model reply must be one duplicate-free JSON object"
+    assert raised.value.repeated_key == "button"
+
+    long_key = "k" * 50
+    raw_unquotable = '{"%s": 1, "%s": 2}' % (long_key, long_key)
+    with pytest.raises(DecisionParseError) as raised_unquotable:
+        _decode_leading_json(raw_unquotable)
+    assert raised_unquotable.value.repeated_key is None
+
+
+def test_a_repeated_key_behind_leading_framing_is_still_named() -> None:
+    """The residual closed: junk before the object does not lose the name.
+
+    A duplicate key at the head was named; the SAME reply behind a prose
+    preamble or a fence used to be refused as ``leading-delimiter``, because
+    the leading-object tolerance swallowed the decoder's typed fact. The
+    tolerance now re-raises it, so both shapes are refused with the
+    duplicate-key sentence, the same class and the repeated key named --
+    converging in one retry instead of two (measured in review round 1).
+    The unquotable half is pinned too: a name the whole-or-nothing guard
+    rejects is absent on this path exactly as on the head one.
+    """
+
+    current = observation()
+    duplicate = '{"actions": [{"kind": "click", "x": 1, "button": "left", "button": "left"}]}'
+    for prefix in ("Sure, here you go: ", "```json\n"):
+        reply = prefix + duplicate
+        with pytest.raises(DecisionParseError) as raised:
+            parse_decision(reply, current, route=_ROUTE)
+        assert str(raised.value) == "model reply must be one duplicate-free JSON object"
+        assert raised.value.repeated_key == "button"
+        refused = rejection_evidence(reply, raised.value, current, LEGACY_ACTION_SURFACE, None)
+        assert refused.class_key == "duplicate-key"
+        assert "'button'" in refused.hint
+
+    framed_unquotable = 'Sure, here you go: {"%s": 1, "%s": 2}' % ("k" * 50, "k" * 50)
+    with pytest.raises(DecisionParseError) as raised_unquotable:
+        parse_decision(framed_unquotable, current, route=_ROUTE)
+    assert raised_unquotable.value.repeated_key is None
+
+
 @pytest.mark.parametrize("phrase", _ENVELOPE_RENDERING_MARKERS)
 def test_a_live_payload_carrying_a_rendering_marker_still_cannot_move_the_class(
     phrase: str,

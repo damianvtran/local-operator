@@ -46,13 +46,15 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Literal, Sequence
+from typing import Any, Iterable, Iterator, Literal, Sequence
 
 from pydantic import (
     BaseModel,
@@ -98,11 +100,39 @@ MILESTONES_MAX = 20
 MILESTONE_NAME_MAX = 80
 ESTIMATE_MAX = 1000.0
 
+#: One cap for the ``owner``/``team`` attributions, at the milestone-name scale
+#: (80): both are short single-line labels, and a value that would not fit one
+#: line is refused rather than silently truncated into a name nobody wrote.
+ATTRIBUTION_MAX = 80
+
+#: The optional display ``title``: a short single-line name, the same scale as
+#: the other one-line labels (80). Longer is refused rather than truncated.
+TITLE_MAX = 80
+
+#: The append-only history is BOUNDED: the newest 500 entries are kept, oldest
+#: dropped first — deep enough for weeks of real reporting, bounded so one row
+#: cannot grow without limit.
+UPDATES_MAX = 500
+
+#: Attachments are COPIED into the store, so both the count per update and
+#: each file's size are bounded: 10 files of at most 5 MB. Beyond either, the
+#: update is refused rather than trimmed — a silently dropped file is evidence
+#: the writer believes was kept.
+ATTACHMENTS_MAX = 10
+ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
+
+#: Extensions copied in as ``image`` attachments; everything else is ``data``
+#: (the kinds renderers branch on, so the classification is stated once).
+_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"})
+
 #: How long a progress snippet stays "fresh". ONE constant, read by the
 #: view/route payloads and by the completion-time check, so the stale badge and
 #: the nudge can never disagree about a record: a work turn yielding within this
-#: window of the last report is not asked to re-report; anything older is.
-PROJECT_PROGRESS_STALE_S: float = 1800.0
+#: window of the last report is not asked to re-report; anything older is. Four
+#: hours is the operator's window ("stale only when not updated in more than 4
+#: hours"), and only ``active`` records are ever stale at all (see
+#: :func:`progress_is_stale`: settled rows never read stale).
+PROJECT_PROGRESS_STALE_S: float = 14400.0
 
 #: Registry mutation lock budget: a bounded waiter, so a dead peer can never
 #: park a tool call forever (the ``teams`` constants' shape).
@@ -256,6 +286,28 @@ def _validate_sessions(sessions: list[str] | None) -> list[str]:
     return values
 
 
+def _short_text_or_none(value: object, label: str, cap: int) -> str | None:
+    """One optional short-text field (``owner``/``team``/``title``), trimmed.
+
+    Optional-not-defaulted is the contract: absent means UNKNOWN (``None``),
+    never a placeholder string — a row written before these fields existed must
+    read as unknown, and a cleared field returns to exactly that state rather
+    than to ``""``. One rule, shared by the row and every input model, so the
+    tool, the desktop route and the phone refuse the same values with the same
+    sentence.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be a string (or '' to clear it)")
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > cap:
+        raise ValueError(f"{label} must be at most {cap} characters")
+    return text
+
+
 def validate_milestones(milestones: list[Any] | None) -> list["ProjectMilestone"]:
     """The ONE list validator, shared by the row and by every input model.
 
@@ -326,6 +378,106 @@ class ProjectMilestone(BaseModel):
         return _iso_date_or_none(value, "milestone completed_at")
 
 
+class ProjectAttachment(BaseModel):
+    """One file copied into the store beside an update entry.
+
+    The FILE lives under ``<projects root>/attachments/<project id>/`` —
+    copied in when the entry is written, never referenced from its original
+    location (a scratch directory gets reaped; the evidence must survive).
+    ``kind`` is classified from the extension at copy time, ``bytes`` is the
+    size then, and ``path`` is where the copy lives — the resolvable handle a
+    renderer opens. A reader tolerates junk here exactly as it does for the
+    history itself (see :func:`_coerce_attachment`).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field(default="", description="Original file name, for display.")
+    kind: Literal["image", "data"] = Field(
+        default="data", description="``image`` by extension; ``data`` otherwise."
+    )
+    path: str = Field(default="", description="Where the COPY lives, resolvable.")
+    bytes: int = Field(default=0, description="Size at copy time.")
+    added_at: str = Field(default="", description="ISO-8601 UTC copy time.")
+
+
+class ProjectUpdateEntry(BaseModel):
+    """One append-only progress report — the project's history entry.
+
+    ``at`` is ISO-8601 UTC, ``text`` is the report as written (markdown,
+    trimmed like every string field), ``by`` names the reporter (a session id
+    or agent label; ``""`` when unknown), and ``attachments`` holds the files
+    copied beside it. The log is append-only, newest last, bounded at
+    :data:`UPDATES_MAX`; malformed or missing history reads as ``[]``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    at: str = ""
+    text: str = ""
+    by: str = ""
+    attachments: list[ProjectAttachment] = Field(default_factory=list)
+
+
+def _coerce_attachment(raw: dict[str, Any]) -> ProjectAttachment:
+    """One attachment OBJECT from a stored row, tolerantly: junk degrades.
+
+    Junk FIELDS degrade (an unknown ``kind`` reads ``data``, a non-numeric
+    ``bytes`` reads ``0``); a non-object list item never reaches here —
+    :func:`_coerce_updates` drops those, the same rule entries follow — so a
+    bare string cannot become an empty attachment nobody can explain.
+    """
+    kind = str(raw.get("kind") or "").strip().lower()
+    try:
+        size = max(int(raw.get("bytes") or 0), 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        size = 0
+    return ProjectAttachment(
+        name=str(raw.get("name") or "").strip(),
+        kind="image" if kind == "image" else "data",
+        path=str(raw.get("path") or "").strip(),
+        bytes=size,
+        added_at=str(raw.get("added_at") or "").strip(),
+    )
+
+
+def _coerce_updates(value: object) -> list[ProjectUpdateEntry]:
+    """The stored history, tolerantly: malformed or missing reads as ``[]``.
+
+    No migration and no refusal: an entry that is not an object is dropped,
+    fields that lost their shape degrade to their empty values, and the log
+    stays bounded (the newest :data:`UPDATES_MAX` entries) exactly as a write
+    keeps it — so a hand-edited row reads, and the next write re-saves it clean.
+    """
+    if not isinstance(value, list):
+        return []
+    entries: list[ProjectUpdateEntry] = []
+    for item in value:
+        if isinstance(item, ProjectUpdateEntry):
+            # The in-process write path hands over already-validated entries
+            # (``create_project``/``update_project`` build them); only rows
+            # that came off DISK arrive as plain objects.
+            entries.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        raw_attachments = item.get("attachments")
+        attachments = [
+            _coerce_attachment(attachment)
+            for attachment in (raw_attachments if isinstance(raw_attachments, list) else [])
+            if isinstance(attachment, dict)
+        ][:ATTACHMENTS_MAX]
+        entries.append(
+            ProjectUpdateEntry(
+                at=str(item.get("at") or "").strip(),
+                text=str(item.get("text") or "").strip(),
+                by=str(item.get("by") or "").strip(),
+                attachments=attachments,
+            )
+        )
+    return entries[-UPDATES_MAX:]
+
+
 def milestone_status(
     milestone: ProjectMilestone, *, today: date | None = None
 ) -> Literal["completed", "overdue", "upcoming"]:
@@ -333,14 +485,39 @@ def milestone_status(
 
     ``today`` exists for tests; left ``None`` the basis is :func:`_utc_today`
     — the SAME date ``completed_at`` is stamped from — so "overdue" and "done
-    today" cannot disagree about which day it is.
+    today" cannot disagree about which day it is. The rule itself lives in
+    :func:`milestone_state`, shared with the JSON-row readers.
     """
-    if milestone.completed_at:
-        return "completed"
     moment = today or _utc_today()
-    if milestone.target_date and date.fromisoformat(milestone.target_date) < moment:
-        return "overdue"
-    return "upcoming"
+    return milestone_state(milestone.completed_at, milestone.target_date, today=moment.isoformat())
+
+
+def milestone_state(
+    completed_at: str | None,
+    target_date: str | None,
+    *,
+    today: str | None = None,
+) -> Literal["completed", "overdue", "upcoming"]:
+    """The derived milestone status from its two raw fields — model OR JSON row.
+
+    One rule, two shapes: :func:`milestone_status` passes a model's fields and
+    the terminal renderers pass a composed row's, so the status the tool
+    reports and the colour a footer or timeline paints cannot disagree about
+    one milestone. Malformed dates compare as text rather than raising: the
+    store tolerates a bad row, so a reader of that row must too (a receipt is
+    a keystroke path and a canvas is a frame — neither may crash).
+    """
+    if completed_at:
+        return "completed"
+    target = str(target_date or "")
+    if not target:
+        return "upcoming"
+    moment = today or _today_iso()
+    try:
+        overdue = date.fromisoformat(target) < date.fromisoformat(moment)
+    except ValueError:
+        overdue = target < moment
+    return "overdue" if overdue else "upcoming"
 
 
 class Project(BaseModel):
@@ -364,6 +541,16 @@ class Project(BaseModel):
     id: str = Field(description="uuid4 hex; also the row's file name.")
     name: str = Field(description="Unique (case-insensitive), 1-64 [A-Za-z0-9._-].")
     description: str = Field(default="", max_length=DESCRIPTION_MAX)
+    #: Who owns the stream / which team manages it. Optional by design: absent
+    #: means UNKNOWN (``None``), never a default string — a row written before
+    #: these fields existed reads as unknown, and clearing returns the field to
+    #: that state rather than to ``""``.
+    owner: str | None = None
+    team: str | None = None
+    #: The DISPLAY name when it differs from the addressing key ``name``:
+    #: listings show it first with the key as secondary. Optional by design —
+    #: absent falls back to ``name`` on every surface (:func:`display_name`).
+    title: str | None = None
     status: ProjectStatus = "active"
     progress: str = Field(default="", max_length=PROGRESS_MAX)
     progress_updated_at: float | None = None
@@ -381,16 +568,45 @@ class Project(BaseModel):
     estimate: float | None = Field(default=None, description="0 < estimate <= 1000.")
     estimate_unit: EstimateUnit = "points"
     milestones: list[ProjectMilestone] = Field(default_factory=list)
+    # -- slice 2: the append-only history (the v2 comment above still applies:
+    # nothing has shipped without it, so ``schema`` stays 1) -------------------
+    #: Every write of a NEW progress line appends one entry here (newest last,
+    #: bounded :data:`UPDATES_MAX`); the freshness pair above remains the
+    #: "current" pointer at its tail. Malformed history reads as ``[]`` — a
+    #: broken log never costs the row (:func:`_coerce_updates`).
+    updates: list[ProjectUpdateEntry] = Field(default_factory=list)
 
     @field_validator("id")
     @classmethod
     def _id(cls, value: str) -> str:
         return validate_project_id(value)
 
+    @field_validator("updates", mode="before")
+    @classmethod
+    def _updates(cls, value: object) -> list[ProjectUpdateEntry]:
+        # BEFORE-validation: the tolerance is about SHAPE (a list of objects),
+        # which must be read before the nested models ever see it.
+        return _coerce_updates(value)
+
     @field_validator("name")
     @classmethod
     def _name(cls, value: str) -> str:
         return validate_project_name(value)
+
+    @field_validator("owner")
+    @classmethod
+    def _owner(cls, value: object) -> str | None:
+        return _short_text_or_none(value, "owner", ATTRIBUTION_MAX)
+
+    @field_validator("team")
+    @classmethod
+    def _team(cls, value: object) -> str | None:
+        return _short_text_or_none(value, "team", ATTRIBUTION_MAX)
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, value: object) -> str | None:
+        return _short_text_or_none(value, "title", TITLE_MAX)
 
     @field_validator("tags")
     @classmethod
@@ -454,14 +670,17 @@ class ProjectEdit(BaseModel):
     ABSENT means "leave it as it is"; every mutation path reads
     ``model_fields_set`` rather than treating ``None`` as a value, so a caller
     can set one field without clobbering the others. Dates accept ``""``/``null``
-    as an explicit clear (see :func:`_edit_date`); ``milestones`` replaces the
-    whole list.
+    as an explicit clear (see :func:`_edit_date`), as do ``owner`` and ``team``;
+    ``milestones`` replaces the whole list.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
     description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
+    owner: str | None = None
+    team: str | None = None
+    title: str | None = None
     status: ProjectStatus | None = None
     progress: str | None = Field(default=None, max_length=PROGRESS_MAX)
     tags: list[str] | None = None
@@ -476,6 +695,21 @@ class ProjectEdit(BaseModel):
     @classmethod
     def _name(cls, value: str | None) -> str | None:
         return None if value is None else validate_project_name(value)
+
+    @field_validator("owner")
+    @classmethod
+    def _owner(cls, value: object) -> str | None:
+        return _short_text_or_none(value, "owner", ATTRIBUTION_MAX)
+
+    @field_validator("team")
+    @classmethod
+    def _team(cls, value: object) -> str | None:
+        return _short_text_or_none(value, "team", ATTRIBUTION_MAX)
+
+    @field_validator("title")
+    @classmethod
+    def _title(cls, value: object) -> str | None:
+        return _short_text_or_none(value, "title", TITLE_MAX)
 
     @field_validator("tags")
     @classmethod
@@ -561,7 +795,16 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     first honest line is still owed), and a report older than
     :data:`PROJECT_PROGRESS_STALE_S` is stale. Computed here so the tool, the
     routes and the completion check cannot disagree about one record.
+
+    ONLY ``active`` RECORDS CAN READ STALE. Paused, done and archived are
+    deliberate statements that the record is settled — the same active-only
+    filter ``stale_projects_for_session`` applies before it can name a project
+    — so a settled row's badge must not nag about a snippet that is simply old.
+    The guard lives HERE, in the one derivation every payload renders, rather
+    than in each surface.
     """
+    if project.status != "active":
+        return False
     if not project.progress:
         return True
     if project.progress_updated_at is None:
@@ -570,8 +813,237 @@ def progress_is_stale(project: Project, *, now: float | None = None) -> bool:
     return (moment - project.progress_updated_at) > PROJECT_PROGRESS_STALE_S
 
 
+def age_text(updated_at: float | None, *, now: float | None = None) -> str | None:
+    """``3s``/``5m``/``2h``/``1d`` age of a raw stamp, or ``None``.
+
+    The 90 s / 90 min / 48 h cut points live HERE — the one copy — and every
+    surface imports this: :func:`reported_age` layers the ``progress`` guard on
+    top for model callers, while the terminal renderers (which hold composed
+    JSON rows, not ``Project`` objects) call it directly, and the row cap below
+    travels with it (agent review round 1, F3/F4: the cut points and the caps
+    had three copies whose comments each claimed canonicity).
+    """
+    if updated_at is None:
+        return None
+    moment = time.time() if now is None else now
+    age = max(0.0, moment - updated_at)
+    if age < 90:
+        return f"{int(age)}s"
+    if age < 5400:
+        return f"{int(age // 60)}m"
+    if age < 172800:
+        return f"{int(age // 3600)}h"
+    return f"{age / 86400:.0f}d"
+
+
+#: One listing/receipt row stays scannable in a transcript. THE number, one
+#: copy: the operator's listing (``slash_commands.project_listing_rows``) and
+#: the model's listing (``tools/project_tool``) both import it, so the two
+#: surfaces cannot truncate the same row at two different widths.
+PROJECT_ROW_CAP = 160
+
+
+def reported_age(project: Project, *, now: float | None = None) -> str | None:
+    """``2h``-style age of the progress snippet, or ``None`` when none is stored.
+
+    The caller composes the sentence, so one implementation of the age
+    arithmetic serves the listing row, the ``show`` block, the update receipt
+    and the completion-time reminder (``Session._project_reminder_text``)
+    without any of them disagreeing about how old the snippet is. Lived in
+    ``tools/project_tool.py`` until the completion check gained a fourth
+    sentence to compose; it moved here with ``progress_is_stale`` for the same
+    reason — the tool layer imports this module, never the other way round.
+    The 90 s / 90 min / 48 h cut points themselves are :func:`age_text`'s,
+    one copy for this and the JSON-row readers.
+    """
+    if not project.progress or project.progress_updated_at is None:
+        return None
+    return age_text(project.progress_updated_at, now=now)
+
+
+def display_name(project: Project | Mapping[str, Any]) -> str:
+    """The human-facing name: the display ``title`` when set, else ``name``.
+
+    THE fallback rule, here so every surface falls back the same way — the
+    tool's rows and receipts, the terminal listing, the TUI canvases and
+    footers. Accepts the row model or its JSON dump (the composed view's
+    ``project`` mapping), because both shapes are read by those surfaces and
+    neither may invent its own precedence. ``name`` stays the ADDRESSING key
+    throughout (slash verbs, ``@project:<name>``, file names): this function
+    decides what a reader SEES, never what a caller types.
+    """
+    if isinstance(project, Mapping):
+        title = project.get("title")
+        name = project.get("name")
+    else:
+        title, name = project.title, project.name
+    return str(title or name or "")
+
+
+def file_size_text(size: int) -> str:
+    """Human size for refusals and attachment lines: ``12 B``/``4.0 KB``/``5.2 MB``.
+
+    ONE decimal place for both units, deliberately: the natural ``:g`` format
+    printed up to six significant digits (``4.00781 KB``, ``97.6562 KB``) —
+    false precision for a screenshot size (design review round 1, D2) — and a
+    conditional format (integer under 10, decimal above) would render the same
+    magnitude in two shapes.
+    """
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
+#: How many history entries a plain-text ``show`` reader prints by default —
+#: a bounded tail, because the full log stays one explicit count away.
+HISTORY_DEFAULT_TAIL = 5
+
+
+def _history_field(entry: object, key: str) -> Any:
+    """One history field, from the row model or the view mapping (see below)."""
+    if isinstance(entry, Mapping):
+        return entry.get(key)
+    return getattr(entry, key, None)
+
+
+def history_lines(
+    project: Project | Mapping[str, Any], *, tail: int = HISTORY_DEFAULT_TAIL
+) -> list[str]:
+    """One ``show`` reader's history section: a bounded tail of the log.
+
+    Accepts the row model or the composed view's ``project`` mapping — the
+    tool's ``show`` renders the model, the routed receipt renders the view —
+    so the two readers state the same section from one copy (the rule
+    :func:`display_name` follows). Newest entries LAST (the log's own order),
+    with the total in the header whenever older entries are elided; attachment
+    lines carry the stored path, the resolvable handle to the copied-in file.
+    """
+    raw_entries = project.get("updates") if isinstance(project, Mapping) else project.updates
+    entries = list(raw_entries) if isinstance(raw_entries, list) else []
+    if tail <= 0:
+        # `0` OMITS the section — including the "none recorded" line, so the
+        # tool description's "0 omits the section" holds for an empty log too
+        # (agent review round 1, F2).
+        return []
+    total = len(entries)
+    if total == 0:
+        return ["history: none recorded"]
+    shown = entries[-tail:]
+    if len(shown) == total:
+        lines = [f"history ({total}):"]
+    else:
+        lines = [f"history ({total}, latest {len(shown)} shown):"]
+    for entry in shown:
+        stamp = str(_history_field(entry, "at") or "").strip() or "(no timestamp)"
+        by = str(_history_field(entry, "by") or "").strip()
+        # One line per entry: whitespace-collapsed so a multi-paragraph
+        # markdown report cannot wrap the block; the row keeps the raw text.
+        text = " ".join(str(_history_field(entry, "text") or "").split()) or "(empty)"
+        by_text = f" by {by}" if by else ""
+        lines.append(f"  - {stamp}{by_text}: {text}")
+        raw_attachments = _history_field(entry, "attachments")
+        for attachment in raw_attachments if isinstance(raw_attachments, list) else []:
+            name = str(_history_field(attachment, "name") or "").strip()
+            kind = str(_history_field(attachment, "kind") or "data").strip()
+            raw_size = _history_field(attachment, "bytes")
+            try:
+                size = int(raw_size or 0)
+            except (TypeError, ValueError):
+                size = 0
+            path = str(_history_field(attachment, "path") or "").strip()
+            lines.append(f"      attachment: {name} [{kind}, {file_size_text(size)}] {path}")
+    return lines
+
+
+def truncate_row(row: str, *, cap: int = PROJECT_ROW_CAP) -> str:
+    """Truncate a listing row to ``cap`` CELLS (not characters) with ``…``.
+
+    Cells, not ``len``: the cap exists to bound what the reader SEES, and a
+    CJK description measured 272 cells in a 160-character row — the row wrapped
+    to three visual lines on the surface whose constant was supposed to bound
+    it (agent review round 1, F4).
+    """
+    from rich.cells import cell_len
+
+    if cell_len(row) <= cap:
+        return row
+    clipped = ""
+    for char in row:
+        if cell_len(clipped + char) > cap - 1:
+            break
+        clipped += char
+    return clipped.rstrip() + "…"
+
+
+def store_error_text(exc: Exception) -> str:
+    """A path-free one-line detail for a store failure.
+
+    An ``OSError`` stringifies with the absolute path it touched
+    (``[Errno 13] Permission denied: '/home/…/.lock'``); a user-facing receipt
+    must not carry a filesystem path, so only the errno sentence survives.
+    Unknown exceptions fall back to their own text (they carry no path).
+    """
+    if isinstance(exc, OSError):
+        detail = exc.strerror or f"errno {exc.errno}"
+        return detail[0].lower() + detail[1:] if detail else "i/o error"
+    return str(exc)
+
+
+def stale_projects_for_session(
+    registry: ProjectRegistry, session_id: str, *, now: float | None = None
+) -> list[Project]:
+    """The active, stale projects ``session_id`` is linked to, name-sorted.
+
+    THE single reading behind the completion-time project check: the producer
+    (``Session._project_continuation``) and the expiry scan
+    (``Session._live_project_reminders``) compute their set through here, so
+    the nudge and the check that retires it can never disagree about which
+    projects are stale. Only ``active`` projects can be named — paused, done
+    and archived are deliberate statements that the record is settled, and a
+    reminder about one would nag the session to revive it — and a project with
+    no progress yet is stale by construction, because the first honest line is
+    still owed.
+    """
+    return [
+        project
+        for project in registry.projects_for_session(session_id)
+        if project.status == "active" and progress_is_stale(project, now=now)
+    ]
+
+
+def stale_projects_fingerprint(projects: Sequence[Project]) -> tuple[tuple[str, str, int], ...]:
+    """The latch/expiry identity of a stale set: ``(id, status, int(stamp))``.
+
+    Sorted so two reads of the same set compare equal; the integer stamp is
+    ``progress_updated_at`` floored (``0`` when unset), which is the freshness
+    state the reminder asserts. A report or status change ALWAYS moves it —
+    the stamp being replaced is at least the staleness window old, so even a
+    refresh cannot land on the same floored integer, and an unset stamp starts
+    at ``0`` — so the remaining stale projects earn another nudge in the same
+    turn.
+    """
+    return tuple(
+        sorted(
+            (project.id, project.status, int(project.progress_updated_at or 0))
+            for project in projects
+        )
+    )
+
+
 def _utc_now() -> float:
     return time.time()
+
+
+def _utc_stamp(now: float) -> str:
+    """ISO-8601 UTC, second granularity — the history log's ``at`` format.
+
+    ``time.gmtime`` + ``strftime`` rather than ``datetime.isoformat`` so the
+    suffix is ``Z`` — the same shape ``session.goal`` stamps — and two readers
+    can compare the strings as text.
+    """
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
 
 
 def _utc_today() -> date:
@@ -681,14 +1153,37 @@ class ProjectRegistry:
         # refresh stays bounded (ONE stat per read) and a fresh row is visible
         # without waiting out the interval.
         self._dir_mtime_ns: int | None = None
+        #: The ``OSError`` that made the last snapshot empty, or ``None``.
+        #: Kept so a surface can tell "nothing is stored" from "nothing could
+        #: be read": the store deliberately degrades to EMPTY on an unreadable
+        #: directory (a reader must not lose its page to a permission blip),
+        #: and answering the empty-store sentence to a broken store is exactly
+        #: the misleading receipt the QA round flagged (Q4).
+        self._load_error: OSError | None = None
         self._load()
+
+    @property
+    def load_error(self) -> OSError | None:
+        """The error that emptied the last load, or ``None`` when it was read.
+
+        Refreshed with every :meth:`_load`, so a store that becomes readable
+        again clears itself without old state (a peer surface re-reads this on
+        each verb).
+        """
+        return self._load_error
 
     def _load(self) -> None:
         """Replace the snapshot with every valid row currently on disk."""
         loaded: dict[str, Project] = {}
         try:
             children = sorted(self.projects_dir.iterdir(), key=lambda path: path.name)
-        except OSError:
+        except OSError as exc:
+            # A store that has never been written is EMPTY, not unreadable:
+            # `projects/` is created on first write, so its absence is the
+            # normal initial state and the empty-store sentence is the right
+            # answer there. Anything else — permissions, I/O — is a failure a
+            # surface must not paper over as "nothing stored".
+            self._load_error = None if isinstance(exc, FileNotFoundError) else exc
             self._projects = {}
             self._dir_mtime_ns = self._dir_mtime()
             self._last_refresh_time = time.time()
@@ -737,6 +1232,9 @@ class ProjectRegistry:
         self._projects = loaded
         self._dir_mtime_ns = self._dir_mtime()
         self._last_refresh_time = time.time()
+        # A readable store clears the flag (see ``load_error``). Set LAST so a
+        # partial load never reports itself readable mid-scan.
+        self._load_error = None
 
     def _dir_mtime(self) -> int | None:
         try:
@@ -751,6 +1249,20 @@ class ProjectRegistry:
             stale = True
         if stale:
             self._load()
+
+    def refresh(self) -> None:
+        """Force one bounded re-read, ignoring the snapshot interval.
+
+        The refusal surfaces read :attr:`load_error` BEFORE any read reaches
+        the store, and a read is what refreshes the snapshot — so a store
+        repaired since the flag was set kept refusing on the live surface
+        (QA round 2, Q5: eight receipts over eleven seconds after a `chmod`
+        back, every one stale). The snapshot's own staleness test cannot see
+        a permission repair either: `chmod` moves the inode's ctime, not the
+        directory's mtime, and the interval may not have elapsed. One stat +
+        one listing per refusal is the bounded cost of telling the truth.
+        """
+        self._load()
 
     def list_projects(self) -> list[Project]:
         """Every project, metadata only, sorted by name (case-insensitive)."""
@@ -868,6 +1380,117 @@ class ProjectRegistry:
         self._dir_mtime_ns = self._dir_mtime()
         return project
 
+    def _store_attachments(
+        self, project_id: str, paths: Sequence[str | Path], *, now: float
+    ) -> list[ProjectAttachment]:
+        """Copy ``paths`` beside the project's row and describe the copies.
+
+        Two-phase on purpose: every path is checked (exists, is a file, within
+        the size cap) BEFORE any byte is copied, so one bad file cannot leave
+        half an update's files orphaned with no metadata pointing at them. The
+        copies live under ``<projects_dir>/attachments/<project id>/`` with a
+        fresh unique name each (``<uuid><suffix>``), so two updates attaching
+        the same source never collide and the original location is never
+        referenced — a scratch directory gets reaped; the evidence must
+        survive. Returns the metadata for the caller's new entry.
+        """
+        if not paths:
+            return []
+        if len(paths) > ATTACHMENTS_MAX:
+            raise ValueError(f"at most {ATTACHMENTS_MAX} attachments per update (got {len(paths)})")
+        sources: list[Path] = []
+        for raw in paths:
+            source = Path(str(raw)).expanduser()
+            if not source.exists():
+                raise ValueError(f"no file at {source}")
+            if not source.is_file():
+                raise ValueError(f"{source} is not a file")
+            size = source.stat().st_size
+            if size > ATTACHMENT_MAX_BYTES:
+                raise ValueError(
+                    f"{source.name!r} is {file_size_text(size)} — attachments "
+                    f"are limited to {file_size_text(ATTACHMENT_MAX_BYTES)} each"
+                )
+            sources.append(source)
+        target_dir = self.projects_dir / "attachments" / project_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _utc_stamp(now)
+        stored: list[ProjectAttachment] = []
+        try:
+            for source in sources:
+                suffix = source.suffix.lower()
+                destination = target_dir / f"{uuid.uuid4().hex}{suffix}"
+                shutil.copyfile(source, destination)
+                stored.append(
+                    ProjectAttachment(
+                        name=source.name,
+                        kind="image" if suffix in _IMAGE_SUFFIXES else "data",
+                        path=str(destination),
+                        bytes=destination.stat().st_size,
+                        added_at=stamp,
+                    )
+                )
+        except BaseException:
+            # A copy that dies mid-loop (disk full, revoked read) must not
+            # leave earlier copies with no entry pointing at them; the
+            # caller's own guard covers everything after this returns
+            # (agent review round 1, F1).
+            self._reclaim_attachment_files(attachment.path for attachment in stored)
+            raise
+        return stored
+
+    def _reclaim_attachment_files(self, paths: Iterable[str]) -> None:
+        """Best-effort unlink of stored attachment files; never raises.
+
+        Only paths UNDER this store's ``attachments/`` root are ever removed:
+        a row is a JSON file a human can edit, so a hand-written path must not
+        turn a reclaim into an arbitrary-file delete. Failures are ignored —
+        a leftover file is a leak, not corruption, and a reclaim error must
+        never fail the operation that triggered it (agent review round 1, F1).
+        """
+        root = (self.projects_dir / "attachments").resolve()
+        for raw in paths:
+            try:
+                target = Path(str(raw))
+                if target.resolve().is_relative_to(root):
+                    target.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover - best-effort reclaim
+                continue
+
+    def _row_references_paths(self, project_id: str, paths: Sequence[str]) -> bool:
+        """True when the ON-DISK row references any of ``paths``.
+
+        Used by ``update_project``'s take-back guard to tell a failure raised
+        BEFORE the row replace (nothing references the new files — take them
+        back) from one raised AFTER it: ``_save_project_locked`` keeps the
+        just-replaced bytes when the follow-up directory fsync fails, and the
+        file policy must mirror the row policy — unlinking here would leave a
+        live row pointing at a deleted file (agent review round 2, F3). The
+        disk artifact is the ground truth for "did the replace stand", so the
+        check reads it rather than trusting a flag through the call. An
+        unreadable or unparseable row reads as True: keeping a file can at
+        worst leak, while unlinking one a landed row points at corrupts.
+        """
+        wanted = {str(path) for path in paths}
+        if not wanted:
+            return False
+        try:
+            payload = json.loads(
+                (self.projects_dir / f"{validate_project_id(project_id)}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        except (OSError, ValueError):
+            return True
+        entries = payload.get("updates") if isinstance(payload, dict) else None
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            for attachment in entry.get("attachments") or []:
+                if isinstance(attachment, dict) and str(attachment.get("path") or "") in wanted:
+                    return True
+        return False
+
     def create_project(
         self,
         fields: ProjectEdit,
@@ -906,10 +1529,24 @@ class ProjectRegistry:
                 id=uuid.uuid4().hex,
                 name=name,
                 description=(fields.description or "").strip(),
+                owner=fields.owner,
+                team=fields.team,
+                title=fields.title,
                 status=status,
                 progress=fields.progress or "",
                 progress_updated_at=now if (fields.progress or "") else None,
                 progress_reported_by=(progress_reported_by if (fields.progress or "") else ""),
+                updates=(
+                    [
+                        ProjectUpdateEntry(
+                            at=_utc_stamp(now),
+                            text=fields.progress or "",
+                            by=progress_reported_by,
+                        )
+                    ]
+                    if (fields.progress or "")
+                    else []
+                ),
                 tags=list(fields.tags or []),
                 sessions=list(sessions),
                 created_at=now,
@@ -924,7 +1561,12 @@ class ProjectRegistry:
             return self._save_project_locked(project)
 
     def update_project(
-        self, project_id: str, fields: ProjectEdit, *, reporter: str = ""
+        self,
+        project_id: str,
+        fields: ProjectEdit,
+        *,
+        reporter: str = "",
+        attachments: Sequence[str | Path] = (),
     ) -> ProjectUpdate:
         """Merge ``fields`` into one project under the store lock.
 
@@ -934,7 +1576,12 @@ class ProjectRegistry:
         refresh amendment: identical text on a FRESH record writes nothing,
         identical text on a STALE record re-stamps freshness (which is what
         makes the completion check's "already current" exit real), and new text
-        writes and stamps.
+        writes, stamps, and APPENDS one entry to the append-only history.
+
+        ``attachments`` rides that new entry: the paths are copied into the
+        store and described on it. Attaching without a new line (a refresh, a
+        clear, or an update that omits ``progress``) is refused, because there
+        would be no entry for the files to belong to.
         """
         project_id = validate_project_id(project_id)
         now = _utc_now()
@@ -954,6 +1601,12 @@ class ProjectRegistry:
                 candidate.description = fields.description.strip()
             if "tags" in supplied and fields.tags is not None:
                 candidate.tags = list(fields.tags)
+            if "owner" in supplied:
+                candidate.owner = fields.owner
+            if "team" in supplied:
+                candidate.team = fields.team
+            if "title" in supplied:
+                candidate.title = fields.title
             if "start_date" in supplied:
                 candidate.start_date = fields.start_date or None
             if "target_date" in supplied:
@@ -977,13 +1630,42 @@ class ProjectRegistry:
                 if fields.status == "done" and not was_done and "completed_at" not in supplied:
                     candidate.completed_at = _today_iso()
 
+            new_text = (fields.progress or "") if "progress" in supplied else ""
+            # The attachment contract, checked BEFORE any mutation: files
+            # attach to the entry a NEW line appends, so a refresh, a clear or
+            # an update without ``progress`` has nothing to carry them.
+            if attachments and not (new_text and new_text != current.progress):
+                raise ValueError(
+                    "attachments ride a NEW progress line: send progress=<text> "
+                    "with attach in the same update (an identical re-send or a "
+                    "clear appends no entry to carry them)"
+                )
+            stored_attachments: list[ProjectAttachment] = []
+            evicted_entries: list[ProjectUpdateEntry] = []
             if "progress" in supplied:
-                new_text = fields.progress or ""
                 if new_text != candidate.progress:
                     candidate.progress = new_text
                     if new_text:
                         candidate.progress_updated_at = now
                         candidate.progress_reported_by = reporter
+                        stored_attachments = self._store_attachments(
+                            project_id, attachments, now=now
+                        )
+                        appended = [
+                            *candidate.updates,
+                            ProjectUpdateEntry(
+                                at=_utc_stamp(now),
+                                text=new_text,
+                                by=reporter,
+                                attachments=stored_attachments,
+                            ),
+                        ]
+                        # The cap evicts oldest-first, and the evicted entries'
+                        # files are reclaimed only AFTER the save lands, so a
+                        # failed save can never leave the live row pointing at
+                        # files this call removed (agent review round 1, F1).
+                        evicted_entries = appended[:-UPDATES_MAX]
+                        candidate.updates = appended[-UPDATES_MAX:]
                     else:
                         # An empty snippet IS "no progress recorded": clearing
                         # the text clears the freshness pair with it, so a
@@ -1001,18 +1683,40 @@ class ProjectRegistry:
 
             # Re-validate the merged candidate through the model's own rules
             # before anything touches disk (dates order, caps, grammar).
-            candidate = Project.model_validate(candidate.model_dump(mode="json", by_alias=True))
-            if candidate == current:
-                # Pydantic equality covers every field, so "nothing moved" is
-                # provable rather than inferred from the changed flags.
-                return ProjectUpdate(current, changed=False, refreshed=refreshed)
-            if not changed:
-                # A merged value differs from the stored one only through
-                # equality above; reaching here with changed=False means the
-                # diff came from normalisation, which still deserves a write.
-                changed = True
-            candidate.updated_at = now
-            saved = self._save_project_locked(candidate)
+            try:
+                candidate = Project.model_validate(candidate.model_dump(mode="json", by_alias=True))
+                if candidate == current:
+                    # Pydantic equality covers every field, so "nothing moved" is
+                    # provable rather than inferred from the changed flags.
+                    return ProjectUpdate(current, changed=False, refreshed=refreshed)
+                if not changed:
+                    # A merged value differs from the stored one only through
+                    # equality above; reaching here with changed=False means the
+                    # diff came from normalisation, which still deserves a write.
+                    changed = True
+                candidate.updated_at = now
+                saved = self._save_project_locked(candidate)
+            except BaseException:
+                # A refusal raised BEFORE the row replace (name conflict,
+                # schema guard, validation, a write that never published) must
+                # take back the files this call already copied: an orphaned
+                # copy has no entry to point at it (agent review round 1, F1).
+                # AFTER the replace the file policy MIRRORS the row policy:
+                # ``_save_project_locked`` deliberately keeps the just-replaced
+                # bytes when the follow-up directory fsync fails, so the files
+                # those bytes reference must be kept with them — unlinking
+                # would leave a live row pointing at a deleted file (agent
+                # review round 2, F3). "The replace stood" is read from disk,
+                # the artifact the decision is about.
+                if stored_attachments and not self._row_references_paths(
+                    project_id, [attachment.path for attachment in stored_attachments]
+                ):
+                    self._reclaim_attachment_files(
+                        attachment.path for attachment in stored_attachments
+                    )
+                raise
+            for evicted in evicted_entries:
+                self._reclaim_attachment_files(a.path for a in evicted.attachments)
             return ProjectUpdate(saved, changed=changed, refreshed=refreshed)
 
     def link_session(self, project_id: str, session_id: str) -> tuple[Project, bool]:
@@ -1137,6 +1841,10 @@ class ProjectRegistry:
             if target.exists():
                 target.unlink()
                 _fsync_dir(self.projects_dir)
+            # The row is gone; reclaim its copied-in files. Best-effort — a
+            # leftover directory is a leak, never a reason to fail a delete
+            # that already happened (agent review round 1, F1).
+            shutil.rmtree(self.projects_dir / "attachments" / project_id, ignore_errors=True)
             self._projects.pop(project_id, None)
             self._dir_mtime_ns = self._dir_mtime()
 

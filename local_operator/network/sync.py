@@ -163,6 +163,14 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # deliberately does not — but ``--keep`` is a copy of a session, not a fork of a
     # running one, and losing the message outright is the worse of the two.)
     "boot-prompt.json",
+    # THE EVAL KERNEL'S RESTART MARKER (``tools.eval.KERNEL_MARKER_NAME``): the
+    # destination of a move has no kernel from the source, and this file is how its
+    # first cell still LEARNS that the namespace was left behind — the same notice a
+    # local rebind gives. Excluding it would make a moved session's first eval run
+    # silently fresh, the exact silent namespace loss the marker exists to prevent.
+    # It is a fact about the SESSION, not a liveness claim about a source process, so
+    # it is not on the ``.session.pid`` side of the argument.
+    "eval-kernel.json",
 )
 
 #: Directories a session directory may hold whose FILES are the user's own

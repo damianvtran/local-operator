@@ -54,3 +54,37 @@ def test_legacy_sdk_signing_remains_compatible() -> None:
     assert result["token_sha256"] == module.EXPECTED_DIGEST
     assert result["claims_verified"] is True
     assert result["header_verified"] is True
+
+
+def test_adapter_environment_carries_mcp_2x() -> None:
+    """Every locked mcp must satisfy the 2.x API the engagement needs.
+
+    Measured on arm 1687 (2026-09-28): the adapter lock had split into mcp
+    1.19.0 for Python < 3.14 and 2.x only for 3.14-darwin, and the paid arm
+    builds on 3.12 -- where the session engagement cannot run at all: the
+    action server dies at start (``Server.add_request_handler`` is 2.x-only)
+    and the episode driver's MCP client dies at connect
+    (``read_timeout_seconds`` is a float in 2.x, a ``timedelta`` in 1.x). The
+    declared floor must admit no 1.x version, and the lock, which the build
+    actually installs, must pin no mcp below 2 -- so a future re-resolution
+    cannot silently re-split the environment the way the pre-fix lock did.
+    """
+
+    adapter = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/pyproject.toml").read_text())
+    declared = _requirements(adapter["project"]["dependencies"])
+    assert "mcp" in declared
+    # The declared floor must refuse the whole 1.x line, probed at more than
+    # one point on purpose: a `>1.19.0`-shaped bound still admits 1.19.1+
+    # (measured in round 1), so a single-equality probe would not guard the
+    # split this test exists for. The lock loop below is what pins the
+    # version actually installed; the floor must only not admit any pre-2.
+    for pre_2 in ("1.0", "1.19.1", "1.99.99"):
+        assert not declared["mcp"].specifier.contains(Version(pre_2), prereleases=True), pre_2
+
+    lock = tomllib.loads((ROOT / "benchmarks/osworld_v2_adapter/uv.lock").read_text())
+    pinned = [package for package in lock["package"] if package["name"] == "mcp"]
+    assert pinned, "the adapter lock must carry an mcp pin"
+    for package in pinned:
+        assert Version(package["version"]) >= Version("2"), (
+            "a locked mcp below 2.x cannot run the session engagement " f"({package['version']})"
+        )

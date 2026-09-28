@@ -90,6 +90,7 @@ from local_operator.harness.loop import AgentLoop, LoopContext, _materialize_asi
 from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     PEER_MESSAGE_MESSAGE_TYPE,
+    PROJECT_REMINDER_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
@@ -101,15 +102,20 @@ from local_operator.harness.message_types import (
 from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
 
 # Hoisted to the harness so the evaluation runner can render a transcript
-# through this same function without importing session code. Only these two
+# through this same function without importing session code. Only these three
 # names are re-exported, and each has a caller here: ``_default_convert_to_llm``
 # is what the session, its tests and ``session_factory``'s thin alias resolve
-# through this module, and ``_is_todo_reminder`` is called only by
-# ``Session._live_todo_reminders``, far below in this module (no guardrail is
-# defined in this region). ``_injected_user_message`` is renderer-internal —
+# through this module, and the two reminder predicates are called only by their
+# live expiry scans (``Session._live_todo_reminders`` /
+# ``Session._live_project_reminders``), far below in this module (no guardrail
+# is defined in this region). ``_injected_user_message`` is renderer-internal —
 # the renderer calls it and nothing outside needs it — so it is deliberately NOT
 # reachable from ``local_operator.session.session``.
-from local_operator.harness.render import _default_convert_to_llm, _is_todo_reminder
+from local_operator.harness.render import (
+    _default_convert_to_llm,
+    _is_project_reminder,
+    _is_todo_reminder,
+)
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
@@ -153,6 +159,7 @@ from local_operator.harness.types import (
     ToolCallComposeEvent,
     ToolContext,
     ToolExecutionEndEvent,
+    ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
     ToolResult,
     Usage,
@@ -178,6 +185,12 @@ from local_operator.incidents import (
     render_cut_off_reason,
 )
 from local_operator.model.effort import cheapest_real_rung
+from local_operator.projects import (
+    Project,
+    reported_age,
+    stale_projects_fingerprint,
+    stale_projects_for_session,
+)
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
@@ -847,6 +860,69 @@ def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
     )
 
 
+#: How many stale projects the completion-time reminder lists before collapsing
+#: the rest into ``… and N more``. A session can be linked to many projects
+#: (§1.3 caps links at 64); the nudge stays bounded regardless.
+_PROJECT_REMINDER_MAX_ROWS = 4
+
+#: The per-row excerpt cap. Each row is ONE line by construction — the excerpt
+#: is whitespace-collapsed first — so a 1000-char progress snippet cannot wrap
+#: the frame, and the full text is always one ``project op='show'`` away.
+_PROJECT_REMINDER_EXCERPT_CHARS = 80
+
+
+def _project_reminder_text(stale: list[Project], *, now: float | None = None) -> str:
+    """The nudge the completion-time project check injects (``_project_continuation``).
+
+    The todo text's twin, carrying §V2.C.3's exact template: ``<system-reminder>``
+    framing and the explicit "injected by the harness" label because the model
+    reads it as a user turn (without the label it would answer the user about a
+    message the user never sent), the stale rows verbatim, and the honest exits
+    — update progress, update status, refresh an unchanged line, unlink — plus
+    the ``ask`` clause. ``reported_age`` is the same age arithmetic every other
+    project surface composes its sentences from. ``now`` exists for tests, which
+    pin the rendered text against a fixed clock.
+    """
+    rows: list[str] = []
+    for project in stale[:_PROJECT_REMINDER_MAX_ROWS]:
+        age = reported_age(project, now=now)
+        if age is None:
+            rows.append(f"- {project.name} [{project.status}] — no progress recorded")
+            continue
+        # The reporter clause is dropped when the row carries no reporter (a
+        # hand-edited or pre-tool row): "by session " with nothing after it
+        # reads as a truncation bug, and the age plus excerpt are still true.
+        reporter = (
+            f" by session {project.progress_reported_by}" if project.progress_reported_by else ""
+        )
+        excerpt = " ".join(project.progress.split())
+        if len(excerpt) > _PROJECT_REMINDER_EXCERPT_CHARS:
+            excerpt = excerpt[: _PROJECT_REMINDER_EXCERPT_CHARS - 1].rstrip() + "…"
+        rows.append(
+            f"- {project.name} [{project.status}] — progress last reported "
+            f'{age} ago{reporter}: "{excerpt}"'
+        )
+    extra = len(stale) - _PROJECT_REMINDER_MAX_ROWS
+    if extra > 0:
+        rows.append(f"… and {extra} more")
+    return (
+        "<system-reminder>\n"
+        "Injected by the harness at the turn boundary. Not from the user, and "
+        "not shown to them.\n"
+        "This session is linked to projects whose recorded progress is stale:\n"
+        + "\n".join(rows)
+        + "\n"
+        "Keep the record true: if this turn's work moved a project on, write one "
+        "dated line with `project op='update' name='<name>' progress='<line>'`; "
+        "if its state changed, `project op='update' name='<name>' "
+        "status='paused|done'`. If the recorded progress still describes reality, "
+        "re-send the same text to refresh it. If this session no longer belongs "
+        "to a project, `project op='unlink' name='<name>'`. If a decision here "
+        "is the user's to make, put it to them with the `ask` tool.\n"
+        "</system-reminder>"
+    )
+
+
 #: ``CustomMessage`` types that belong in the transcript as message entries.
 #:
 #: An ALLOW-LIST, because the cost of the two mistakes is asymmetric. Omitting a
@@ -1267,6 +1343,30 @@ def _stamped_todo_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, st
         for item in stamped
         if isinstance(item, (list, tuple)) and len(item) == 3
     )
+
+
+def _stamped_project_fingerprint(details: Mapping[str, Any]) -> tuple[tuple[str, str, int], ...]:
+    """The stale-set fingerprint a project reminder was built from, normalized.
+
+    The todo normaliser's twin, with one deliberate addition: the third element
+    is an INTEGER (``int(progress_updated_at or 0)``), so a stamp that will not
+    coerce is dropped rather than raised on — a reminder with no usable stamp
+    compares equal to nothing and expires, which is the safe direction (an
+    unverifiable nudge is worth less than one turn without it). The JSON round
+    trip matters identically: ``details`` is a plain dict and any round trip
+    turns the nested tuples into lists, so a raw ``!=`` against the live
+    fingerprint would expire every reminder on sight.
+    """
+    stamped = details.get("fingerprint") or ()
+    out: list[tuple[str, str, int]] = []
+    for item in stamped:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            continue
+        try:
+            out.append((str(item[0]), str(item[1]), int(item[2])))
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
 
 
 # Relocated to ``compaction.marker`` so hosts that must not import the session
@@ -2851,6 +2951,19 @@ class Session:
         # from disk on a resume (``_load_todo_snapshot`` sets it) so the first
         # turn after a restore does not re-persist an unchanged restored list.
         self._persisted_todo_fingerprint: tuple[tuple[str, str, str], ...] | None = None
+        # Project-continuation latch: the stale-set fingerprint captured at the
+        # last project nudge in THIS user turn — the sorted
+        # ``(project_id, status, int(progress_updated_at or 0))`` tuples of the
+        # projects that reminder named — so a model that yields twice with a
+        # byte-identical stale set is not nudged a second time. Reset per user
+        # turn beside the todo latch; see :meth:`_project_continuation`.
+        self._project_reminder_fingerprint: tuple[tuple[str, str, int], ...] | None = None
+        # Per-turn count of tool-execution events seen this user turn. The
+        # project guardrail fires only after a worked turn: a turn that ran no
+        # tools cannot have moved a project's record, so nudging it to update
+        # one would be asking for a report on nothing. Reset beside the two
+        # latches in _run_turn_pipeline.
+        self._turn_tool_calls = 0
 
         self._disposed = False
         self._subagent_roster_generation = 0
@@ -2916,6 +3029,14 @@ class Session:
         #: ``assistant(tool_use) -> user -> tool_result`` and brick the session
         #: (see ``_append_or_park_journal``). The flush is at the turn boundary,
         #: next to the other parked notices.
+        #:
+        #: NO NOTICE IS EMITTED FROM THIS QUEUE ANY MORE (``journal_shape_incident``
+        #: is the emitter and now writes nothing) — the operator's ruling is quoted
+        #: there. The queue, its dedupe and its exposure gate are KEPT intact rather
+        #: than torn out: they are the funnel every masking surface already reports
+        #: through, and gutting them here would mean re-plumbing the pipe filter and
+        #: the live-text path for no observable change. What they feed now files
+        #: nothing, which is the whole point.
         self._pending_shape_incidents: list[tuple[str, list[str], str, bool]] = []
         # The sink for shape hits observed by layers that mask BEFORE a result
         # exists — the live pipe filter and the live/peek/abort text path. The
@@ -2987,6 +3108,12 @@ class Session:
             ),
         )
         self._wake_deliver_hook: Callable[[DueWake], Awaitable[None]] = self._deliver_wake
+        #: Whether this session is AIDA's (``local_operator.aida``), resolved
+        #: once per open by :meth:`_aida_is_hers` — one stat of
+        #: ``<config>/aida/state.json`` on every session that is not hers, and
+        #: the gate on every aida hook below (load hold, persist reconcile,
+        #: config-watch reconcile, delivery guard, after-turn tray drain).
+        self._aida_duty = False
         #: Set by the deliver trampoline, consumed by the next persist, which
         #: is what stamps ``last_fired_at`` on the wake index entry. See
         #: :meth:`_persist_wake_schedules`.
@@ -3182,10 +3309,13 @@ class Session:
         so the escape hatch has to be covered — and it is ordered after the
         rebound so it measures the real bytes.
 
-        Expired todo reminders are dropped here for the same reason: every path
-        that reaches a provider has to be free of them.
+        Expired continuation reminders (todo and project) are dropped here for
+        the same reason: every path that reaches a provider has to be free of
+        them.
         """
-        rendered = self._convert_to_llm(self._live_todo_reminders(messages))
+        rendered = self._convert_to_llm(
+            self._live_project_reminders(self._live_todo_reminders(messages))
+        )
         # Immediately after the conversion and before any other pass, so EVERY
         # caller of this method is covered by one application: the turn path,
         # compaction, `_wire_legal_snapshot` and the token counter. Repairing at
@@ -3372,7 +3502,11 @@ class Session:
             # (and a Pillow re-encode for any oversized block) on a question
             # the header sniff cannot answer. ``set_model`` calls this on the
             # TUI event loop; a paste-heavy history must not stall a keypress.
-            rendered = self._convert_to_llm(self._live_todo_reminders(list(self._context.messages)))
+            rendered = self._convert_to_llm(
+                self._live_project_reminders(
+                    self._live_todo_reminders(list(self._context.messages))
+                )
+            )
         if not any(
             isinstance(block, ImageContent) for message in rendered for block in message.content
         ):
@@ -3438,6 +3572,39 @@ class Session:
         def expired(message: AgentMessage) -> bool:
             return (
                 _is_todo_reminder(message) and _stamped_todo_fingerprint(message.details) != current
+            )
+
+        return [message for message in messages if not expired(message)]
+
+    def _live_project_reminders(self, messages: list[AgentMessage]) -> list[AgentMessage]:
+        """``messages`` without project reminders the stale set has since outrun.
+
+        The todo scan's twin, one store over: a project reminder asserts "these
+        projects' records are stale", so it expires the instant the stale set
+        moves — the record was refreshed, a status changed, a project was
+        unlinked or archived. Expiry is a RENDER decision exactly as above; the
+        live list is never rewritten, so the guardrail's own latch still reads
+        what it wrote.
+
+        The current fingerprint comes through the same
+        ``stale_projects_for_session``/``stale_projects_fingerprint`` pair the
+        producer uses, so the nudge and the check that retires it cannot
+        disagree about which projects are stale. ``project_registry`` is None
+        only on a host that keeps no projects at all — no project reminder can
+        exist in that list, and the empty set is also the honest answer if one
+        is ever planted: an unverifiable claim expires.
+        """
+        if not any(_is_project_reminder(message) for message in messages):
+            return messages
+        registry = self.project_registry
+        current = stale_projects_fingerprint(
+            stale_projects_for_session(registry, self._session_id) if registry is not None else []
+        )
+
+        def expired(message: AgentMessage) -> bool:
+            return (
+                _is_project_reminder(message)
+                and _stamped_project_fingerprint(message.details) != current
             )
 
         return [message for message in messages if not expired(message)]
@@ -9691,6 +9858,12 @@ class Session:
         # post-compaction continuations of this SAME user turn, and re-arming
         # there would re-nudge an unchanged list the model already declined.
         self._todo_reminder_fingerprint = None
+        # The project guardrail's latch and its worked-turn counter share this
+        # site for twin reasons: the user's next message may be the update the
+        # stale set was waiting for (so a fresh nudge is allowed), and work done
+        # in a PREVIOUS user turn must not license a nudge in this one.
+        self._project_reminder_fingerprint = None
+        self._turn_tool_calls = 0
         begin_message = getattr(self._stream_fn, "begin_message", None)
         if callable(begin_message):
             begin_message()
@@ -9755,6 +9928,13 @@ class Session:
             # operator's rotation ticket has to exist even when the turn that
             # leaked the credential is the one being aborted.
             await self._flush_shape_incidents()
+            # AIDA'S TRAY DRAIN, at the end of the turn that may have written
+            # it: one stat when the tray is empty (every turn of every other
+            # session skips on the duty flag). Awaited, not spawned, because
+            # the turn lock is still held here and the arm it may perform is
+            # sub-millisecond file work.
+            if getattr(self, "_aida_duty", False):
+                await self._aida_after_turn()
             # LAST, by design: ``_run_turn``'s own ``finally`` has already
             # cleared ``_is_streaming`` on the way out of the await above, and
             # ``_flush_held_end`` has delivered the end event, so a reader
@@ -10023,7 +10203,15 @@ class Session:
                 # batch's remaining calls; see LoopConfig.has_pending_fork.
                 has_pending_fork=self.has_pending_fork,
                 get_aside_messages=self._drain_asides,
-                get_follow_up_messages=self._todo_continuation,
+                # ONE follow-up hook for BOTH continuation guardrails (todos and
+                # projects). LoopConfig carries a single follow-up slot and the
+                # loop's charging rule is written against it: a batch holding
+                # any follow-up re-enters ONCE and charges the (larger,
+                # self-limiting) follow-up budget, never the 8-budget shared
+                # with steering/asides. Composing the producers here — rather
+                # than registering a second seam the charging rule does not
+                # know about — is what keeps the two in step.
+                get_follow_up_messages=self._guardrail_continuations,
                 resolve_fallback_tool=self._resolve_tool_outside_inventory,
                 # Redact stored credential values out of every tool result
                 # before the message lands in the transcript. The store is
@@ -10098,6 +10286,15 @@ class Session:
                         # pipeline flushes it if no continuation is queued.
                         self._held_end = event
                     continue
+                # The worked-turn guard for the project guardrail: a turn that
+                # ran no tools cannot have moved a project's record. Both halves
+                # of a call (start and end) count, not once per call — the only
+                # question asked of this counter is "≥ 1" — and counting the
+                # start is what keeps a call whose end never arrived (batch
+                # skip, abort) from reading as no work at all. Reset in
+                # _run_turn_pipeline's head, beside the guardrail latches.
+                if isinstance(event, (ToolExecutionStartEvent, ToolExecutionEndEvent)):
+                    self._turn_tool_calls += 1
                 is_todo_end = isinstance(event, ToolExecutionEndEvent) and event.tool_name == "todo"
                 if is_todo_end:
                     # The tool has already mutated its store when this event is
@@ -10505,6 +10702,25 @@ class Session:
         root = scratchpad_root(bound if isinstance(bound, (str, Path)) else None)
         return None if root is None else str(root)
 
+    def _session_dir(self) -> str | None:
+        """This session's DIRECTORY as a path string, or ``None``.
+
+        Derived FROM :meth:`_scratchpad_dir` (its parent) rather than from the
+        transcript a second time: the two must gate IDENTICALLY — an agent
+        directory has neither, and a derivation cannot disagree with itself.
+        The consumer is the ``eval`` tool's cross-process kernel marker
+        (``<session dir>/eval-kernel.json``): a runtime that restarts loses the
+        in-memory receipt that announced a kernel reset, so the first cell
+        after the restart reads this directory instead.
+
+        The directory is NOT created here, for the same reason the scratchpad
+        root is not: it is the transcript's own directory and exists (or not)
+        on the transcript's terms — a speculative runtime must leave nothing
+        on disk (``Transcript(defer_materialise=True)``).
+        """
+        scratchpad = self._scratchpad_dir()
+        return None if scratchpad is None else str(Path(scratchpad).parent)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -10517,6 +10733,17 @@ class Session:
             cwd=self._cwd,
             # Derived, never configured: see :meth:`_scratchpad_dir`.
             scratchpad_dir=self._scratchpad_dir(),
+            # The session's OWN directory: where the eval tool records its
+            # cross-process kernel marker. None wherever the scratchpad is
+            # None — derived from it, so the two gates cannot drift.
+            session_dir=self._session_dir(),
+            # A Session's eval kernel lives exactly as long as this runtime:
+            # the dispose hook this Session registers closes it, and the
+            # eval-side reaper must not second-guess that with a kernel-only
+            # clock (a busy session with a long gap between cells was losing
+            # its namespace mid-task). See the module docstring of
+            # ``local_operator/tools/eval.py``.
+            kernel_managed_by_session=True,
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
@@ -10844,6 +11071,33 @@ class Session:
         if self._disposed or not raw:
             return
         text = rendered or format_incident_message(raw, self._model.provider, self._model.model_id)
+        if not rendered:
+            # THE DESKTOP/SSE COPY of the Radient usage-limit remedy. The
+            # incident text is what the desktop renders as its
+            # `[session incident …]` row (and what the next turn's model
+            # context replays), so guidance a user must see has to live in
+            # THIS string rather than only in the TUI's error line. Gated on
+            # the RAW error's rendered form and the session's provider; a
+            # no-op for every other failure. Bounded and swallowing — see the
+            # module — and the append is idempotent, so a reappearing incident
+            # cannot stack a second remedy.
+            #
+            # The local guard is explicit even though the module's contract
+            # already covers the await: the property this method relies on
+            # (nothing here can raise) must be LOCAL, not borrowed, or an
+            # import-time failure would escape and take the incident's own
+            # write with it (review round 1, R4).
+            try:
+                from local_operator.providers.radient_recovery import (
+                    append_recovery_line_once,
+                    usage_limit_recovery_applies,
+                    usage_limit_recovery_line,
+                )
+
+                if usage_limit_recovery_applies(raw, self._model.provider):
+                    text = append_recovery_line_once(text, await usage_limit_recovery_line())
+            except Exception:  # noqa: BLE001 — a remedy must never replace the incident
+                logger.debug("Radient usage-limit remedy could not be derived", exc_info=True)
         details: dict[str, Any] = {"text": text, "raw": raw[:1000]}
         if token:
             details["token"] = token
@@ -11155,7 +11409,16 @@ class Session:
             logger.debug("shape incident queue failed", exc_info=True)
 
     async def _flush_shape_incidents(self) -> None:
-        """Journal the queued shape reports. Called at the turn boundary."""
+        """Drain the queued shape reports at the turn boundary. Files NOTHING.
+
+        The drain is kept — and the queue with it — so the funnel every masking
+        surface already reports through still exists and still empties itself, and
+        so a reader tracing "what happens to a queued hit" arrives at
+        :meth:`journal_shape_incident` and finds the operator's ruling rather than
+        a dangling field. What it does NOT do is emit: the emitter it calls is
+        silent (see its docstring). Called at the turn boundary like the other
+        parked notices.
+        """
         pending, self._pending_shape_incidents = self._pending_shape_incidents, []
         for tool, labels, summary, reached_model in pending:
             try:
@@ -11163,94 +11426,73 @@ class Session:
                     tool, labels, summary, reached_model=reached_model
                 )
             except Exception:  # noqa: BLE001 — a notice is not worth a turn
-                logger.warning("could not journal a credential-shape incident", exc_info=True)
+                logger.warning("could not flush a credential-shape report", exc_info=True)
 
     async def journal_shape_incident(
         self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
     ) -> None:
-        """Tell the OPERATOR (transcript, live receipt) that READABLE material was masked.
+        """The credential-shape NOTICE's emitter, and it is deliberately SILENT.
 
-        Rendered rather than classified: this is not a FAILURE, and running it
-        through :func:`~local_operator.incidents.classify_incident` would attach
-        a failure category and a "this is why the previous turn ended" tail to a
-        turn that ended for its own reasons — the same reason a credential
-        change and a model switch carry their own formatter.
+        THE OPERATOR'S RULING, verbatim, and it is the requirement:
 
-        **The MODEL is deliberately NOT told**, which is where this record now
-        differs from every other notice in :mod:`local_operator.incidents`: it
-        carries :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`, a type the
-        renderer's allow-list excludes, so the row reaches the transcript and the
-        live operator receipt and never enters the model's context. It rode
-        ``session_incident`` until 2026-09-24, which injected it as a user turn —
-        measured at 1,493 unnamed notices across 1,080 sessions on this machine,
-        plus the named ones. The notice names a value the guard ALREADY masked out
-        of the text the model received, so the model never held it, cannot rotate
-        it, and the guard's own false positives (a usage counter, a DSN whose
-        username is its password) had agents ending turns over leaks that had not
-        happened. See ``harness/message_types.py`` for the full argument and
-        ``harness/render.py`` for the exclusion, which is load-bearing.
+            "Remove the operator-facing information too, it's false positive so it
+            would confuse users."
 
-        ``reached_model`` is the severity, and its default is the ESCALATED one so
-        that a caller which does not know cannot make the quieter claim. In-tree it
-        is now always True: both producers (the session result hook and
-        ``harness.redaction.report_shape_hits``, which every other surface goes
-        through) gate on it, because a credential masked WHOLE was never leaked to
-        the transcript and so is no incident at all. The quieter wording is kept in
-        the formatter rather than deleted — it is the formatter's own contract, and
-        a caller that deliberately has something to say about a contained hit
-        should not have to invent the words — and what the operator asked for is
-        silence on the contained case, not the deletion of the sentence.
+        and the same instruction the day before, on the same class of noise:
 
-        Persisted, unlike an MCP recovery: what it records (a credential reached a
-        tool result, and either it was contained there or it is readable in this
-        context) is still true in a resumed session, and the value stays contained
-        because the store re-registers it from the transcript's own redaction.
+            "remove anything that is flagging incidents or injecting any sort of
+            credential detection context so that we stop confusing/tripping up
+            agents".
+
+        So this method reaches no surface at all: no transcript row, no live
+        receipt, no ``hub peek`` heading, nothing to the model. It is kept as a
+        method — and kept on the flush path — rather than deleted, so the one
+        place every surface funnels through remains visible and NAMEABLE: a reader
+        asking "where would a shape notice be filed?" finds this method and its
+        answer, instead of finding no trace of the mechanism and rebuilding one.
+
+        WHY THE NOTICE GOES, in the operator's own evidence: four rows in a single
+        session, on ``read``, ``write``, ``eval`` and ``edit``. Three read "a
+        credential the shape table could not name" (an ESCALATION naming nothing —
+        the empty-labels case), and the ``read`` one named its call as a workflow
+        YAML file being opened. A credential-SHAPE guard firing on a CI workflow
+        being read is the false positive the operator ruled noise, and the notice
+        told the operator to rotate a credential that was never leaked while
+        costing every agent that saw one a turn spent chasing it.
+
+        WHAT IS NOT REMOVED, and must never become conditional here because it does
+        not live here: the MASKing on every surface (including the bash pipe
+        filter), the CONTAINMENT registration on both paths
+        (``VariableStore.redact_with_report`` and the pipe filter's
+        ``register_shape_hits_for_containment``), the high-confidence shape table,
+        and the unsafe-command safeguards. The notice was the INDICATOR; those are
+        the PROTECTION, and only the indicator was asked to go. Every one of them
+        runs UPSTREAM of this method — masking and registration are complete before
+        a hit is ever queued — so silencing the notice cannot weaken them.
+
+        WHAT ALREADY-PERSISTED ROWS DO, since the just-stored transcript of an older
+        build still carries them and a resume replays them: they render EXACTLY as
+        they did before. The record keeps its own
+        :data:`SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE`, the TUI's fold keeps its
+        branch for that type, ``harness/comms.py`` keeps its peek heading, and the
+        renderer's exclusion in ``harness/render.py`` keeps it out of the model.
+        Nothing here touches those, deliberately: the row is a fact of history, and
+        a change that hid it would make an old session show a hole where it used to
+        show a row. Only NEW rows stop being written.
+
+        ``tool``, ``labels``, ``summary`` and ``reached_model`` are still accepted
+        so the call site and its signature are unchanged; they are now unused. The
+        signature is kept rather than narrowed because the arguments ARE the
+        record's shape, and a future reader comparing this method to
+        ``format_shape_incident_message`` (which is kept, unchanged, for the same
+        reason the wording is kept — see ``incidents.py``) should see them agree.
         """
-        from local_operator.incidents import format_shape_incident_message
-
-        if self._disposed:
-            return
-        text = format_shape_incident_message(tool, labels, summary, reached_model=reached_model)
-        message = CustomMessage(
-            custom_type=SESSION_CREDENTIAL_REDACTION_MESSAGE_TYPE,
-            attribution="system",
-            details={
-                "text": text,
-                "tool": tool,
-                "shapes": list(labels),
-                "summary": summary,
-                # Recorded, and NOTHING reads it today (agent review R1, nit): it
-                # is there so the classification is a field on the record rather
-                # than something a future reader has to re-derive by matching the
-                # prose, which is the fragile thing this change exists to remove.
-                "reached_model": reached_model,
-            },
-        )
-        try:
-            async with self._journal_lock:
-                await self._transcript.append_message(message, preserve_mtime=True)
-                self._append_or_park_journal(message)
-        except OSError:
-            logger.warning("could not journal a credential-shape incident", exc_info=True)
-            return
-        # THE LIVE RECEIPT, and the reason this method exists in the shape it
-        # does: a row written to the transcript — and, until this change, to the
-        # model's context — is not
-        # a ticket — the operator has to SEE it. Measured before this
-        # emit: the row reached the model, persisted, and painted on no operator
-        # surface at all, live or on replay.
-        #
-        # `warning` ink for whichever classification reaches this method, and
-        # in-tree today that is only the escalated one: the contained hit is
-        # dropped at `_queue_shape_incident`, the single gate, so this comment is
-        # about the INK of a severity this path still carries by text. The
-        # severity difference lives in the wording rather than in the ink, because
-        # a quieter ink for the contained case is a DESIGN decision on the notice
-        # row rather than something this change should make by the back door.
-        try:
-            await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
-        except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
-            logger.debug("could not emit the shape-incident receipt", exc_info=True)
+        # NO EMISSION, on purpose. See the docstring for the operator's ruling, the
+        # false-positive evidence, and the list of what this deliberately does not
+        # touch. Explicitly NOT a `raise` or a `del`: the method is on the flush
+        # path for every queued hit, and an exception here would turn a silenced
+        # notice into a failed turn boundary.
+        return
 
     async def journal_mcp_unavailable(self, server: str, reason: str) -> None:
         """Tell the MODEL an MCP server's tools are gone — a WARNING, not a failure.
@@ -12077,6 +12319,81 @@ class Session:
                 details={"text": _todo_reminder_text(pending), "fingerprint": fingerprint},
             )
         ]
+
+    async def _project_continuation(self) -> list[AgentMessage]:
+        """The completion-time project check: re-assert stale project rows at the yield boundary.
+
+        The todo guardrail's twin, one store over (design §V2.C). A project
+        this session is linked to whose recorded progress has gone stale gets
+        its row put back in front of the model when the turn is about to end:
+        the yield boundary is the last point at which the model can still act
+        on it, and the act (``project op='update'``) is what keeps the
+        operator's record true. In-process and at the boundary by
+        construction — injecting into a live turn is something only the
+        process running that turn's loop can do, which is why no background
+        sweep exists (§V2.C.4).
+
+        Fires only while the turn is MOVING and the record is quiet: at least
+        one tool-execution event landed this turn (``_turn_tool_calls`` — a
+        turn that ran no tools cannot have moved a project's state), and the
+        stale set (``stale_projects_for_session``: linked AND active AND
+        stale) has moved since the last nudge THIS turn. The latch is the
+        stale-set fingerprint ``(id, status, int(progress_updated_at or 0))``:
+        a byte-identical set is never nudged twice (a model yielding twice on
+        it is stuck, and the reminder's own exits — update / refresh /
+        unlink — are what move it), while a refresh or a status change moves
+        the fingerprint and lets the REMAINING stale projects earn another
+        nudge in the same turn (a refresh cannot collide with the floored
+        stamp it replaces — see ``stale_projects_fingerprint``). A fresh user
+        turn re-arms it (see ``_run_turn_pipeline``).
+
+        Budget: shares ``max_follow_up_continuations`` with the todo producer
+        through the ONE hook below (``_guardrail_continuations``), so the
+        loop's batch rule — a mixed todos+projects batch re-enters once,
+        charged to the follow-up budget — applies unchanged; it never touches
+        the steering/aside budget.
+
+        Ephemeral exactly as the todo nudge is: appended by the follow-up
+        drain with no AgentEvent, never in the run's ``new_messages``, never
+        persisted (``PROJECT_REMINDER_MESSAGE_TYPE`` is NOT in
+        ``_PERSISTABLE_CUSTOM_TYPES``), and it stops being SENT the moment
+        the stale set moves — see :meth:`_live_project_reminders`.
+        """
+        registry = self.project_registry
+        if registry is None:
+            return []
+        if self._turn_tool_calls <= 0:
+            return []
+        stale = stale_projects_for_session(registry, self._session_id)
+        if not stale:
+            return []
+        fingerprint = stale_projects_fingerprint(stale)
+        if fingerprint == self._project_reminder_fingerprint:
+            return []
+        self._project_reminder_fingerprint = fingerprint
+        return [
+            CustomMessage(
+                custom_type=PROJECT_REMINDER_MESSAGE_TYPE,
+                attribution="system",
+                # The fingerprint rides ALONG with the text, as on the todo
+                # side: it is what the render path compares to decide the
+                # assertion is still true (see :meth:`_live_project_reminders`).
+                details={"text": _project_reminder_text(stale), "fingerprint": fingerprint},
+            )
+        ]
+
+    async def _guardrail_continuations(self) -> list[AgentMessage]:
+        """The ONE follow-up hook: both continuation guardrails' messages.
+
+        ``LoopConfig`` carries a single follow-up slot and the loop's
+        per-producer charging is written against it (a batch holding any
+        follow-up re-enters ONCE and charges the follow-up budget — see
+        ``_collect_yield_injections`` / the outer-loop tail), so the two
+        producers compose here instead of registering through a second seam
+        the charging rule does not know about. Order is stable — todos first,
+        then projects — so a mixed batch's contents are deterministic.
+        """
+        return [*await self._todo_continuation(), *await self._project_continuation()]
 
     # -- compaction ------------------------------------------------------------
 
@@ -15009,6 +15326,17 @@ class Session:
     # -- wakes -------------------------------------------------------------------
 
     def _load_wake_schedules(self) -> None:
+        # AIDA'S DUTY IS RESOLVED FIRST, before every early return below, and
+        # that placement is load-bearing rather than stylistic: a session with
+        # NO wake-schedules entry at all is exactly the state her engine must
+        # be able to recover from (her first arm may have failed, or a pause
+        # may have emptied the list), and a flag gated behind "this session
+        # already has rows" would make that state unreachable from her own
+        # persist hook — no rows, no duty, no reconcile, no rows. One stat of
+        # her state file on every other session, and the gate for the load
+        # hold, the persist reconcile, the config-watch reconcile, the
+        # delivery guard and the after-turn tray drain.
+        self._aida_duty = self._aida_is_hers()
         # A wake is active ownership, not conversation history. A fork declines
         # only snapshots copied at its creation boundary; snapshots appended
         # afterwards belong to the fork and must survive its next resume.
@@ -15029,7 +15357,99 @@ class Session:
                 schedules.append(WakeSchedule.model_validate(raw))
             except Exception:
                 logger.warning("dropping malformed persisted wake schedule: %r", raw)
+        # AIDA'S LOAD-TIME HOLD, at the one place rows enter memory. While she
+        # is paused or disabled, her ``aida-*`` rows do not get loaded at all —
+        # a session opened during a pause must not arm them, and the index
+        # guard the supervisor reads cannot help a session that is already
+        # live (this is the delivery-side half of that hole; see
+        # ``delivery_allowed`` in the same module for the fire-time half).
+        if self._aida_duty:
+            schedules = self._aida_filter_rows(schedules)
         self._wake.load(schedules)
+
+    # -- aida engine attachment ---------------------------------------------
+
+    def _aida_is_hers(self) -> bool:
+        """Whether THIS session is the one ``aida/state.json`` names.
+
+        One stat on every other session on the machine, and the flag every
+        aida hook is gated on, so an install that never enabled her pays one
+        missed stat per session open. Failure answers False: a session that
+        cannot prove it is hers must not run her engine.
+        """
+        try:
+            from local_operator.aida import state as aida_state
+            from local_operator.paths import config_dir
+
+            return aida_state.is_aida_session(config_dir(), self._session_id)
+        except Exception:  # noqa: BLE001 — a lookup, never a boot dependency
+            logger.debug("aida: could not resolve her session identity", exc_info=True)
+            return False
+
+    def _aida_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+        """Drop her ``aida-*`` rows when she is paused or disabled."""
+        try:
+            from local_operator.aida import proactive
+            from local_operator.paths import config_dir
+
+            return proactive.filter_on_load(schedules, config_dir=config_dir())
+        except Exception:  # noqa: BLE001 — the fire-time guard still holds
+            logger.warning("aida: load-time hold failed; arming unfiltered", exc_info=True)
+            return schedules
+
+    async def _aida_reconcile_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
+        """The engine's reconcile over one schedule list, notes journaled.
+
+        Called from the persist (so a fire's automatic re-arm and every wake
+        tool mutation land through ONE writer), from the config watcher (a
+        pause/resume issued in another process arrives here within its 2 s
+        tick) and from the after-turn drain. Never raises: a failure leaves
+        the list exactly as the caller gave it.
+        """
+        try:
+            from local_operator.aida import proactive
+            from local_operator.paths import config_dir
+
+            result = proactive.reconcile(
+                schedules, config_dir=config_dir(), session_id=self._session_id
+            )
+            if result.notes:
+                await proactive.append_notes(self._transcript, result.notes)
+            return result.schedules
+        except Exception:  # noqa: BLE001 — the schedule write outranks the engine
+            logger.warning("aida: reconcile failed; leaving the list as given", exc_info=True)
+            return schedules
+
+    async def _aida_reconcile_now(self) -> None:
+        """Reconcile the LIVE list and persist only when something moved."""
+        try:
+            current = list(self._wake.schedules)
+            updated = await self._aida_reconcile_rows(current)
+            if updated != current:
+                await self.set_wake_schedules(updated)
+        except Exception:  # noqa: BLE001 — best-effort by contract
+            logger.warning("aida: live reconcile failed", exc_info=True)
+
+    async def _aida_after_turn(self) -> None:
+        """Turn-end drain of her escalation tray. One stat when idle.
+
+        The tray is written BY Aida during a turn, so the end of that turn is
+        the earliest honest moment to act on it; without this the request
+        would wait for the next unrelated persist (potentially a day), which
+        is exactly the lag the tray exists to avoid.
+        """
+        try:
+            from local_operator.aida import state
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+            if not state.is_aida_session(root, self._session_id):
+                return
+            if not state.escalate_path(root).exists():
+                return
+            await self._aida_reconcile_now()
+        except Exception:  # noqa: BLE001 — an instrument never fails a turn
+            logger.warning("aida: after-turn drain failed", exc_info=True)
 
     async def _wake_deliver_via_hook(self, due: DueWake) -> None:
         """Scheduler-facing deliver trampoline: reads the CURRENT hook at fire
@@ -15424,6 +15844,23 @@ class Session:
         if pending:
             superseded = {schedule.id for schedule in pending}
             schedules = [*[s for s in schedules if s.id not in superseded], *pending]
+        # AIDA'S ENGINE WRITES HERE, and nowhere else while this session is
+        # live: the reconcile applies the pause/disable hold, ensures the
+        # single cadence row (this is how a fired one-shot is re-armed for
+        # tomorrow — the pump persists the advanced list immediately after a
+        # delivery), and drains the escalation tray within its budget. Its
+        # output IS what the transcript and index below are written from, so
+        # the one-writer invariant holds: external armers refuse a session
+        # with a live owner (``wakes/arm.py``), and the live owner's rows are
+        # exactly this function's output.
+        #
+        # ``getattr`` rather than a bare read: this method is bound onto
+        # partial test hosts (``test_serving_drain``'s ``PersistHost`` is the
+        # precedent), and a host that never ran ``Session.__init__`` has no
+        # aida flag — absent means "not her session", which is the same answer
+        # every other non-Aida caller gets.
+        if getattr(self, "_aida_duty", False):
+            schedules = await self._aida_reconcile_rows(schedules)
         await self._transcript.append_custom(
             WAKE_SCHEDULES_CUSTOM_TYPE,
             {"schedules": [schedule.model_dump() for schedule in schedules]},
@@ -15933,7 +16370,29 @@ class Session:
         if self._model_source in ("flag", "child"):
             return
         if saved is None:
-            self._model_migration_notice = bool(self._transcript.entries())
+            from local_operator.session.model_selection import (
+                SELECTED_MODEL_CUSTOM_TYPE,
+            )
+
+            # A CONVERSATION THAT NEVER RAN AND NEVER CHOSE ANYTHING (UX round
+            # 1, U2). A transcript holding only presentation metadata — the
+            # conversation-name row, wake snapshots, Aida's birth marker — has
+            # no saved selection to be "incomplete", and the amber notice read
+            # as a fault on her very first turn, minutes after her conversation
+            # was created. What makes a transcript a real conversation for this
+            # notice is a turn having run, or a selection having been written
+            # and lost — so either a message row or a `selected_model` row
+            # keeps the notice (the latter is the unusable-selection recovery
+            # this branch's sibling below also serves).
+            self._model_migration_notice = any(
+                row.type == ENTRY_MESSAGE
+                or (
+                    row.type == ENTRY_CUSTOM
+                    and str((row.payload or {}).get("custom_type", ""))
+                    == SELECTED_MODEL_CUSTOM_TYPE
+                )
+                for row in self._transcript.entries()
+            )
             return
         selector, effort = saved.selector, saved.effort
         if saved.boot_selector is not None:
@@ -16060,7 +16519,27 @@ class Session:
         ``wake_prompt`` custom message. A wake resumed PAST its due time is
         annotated as missed — the agent must not read it as punctual, and a
         recurring one names the skipped occurrences (deduplicated to a count;
-        the identical message is NOT repeated per miss)."""
+        the identical message is NOT repeated per miss).
+
+        AIDA'S FIRE-TIME GUARD rides FIRST: an ``aida-*`` occurrence that comes
+        due while she is held is dropped (the schedule still advances in the
+        pump, so unpausing re-arms forward rather than replaying). This is the
+        window between a pause landing in another process and its delivery to
+        this one's schedule list; the load-time filter and the supervisor skip
+        cover the other two paths.
+        """
+        if getattr(self, "_aida_duty", False):
+            try:
+                from local_operator.aida import proactive
+                from local_operator.paths import config_dir
+
+                if proactive.is_aida_row(due.schedule.id) and not proactive.delivery_allowed(
+                    config_dir()
+                ):
+                    logger.info("aida: dropping held wake %s (%s)", due.schedule.id, "paused")
+                    return
+            except Exception:  # noqa: BLE001 — fail OPEN: the wake is already due
+                logger.debug("aida: delivery guard could not read the hold", exc_info=True)
         text = format_wake_delivery_text(due)
         missed_note = self._missed_delivery_note(due)
         if missed_note:
@@ -16325,6 +16804,16 @@ class Session:
                 self._web_tools_dirty = True
         if "hosting" in changed or "model_name" in changed or "model_effort" in changed:
             self._on_configured_model_changed(values, local=source == "local", changed=changed)
+        # AIDA'S LIVE-CONFIG SEAM. A pause or resume issued from ANOTHER
+        # process (the desktop app, a second terminal — the ops write the
+        # ``aida.cadence.paused`` key) reaches this session through the
+        # platform's own registry-key diff, which is what makes "ask the owner
+        # to drop/re-arm its rows in-process" need no bespoke RPC: the owner is
+        # THIS process, and the reconcile below is the in-process actor. The
+        # reconcile persists through the normal writer, so the index and
+        # transcript follow in the same breath.
+        if getattr(self, "_aida_duty", False) and any(key.startswith("aida.") for key in changed):
+            self._spawn_background(self._aida_reconcile_now())
 
     def _rebuild_effort_tier_tools(self) -> None:
         """Re-render the tools whose schema advertises the configured effort tiers.

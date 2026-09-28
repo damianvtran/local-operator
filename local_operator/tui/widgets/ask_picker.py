@@ -282,7 +282,7 @@ OTHER_HINT = "an answer that is not on the list — type it here"
 #: A secret question has no options: the one row IS the paste field.
 SECRET_LABEL = "Paste the value (hidden)"
 SECRET_PREFIX = "Value: "
-SECRET_HINT = "hidden as you type — enter stores, esc skips"
+SECRET_HINT = "hidden as you type — enter hands it over, esc declines"
 #: Same glyph the login key prompt uses, so a secret paste looks like one.
 SECRET_MASK = "•"
 
@@ -2864,7 +2864,7 @@ class AskPickerScreen(Container):
         if rejection:
             row.append(rejection, style=muted)
             return _cut_row(row, width)
-        hints = self._footer_hints(width) if drawn else [self._exit_hint]
+        hints = self._footer_hints(width) if drawn else [self._shown_exit_hint]
         for position, (key, what) in enumerate(hints):
             if position:
                 row.append(" · ", style=dim)
@@ -3310,7 +3310,7 @@ class AskPickerScreen(Container):
                 # nobody can discover. Inferring the handover from the buffer
                 # instead cost two rounds and two lost messages (F9, D18).
                 hints.append((TAB_HINT_KEY, "answer here"))
-            hints.append(self._exit_hint)
+            hints.append(self._shown_exit_hint)
             # Through the same ladder the focused footer uses, rather than
             # returned raw for `_cut_row` to ellipsise. Returned raw, a narrow
             # card cut the exit mid-word — `1 answer · esc sk…` at 22 columns —
@@ -3333,7 +3333,10 @@ class AskPickerScreen(Container):
             if self.question.secret:
                 # No movement keys: there is only one row, and advertising
                 # arrows or digits would describe a keyboard that does nothing.
-                hints = [("type", "the value"), ("enter", "store")]
+                # "hand over", not "store": the value is not saved — it is
+                # relayed (session memory, off disk by default), and the two
+                # words must not argue with each other (U2, UX round 1).
+                hints = [("type", "the value"), ("enter", "hand over")]
                 ladder = ["type", "enter", "esc"]
             else:
                 hints = [("type", "your answer"), ("↑↓", "move"), ("enter", "accept")]
@@ -3392,7 +3395,7 @@ class AskPickerScreen(Container):
             # with `space` (the only key that can answer it) BEYOND the exit —
             # so "one from the end" would put `^e` on the wrong side of `esc`
             # there while looking right on the single-select.
-            exit_key = self._exit_hint[0]
+            exit_key = self._shown_exit_hint[0]
             cut = ladder.index(exit_key) if exit_key in ladder else len(ladder)
             ladder = [*ladder[:cut], REVEAL_HINT_KEY, *ladder[cut:]]
             # ...and shed OUTRIGHT before the second pass reaches the exit.
@@ -3412,12 +3415,27 @@ class AskPickerScreen(Container):
             # `hints` here: the exit is what the check is protecting, so leaving
             # it out would ask whether the row fits without the thing that has
             # to fit.
-            if _hint_cells([*hints, self._exit_hint]) > width:
+            if _hint_cells([*hints, self._shown_exit_hint]) > width:
                 hints = [pair for pair in hints if pair[0] != REVEAL_HINT_KEY]
                 ladder = [key for key in ladder if key != REVEAL_HINT_KEY]
-        hints.append(self._exit_hint)
+        hints.append(self._shown_exit_hint)
 
         return self._shed_to_fit(hints, ladder, width)
+
+    @property
+    def _shown_exit_hint(self) -> tuple[str, str]:
+        """The exit hint in THIS question's words.
+
+        `skip` is honest for a question the agent can proceed without — it
+        leaves this one unanswered and keeps the ones already answered — but a
+        secret question's Escape DECLINES the handover: nothing was provided,
+        so the command the user was asked to authorise does not run. The field
+        and the footer must say decline, not skip, or the card understates
+        what the key does (U2, UX round 1).
+        """
+        if self.question.secret:
+            return ("esc", "decline")
+        return self._exit_hint
 
     def _reveal_hint(self) -> tuple[str, str] | None:
         """``^e more`` / ``^e less``, or nothing where the key does nothing.

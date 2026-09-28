@@ -34,7 +34,12 @@ from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
 from local_operator.tui.session_catalog import CatalogEntry, rank_entries
 from local_operator.tui.terminal_title import SPINNER_FRAMES
-from local_operator.tui.widgets.session_picker import COMPLETION_MARKERS, row_state_mark
+from local_operator.tui.widgets.session_picker import (
+    AIDA_MARKER,
+    COMPLETION_MARKERS,
+    aida_row_id,
+    row_state_mark,
+)
 from local_operator.tui.widgets.tool_card import truncate_cells
 
 SIDEBAR_WIDTH = 30
@@ -363,6 +368,9 @@ class SessionSidebar(Widget, can_focus=True):
     def __init__(self) -> None:
         super().__init__(id="session-sidebar")
         self.entries: tuple[CatalogEntry, ...] = ()
+        #: Her id for `AIDA_MARKER`; refreshed with the entries (`set_entries`),
+        #: ``None`` until a list has been built.
+        self._aida_id: str | None = None
         self.current_id = ""
         self._requested_id = ""
         self._requested_at = 0.0
@@ -828,6 +836,10 @@ class SessionSidebar(Widget, can_focus=True):
             self._deferred = ordered
             return
         self.entries = ordered
+        # Her id, read once per list build (see `session_picker.aida_row_id`)
+        # so the row that names her can carry her mark and no other row's
+        # geometry moves.
+        self._aida_id = aida_row_id()
         self._catalog_loading = False
         self.error = ""
         # Before the re-adopt below, never after: a landed jump must be the
@@ -1749,6 +1761,10 @@ class SessionSidebar(Widget, can_focus=True):
             # for it. `sub_title` already degrades to either half alone, and
             # to `row.name` when it has neither.
             name = entry.sub_title if entry.subagent else entry.row.name
+            if self._aida_id is not None and entry.row.id == self._aida_id:
+                # Her mark, prefixed before truncation so a narrow row eats the
+                # title and never the mark (design round 1, D1).
+                name = f"{AIDA_MARKER} {name}"
             title = truncate_cells(name or UNTITLED_CONVERSATION, title_width)
             if entry.subagent:
                 # `sub_title` is "label · role", and the role is the half that

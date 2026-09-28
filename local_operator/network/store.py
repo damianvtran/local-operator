@@ -10,6 +10,19 @@ the repository's other staged write already documents: it is durability of
 *process*, not of *host* (no fsync of the directory, so a rename outlives a crashed
 process but not a power cut).
 
+THE PATH RESOLVERS ARE PURE, AND THEIR ``ensure_*`` TWINS CREATE. A reader asks
+``networks_dir`` where the records live; a writer calls ``ensure_networks_dir``
+first. The split is not tidiness — the fused version cost a measured bug:
+``list_networks`` is a READ, reached from ``GET /v1/desktop/commands`` through
+``slash_commands.command_argument_words`` → ``peers.known_peer_names``, and it
+called the creating resolver. A machine that had never joined a network therefore
+grew ``<config>/network/networks`` from that GET, and
+``server.utils.desktop_mesh.has_any_network`` — an honest ``is_dir`` probe on top
+of it — reported a network on a fresh install. ``.glob`` over a missing directory
+yields nothing, so the pure resolver is all a listing needs; ``.iterdir`` raises,
+so the one caller that needs a listing guards with ``is_dir`` (see
+:func:`purge_network_artifacts`).
+
 THE LOCK SERIALISES WRITES, AND A CALLER'S OWN READ-MODIFY-WRITE NEEDS THE SAME
 LOCK TOO. Both of the guarantees above are about ONE write: two callers of
 ``save`` cannot tear the file or mint the same sequence, and neither of those
@@ -70,14 +83,16 @@ from pathlib import Path
 from secrets import token_hex
 from typing import Any, Callable, Iterator, TextIO
 
-from local_operator.network.identity import network_root
+from local_operator.network.identity import ensure_network_root, network_root
 from local_operator.network.types import (
     PEERS_RUN_DIRNAME,
+    JoinAnswer,
     MemberRecord,
     MeshRefusal,
     NetworkRecord,
     PairDecision,
     PeerRecord,
+    PendingJoin,
     PendingPairing,
     SecretState,
 )
@@ -113,7 +128,19 @@ def new_network_id() -> str:
 
 
 def networks_dir(root: Path | None = None) -> Path:
-    path = network_root(root) / NETWORKS_DIRNAME
+    """``<config>/network/networks`` — the path, never created by a reader.
+
+    A listing over a directory that is not there answers "no networks", which is
+    the truth on a fresh install; the module docstring records the bug the fused
+    resolver caused. Writers use :func:`ensure_networks_dir`.
+    """
+    return network_root(root) / NETWORKS_DIRNAME
+
+
+def ensure_networks_dir(root: Path | None = None) -> Path:
+    """``<config>/network/networks``, created 0700 down the chain — WRITERS ONLY."""
+    ensure_network_root(root)
+    path = networks_dir(root)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -128,7 +155,19 @@ def secrets_path(network_id: str, root: Path | None = None) -> Path:
 
 
 def outbox_dir(root: Path | None = None) -> Path:
-    path = network_root(root) / OUTBOX_DIRNAME
+    """``<config>/network/outbox`` — the path, never created by a reader.
+
+    A reader that asks "which invites are minted?" (``cli.py``, and
+    :func:`purge_network_artifacts`) globs this: nothing here means none were.
+    Writers use :func:`ensure_outbox_dir`.
+    """
+    return network_root(root) / OUTBOX_DIRNAME
+
+
+def ensure_outbox_dir(root: Path | None = None) -> Path:
+    """``<config>/network/outbox``, created 0700 down the chain — WRITERS ONLY."""
+    ensure_network_root(root)
+    path = outbox_dir(root)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -140,8 +179,17 @@ def peer_outbox_dir(device_id: str, root: Path | None = None) -> Path:
     A subdirectory per peer, because the queue is drained by device and a flat
     directory of frames would need every file read to answer "what is queued for
     d_…" — and the answer is needed on every reconnect.
+
+    Pure, like the rest of the resolvers: :func:`queued_frames` asks it for a
+    device with nothing queued and gets an empty queue from an absent directory.
     """
-    path = outbox_dir(root) / device_id
+    return outbox_dir(root) / device_id
+
+
+def ensure_peer_outbox_dir(device_id: str, root: Path | None = None) -> Path:
+    """``<config>/network/outbox/<device_id>``, created 0700 — WRITERS ONLY."""
+    ensure_outbox_dir(root)
+    path = peer_outbox_dir(device_id, root)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -310,6 +358,7 @@ def save(record: NetworkRecord, root: Path | None = None) -> Path:
     have this?" compares sequences.
     """
     target = record_path(record.network_id, root)
+    ensure_networks_dir(root)
     with _write_lock(target):
         record.sequence = max(record.sequence, _sequence_on_disk(target)) + 1
         payload = record.to_json()
@@ -362,6 +411,7 @@ def mutate(network_id: str, root: Path | None = None) -> Iterator[NetworkRecord]
 
 
 def save_secrets(state: SecretState, root: Path | None = None) -> Path:
+    ensure_networks_dir(root)
     return _write_private_json(secrets_path(state.network_id, root), state.to_json())
 
 
@@ -372,6 +422,7 @@ def save_invite_token(invite_id: str, token: str, root: Path | None = None) -> P
     a token printed by a command ends up in the agent's transcript, and the
     transcript is replayed to the provider on every later turn.
     """
+    ensure_outbox_dir(root)
     return _write_private_text(invite_path(invite_id, root), token + "\n")
 
 
@@ -385,9 +436,16 @@ def pending_dir(root: Path | None = None) -> Path:
 
     Its own directory rather than the outbox, because its lifetime is seconds and
     a reader must be able to answer "is a pairing waiting?" without scanning
-    queue files.
+    queue files — and that reader is why this resolver creates nothing either (see
+    :func:`networks_dir`). Writers use :func:`ensure_pending_dir`.
     """
-    path = network_root(root) / PENDING_DIRNAME
+    return network_root(root) / PENDING_DIRNAME
+
+
+def ensure_pending_dir(root: Path | None = None) -> Path:
+    """``<config>/network/pending``, created 0700 down the chain — WRITERS ONLY."""
+    ensure_network_root(root)
+    path = pending_dir(root)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
@@ -401,8 +459,24 @@ def decision_path(invite_id: str, root: Path | None = None) -> Path:
     return pending_dir(root) / f"{invite_id}.decision.json"
 
 
+def parked_join_path(invite_id: str, root: Path | None = None) -> Path:
+    """The JOINING device's parked ceremony — the mirror of :func:`pending_path`.
+
+    A distinct suffix on purpose: ``pending_pairings`` globs ``*.pending.json`` and
+    would try to parse one of these as a :class:`PendingPairing`, quarantine it, and
+    delete a live ceremony's record (its own comment calls that file pair the
+    inviter's). Two records, two readers, one directory.
+    """
+    return pending_dir(root) / f"{invite_id}.joining.json"
+
+
+def join_answer_path(invite_id: str, root: Path | None = None) -> Path:
+    return pending_dir(root) / f"{invite_id}.join-answer.json"
+
+
 def save_pending_pairing(pending: PendingPairing, root: Path | None = None) -> Path:
     """Write the waiting pairing, 0600. Deleted with its decision."""
+    ensure_pending_dir(root)
     return _write_private_json(pending_path(pending.invite_id, root), pending.to_json())
 
 
@@ -445,6 +519,7 @@ def clear_pending_pairing(invite_id: str, root: Path | None = None) -> None:
 
 def save_pair_decision(decision: PairDecision, root: Path | None = None) -> Path:
     """Write the human's answer where the relay's pairing loop will see it."""
+    ensure_pending_dir(root)
     return _write_private_json(decision_path(decision.invite_id, root), decision.to_json())
 
 
@@ -461,6 +536,68 @@ def pair_decision(invite_id: str, root: Path | None = None) -> PairDecision | No
 
 def clear_pair_decision(invite_id: str, root: Path | None = None) -> None:
     decision_path(invite_id, root).unlink(missing_ok=True)
+
+
+def save_pending_join(pending: PendingJoin, root: Path | None = None) -> Path:
+    """Write the JOINER's parked ceremony, 0600. Readable until it is answered."""
+    return _write_private_json(parked_join_path(pending.invite_id, root), pending.to_json())
+
+
+def pending_join(invite_id: str, root: Path | None = None) -> PendingJoin | None:
+    """The parked ceremony, or ``None`` when the file is not there or unreadable.
+
+    Expiry is NOT judged here, exactly as :func:`pending_pairing` leaves it to its
+    callers: the CLI is the only place that has sentences for "this ran out of
+    time" and "the process that held it is gone", and a reader that silently
+    dropped an expired record could not tell those two from "nobody is pairing".
+    """
+    data = _read_json(parked_join_path(invite_id, root))
+    if data is None:
+        return None
+    try:
+        return PendingJoin.from_json(data)
+    except (TypeError, ValueError):
+        _quarantine(parked_join_path(invite_id, root))
+        return None
+
+
+def pending_joins(root: Path | None = None) -> list[PendingJoin]:
+    """Every parked ceremony on this device, oldest first.
+
+    A listing that CLEARS nothing, unlike :func:`pending_pairings`: an expired
+    record whose process is still running is a ceremony someone is about to answer,
+    and the answerer needs to find it to refuse it by name.
+    """
+    found: list[PendingJoin] = []
+    for path in sorted(pending_dir(root).glob("*.joining.json")):
+        record = pending_join(path.name[: -len(".joining.json")], root)
+        if record is not None:
+            found.append(record)
+    return sorted(found, key=lambda row: row.issued_at)
+
+
+def clear_pending_join(invite_id: str, root: Path | None = None) -> None:
+    parked_join_path(invite_id, root).unlink(missing_ok=True)
+
+
+def save_join_answer(answer: JoinAnswer, root: Path | None = None) -> Path:
+    """Write the joiner's human answer where the waiting ceremony will see it."""
+    return _write_private_json(join_answer_path(answer.invite_id, root), answer.to_json())
+
+
+def join_answer(invite_id: str, root: Path | None = None) -> JoinAnswer | None:
+    data = _read_json(join_answer_path(invite_id, root))
+    if data is None:
+        return None
+    try:
+        return JoinAnswer.from_json(data)
+    except (TypeError, ValueError):
+        _quarantine(join_answer_path(invite_id, root))
+        return None
+
+
+def clear_join_answer(invite_id: str, root: Path | None = None) -> None:
+    join_answer_path(invite_id, root).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +659,10 @@ def purge_network_artifacts(
         # network this record still mentions, and an uninstall that leaves frames for
         # a device it no longer knows is the kind of leftover a purge exists to
         # prevent. A SCOPED purge cannot attribute those, so it keeps them and says so.
-        for queue in sorted(outbox_dir(root).iterdir()):
+        # ``iterdir`` raises on a directory that is not there, unlike ``glob``, and a
+        # purge has to run on a machine whose outbox was never created.
+        outbox = outbox_dir(root)
+        for queue in sorted(outbox.iterdir() if outbox.is_dir() else []):
             if queue.is_dir():
                 shutil.rmtree(queue, ignore_errors=True)
                 removed["queues"] += 1
@@ -549,6 +689,17 @@ def purge_network_artifacts(
             continue
         pending_file.unlink()
         clear_pair_decision(row.invite_id, root)
+        removed["pending"] += 1
+    # And the ceremonies THIS device parked as the joiner, attributed the same exact
+    # way. ``removed["pending"]`` counts them together with the inviter's rows because
+    # the receipt's own words are "parked pairing file(s)": to the device holding them
+    # they are one class of leftover, and a purge that left a join record naming a
+    # network it just forgot would resurrect half a ceremony on the next answer.
+    for own in pending_joins(root):
+        if own.network_id not in targets:
+            continue
+        clear_pending_join(own.invite_id, root)
+        clear_join_answer(own.invite_id, root)
         removed["pending"] += 1
     return removed
 
@@ -619,11 +770,26 @@ def read_config(path: tuple[str, ...], default: Any, root: Path | None = None) -
 
     Function-local import of ``ConfigManager``: it pulls the YAML store, and this
     module is on the CLI startup path.
+
+    A READ OF A SETTING DOES NOT CREATE THE STORE IT READS (review round 1, R1-3).
+    ``ConfigManager.__init__`` → ``_load_config`` mkdirs the config root whenever
+    ``config.yml`` is absent (its documented "create with defaults on first run"
+    behaviour — correct for a WRITER, wrong for a read of one nested value), so a
+    read against a root that did not exist yet materialised ``<config>``. The
+    short-circuit below is not an approximation of the same answer: it IS the same
+    answer, measured — ``DEFAULT_CONFIG`` carries no ``network`` block, so
+    ``get_nested_value`` on the freshly-created default returns the caller's
+    ``default`` for every path this module asks about. QA reproduced the scope
+    precisely (Q-3): the CONFIG root, not ``network/``, and nothing at all when
+    ``root`` is passed explicitly.
     """
-    from local_operator.config import ConfigManager
+    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
     from local_operator.paths import config_dir
 
-    manager = ConfigManager(root or config_dir())
+    directory = Path(root) if root is not None else config_dir()
+    if not (directory / CONFIG_FILE_NAME).exists():
+        return default
+    manager = ConfigManager(directory)
     return manager.get_nested_value(path, default)
 
 
@@ -655,6 +821,8 @@ def list_networks(root: Path | None = None) -> list[NetworkRecord]:
     two different networks to someone comparing screens.
     """
     records: list[NetworkRecord] = []
+    # A READ, so it creates nothing: a directory that is not there has no records,
+    # which is the honest answer on a fresh install (see the module docstring).
     for path in sorted(networks_dir(root).glob("*.json")):
         if path.name.endswith(".secrets.json") or path.name.endswith(CORRUPT_SUFFIX):
             continue
@@ -773,7 +941,17 @@ def prune(record: NetworkRecord, *, now: float | None = None) -> dict[str, int]:
 
 
 def run_record_path(pid: int, root: Path | None = None) -> Path:
-    """Where one relay's discovery record lives: ``run/peers/<pid>.json``."""
+    """Where one relay's discovery record lives: ``run/peers/<pid>.json``.
+
+    A PURE RESOLVER. It used to CREATE ``run/`` and ``run/peers/``, because
+    ``registry.record_path`` routed through ``registry.run_dir``, which mkdirs —
+    and that made every caller that only wanted to NAME a path, or to scan for
+    one, the reason a mesh-shaped run tree existed on a device that had never run
+    a relay. ``server.utils.desktop_mesh._relay_record`` is the caller that made
+    it visible from the desktop plane: ``GET /v1/desktop/networks`` created
+    ``run/peers`` on a fresh install (review round 1, R1-1). The creating spelling
+    is ``registry.ensure_run_dir``, which only the writers call.
+    """
     from local_operator.session.runtime import registry
 
     return registry.record_path(pid, root, dirname=PEERS_RUN_DIRNAME)
@@ -801,7 +979,12 @@ def unpublish_peer_record(pid: int, root: Path | None = None) -> None:
 def scan_peer_records(
     root: Path | None = None, *, reap: bool = True
 ) -> list[tuple[PeerRecord, str]]:
-    """Every relay record, each with its ``live``/``wedged``/``stale`` verdict."""
+    """Every relay record, each with its ``live``/``wedged``/``stale`` verdict.
+
+    A READ, and it creates nothing on the way: ``registry.scan`` resolves its
+    directory without creating and answers ``[]`` when it is absent, so "no relay
+    has ever run here" costs a glob rather than a mkdir (review round 1, R1-1).
+    """
     from local_operator.session.runtime import registry
 
     return registry.scan(root, dirname=PEERS_RUN_DIRNAME, parse=PeerRecord.from_json, reap=reap)
@@ -890,7 +1073,7 @@ def enqueue_frame(
             f"refusing to queue a rotation that carries this network's secret for {device_id}: "
             "that device is not a member any more",
         )
-    directory = peer_outbox_dir(device_id, root)
+    directory = ensure_peer_outbox_dir(device_id, root)
     moment = time.time() if now is None else now
     name = f"{int(moment * 1000):013d}-{os.getpid()}-{token_hex(4)}.frame"
     return _write_private_json(directory / name, frame)

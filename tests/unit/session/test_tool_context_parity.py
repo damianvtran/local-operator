@@ -210,6 +210,51 @@ def test_scratchpad_dir_is_none_for_an_agent_directory(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# session_dir + kernel_managed_by_session: DERIVED like the scratchpad, and
+# the eval kernel's marker directory and lifetime declaration respectively
+# ---------------------------------------------------------------------------
+
+
+def test_session_dir_follows_the_transcript_directory(tmp_path) -> None:
+    """The eval tool's cross-process restart marker lives in the session's OWN
+    directory (``<session dir>/eval-kernel.json``), so a RESTARTED runtime —
+    whose in-memory receipt ledger is empty — can still tell its first fresh
+    cell that earlier state is gone. Derived like the scratchpad, and the two
+    are asserted TOGETHER because they gate on the same transcript fact: a
+    session_dir without a scratchpad (or the reverse) would mean one of the
+    two derivations drifted."""
+    session = _session_for(tmp_path, tmp_path / "sessions" / "abc123")
+
+    context = session._build_tool_context()
+    assert context.session_dir == str(tmp_path / "sessions" / "abc123")
+    assert context.scratchpad_dir == str(tmp_path / "sessions" / "abc123" / "scratchpad")
+
+
+def test_session_dir_is_none_for_an_agent_directory(tmp_path) -> None:
+    """An ``--train`` agent directory is zipped and exported whole: no
+    scratchpad, no eval marker, and the eval tool must not create either."""
+    transcript_dir = tmp_path / "agents" / "abc123"
+    session = _session_for(tmp_path, transcript_dir)
+
+    context = session._build_tool_context()
+    assert context.session_dir is None
+    assert context.scratchpad_dir is None
+    assert not (transcript_dir / "eval-kernel.json").exists()
+    assert not (transcript_dir / "scratchpad").exists()
+
+
+def test_session_contexts_declare_eval_kernel_ownership(tmp_path) -> None:
+    """Every Session declares its eval kernel as runtime-owned, so the
+    eval-side reaper never closes it on a kernel-only clock. That declaration
+    is what makes the 18.7-minute-gap incident impossible by construction:
+    without it, a busy session's kernel looks idle to a timer that cannot see
+    the runtime at all."""
+    session = _session_for(tmp_path, tmp_path / "sessions" / "owned")
+
+    assert session._build_tool_context().kernel_managed_by_session is True
+
+
+# ---------------------------------------------------------------------------
 # attached_probe: DERIVED from the session's own goal state, which is why it is
 # not in the table either — there is no host-supplied value to hand and compare,
 # so the sentinel guard cannot see it. It is pinned directly instead, because

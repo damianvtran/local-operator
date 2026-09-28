@@ -357,6 +357,22 @@ loaded". Debounce state: `self._skew_notice_shown: set[tuple]`.
      `runtime_version` means the runtime predates the field, i.e. it is older
      than this window by construction — warn once per session with the
      absent-version copy.
+
+     **Peer scope (PR #1640, 2026-09-26).** That inference holds for a runtime
+     ON THIS MACHINE only. A runtime on another device publishes no build here
+     — a federated row carries none, so `RemoteSessionFacts.version` is never
+     *filled* (the field exists and `record()` forwards it, but `from_row` and
+     `_refresh_facts` never set it) — and an absent stamp there is
+     **UNOBSERVABLE**, not old. For a peer the absent-version copy is wrong in
+     both halves: the peer is not older, and "switch to the new version" names
+     THIS install's reaper, which has no jurisdiction over another device's
+     runtime. `_check_build_skew` therefore returns before the comparison when
+     `runtime_locality == "another-machine"` **and** the stamp is empty. The
+     direction arm is left intact on purpose: if the row ever carries a build,
+     the comparison resumes without changing that guard — but the remedy half
+     is still anchored to this device (`on_disk` is `update.disk_build()`
+     here), so a stamp-carrying change must also decide what "switch to the new
+     version" means across two installs (§4.4's peer column).
 2. `_start_runtime_engage` (`app.py:8848`) and the success tail of
    `_bind_then_dispatch` (`app.py:9004`) — re-check A immediately before a
    spawn, and re-check C after a fresh bind (`ensure()` resolved
@@ -421,10 +437,10 @@ Render a warning instead of returning silently:
 
 ### 4.4 Four-quadrant behaviour (the matrix the tests pin)
 
-| Viewer \ Runtime | old runtime (no field, pre-B) | new runtime |
-|---|---|---|
-| **old viewer** (pre-#624, no `slash_consumers`) | status quo (old/ old: both sides pre-#624 behave as that pair always did — noop `team_mutate`, silent; unchanged by this PR) | **B: runtime admits the request; turn runs; viewer paints the row from the relay.** A warns at adopt/engage. |
-| **new viewer** (declares receipts) | renderer degrades loudly (noop `team_mutate` → warning); C warns | declared ⇒ runtime never admits; viewer submits exactly as today. **Single turn, no double-submission.** |
+| Viewer \ Runtime | old runtime (no field, pre-B) | new runtime | runtime on ANOTHER DEVICE |
+|---|---|---|---|
+| **old viewer** (pre-#624, no `slash_consumers`) | status quo (old/ old: both sides pre-#624 behave as that pair always did — noop `team_mutate`, silent; unchanged by this PR) | **B: runtime admits the request; turn runs; viewer paints the row from the relay.** A warns at adopt/engage. | **No C notice, and none is owed.** A peer's build is unobservable from here (a federated row carries none), so the absent stamp is silence rather than a claim of age — the copy the quadrant above would paint is false in both halves for a peer (§4.3's peer scope, PR #1640). A peer that *does* report a stamp takes the ordinary comparison. |
+| **new viewer** (declares receipts) | renderer degrades loudly (noop `team_mutate` → warning); C warns | declared ⇒ runtime never admits; viewer submits exactly as today. **Single turn, no double-submission.** | as above: no C notice while the build is unobservable; a peer's own window is the one that reports its own disk drift. |
 
 ## 5. Tests
 

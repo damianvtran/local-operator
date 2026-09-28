@@ -381,21 +381,29 @@ def classify_rejection(reason: str) -> str:
         return "keys-not-array"
     if "type=union_tag_invalid" in reason:
         return "unknown-action-kind"
-    if "is not valid JSON" in reason or "duplicate-free JSON object" in reason:
-        # Two causes under one JSON-parse failure, and they are DIFFERENT
-        # failures that used to share one key and one hint (see
-        # ``_LEADING_DELIMITER_RULE``). The offset is the discriminator: a
-        # decode that cannot start is a reply whose FIRST byte is not a JSON
-        # value, while a decode that starts and then breaks is a reply whose
-        # object was cut off or double-escaped. Keyed on the parser's own
-        # reported position and not on the reply text, because this classifier
-        # must run over sealed artifacts too, 271 of whose 311 reply sections
-        # carry the placeholder instead of the reply. The envelope decoder's OWN
-        # sentence (``duplicate-free JSON object``) reports no offset -- it is our
-        # wording for a ``json.loads`` failure over the whole string, which is
-        # also how trailing text and duplicate keys fail -- so it lands in the
-        # residual, which is why that half's hint names text outside the object
-        # as one of its causes.
+    if "duplicate-free JSON object" in reason:
+        # One key repeated inside one JSON object. The object itself READ:
+        # ``json.loads`` resolves a repeated key last-wins, which is exactly why
+        # the reply is refused -- two readers may disagree about which value
+        # won, so the object does not state one decision -- and the repair is to
+        # name each key once. Until this split the sentence fell into the
+        # residual JSON class below, whose hint names truncation and
+        # double-escaping; a model standing in front of a complete object was
+        # told it had written an incomplete one, could not act on the
+        # correction, and reproduced the same shape until the episode died
+        # (measured: task_005, three consecutive duplicate-key refusals, sealed
+        # model_failure at step 64, 2026-09-27). Keyed on the phrase every
+        # generation of the sentence carries -- including the sealed artifacts
+        # that recorded the older wording -- so both read under one class.
+        return "duplicate-key"
+    if "is not valid JSON" in reason:
+        # The JSON-parse pair. The offset is the discriminator: a decode that
+        # cannot start is a reply whose FIRST byte is not a JSON value, while a
+        # decode that starts and then breaks is a reply whose object was cut
+        # off or double-escaped. Keyed on the parser's own reported position
+        # and not on the reply text, because this classifier must run over
+        # sealed artifacts too, 271 of whose 311 reply sections carry the
+        # placeholder instead of the reply.
         #
         # What the leading key MEANS moved when the decoder learned to read a
         # decision behind leading junk (``_locate_leading_object``): the shapes
@@ -727,7 +735,16 @@ def rejection_evidence(
         class_key = classify_rejection(reason)
     return RejectionEvidence(
         class_key=class_key,
-        hint=rejection_hint(class_key, reason=reason, observation=observation, surface=surface),
+        hint=rejection_hint(
+            class_key,
+            reason=reason,
+            observation=observation,
+            surface=surface,
+            # The repeated key is a typed fact on the decoder's exception, not
+            # part of its sentence: the sentence is what classification reads,
+            # and it must not carry model text (see ``DuplicateJSONKeyError``).
+            repeated_key=getattr(error, "repeated_key", None),
+        ),
         evidence_reply=reply_text or None,
         stream_shape=stream_shape,
     )
@@ -740,6 +757,7 @@ def rejection_hint(
     observation: Observation,
     surface: ActionSurface = LEGACY_ACTION_SURFACE,
     shape: HintShape = HintShape(),
+    repeated_key: str | None = None,
 ) -> str:
     """The model-facing correction for one refusal class.
 
@@ -789,6 +807,8 @@ def rejection_hint(
             "with exactly one JSON object, beginning with '{', and nothing else: "
             f"{_example_json(surface, observation, shape)}"
         )
+    if class_key == "duplicate-key":
+        return _duplicate_key_hint(repeated_key, observation, surface, shape)
     if class_key == "incomplete-json":
         # The other half: the decode STARTED, so the first byte was fine and
         # the object broke afterwards. Both causes are named. The second one is
@@ -1143,6 +1163,42 @@ def _unknown_action_kind_hint(reason: str, surface: ActionSurface) -> str:
         parts.append(f'Did you mean "{nearest}"?')
     parts.append(f"The accepted kinds are {accepted}.")
     return " ".join(parts)
+
+
+def _duplicate_key_hint(
+    repeated_key: str | None,
+    observation: Observation,
+    surface: ActionSurface,
+    shape: HintShape,
+) -> str:
+    """Correct a reply whose object names the same key more than once.
+
+    The refusal exists because two JSON readers may resolve a repeated key
+    differently (first-wins vs last-wins), so an object with one does not state
+    which value was meant; the repair is to name each key once. The repeated
+    key is quoted WHOLE or not at all -- it travels as DATA on the decoder's
+    exception and never in the sentence ``classify_rejection`` reads (a marker
+    test over model text is a class the payload can name), and the
+    whole-or-nothing guard is re-applied HERE because this is the one boundary
+    where a model-supplied name may legitimately appear. Without a name the
+    rule is stated without one rather than echoing a rendering the guard
+    rejected.
+
+    Naming the key is what makes the correction actionable rather than merely
+    true: a reply that touched the reserved envelope is replayed back as a
+    placeholder, so the model cannot look at what it wrote and find the repeat
+    itself. It is told the one fact it needs to stop reproducing the defect.
+    """
+
+    if repeated_key is not None and is_quotable_key(repeated_key):
+        lead = f"the key {repeated_key!r} appears more than once in the object"
+    else:
+        lead = "at least one key of the object appears more than once"
+    return (
+        f"{lead}: every key may appear only once in a JSON object, so write each "
+        f"field exactly once. Reply with exactly one JSON object and nothing "
+        f"else: {_example_json(surface, observation, shape)}"
+    )
 
 
 def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:

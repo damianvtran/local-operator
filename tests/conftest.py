@@ -70,6 +70,16 @@ _AMBIENT_VARS = (
     # ``test_bash_long_sleep_guard.py`` asserts. Read off the command's own
     # assignments only, never the process environment.
     "LOCAL_OPERATOR_ALLOW_LONG_SLEEP",
+    # The org destination guard's escape hatch (``providers/radient_credentials``
+    # ``ORG_ALLOW_NONCANONICAL_ENV``): the explicit, OFF-by-default opt-in that
+    # lets the CLI send a signed-in account's bearer to a NON-canonical hub. An
+    # inherited value would waive the refusal the org-guard cells assert
+    # (``test_cli_org_sharing.py::test_org_calls_refuse_a_non_canonical_hub_by_default``
+    # among them) — the same ESCAPE-HATCH class as ``ALLOW_NESTED_SESSION`` — and
+    # it is a name the harness's own QA rigs export, so an operator's shell
+    # plausibly carries it. Cells that want it on set it through ``monkeypatch``
+    # explicitly.
+    "RADIENT_ORG_ALLOW_NONCANONICAL_BASE",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit
@@ -163,6 +173,17 @@ _AMBIENT_VARS = (
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
     "LOP_RUNTIME_DEFER_MATERIALISE",
+    # The engage claim (``session/runtime/types.ENGAGED_ENV``), written by
+    # ``launch._spawn_runtime`` for a warm and read at boot by
+    # ``RuntimeServer``, which stamps ``SessionRecord.engaged_at`` from it. This
+    # is the escape-hatch class the list exists for, and an inherited value would
+    # be QUIET about it: every runtime a test constructs would arrive carrying a
+    # keep-alive claim, so the cells that assert the ORDINARY drain — and the
+    # LRU's population, which is read off other records — would take the
+    # keep-alive path while looking like they tested the population the drain was
+    # written for. A cell that wants a warmed runtime sets it through the
+    # production spawn instead (``test_runtime_keep_alive`` does).
+    "LOP_SESSION_ENGAGED",
     # The e2e stage's fake install prefix for the runtime self-refresh: a
     # runtime that inherited it would compare its boot stamp against a
     # directory the test owns rather than its real install, and could
@@ -280,6 +301,13 @@ _AMBIENT_VARS = (
     "PNPM_HOME",
     "XDG_DATA_HOME",
     "COREPACK_HOME",
+    # Aida's kill switch (``aida/state.ENV_DISABLE``). An inherited value is the
+    # escape-hatch class this list exists for: every cell that asserts her
+    # behaviour — session created, pinned, cadence armed, pause honoured — would
+    # silently drive a disabled install while looking like it tested the
+    # feature, and the zero-footprint cells would pass for the wrong reason.
+    # The aida conftest clears it for its own package; this scrubs it everywhere.
+    "LOCAL_OPERATOR_NO_AIDA",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real

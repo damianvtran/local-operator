@@ -1010,6 +1010,33 @@ _FRONTEND_LOCAL_SLASHES = {
     # dispatches it. A runtime-side `/network` would act on another machine's
     # mesh, which is why it is not there.
     "network",
+    # The projects page and its store are THIS machine's: `config_dir()/projects`
+    # is the row store, `config_dir()/sessions/` is what the page's linked
+    # sessions resolve against, and the run records its runtime state reads are
+    # this machine's too — the same argument `/settings` and `/delete` make
+    # about config.yml and the session store. Routed to a runtime it would show
+    # a viewer a page about the runtime's sessions while the receipt and the
+    # composer it is typed into belong to this terminal.
+    #
+    # KNOWN LIMITATION, stated in the design and kept: on a remote-attached
+    # session the completion check still runs in the session's OWN process (its
+    # machine's store), so a follower's page reads a store its session does not
+    # write. v2 is single-machine; serving the owner's project view over the
+    # control protocol is a follow-up.
+    "project",
+    # HER WHOLE FAMILY IS LOCAL, for the `/resume` and `/settings` reasons at
+    # once. Opening her conversation is a transition THIS frontend performs
+    # (the `/new`/`/resume` argument: the session it lands on is opened on this
+    # machine, and a viewer's own conversation is not something a runtime can
+    # switch), and pause/resume/status read and write THIS machine's
+    # config.yml and wake index — the very files `/settings` argues about,
+    # read by the engine the command steers. The desktop has its own
+    # destination for the same word (`desktop_destination="aida.open"`,
+    # answered by `server/routes/desktop_aida.py`), which is the shape this set
+    # describes: each frontend answers `/aida` against its own root. This is
+    # also what keeps it out of `serving.py::_slash_result`, exactly as the
+    # `/notifications` clause above states the rule.
+    "aida",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the

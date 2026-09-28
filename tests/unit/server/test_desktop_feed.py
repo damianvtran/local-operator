@@ -804,8 +804,15 @@ def test_the_absence_of_a_presence_file_is_the_absent_answer(tmp_path):
 
 
 def test_a_stale_or_dead_lease_is_reaped(tmp_path):
-    """The two reaping rules, which the presence shares with ``scan_viewers``."""
+    """The two reaping rules, which the presence shares with ``scan_viewers``.
+
+    The legacy machine-wide lease is written as a WRITER does — the directory is
+    asked for explicitly, because ``delivery_path`` is a pure resolver since
+    #1666's review round 1 (R1-1) and no longer creates ``run/desktop`` as a side
+    effect of being written through.
+    """
     root = tmp_path
+    presence_module.ensure_desktop_run_dir(root)
     path = presence_module.delivery_path(root)
     path.write_text(
         json.dumps(

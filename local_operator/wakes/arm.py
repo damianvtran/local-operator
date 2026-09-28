@@ -204,6 +204,7 @@ async def arm_wake(
     cwd: str | None = None,
     now_ms: int | None = None,
     request_id: str = "",
+    wake_id: str = "",
 ) -> WakeWriteOutcome:
     """Add one schedule to ``session_id``'s wakes. ``request`` is the same
     ``message``/``in``/``at``/``every``/``until``/``limit`` mapping the agent's
@@ -215,6 +216,15 @@ async def arm_wake(
     comparing fields no further than the wake's own firing can change — the defect
     review round 4 (R9) drove. Writers with no request id (the agent's tool, the
     CLI) leave it unset and fall back to id-plus-message.
+
+    ``wake_id`` names the row instead of letting the ``w1``..``w16`` allocator
+    assign one, for a caller that owns a FAMILY of schedules and must find its
+    rows again (the Aida engine re-arms ``aida-cadence`` / ``aida-extra-N`` by
+    id on every tick). It is the same row either way — same validation, same
+    transcript-first write, same index and install hook — only the handle
+    differs, and the caller is responsible for choosing one that is legal
+    (``session_directory_name``-safe text) and not already in use. A clash is
+    refused as a conflict rather than silently re-pointing at the existing row.
     """
 
     def mutate(
@@ -224,6 +234,14 @@ async def arm_wake(
         if "error" in built:
             raise _refusal(built)
         schedule = built["schedule"]
+        if wake_id:
+            if any(row.id == wake_id for row in existing):
+                raise WakeWriteError(
+                    f"a wake with the id {wake_id!r} already exists on this conversation.",
+                    status=STATUS_CONFLICT,
+                    code="wake_conflict",
+                )
+            schedule = schedule.model_copy(update={"id": wake_id})
         if request_id:
             schedule = schedule.model_copy(update={"request_id": request_id})
         return schedule.id, [*existing, schedule], schedule.next_due_at

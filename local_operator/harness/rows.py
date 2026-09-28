@@ -90,7 +90,16 @@ _HARNESS_NOTICE_HEADS: tuple[str, ...] = (
     "[model switch] ",  # incidents.format_model_switch_message
     "[session incident",  # incidents.Incident.render
     "[session credential] ",  # incidents.format_credential_message
-    "[credential redaction] ",  # incidents.format_shape_incident_message
+    # ``[credential redaction] `` is retained deliberately after the notice it heads
+    # stopped being written (2026-09-27). Nothing armed writes that head any more —
+    # ``Session.journal_shape_incident`` is silent by the operator's ruling — but a
+    # transcript written before that date still contains rows carrying it, and the
+    # audit replay serves those STORED rows verbatim. Removing the head would make
+    # an OLD session's persisted notice paint as the operator's own words on replay
+    # on every surface that consults this tuple, which is exactly the defect the
+    # head exists to prevent; the rule costs a live session nothing, because the
+    # words no longer occur in one.
+    "[credential redaction] ",  # incidents.format_shape_incident_message (legacy rows)
     "[mcp recovery] ",  # incidents.format_mcp_recovery_message
     # The MCP-unavailable WARNING, and the one head here that is not an
     # incident: a server whose tools are gone is a missing capability, not a

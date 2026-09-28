@@ -41,7 +41,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from local_operator.mobile.attach_client import AttachClient
@@ -55,6 +55,7 @@ from local_operator.harness.approval import (
     operator_nonce,
     request_proof,
 )
+from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile.auth import (
     COOKIE_NAME,
     check_password,
@@ -70,7 +71,7 @@ from local_operator.mobile.types import (
 from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.types import reported_subagent_count
+from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
 from local_operator.tui.sidebar_pins import PINS_FILE, read_pins, set_pin
 
 logger = logging.getLogger(__name__)
@@ -2821,6 +2822,14 @@ class MobileDaemon:
         # A deliberate Start is not speculative prewarming inherited from an
         # enclosing process. The child's existing adopt path mints this exact ID.
         env.pop("LOP_RUNTIME_DEFER_MATERIALISE", None)
+        # …AND NEITHER IS IT AN ENGAGE, which the sibling above does not cover.
+        # The claim is set in a WARM child's environment, so a daemon started
+        # from inside a session inherits it and — without this line — hands every
+        # session it starts a record claiming an engage that never happened, i.e.
+        # the 300 s keep-alive window bought by the wrong fact. This is the one
+        # runtime spawn outside ``launch._spawn_runtime``, so it does not get
+        # that function's scrub (review round 1, M1).
+        env.pop(ENGAGED_ENV, None)
         # BOTH name axes, exactly as the viewer's own spawn in
         # ``session/runtime/launch.py`` does — this is the PHONE-started runtime,
         # and until now it was the one session start with no branding at all, so
@@ -4002,6 +4011,170 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
         return _maybe_gzip(request, JSONResponse({"models": models}))
 
+    # --- projects ---------------------------------------------------------
+    #
+    # The phone's read-write surface over the project store
+    # (:mod:`local_operator.mobile.projects`). It mirrors the desktop route
+    # family on purpose — the same key resolution, the same refusal statuses
+    # and machine codes, and the desktop's own wire models — so the phone and
+    # the desktop cannot describe one project differently. The store is the
+    # ``project`` tool's own store: every handler reads it fresh per call and
+    # runs it off-loop, because a registry call touches the filesystem (and,
+    # for the live-session counts, the runtime record directory).
+
+    async def _project_body(request: Request) -> dict[str, Any] | None:
+        """The JSON object a project write carries, or None when unreadable."""
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return body if isinstance(body, dict) else None
+
+    async def _project_call(fn: Callable[..., dict[str, Any]], *args: Any) -> Response:
+        """Run one project-store call off-loop; a refusal answers its JSON body."""
+        try:
+            payload = await asyncio.to_thread(fn, *args)
+        except mobile_projects.ProjectRouteError as exc:
+            return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status)
+        return JSONResponse(payload)
+
+    async def api_projects(request: Request) -> Response:
+        """Every project as a summary, in the board's own order — status rank,
+        then freshest — which is what both the list and the status-grouped
+        board render, so the two views cannot order one store differently."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _project_call(mobile_projects.list_payload, config_dir())
+
+    async def api_project_create(request: Request) -> Response:
+        """Create one project from ``{name, description?, status?, tags?}``.
+
+        A phone-created project starts UNLINKED (the desktop create body
+        carries no sessions either): linking is the tool's or the UI's
+        deliberate next act, never a side effect of creation.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _project_body(request)
+        if body is None:
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.paths import config_dir
+
+        return await _project_call(mobile_projects.create_payload, config_dir(), body)
+
+    async def api_project(request: Request) -> Response:
+        """One project plus its linked sessions — the detail sheet's read.
+
+        Composed by ``build_project_view`` — the same function the tool's
+        ``show`` and the desktop route read — so the phone's per-session rows
+        (state, subagents, todos) cannot disagree with the other surfaces.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _project_call(
+            mobile_projects.detail_payload, config_dir(), str(request.path_params["key"])
+        )
+
+    async def api_project_patch(request: Request) -> Response:
+        """A partial edit: only the keys the caller sent are touched.
+
+        The body is the desktop ``PATCH`` vocabulary (dates, estimate, status,
+        progress…); the tri-state ``""``-clears-a-date rule lives in the same
+        edit model both surfaces construct.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _project_body(request)
+        if body is None:
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.paths import config_dir
+
+        return await _project_call(
+            mobile_projects.patch_payload, config_dir(), str(request.path_params["key"]), body
+        )
+
+    async def api_project_delete(request: Request) -> Response:
+        """Delete one project, confirmed by repeating its NAME in the body.
+
+        The name — not the id — is what the operator sees and can type; a
+        mismatch is refused rather than treated as a silent success.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _project_body(request)
+        if body is None:
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.paths import config_dir
+
+        return await _project_call(
+            mobile_projects.delete_payload, config_dir(), str(request.path_params["key"]), body
+        )
+
+    async def api_project_milestone(request: Request) -> Response:
+        """Add-or-update one milestone; ``completed`` is the detail sheet's toggle."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _project_body(request)
+        if body is None:
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.paths import config_dir
+
+        return await _project_call(
+            mobile_projects.milestone_payload, config_dir(), str(request.path_params["key"]), body
+        )
+
+    async def api_project_milestone_remove(request: Request) -> Response:
+        """Remove one milestone by name."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _project_call(
+            mobile_projects.milestone_remove_payload,
+            config_dir(),
+            str(request.path_params["key"]),
+            str(request.path_params["name"]),
+        )
+
+    async def api_project_link(request: Request) -> Response:
+        """Link one session id to a project."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        body = await _project_body(request)
+        if body is None:
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+        from local_operator.paths import config_dir
+
+        return await _project_call(
+            mobile_projects.link_payload, config_dir(), str(request.path_params["key"]), body
+        )
+
+    async def api_project_unlink(request: Request) -> Response:
+        """Unlink one session id from a project."""
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.paths import config_dir
+
+        return await _project_call(
+            mobile_projects.unlink_payload,
+            config_dir(),
+            str(request.path_params["key"]),
+            str(request.path_params["session_id"]),
+        )
+
     routes: list[BaseRoute] = [
         Route("/healthz", healthz),
         Route("/login", login_page, methods=["GET"]),
@@ -4034,6 +4207,23 @@ def build_app(daemon: MobileDaemon):
         Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
+        Route("/api/projects", api_projects),
+        Route("/api/projects", api_project_create, methods=["POST"]),
+        Route("/api/projects/{key:str}", api_project),
+        Route("/api/projects/{key:str}", api_project_patch, methods=["PATCH"]),
+        Route("/api/projects/{key:str}", api_project_delete, methods=["DELETE"]),
+        Route("/api/projects/{key:str}/milestones", api_project_milestone, methods=["POST"]),
+        Route(
+            "/api/projects/{key:str}/milestones/{name:str}",
+            api_project_milestone_remove,
+            methods=["DELETE"],
+        ),
+        Route("/api/projects/{key:str}/links", api_project_link, methods=["POST"]),
+        Route(
+            "/api/projects/{key:str}/links/{session_id:str}",
+            api_project_unlink,
+            methods=["DELETE"],
+        ),
         Route("/mark.png", mark_png),
         Route("/", index),
     ]

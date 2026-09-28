@@ -4720,6 +4720,14 @@ class Editor(TextArea):
         the prompt carries the token verbatim — and a stale prose ink never
         blocks a path that does exist. The ink is a hint about what the resolver
         will do; the resolver's own verdict, not the hint, decides what is sent.
+
+        THE PROJECT ARM IS NOT LEFT TO THAT BOUND, because it does not have to
+        be: the store read hands over a publish counter that rides the memo key
+        (`project_ink_epoch`), so a store read that lands while the draft sits
+        untouched re-asks the question on the very next evaluation instead of
+        waiting for a keystroke. The path arm keeps the one-edit lag — nothing
+        tells the editor a file appeared on disk — and this entry is the only
+        difference between them.
         """
         if "@" not in self.text:
             # No token can resolve in a draft without an `@`, whatever the kill
@@ -4728,11 +4736,20 @@ class Editor(TextArea):
             # off the first paint: `render_line` reaches this on every frame,
             # including the empty composer at boot (backend load report B-F10).
             return {}
-        from local_operator.references import at_references_enabled, reference_resolves
+        from local_operator.references import (
+            at_references_enabled,
+            project_ink_epoch,
+            reference_resolves,
+        )
 
         cwd = self._reference_cwd()
         enabled = at_references_enabled()
-        key: tuple[object, ...] = (self.text, cwd, enabled)
+        # The project store's publish counter rides the key: a store read that
+        # LANDS while the draft sits untouched invalidates a memo taken before
+        # it, so the project arm does not share the path arm's one-draft-edit
+        # lag (`project_ink_epoch` documents why the path arm must). This entry
+        # only re-ENABLES the question — the predicate still answers it.
+        key: tuple[object, ...] = (self.text, cwd, enabled, project_ink_epoch())
         cached = self._reference_runs_cache
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -7927,12 +7944,14 @@ class Editor(TextArea):
                 self._name_choices = frozenset()
                 self._name_choices_family = None
                 self.post_message(ArgumentQueryOpened(command or ""))
-            elif command in ("mcp", "team", "teams"):
-                # `/mcp` and `/team` are two-level: `/mcp` reserves verbs in the
-                # first argument slot and offers servers in the second; `/team`
-                # reserves the `chart` subcommand in the first slot and, once
-                # `chart ` is present, re-offers TEAM NAMES in the second (the
-                # [name] the chart wants). ArgumentQueryOpened fires on the
+            elif command in ("mcp", "team", "teams", "project"):
+                # `/mcp`, `/team` and `/project` are two-level: `/mcp` reserves
+                # verbs in the first argument slot and offers servers in the
+                # second; `/team` reserves the `chart` subcommand in the first
+                # slot and, once `chart ` is present, re-offers TEAM NAMES in
+                # the second (the [name] the chart wants); `/project` reserves
+                # its six verbs and re-offers PROJECT NAMES once a name-taking
+                # verb's space is typed. ArgumentQueryOpened fires on the
                 # command WORD, so without this the first-slot rows would stay
                 # up after the subcommand was completed and the second slot
                 # would have nothing to offer. Tracked rather than refreshed per
@@ -7968,6 +7987,23 @@ class Editor(TextArea):
                     # does for the chart slot.
                     if subcommand != (self._argument_subcommand or ""):
                         self._argument_subcommand = subcommand
+                        self.post_message(RefreshArgumentChoices(command, cursor))
+                elif command == "project":
+                    # `/project` is two-level exactly as `/mcp` is: reserved
+                    # verbs in the first slot, that verb's project NAMES in the
+                    # second — for the NAME-TAKING verbs only; `list` and `new`
+                    # offer nothing once their space is there, and the builder
+                    # is what decides (it reads the space itself, like
+                    # `/mcp`'s). Keyed on `verb + sep` for the whole transition,
+                    # the `/mcp` branch's rule: the builder flips precisely on
+                    # the terminating space, so a token-only key would never
+                    # fire the edge that changes the answer (#377), and a key
+                    # that only tracked name-taking verbs would leave the verb
+                    # rows standing after `/project new ` instead of clearing
+                    # them.
+                    project_key = f"{first_tok.casefold()}{sep}" if list_argument else ""
+                    if project_key != (self._argument_subcommand or ""):
+                        self._argument_subcommand = project_key
                         self.post_message(RefreshArgumentChoices(command, cursor))
                 else:
                     # `/team` has exactly ONE thing that changes its choice set:

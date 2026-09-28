@@ -200,9 +200,8 @@ def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
     so it has to send the model to that rule rather than paraphrase it into a
     subtly weaker one of its own.
     """
-    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})(
-        "guide://system-tools"
-    )
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://system-tools")
 
     assert body is not None
     assert "console guide already carries that rule" in body
@@ -211,6 +210,15 @@ def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
     # rather than paper over: the surface cannot answer a UAC dialog.
     assert "surface cannot" in body and "answer it" in body
     assert "UAC" in body
+    # The sudo half of the same rule, pinned on both sides: the install guide
+    # names the handover (the user's `ask` secret question, relayed by
+    # `secret_ref`) and defers to the console guide, which must carry the
+    # step-by-step recipe it points to.
+    assert "secret question" in body
+    assert "secret_ref" in body
+    console = resolver("guide://console")
+    assert console is not None
+    assert "ask first, then relay the password by `secret_ref`" in console
 
 
 def test_installing_a_missing_tool_is_reachable_from_the_console_surfaces() -> None:
@@ -348,8 +356,16 @@ def test_network_guide_names_the_human_step_and_the_real_commands() -> None:
     assert "lop network invite --role drive --json" in body
     assert "lop network join @<token-file>" in body
     assert "lop network peers --json" in body
-    # R3: the human reads the code off the screen; the agent may not finish it.
+    # R3: the human reads the code off the screen, and the SECOND PHASE IS THEIRS.
+    # The guide said the opposite for one revision ("You may pass the value they read
+    # back") and review round 1 removed the tool field that made it payable: the digits
+    # both devices derive are the same ones, so a tool able to echo the code it printed
+    # satisfies the comparison that exists to catch a substitution. What the guide has
+    # to pin is therefore that the step is CLOSED to the agent, in the CLI's own
+    # spelling, with the command it hands over.
     assert "You cannot do this step" in body
+    assert "The second phase is the user's" in body
+    assert "has no `confirm` field" in body
     assert "code" in body and "fingerprint" in body
     # R17's controls, with the rule that guards them.
     assert "lop network panic" in body
@@ -385,9 +401,16 @@ def test_network_guide_names_the_human_step_and_the_real_commands() -> None:
     assert "ok` is FALSE whenever" in body
     # Brokering is still unbuilt, and `--purge`'s scope is still spelled out.
     assert "--purge-identity" in body and "does not" in body
-    # The two-phase pair the design sketches does not exist in this CLI, so the
-    # guide must not teach it.
-    assert "join --confirm" not in body
+    # The two-phase pair is now what the CLI emits, so the guide teaches it — and it
+    # must teach the half that keeps the interlock real: the second phase is a command
+    # the USER runs. The earlier revision told the agent it "may pass the value they
+    # read back", which review round 1 removed along with the tool field that made it
+    # payable: the digits both devices derive are the same ones, so an agent able to
+    # echo the code it printed would satisfy the comparison by construction.
+    assert "join --confirm" in body
+    assert "--park" in body
+    assert "You cannot do this step" in body
+    assert "pairing_unanswered" in body
     # Shareable prompt text: no machine-shaped absolute paths, and no home dir.
     assert "/Users/" not in body
     assert "/home/" not in body

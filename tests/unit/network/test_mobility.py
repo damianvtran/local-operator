@@ -891,12 +891,12 @@ def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
         # otherwise sit out in full; the poll the wait notices it on is 0.2 s.
         budget = mobility.move_bound_s(0.0)
         started = time.monotonic()
-        committed, refusal = mobility._await_own_progress(  # noqa: SLF001
+        outcome, refusal = mobility._await_own_progress(  # noqa: SLF001
             server_a, session_id, budget=budget, invited=invited
         )
         elapsed = time.monotonic() - started
 
-        assert committed is False, "a refusal is not a commit"
+        assert outcome == "none", "a refusal is not a commit"
         assert refusal == ("busy", sentence), refusal
         assert elapsed < 1.0, (
             f"the refusal took {elapsed:.1f}s of a {budget:.0f}s budget, so it waited for the "
@@ -912,11 +912,11 @@ def test_an_offload_returns_the_destinations_refusal_instead_of_waiting_it_out(
             stranger,
             {"session_id": session_id, "code": "busy", "message": "not this move"},
         )
-        committed, refusal = mobility._await_own_progress(  # noqa: SLF001
+        outcome, refusal = mobility._await_own_progress(  # noqa: SLF001
             server_a, session_id, budget=0.3, invited=invited
         )
 
-        assert committed is False and refusal is None, refusal
+        assert outcome == "none" and refusal is None, refusal
     finally:
         progress.forget(session_id)
 

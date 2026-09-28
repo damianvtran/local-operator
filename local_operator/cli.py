@@ -51,10 +51,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
 from local_operator import procname
-from local_operator.agent_profiles import SEED_ORIGIN_PREFIX
+from local_operator.agent_profiles import (
+    SEED_ORIGIN_PREFIX,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
+)
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
-from local_operator.env import get_env_config, resolve_radient_api_base_url
+from local_operator.env import get_env_config
 from local_operator.logger import configure_cli_logging, file_logging
 from local_operator.optional import missing_extra_error
 from local_operator.paths import config_dir
@@ -67,7 +71,8 @@ from local_operator.resume import RESUME_LATEST
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from local_operator.agents import AgentRegistry
+    from local_operator.agents import AgentData, AgentRegistry
+    from local_operator.clients.radient import RadientClient
 
 from local_operator.helpers import setup_cross_platform_environment
 
@@ -413,6 +418,13 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         help="ID of the agent to push to Radient (explicit overwrite)",
     )
+    push_parser.add_argument(
+        "--org",
+        type=str,
+        default=None,
+        help="Publish into this organization's workspace instead of the public hub "
+        "(Agent Hub org sharing; requires `lop login radient`)",
+    )
     # Pull command
     pull_parser = agents_subparsers.add_parser(
         "pull", help="Pull (download) an agent from Radient", parents=[parent_parser]
@@ -422,6 +434,35 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         required=True,
         help="ID of the agent to pull from Radient",
+    )
+    pull_parser.add_argument(
+        "--org",
+        type=str,
+        default=None,
+        help="Pull from this organization's workspace instead of the public hub "
+        "(Agent Hub org sharing; requires `lop login radient`)",
+    )
+    # Sync command
+    sync_parser = agents_subparsers.add_parser(
+        "sync",
+        help="Update installed starters and hub-pulled agents to their latest text",
+        parents=[parent_parser],
+    )
+    sync_group = sync_parser.add_mutually_exclusive_group()
+    sync_group.add_argument(
+        "--name",
+        type=str,
+        help="Sync only the installed profile with this name",
+    )
+    sync_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Sync every installed starter and hub-pulled agent (default when --name is absent)",
+    )
+    sync_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Also replace copies that were edited locally after their install/pull",
     )
 
     # Teams command
@@ -458,6 +499,32 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=str,
         required=True,
         help="Name of the team to delete",
+    )
+    teams_push = teams_subparsers.add_parser(
+        "push",
+        help="Push a team to an organization (Agent Hub org sharing)",
+        parents=[parent_parser],
+    )
+    teams_push.add_argument("name", type=str, help="Name of the local team to push")
+    teams_push.add_argument(
+        "--org",
+        type=str,
+        default=None,
+        help="Organization tenant to publish into (`lop teams push --org <tenant_id> "
+        "<team>`; requires `lop login radient`)",
+    )
+    teams_pull = teams_subparsers.add_parser(
+        "pull",
+        help="Pull a team from an organization (Agent Hub org sharing)",
+        parents=[parent_parser],
+    )
+    teams_pull.add_argument("team_id", type=str, help="ID of the published team to pull")
+    teams_pull.add_argument(
+        "--org",
+        type=str,
+        default=None,
+        help="Organization tenant the team belongs to (`lop teams pull --org "
+        "<tenant_id> <team-id>`; requires `lop login radient`)",
     )
 
     # Serve command to start the API server
@@ -1909,6 +1976,17 @@ def config_edit_command(args: argparse.Namespace) -> int:
     try:
         # Parse the value to the appropriate type
         value = args.value
+        if setting.empty_unsets and not str(value).strip():
+            # An empty argument UNSETS, which is the page's clear-to-unset gesture and
+            # the server's `PATCH /v1/settings` branch of the same name. Without it the
+            # empty string reached the LIST parse, which turns it into `[]` and STORED
+            # that: the key stayed present carrying an explicit "none", so
+            # `settings_get` reported a deliberate choice where the user had asked for
+            # the automatic one — the state `reset_setting` exists to avoid, and the
+            # reason the flag is on the rows that carry it (review round 1, M4).
+            settings_io.reset_setting(config_manager, setting)
+            print(f"Cleared {args.key}: it reads as its default again")
+            return 0
         # An ENUM's displayed LABEL is not always its stored VALUE (D11).
         # `model_effort auto` means the stored ``""``, and the guessed parse
         # below would hand the literal string ``auto`` to ``validate`` and have
@@ -1931,16 +2009,27 @@ def config_edit_command(args: argparse.Namespace) -> int:
             )
         if matched_choice is not None:
             value = matched_choice.value
-        elif setting.kind is settings_io.Kind.CASCADE:
+        elif setting.kind in (settings_io.Kind.CASCADE, settings_io.Kind.LIST):
             # The guessing ladder below knows int/float/bool/null and nothing
-            # structured, so a cascade's JSON fell through it as a plain
-            # string and was stored verbatim. ``coerce`` owns the CASCADE
-            # parse — one definition shared with the page — and raises a
-            # ``ValueError`` written for the user, which this function's
-            # existing ``except ValueError`` reports in the same words, on the
-            # same stream, with the same exit code as every other refusal
-            # here. Catching it again at this call site would be a second copy
-            # of that format to keep in sync.
+            # structured in EITHER sense:
+            #
+            # * a cascade's JSON fell through it as a plain string and was stored
+            #   verbatim;
+            # * a LIST's comma-separated text did too, and `validate` then refused
+            #   it with "expected a comma-separated list" — the message a user sees
+            #   immediately after typing a comma-separated list. Every
+            #   list-valued key was unreachable from this command because of it
+            #   (`providers.openrouter.order`, `web_search.providers`, and the mesh's
+            #   `network.advertise_hosts`, where the list is the whole setting), while
+            #   the /settings page could set them, because the page calls the parser
+            #   this branch was skipping.
+            #
+            # ``coerce`` owns both parses — one definition shared with the page — and
+            # raises a ``ValueError`` written for the user, which this function's
+            # existing ``except ValueError`` reports in the same words, on the same
+            # stream, with the same exit code as every other refusal here. Catching it
+            # again at this call site would be a second copy of that format to keep in
+            # sync.
             value = settings_io.coerce(setting, value)
         else:
             # Try to convert to int
@@ -5269,7 +5358,11 @@ def _wake_rows() -> "list[dict[str, Any]]":
     for session_id, entry in read_index(root).items():
         if not isinstance(entry, dict):
             continue
-        dormant = bool(entry.get("stopped_at"))
+        # ``held_at`` reads as dormant here too: a paused Aida's entry will not
+        # fire until resume, and listing it as armed would be the same
+        # fabricated-alarm disease this listing exists to end (see
+        # ``wakes.store.is_held`` for why the two markers share one meaning).
+        dormant = bool(entry.get("stopped_at") or entry.get("held_at"))
         # GHOST, asked with the supervisor's own predicate (round 2, Q4). The
         # supervisor refuses an entry whose session has no transcript and
         # retires on a ghost-only store, while this listing had no ghost
@@ -7358,6 +7451,11 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
 
     # Get agents for current page
     page_agents = agents[start_idx:end_idx]
+    # The agents module is already imported whenever a registry exists — this
+    # is the handler that receives one — so quoting its baseline prefix costs
+    # nothing, and this must not become a second spelling of "hub_sha256:".
+    from local_operator.agents import HUB_SHA256_PREFIX
+
     print("\n\033[1;32m╭─ Agents ────────────────────────────────────\033[0m")
     for i, agent in enumerate(page_agents):
         is_last = i == len(page_agents) - 1
@@ -7372,12 +7470,23 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
         print(f"\033[1;32m{left_bar}   • Model: {agent.model or 'default'}\033[0m")
         if agent.description:
             print(f"\033[1;32m{left_bar}   • Description: {agent.description}\033[0m")
-        # The `seed:` provenance marker is bookkeeping this listing's reader
-        # cannot act on: it records that a role was installed from a packaged
-        # starter so `agent op='reset'` knows it may restore it. Hiding it
-        # keeps a machine-only tag out of a human-facing inventory.
+        # Provenance markers are bookkeeping this listing's reader cannot act
+        # on: `seed:` records the starter a role was installed from (so
+        # `op='reset'` knows it may restore it), and `seed_version:` /
+        # `seed_sha256:` / `hub_sha256:` are the sync baselines (`lop agents
+        # sync`). Hiding them keeps machine-only tags out of a human-facing
+        # inventory; the tags a person wrote still show. A row's `hub:` marker
+        # stays VISIBLE — it names the marketplace listing the row came from,
+        # which is something a reader can act on (`agents pull --id`).
         shown_tags = [
-            tag for tag in agent.tags if not str(tag).strip().lower().startswith(SEED_ORIGIN_PREFIX)
+            tag
+            for tag in agent.tags
+            if not str(tag)
+            .strip()
+            .lower()
+            .startswith(
+                (SEED_ORIGIN_PREFIX, SEED_VERSION_PREFIX, SEED_SHA256_PREFIX, HUB_SHA256_PREFIX)
+            )
         ]
         if shown_tags:
             print(f"\033[1;32m{left_bar}   • Tags: {', '.join(shown_tags)}\033[0m")
@@ -7392,6 +7501,43 @@ def agents_list_command(args: argparse.Namespace, agent_registry: "AgentRegistry
     if page < total_pages:
         print(f"\033[1;32m│ Use --page {page + 1} to see next page\033[0m")
     print("\033[1;32m╰──────────────────────────────────────────────\033[0m")
+    return 0
+
+
+def agents_sync_command(
+    args: argparse.Namespace, agent_registry: "AgentRegistry", base_dir: Path
+) -> int:
+    """Update installed starters and hub-pulled agents; print the shared report.
+
+    A named function rather than inline dispatch so the command is reachable
+    the way its siblings are (``agents_delete_command`` et al.) — the parser
+    test and the handler test then cover the same callable the CLI runs, and
+    the rendering comes from ``agent_sync`` so this surface cannot grow a
+    second opinion about what a verdict means.
+    """
+
+    # Lazy: the sync coordinator pulls the agent registry module (dill, yaml)
+    # and the Radient client, none of which belong on the startup path.
+    from local_operator.agent_sync import resolve_hub_client_sync, sync_agent_profiles
+
+    # ``--all`` is READ, not decorative: it names "every installed row" — the
+    # same set the absence of --name selects — so the flag does what it says
+    # instead of parsing into nothing (agent review round 1, n1).
+    if getattr(args, "all", False):
+        names = None
+    else:
+        names = [args.name] if getattr(args, "name", None) else None
+    radient_client = resolve_hub_client_sync(
+        agent_registry.config_dir,
+        base_url=_radient_hub_base_url(ConfigManager(base_dir)),
+    )
+    report = sync_agent_profiles(
+        agent_registry,
+        radient_client=radient_client,
+        names=names,
+        force=bool(getattr(args, "force", False)),
+    )
+    print("\n" + report.render())
     return 0
 
 
@@ -7547,8 +7693,381 @@ def teams_delete_command(name: str, team_registry: Any) -> int:
     return 0
 
 
+# --- Agent Hub organization sharing (design §8.3) -----------------------------
+#
+# Org commands reuse the marketplace commands' shapes (agents push/pull) and the
+# local Team registry (teams push/pull), with one substitution: the Radient
+# client acts as the signed-in PERSON. Organization calls authenticate with the
+# stored Radient OAuth access token -- never the tenant API key, because an API
+# key proves an application tenant, not a person's membership (§2.2) -- and a
+# pasted ``radient-key`` login or no login at all gets the re-login remedy.
+
+
+def _select_local_agent(args: argparse.Namespace, agent_registry: Any) -> "AgentData | None":
+    """The local agent a push names by ``--name`` or ``--id``, or None after error.
+
+    One implementation for the public and the org push so "which row did the
+    user mean" cannot be answered two ways; the messages are the ones the
+    public push has always printed.
+    """
+    if getattr(args, "name", None):
+        agent = agent_registry.get_agent_by_name(args.name)
+        if not agent:
+            print(f"\n\033[1;31mError: No agent found with name: {args.name}\033[0m")
+            return None
+        return agent
+    if getattr(args, "id", None):
+        try:
+            return agent_registry.get_agent(args.id)
+        except KeyError:
+            print(f"\n\033[1;31mError: No agent found with ID: {args.id}\033[0m")
+            return None
+    print("\n\033[1;31mError: Must provide --name or --id for push\033[0m")
+    return None
+
+
+def _hub_cause(exc: BaseException) -> str:
+    """One line naming the hub's refusal, keeping its machine-readable code.
+
+    ``APIError`` carries ``code``/``details`` beside the prose (contract §2.4),
+    and the organization vocabulary keys on the code (§2.2): ``name_taken``
+    vs ``team_plan_required`` vs ``moderation_rejected`` ask the user for three
+    different next steps. The details worth showing are folded in; everything
+    else stays one sentence.
+    """
+    code = getattr(exc, "code", None)
+    if not code:
+        return str(exc)
+    details = getattr(exc, "details", None) or {}
+    if code == "name_taken":
+        existing = details.get("existing_agent_id") or details.get("existing_team_id")
+        if existing:
+            return f"{exc} (existing id: {existing}) [{code}]"
+    if code in ("invalid_instruction_set", "invalid_team_document"):
+        field, rule = details.get("field"), details.get("rule")
+        if field and rule:
+            return f"{exc} ({field} {rule}) [{code}]"
+    if code == "team_plan_required":
+        return f"{exc} (the organization's Team plan is not active) [{code}]"
+    return f"{exc} [{code}]"
+
+
+def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
+    """A Radient client acting as the signed-in PERSON, or None after the remedy.
+
+    Organization operations authenticate with the stored Radient OAuth access
+    token -- never the tenant API key, because an API key proves an application
+    tenant, not a person's membership (design §8.3/§2.2). The resolver answers
+    only for an OAuth row AND only for a destination allowed to receive the
+    person's bearer: a non-canonical configured hub is refused before any
+    credential is attached (``RADIENT_ORG_ALLOW_NONCANONICAL_BASE`` is the
+    explicit local/QA opt-in), and a refused destination gets its own sentence
+    because its fix is a different one from a missing login's (review round 1,
+    R1-2/S-1).
+    """
+    from pydantic import SecretStr  # lazy: pydantic stays off the startup path
+
+    from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
+    from local_operator.env import (
+        DEFAULT_RADIENT_API_BASE_URL,  # quoted, never spelled (see below)
+    )
+    from local_operator.providers.radient_credentials import (  # lazy: auth stack
+        ORG_LOGIN_REMEDY,
+        org_destination_refused_sentence,
+        org_oauth_destination_allowed,
+        resolve_radient_oauth_access_sync,
+    )
+
+    config_manager = ConfigManager(base_dir)
+    base_url = _radient_hub_base_url(config_manager)
+    access = resolve_radient_oauth_access_sync(config_manager.config_dir, base_url)
+    if access is None:
+        if not org_oauth_destination_allowed(base_url):
+            # The sentence comes from the ONE definition the CLI and the local
+            # server share, and the canonical host in it is quoted at runtime
+            # from env.py's constant: cli.py must stay free of URL-shaped
+            # Radient literals (test_radient_hub_base_resolution's
+            # single-reader invariant), which the shared renderer keeps true.
+            print(
+                "\n\033[1;31mError: "
+                + org_destination_refused_sentence(base_url, DEFAULT_RADIENT_API_BASE_URL)
+                + "\033[0m"
+            )
+        else:
+            print(f"\n\033[1;31mError: {ORG_LOGIN_REMEDY}\033[0m")
+        return None
+    return RadientClient(api_key=SecretStr(access.access_token), base_url=base_url)
+
+
+def _org_target_or_picker(
+    args: argparse.Namespace, base_dir: Path
+) -> "tuple[RadientClient, str] | None":
+    """The ``(client, tenant)`` a team command runs against, or None after guidance.
+
+    ``--org`` names the organization explicitly. When it is omitted the command
+    does not guess: it prints the account's memberships and requires the flag
+    (design §8.3's org picker). There is deliberately no interactive prompt and
+    no default organization -- a non-interactive default would have to invent
+    which org a script meant, which is the class of guess the design forbids.
+    """
+    client = _resolve_org_client(base_dir)
+    if client is None:
+        return None
+    declared = getattr(args, "org", None)
+    tenant = (declared or "").strip()
+    if tenant:
+        return client, tenant
+    try:
+        memberships = client.list_memberships()
+    except Exception as exc:  # noqa: BLE001 — any hub failure gets the same remedy
+        print(f"\n\033[1;31mError: could not list your organizations: {_hub_cause(exc)}\033[0m")
+        return None
+    if not memberships:
+        print(
+            "\n\033[1;31mError: this command publishes inside an organization, and this "
+            "account is not a member of one. Ask an organization owner to invite you.\033[0m"
+        )
+        return None
+    if declared is not None:
+        # The flag was PASSED but empty: say so rather than letting a blank
+        # value read like an omitted one (review round 1, R1-1's parenthetical).
+        print(
+            "\n\033[1;31mError: --org needs an organization tenant id (the value was "
+            "empty). Your organizations:\033[0m"
+        )
+    else:
+        print(
+            "\n\033[1;33mThis command runs inside an organization -- pass --org <tenant_id>. "
+            "Your organizations:\033[0m"
+        )
+    for membership in memberships:
+        if not isinstance(membership, dict):
+            continue
+        plan = membership.get("plan") or {}
+        print(
+            f"  • {membership.get('tenant_name', '?')} "
+            f"(tenant_id: {membership.get('tenant_id', '?')}, "
+            f"role: {membership.get('role', '?')}, "
+            f"plan: {plan.get('status', 'none') if isinstance(plan, dict) else 'none'})"
+        )
+    return None
+
+
+def agents_push_org_command(args: argparse.Namespace, agent_registry: Any, base_dir: Path) -> int:
+    """``lop agents push --org <tenant>`` -- publish into an organization (§8.3).
+
+    Same local selection as the public push (``--name``/``--id`` address the
+    LOCAL row); the difference is the transport: the row is published as an
+    instruction-set document (the org workspace's format, §4.4) through a
+    client that acts as the signed-in person. There is no overwrite arm here:
+    the hub refuses a name the organization already holds with ``name_taken``
+    (the existing id rides in ``details``), and republish-by-hub-id is the
+    desktop transport's, not this command's.
+    """
+    from local_operator.agents import instruction_set_fields  # lazy: heavy module
+    from local_operator.clients.radient import (  # lazy: HTTP stack
+        InstructionSetError,
+        build_instruction_set_document,
+    )
+
+    tenant = str(getattr(args, "org", "") or "").strip()
+    if not tenant:
+        # A passed-but-empty `--org` is NOT an absent one: falling through to the
+        # public path would publish to a different namespace than the user asked
+        # for (review round 1, R1-1).
+        print(
+            "\n\033[1;31mError: --org needs an organization tenant id (the value was "
+            "empty). `lop teams push` with no --org lists the organizations you "
+            "belong to.\033[0m"
+        )
+        return 1
+    client = _resolve_org_client(base_dir)
+    if client is None:
+        return 1
+    agent = _select_local_agent(args, agent_registry)
+    if agent is None:
+        return 1
+    try:
+        document = build_instruction_set_document(
+            **instruction_set_fields(agent_registry, agent, {})
+        )
+    except (InstructionSetError, ValueError) as exc:
+        print(f"\n\033[1;31mError: cannot publish this agent: {exc}\033[0m")
+        return 1
+    try:
+        result = client.publish_agent_instruction_set(document, visibility="org", tenant_id=tenant)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError pushing agent to the organization: {_hub_cause(exc)}\033[0m")
+        return 1
+    agent_id = result.get("agent_id") if isinstance(result, dict) else None
+    print(
+        f"\n\033[1;32mSuccessfully pushed agent '{agent.name}' to organization "
+        f"'{tenant}'. Agent ID: {agent_id}\033[0m"
+    )
+    return 0
+
+
+def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_dir: Path) -> int:
+    """``lop agents pull --org <tenant>`` -- pull an org agent (§8.3).
+
+    The download flow is the public one (the hub exports an org row's document
+    as the same archive); what changes is the credential: the client acts as
+    the signed-in person, so a member can pull a row an anonymous caller gets a
+    404 for. ``--org`` asserts WHICH organization the row is expected from: the
+    row is read first (the same optional-auth read the desktop uses, with the
+    person's bearer), so a row that belongs to another organization -- or that
+    the hub answers 404 for, which is also the non-member answer (§8.2) -- is
+    refused BEFORE anything is downloaded or written locally (review round 1,
+    Q-1/R1-4).
+    """
+    tenant = str(getattr(args, "org", "") or "").strip()
+    if not tenant:
+        print(
+            "\n\033[1;31mError: --org needs an organization tenant id (the value was "
+            "empty). `lop teams push` with no --org lists the organizations you "
+            "belong to.\033[0m"
+        )
+        return 1
+    client = _resolve_org_client(base_dir)
+    if client is None:
+        return 1
+    try:
+        payload = client.get_agent(args.id, with_credential=True)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError pulling agent from the organization: {_hub_cause(exc)}\033[0m")
+        return 1
+    # The hub envelopes reads ({"msg", "result"}); the row is the result object.
+    row = payload.get("result") if isinstance(payload, dict) else None
+    if row is None:
+        print(
+            "\n\033[1;31mError pulling agent from the organization: agent not found -- "
+            "no such agent, or this account is not a member of the organization it "
+            "belongs to (the hub answers both the same way).\033[0m"
+        )
+        return 1
+    if not isinstance(row, dict):
+        print(
+            "\n\033[1;31mError pulling agent from the organization: the hub did not "
+            "answer with the agent document.\033[0m"
+        )
+        return 1
+    row_tenant = str(row.get("tenant_id") or "")
+    if row_tenant != tenant:
+        if row_tenant and str(row.get("visibility") or "") == "org":
+            print(
+                f"\n\033[1;31mError: that agent belongs to organization '{row_tenant}', "
+                f"not '{tenant}'. Check --org.\033[0m"
+            )
+        else:
+            print(
+                f"\n\033[1;31mError: that agent is not shared with organization "
+                f"'{tenant}'. Check --org (public agents pull without the flag).\033[0m"
+            )
+        return 1
+    try:
+        imported_agent, renamed_from = agent_registry.download_agent_from_radient(
+            client, args.id, with_credential=True
+        )
+        print(
+            f"\n\033[1;32mSuccessfully pulled agent '{imported_agent.name}' "
+            f"(ID: {imported_agent.id}) from organization '{tenant}'\033[0m"
+        )
+        if renamed_from is not None:
+            print(
+                f"\033[1;33m  Renamed from '{renamed_from}': you already have an "
+                f"agent with that name.\033[0m"
+            )
+        return 0
+    except Exception as e:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError pulling agent from the organization: {_hub_cause(e)}\033[0m")
+        return 1
+
+
+def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
+    """``lop teams push --org <tenant> <team>`` -- publish a team (§8.3).
+
+    Builds the hub_teams document from the local Team (``hub_team_document``;
+    §1.6's mapping) and publishes it into the organization's workspace. Teams
+    are org-only in v1, so ``--org`` is required: when it is omitted the
+    account's memberships are printed and the flag demanded -- no interactive
+    prompt, no guessed target.
+    """
+    from local_operator.teams import hub_team_document  # lazy: pydantic models
+
+    target = _org_target_or_picker(args, base_dir)
+    if target is None:
+        return 1
+    client, tenant = target
+    team = team_registry.get_team_by_name(args.name)
+    if team is None:
+        print(f"\n\033[1;31mError: No team found with name: {args.name}\033[0m")
+        return 1
+    document = hub_team_document(team)
+    try:
+        result = client.publish_team_document(document, tenant)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError pushing team to the organization: {_hub_cause(exc)}\033[0m")
+        return 1
+    info = result.get("team") if isinstance(result, dict) else None
+    team_id = info.get("id") if isinstance(info, dict) else None
+    print(
+        f"\n\033[1;32mSuccessfully pushed team '{team.name}' to organization "
+        f"'{tenant}'. Team ID: {team_id}\033[0m"
+    )
+    return 0
+
+
+def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: Path) -> int:
+    """``lop teams pull --org <tenant> <team-id>`` -- reconstruct a team (§8.3).
+
+    ``GET /v1/teams/:teamid`` is org-agnostic by id, so ``--org`` is the user's
+    statement of which organization they mean; a document owned by a different
+    tenant is refused rather than stored under the wrong expectation. The local
+    row is reconstructed by ``TeamRegistry.import_hub_team`` and the rename
+    notes (if any) are printed -- the pull reports what it actually stored.
+    """
+    target = _org_target_or_picker(args, base_dir)
+    if target is None:
+        return 1
+    client, tenant = target
+    try:
+        document = client.get_team(args.team_id)
+    except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
+        print(f"\n\033[1;31mError pulling team from the organization: {_hub_cause(exc)}\033[0m")
+        return 1
+    owner = str(document.get("tenant_id") or "")
+    if owner and owner != tenant:
+        print(
+            f"\n\033[1;31mError: that team belongs to organization '{owner}', "
+            f"not '{tenant}'. Check --org.\033[0m"
+        )
+        return 1
+    try:
+        outcome = team_registry.import_hub_team(document)
+    except (ValueError, TypeError) as exc:
+        print(f"\n\033[1;31mError: cannot reconstruct this team locally: {exc}\033[0m")
+        return 1
+    team = outcome.team
+    print(
+        f"\n\033[1;32mSuccessfully pulled team '{team.name}' (ID: {team.id}) "
+        f"from organization '{tenant}'\033[0m"
+    )
+    if outcome.renamed_from is not None:
+        if outcome.invalid_name:
+            print(
+                f"\033[1;33m  Stored as '{team.name}': the published name "
+                f"'{outcome.renamed_from}' is not a valid local team name.\033[0m"
+            )
+        else:
+            print(
+                f"\033[1;33m  Renamed from '{outcome.renamed_from}': you already "
+                f"have a team with that name.\033[0m"
+            )
+    return 0
+
+
 def _radient_hub_base_url(config_manager: ConfigManager) -> str:
-    """The ONE place the CLI resolves the Radient Agent Hub API root.
+    """The CLI's name for the hub API root resolution.
 
     ``config.yml``'s ``values.radient_base_url`` — the NESTED key the config
     store actually holds; a flat document-root ``radient_base_url`` is dropped by
@@ -7559,8 +8078,17 @@ def _radient_hub_base_url(config_manager: ConfigManager) -> str:
     push`` and ``agents pull`` each carried their own literal, two of the three
     naming a route or a host that does not exist, so one configuration resolved
     three different destinations and two of them could never work.
+
+    The RULE lives in ``providers.radient_credentials.configured_radient_base_url``
+    (agent review round 1, n2): the sync coordinator needs the same resolution,
+    and a second copy beside the first is how the two drift. This helper stays
+    so the CLI's call sites keep naming their own surface rather than each
+    importing the provider module.
     """
-    return resolve_radient_api_base_url(config_manager.get_config_value("radient_base_url", None))
+
+    from local_operator.providers.radient_credentials import configured_radient_base_url
+
+    return configured_radient_base_url(config_manager)
 
 
 def agents_delete_command(
@@ -9323,6 +9851,15 @@ def main() -> int:
                 return agents_delete_command(args, agent_registry, base_dir)
             elif args.agents_command == "push":
                 # Push agent to Radient
+                if getattr(args, "org", None) is not None:
+                    # Org scope is a different transport and credential (§8.3):
+                    # the instruction-set document, published with the signed-in
+                    # account's OAuth token. Redirected before the public branch
+                    # so that path's code and output stay exactly as they were
+                    # (design §11 R-6). `is not None`, not truthiness: a PASSED
+                    # but empty `--org` is the org path's to refuse, and must
+                    # never fall through to the public one (round 1, R1-1).
+                    return agents_push_org_command(args, agent_registry, base_dir)
                 from local_operator.clients.radient import RadientClient  # lazy
                 from local_operator.providers.radient_credentials import (
                     resolve_radient_credential_sync,
@@ -9338,23 +9875,13 @@ def main() -> int:
                     return 1
                 radient_client = RadientClient(api_key=api_key, base_url=base_url)
                 # Support push by name or id
-                agent = None
-                agent_id_to_overwrite = None
-                if getattr(args, "name", None):
-                    agent = agent_registry.get_agent_by_name(args.name)
-                    if not agent:
-                        print(f"\n\033[1;31mError: No agent found with name: {args.name}\033[0m")
-                        return 1
-                elif getattr(args, "id", None):
-                    try:
-                        agent = agent_registry.get_agent(args.id)
-                        agent_id_to_overwrite = args.id
-                    except KeyError:
-                        print(f"\n\033[1;31mError: No agent found with ID: {args.id}\033[0m")
-                        return 1
-                else:
-                    print("\n\033[1;31mError: Must provide --name or --id for push\033[0m")
+                agent = _select_local_agent(args, agent_registry)
+                if agent is None:
                     return 1
+                # `--id` doubles as the explicit-overwrite selector for the zip
+                # flow; nothing aligns a local uuid with a hub listing id, so the
+                # ordinary outcome for it is a create (see the outcome branch).
+                agent_id_to_overwrite = getattr(args, "id", None) or None
                 # The zip is uploaded and finished with inside this block, so
                 # the context manager reclaims its temp directory on every
                 # exit path. The bare export_agent() left one behind per push.
@@ -9390,6 +9917,13 @@ def main() -> int:
                         return 1
             elif args.agents_command == "pull":
                 # Pull agent from Radient
+                if getattr(args, "org", None) is not None:
+                    # Org scope: the same download flow, but the client acts as
+                    # the signed-in person (§8.3) -- a non-member is answered the
+                    # same 404 a missing id gets, so authorization stays the
+                    # hub's (§8.2). `is not None` so an empty --org cannot run
+                    # the anonymous public download (round 1, R1-1).
+                    return agents_pull_org_command(args, agent_registry, base_dir)
                 from local_operator.clients.radient import RadientClient  # lazy
 
                 agent_id = args.id
@@ -9423,6 +9957,13 @@ def main() -> int:
                 except Exception as e:
                     print(f"\n\033[1;31mError pulling agent from Radient: {e}\033[0m")
                     return 1
+            elif args.agents_command == "sync":
+                # Update installed starters (and hub-pulled agents). The seed
+                # arm needs no credential and always runs; the hub arm resolves
+                # one in ``agents_sync_command`` and degrades per row (never
+                # fails the run) when it cannot — that policy lives in the
+                # shared sync functions, not in this branch.
+                return agents_sync_command(args, agent_registry, base_dir)
             else:
                 parser.error(f"Invalid agents command: {args.agents_command}")
         elif args.subcommand == "teams":
@@ -9449,6 +9990,10 @@ def main() -> int:
                     return teams_show_command(args.name, team_registry)
                 elif args.teams_command == "delete":
                     return teams_delete_command(args.name, team_registry)
+                elif args.teams_command == "push":
+                    return teams_push_command(args, team_registry, base_dir)
+                elif args.teams_command == "pull":
+                    return teams_pull_command(args, team_registry, base_dir)
                 else:
                     parser.error(f"Invalid teams command: {args.teams_command}")
             except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as e:

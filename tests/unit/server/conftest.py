@@ -172,6 +172,26 @@ def _no_live_api_key_check(monkeypatch):
     monkeypatch.setattr(key_check, "check_api_key", _unchecked)
 
 
+@pytest.fixture
+def fake_org_credential():
+    """The organization surfaces resolve the signed-in account's OAuth row.
+
+    Design §8.3/§2.2: org calls authenticate with the stored Radient OAuth
+    access token -- the PERSON -- never the tenant API key, because an API key
+    proves an application tenant, not a person's membership. Patched on the
+    module the handlers import from at call time (``resolve_radient_oauth_access``
+    is read lazily inside the routes), so only the credential lookup is
+    replaced; the routes under test are the real ones.
+    """
+    from local_operator.providers.auth_store import OAuthAccess
+
+    with patch(
+        "local_operator.providers.radient_credentials.resolve_radient_oauth_access",
+        new=AsyncMock(return_value=OAuthAccess(access_token="org-access-token", credential_id=1)),
+    ) as resolver:
+        yield resolver
+
+
 # Fixture for overriding the executor dependency for successful chat requests.
 @pytest.fixture
 def dummy_executor():

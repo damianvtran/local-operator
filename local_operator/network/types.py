@@ -932,6 +932,17 @@ class PairingRefusal(MeshRefusal):
     """A pairing step refused (invite validation, SAS, admission)."""
 
 
+class JoinParkUnanswered(MeshRefusal):
+    """A parked join ran out of time with no answer: exit ``3``, not exit ``1``.
+
+    Exit 3 is the design's "a human decision is required" (``mesh-ui.md`` §1.4.3) and
+    every other refusal is exit 1, so the two cannot be the same object. It is a
+    ``MeshRefusal`` subclass so the ``--json`` body keeps the ``code``/``message``
+    shape every consumer already parses, and it is a DISTINCT class so nothing else
+    on this path can be reported as a missing human by accident.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Records
 # ---------------------------------------------------------------------------
@@ -1118,6 +1129,121 @@ class PairDecision:
     @staticmethod
     def from_json(data: dict[str, Any]) -> PairDecision:
         return PairDecision(**_known(PairDecision, data))
+
+
+@dataclass
+class PendingJoin:
+    """A pairing THIS device started from an invite and has not confirmed yet.
+
+    WHY THIS EXISTS ON DISK, on the joining side. The joiner's half of the human
+    step is a transcription too — a person reads six digits off the INVITER's
+    screen and types them here — and the socket that ceremony runs on belongs to
+    the process that dialled it. An agent has no terminal to type at and cannot
+    hold one turn open for the minutes two people need, so the ceremony is two
+    invocations: ``lop network join @<token> --park`` opens it, writes this record
+    and waits, and ``lop network join --confirm <code>`` records the answer from
+    wherever the human is (the inviter's half has the same shape: a
+    :class:`PendingPairing` answered by ``lop network confirm``).
+
+    THE SOCKET IS WHY THIS IS A WAIT AND NOT A RESUME, and it is the constraint
+    the whole record is built around: the code is derived from the LIVE transcript,
+    so a second dial is a different ceremony with a different code. A phase two
+    that re-dialled could only compare a code against a stale derivation, which is
+    exactly the property the code exists to provide, so the confirmation has to
+    reach the process that derived it. ``pid`` is what lets the answering
+    invocation tell an open ceremony from one whose process is already gone, and
+    ``result`` is what lets it report what actually happened rather than a claim
+    that something did.
+
+    ``sas`` is derived from this device's own handshake, and BOTH devices derive the
+    same digits — that equality is the check, not a coincidence. The value therefore
+    does travel: the joining device sends its transcription inside a frame sealed with
+    the session key (``handshake.pair_ready_frame``, compared in ``relay.py``'s
+    ``net_pair_ready``). What it never does is appear in cleartext on the wire, in a
+    log line, in an error message or in the audit log, and it lives in a 0600 file
+    under a 0700 directory for the seconds the ceremony lasts. Its security was never
+    secrecy in the first place: it rests on a person having read it off the other
+    device's screen. The earlier wording here ("never sent to the peer in either
+    direction") was false and is the premise agent review round 1 corrected (semantic
+    finding 2).
+    """
+
+    invite_id: str
+    network_id: str
+    network_name: str
+    inviter_device_id: str
+    inviter_name: str
+    #: THIS device's derivation — the digits its human must find on the other
+    #: screen, and what an answer's ``code`` is checked against before it travels.
+    sas: str
+    fingerprint: str
+    #: Whether the human was asked for the fingerprint (``--verify``) rather than the
+    #: six digits. The parked ceremony compares what it was asked for; the wire still
+    #: carries the digits, which are this device's own derivation either way.
+    verify: bool = False
+    #: The process holding the socket. Zero once the ceremony has finished.
+    pid: int = 0
+    issued_at: float = field(default_factory=time.time)
+    expires_at: float = 0.0
+    #: ``awaiting_confirmation`` while open; ``joined`` or ``refused`` once the
+    #: ceremony has an outcome, which the answering invocation reads from here.
+    status: str = "awaiting_confirmation"
+    #: The success payload ``_cmd_join`` emits, exactly as it would have printed it.
+    result: dict[str, Any] = field(default_factory=dict)
+    #: The same payload's human lines, so one rendering is not invented twice.
+    result_lines: list[str] = field(default_factory=list)
+    error_code: str = ""
+    message: str = ""
+    schema: int = 1
+
+    def seconds_left(self, now: float | None = None) -> float:
+        return max(0.0, self.expires_at - (time.time() if now is None else now))
+
+    def is_open(self, now: float | None = None) -> bool:
+        """Whether the ceremony can still take an answer.
+
+        An outcome keeps it readable past its window: the invocation that answers
+        a ceremony has to be able to read what the ceremony did.
+        """
+        if self.status != "awaiting_confirmation":
+            return True
+        return self.seconds_left(now) > 0.0
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> PendingJoin:
+        return PendingJoin(**_known(PendingJoin, data))
+
+
+@dataclass
+class JoinAnswer:
+    """The joining device's human answer to a :class:`PendingJoin`.
+
+    ``code`` is what the human typed after reading the OTHER device's screen. It is
+    checked against the parked record's own derivation before it is written, and
+    that check is a typo guard rather than the admission decision: the inviter still
+    compares the value that arrives on the wire with its own derivation, so a code
+    that matches locally and disagrees there ends the ceremony exactly as it does
+    today. A code that does NOT match locally is refused without writing anything,
+    which leaves the ceremony open — the difference between a mistyped digit and a
+    spent invite, and the reason the local check exists.
+    """
+
+    invite_id: str
+    decision: Literal["admit", "decline"]
+    code: str = ""
+    answered_by: str = "human"
+    answered_at: float = field(default_factory=time.time)
+    schema: int = 1
+
+    def to_json(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @staticmethod
+    def from_json(data: dict[str, Any]) -> JoinAnswer:
+        return JoinAnswer(**_known(JoinAnswer, data))
 
 
 @dataclass

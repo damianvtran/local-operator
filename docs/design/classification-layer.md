@@ -37,8 +37,8 @@ In scope:
 
 1. `local_operator/classification/` — a vendor-agnostic decision client (Jev today, another
    model tomorrow) with a cascade: **Radient → TypeSafe → OpenRouter**.
-2. Skill, guide and MCP-server recommendations, rendered as a short advisory block, computed
-   once per user message.
+2. Skill, guide, MCP-server and project recommendations, rendered as a short advisory block,
+   computed once per user message.
 3. An API-key-only login for the TypeSafe (Jev) provider, kept out of the chat model list.
 4. Configuration keys, cost logging, and metering.
 5. The Radient server-side `POST /v1/decisions` route that makes the first cascade leg real.
@@ -172,14 +172,14 @@ def vendor_status(config_dir: Path | None, settings: Mapping[str, Any] | None = 
 Recommendation layer (same package, `recommend.py`):
 
 ```python
-ResourceKind = Literal["skill", "guide", "mcp"]
+ResourceKind = Literal["skill", "guide", "mcp", "project"]
 
 @dataclass(frozen=True)
 class Candidate:
     kind: ResourceKind
-    name: str                       # skill/guide name, or MCP server id
+    name: str                       # skill/guide name, MCP server id, or project name
     description: str                # harness-owned text only (see §6 security note)
-    resource_url: str               # "skill://x" | "guide://x" | "mcp://x"
+    resource_url: str               # "skill://x" | "guide://x" | "mcp://x" | "project:<name>"
 
 @dataclass(frozen=True)
 class RecommendationRequest:
@@ -296,7 +296,8 @@ not tool results. What goes out is:
   "candidates": {
     "skills": ["name: description", …],
     "guides": ["name: description", …],
-    "mcp_servers": ["name: description", …]
+    "mcp_servers": ["name: description", …],
+    "projects": ["name: <status> · <description>", …]
   }
 }
 ```
@@ -306,7 +307,7 @@ Budgeting, applied in this order until the serialized state fits `values.classif
 
 1. drop `context` entirely;
 2. trim each candidate line to 120 chars, then to 60;
-3. drop the lowest-priority candidate kind (mcp → guide → skill);
+3. drop the lowest-priority candidate kind (project → mcp → guide → skill);
 4. truncate `request` to the remaining budget, appending `" …[truncated]"`.
 
 `context` is whatever short, representative, already-redacted string the caller can supply — in
@@ -417,8 +418,10 @@ default and say so — not to exceed the budget silently.
 ## 6. Security and privacy rails
 
 - **Option text must be harness-owned.** Only the skill/guide description as discovered from the
-  local filesystem, and the MCP server's own name plus harness-written capability hints
-  (`mcp/resources.py:_CAPABILITY_HINTS`). Never config-authored or remote-authored prose as an
+  local filesystem, the MCP server's own name plus harness-written capability hints
+  (`mcp/resources.py:_CAPABILITY_HINTS`), and — for the `project` kind — the operator's OWN
+  stored project metadata (name, status, description), which is operator-authored text routed
+  back to the operator's own model. Never config-authored or remote-authored prose as an
   *option description*: that reintroduces the prompt-injection surface `mcp/resources.py:10-13`
   deliberately excludes. Remote text may still be part of `state` as untrusted data — the model
   is judging a request, and the answer is only a suggestion.
@@ -438,16 +441,20 @@ reusing it means one classification per user message with no new freeze machiner
 
 Sequence per user message:
 
-1. build the candidate list — the same discovered skills/guides the router sees, plus the
-   configured MCP server names with their capability hints. The list is resolved **per message**
-   for freshness: the cached roster is keyed on a fingerprint of the skill tree (roots plus
-   per-file `(mtime_ns, size)`, ~0.29 ms at 8 roots / 57 skills), so a skill installed
+1. build the candidate list — the same discovered skills/guides the router sees, the configured
+   MCP server names with their capability hints, and the operator's own project rows. The list is
+   resolved **per message** for freshness: the cached roster is keyed on a fingerprint of the
+   skill tree (roots plus per-file `(mtime_ns, size)`, ~0.29 ms at 8 roots / 57 skills) and on
+   the projects store's `(count, max(updated_at))`, so a skill installed or a project written
    mid-conversation is a candidate on the very next message — after a steer, in the parent session
-   and in any child started afterwards. The same signal RE-OPENS the frozen knowledge block, whose
-   previous render is parked in `superseded_block` because a subagent's block is built
-   synchronously and must not come back empty in the window before the next render. An unchanged
+   and in any child started afterwards. The skill-tree fingerprint is also what RE-OPENS the frozen
+   knowledge block — not the projects one: the frozen block is the embedder's selection, and
+   projects do not enter it. The block's previous render is parked in `superseded_block` because a
+   subagent's block is built synchronously and must not come back empty in the window before the
+   next render. An unchanged
    tree costs one stat walk and nothing else. Candidates past `maxCandidates` per kind are chosen
-   by `shortlist`, not by discovery order (§5);
+   by `shortlist`, not by discovery order (§5); project rows enter the roster already capped to
+   the newest 12 by `updated_at` (§8 of the projects design).
 2. `await asyncio.gather(...)` the existing selection and the classification, so the added
    latency is the *difference*, not the sum — and bound the WAIT for the classification by
    `values.classification.waitMs` rather than by its deadline (see §5a rule 6: a call that misses
@@ -506,6 +513,10 @@ These may help with this request — read the ones that actually fit, ignore the
 - mcp://hubspot
 </resource_recommendations>
 ```
+
+The one kind-aware line: a project renders as `- project:<name> — <status> · <description>`,
+because `project:<name>` is a tool token, not a readable resource — the line has to carry what
+the project is. Every other kind stays a bare URL.
 
 Phrasing rules: advisory ("may help", "ignore the rest"), never imperative, never exclusive, and
 never a claim that a resource is authoritative for the turn. A wrong recommendation must cost a

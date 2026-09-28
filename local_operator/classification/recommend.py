@@ -3,7 +3,7 @@
 QUESTION DESIGN, AND WHY IT IS SHAPED THIS WAY
 ==============================================
 
-Three questions, one per resource kind — a ``choice`` over that kind's
+One question per resource kind — a ``choice`` over that kind's
 candidates plus an explicit ``none``. That is the whole set, and the shape is
 the result of what the model can and cannot do:
 
@@ -11,8 +11,8 @@ the result of what the model can and cannot do:
   typed question; it cannot emit a list. Asking "which skill?" once per KIND is
   therefore the cheapest way to get a per-kind pick, and the alternative — a
   ``noul`` per candidate ("does this one apply?") — costs one question block
-  each: 12 candidates × 3 kinds would be 36 question objects, i.e. 36
-  instructions strings, where the choice form needs 3. Measured on the live
+  each: 12 candidates × 4 kinds would be 48 question objects, i.e. 48
+  instructions strings, where the choice form needs 4. Measured on the live
   alpha route (2026-09-18): one ``choice`` question with 2 options and one
   ``noul`` question together cost 380 input tokens, while test calls show the
   per-question instructions are the dominant fixed cost of a small request.
@@ -41,7 +41,8 @@ the result of what the model can and cannot do:
 MEASURED COST (live, OpenRouter alpha route, 2026-09-18)
 =======================================================
 
-Three questions over 5 options total with a ~430-char state: **519 input
+Three questions over 5 options total with a ~430-char state (measured
+2026-09-18, when the layer shipped three kinds): **519 input
 tokens, 102 output tokens, $0.0000218** reported by the vendor. Deriving the
 price from three calls (519/102 → 0.000021798; 380/60 → 0.00001596;
 421/42 → 0.000017682) gives **$0.042 per Mtok of input and output costed at
@@ -66,6 +67,7 @@ from typing import Any
 
 from local_operator.classification.context import (
     Candidate,
+    CandidateLike,
     ResourceKind,
     candidate_line,
     select_candidates,
@@ -103,9 +105,11 @@ NONE_OPTION_TEXT = "None of these fits this request"
 #: a per-question accident instead of a per-shape decision.
 QUESTION_ID_PREFIX = "recommend_"
 
-#: Kinds in the order their questions are asked (skills first: they are the
-#: most specific kind, and a model reading top-down spends its attention there).
-QUESTION_KIND_ORDER: tuple[ResourceKind, ...] = ("skill", "guide", "mcp")
+#: Kinds in the order their questions are asked (skills first: they are the most
+#: specific kind, and a model reading top-down spends its attention there;
+#: projects last — the kind the state's ladder drops first, so the reading order
+#: and the budget order agree, see ``context.KIND_DROP_ORDER``).
+QUESTION_KIND_ORDER: tuple[ResourceKind, ...] = ("skill", "guide", "mcp", "project")
 
 _OPTION_ID_SAFE = re.compile(r"[^A-Za-z0-9_.:-]+")
 
@@ -261,7 +265,12 @@ def build_questions(
             criteria[identifier] = candidate_line(candidate)
             kind_options[identifier] = candidate
         criteria[NONE_OPTION] = NONE_OPTION_TEXT
-        kind_label = {"skill": "skill", "guide": "guide", "mcp": "MCP server"}[kind]
+        kind_label = {
+            "skill": "skill",
+            "guide": "guide",
+            "mcp": "MCP server",
+            "project": "project",
+        }[kind]
         questions.append(
             Question(
                 id=question_id,
@@ -288,11 +297,12 @@ def collect_resources(
     """Map answers back to candidates, best first, capped.
 
     Ordering is by the model's own confidence in the pick, then by question
-    order (skills before guides before MCP servers) as a stable tie-break — a
-    model that is 51% sure about a skill and 95% about a guide should spend the
-    first line of the block on the guide. Resources the model explicitly
-    declined (``none``) contribute nothing, and a duplicate pick across two
-    kinds cannot happen because a candidate belongs to exactly one kind.
+    order (skills before guides before MCP servers before projects) as a stable
+    tie-break — a model that is 51% sure about a skill and 95% about a guide
+    should spend the first line of the block on the guide. Resources the model
+    explicitly declined (``none``) contribute nothing, and a duplicate pick
+    across two kinds cannot happen because a candidate belongs to exactly one
+    kind.
     """
     picks: list[tuple[float, int, Candidate]] = []
     for index, question in enumerate(plan.questions):
@@ -322,6 +332,26 @@ def _top_probability(answer: Answer) -> float:
     return max(answer.probabilities.values(), default=0.0)
 
 
+def _recommendation_line(candidate: CandidateLike) -> str:
+    """One body line of the advisory block.
+
+    Every kind but one renders as its URL: the URL is what the model reads
+    next, and the surfaces behind ``skill://``/``guide://``/``mcp://`` are all
+    readable. A project has no reader — ``project:<name>`` is a token for the
+    ``project`` tool, not a document — so its line also carries the row's own
+    status and description (composed into ``description`` by the wiring, §8),
+    which is the text that lets the model judge whether the project fits the
+    request at all.
+
+    ``session_factory._recommendation_line`` is a deliberate second copy: the
+    turn path must not import this package, and the two renderers' outputs are
+    pinned line-for-line by ``tests/unit/classification/test_block_parity.py``.
+    """
+    if candidate.kind == "project" and candidate.description:
+        return f"- {candidate.resource_url} — {candidate.description}"
+    return f"- {candidate.resource_url}"
+
+
 def render_block(resources: Sequence[Candidate]) -> str:
     """The advisory block, verbatim per §7, or ``""`` when there is nothing to say.
 
@@ -341,7 +371,7 @@ def render_block(resources: Sequence[Candidate]) -> str:
         "<resource_recommendations>",
         "These may help with this request — read the ones that actually fit, ignore the rest:",
     ]
-    lines.extend(f"- {candidate.resource_url}" for candidate in resources)
+    lines.extend(_recommendation_line(candidate) for candidate in resources)
     lines.append("</resource_recommendations>")
     return "\n".join(lines)
 

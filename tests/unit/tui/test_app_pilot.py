@@ -401,6 +401,10 @@ class FakeSession:
         #: Optional team registry for ``/team``. Tests that exercise teams
         #: assign a real ``TeamRegistry``; everyone else pays nothing.
         self.team_registry: Any | None = None
+        #: Optional project registry for ``/project``. Same opt-in shape as
+        #: ``team_registry``: tests that exercise projects assign a real
+        #: ``ProjectRegistry``; everyone else pays nothing.
+        self.project_registry: Any | None = None
         self.attached_teams: list[Any] = []
         #: Optional agent registry for ``/agent``, same opt-in shape as
         #: ``team_registry``: tests that exercise profiles assign a real
@@ -13487,6 +13491,13 @@ async def test_a_desktop_pin_shows_in_the_tui_and_a_tui_pin_shows_on_the_desktop
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
+    # The server lifespan ENSURES AIDA (her session, pin and cadence) on
+    # every boot of the real app — a deliberate product behaviour — and this
+    # test asserts EXACT pin and row sets on this root. The documented kill
+    # switch is what keeps its subject (pin semantics) isolated from a feature
+    # it does not test; without it her boot-time session is a fourth row and
+    # her pin a second line in the store.
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
     for name in list(os.environ):
         if name.startswith("CMUX_"):
             monkeypatch.delenv(name)
@@ -13576,6 +13587,13 @@ async def test_a_pinned_run_the_desktop_cannot_list_produces_no_row(tmp_path, mo
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "pins-pilot-token")
+    # The server lifespan ENSURES AIDA (her session, pin and cadence) on
+    # every boot of the real app — a deliberate product behaviour — and this
+    # test asserts EXACT pin and row sets on this root. The documented kill
+    # switch is what keeps its subject (pin semantics) isolated from a feature
+    # it does not test; without it her boot-time session is a fourth row and
+    # her pin a second line in the store.
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_AIDA", "1")
     for name in list(os.environ):
         if name.startswith("CMUX_"):
             monkeypatch.delenv(name)

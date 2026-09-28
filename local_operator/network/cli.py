@@ -29,12 +29,21 @@ THE TWO REFUSALS THAT ARE FEATURES, NOT FRUSTRATIONS:
   is no flag anywhere that accepts a SAS on the inviter's side, and ``--sas-stdin``
   (the test seam) is refused unless ``LOP_NETWORK_TEST_MODE=1``. An agent therefore
   cannot complete a pairing on its own, which is the property R3 asks for.
+
+  AN AGENT CAN STILL DRIVE ONE, and the two spellings are the same ceremony:
+  ``join @<token> --park`` opens it and prints the code (plus a ``status:
+  awaiting_confirmation`` body, and ``3`` when nobody answers in time), and
+  ``join --confirm <code>`` records what the human read off the other screen. The
+  agent can start a pairing, hand the person their half, and finish it — it can
+  never supply the code, which is the half R3 is about.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio  # stdlib, so add_parser's import graph stays stdlib-only.
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -130,7 +139,20 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     init.add_argument("name")
     init.add_argument("--listen-address", default="", help="Bind address (127.0.0.1 = dial-only)")
     init.add_argument("--port", type=int, default=0)
-    init.add_argument("--advertise-host", action="append", default=[], dest="advertise_hosts")
+    # THE TWIN OF `join --advertise-host`, and the one that decides what an INVITE
+    # carries: the declared entries LEAD the list the record publishes, so on a device
+    # behind a tunnel this is how every invite it mints names an address a joiner can
+    # dial. The help string was missing while its twin had one (review round 1, N1).
+    init.add_argument(
+        "--advertise-host",
+        action="append",
+        default=[],
+        dest="advertise_hosts",
+        help=(
+            "host:port peers should use to reach THIS device (repeatable), in "
+            "preference order; add a tunnel or public address here"
+        ),
+    )
     init.add_argument("--no-start", action="store_true", help="Do not start the relay")
     init.add_argument("--json", action="store_true")
 
@@ -157,8 +179,40 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "token", nargs="?", default="", help="A token, @path, or nothing for the newest"
     )
     join.add_argument("--host", default="", help="Override the endpoint to dial")
+    # THE OTHER HALF OF `init --advertise-host`, and the one an operator needs most:
+    # the inviter can name its address when it creates the network, but a JOINER
+    # could only do so by hand-editing `network.advertise_hosts` into config.yml —
+    # which took no effect at all until this release (see `settings_io`, the
+    # `network` section). Without it, a joining device behind a tunnel published
+    # nothing dialable and every peer that later tried to reach it got `no_endpoint`.
+    join.add_argument(
+        "--advertise-host",
+        action="append",
+        default=[],
+        dest="advertise_hosts",
+        help=(
+            "host:port peers should use to reach THIS device (repeatable), in "
+            "preference order; add a tunnel or public address here"
+        ),
+    )
     join.add_argument("--verify", action="store_true", help="Compare the 160-bit fingerprint")
     join.add_argument("--emit-sas", action="store_true", help="Print this device's code, then wait")
+    # THE TWO-PHASE PAIR (design §1.4.3). ``--park`` opens the ceremony and waits for a
+    # second process to transcribe the code; ``--confirm`` is that second process. Both
+    # are needed because a ceremony's code is bound to the socket that derived it: an
+    # invocation that exits cannot be confirmed later, and a re-dial is a DIFFERENT
+    # code. See ``_park_join`` for the whole argument.
+    join.add_argument(
+        "--park",
+        action="store_true",
+        help="Start the pairing and wait for `--confirm <code>` instead of prompting",
+    )
+    join.add_argument(
+        "--confirm",
+        metavar="CODE",
+        default="",
+        help="Answer a parked pairing with the code read off the other device's screen",
+    )
     join.add_argument("--name", default="", help="The name this device will be known by")
     join.add_argument(
         "--sas-stdin",
@@ -265,6 +319,69 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
         "--force",
         action="store_true",
         help="with --stop: signal a target whose turn is in flight (as `lop stop --force`)",
+    )
+    # THE THREE PILOT ACTS. `--engage` warms a session elsewhere and `--stop`
+    # kills one, but nothing in this family could put a TURN to a conversation
+    # that already lives on another device: the viewer existed (a peer's row
+    # opened as an ordinary viewer, ``session/remote_open.py``) and only the TUI
+    # could reach it, so a shell — or an agent, which has no composer — had no way
+    # to prompt, correct or configure a session the mesh had just moved.
+    #
+    # THEY DRIVE THE SAME VIEWER the TUI's sidebar pick and `lop --resume <peer's
+    # id>` open, and that is deliberate: a second client that built its own frames
+    # would be a second front-end path for one conversation (the spine's rule, and
+    # the reason ``RemoteSessionClient`` overrides only ``connect``).
+    #
+    # THE TEXT IS A POSITIONAL BECAUSE THE FLAG'S VALUE IS TAKEN. `--prompt`
+    # already means "--create's first turn", and one flag with two meanings a
+    # caller cannot tell apart from the flag itself is how `--prompt X` comes to
+    # do two things depending on a token three words to the left. So the session
+    # id is the flag's value — the way `--engage`/`--stop` already spell "do this
+    # to that conversation" — and the words to deliver are the positional, with
+    # stdin for the shell case (`lop send`'s own rule).
+    net_sessions.add_argument(
+        "--send",
+        metavar="SESSION",
+        default="",
+        help="deliver a turn to that session on its device, and wait for the outcome",
+    )
+    net_sessions.add_argument(
+        "--steer",
+        metavar="SESSION",
+        default="",
+        help="inject into that session's turn, where it is already running",
+    )
+    net_sessions.add_argument(
+        "--slash",
+        metavar="SESSION",
+        default="",
+        help="run a slash command in that session on its device (e.g. '/rename new name')",
+    )
+    # REMAINDER, so the payload is what the user typed rather than what the
+    # parser makes of it: with ``nargs="*"`` every word matching a declared
+    # option was consumed as that option, wherever it appeared — `check the
+    # --name field` delivered `check the` and exited 0, and a prompt containing
+    # `--force` became a usage error instead of a turn (review round 1, MAJOR-1).
+    # What that buys has a BOUNDARY, and it is the parser's own: the payload runs
+    # from the first token that is not an option to the end of the line, so a
+    # token that IS one of this command's flags is still read as that flag —
+    # `--send <s> --json is the field` delivers `is the field` with JSON output
+    # on, and a create-only flag (`--model X …`) is swallowed whole (review round
+    # 2, MINOR-1). `--` is the escape for text that begins with a dash; a flag
+    # that only describes a NEW session is refused outright below rather than
+    # accepted and dropped.
+    net_sessions.add_argument(
+        "text",
+        nargs=argparse.REMAINDER,
+        default=[],
+        metavar="TEXT",
+        help=(
+            "with --send/--steer/--slash: the text to deliver, taken as-is from the first "
+            "word that is not one of this command's own flags, to the end of the line (so "
+            "a `--name` inside it stays text) — a LEADING flag-shaped word is read as that "
+            "flag, so put this command's flags BEFORE the session id, or separate the text "
+            "with `--`; omit to read it from stdin"
+        ),
     )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
@@ -494,7 +611,7 @@ def main(args: argparse.Namespace) -> int:
     try:
         return int(handler(args))
     except Exception as exc:  # noqa: BLE001 — a CLI reports, it does not traceback
-        from local_operator.network.types import MeshRefusal
+        from local_operator.network.types import JoinParkUnanswered, MeshRefusal
 
         if isinstance(exc, MeshRefusal):
             # A --json CALLER GETS A BODY, not just a non-zero exit. The refusal
@@ -508,7 +625,10 @@ def main(args: argparse.Namespace) -> int:
             if _json_mode(args):
                 print(json.dumps({"ok": False, "code": exc.code, "message": exc.sentence}))
             print(f"\033[1;31m{exc.sentence}\033[0m", file=sys.stderr)
-            return 1
+            # 3 IS ITS OWN EXIT CODE (the design's "a human decision is required"), and
+            # it is checked BEFORE the generic 1 so a caller can tell "nobody answered
+            # in time" from "the network said no" without matching on English.
+            return 3 if isinstance(exc, JoinParkUnanswered) else 1
         raise
 
 
@@ -993,11 +1113,26 @@ def _cmd_member_caps(args: argparse.Namespace) -> int:
     caps = [str(item) for item in args.capabilities]
     record = _resolve(args.network)
     from local_operator.network.relay import capability_change_lines
+    from local_operator.network.types import MeshRefusal
+
+    # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME. `credential
+    # share --with` resolves a name or an id here, and `lop network show`/`peers`
+    # print names — so an operator who copied the name they were just shown got
+    # "device-b is not an active member of credlab" from this verb while it IS one
+    # (measured on the two-device rig, audit round 2). One resolver, one spelling,
+    # and the refusal names the member list rather than denying the device exists.
+    resolved_device = _resolve_device(record, args.device)
+    if resolved_device is None:
+        raise MeshRefusal(
+            "unknown_member",
+            f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
+            "for the member list (a name, a device id, or an unambiguous tail of one)",
+        )
 
     if verb == "grant":
-        change, applied = _apply_capability_change(record, args.device, grant=caps)
+        change, applied = _apply_capability_change(record, resolved_device, grant=caps)
     else:
-        change, applied = _apply_capability_change(record, args.device, revoke=caps)
+        change, applied = _apply_capability_change(record, resolved_device, revoke=caps)
     payload = {
         "ok": True,
         "network_id": record.network_id,
@@ -1105,7 +1240,17 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
         for key in sorted(document.entries):
             entry = document.entries[key]
             row: dict[str, Any] = {
-                "key": key,
+                # ``credential_name``, and the SPELLING is load-bearing: the agent tool
+                # scrubs any field whose NAME contains a secret marker, the markers are
+                # matched as substrings, and both ``key`` and ``credential_key`` carry
+                # "key" — so this row's NAME (a provider name like OPENAI_API_KEY, never
+                # a value) was dropped on the tool's side and the digest rendered
+                # ``None`` where the credential's name belongs (agent review round 1,
+                # code finding 4). The scrubber and its markers stay exactly where they
+                # are, because the boundary is worth more than the spelling; the field
+                # is named so the heuristic cannot eat the one fact this listing exists
+                # to convey.
+                "credential_name": key,
                 "kind": entry.kind,
                 "owner_device": entry.owner_device,
                 "owner_device_name": entry.owner_device_name,
@@ -1134,7 +1279,9 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                     else (row["owner_device_name"] or row["owner_device"])
                 )
                 who = f" ({row['identity_label']})" if row["identity_label"] else ""
-                lines.append(f"  {row['key']:<14} {row['kind']:<15} owner: {owner}{who}")
+                lines.append(
+                    f"  {row['credential_name']:<14} {row['kind']:<15} owner: {owner}{who}"
+                )
                 for holder in row["holders"]:
                     # The owner's own row and this device's are not "shares": the first
                     # is what makes the entry coherent and the second is the reader.
@@ -1444,6 +1591,12 @@ def _resolve_device(record: Any, name: str) -> str | None:
     wire, and an operator reading `lop network show` has both. Matching either here
     (and refusing an ambiguous tail) is what stops a share from silently landing on
     the wrong device — a mistargeted share spends the wrong machine's quota.
+
+    THE THREE VERBS THAT TAKE A DEVICE ALL COME THROUGH HERE: ``credential share
+    --with``, ``member grant|revoke`` and ``member rm`` (review round 1, R3 added the
+    last two). A verb that hands its raw argument to the row writer answers a valid
+    NAME with "is not an active member" — a false statement about the network, since
+    the device is one and only the SPELLING was wrong.
     """
     wanted = str(name or "").strip()
     if not wanted:
@@ -1512,11 +1665,36 @@ def _member_name(record: Any, device_id: str) -> str:
 
 def _cmd_member_rm(args: argparse.Namespace) -> int:
     """Revoke a member: tombstone, rotate, bump the epoch, fan out (R5)."""
+    # THE ARGUMENT IS A DEVICE, AND EVERY OTHER SURFACE PRINTS ITS NAME — the same rule
+    # ``member grant|revoke`` follows (audit round 2, review round 1 R3). A name is what
+    # ``lop network show`` prints, so an operator who copied it used to get
+    # "device-b is not a member of credlab" from a member that IS one: false, and it
+    # names the network instead of the argument. Resolved ONCE, before either path, so
+    # both the relay and the local writer are handed a device id.
+    record = _resolve(args.network)
+    from local_operator.network import store
+    from local_operator.network.types import MeshRefusal
+
+    device_id = _resolve_device(record, args.device)
+    if device_id is None:
+        # THE SECRET GATE COMES FIRST, and it is the shared refusal every member verb
+        # already gives (``test_refusals``): it names the precondition that blocks the
+        # write for ANY spelling, so correcting the argument first would send the operator
+        # after a member list they still could not act on. (``lop network show`` CAN answer
+        # from a running relay without the secret, so this sequence is not the only one
+        # that could inform them — it is the one that matches what the write needs.)
+        # Safe here because ``require_secrets`` only reads.
+        store.require_secrets(record.network_id)
+        raise MeshRefusal(
+            "unknown_member",
+            f"{args.device!r} is not a device in {record.name}; run 'lop network show' "
+            "for the member list (a name, a device id, or an unambiguous tail of one)",
+        )
     # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
     # epoch rotation and the queue write all happen here (below), and the payload
     # says the rotation is queued rather than fanning out.
     live = _relay_call(
-        "net_member_rm", network=args.network, device_id=args.device, allow_no_answer=True
+        "net_member_rm", network=args.network, device_id=device_id, allow_no_answer=True
     )
     if live is not None:
         return _emit(
@@ -1529,11 +1707,11 @@ def _cmd_member_rm(args: argparse.Namespace) -> int:
             ],
         )
     imported = _import_relay()
-    from local_operator.network import store
-
-    record = _resolve(args.network)
+    # No second ``_resolve`` and no second ``store`` import: ``record`` came off the top
+    # of this command and the local write needs nothing the resolution did not already
+    # read (review round 2, NIT-2).
     state = store.require_secrets(record.network_id)
-    outcome = imported.remove_member(record, state, device_id=args.device, by=record.self_device_id)
+    outcome = imported.remove_member(record, state, device_id=device_id, by=record.self_device_id)
     for member in record.active_members():
         if member.device_id == record.self_device_id:
             continue
@@ -1617,6 +1795,25 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     if args.print_token:
         print(Path(path).read_text(encoding="utf-8").strip())
         return 0
+    # THE COMMAND THE RECEIPT PRINTS IS THE ONE THAT WORKS, so it does not re-type an
+    # endpoint the token already carries. ``--host`` is an OVERRIDE, and the printed
+    # value was ``hosts[0]`` — an entry a joiner is not obliged to be able to dial: the
+    # list leads with the record's own snapshot (``init``'s write, plus any
+    # ``--advertise-host`` declaration), which can name a port the listener does not
+    # hold. Pinning the flag to it turned a working ``join @token`` — which walks the
+    # whole list — into ``ConnectionRefusedError`` and rc=1 when the operator followed
+    # the advice verbatim (QA round 2, Q-3). The placeholder stays for the one state
+    # where the token names no endpoint at all, because there the flag is exactly what
+    # the join asks for (QA round 1, Q2).
+    # THE LOCAL PATH DOES NOT TRAVEL (design review round 1, D3). This line is advice for
+    # the OTHER device, and the absolute path it used to carry was the inviter's own
+    # `$HOME` — a path that device does not have, printed as though the two shared a
+    # filesystem. `@<token-file>` is the placeholder the rest of this module's receipts
+    # already use, so the line keeps one spelling; the concrete path is in the line above,
+    # where it is the inviter's own business.
+    command = "then, on the other device: lop network join @<token-file>"
+    if not payload.get("hosts"):
+        command += " --host <this device's address:port>"
     return _emit(
         args,
         payload,
@@ -1626,26 +1823,13 @@ def _cmd_invite(args: argparse.Namespace) -> int:
             f"token written to {path}",
             "it is single use and is not printed: read that file, or run this with a TTY "
             "and --print",
-            # THE PATH THIS LINE USED TO NAME WAS THIS DEVICE'S OWN, in a command
-            # for the OTHER one: `@{path}` there resolves against a filesystem
-            # that does not have the file, so the line read as one step when the
-            # trip is two — carry the file across, then run. The guide's pairing
-            # step 3 and the README's getting-started both already spell it that
-            # way ("hand that file to the other machine out of band"), and they
-            # are right: `--print` is the only alternative channel and it is
-            # refused on a non-TTY stdout, which is every TUI front end of this
-            # family (network_cli.run_network gives the child a pipe on purpose).
-            # So the file IS the channel, and the line has to say so. The
-            # `--host` half still rides along, because that value is genuinely
-            # this device's own answer.
-            "then, on the other device: carry that file over and run "
-            "lop network join @<token-file>"
-            + (f" --host {payload['hosts'][0]}" if payload.get("hosts") else ""),
+            command,
         ],
     )
 
 
 def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[str, Any], str]:
+    from local_operator.network import relay as relay_mod
     from local_operator.network import store
     from local_operator.network.invite import mint as mint_invite
 
@@ -1656,7 +1840,13 @@ def _invite_locally(args: argparse.Namespace, hosts: list[str]) -> tuple[dict[st
         state.secret,
         role=args.role,
         ttl_s=float(args.expires),
-        hosts=hosts or None,
+        # SAME RULE AS THE RELAY PATH (QA round 1, Q2): an explicit ``--host`` wins,
+        # and otherwise the token carries what this device advertises rather than the
+        # record's config-derived list, which is empty whenever a relay listens on a
+        # port the record never learned.
+        hosts=hosts
+        or relay_mod.advertise_endpoints(relay_mod.NetworkSettings.from_config())
+        or None,
         device_id=args.device,
     )
     record.invites.append(minted.record)
@@ -1698,7 +1888,29 @@ def _cmd_join(args: argparse.Namespace) -> int:
     shows, and the inviter's human confirms the other way. A mismatch burns the
     invite — refusing rather than warning is what makes pairing resistant to a relay
     in the middle.
+
+    TWO WAYS TO HOLD THE CEREMONY, ONE CEREMONY. A terminal gets the prompt it always
+    had. A caller with no terminal gets the two-phase pair (design §1.4.3): ``--park``
+    opens the ceremony and hands back the code, and ``--confirm <code>`` — a second
+    invocation, wherever the person is — records the transcription the ceremony is
+    waiting for. Neither spelling can complete a pairing without a human reading a
+    code off another screen; see ``_park_join`` for why the confirmation has to reach
+    the process that derived the code rather than starting a second one.
     """
+    confirm = str(getattr(args, "confirm", "") or "").strip()
+    if confirm:
+        return _answer_parked_join(args, confirm)
+    if bool(getattr(args, "park", False)):
+        # USAGE errors, not refusals (the guide's rc 2): each names a flag pair that
+        # cannot mean one thing at the same time, and silently dropping one of the two
+        # would leave the caller believing the other had been honoured.
+        if getattr(args, "sas_stdin", False):
+            print("--park waits for `--confirm`; --sas-stdin answers a prompt", file=sys.stderr)
+            return 2
+        if getattr(args, "emit_sas", False):
+            print("--park prints the code itself; --emit-sas does not park", file=sys.stderr)
+            return 2
+
     from local_operator.network import invite as invite_mod
     from local_operator.network import relay as relay_mod
     from local_operator.network import store, wire
@@ -1740,6 +1952,23 @@ def _cmd_join(args: argparse.Namespace) -> int:
             "new file across.",
         )
 
+    if bool(getattr(args, "park", False)):
+        # ONE PARKED CEREMONY PER INVITE, refused BEFORE the dial rather than overwritten
+        # after it. The record is keyed by the invite, so a second ``--park`` on the same
+        # token would replace the first record and leave THAT process waiting on an
+        # answer nothing would write — two sockets for one invite, and the inviter admits
+        # one. A record whose process is gone is not a ceremony, so taking its place is
+        # allowed. Saying no before the dial also keeps the answer deterministic: asking the
+        # inviter twice would report whichever of the two it happened to notice first.
+        already = store.pending_join(envelope.invite_id)
+        if already is not None and already.is_open() and _process_alive(already.pid):
+            raise MeshRefusal(
+                "pairing_already_parked",
+                f"this device is already pairing with that invite (pid {already.pid}). Answer "
+                "that one with `lop network join --confirm <code>`, or wait for its window "
+                "to close.",
+            )
+
     last_reason = ""
     for host in hosts:
         link_result = _join_one(
@@ -1749,6 +1978,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
             identity=identity,
             settings=settings,
             args=args,
+            declared_hosts=tuple(args.advertise_hosts or []),
             wire=wire,
             Handshake=Handshake,
             Credential=Credential,
@@ -1830,6 +2060,7 @@ def _join_one(
     identity: Any,
     settings: Any,
     args: argparse.Namespace,
+    declared_hosts: tuple[str, ...] = (),
     **helpers: Any,
 ) -> tuple[list[str], dict[str, Any]] | str | None:
     """One dial attempt: handshake, the human step, then admission.
@@ -1840,11 +2071,17 @@ def _join_one(
     "nothing was listening at 52.27.70.210:4200" and "the handshake stopped with
     ConnectionResetError" are different problems, and the second is what a refused
     or already-redeemed token looks like from here (QA round 1, F-4).
+
+    ``declared_hosts`` is ``--advertise-host``, threaded as an argument rather than
+    read off ``args`` because this driver also runs from tests that build their own
+    ``Namespace`` for the flags the ceremony needs (``tests/unit/network/
+    test_relay_e2e.py``): an attribute read here would make those rigs carry a flag
+    they do not exercise. Empty means "declare nothing" — the detected addresses
+    are published either way — and the CLI is the only caller that passes more.
     """
     import socket
 
     from local_operator.network import wire
-    from local_operator.network.handshake import refusal_from_pairing
     from local_operator.network.identity import mint_instance_id
     from local_operator.network.types import HandshakeRefusal, MeshRefusal
 
@@ -1870,7 +2107,12 @@ def _join_one(
     # inviter copies the hello's list onto our member row, and `listen` is what
     # every later reader of this record sees. Deriving them separately is how the
     # record came to claim the INVITER's address (QA round 1, F-7).
-    advertised = relay_mod.advertise_endpoints(settings)
+    #
+    # `declared_hosts` leads that list, exactly as it does for `init` (mesh-
+    # transport-identity §10.4): the joiner is the device that most often has no
+    # dialable address of its own — that is usually WHY it is joining rather than
+    # hosting — and a tunnel or public address is something only its operator knows.
+    advertised = relay_mod.advertise_endpoints(settings, declared=declared_hosts)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         handshake = Handshake.new(
@@ -1909,6 +2151,25 @@ def _join_one(
         if args.emit_sas:
             print(json.dumps({"sas": result.sas, "fingerprint": fingerprint}))
             sys.stdout.flush()
+        elif getattr(args, "park", False):
+            # PHASE ONE. Everything above this line is the ceremony a terminal runs;
+            # below it, who answers is the only difference — and that difference is
+            # why this is a branch rather than a prompt with a longer timeout.
+            return _park_join(
+                args=args,
+                store=store,
+                envelope=envelope,
+                result=result,
+                fingerprint=fingerprint,
+                sock=sock,
+                codec=codec,
+                reader=reader,
+                host=host,
+                identity=identity,
+                advertised=advertised,
+                handshake=handshake,
+                helpers=helpers,
+            )
         else:
             print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
             sys.stdout.flush()
@@ -1916,58 +2177,19 @@ def _join_one(
         if typed is None:
             sock.sendall(codec.seal(helpers["pair_abort_frame"](req=1, reason="declined_local")))
             raise MeshRefusal("declined", "this device declined the pairing")
-        sock.sendall(codec.seal({"op": "net_pair_ready", "req": 1, "sas": typed}))
-        # The wait is the CONFIRM budget, not the handshake timeout: the other side
-        # now has to reach a human, and timing out at 10 s would fail every honest
-        # pairing on a device whose relay is a daemon. It is also the SAME number the
-        # prompt printed a moment ago — ``invite_mod.remaining_seconds`` is the one owner
-        # of "what is left", so the promise and this wait cannot drift with the token's
-        # age (agent review round 1, MAJOR 2).
-        remaining = invite_mod.remaining_seconds(envelope)
-        answer = codec.open(
-            reader.read_record_payload(wire.deadline_in(helpers["pair_timeout_seconds"](remaining)))
-        )
-        if answer.get("op") == "net_pair_abort":
-            # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
-            # in ``handshake`` beside the frames it describes. This call used to go
-            # through ``invite_mod``, which never had the helper: every wrong-SAS
-            # pairing — a typo in six digits, the normal user path — died with
-            # ``AttributeError: module 'local_operator.network.invite' has no
-            # attribute 'sas_mismatch_sentence'`` instead of refusing (QA round 1,
-            # F-1). Going through the one function also gets the invite-shaped
-            # reasons (``invite_already_used``, ``invite_in_use``) their sentences.
-            # The refusing device's own sentence comes too: it is the only place the
-            # joiner can learn which id was refused and what to do about it (Q-R3-3).
-            raise refusal_from_pairing(
-                str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
-            )
-        if not answer.get("admit"):
-            raise MeshRefusal("not_admitted", "the other device did not admit this machine")
-        record = _persist_join(
-            answer,
-            envelope,
-            identity,
-            host,
-            store,
-            peer_endpoints=handshake.peer_endpoints,
+        return _finish_pairing(
+            typed=typed,
+            sock=sock,
+            codec=codec,
+            reader=reader,
+            envelope=envelope,
+            host=host,
+            identity=identity,
+            store=store,
+            handshake=handshake,
             advertised=advertised,
-        )
-        return (
-            [
-                f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
-                f"members: {len(record.active_members())}",
-                "next: lop network peers   ·   lop sessions --all-peers",
-            ],
-            {
-                "network_id": record.network_id,
-                "name": record.name,
-                "epoch": record.epoch,
-                "members": len(record.active_members()),
-                "device_id": identity.device_id,
-                "inviter": envelope.inviter_device_id,
-                "role": record.self_role,
-                "fingerprint": fingerprint,
-            },
+            fingerprint=fingerprint,
+            helpers=helpers,
         )
     except HandshakeRefusal as refusal:
         # NOT named as a peer refusal: the listener closes the socket on a refusal
@@ -1997,8 +2219,16 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
     ``--sas-stdin`` exists for the e2e harness and is refused outside
     ``LOP_NETWORK_TEST_MODE=1``: it is a seam for a script feeding a prompt a human
     would type, not a way for an agent to complete a pairing.
+
+    Without a terminal there is no prompt to answer, so this refuses with a CODE
+    (``join_needs_tty``) rather than a bare ``ValueError``: a ``ValueError`` reached
+    ``--json`` callers as a traceback-shaped non-answer, and the sentence it now
+    carries names the two-phase pair, which is the path a caller with no terminal
+    actually has.
     """
     import os
+
+    from local_operator.network.types import MeshRefusal
 
     if args.sas_stdin:
         if os.environ.get(TEST_MODE_ENV) != "1":
@@ -2012,9 +2242,12 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
         )
         typed = input(prompt).strip()
     else:
-        raise ValueError(
-            "joining needs a person at a keyboard: run this in a terminal (or use "
-            f"{TEST_MODE_ENV}=1 with --sas-stdin from a harness)"
+        raise MeshRefusal(
+            "join_needs_tty",
+            "joining needs a person at a keyboard: run this in a terminal, or start the "
+            "two-phase pair with `lop network join @<token-file> --park --json` and "
+            "finish it with `lop network join --confirm <code>` where the person is. "
+            f"({TEST_MODE_ENV}=1 with --sas-stdin is a harness seam, not a way in.)",
         )
     if not typed:
         return None
@@ -2026,6 +2259,508 @@ def _read_code(args: argparse.Namespace, derived: str, fingerprint: str) -> str 
             return ""
         return derived
     return typed
+
+
+def _finish_pairing(
+    *,
+    typed: str,
+    sock: Any,
+    codec: Any,
+    reader: Any,
+    envelope: Any,
+    host: str,
+    identity: Any,
+    store: Any,
+    handshake: Any,
+    advertised: list[str],
+    fingerprint: str,
+    helpers: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    """Send the human's transcription and turn the answer into a receipt.
+
+    ONE COPY OF THE LAST HALF OF A JOIN, because there are now two ways to supply the
+    transcription (a prompt, or ``join --confirm`` answering a parked ceremony) and a
+    second copy of this would be a second place for the wait, the abort map and the
+    persistence to drift. ``typed`` is what the human transcribed: for ``--verify``
+    the caller has already resolved it to this device's own derivation, exactly as the
+    prompt path does.
+    """
+    from local_operator.network import wire
+    from local_operator.network.handshake import pair_ready_frame, refusal_from_pairing
+    from local_operator.network.types import MeshRefusal
+
+    invite_mod = helpers["invite_mod"]
+    sock.sendall(codec.seal(pair_ready_frame(req=1, typed_sas=typed)))
+    # The wait is the CONFIRM budget, not the handshake timeout: the other side
+    # now has to reach a human, and timing out at 10 s would fail every honest
+    # pairing on a device whose relay is a daemon. It is also the SAME number the
+    # prompt printed a moment ago — ``invite_mod.remaining_seconds`` is the one owner
+    # of "what is left", so the promise and this wait cannot drift with the token's
+    # age (agent review round 1, MAJOR 2).
+    remaining = invite_mod.remaining_seconds(envelope)
+    answer = codec.open(
+        reader.read_record_payload(wire.deadline_in(helpers["pair_timeout_seconds"](remaining)))
+    )
+    if answer.get("op") == "net_pair_abort":
+        # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
+        # in ``handshake`` beside the frames it describes. This call used to go
+        # through ``invite_mod``, which never had the helper: every wrong-SAS
+        # pairing — a typo in six digits, the normal user path — died with
+        # ``AttributeError: module 'local_operator.network.invite' has no
+        # attribute 'sas_mismatch_sentence'`` instead of refusing (QA round 1,
+        # F-1). Going through the one function also gets the invite-shaped
+        # reasons (``invite_already_used``, ``invite_in_use``) their sentences.
+        # The refusing device's own sentence comes too: it is the only place the
+        # joiner can learn which id was refused and what to do about it (Q-R3-3).
+        raise refusal_from_pairing(
+            str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
+        )
+    if not answer.get("admit"):
+        raise MeshRefusal("not_admitted", "the other device did not admit this machine")
+    record = _persist_join(
+        answer,
+        envelope,
+        identity,
+        host,
+        store,
+        peer_endpoints=handshake.peer_endpoints,
+        advertised=advertised,
+    )
+    return (
+        [
+            f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
+            f"members: {len(record.active_members())}",
+            "next: lop network peers   ·   lop sessions --all-peers",
+        ],
+        {
+            "network_id": record.network_id,
+            "name": record.name,
+            "epoch": record.epoch,
+            "members": len(record.active_members()),
+            "device_id": identity.device_id,
+            "inviter": envelope.inviter_device_id,
+            "role": record.self_role,
+            "fingerprint": fingerprint,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# The two-phase pair: phase one parks the ceremony, phase two answers it
+# ---------------------------------------------------------------------------
+#
+# WHY A PARK AT ALL, when this is one ceremony and the terminal runs it in one
+# process. The code two humans compare is derived from the LIVE transcript, so the
+# confirmation cannot be replayed into a later invocation: a second dial is a
+# different handshake, a different transcript and therefore a DIFFERENT code — and a
+# phase two that accepted the old code against a fresh derivation would have thrown
+# away the one property the code provides (it is a fingerprint of THIS connection,
+# which is what makes a relay in the middle visible). The inviter's half of the same
+# human step already works this way for the same reason: its relay parks the pairing
+# in a record and waits for ``lop network confirm`` to write the answer
+# (``relay._await_pairing_decision``). These are the joining device's mirror of that
+# pair of records, and the poll interval and the window are the same two numbers.
+
+
+#: What phase one says when nobody answered in time. One owner, because the JSON
+#: caller, the terminal caller and the phase-two invocation all have to say it.
+_JOIN_UNANSWERED_SENTENCE = (
+    "nobody confirmed the pairing in time, so it was abandoned and nothing was joined. "
+    "The invite is untouched: start again with `lop network join @<token-file> --park --json`."
+)
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether the process that parked a ceremony is still there to finish it.
+
+    DELEGATED, and the delegation is a correctness fix rather than a tidiness one:
+    ``os.kill(pid, 0)`` is a liveness probe on POSIX and a KILL on Windows — CPython
+    reaches ``TerminateProcess`` there — so probing a live pid would end the very
+    ceremony this asks about. The cross-platform battery's
+    ``static.posix_attributes`` probe caught this exact line when it was written that
+    way (1 fatal, both OSes), and ``procstate.pid_alive`` is the shared probe that
+    asks the right question per platform: it is what ``browser_bridge.state`` and
+    ``mobile.resources`` both delegate to, for this reason. It fails CLOSED (any
+    doubt answers True), which is the direction this caller wants: a ceremony that
+    looks alive is refused as a second park, and a wrong "gone" would let a second
+    socket race the first for the one admission the inviter grants.
+    """
+    from local_operator import procstate
+
+    if pid <= 0:
+        return False
+    return procstate.pid_alive(pid)
+
+
+def _awaiting_payload(pending: Any) -> dict[str, Any]:
+    """Phase one's body: the code, and the sentence that says who must read it.
+
+    THE SENTENCE IS PART OF THE CONTRACT, which is why it is produced here rather
+    than by whichever caller happens to render it (``mesh-ui.md`` §3.2): an agent
+    that shows the user anything other than this sentence is paraphrasing the one
+    instruction that makes the ceremony a human step.
+    """
+    from local_operator.network import wire
+
+    shown = pending.fingerprint if pending.verify else wire.sas_display(pending.sas)
+    what = "fingerprint" if pending.verify else "code"
+    return {
+        "ok": True,
+        "status": "awaiting_confirmation",
+        "sas": pending.sas,
+        "fingerprint": pending.fingerprint,
+        "verify": pending.verify,
+        "shown": shown,
+        "network_id": pending.network_id,
+        "name": pending.network_name,
+        "inviter": pending.inviter_name or pending.inviter_device_id,
+        "invite_id": pending.invite_id,
+        "expires_at": pending.expires_at,
+        "seconds_left": round(pending.seconds_left(), 1),
+        "sentence": (
+            f"Ask the user to read back the {what} {shown} from the other device, then "
+            f"confirm it with `lop network join --confirm <{what}>`."
+        ),
+    }
+
+
+def _await_join_answer(invite_id: str, window: float, store: Any) -> Any:
+    """Poll for the human's answer — one 0.2 s tick and one deadline, the same shape
+    ``relay._await_pairing_decision`` uses for the inviter's half.
+
+    A poll rather than a notification because the answer comes from a different
+    process: a file is the only channel both halves can already write (a socket would
+    be a second protocol, and a signal handler in a CLI that is also a library is a
+    worse one).
+    """
+    deadline = time.monotonic() + max(0.0, window)
+    while time.monotonic() < deadline:
+        answer = store.join_answer(invite_id)
+        if answer is not None:
+            return answer
+        time.sleep(0.2)
+    return None
+
+
+def _parked_outcome(
+    pending: Any,
+    *,
+    status: str,
+    store: Any,
+    error_code: str = "",
+    message: str = "",
+    result: dict[str, Any] | None = None,
+    result_lines: list[str] | None = None,
+) -> None:
+    """Leave the ceremony's outcome where the invocation that answered it can read it.
+
+    WRITTEN EVEN WHEN THE CEREMONY FAILED. The process that supplied the code did not
+    run the ceremony, so without this it could only report its own success at writing
+    a code and nothing about what the code did. The pid is zeroed with the outcome,
+    which is what makes a finished record readable-but-dead to every later reader.
+    """
+    pending.status = status
+    pending.error_code = error_code
+    pending.message = message
+    pending.pid = 0
+    if result is not None:
+        pending.result = dict(result)
+    if result_lines is not None:
+        pending.result_lines = list(result_lines)
+    store.save_pending_join(pending)
+
+
+def _park_join(
+    *,
+    args: argparse.Namespace,
+    store: Any,
+    envelope: Any,
+    result: Any,
+    fingerprint: str,
+    sock: Any,
+    codec: Any,
+    reader: Any,
+    host: str,
+    identity: Any,
+    advertised: list[str],
+    handshake: Any,
+    helpers: dict[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    """Phase one: hold the open ceremony and wait for a second invocation's answer.
+
+    THE PROCESS THAT DIALED IS THE PROCESS THAT FINISHES, and everything else here
+    follows from that: the record it writes is the only channel to the person who
+    answers, the answer file is the only channel back, and the exit code distinguishes
+    "nobody answered" (3, a human is still required) from "the network said no" (1, a
+    refusal).
+
+    NOTHING IS SENT TO THE PEER UNTIL AN ANSWER ARRIVES. The derivation is complete —
+    that is what makes the code printable — but ``net_pair_ready`` is the frame that
+    tells the inviter a human transcribed something, so a park that never gets an
+    answer closes the socket without ever claiming one.
+    """
+    import os
+
+    from local_operator.network import types
+    from local_operator.network.types import JoinParkUnanswered, MeshRefusal
+
+    invite_mod = helpers["invite_mod"]
+    # ONE OWNER OF "WHAT IS LEFT", as on every other path: the window the parked
+    # ceremony waits is the number the prompt prints and the inviter's relay waits.
+    window = helpers["pair_timeout_seconds"](invite_mod.remaining_seconds(envelope))
+    pending = types.PendingJoin(
+        invite_id=envelope.invite_id,
+        network_id=envelope.network_id,
+        network_name=envelope.network_name,
+        inviter_device_id=envelope.inviter_device_id,
+        inviter_name=envelope.inviter_name,
+        sas=result.sas,
+        fingerprint=fingerprint,
+        verify=bool(getattr(args, "verify", False)),
+        pid=os.getpid(),
+        expires_at=time.time() + window,
+    )
+    # A leftover answer from an earlier ceremony would answer THIS one: the record is
+    # keyed by invite, and one invite mints one ceremony. Cleared BEFORE the record is
+    # visible, because the reverse order has a window in which an answer that arrives
+    # for the new ceremony is deleted by the park that is waiting for it. A second park
+    # on this invite was already refused by the caller, so what is cleared here is a
+    # leftover and never a live answer.
+    store.clear_join_answer(envelope.invite_id)
+    store.save_pending_join(pending)
+    if _json_mode(args):
+        # FLUSHED, because this body is the whole point of phase one: an agent reads
+        # it to learn the code, and buffered output would arrive after the window it
+        # describes had closed (its reader waits on this pipe, not on our exit).
+        print(json.dumps(_awaiting_payload(pending), indent=2, sort_keys=True, default=str))
+        sys.stdout.flush()
+    else:
+        print(invite_mod.joiner_prompt(envelope, result.sas, fingerprint))
+        print(
+            f"waiting up to {int(window)}s for the code from the other device: answer it with "
+            "`lop network join --confirm <code>`, run wherever the person reading that "
+            "screen is."
+        )
+        sys.stdout.flush()
+
+    answer = _await_join_answer(envelope.invite_id, window, store)
+    if answer is None:
+        store.clear_join_answer(envelope.invite_id)
+        _parked_outcome(
+            pending,
+            status="unanswered",
+            store=store,
+            error_code="pairing_unanswered",
+            message=_JOIN_UNANSWERED_SENTENCE,
+        )
+        raise JoinParkUnanswered("pairing_unanswered", _JOIN_UNANSWERED_SENTENCE)
+    if answer.decision != "admit":
+        sock.sendall(codec.seal(helpers["pair_abort_frame"](req=1, reason="declined_local")))
+        store.clear_join_answer(envelope.invite_id)
+        _parked_outcome(
+            pending,
+            status="refused",
+            store=store,
+            error_code="declined",
+            message="this device declined the pairing",
+        )
+        raise MeshRefusal("declined", "this device declined the pairing")
+    # ``--verify`` asked the human for the FINGERPRINT, which is not what the wire
+    # compares: the six digits are this device's own derivation and travel in the
+    # frame, exactly as the prompt path resolves them. So the answer's text is only
+    # ever the thing that was compared HERE.
+    typed = pending.sas if pending.verify else answer.code
+    try:
+        lines, payload = _finish_pairing(
+            typed=typed,
+            sock=sock,
+            codec=codec,
+            reader=reader,
+            envelope=envelope,
+            host=host,
+            identity=identity,
+            store=store,
+            handshake=handshake,
+            advertised=advertised,
+            fingerprint=fingerprint,
+            helpers=helpers,
+        )
+    except MeshRefusal as refusal:
+        store.clear_join_answer(envelope.invite_id)
+        _parked_outcome(
+            pending,
+            status="refused",
+            store=store,
+            error_code=refusal.code,
+            message=refusal.sentence,
+        )
+        raise
+    store.clear_join_answer(envelope.invite_id)
+    _parked_outcome(
+        pending,
+        status="joined",
+        store=store,
+        result={"ok": True, **payload},
+        result_lines=lines,
+    )
+    return lines, payload
+
+
+def _live_parked_joins(store: Any) -> list[Any]:
+    """The parked ceremonies that could still take an answer, newest last.
+
+    Finished records are dropped here rather than by the store: this is the caller
+    that knows the difference between "that ceremony has an outcome, report it" and
+    "that ceremony is gone", and it is the only place both are asked at once.
+    """
+    return [
+        row
+        for row in store.pending_joins()
+        if row.status == "awaiting_confirmation" and row.is_open() and _process_alive(row.pid)
+    ]
+
+
+def _answer_parked_join(args: argparse.Namespace, typed: str) -> int:
+    """Phase two: record the human's code where the parked ceremony will read it.
+
+    THE CODE IS CHECKED HERE AND ADMITTED THERE. This invocation compares the value
+    with the derivation the ceremony parked — which catches a mistyped digit WITHOUT
+    spending the invite, and leaves the ceremony open to try again — while the inviter
+    still compares what arrives on the wire with its own derivation, and THAT is the
+    check that decides. A local pass is therefore not an admission: what this prints
+    is what the ceremony reported, not what this command caused.
+
+    WHICH CEREMONY, WHEN SEVERAL ARE PARKED: the code chooses. The six digits are
+    compared against each parked derivation, so the value the human read off a screen
+    identifies the ceremony it belongs to without a second argument whose spelling
+    could drift from the file it names. A finished ceremony's record is still readable
+    through its outcome, so answering one twice reports the same receipt instead of
+    inventing a second pairing.
+    """
+    from local_operator.network import store, types
+    from local_operator.network.types import MeshRefusal
+
+    records = store.pending_joins()
+    matches = [row for row in records if _parked_code_matches(row, typed)]
+
+    # 1. A ceremony that already has an outcome: report it, do not answer it again. A
+    #    repeated ``--confirm`` (an agent retrying a call whose process timed out) must
+    #    not mint a second pairing, and the record is what makes that possible.
+    finished = [row for row in matches if row.status != "awaiting_confirmation"]
+    if finished:
+        done = finished[-1]
+        store.clear_pending_join(done.invite_id)
+        store.clear_join_answer(done.invite_id)
+        if done.status == "joined":
+            return _emit(args, dict(done.result), list(done.result_lines))
+        raise MeshRefusal(done.error_code or "pairing_failed", done.message or "the pairing failed")
+
+    # 2. An open ceremony whose own derivation this code matches: answer it. The test
+    #    comes BEFORE the "nothing is parked" branch below, or a mistyped digit would be
+    #    reported as a missing ceremony and the person would be told to start over
+    #    instead of to look at both screens again.
+    live = _live_parked_joins(store)
+    live_ids = {row.invite_id for row in live}
+    chosen = next((row for row in reversed(matches) if row.invite_id in live_ids), None)
+    if chosen is not None:
+        answer = types.JoinAnswer(
+            invite_id=chosen.invite_id,
+            decision="admit",
+            code=typed,
+            answered_by=_answered_by(args),
+        )
+        store.save_join_answer(answer)
+        outcome = _await_join_result(chosen, store)
+        store.clear_pending_join(chosen.invite_id)
+        store.clear_join_answer(chosen.invite_id)
+        if outcome is None:
+            raise MeshRefusal(
+                "pairing_abandoned",
+                "the pairing process stopped before it reported back, so nothing was joined and "
+                "the invite is untouched. Start again with `lop network join @<token-file> "
+                "--park --json`.",
+            )
+        if outcome.status == "joined":
+            return _emit(args, dict(outcome.result), list(outcome.result_lines))
+        raise MeshRefusal(
+            outcome.error_code or "pairing_failed", outcome.message or "the pairing failed"
+        )
+
+    # 3. Nothing was answered, and each case gets its own name because the remedy
+    #    differs: a dead process and a closed window both mean "start again", a mistyped
+    #    code means "look at the screens" — and the last one is the only case where the
+    #    ceremony is STILL OPEN and nothing has been sent to the peer.
+    if live:
+        raise MeshRefusal(
+            "sas_mismatch",
+            "that code does not match the one THIS device derived for the parked pairing, so "
+            "nothing was sent: compare the two screens again and confirm the value the other "
+            "device is showing.",
+        )
+    lingering = [row for row in matches if row.status == "awaiting_confirmation"]
+    if any(not row.is_open() for row in lingering):
+        raise MeshRefusal(
+            "pairing_expired",
+            "that pairing ran out of time before it was confirmed, so the invitation is spent "
+            "and nothing was joined. Mint a fresh invite and start again.",
+        )
+    if lingering:
+        raise MeshRefusal(
+            "pairing_abandoned",
+            "the process that opened that pairing is gone, so there is nothing left to answer. "
+            "Start again with `lop network join @<token-file> --park --json`.",
+        )
+    if records:
+        raise MeshRefusal(
+            "no_parked_join",
+            "no pairing parked on this device is waiting for that code: the open one, if there "
+            "is one, is the ceremony whose own derivation this device printed. Start again with "
+            "`lop network join @<token-file> --park --json`.",
+        )
+    raise MeshRefusal(
+        "no_parked_join",
+        "no pairing is parked on this device, so there is nothing to confirm. Start one with "
+        "`lop network join @<token-file> --park --json`.",
+    )
+
+
+def _parked_code_matches(pending: Any, typed: str) -> bool:
+    """Whether the human's value is this ceremony's own derivation.
+
+    ``--verify`` compares the 160-bit fingerprint as the prompt path does, and strips
+    the same separators; otherwise it is the six digits through the shared
+    ``sas_matches`` (constant time, and a value that is not six digits is a mismatch
+    rather than a near miss).
+    """
+    import hmac
+
+    from local_operator.network.handshake import sas_matches
+
+    if pending.verify:
+        typed_fp = typed.replace("-", "").replace(" ", "").upper()
+        derived_fp = str(pending.fingerprint).replace("-", "").upper()
+        return bool(typed_fp) and hmac.compare_digest(derived_fp, typed_fp)
+    return sas_matches(str(pending.sas), typed)
+
+
+def _await_join_result(pending: Any, store: Any) -> Any:
+    """Wait for the parked ceremony to say what the answer did.
+
+    The window is the ceremony's own remaining life plus a short grace: the ceremony
+    is the process that has to send the frame and read the admission, and the answer
+    this call just wrote is what releases it.
+    """
+    deadline = time.monotonic() + pending.seconds_left() + 10.0
+    while time.monotonic() < deadline:
+        row = store.pending_join(pending.invite_id)
+        if row is None:
+            return None
+        if row.status != "awaiting_confirmation":
+            return row
+        if not _process_alive(row.pid):
+            return None
+        time.sleep(0.2)
+    return None
 
 
 def _session_protocol() -> int:
@@ -2344,6 +3079,659 @@ _STOP_REMEDIES: dict[str, str] = {
 }
 
 
+#: How long a pilot act waits for the viewer to OPEN and BIND its owner. A warm
+#: peer answers in about a second (measured against a real pair), but the first
+#: act on a STORED session has to engage a runtime over there — a process launch
+#: plus that device's own registry work — so this is a spawn budget rather than a
+#: socket default. It is the same reason the TUI grants a peer call 260 s.
+PILOT_BIND_TIMEOUT_S = 120.0
+
+#: How long ``--send`` waits for the owner's TERMINAL outcome once the prompt is
+#: admitted. ADMISSION IS NOT COMPLETION (``AttachedSession.prompt_and_wait``
+#: says exactly that), and a turn is unbounded work on a machine nobody here
+#: supervises: a tool call can take minutes. So the bound is real, and its expiry
+#: is REPORTED as "still running" with the session named — never retried, and
+#: never rounded up into a success. It sits below the TUI's own child budget for
+#: these acts (``tui/network_cli.PILOT_CALL_TIMEOUT_S``) so the composer shows
+#: this verb's answer rather than a timeout about a call that was working.
+PILOT_TURN_TIMEOUT_S = 300.0
+
+#: How long a steer frame or a routed slash may take to come back. Both are
+#: request/reply against a runtime that is ALREADY running (the dial is made on
+#: the peer's side of an open stream), so this is a round trip, not a spawn.
+PILOT_REPLY_TIMEOUT_S = 60.0
+
+#: THE WORST CASE ONE PILOT ACT CAN OCCUPY, DERIVED from the three budgets above
+#: rather than restated beside them — because the one restatement drifted the
+#: first time it was written: the TUI's child budget claimed to sit above what
+#: this verb waits and did not, so a `/network sessions --send …` typed in a
+#: session reaped its child at 480 s under an act that was still working (review
+#: round 1, MAJOR-3). The terms are the act's own parts in order: the viewer is
+#: OPENED (one bind budget), BOUND (a second — the cold-to-working seam is where a
+#: stored session engages a runtime over there), and the act then waits for its
+#: reply, of which the longest rung is the turn. ``_cmd_pilot`` enforces this as
+#: ONE bound around the whole act, so the number is a promise rather than a
+#: restatement: it also covers the reads with no rung of their own (the row
+#: lookup, the teardown), which is why the rungs' sum is not by itself a bound.
+PILOT_ACT_TIMEOUT_S = 2 * PILOT_BIND_TIMEOUT_S + max(PILOT_TURN_TIMEOUT_S, PILOT_REPLY_TIMEOUT_S)
+
+#: The ``style`` values a ``SlashResult`` may carry (``session/frontend_state``:
+#: ``info``/``warning``/``error``, the three the owner's own renders use). A
+#: receipt outside this set is one this build cannot read an outcome from, which
+#: ``_pilot_slash`` reports as unreported rather than guessing (review round 1,
+#: NIT-6): the old test was ``style != "error"``, and a MISSING style is not
+#: ``error``, so an unreadable receipt read as success.
+_SLASH_STYLES = ("info", "warning", "error")
+
+
+def _pilot_text(args: argparse.Namespace) -> str:
+    """The words a pilot act delivers: the positional, else stdin.
+
+    stdin is the shell's route for text that is not one argv word — an embedded
+    newline, a heredoc, a paste — which is ``lop send``'s own rule. A TTY is NOT
+    read: at a terminal an empty positional is a caller mid-command, and a verb
+    that parked on EOF waiting for one would read as a hang. The TUI's child gets
+    ``/dev/null`` for stdin (``tui/network_cli``), so a composer line reaches
+    this function with its words on argv and never blocks here.
+
+    THE WORDS ARE THE USER'S FROM THE FIRST NON-OPTION TOKEN: the positional is an
+    argparse REMAINDER (see its declaration for the defect that bought and for the
+    boundary), so nothing after that first plain token is re-read as a flag. The one
+    token this function does look at is a LEADING ``--``, which is the separator
+    rather than payload — see :func:`_pilot_text_from_args`.
+    """
+    text = _pilot_text_from_args(args)
+    if text or sys.stdin.isatty():
+        return text
+    return sys.stdin.read().strip()
+
+
+def _pilot_text_from_args(args: argparse.Namespace) -> str:
+    """The payload's own words, with argparse's separator taken back off.
+
+    A LEADING ``--`` IS THE SEPARATOR, not the first word of the payload. argparse
+    does not consume it under a ``REMAINDER`` — measured through the real parser:
+    ``--send ID -- explain the --peer flag`` arrives with the token still in the
+    list — so the spelling every other CLI taught the user would otherwise prefix
+    their prompt with a literal ``--``. Only the FIRST one is dropped, so a
+    payload that genuinely begins with a dash keeps an escape (``-- -- …``), and a
+    ``--`` in the MIDDLE of the text is left alone: it is a word the user typed.
+
+    WHAT ARRIVES HERE IS ALREADY POST-BOUNDARY: a leading flag-shaped token that is
+    one of this command's own flags never reaches this function as text (the parser
+    read it as that flag), which is why ``--`` is the documented way to send one and
+    why ``_cmd_sessions`` refuses the create-only flags outright rather than letting
+    one swallow the words around it.
+    """
+    parts = [str(part) for part in (getattr(args, "text", None) or ())]
+    if parts[:1] == ["--"]:
+        parts = parts[1:]
+    return " ".join(parts).strip()
+
+
+def _pilot_last_reply(viewer: Any) -> str:
+    """The last assistant text the viewer holds, or "" — the turn's own output.
+
+    Read from the display window rather than from anywhere this module keeps: the
+    owner is the author of a reply, and a CLI that cached one would be a second
+    copy of a conversation it does not own.
+    """
+    try:
+        rows = list(viewer.display_history_window())
+    except Exception:  # noqa: BLE001 — a missing history is "no reply", not a crash
+        return ""
+    for row in reversed(rows):
+        if str(getattr(row, "role", "")) != "assistant":
+            continue
+        text = getattr(row, "text", "")
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
+
+
+def _pilot_peer_block(peer: str) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
+    """The named peer's own catalogue block, or the refusal that stopped the read.
+
+    Read through this device's relay, which is the only thing that knows whether a
+    peer is answering — and read on FAILURE paths only, so an act that works never
+    pays a second fan-out for a distinction it does not need. (What a SUCCESS
+    receipt names is not read here either: the device comes from the session's own
+    row, which the act has already read — see ``_pilot_act``.)
+    """
+    from local_operator.network.types import MeshRefusal
+
+    try:
+        answer = _relay_answer("peer_session_rows", timeout=_listing_timeout())
+    except MeshRefusal as refusal:
+        # THIS DEVICE'S OWN RELAY is the component that failed, and its sentence
+        # already names it and the remedy.
+        return None, (refusal.code, refusal.sentence)
+    for device_id, entry in (answer.get("peers") or {}).items():
+        if device_id == peer or str(entry.get("name") or "") == peer:
+            return entry, None
+    return None, None
+
+
+def _pilot_unreachable_sentence(session_id: str, peer: str, block: dict[str, Any] | None) -> str:
+    """The one sentence for "this device cannot tell you about that peer".
+
+    Composed here rather than at each raise site because the two callers — an id
+    that resolved to nothing, and a dial that failed — must not describe one
+    situation two ways; that is the rule
+    ``remote_open.unreachable_peer_sentence`` already follows one layer down.
+    """
+    from local_operator.resume import peer_reason_words
+
+    if block is None:
+        return (
+            f"{peer} is not a device this network knows — `lop network peers` lists the "
+            "members this device can see"
+        )
+    reason = peer_reason_words(str(block.get("reason") or ""))
+    return (
+        f"{peer} is unreachable ({reason}), so nothing about {session_id} can be answered "
+        f"from here: `lop network doctor --peer {peer}` diagnoses the link"
+    )
+
+
+def _pilot_unresolved(session_id: str, peer: str) -> tuple[str, str]:
+    """The refusal an id that resolved to no peer row actually deserves.
+
+    THREE STATES WEAR ONE SYMPTOM, and a caller cannot act on any of them until it
+    knows which: no relay is running here (nothing on the mesh can be piloted at
+    all, and the remedy is `lop network start`), the named device did not answer
+    (the conversation may well be there — telling the user it is not would be a
+    claim this side cannot support), or the device answered and holds no such id (a
+    real "no", and a different next step).
+    """
+    block, refusal = _pilot_peer_block(peer)
+    if refusal is not None:
+        return refusal
+    if block is None or not block.get("reachable"):
+        return "peer_unreachable", _pilot_unreachable_sentence(session_id, peer, block)
+    return (
+        "session_unknown",
+        f"{peer} does not hold {session_id}: `lop network sessions --peer {peer}` lists "
+        "what it does hold",
+    )
+
+
+def _pilot_dial_refusal(
+    session_id: str, peer: str, message: str, config_dir: Path
+) -> tuple[str, str]:
+    """The refusal for a viewer whose dial produced NO SESSION.
+
+    ONE RULE FOR BOTH RUNGS — the open and the bind — and it is a correction this
+    PR made against itself twice. The first version asked the peer's catalogue
+    here; CI caught the same state answering two ways, because a cached row let the
+    dial fail a rung later than an uncached one. The read is not usable at this
+    moment anyway: A LINK THIS DEVICE'S RELAY STILL BELIEVES IN REPORTS THE PEER AS
+    REACHABLE for seconds after it died (measured in CI — the bind timed out while
+    the catalogue said `reachable`), and the fan-out a stopped peer needs can
+    itself time out, which leaves nothing to classify by.
+
+    So nothing is read but this device's own relay record (a local file read, no
+    dial). What the transport CAN say is that the dial produced no session, and
+    that one fact covers both sub-cases a person acts on — a device that is not
+    there, and a device whose runtime for that conversation is gone — whose first
+    step is the same one command. The code names the far end of the act (the
+    component in both), and the transport's own sentence rides along verbatim, so a
+    refused frame still reads as a refusal rather than as a link problem.
+    """
+    from local_operator.network import store
+
+    if store.find_own_relay(config_dir) is None:
+        return "relay_unavailable", _relay_unavailable_message()
+    return (
+        "peer_unreachable",
+        f"the dial to {peer} for {session_id} produced no session ({message}), so "
+        "nothing about that conversation is known from here: `lop network doctor "
+        f"--peer {peer}` tells a link that is down from a runtime that stopped, and "
+        "the session itself is untouched either way",
+    )
+
+
+def _cmd_pilot(args: argparse.Namespace, *, verb: str, session_id: str) -> int:
+    """``--send``/``--steer``/``--slash``: one act on a session that is not here.
+
+    WHY THIS DOES NOT GO THROUGH ``_relay_answer``. Every other verb in this file
+    is a request to THIS device's relay, and the session plane has a local op for
+    each of them. A turn is a different shape: what it needs is a PIPE — the owner
+    streams the turn's rows down it, and the answer is many frames rather than
+    one — and the client that speaks that pipe is the viewer (``stream_open`` plus
+    the viewer protocol, ``RemoteSessionClient``). So this opens the SAME viewer
+    the TUI's sidebar pick and ``lop --resume <a peer's id>`` open, and drives it.
+    A client that built its own frames here would be a second front-end path for
+    one conversation, which is what the spine forbids.
+
+    THE OWNER'S OWN WORDS ARE THE RECEIPT. Nothing here invents an outcome: the
+    admission sentence is the owner's, a slash receipt is the owner's own
+    ``SlashResult``, and "the turn ended" is the owner's terminal event. What this
+    side adds is the CONTRACT around them: ``ok`` answers one question — did the
+    peer run the act to its own terminal outcome — so a delivered-but-unfinished
+    act reports ``outcome: running``/``queued`` rather than an exit 0 that a
+    script would read as "it is done".
+    """
+    from local_operator.network.types import MeshRefusal
+
+    peer = str(getattr(args, "peer", "") or "")
+    if not peer:
+        raise MeshRefusal(
+            "peer_required",
+            f"--{verb} needs --peer: a conversation lives on one device, and only that "
+            "device's runtime can run a turn inside it",
+        )
+    text = _pilot_text(args)
+    if not text:
+        print(
+            f"--{verb} needs some text — pass it after the session id, or pipe it in",
+            file=sys.stderr,
+        )
+        return 2
+    if verb == "slash" and not text.lstrip("/").strip():
+        print(
+            "--slash needs a command, e.g. --slash <session> '/rename a better name'",
+            file=sys.stderr,
+        )
+        return 2
+
+    from local_operator.paths import config_dir
+
+    try:
+        payload, lines = asyncio.run(
+            asyncio.wait_for(
+                _pilot_act(
+                    verb=verb,
+                    session_id=session_id,
+                    peer=peer,
+                    text=text,
+                    config_dir=Path(config_dir()),
+                ),
+                # ONE bound around the whole act, at the number its parts add up
+                # to (``PILOT_ACT_TIMEOUT_S``) — the sum of the rungs alone is not
+                # a bound on the act, because the row lookup and the teardown have
+                # no rung of their own.
+                timeout=PILOT_ACT_TIMEOUT_S,
+            )
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not finish this act on {session_id} within "
+            f"{PILOT_ACT_TIMEOUT_S:.0f}s — the worst case this verb budgets for; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+    return _emit(args, payload, lines)
+
+
+async def _pilot_act(
+    *,
+    verb: str,
+    session_id: str,
+    peer: str,
+    text: str,
+    config_dir: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    """Open ``session_id`` on the peer as its viewer, perform ONE act, report it."""
+    from local_operator.network.types import MeshRefusal
+    from local_operator.session.remote_open import (
+        open_remote_viewer,
+        remote_row_for,
+        unreachable_peer_sentence,
+    )
+
+    # The reachability read is CACHE-FIRST and answers ``None`` with no dial when
+    # this device holds the id itself, so the local path pays nothing for it —
+    # the same property the TUI's guard and the shell's ``--resume`` rely on.
+    row = await asyncio.to_thread(remote_row_for, session_id, config_dir)
+    if row is None:
+        # WHICH refusal this is depends on facts this side has not read yet, and
+        # the three of them need three different next steps — see
+        # ``_pilot_unresolved``. Read on the failure path only.
+        code, sentence = await asyncio.to_thread(_pilot_unresolved, session_id, peer)
+        raise MeshRefusal(code, sentence)
+    if not row.reachable:
+        # The peer's name, the reason in words and the diagnosing command, all
+        # composed in the one place that owns "a peer row becomes a viewer".
+        raise MeshRefusal("peer_unreachable", unreachable_peer_sentence(session_id, row))
+
+    # THE DEVICE THE WORK HAPPENS ON, from the row and never from the string typed.
+    # ``--peer`` names where a conversation lives, but it is not what ROUTES this
+    # act — the session id is — so echoing it back as the receipt's answer made a
+    # wrong ``--peer`` invisible: `--peer no-such-device --send <id> hello` answered
+    # ``"peer": "no-such-device"`` with rc 0 while the turn ran on the real peer
+    # (QA round 1, Q1). The row this act has already read is the one place that
+    # answers it, so this costs no second fan-out — the same reason
+    # ``_pilot_peer_block``'s catalogue read stays on the failure paths.
+    #
+    # The typed string is judged by the exact-match rule that failure path already
+    # uses (device NAME or device ID, ``_pilot_peer_block``), and when it is neither
+    # it is REPORTED beside the device rather than dropped: a receipt that silently
+    # substituted the right name would hide the caller's mistake, and one that
+    # repeated the wrong name as the answer is the defect this replaced.
+    device_id = str(getattr(row, "owner_device", "") or "")
+    device = str(getattr(row, "owner_device_name", "") or device_id or peer)
+    named = "" if peer in (device, device_id) else peer
+
+    async def _never() -> Any:
+        # A remote viewer never takes over: a remote owner sets ``_can_go_cold``,
+        # so owner loss leaves this viewer cold rather than making this device a
+        # second writer (INV-1). The facade requires the factory, and it is
+        # unreachable — the same spelling the shell's ``--resume`` path uses.
+        raise RuntimeError("a viewer never takes over a session")
+
+    try:
+        viewer = await asyncio.wait_for(
+            open_remote_viewer(
+                session_id,
+                config_dir=config_dir,
+                takeover=_never,
+                # A ONE-SHOT SHELL VIEWER CONSUMES NO ACTION RECEIPT, and saying so
+                # is what makes /goal, /agent and /team work from here: the owner
+                # completes a receipt only when the client did NOT declare it
+                # (``runtime_must_complete``), so a viewer that claimed the attached
+                # vocabulary and rendered nothing left those three commands setting
+                # state and starting no turn — with a zero exit (review round 1,
+                # MAJOR-2). ``()`` is the honest declaration for a process that
+                # prints the owner's receipt and exits, and it is the reason this
+                # seam takes the list at all.
+                slash_consumers=(),
+            ),
+            timeout=PILOT_BIND_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "peer_unreachable",
+            f"{peer} did not open {session_id} within {PILOT_BIND_TIMEOUT_S:.0f}s; "
+            f"`lop network doctor --peer {peer}` diagnoses the link",
+        ) from exc
+    except ConnectionError as exc:
+        # THE OPEN IS A DIAL TOO. An unhandled `ConnectionError` here would surface
+        # as a traceback, which is the one thing this family never does with a
+        # refusal; see ``_pilot_dial_refusal`` for how the component is decided.
+        code, sentence = await asyncio.to_thread(
+            _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+        )
+        raise MeshRefusal(code, sentence) from exc
+    if viewer is None:
+        # Between the row read and here the id stopped being a peer's row (moved
+        # away, tombstoned). Refuse rather than let the id fall through to a local
+        # viewer for a conversation this device does not hold.
+        raise MeshRefusal("session_unknown", f"{session_id} is no longer a session held by {peer}")
+    try:
+        try:
+            # The cold-to-working seam: the first act that needs the runtime binds
+            # it, which is where a stored session on the peer ENGAGES a runtime.
+            await asyncio.wait_for(viewer.bind_runtime(), timeout=PILOT_BIND_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise MeshRefusal(
+                "session_unreachable",
+                f"{peer} did not answer for {session_id} within "
+                f"{PILOT_BIND_TIMEOUT_S:.0f}s — its runtime may be starting, or wedged; "
+                f"`lop network doctor --peer {peer}` diagnoses the link",
+            ) from exc
+        except ConnectionError as exc:
+            # A DIAL THAT PRODUCED NO STREAM IS THE DEVICE, whichever rung noticed:
+            # this is the one CI's stopped-peer case lands on (the viewer is cold
+            # until ``bind_runtime``, so the dial that produces no welcome frame
+            # fails HERE), and it must answer what the OPEN rung answers — one
+            # situation, one code, because the reachability read that catches most
+            # stopped peers answers ``peer_unreachable`` and a script branches on
+            # the code, not on which rung was unlucky (review round 1, MINOR-4,
+            # settled on the GUIDE side: its ``session_unreachable`` row says a
+            # bind that ran out of its BUDGET, which is the timeout rung above).
+            code, sentence = await asyncio.to_thread(
+                _pilot_dial_refusal, session_id, peer, str(exc), config_dir
+            )
+            raise MeshRefusal(code, sentence) from exc
+        if verb == "send":
+            payload, lines = await _pilot_send(viewer, session_id, device, text)
+        elif verb == "steer":
+            payload, lines = await _pilot_steer(viewer, session_id, device, text)
+        else:
+            payload, lines = await _pilot_slash(viewer, session_id, device, text)
+    finally:
+        # The viewer goes away and the PEER keeps its runtime: closing a viewer
+        # never stops the owner (the product's own rule, and the reason a moved
+        # session is still there next time).
+        #
+        # A FAILED TEARDOWN NEVER SPEAKS FOR THE ACT: this runs on the way out of
+        # both paths, so an exception here would replace the ``MeshRefusal``
+        # explaining what actually went wrong with a dispose error (review round
+        # 1, MINOR-5). Swallowed and logged, like the other teardown paths.
+        try:
+            await viewer.dispose()
+        except Exception:  # noqa: BLE001 — see above: the refusal outranks it
+            logging.getLogger(__name__).debug("disposing the pilot viewer failed", exc_info=True)
+
+    if named:
+        # The typed string was NOT this device. The receipt keeps the answer (who
+        # ran it) and carries the caller's own word beside it, in the payload and in
+        # the lines, so both a script and a person can see the disagreement.
+        payload["peer_named"] = named
+        lines.append(
+            f"you named {named}; {session_id} is held by {device}, which is where this ran"
+        )
+    return payload, lines
+
+
+async def _pilot_send(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Deliver a turn and wait for the owner's terminal outcome.
+
+    ``prompt_and_wait`` rather than ``prompt`` for exactly the reason its own
+    docstring gives: ``prompt`` returns on durable ADMISSION, which a shell
+    caller cannot tell from completion. It also routes the frame to the owner's
+    ``steer`` op when the peer is already streaming — the reconciliation the
+    composer makes, kept here rather than re-decided, so a message sent into a
+    live turn is delivered rather than refused for a race the client owns.
+    """
+    from local_operator.session.errors import RuntimeRetiring
+
+    payload: dict[str, Any] = {"session_id": session_id, "peer": peer, "verb": "send"}
+    try:
+        await asyncio.wait_for(viewer.prompt_and_wait(text), timeout=PILOT_TURN_TIMEOUT_S)
+    except TimeoutError:
+        payload.update(ok=False, outcome="running", code="turn_running")
+        return payload, [
+            f"{session_id} on {peer} took the turn and is still running it.",
+            "It was admitted there, so the work is happening — this command simply "
+            f"stopped waiting at {PILOT_TURN_TIMEOUT_S:.0f}s. Open it to watch it: "
+            f"`lop --resume {session_id}`",
+        ]
+    except RuntimeRetiring as exc:
+        payload.update(ok=False, outcome="queued", code="runtime_retiring", error=str(exc))
+        return payload, [
+            f"{peer} is retiring that session's runtime, so no turn ran here.",
+            str(exc),
+        ]
+    except RuntimeError as exc:
+        # The owner's own terminal outcome was an error — the peer's sentence is
+        # the receipt (``prompt_and_wait`` raises with ``outcome.error`` in it).
+        payload.update(ok=False, outcome="failed", code="turn_failed", error=str(exc))
+        return payload, [f"{session_id} on {peer} ran the turn and it failed:", str(exc)]
+    except ConnectionError as exc:
+        payload.update(ok=False, outcome="lost", code="session_unreachable", error=str(exc))
+        return payload, [
+            f"the connection to {peer} for {session_id} was lost during the turn:",
+            str(exc),
+            "The turn may still be running there — re-read the session before assuming "
+            "it stopped.",
+        ]
+    reply = _pilot_last_reply(viewer)
+    payload.update(ok=True, outcome="finished", reply=reply)
+    lines = [f"{session_id} on {peer}: the turn finished."]
+    if reply:
+        lines.append(reply)
+    return payload, lines
+
+
+async def _pilot_steer(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Inject into the turn that is running there — or say there is none.
+
+    A STEER IS NOT A PROMPT WITH ANOTHER NAME, and this gate is where the
+    difference becomes visible: the owner queues a steer against the turn it is
+    running, so a steer aimed at a session whose turn has ENDED has nothing to
+    correct. ``AttachedSession.prompt`` routes to a steer when the session is
+    streaming and to a prompt when it is not — right for a composer, where the
+    user does not choose, and wrong for this flag, whose whole meaning is "into
+    the turn already running": it would start a new turn instead. So the
+    streaming edge is read first, and an idle owner is refused BY NAME.
+
+    The read is the viewer's synced copy of the owner's own state (an owner that
+    stops clears it, ``_end_turn_locally``), not a guess from a timer. If it is
+    stale in the other direction the owner still QUEUES the steer for its next
+    turn and says so in its receipt, which this verb prints verbatim.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if not bool(getattr(viewer, "is_streaming", False)):
+        raise MeshRefusal(
+            "turn_not_running",
+            f"{session_id} on {peer} is not running a turn, so a steer has nothing to "
+            "correct: use --send to start one, or --slash to change the session",
+        )
+    try:
+        receipt = await asyncio.wait_for(viewer.prompt(text), timeout=PILOT_REPLY_TIMEOUT_S)
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"{peer} did not answer for the steer within {PILOT_REPLY_TIMEOUT_S:.0f}s; "
+            "the turn there is unaffected, and the steer may or may not have landed",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    because = str(receipt or "").strip() or "accepted"
+    return (
+        {
+            "ok": True,
+            "session_id": session_id,
+            "peer": peer,
+            "verb": "steer",
+            "outcome": "steered",
+            "receipt": because,
+        },
+        [
+            f"{session_id} on {peer}: {because}",
+            "A steer is delivered at the owner's "
+            "next tool boundary; it does not interrupt the step already running.",
+        ],
+    )
+
+
+async def _pilot_slash(
+    viewer: Any, session_id: str, peer: str, text: str
+) -> tuple[dict[str, Any], list[str]]:
+    """Run a routed slash command in the peer's session, and print its receipt.
+
+    ROUTED, not re-implemented: ``route_shared_slash`` carries the commands the
+    owner's capability list marks ``authoritative_session``, so the OWNER's state
+    is what moves (a rename lands in the peer's own session record, a model switch
+    in its own registry). The receipt is the owner's ``SlashResult`` — its ``text``
+    is the sentence, its ``style`` says whether it worked — so the exit code comes
+    from the peer rather than from this side's guess about what a command did.
+
+    ``peer`` is the device the command ran on, the same fact the other two acts
+    report: this receipt named NO device before (QA round 1, Q1's sibling on this
+    verb), and a slash that changes state on another machine has to say which one.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    command, _, arguments = text.lstrip("/").partition(" ")
+    command = command.strip()
+    try:
+        receipt = await asyncio.wait_for(
+            viewer.route_shared_slash(command, arguments.strip()),
+            timeout=PILOT_REPLY_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        raise MeshRefusal(
+            "session_unreachable",
+            f"the peer did not answer /{command} within {PILOT_REPLY_TIMEOUT_S:.0f}s",
+        ) from exc
+    except ConnectionError as exc:
+        raise MeshRefusal("session_unreachable", str(exc)) from exc
+    payload: dict[str, Any] = {
+        "session_id": session_id,
+        "peer": peer,
+        "verb": "slash",
+        "command": command,
+        "receipt": receipt,
+    }
+    if not isinstance(receipt, dict):
+        # An owner that answers prose instead of a typed result: it is reported,
+        # never counted as success — this side has no field to read an outcome
+        # from, and an exit 0 here would be a guess dressed as the peer's word
+        # (review round 1, NIT-6). The family's own word for that is
+        # `slash_unreported` (``_reported``), because a receipt that does not
+        # carry the fact it is a receipt for is not a receipt.
+        raise MeshRefusal(
+            "slash_unreported",
+            f"{peer} answered /{command} with prose rather than a typed receipt, so "
+            f"whether it ran is unknown: {str(receipt)[:200]}",
+        )
+    # THE RECEIPT'S OWN FIELDS, and only them: ``SlashResult`` is
+    # ``kind``/``text``/``style``/``data`` (``session/frontend_state.py``), so a
+    # fallback to any other key would be this side inventing a field the owner
+    # never sends — and reading a mesh ``detail`` here is exactly the raw-token
+    # leak ``test_reason_surfaces`` exists to catch.
+    style = str(receipt.get("style") or "")
+    said = str(receipt.get("text") or "").strip()
+    if style not in _SLASH_STYLES:
+        # ``ok`` used to be ``style != "error"``, which is TRUE for a receipt with
+        # no style at all — a success claim about a field the owner never sent.
+        raise MeshRefusal(
+            "slash_unreported",
+            f"{peer}'s receipt for /{command} carried no style this build knows "
+            f"({style or 'none'}), so whether it ran is unknown: {said[:200]!r}",
+        )
+    payload.update(
+        ok=style != "error",
+        outcome="ran" if style != "error" else "refused",
+        text=said,
+        style=style,
+    )
+    return payload, [f"{session_id} on {peer}: /{command} — {said or 'no receipt'}"]
+
+
+#: The dests of the flags that only describe a session being CREATED (each one's
+#: own help opens with "with --create:"). With a pilot act they can neither apply
+#: nor be ignored silently: they are ACCEPTED and then dropped, and the words a user
+#: meant as their text are most of the reason one is on the line — `--send <s>
+#: --model X is the field` delivers "is the field" and never mentions the two tokens
+#: it ate (review round 2, MINOR-1).
+#:
+#: THREE OF THEM ARE THE PARENT PARSER'S, not this subcommand's — ``model``,
+#: ``hosting`` and ``run_in`` parse before OR after the subcommand (measured), and a
+#: launch flag is exactly as dropped with an act as a create-only one. They are here
+#: for that reason and despite the placement.
+#:
+#: The payload is taken from the first token that is not an option, so a flag-shaped
+#: first token cannot be told from a flag. Refusing the flag, and naming `--` in
+#: the sentence, is the one answer that does not also break a flag a caller
+#: passes deliberately.
+#: `--json` is deliberately NOT in this set — it is an option this verb really uses,
+#: so its meaning here is knowable, and the narrowed help text is what says a leading
+#: `--json` is read as the flag.
+_CREATE_ONLY_DESTS: tuple[str, ...] = (
+    "name",
+    "cwd",
+    "prompt",
+    "profile",
+    "team",
+    "effort",
+    "agent",
+    "agent_name",
+    "agent_id",
+    "model",
+    "hosting",
+    "run_in",
+)
+
+
 def _cmd_sessions(args: argparse.Namespace) -> int:
     """``lop network sessions`` — the session plane, across the mesh.
 
@@ -2376,6 +3764,57 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # a sentence naming a flag that does not exist (Q-R5-2).
         print("--force applies to --stop only", file=sys.stderr)
         return 2
+
+    # THE PILOT ACTS ARE DECIDED FIRST, and that ordering is the point: they are
+    # the only verbs here that open a VIEWER, and a command line that asked for
+    # one of them AND an archive/stop would run one act while silently dropping
+    # the other — the class of untruth ``--force`` above is refused for.
+    pilot = [
+        (name, str(getattr(args, name, "") or ""))
+        for name in ("send", "steer", "slash")
+        if str(getattr(args, name, "") or "")
+    ]
+    if pilot:
+        if len(pilot) > 1:
+            print(
+                "name one of --send/--steer/--slash: each is one act on one session, and "
+                "they are not a pipeline",
+                file=sys.stderr,
+            )
+            return 2
+        verb, target = pilot[0]
+        clash = next(
+            (
+                name
+                for name in ("create", "engage", "stop", "archive", "unarchive", "delete")
+                if getattr(args, name, "")
+            ),
+            "",
+        )
+        if clash:
+            print(
+                f"--{verb} acts on the session you name; --{clash} would act on another, so "
+                "this command would do one of the two",
+                file=sys.stderr,
+            )
+            return 2
+        # A FLAG THAT ONLY DESCRIBES A NEW SESSION, WITH AN ACT, is the same untruth
+        # ``--force`` above is refused for and the reason `--create` is in the clash
+        # list: accepted and then dropped, with the user's own words the most likely
+        # thing it swallowed. See ``_CREATE_ONLY_DESTS``.
+        create_only = next(
+            (dest for dest in _CREATE_ONLY_DESTS if str(getattr(args, dest, "") or "")), ""
+        )
+        if create_only:
+            print(
+                f"--{create_only.replace('_', '-')} describes a session being CREATED, and "
+                f"--{verb} acts on one that already exists: it would be accepted and then "
+                "dropped. If you meant those words as text, separate the text with `--` "
+                f"(`--{verb} <session> -- <text>`)",
+                file=sys.stderr,
+            )
+            return 2
+        return _cmd_pilot(args, verb=verb, session_id=target)
 
     # ARCHIVE, RESTORE AND DELETE: routed to the OWNER, never replicated (§8.1).
     # The guards, the confirmation semantics and the retention interaction stay in
@@ -3194,7 +4633,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         decision="admit" if admit else "decline",
         matched=admit,
         reason="" if admit else "declined",
-        answered_by="harness" if args.sas_stdin else "human",
+        answered_by=_answered_by(args),
         allow_no_answer=True,
     )
     if live is None:
@@ -3275,6 +4714,27 @@ def _read_confirmation(args: argparse.Namespace) -> str:
     except (EOFError, KeyboardInterrupt):
         typed = ""
     return "yes" if typed in ("y", "yes") else "no"
+
+
+def _answered_by(args: argparse.Namespace) -> str:
+    """Who supplied a code or a yes/no — decided once, and only claimed when true.
+
+    ``human`` IS A CLAIM ABOUT A PERSON, so it may only be made where a person could
+    have typed the answer: this process has to own a terminal. Two things force that
+    reading. ``--sas-stdin`` is the explicit pipe seam (the e2e harness, or a script),
+    and a piped answer that did not announce itself is still a pipe — no person is
+    behind it, and the CLI cannot see one. And the audit's question is exactly "did a
+    person read this back?", which is what ``pairing_confirmed``'s ``answered_by`` is
+    for, so an unattributable answer must not be dressed up as a human one. Agent
+    review round 1 (semantic finding 3) found this field claiming ``human`` for a
+    machine-supplied code: the tool's phase two passed no seam, so the old rule — "not
+    ``--sas-stdin``, therefore human" — was reading a machine as a person. The tool has
+    no phase two any more (its ``confirm`` field is gone), and a script that runs this
+    command is now recorded as what it is.
+    """
+    if getattr(args, "sas_stdin", False):
+        return "harness"
+    return "human" if _has_terminal() else "harness"
 
 
 def _has_terminal() -> bool:

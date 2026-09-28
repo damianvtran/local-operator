@@ -560,6 +560,80 @@ def test_a_command_with_a_reason_sheds_the_reason_before_the_command() -> None:
     assert _failure_row("minerva-qa", line, 45) == "failed: minerva-qa — /mcp reauth minerva-qa"
 
 
+def test_a_borrowed_signin_keeps_the_owner_and_a_command() -> None:
+    """Design round 1, D1/D2 — the one family whose command does NOT lead its text.
+
+    ``render_borrowed_signin`` names the owning device FIRST, because the command is
+    only meaningful on that device. Round 2 handled the overlong tail by keeping the
+    command whole and shedding that owner, and the design round measured why that is
+    the wrong fact to lose: ``failed: launchdarkly — /mcp login launchdarkly…`` prints
+    the LOCAL instruction this family exists to replace (a local grant silently wins
+    over the borrow), and it is indistinguishable at a glance from a device whose own
+    credential is dead. The one part that IS repeated is the server name the command
+    ends on — the row's own label already prints it — so that is what the ladder drops
+    first, and the ``…`` marks the elided ARGUMENT instead of trailing a complete
+    command (D3).
+    """
+    from local_operator.network.credentials.messages import render_borrowed_signin
+    from local_operator.tui.widgets.toast import toast_max_width, truncate_cells
+
+    owner = "damians-MacBook-Pro"
+    widest = TOAST_MAX_WIDTH - TOAST_PADDING_CELLS
+    # Rung 1, unchanged: both halves fit at the widest card for the canonical pair
+    # (38-cell text, 55-cell row against the detail row's 56).
+    assert (
+        _failure_row("linear", render_borrowed_signin(owner, "linear"), widest)
+        == "failed: linear — damians-MacBook-Pro: /mcp login linear"
+    )
+    # A 12-cell server name cannot hold both, and there the OWNER is what survives:
+    # measured at exactly 56 cells, and the elision is marked so ``/mcp login`` cannot
+    # be read as the whole command (it answers ``usage: /mcp login <name>``).
+    assert (
+        _failure_row("launchdarkly", render_borrowed_signin(owner, "launchdarkly"), widest)
+        == "failed: launchdarkly — damians-MacBook-Pro: /mcp login …"
+    )
+    # The case the finding is FOR: macOS's collision suffix pushes the round-2
+    # threshold to zero, so ``linear`` used to shed its owner too. The owner is named.
+    long_device = _failure_row(
+        "linear", render_borrowed_signin("Damians-MacBook-Pro-2", "linear"), widest
+    )
+    assert long_device == "failed: linear — Damians-MacBook-Pro-2: /mcp login …"
+    assert "Damians-MacBook-Pro-2" in long_device
+    # Below the owner rung the COMMAND outranks the owner: that is the row base
+    # printed, and the repair D2 asks for. The round-2 ladder ended on the clamp of
+    # ``full``, whose head is the owner, so from a 43-cell card down it read
+    # ``failed: linear — damians-MacBook…`` — a truncated machine name and no command
+    # at all, truncating the very suffix that tells one device from another.
+    forty_four = toast_max_width(44) - TOAST_PADDING_CELLS
+    forty_three = toast_max_width(43) - TOAST_PADDING_CELLS
+    assert (
+        _failure_row("linear", render_borrowed_signin(owner, "linear"), forty_four)
+        == "failed: linear — /mcp login linear"
+    )
+    assert (
+        _failure_row("linear", render_borrowed_signin(owner, "linear"), forty_three)
+        == "failed: linear — /mcp login line…"
+    )
+    # NEGATIVE CONTROL: a text that merely MENTIONS a command later is left exactly as
+    # it was — the recognition is a shape (one space-free token, then ``: ``), not a
+    # substring search for ``/mcp ``.
+    text = "the endpoint /mcp login x is not configured" + "y" * 30
+    assert _failure_row("srv", text, widest) == truncate_cells(f"failed: srv — {text}", widest - 2)
+    # NEGATIVE CONTROL 2, and the reason the recogniser was tightened with the rewrite:
+    # rungs 2/3 below REWORD the tail, so a text of the family's SHAPE that names a
+    # different server must not have its words reshuffled into an elision it never had.
+    impostor = f"{owner}: /mcp login gitlab"
+    assert _failure_row("srv", impostor, forty_three) == truncate_cells(
+        f"failed: srv — {impostor}", forty_three - 2
+    )
+    # ... and the comparison is the WHOLE command, so a server name that itself
+    # contains a space still matches its own row and is not read as a longer name's
+    # last word.
+    spaced = "my server"
+    spaced_row = _failure_row(spaced, render_borrowed_signin(owner, spaced), widest)
+    assert spaced_row == "failed: my server — damians-MacBook-Pro: /mcp login …"
+
+
 def test_a_diagnostic_with_a_dash_is_still_clamped_exactly_as_before() -> None:
     """The shed is keyed on a LEADING command, never on the dash.
 

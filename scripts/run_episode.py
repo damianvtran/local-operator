@@ -918,6 +918,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="'scripted-finish' issues one finish action with no provider "
         "(for proving the script against a fake adapter; never for a result)",
     )
+    parser.add_argument(
+        "--engagement",
+        default="reply",
+        choices=("reply", "session"),
+        help=(
+            "'reply' (default) is the reply-channel arm: one decision per model call "
+            "through the projected action tool. 'session' is the pilot session arm: the "
+            "episode runs as one sdk.open_session turn whose actions arrive as calls to "
+            "a session-scoped MCP server, so the model drives the full harness surface. "
+            "The session arm writes a PILOT record, not the sealed-bundle format, and "
+            "is not comparable to reply-arm results"
+        ),
+    )
+    parser.add_argument(
+        "--session-route",
+        type=functools.partial(_parse_route, flag="--session-route"),
+        default=None,
+        metavar="PROVIDER/MODEL",
+        help=(
+            "the model the SESSION runs on; default: the episode --route. "
+            "'test/mock' drives the plumbing deterministically with the mock provider"
+        ),
+    )
+    parser.add_argument(
+        "--session-wall-s",
+        type=float,
+        default=None,
+        help=(
+            "wall bound for the session arm's turn; past it the driving process calls "
+            "abort() so the episode ends through the normal stop path. Default: none"
+        ),
+    )
     return parser
 
 
@@ -1028,6 +1060,109 @@ def _ensure_lease_outlasts_wall(
             purpose=args.infra_purpose,
         ),
     )
+
+
+async def _run_session_arm(
+    *,
+    args: argparse.Namespace,
+    spec: Any,
+    config: Any,
+    selector: Any,
+    resolver: SecretResolver,
+    route: tuple[str, str],
+) -> int:
+    """Drive ONE episode through the session engagement (the pilot arm).
+
+    The engagement is imported HERE, function-locally: this script's module
+    body must stay free of session/TUI imports (``tests/unit/evaluation/runner/
+    test_isolation.py`` probes exactly that), and a reply-arm run must not pay
+    the session arm's import graph at all.
+
+    ISOLATION IS PREFLIGHT-CHECKED, NEVER ASSUMED. The session needs three
+    ambient facts the launchd launcher sets: a scratch ``HOME``, the scratch
+    config root, and ``LOP_RUN_SCRATCH_ROOT``. Each is REQUIRED here -- an
+    unset variable is a refusal, not a fallback to the operator's own home --
+    and the episode's cwd is created INSIDE the scratch so MCP discovery reads
+    the episode's declaration rather than the operator's (the recorded QA
+    MUST: MCP discovery is cwd-scoped).
+    """
+
+    from local_operator.evaluation.session_arm import (
+        _outcome_json as _session_outcome_json,
+    )
+    from local_operator.evaluation.session_arm import run_session_episode
+    from local_operator.session.spec import (
+        ApprovalPolicy,
+        SessionIsolationError,
+        SessionRoots,
+        SessionSpec,
+        VolatileRootError,
+    )
+
+    missing = [
+        name
+        for name in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "LOP_RUN_SCRATCH_ROOT")
+        if not os.environ.get(name)
+    ]
+    if missing:
+        print(
+            "--engagement session requires " + ", ".join(missing) + " (the episode "
+            "scratch the launcher sets); refusing to run the session against an "
+            "ambient home",
+            file=sys.stderr,
+        )
+        return EXIT_PREFLIGHT
+    home = Path(os.environ["HOME"]).resolve()
+    scratch_root = Path(os.environ["LOP_RUN_SCRATCH_ROOT"]).resolve()
+    config_dir = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"]).resolve()
+    agent_home = Path(
+        os.environ.get("LOCAL_OPERATOR_HOME") or (home / "local-operator-home")
+    ).resolve()
+    cwd = scratch_root / "workspace"
+    cwd.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        roots = SessionRoots(
+            config_dir=config_dir, agent_home=agent_home, cwd=cwd, allow_volatile=False
+        )
+        roots.assert_durable()
+    except (VolatileRootError, SessionIsolationError) as error:
+        print(str(error), file=sys.stderr)
+        return EXIT_PREFLIGHT
+
+    session_provider, session_model = args.session_route or route
+    session_spec = SessionSpec(
+        hosting=session_provider,
+        # exec --yolo semantics: see session_arm.SESSION_APPROVALS for why an
+        # unattended episode must not turn its own gates into a measurement.
+        model=session_model,
+        approvals=ApprovalPolicy.auto(),
+    )
+    try:
+        resolved = resolver.resolve([ref.name for ref in spec.secret_refs])
+    except Exception as error:  # noqa: BLE001 - the resolver's refusals are preflight
+        # The diagnostic names the REF and never a value; a missing or unusable
+        # secret is the operator's to fix before anything is allocated.
+        print(f"secret resolution failed before launch: {error}", file=sys.stderr)
+        return EXIT_PREFLIGHT
+
+    outcome = await run_session_episode(
+        spec=spec,
+        config=config,
+        selector=selector,
+        roots=roots,
+        scratch_root=scratch_root,
+        session_spec=session_spec,
+        secrets=resolved,
+        display_name=f"arm-{spec.episode_id}",
+        max_wall_s=args.session_wall_s,
+    )
+    print(json.dumps(_session_outcome_json(outcome), indent=2, sort_keys=True))
+    diagnostic = outcome.diagnostic or ""
+    if outcome.status == "failed_pre_bundle" and diagnostic.startswith(_SECRET_DIAGNOSTICS):
+        # Same contract as the reply arm: name the ref, keep the value out.
+        print(diagnostic, file=sys.stderr)
+        return EXIT_PREFLIGHT
+    return EXIT_OK if outcome.status == "completed" else EXIT_EPISODE
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -1158,6 +1293,20 @@ async def run(args: argparse.Namespace) -> int:
             **_infra_disclosure_metadata(infra_values),
         },
     )
+
+    if args.engagement == "session":
+        try:
+            return await _run_session_arm(
+                args=args,
+                spec=spec,
+                config=config,
+                selector=selector,
+                resolver=resolver,
+                route=(provider, model),
+            )
+        finally:
+            if auth_store is not None:
+                auth_store.close()
 
     if args.model_client == "scripted-finish":
         model_client: Any = _ScriptedFinish(route)
