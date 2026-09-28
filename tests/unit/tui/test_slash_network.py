@@ -1318,6 +1318,79 @@ async def test_the_invite_arm_accepts_every_line_its_own_receipt_prints(
 
 
 @pytest.mark.asyncio
+async def test_the_invite_arm_addresses_a_multi_word_name_the_way_its_siblings_do(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """U2-1: a name `new` accepted has to be a name `invite` can address.
+
+    `new` takes the WHOLE tail, so `/network new My Fancy Net` makes a mesh a space
+    wide, and `rename`, `rm`, `disconnect` and `member rm` each resolve a
+    longest-prefix target so that name stays reachable. `invite` was the fifth and
+    the only one that read the space as a surplus word, answering *My Fancy Net is
+    more than one name* — a sentence that is false about a name this same surface
+    creates, lists and renames, and that left the 26-character id (copied out of a
+    DIFFERENT refusal) as the only route to the mesh the user had just named.
+
+    The resolve is its siblings', and the LEFTOVER is what still refuses, which is
+    what keeps R2-2 whole: `/network invite My Fancy Net extra` must not quietly
+    mint against the two words it could resolve, and an unresolvable multi-word tail
+    must not run either — a local refusal is the only answer that cannot drop a
+    word. The single misspelt token still degrades to the CLI (which names the
+    networks this device is in), because that refusal is the CLI's own.
+
+    The argv goes through the real `lop network` parser exactly as its sibling above
+    does: a name with a space reaches argparse as ONE token only if the arm joins it,
+    and a name split across two argv entries is the same defect one layer down.
+    """
+    import argparse
+
+    from local_operator.network import cli as net_cli
+    from tests.unit.network import conftest as net_fixtures
+
+    # BOTH names are in the store, so the LONGEST match has to win: the arm must
+    # address the mesh the user typed rather than the one that is merely a prefix.
+    _isolated_network_store(monkeypatch, ("My Fancy", "My Fancy Net"))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+    network = net_fixtures.subcommands_of(parser)["network"]
+
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/network invite My Fancy Net")
+        await app.workers.wait_for_complete()
+        assert run.calls == [["invite", "--role", "drive", "--network", "My Fancy Net"]], run.calls
+        network.parse_args(run.calls[0])
+        # The shorter name is still addressable beside it, and a leading flag pair
+        # rides with a multi-word name the way the receipt's own line does.
+        await _submit(pilot, app, "/network invite --role admin My Fancy")
+        await app.workers.wait_for_complete()
+        flagged = ["invite", "--role", "admin", "--network", "My Fancy"]
+        assert run.calls[1:] == [flagged], run.calls[1:]
+        # A SURPLUS THE RESOLVE CAN SEE: the name resolved, the extra word refused.
+        await _submit(pilot, app, "/network invite My Fancy Net extra")
+        await app.workers.wait_for_complete()
+        assert len(run.calls) == 2, run.calls
+        notices = "\n".join(_notices(app))
+        assert "My Fancy Net extra is more than one name" in notices, notices
+        # A SURPLUS IT CANNOT: nothing in this tail names a network, and the arm may
+        # not hand the first word to the CLI and drop the rest on the way.
+        await _submit(pilot, app, "/network invite Gamma Mesh extra")
+        await app.workers.wait_for_complete()
+        assert len(run.calls) == 2, run.calls
+        assert "Gamma Mesh extra is more than one name" in "\n".join(_notices(app))
+        # ONE misspelt token is not a surplus: it is passed through, so the refusal
+        # that comes back names the networks this device is actually in.
+        await _submit(pilot, app, "/network invite My-Fancy-Typo")
+        await app.workers.wait_for_complete()
+        assert run.calls[2:] == [
+            ["invite", "--role", "drive", "--network", "My-Fancy-Typo"]
+        ], run.calls[2:]
+
+
+@pytest.mark.asyncio
 async def test_the_invite_refusal_names_a_remedy_the_caret_accepts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
