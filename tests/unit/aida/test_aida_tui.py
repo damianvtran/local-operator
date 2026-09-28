@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from local_operator.tui.widgets.editor import Editor
 from tests.unit.tui.test_app_pilot import (
     FakeSession,
     _factory,
@@ -67,7 +68,7 @@ async def test_the_picker_leads_with_her_pinned_row(tmp_path, monkeypatch) -> No
     app = _boot(tmp_path, monkeypatch)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        editor = app.query_one("Editor")
+        editor = app.query_one(Editor)
         editor.focus()
         editor.text = "/resume"
         editor.move_cursor(editor._end_of_buffer())
@@ -106,6 +107,7 @@ async def test_the_pause_resume_status_receipts(tmp_path, monkeypatch) -> None:
     from local_operator.config import ConfigManager
 
     her_id = await aida_pkg.ensure_session(tmp_path)
+    assert her_id is not None
     # The cadence arm is what gives ``pause`` an index entry to stamp: her
     # ensure writes ``wakes/<id>.json`` with the ``aida-cadence`` one-shot.
     from local_operator.wakes import store as wake_store
@@ -115,7 +117,7 @@ async def test_the_pause_resume_status_receipts(tmp_path, monkeypatch) -> None:
     app = _boot(tmp_path, monkeypatch)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        editor = app.query_one("Editor")
+        editor = app.query_one(Editor)
 
         async def run(command: str) -> str:
             editor.focus()
@@ -212,7 +214,7 @@ async def test_a_request_rides_the_adoption_onto_her_conversation(tmp_path, monk
     app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=resume_factory)
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
-        editor = app.query_one("Editor")
+        editor = app.query_one(Editor)
         editor.focus()
         editor.text = "/aida summarise everything in flight"
         editor.move_cursor(editor._end_of_buffer())
