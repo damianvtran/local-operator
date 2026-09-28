@@ -59,6 +59,7 @@ from local_operator.tools.builtin import (
     _validation_error,
     spill_truncate,
 )
+from local_operator.tools.confinement import confinement_of
 
 #: Sentinel for "jedi has not been resolved yet", distinct from a resolved
 #: ``None`` (the extra is absent). The two cannot share a spelling: the first
@@ -645,6 +646,20 @@ async def execute_lsp(
         return _error(tool_call_id, "lsp", "line is 1-based; the first line is 1")
     if params.new_name and not _IDENTIFIER_RE.fullmatch(params.new_name):
         return _error(tool_call_id, "lsp", f"new_name is not an identifier: {params.new_name!r}")
+
+    # A confined session refuses this tool entirely: the analysis runs
+    # IN-PROCESS and reads the project's import graph around the named file, so
+    # checking the one path argument could not confine what it reads. Fail
+    # closed with the reason named (see ``tools.confinement``).
+    confinement = confinement_of(context)
+    if confinement is not None:
+        return _error(
+            tool_call_id,
+            "lsp",
+            "refused: this session is confined to "
+            f"{confinement.root}, and `lsp` analyses a project's import graph "
+            "in-process -- a reach this boundary does not cover",
+        )
 
     cwd = _safe_cwd(context)
     try:

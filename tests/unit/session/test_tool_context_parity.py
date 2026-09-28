@@ -80,6 +80,11 @@ SENTINELS: dict[str, Any] = {
     # ``/project`` surface would answer "unavailable" while the store sat right
     # there on disk.
     "project_registry": object(),
+    # The confinement root backs every local tool's enforcement points (shell
+    # spawn, path readers). Dropped on the way to the executor, a session the
+    # caller confined would run its UNCONFINED default -- shell on the host,
+    # paths anywhere -- which is the boundary silently off.
+    "confinement_root": "/tmp/sentinel-confinement",
 }
 
 #: ToolContext fields the Session takes under a DIFFERENT name. Kept tiny and

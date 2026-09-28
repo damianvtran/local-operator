@@ -57,6 +57,7 @@ def _run_rig(
     interpreter: spawn_helpers.SpawnInterpreter,
     *,
     child_acts: str | None = None,
+    challenge_reply: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     selector_dir = root / "adapter"
     selector = spawn_helpers.build_spawnable_adapter(
@@ -104,6 +105,8 @@ def _run_rig(
     ]
     if child_acts is not None:
         args += ["--child-acts", child_acts]
+    if challenge_reply is not None:
+        args += ["--challenge-reply", challenge_reply]
     completed = subprocess.run(
         args, capture_output=True, text=True, env=env, cwd=str(REPO), check=False
     )
@@ -124,6 +127,19 @@ def _record_kinds(run_root: Path) -> list[str]:
     records = sorted(run_root.rglob("events.jsonl"))
     assert len(records) == 1, records
     return [json.loads(line)["kind"] for line in records[0].read_text().splitlines()]
+
+
+def _record_payloads(run_root: Path, kind: str) -> list[dict[str, Any]]:
+    """Every recorded row of one kind (``{"kind": ..., **payload}`` rows)."""
+
+    records = sorted(run_root.rglob("events.jsonl"))
+    assert len(records) == 1, records
+    rows = [json.loads(line) for line in records[0].read_text().splitlines()]
+    return [
+        {key: value for key, value in row.items() if key != "kind"}
+        for row in rows
+        if row["kind"] == kind
+    ]
 
 
 def _log_events(log: Path) -> list[dict[str, Any]]:
@@ -152,11 +168,25 @@ def test_a_whole_episode_runs_offline_and_scores(
         "mcp_settle",
         "tools",
         "action_batch",
+        "action_completion_challenged",
         "action_finish",
     ):
         assert expected in kinds, kinds
     assert kinds.count("action_batch") == 1
+    # The completion gate round-tripped through the REAL bridge: the first
+    # `done` claim was challenged once, then the script re-declared and THAT
+    # declaration ended the episode -- and the record carries the claim the
+    # gate reasoned about, status and reason both.
+    assert kinds.count("action_completion_challenged") == 1
     assert kinds.count("action_finish") == 1
+    challenged = _record_payloads(run_root, "action_completion_challenged")
+    assert challenged[0]["reason"] == "session-arm rig: episode complete"
+    assert "That declaration is a CLAIM" in challenged[0]["challenge"]
+    assert "session-arm rig: episode complete" in challenged[0]["challenge"]
+    finished = _record_payloads(run_root, "action_finish")
+    assert finished[0]["status"] == "done"
+    assert finished[0]["reason"] == "session-arm rig: episode complete, re-checked"
+    assert finished[0]["completion_challenged"] is True
 
     # The wait batch's rendered frame came back through the MCP tool result:
     # the model's next request carries the tool row the call produced.
@@ -165,10 +195,52 @@ def test_a_whole_episode_runs_offline_and_scores(
         event.get("last_tool_text") for event in events
     ]
 
+    # ...and the challenge itself reached the model through the same wire: the
+    # request after the first finish carried the challenge as its last tool
+    # row, which is the whole mechanism -- a refusal the model can read.
+    assert any(
+        "That declaration is a CLAIM" in (event.get("last_tool_text") or "") for event in events
+    ), [event.get("last_tool_text") for event in events]
+
     # The canary secrets never surface outside the worker's own pipe.
     assert CANARY_SECRET not in completed.stdout
     assert CANARY_SECRET not in completed.stderr
     assert CANARY_KEY not in completed.stdout
+
+
+def test_a_challenged_claim_is_rescued_by_a_corrective_action(
+    durable_path: Path,  # noqa: F811
+    adapter_wheel: Path,
+    spawn_interpreter: spawn_helpers.SpawnInterpreter,
+) -> None:
+    """task_013's shape, end to end on the offline rig: CHALLENGE -> ACTION -> finish.
+
+    The real-task failure this gate exists for was a model that had completed
+    the work and declared it finished without the submission -- the episode
+    ended on the claim, the evaluator's state capture had no ``form_response``,
+    and the run scored 0 where the same answers scored 1.0 through a channel
+    that challenged the claim. This test drives the second half of that
+    rescue: the challenged script does NOT re-declare -- it makes one more
+    corrective action (the submit stand-in), and the NEXT finish ends the
+    episode with the score intact.
+    """
+
+    root = durable_path / f"s-{uuid.uuid4().hex[:8]}"
+    completed, run_root, log = _run_rig(
+        root, adapter_wheel, spawn_interpreter, challenge_reply="act"
+    )
+
+    outcome = _outcome(completed)
+    assert outcome["steps"] == 2  # the corrective action after the challenge counted
+    assert outcome["terminal_reason"] == "finish"
+    assert outcome["score"]["status"] == "scored" and outcome["score"]["binary"] == 1
+
+    kinds = _record_kinds(run_root)
+    assert kinds.count("action_batch") == 2
+    assert kinds.count("action_completion_challenged") == 1
+    assert kinds.count("action_finish") == 1
+    finished = _record_payloads(run_root, "action_finish")
+    assert finished[0]["completion_challenged"] is True
 
 
 @pytest.mark.parametrize("child_acts", ["finish", "wait"])
@@ -191,6 +263,7 @@ def test_a_delegated_child_cannot_drive_or_end_the_episode(
     assert outcome["terminal_reason"] == "finish"
     kinds = _record_kinds(run_root)
     assert kinds.count("action_batch") == 1
+    assert kinds.count("action_completion_challenged") == 1
     assert kinds.count("action_finish") == 1
 
     events = _log_events(log)

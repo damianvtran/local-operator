@@ -3465,9 +3465,22 @@ def _bounded_quote(text: str) -> str:
 
 
 def build_completion_challenge(
-    *, claim: FinishAction, instruction: str, observation: Observation
+    *,
+    claim: FinishAction,
+    instruction: str,
+    observation: Observation,
+    reply_guidance: str | None = None,
 ) -> str:
     """The user turn that asks the model to check a ``done`` claim.
+
+    ``reply_guidance`` is the ONE sentence that states HOW to answer, and it is
+    a parameter because the channel differs while the challenge's substance
+    must not: the reply channel's answer is a JSON batch bound to an
+    observation id, while the session engagement's answer is another call to
+    the action tool. Everything above the guidance -- the claim quoted as a
+    claim, the task restated, the end state named as the only evidence -- is
+    byte-identical across channels when the default is used, which is what
+    keeps the two channels' challenges comparable.
 
     WHY THE WORDING IS SHAPED THIS WAY, and it is not a polite "are you sure?".
     The measured failure is not a model that did not look -- its claim was TRUE
@@ -3491,6 +3504,12 @@ def build_completion_challenge(
     observation, and getting that wrong costs a billed rejection.
     """
 
+    guidance = reply_guidance or (
+        "Reply with a JSON batch for this same observation "
+        f"(Observation ID: {observation.observation_id}; Frames: "
+        f"{_frames_line(observation)}) and nothing else."
+    )
+
     return (
         "You declared this task finished. That declaration is a CLAIM, and it is "
         "not accepted yet: check it against what the environment actually shows.\n\n"
@@ -3507,10 +3526,7 @@ def build_completion_challenge(
         "* the SAME finish action, unchanged, if this observation already shows every "
         "required outcome; or\n"
         "* a batch of actions that closes the gap you can see.\n\n"
-        "Do no optional extra work, and do not restate your plan. Reply with a JSON "
-        "batch for this same observation "
-        f"(Observation ID: {observation.observation_id}; Frames: "
-        f"{_frames_line(observation)}) and nothing else."
+        "Do no optional extra work, and do not restate your plan. " + guidance
     )
 
 
