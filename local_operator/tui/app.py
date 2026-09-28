@@ -11621,6 +11621,17 @@ class OperatorApp(App[None]):
     def _apply_pending_frontend_state(self, generation: int) -> None:
         if self._restart_plan is not None:
             return
+        if not self.is_running:
+            # A paint scheduled before shutdown is still flushed during it:
+            # ``App._shutdown`` clears ``_running`` BEFORE ``_close_all`` prunes
+            # the tree, and Textual flushes pending callbacks after every
+            # dispatch — so a delta that lands while the app is quitting (the
+            # attach client outlives the UI) used to query widgets that no
+            # longer exist: ``NoMatches: No nodes match 'Editor'`` out of
+            # ``run_test``/quit, seen in CI run 36449068218 as
+            # [model-spawn]. Once the app is shutting down there is nothing
+            # left to paint, so this is a drop, not a skip.
+            return
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
