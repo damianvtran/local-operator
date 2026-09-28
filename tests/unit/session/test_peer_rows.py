@@ -21,9 +21,12 @@ from pathlib import Path
 import pytest
 
 from local_operator.network import store
+from local_operator.resume import SessionRow
 from local_operator.session import peer_rows as peer_rows_mod
 from local_operator.session.peer_rows import (
+    RemotePark,
     clear_cache,
+    park_edges,
     peer_session_row,
     peer_session_rows,
 )
@@ -458,3 +461,160 @@ def test_two_devices_reporting_one_id_stay_two_rows() -> None:
         [_Row("s_1", "d_aa"), _Row("s_1", "d_aa")],
     )
     assert [row.id for row in peer_session_rows(catalog=repeated)] == ["s_1"]
+
+
+# ---------------------------------------------------------------------------
+# Park edges: the episode model the origin's notice rides.
+#
+# These drive the PURE helper with constructed rows, plus two cells through the
+# real producer so the stored-half discriminator is pinned against the shape
+# ``RelayPeerCatalog`` actually mints rather than against a hand-guessed one.
+
+
+def _parked_row(
+    session_id: str,
+    device_id: str = "d_aa",
+    *,
+    name: str = "Some conversation",
+    kind: str | None = "approval",
+    device_name: str = "radiant-m4",
+    live_state: str = "busy",
+) -> SessionRow:
+    """One row for the pure matrix: only the fields ``park_edges`` reads are set."""
+    return SessionRow(
+        id=session_id,
+        mtime=0.0,
+        name=name,
+        pending=kind,
+        live_state=live_state,
+        locality="remote",
+        owner_device=device_id,
+        owner_device_name=device_name,
+    )
+
+
+def test_the_park_edge_matrix_appear_clear_repark_and_kind_change() -> None:
+    """One notice per EPISODE, and the four transitions that define one.
+
+    Appear (fires), the same park polled again (silent), the park clearing
+    (already answered — the map drops the key, and the caller withdraws the
+    card that claimed otherwise), and a re-park (a NEW episode, because a
+    second park is a second thing a person must do).
+    """
+    parked = _parked_row("s_1")
+    edges, state = park_edges({}, [parked])
+    assert [(edge.session_id, edge.kind) for edge in edges] == [("s_1", "approval")]
+
+    edges, state = park_edges(state, [parked])
+    assert edges == (), "the same park polled again is the same episode"
+
+    idle = _parked_row("s_1", kind=None, live_state="idle")
+    edges, cleared = park_edges(state, [idle])
+    assert edges == () and cleared == {}, "an answered park leaves the map"
+
+    edges, _ = park_edges(cleared, [parked])
+    assert [edge.session_id for edge in edges] == ["s_1"], "a re-park re-arms"
+
+
+def test_a_kind_change_is_a_new_episode() -> None:
+    """ask -> approval is a new remedy: the approval needs a presence gesture.
+
+    Polling the OLD kind's map against a row whose kind moved must fire again —
+    the user was told to answer, and the session now needs something different
+    from them.
+    """
+    edges, state = park_edges({}, [_parked_row("s_1", kind="ask")])
+    assert [edge.kind for edge in edges] == ["ask"]
+
+    edges, _ = park_edges(state, [_parked_row("s_1", kind="approval")])
+    assert [edge.kind for edge in edges] == ["approval"]
+
+
+def test_a_park_edge_carries_the_device_and_the_conversation_name() -> None:
+    """Every surface composes from this tuple: device label, kind, title.
+
+    ``device_name`` and ``name`` are what the banner's title and body and the
+    toast's copy are built from, so the row's identity must travel whole rather
+    than as an id the caller would have to look up again.
+    """
+    row = _parked_row("s_1", name="Rename the deploy job", device_name="radiant-m4")
+    edges, _ = park_edges({}, [row])
+    assert edges == (
+        RemotePark(
+            session_id="s_1",
+            device_id="d_aa",
+            device_name="radiant-m4",
+            kind="approval",
+            name="Rename the deploy job",
+        ),
+    )
+
+
+def test_two_devices_parking_one_id_are_two_episodes() -> None:
+    """The key carries the DEVICE, same as the producer's de-duplication.
+
+    A map keyed on the session id alone lets the first device's park swallow
+    the second's notice — the cross-device collapse ``_read`` refuses to make,
+    reintroduced one layer up where it would be silent.
+    """
+    rows = [
+        _parked_row("same-id", "d_aa", name="This device's copy"),
+        _parked_row("same-id", "d_bbb", name="The other device's copy"),
+    ]
+    edges, state = park_edges({}, rows)
+    assert [(edge.device_id, edge.session_id) for edge in edges] == [
+        ("d_aa", "same-id"),
+        ("d_bbb", "same-id"),
+    ]
+    edges, _ = park_edges(state, rows)
+    assert edges == (), "each device's episode is its own"
+
+
+def test_a_stored_unread_completion_is_not_a_park() -> None:
+    """The §2 discriminator, pinned against the producer's real stored shape.
+
+    The relay's stored half mints ``state: "stored"``, ``detached: True`` for a
+    session with no runtime, and translates an unread COMPLETION into
+    ``pending: "ask"``. ``_live_state`` maps ``stored`` to the empty string, so
+    the row the helper must refuse is refused THROUGH the real producer — a
+    completion that already finished needs nobody, and announcing it as a park
+    would page a person for an answered turn.
+    """
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [_Row("s_stored", "d_aa", state="stored", detached=True, pending="ask")],
+    )
+    (row,) = peer_session_rows(catalog=catalog)
+    assert row.live_state == "", "the stored half is a cold row"
+    assert row.pending == "ask", "...carrying the translation this test is about"
+    edges, state = park_edges({}, [row])
+    assert edges == () and state == {}
+
+
+def test_a_live_parked_row_is_a_park_through_the_producer() -> None:
+    """The other half of the same fixture pair: a live parked turn DOES fire.
+
+    ``state: "busy"`` plus the record's ``pending`` is the shape the two
+    measured approval pilots carried; it must survive the same read that
+    refuses the stored row, or the discriminator has traded one half for the
+    other.
+    """
+    catalog = _Catalog(
+        [_Facts("d_aa", "radiant-m4", reachable=True)],
+        [
+            _Row(
+                "s_live",
+                "d_aa",
+                name="Backfill the audit log",
+                state="busy",
+                busy=True,
+                pending="approval",
+            )
+        ],
+    )
+    (row,) = peer_session_rows(catalog=catalog)
+    assert row.live_state == "busy"
+    edges, _ = park_edges({}, [row])
+    assert [(edge.session_id, edge.kind, edge.device_name) for edge in edges] == [
+        ("s_live", "approval", "radiant-m4")
+    ]
