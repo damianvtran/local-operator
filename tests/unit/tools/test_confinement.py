@@ -23,12 +23,23 @@ The tests split by platform on purpose:
   the real ``/usr/bin/sandbox-exec``, skipped elsewhere. A skip here means the
   platform has no boundary to test, not that the boundary is untested: the
   fail-closed refusal for such hosts is covered below and runs everywhere.
+
+The NETWORK half (landed 2026-09-28, completion of the same boundary) is
+pinned in the same two registers: the profile shape and the in-process tool
+refusals are pure logic, while ``TestShellBoundary.test_a_jailed_shell_cannot
+_reach_the_network`` proves the denial with the real kernel sandbox -- including
+a PRE-FIX CONTROL that patches the profile back to main's
+``(allow network-outbound)`` so the test shows the leak reproduces when only
+that line differs, rather than merely passing.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -66,6 +77,14 @@ class TestConfinementDecisions:
         assert "(allow file-write* (subpath " in profile
         assert '(allow file-read-metadata (subpath "/"))' in profile
         assert '(literal "/dev/null")' in profile
+        # The network line: no allowance survives, and the explicit deny is
+        # present for the reader. Measured while building this: an allow
+        # placed BEFORE a later deny WINS in seatbelt's rule order, so the
+        # correctness is the absent allow and the deny is documentation --
+        # both are pinned so a future edit that reintroduces the allow (however
+        # spelled) fails here before it fails a probe run.
+        assert "network-outbound" not in profile
+        assert "(deny network*)" in profile
 
     def test_a_relative_root_resolves_before_it_is_compared(
         self, tmp_path: Path, monkeypatch
@@ -262,6 +281,98 @@ class TestShellBoundary:
         )
         assert not result.is_error
         assert "free" in result.text
+
+    @DARWIN_ONLY
+    @pytest.mark.asyncio
+    async def test_a_jailed_shell_cannot_reach_the_network(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The network completion, proved against the real kernel sandbox.
+
+        The leak this closes was recorded on a real episode run: the model's
+        shell (and the in-process ``web_search``/``web_fetch`` tools) reached
+        the campaign host's network. This test refuses to take the fix on
+        faith -- a LOCAL listener stands in for "the host's network" (so the
+        test needs no internet and cannot flake on one), and the SAME command
+        is then run with main's profile patched back in (one line: the
+        ``allow network-outbound`` this branch replaced). The control leg is
+        what makes the test discriminate: if the product profile ever regains
+        a network allowance, the refused leg returns HTTP=200 and fails here.
+        """
+
+        class AliveHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - stdlib spelling
+                body = b"host-service-alive"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+                pass
+
+        root = tmp_path / "jail"
+        root.mkdir()
+        context = _context(root)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), AliveHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            curl = (
+                f"curl -sS -m 5 -o /dev/null -w 'HTTP=%{{http_code}}' "
+                f"http://127.0.0.1:{server.server_address[1]}/ ; true"
+            )
+            refused = await builtin.execute_bash(
+                "net-jailed", {"command": curl}, AbortSignal(), None, context
+            )
+            assert "HTTP=000" in refused.text, refused.text
+            assert "HTTP=200" not in refused.text, refused.text
+
+            # The pre-fix control: main's profile, one string swap, same tool
+            # call path -- the listener IS reachable when only that line
+            # differs, so the leg above is testing the line rather than the
+            # listener.
+            real_profile = ToolConfinement.profile
+
+            def pre_fix(self: ToolConfinement) -> str:
+                return real_profile(self).replace("(deny network*)", "(allow network-outbound)")
+
+            monkeypatch.setattr(ToolConfinement, "profile", pre_fix)
+            allowed = await builtin.execute_bash(
+                "net-prefix-control", {"command": curl}, AbortSignal(), None, context
+            )
+            assert "HTTP=200" in allowed.text, allowed.text
+            # Undo before the python legs: they must run under THIS branch's
+            # profile, not the control's (monkeypatch would restore only at
+            # test end).
+            monkeypatch.undo()
+        finally:
+            server.shutdown()
+
+        # The python shapes, which is what the recorded run's `bash` calls
+        # would also have hit: a TCP connect fails with EPERM (even though the
+        # seatbelt profile is not a firewall -- the syscall itself is denied),
+        # and name resolution fails FAST rather than hanging on a resolver.
+        connect = (
+            'python3 -c "import socket\n'
+            "s=socket.socket();s.settimeout(3)\n"
+            "try:\n s.connect(('1.1.1.1',443));print('CONNECTED')\n"
+            "except Exception as e:print('FAILED',type(e).__name__,str(e)[:80])\""
+        )
+        result = await builtin.execute_bash(
+            "net-connect", {"command": connect}, AbortSignal(), None, context
+        )
+        assert "FAILED PermissionError" in result.text, result.text
+        assert "Operation not permitted" in result.text, result.text
+
+        resolve = (
+            'python3 -c "import socket\n'
+            "try:\n print('RESOLVED',socket.getaddrinfo('example.com',443)[0][4])\n"
+            "except Exception as e:print('DNS-FAILED',type(e).__name__,str(e)[:80])\""
+        )
+        result = await builtin.execute_bash(
+            "net-dns", {"command": resolve}, AbortSignal(), None, context
+        )
+        assert "DNS-FAILED gaierror" in result.text, result.text
 
 
 class TestPathTools:
@@ -471,6 +582,50 @@ class TestPathTools:
         )
         assert lsp_refusal.is_error
         assert "confined" in lsp_refusal.text
+
+    @pytest.mark.asyncio
+    async def test_the_in_process_network_tools_refuse_when_confined(self, tmp_path: Path) -> None:
+        """The five host-network spellings, each refused with the ONE sentence.
+
+        These tools are in-process clients -- there is no child for the kernel
+        to hold -- so the boundary is a refusal, and the assertion is the
+        EXACT text (``network_refusal``), because the refusal a trajectory
+        shows is the deferred finding the session-arm write-up carries: two
+        spellings of the same reach must not produce two sentences. Each
+        executor is exercised at its real entry point, and every one of them
+        must answer BEFORE any config, service or host probe runs (the
+        refusals are placed ahead of those, so this test is offline).
+        """
+
+        from local_operator.web_fetch.tool import execute_web_fetch
+        from local_operator.web_search.read_tool import execute_web_read
+        from local_operator.web_search.tool import execute_web_search
+
+        root = tmp_path / "jail"
+        root.mkdir()
+        context = _context(root)
+        confinement = ToolConfinement.at(root)
+
+        cases = [
+            ("web_search", execute_web_search, {"query": "NeurIPS best paper awards"}),
+            (
+                "web_fetch",
+                execute_web_fetch,
+                {"url": "https://neurips.cc/virtual/awards"},
+            ),
+            ("read", builtin.execute_read, {"path": "https://icml.cc/virtual/awards"}),
+            ("web_read", execute_web_read, {"question": "who won the award"}),
+            ("browser", builtin.execute_browser, {"action": "open", "url": "https://iclr.cc"}),
+        ]
+        for tool_name, execute, args in cases:
+            result = await execute(f"refuse-{tool_name}", args, None, None, context)
+            assert result.is_error, (tool_name, result.text)
+            assert result.text == confinement.network_refusal(tool_name), (tool_name, result.text)
+
+        # The same sentences name the confinement root, and the refusal is not
+        # something a free session can reach: that default is pinned by
+        # test_an_unconfined_context_is_untouched below.
+        assert str(root.resolve()) in confinement.network_refusal("web_fetch")
 
     @pytest.mark.asyncio
     async def test_scratchpad_scheme_still_works_inside_a_confined_session(

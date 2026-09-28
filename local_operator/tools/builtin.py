@@ -16571,6 +16571,18 @@ async def execute_browser(
     context: ToolContext | None = None,
 ) -> ToolResult:
     """Serialize and persist browser side effects at the host-owned boundary."""
+    # A confined session refuses the browser WHOLE. Every action it offers --
+    # goto, read, screenshot, download -- drives a host browser whose network
+    # this boundary cannot hold (the tool talks to a host service this
+    # process dials; the browser itself is outside any jail), and the tool can
+    # exist in an episode on this fleet: its cmux arm is a PATH lookup,
+    # measured true even under `env -i` (the UI/bridge arms resolve through
+    # the session's config dir where it is the run scratch, and the console
+    # tool with it -- scoping, not a boundary; see tools.confinement). Refuse
+    # before any lane or host machinery runs, so the refusal costs no probe.
+    confinement = confinement_of(context)
+    if confinement is not None:
+        return _error(tool_call_id, "browser", confinement.network_refusal("browser"))
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):

@@ -32,6 +32,35 @@ confinement FAILS CLOSED: the command is refused with the reason named,
 because a restriction that looks like a jail but leaks is worse than a clear
 refusal -- it would read as a solved problem.
 
+THE NETWORK SIDE (landed 2026-09-28 -- the completion of the same
+argument). An episode that can query the host's network is not comparable to
+the published harnesses, none of which can: their numbers come from driving
+the GUEST, never the host, and the session engagement measured its model doing
+exactly the opposite -- ``web_search``/``web_fetch`` calls against
+NeurIPS/ICML/ICLR award pages, alongside 27 ``bash`` calls. So the bench-side
+boundary was extended the same way the filesystem one was: shell children
+get NO network allowance (the profile's old ``(allow network-outbound)`` is
+gone; ``(deny network*)`` rides the default deny), and the denial was
+MEASURED, not assumed. A jailed child's TCP connects fail with ``EPERM``
+against the open internet AND against the host's own loopback; UDP
+``sendto`` fails the same way; ``getaddrinfo`` fails FAST with ``EAI_NONAME``
+(no resolver round trip, no hang); even ``AF_UNIX`` connects are denied, so
+the loopback services this machine runs -- the desktop app's bridge, cmux, a
+local proxy, another session's socket -- are unreachable from the jail too.
+The in-process half is refused rather than sandboxed: ``web_search``,
+``web_fetch``, the ``read <url>`` sugar, ``web_read`` and ``browser`` all
+refuse under confinement via :meth:`ToolConfinement.network_refusal`, because
+a kernel sandbox cannot wrap a call the session's own process makes, and a
+text-level check a tool could circumvent (a built URL, a redirect, a second
+backend) is the leak-shaped restriction this module exists to avoid. The
+fidelity the refusals trade -- shipped tools a real session has -- is a
+DEFERRED FINDING that must ride the session-arm write-up: the arm's reduced
+surface has to be stated next to its numbers, not discovered by a reader
+comparing tool inventories. The GUEST's own network access is untouched by
+all of this: an episode drives its VM through the apparatus (the action
+bridge, the adapter worker), and the only caller of :meth:`ToolConfinement.
+wrap` is the ``bash`` tool, so no apparatus process is inside the jail.
+
 WHAT THIS DOES NOT COVER, stated rather than implied:
 
 * Reads of SYSTEM paths stay allowed -- ``/usr``, ``/System``, ``/Library``,
@@ -42,18 +71,29 @@ WHAT THIS DOES NOT COVER, stated rather than implied:
   interpreter; these are the host's machinery, not the operator's data. The
   operator's own home (outside the root), other volumes, ``/tmp`` and every
   other user's files are NOT in the allowlist and the kernel denies them.
-* Network is deliberately unchanged (``network-outbound`` is allowed): this
-  boundary is about the filesystem, and an episode's shell needing to reach a
-  package index is not the leak this closes.
+* An ALREADY-OPEN connection handed into the jail keeps working: measured (a
+  connected fd passed to a sandboxed child sent and received normally --
+  seatbelt checks the connect, not the send). Nothing hands one in -- children
+  are spawned with only stdio pipes, every other fd closed -- so this is a
+  property of the mechanism, not of this deployment.
 * The confinement binds a session's OWN tools and the children it spawns
   (``task`` children inherit it). A same-account process that is not part of
   the session -- the operator's own terminal, a daemon -- is untouched; this
   is a boundary around the session, not around the machine.
-* Tool surfaces that are host CAPABILITIES by design -- the browser tool (a
-  real browser on the operator's machine), the console tool, peer messaging
-  -- are not confined by this module and are named as out of scope for it.
-  Where they write a file the path IS checked (see ``builtin``'s uses of
-  :meth:`ToolConfinement.path_denial`).
+* Tool surfaces that are host CAPABILITIES by design -- the console tool
+  (a pty inside the desktop app) and peer messaging -- are not confined by
+  this module and are named as out of scope for it. Where they write a file
+  the path IS checked (see ``builtin``'s uses of
+  :meth:`ToolConfinement.path_denial`). The BROWSER tool is refused under
+  confinement rather than left out of scope: it is a per-session tool that
+  can exist in an episode (its cmux arm is a PATH lookup, measured true even
+  under ``env -i`` on this fleet) and every one of its actions reaches the
+  host's network on the episode's behalf. The console and peer surfaces are
+  effectively absent where it matters -- both resolve through the SESSION'S
+  config dir, which for an episode is the run scratch, and no console host
+  or peer registry is published there -- but that is scoping, not a
+  boundary; treat them as UNVERIFIED-in-episode and name them in the
+  write-up alongside the network refusals.
 * ``/dev`` reads are allowed wholesale (devices a child legitimately opens:
   null, zero, random, tty, fd). Raw disk devices are root-only by their own
   permissions, and this module does not attempt to re-den them.
@@ -98,7 +138,9 @@ half its tools agree and half not:
 * the ``bash`` tool wraps its spawn with :meth:`ToolConfinement.wrap` and
   refuses when that returns ``None``;
 * the path tools call :meth:`ToolConfinement.path_denial` on the path their
-  own resolver produced.
+  own resolver produced;
+* the in-process network tools call :meth:`ToolConfinement.network_refusal`
+  before any service is constructed, so the refusal costs no connection.
 
 The profile's read allowlist is built ONCE per confinement and passed to
 sandbox-exec inline (``-p``), never through a scratch file: a file inside the
@@ -270,6 +312,29 @@ class ToolConfinement:
             "confined session refuses to run commands it cannot confine"
         )
 
+    def network_refusal(self, tool_name: str) -> str:
+        """The refusal for a tool that reaches the host's network in-process.
+
+        ONE spelling for the whole family (``web_search``, ``web_fetch``, the
+        ``read <url>`` sugar, ``web_read``, ``browser``): the same reach must
+        not answer with two sentences depending on which spelling the model
+        chose, and the refusal a trajectory shows is also the deferred finding
+        the session-arm write-up carries, so its text is pinned by tests.
+
+        Why refuse instead of allow: the shell's boundary is a kernel
+        sandbox, and an in-process HTTP client is not a child process the
+        kernel can wrap -- confining it would need a per-tool check the tool
+        itself can bypass (a URL built after the check, a redirect, a second
+        backend), which is the leak-shaped restriction this module exists to
+        avoid. A clear refusal is the honest answer (see the module docstring
+        for the comparability reason and the fidelity trade).
+        """
+
+        return (
+            f"refused: this session is confined to {self.root}, and `{tool_name}` "
+            "reaches the host's network -- a reach this boundary does not cover"
+        )
+
     def temp_dir(self) -> Path:
         """The session's temp directory INSIDE the root, created on demand."""
 
@@ -302,7 +367,7 @@ class ToolConfinement:
     def profile(self) -> str:
         """The seatbelt profile for this root, as sandbox-exec's ``-p`` text.
 
-        ``deny default`` plus an explicit allowlist, with THREE structural
+        ``deny default`` plus an explicit allowlist, with FOUR structural
         pieces worth stating because each was measured while building this.
         The first: reading the ROOT DIRECTORY itself is allowed
         (``literal "/"``). Without it every command aborts before exec;
@@ -322,6 +387,16 @@ class ToolConfinement:
         The third: the write allowlist is the root plus the null devices, and
         nothing else -- writes are the direction that matters most and they
         are the strictest list in the file.
+
+        The fourth: the network line. ``(deny network*)`` REPLACED the
+        ``(allow network-outbound)`` this profile used to carry, and it sits
+        after nothing that allows network -- measured on the build host, an
+        allow placed before a later deny WINS in seatbelt's rule order, so
+        the deny is documentation for the reader and the correctness comes
+        from the absent allow. What the line does was measured too: TCP
+        (internet and loopback), UDP and AF_UNIX connects all fail with
+        ``EPERM``, and DNS fails fast, while in-scratch file work is
+        untouched (see the module docstring's network section).
         """
 
         read_subpaths = (
@@ -338,7 +413,7 @@ class ToolConfinement:
             "(allow process-exec)\n"
             "(allow sysctl-read)\n"
             "(allow mach-lookup)\n"
-            "(allow network-outbound)\n"
+            "(deny network*)\n"
             '(allow file-read-metadata (subpath "/"))\n'
             f'(allow file-read* (literal "/") {reads})\n'
             f'(allow file-write* (subpath "{self.root}") {writes})\n'
