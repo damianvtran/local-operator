@@ -40,7 +40,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures and he
     pair,
 )
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — the fixtures `pair` reaches for
-    _pair,
+    _pair_settled,
     devices,
 )
 
@@ -62,7 +62,7 @@ def _hand_to_peer(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role=role, settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role=role, settings=server_b.settings)
     _owned_session(server_a)
     result = _move(server_a, SESSION, to=server_b.identity.device_id, monkeypatch=monkeypatch)
     assert result["ok"] is True, result
@@ -126,7 +126,12 @@ def test_an_archived_session_arrives_archived(
     server_a, server_b, _host, _port = request.getfixturevalue("pair")
     # ``settings=server_b.settings`` or the joiner publishes a record nobody can
     # dial and the move answers ``unreachable`` — see every other cell in this file.
-    _pair(request.getfixturevalue("pair"), monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(
+        request.getfixturevalue("pair"),
+        monkeypatch,
+        role="admin",
+        settings=server_b.settings,
+    )
     _owned_session(server_a)
     assert set_archived(server_a.root, SESSION, True) is True
     assert SESSION in archived_ids(server_a.root), "the archive must be visible first"
@@ -158,7 +163,12 @@ def test_a_keep_copy_does_not_inherit_the_archive(
     from local_operator.session.archived import archived_ids, set_archived
 
     server_a, server_b, _host, _port = request.getfixturevalue("pair")
-    _pair(request.getfixturevalue("pair"), monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(
+        request.getfixturevalue("pair"),
+        monkeypatch,
+        role="admin",
+        settings=server_b.settings,
+    )
     _owned_session(server_a)
     set_archived(server_a.root, SESSION, True)
 
