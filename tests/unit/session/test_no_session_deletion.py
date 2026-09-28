@@ -1929,7 +1929,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # mkstemp temp in that SAME directory. The id is a uuid4 hex produced by the
     # store itself, never a caller-chosen component; `_atomic_write_text` has
     # exactly one caller (``_save_project_locked``, with a path it built from
-    # ``projects_dir``), and none of these four can name anything under
+    # ``projects_dir``), and none of these calls can name anything under
     # ``sessions/`` — deleting a project row never touches a session directory
     # by design.
     (
@@ -1954,6 +1954,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/projects.py::ProjectRegistry.delete_project",
         "<path>.unlink",
         "Removes ONE <config_dir>/projects/<id>.json row; session directories are " "never touched",
+    ),
+    (
+        "local_operator/projects.py::ProjectRegistry.delete_project",
+        "shutil.rmtree",
+        "Reclaims <config_dir>/projects/attachments/<id>/ — a directory SIBLING of "
+        "sessions/, never equal to or above one; <id> passed validate_project_id "
+        "(one safe path segment) and must match a loaded row before this runs",
+    ),
+    (
+        "local_operator/projects.py::ProjectRegistry._reclaim_attachment_files",
+        "<path>.unlink",
+        "Unlinks ONE stored attachment FILE per call, and only after the resolved "
+        "path is proven under <config_dir>/projects/attachments/ — a row pointing "
+        "anywhere else (including sessions/) is skipped, never removed",
     ),
     # The eval tool's cross-process restart marker (``tools/eval.py``): the same
     # atomic-write shape as ``registry._staged_write`` above — a
@@ -2006,6 +2020,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/aida/bootstrap.py::_discard_failed_create",
         "shutil.rmtree",
         "removes only the JUST-MINTED <sessions>/<id> that holds no transcript (failed create)",
+    ),
+    (
+        "local_operator/evaluation/session_arm.py::declare_action_server",
+        "<path>.replace",
+        # Atomic publish of the episode's OWN MCP declaration: the temporary is a
+        # sibling of the declaration itself (``.<name>.<hex>.tmp``) under the
+        # episode's scratch config dir. Both paths derive from that dir alone —
+        # no session id, no caller input — so neither can name an entry under
+        # ``sessions/``.
+        "<episode>/.local-operator/mcp.json temp -> same file; both paths episode-scratch-derived",
+    ),
+    (
+        "local_operator/evaluation/session_arm.py::ActionBridge.stop",
+        "<path>.unlink",
+        # Removes exactly the UNIX socket this bridge bound: a session-unique name
+        # (``b-<hex>.sock``) inside the episode scratch, by the exact path it
+        # bound — never a session-store entry.
+        "removes the episode's own bridge socket, by the exact path it bound",
     ),
 )
 

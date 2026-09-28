@@ -308,3 +308,79 @@ async def test_requests_without_the_desktop_token_are_refused(api) -> None:
         headers={"Authorization": f"Bearer {uuid4().hex}"},
     )
     assert anonymous.status_code in (401, 403)
+
+
+async def test_owner_team_and_title_flow_through_listing_and_detail(api) -> None:
+    client, _root = api
+    created = await client.post("/v1/desktop/projects", json={"name": "gamma"})
+    project_id = created.json()["result"]["id"]
+
+    patched = await client.patch(
+        f"/v1/desktop/projects/{project_id}",
+        json={"owner": "Damian", "team": "Platform", "title": "Gamma Stream"},
+    )
+    assert patched.status_code == 200
+    result = patched.json()["result"]
+    assert (result["owner"], result["team"], result["title"]) == (
+        "Damian",
+        "Platform",
+        "Gamma Stream",
+    )
+
+    listed = (await client.get("/v1/desktop/projects")).json()["result"]["projects"][0]
+    assert listed["owner"] == "Damian" and listed["title"] == "Gamma Stream"
+
+    detail = (await client.get(f"/v1/desktop/projects/{project_id}")).json()["result"]
+    assert detail["project"]["owner"] == "Damian"
+    assert detail["project"]["title"] == "Gamma Stream"
+    assert detail["project"]["updates"] == []
+
+    cleared = await client.patch(f"/v1/desktop/projects/{project_id}", json={"owner": ""})
+    assert cleared.json()["result"]["owner"] is None
+
+
+async def test_a_progress_write_appends_history_and_settled_rows_never_read_stale(api) -> None:
+    client, root = api
+    created = await client.post("/v1/desktop/projects", json={"name": "delta"})
+    project_id = created.json()["result"]["id"]
+    # Never reported: stale by construction while the first honest line is owed.
+    assert created.json()["result"]["progress_stale"] is True
+
+    patched = await client.patch(
+        f"/v1/desktop/projects/{project_id}", json={"progress": "first", "status": "done"}
+    )
+    assert patched.json()["result"]["progress_stale"] is False
+    row = json.loads((root / "projects" / f"{project_id}.json").read_text())
+    assert [update["text"] for update in row["updates"]] == ["first"]
+    assert row["updates"][0]["by"] == "operator"
+    assert row["updates"][0]["at"].endswith("Z")
+
+    # A settled row never reads stale even once its one line ages out.
+    aged = json.loads((root / "projects" / f"{project_id}.json").read_text())
+    aged["progress_updated_at"] = 0.0
+    (root / "projects" / f"{project_id}.json").write_text(json.dumps(aged))
+    summary = (await client.get("/v1/desktop/projects")).json()["result"]["projects"][0]
+    assert summary["progress_stale"] is False
+    detail = (await client.get(f"/v1/desktop/projects/{project_id}")).json()["result"]
+    assert detail["project"]["progress_stale"] is False
+    # The history survives the aging — it is the log, not the freshness pair.
+    assert [update["text"] for update in detail["project"]["updates"]] == ["first"]
+
+
+async def test_a_row_written_before_the_new_fields_reads_with_nulls(api) -> None:
+    client, root = api
+    created = await client.post("/v1/desktop/projects", json={"name": "legacy"})
+    project_id = created.json()["result"]["id"]
+    path = root / "projects" / f"{project_id}.json"
+    payload = json.loads(path.read_text())
+    for key in ("owner", "team", "title", "updates"):
+        payload.pop(key, None)
+    path.write_text(json.dumps(payload))
+
+    detail = await client.get(f"/v1/desktop/projects/{project_id}")
+    assert detail.status_code == 200
+    project = detail.json()["result"]["project"]
+    assert project["owner"] is None and project["team"] is None and project["title"] is None
+    assert project["updates"] == []
+    listed = (await client.get("/v1/desktop/projects")).json()["result"]["projects"][0]
+    assert listed["owner"] is None and listed["title"] is None

@@ -36,8 +36,10 @@ from local_operator.harness.types import (
 )
 from local_operator.projects import (
     _SESSION_ID_RE,
+    HISTORY_DEFAULT_TAIL,
     MILESTONES_MAX,
     SESSIONS_MAX,
+    UPDATES_MAX,
     MilestoneEdit,
     Project,
     ProjectEdit,
@@ -47,6 +49,8 @@ from local_operator.projects import (
     ProjectRegistryLockTimeout,
     ProjectSchemaGuardError,
     build_project_view,
+    display_name,
+    history_lines,
     milestone_status,
     progress_is_stale,
     readable_error,
@@ -76,6 +80,16 @@ class ProjectParams(BaseModel):
     name: str | None = Field(default=None, description="Project name (all ops but list).")
     description: str | None = Field(
         default=None, description="create/update: one line on the workstream."
+    )
+    owner: str | None = Field(
+        default=None, description="create/update: who owns the stream; '' clears it."
+    )
+    team: str | None = Field(
+        default=None, description="create/update: the team managing it; '' clears it."
+    )
+    title: str | None = Field(
+        default=None,
+        description="create/update: display name (falls back to the key ``name``); '' clears it.",
     )
     status: Literal["active", "paused", "done", "archived"] | None = Field(
         default=None,
@@ -140,6 +154,23 @@ class ProjectParams(BaseModel):
         description="milestone: True sets completed_at to today, False clears it.",
     )
     remove: bool = Field(default=False, description="milestone: remove the named milestone.")
+    attach: list[str] | None = Field(
+        default=None,
+        description=(
+            "update: local file paths copied into the update's history entry "
+            "(screenshots/evidence). <= 10 files, <= 5 MB each; needs a NEW "
+            "progress line."
+        ),
+    )
+    history: int | None = Field(
+        default=None,
+        ge=0,
+        le=UPDATES_MAX,
+        description=(
+            "show: how many recent history entries to print (default "
+            f"{HISTORY_DEFAULT_TAIL}, max {UPDATES_MAX}; 0 omits the section)."
+        ),
+    )
 
 
 class ProjectDeleteParams(BaseModel):
@@ -180,10 +211,19 @@ def _estimate_text(project: Project) -> str:
 
 def _row(project: Project, *, now: float | None = None) -> str:
     """One scannable listing line, ``PROJECT_ROW_CAP``-bounded (in CELLS)."""
+    identity = display_name(project) or "- unnamed"
+    if project.title:
+        # Title-first with the key as secondary: the key is the addressing
+        # handle, so a titled row must keep it recoverable from the listing.
+        identity = f"{identity} ({project.name})"
     parts = [
-        f"- {project.name} [{project.status}]",
+        f"- {identity} [{project.status}]",
         _estimate_text(project),
     ]
+    if project.owner:
+        parts.append(f"owner: {project.owner}")
+    if project.team:
+        parts.append(f"team: {project.team}")
     if project.target_date:
         parts.append(f"→{project.target_date}")
     if project.milestones:
@@ -205,22 +245,33 @@ def _row(project: Project, *, now: float | None = None) -> str:
     return truncate_row(row)
 
 
-def _field_lines(project: Project) -> list[str]:
+def _field_lines(project: Project, *, history_tail: int = HISTORY_DEFAULT_TAIL) -> list[str]:
     """The ``show`` header block: every stored field, derived status where one exists."""
     lines = [
-        f"{project.name} [{project.status}]",
-        f"description: {project.description or '(unstated)'}",
-        f"estimate: {_estimate_text(project)}",
-        f"dates: start {project.start_date or '—'} · target {project.target_date or '—'}"
-        f" · completed {project.completed_at or '—'}",
-        f"tags: {', '.join(project.tags) if project.tags else '(none)'}",
+        f"{display_name(project) or '(unnamed)'} [{project.status}]",
     ]
+    if project.title:
+        # The display title is the first line; the addressing key must stay
+        # visible (it is what op='update'/'link' take).
+        lines.append(f"key: {project.name}")
+    lines.extend(
+        [
+            f"description: {project.description or '(unstated)'}",
+            f"owner: {project.owner or '(unstated)'}",
+            f"team: {project.team or '(unstated)'}",
+            f"estimate: {_estimate_text(project)}",
+            f"dates: start {project.start_date or '—'} · target {project.target_date or '—'}"
+            f" · completed {project.completed_at or '—'}",
+            f"tags: {', '.join(project.tags) if project.tags else '(none)'}",
+        ]
+    )
     age = reported_age(project)
     stale = ", stale" if progress_is_stale(project) else ""
     freshness = f"reported {age} ago{stale}" if age is not None else "none recorded"
     lines.append(f"progress ({freshness}): {project.progress or '—'}")
     if project.progress and project.progress_reported_by:
         lines.append(f"progress reported by: {project.progress_reported_by}")
+    lines.extend(history_lines(project, tail=history_tail))
     if project.milestones:
         lines.append(f"milestones ({len(project.milestones)}/{MILESTONES_MAX}):")
         for milestone in project.milestones:
@@ -282,6 +333,8 @@ def _project_edit(params: ProjectParams, *, creating: bool) -> ProjectEdit:
         # field (ProjectEdit forbids extras, so a leak here would be a
         # validation error on every deliberate replace).
         "replace_milestones",
+        "attach",
+        "history",
     }
     for field in params.model_fields_set:
         if field in dispatch_only:
@@ -315,7 +368,9 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     return _text(tool_call_id, "project", text, details=spill or None)
 
 
-async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) -> ToolResult:
+async def _op_show(
+    context: ToolContext | None, tool_call_id: str, name: str, *, history_tail: int
+) -> ToolResult:
     registry = _registry(context)
     if registry is None:
         return _error(tool_call_id, "project", "no project registry attached to this session.")
@@ -325,7 +380,7 @@ async def _op_show(context: ToolContext | None, tool_call_id: str, name: str) ->
         return _error(tool_call_id, "project", str(exc))
     if project is None:
         return _error(tool_call_id, "project", f"no project named {name!r} (try op='list')")
-    lines = _field_lines(project)
+    lines = _field_lines(project, history_tail=history_tail)
     try:
         lines.extend(_session_lines(build_project_view(project, config_dir=registry.config_dir)))
     except Exception as exc:  # noqa: BLE001 — the record is the point; the view degrades
@@ -418,7 +473,9 @@ async def _op_update(
     reporter = _calling_session_id(context) or "operator"
     try:
         fields = _project_edit(params, creating=False)
-        outcome = registry.update_project(project.id, fields, reporter=reporter)
+        outcome = registry.update_project(
+            project.id, fields, reporter=reporter, attachments=params.attach or ()
+        )
     except ProjectRegistryLockTimeout as exc:
         return _error(tool_call_id, "project", str(exc))
     except ProjectSchemaGuardError as exc:
@@ -467,6 +524,9 @@ async def _op_update(
         # think it reported something.
         detail = f"status {updated.status}"
     detail += replaced
+    stored = len(params.attach or ())
+    if stored:
+        detail += f", {stored} attachment{'s' if stored != 1 else ''} stored"
     return _text(
         tool_call_id,
         "project",
@@ -600,10 +660,18 @@ async def execute_project(
     needs_name = {"show", "create", "update", "link", "unlink", "milestone"}
     if params.op in needs_name and not (params.name or "").strip():
         return _error(tool_call_id, "project", f"op={params.op!r} needs 'name'.")
+    if params.attach and params.op != "update":
+        return _error(
+            tool_call_id,
+            "project",
+            "attach works only with op='update': the files ride the history entry a "
+            "NEW progress line appends. Create the project first if it does not exist.",
+        )
     if params.op == "list":
         return await _op_list(context, tool_call_id)
     if params.op == "show":
-        return await _op_show(context, tool_call_id, str(params.name))
+        tail = HISTORY_DEFAULT_TAIL if params.history is None else params.history
+        return await _op_show(context, tool_call_id, str(params.name), history_tail=tail)
     if params.op == "create":
         return await _op_create(context, tool_call_id, params)
     if params.op == "update":

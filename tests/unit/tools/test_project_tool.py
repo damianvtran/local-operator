@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from local_operator.harness.types import ToolContext
-from local_operator.projects import ProjectRegistry
+from local_operator.projects import PROJECT_PROGRESS_STALE_S, ProjectRegistry
 from local_operator.tools.project_tool import (
     build_project_delete_tool,
     build_project_tool,
@@ -123,7 +124,7 @@ async def test_identical_progress_on_a_stale_record_refreshes_it(
     # surgery would be discarded: every mutation reloads under the lock.)
     path = tmp_path / "projects" / f"{project.id}.json"
     payload = json.loads(path.read_text())
-    payload["progress_updated_at"] = time.time() - 3600
+    payload["progress_updated_at"] = time.time() - PROJECT_PROGRESS_STALE_S - 60
     path.write_text(json.dumps(payload))
 
     body = await call(context, op="update", name="alpha", progress="still true")
@@ -329,11 +330,13 @@ async def test_a_refresh_and_a_deliberate_replace_both_say_so(context, registry,
     )
     await call(context, op="update", name="alpha", progress="still true")
     project = registry.get_project_by_name("alpha")
-    # Backdate the stamp ON DISK so the identical line REFRESHES instead of
-    # no-oping — every mutation reloads, so in-memory surgery would be lost.
+    # Backdate the stamp ON DISK past the staleness window so the identical
+    # line REFRESHES instead of no-oping — every mutation reloads, so in-memory
+    # surgery would be lost. Constant-driven: the S6d slice moved the window to
+    # four hours, and a hardcoded hour stopped being stale under it.
     path = tmp_path / "projects" / f"{project.id}.json"
     payload = json.loads(path.read_text())
-    payload["progress_updated_at"] = time.time() - 3600
+    payload["progress_updated_at"] = time.time() - PROJECT_PROGRESS_STALE_S - 60
     path.write_text(json.dumps(payload))
 
     body = await call(
@@ -408,3 +411,107 @@ async def test_delete_removes_the_row_and_unknown_names_are_refused(context, reg
     assert "deleted project 'alpha'" in await delete(context, "alpha")
     assert registry.get_project_by_name("alpha") is None
     assert "no project named 'alpha'" in await delete(context, "alpha")
+
+
+@pytest.mark.asyncio
+async def test_owner_team_and_title_flow_through_create_update_and_reads(context, registry) -> None:
+    await call(
+        context,
+        op="create",
+        name="alpha",
+        owner="Damian",
+        team="Platform",
+        title=" Alpha Stream ",
+    )
+    project = registry.get_project_by_name("alpha")
+    assert (project.owner, project.team, project.title) == ("Damian", "Platform", "Alpha Stream")
+
+    body = await call(context, op="show", name="alpha")
+    assert "Alpha Stream [active]" in body
+    assert "key: alpha" in body
+    assert "owner: Damian" in body and "team: Platform" in body
+
+    listed = await call(context, op="list")
+    assert "- Alpha Stream (alpha) [active]" in listed
+
+    await call(context, op="update", name="alpha", title="")
+    project = registry.get_project_by_name("alpha")
+    assert project.title is None
+    # Untitled reads fall back to the key everywhere, with no key line (the
+    # first line IS the key).
+    body = await call(context, op="show", name="alpha")
+    assert "alpha [active]" in body and "key:" not in body
+    assert "- alpha [active]" in await call(context, op="list")
+
+
+@pytest.mark.asyncio
+async def test_invalid_attributions_return_the_stores_sentence(context) -> None:
+    await call(context, op="create", name="alpha")
+    body = await call(context, op="update", name="alpha", owner="x" * 81)
+    assert "owner must be at most 80 characters" in body
+
+
+@pytest.mark.asyncio
+async def test_the_history_shows_a_tail_and_attach_stores_files(
+    context, registry, tmp_path
+) -> None:
+    await call(context, op="create", name="alpha")
+    await call(context, op="update", name="alpha", progress="first line")
+
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"p" * 512)
+    body = await call(
+        context, op="update", name="alpha", progress="second line", attach=[str(shot)]
+    )
+    assert "1 attachment stored" in body
+
+    await call(context, op="update", name="alpha", progress="third line")
+    shown = await call(context, op="show", name="alpha")
+    assert "history (3):" in shown
+    assert "first line" in shown and "third line" in shown
+    assert "attachment: shot.png [image, 512 B]" in shown
+    stored = registry.get_project_by_name("alpha").updates[1].attachments[0].path
+    assert Path(stored).exists()
+
+    tailed = await call(context, op="show", name="alpha", history=1)
+    assert "history (3, latest 1 shown):" in tailed
+    assert "third line" in tailed and "first line" not in tailed
+    assert "history" not in await call(context, op="show", name="alpha", history=0)
+
+
+@pytest.mark.asyncio
+async def test_attach_refusals_surface_the_stores_sentence(context, tmp_path) -> None:
+    await call(context, op="create", name="alpha")
+    shot = tmp_path / "s.png"
+    shot.write_bytes(b"x")
+
+    body = await call(context, op="update", name="alpha", attach=[str(shot)])
+    assert "NEW progress line" in body
+
+    body = await call(context, op="create", name="beta", progress="x", attach=[str(shot)])
+    assert "attach works only with op='update'" in body
+
+    body = await call(
+        context, op="update", name="alpha", progress="x", attach=[str(tmp_path / "nope.png")]
+    )
+    assert "no file at" in body
+
+
+@pytest.mark.asyncio
+async def test_history_zero_omits_the_section_even_when_empty(context) -> None:
+    """``history=0`` honours "0 omits the section" for an empty log too (review F2)."""
+    await call(context, op="create", name="alpha")
+    shown = await call(context, op="show", name="alpha")
+    assert "history: none recorded" in shown
+    assert "history" not in await call(context, op="show", name="alpha", history=0)
+
+
+@pytest.mark.asyncio
+async def test_attachment_sizes_print_one_decimal_across_the_unit(context, tmp_path) -> None:
+    """The pin for the D2 style: one decimal place for KB and MB, bytes exact."""
+    await call(context, op="create", name="alpha")
+    frame = tmp_path / "frame.png"
+    frame.write_bytes(b"k" * 4104)
+    await call(context, op="update", name="alpha", progress="kb line", attach=[str(frame)])
+    shown = await call(context, op="show", name="alpha")
+    assert "attachment: frame.png [image, 4.0 KB]" in shown

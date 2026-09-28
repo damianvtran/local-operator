@@ -683,6 +683,25 @@ def test_server_tool_filters_parse_aliases_for_every_transport() -> None:
         assert dumped["disabledTools"] == ["search_private"]
 
 
+def test_own_turn_only_parses_for_every_transport_and_defaults_off() -> None:
+    from local_operator.mcp.config import (
+        MCPHttpServerConfig,
+        MCPSseServerConfig,
+        MCPStdioServerConfig,
+    )
+
+    payloads = [
+        (MCPStdioServerConfig, {"command": "x"}),
+        (MCPHttpServerConfig, {"url": "https://x.test"}),
+        (MCPSseServerConfig, {"url": "https://x.test/sse"}),
+    ]
+    for cls, base in payloads:
+        assert cls.model_validate(base).own_turn_only is False
+        cfg = cls.model_validate({**base, "ownTurnOnly": True})
+        assert cfg.own_turn_only is True
+        assert cfg.model_dump(by_alias=True)["ownTurnOnly"] is True
+
+
 def test_the_user_scope_write_honours_an_isolated_config_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

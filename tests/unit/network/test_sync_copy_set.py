@@ -259,6 +259,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/evaluation/runner/action_tool.py": (1, "the action tool's name"),
+    "local_operator/evaluation/action_server.py": (
+        1,
+        "``SERVER_NAME``: the MCP server's name — the identifier-not-a-path case, "
+        "matching the reply-channel and action-tool precedents above",
+    ),
     "local_operator/agents.py": (
         1,
         "``_DEFAULT_EXPORT_STEM``: the stem an ``lop agents export`` file is written "
