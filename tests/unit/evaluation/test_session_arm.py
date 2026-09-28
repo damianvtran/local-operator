@@ -185,6 +185,7 @@ class TestDeclaration:
         assert entry["args"][3] == str(tmp_path / "b.sock")
         assert entry["preloadTools"] is True
         assert entry["enabledTools"] == ["apply_actions"]
+        assert entry["ownTurnOnly"] is True
         assert entry["cwd"] == str(work)
 
     def test_merges_an_existing_file(self, tmp_path: Path) -> None:

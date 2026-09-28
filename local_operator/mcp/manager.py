@@ -73,6 +73,7 @@ from local_operator.mcp.config import (
     MCPSseServerConfig,
     MCPStdioServerConfig,
     load_all_mcp_configs,
+    server_own_turn_only,
     tool_enabled_by_config,
     validate_server_config,
 )
@@ -4210,6 +4211,28 @@ class McpManager:
     ) -> ToolResult:
         """One tools/call with arg hygiene, abort racing, and one retry."""
         tool_label = create_mcp_tool_name(server_name, mcp_tool_name)
+        if context.job_id is not None and server_own_turn_only(self._configs.get(server_name)):
+            # ``ownTurnOnly``: the call is running for DELEGATED work (a child
+            # job), and the servers that declare this rule are the ones whose
+            # effects ARE the measurement. Refusing here -- before any
+            # connection or forwarding -- is what keeps a child's call out of
+            # the episode's step and terminal accounting; the job is named so
+            # the refusal is attributable in the transcript.
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name=tool_label,
+                content=[
+                    TextContent(
+                        text=(
+                            f"Refused: the {server_name!r} MCP server is declared "
+                            "ownTurnOnly, so only the owning session's own turn may "
+                            f"call it. This call ran on behalf of background job "
+                            f"{context.job_id!r}; nothing was sent to the server."
+                        )
+                    )
+                ],
+                is_error=True,
+            )
         try:
             if deferred or server_name not in self._connections:
                 conn = await self.wait_for_connection(server_name)

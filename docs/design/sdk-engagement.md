@@ -409,6 +409,13 @@ async with open_session(spec, roots=roots) as session:
 - `scripts/run_episode.py` — `--engagement {reply,session}` (default reply),
   `--session-route`, `--session-wall-s`; the session branch refuses an ambient
   home and requires the launchd scratch env.
+- The action surface is **own-turn only** (agent review R1, Q-1): the episode's
+  declaration carries the generic MCP flag ``ownTurnOnly`` — a delegated child
+  neither inherits nor can activate the action tool, and the manager refuses
+  any execution whose ``ToolContext`` carries a child's job id — so only the
+  episode's own turn can drive or end the run. Pinned end to end by the
+  spawned whole-episode rig (``test_session_arm_script.py``) and at unit level
+  in ``test_manager.py`` / ``test_launch_subagent.py``.
 - The reply-channel arm is UNCHANGED and remains the default (design §5's
   not-to-be-moved list); the session arm writes a PILOT record and is not
   comparable to reply-arm results.
@@ -421,7 +428,9 @@ async with open_session(spec, roots=roots) as session:
   `scratch-homes/<run-name>`.
 - Tests: `tests/unit/evaluation/test_session_arm.py`,
   `tests/unit/evaluation/test_action_server.py`,
-  `tests/unit/mcp/test_tool_bridge.py` (image forwarding, transport helpers).
+  `tests/unit/evaluation/adapters/osworld/test_session_arm_script.py` (the
+  spawned whole-episode rig, driven by ``session_arm_rig.py``),
+  `tests/unit/mcp/test_tool_bridge.py` (image forwarding, the error-text tweak).
 - Parity (§7) as measured on this tree: an SDK session and
   `exec --json` on the same spec published IDENTICAL tool arrays (29 names,
   incl. the minted action tool) and identical 10-event sequences.
