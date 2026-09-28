@@ -202,8 +202,8 @@ class NetworkParams(BaseModel):
     peer: str = Field(
         default="",
         description=(
-            "For sessions: the device to ask (a name from `peers`). Required by "
-            "create/engage/stop/delete."
+            "For sessions: the device to ask (a name from `peers`). For ready: the "
+            "device to report on. Required by create/engage/stop/delete."
         ),
     )
     all_peers: bool = Field(default=False, description="For sessions: list every device.")
@@ -782,44 +782,19 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             )
         return lines
     if action == "ready":
-        # THE SAME ROWS THE CLI SHOWS ITS OWN READER, through the same reading for
-        # reachability (``readiness.reachability_reading``): a REFUSED connection
-        # must not read as "nothing answered" in an agent's digest any more than on
-        # a person's screen — that conflation is the finding this verb exists to
-        # surface. Capability sentences and remedies come from the payload as
-        # composed; the raw vocabulary stays in this tool's ``details``.
+        # THE SAME ROWS THE CLI SHOWS ITS OWN READER, through the shared
+        # renderer (``readiness.render_check_lines``) — one loop, one register,
+        # so the digest and the CLI cannot drift (agent review round 1, NIT-2),
+        # and the reachability reading is this verb's own (a REFUSED connection
+        # must not read as "nothing answered" in an agent's digest any more than
+        # on a person's screen; the raw vocabulary stays in ``details``).
         from local_operator.network import readiness as readiness_mod
-        from local_operator.resume import doctor_detail_words
 
-        ready_lines = []
-        for check in payload.get("checks") or []:
-            state = "ok  " if check.get("ok") else "FAIL"
-            kind = str(check.get("check") or "")
-            label = str(check.get("device_name") or check.get("device_id") or "")
-            if kind == "readiness":
-                ready_lines.append(
-                    f"{state} {kind} {check.get('capability', '')} {label}: "
-                    f"{check.get('detail', '')}".rstrip()
-                )
-            elif kind == "reachability":
-                ready_lines.append(
-                    f"{state} {kind} {label} {check.get('endpoint', '')}: "
-                    f"{readiness_mod.reachability_reading(check)}".rstrip()
-                )
-            else:
-                ready_lines.append(
-                    f"{state} {kind} {check.get('device_id', '')} "
-                    f"{doctor_detail_words(str(check.get('detail', '')))}".rstrip()
-                )
-            for remedy in check.get("remedies") or ():
-                ready_lines.append(f"  - {remedy}")
+        ready_lines = readiness_mod.render_check_lines(payload.get("checks") or [])
         if not ready_lines:
-            ready_lines = ["nothing to check: no networks, or no other members yet"]
+            ready_lines = [readiness_mod.NOTHING_TO_CHECK_LINE]
         if not payload.get("identity_present", True):
-            ready_lines.append(
-                "this device has no mesh identity: run `lop network init`, or "
-                "re-pair with a new invite"
-            )
+            ready_lines.append(readiness_mod.NO_IDENTITY_LINE)
         return ready_lines
     if action == "log":
         records = payload.get("records") or []
@@ -1109,6 +1084,16 @@ async def execute_network(
 
     scrubbed = _scrub(payload)
     if code != 0 or scrubbed.get("ok") is False:
+        if params.action == "ready" and isinstance(scrubbed.get("checks"), list):
+            # AN UNHEALTHY REPORT IS STILL THE REPORT (QA round 1, Q-1): the
+            # FAIL rows and their remedies are this verb's whole product, and
+            # the generic refusal branch below kept only ``code: message`` —
+            # dropping exactly the rows the hint says to read, on the one path
+            # they exist for. The rows read through the same renderer the
+            # healthy path uses; the raw payload still rides ``details``.
+            body = "\n".join(_render(params.action, scrubbed))
+            text, spill = spill_truncate(body, _TOOL, context)
+            return _error(tool_call_id, _TOOL, text, details=spill or {"network": scrubbed})
         # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
         # before ``error`` (which only the install/uninstall diagnostics still
         # use) and before stderr, which in ``--json`` mode is empty BY DESIGN —

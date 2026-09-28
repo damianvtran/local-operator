@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +222,91 @@ def test_a_second_endpoint_that_answers_is_reported_while_the_dead_one_is_named(
     # asked over: the build row is a real comparison, not a not-asked placeholder.
     build = _capability(payload, readiness.CAPABILITY_BUILD)
     assert build["ok"] is True and build.get("code", "") == ""
+    server_b.stop()
+
+
+def test_a_non_peer_listener_is_never_reported_as_the_peer(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Design round 1, D1, driven live: something else accepts the peer's address.
+
+    The reviewer's reproduction on this host — a non-peer process holding a
+    candidate port — reduced to its mechanism: the first report DIALS the peer's
+    real address (identifying it, so a link exists), then a bare listener holds
+    a second declared address. In the second report the listener's accept must
+    not read as the peer (the row renders the observed fact), while the peer's
+    OWN address keeps its claim — "answered" when it wins the race, "the link
+    runs there" when it does not, which is why the outcomes are asserted as a
+    set rather than a winner this test cannot schedule.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+
+    # First report: the dial identifies the peer at ``live`` and installs the link.
+    rc, _payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    assert rc == 1
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)  # the backlog completes accepts; nobody here is the peer
+        fake = f"127.0.0.1:{listener.getsockname()[1]}"
+        _set_peer_endpoints(server_a, record, server_b.identity.device_id, [fake, live])
+
+        rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+        assert rc == 1
+        reach = {row["endpoint"]: row for row in _rows(payload, "reachability")}
+
+        imposter = reach[fake]
+        assert imposter["ok"] is False
+        assert imposter["observed"]["outcome"] in ("connected_unverified", "connected_elsewhere")
+        reading = readiness.reachability_reading(imposter)
+        assert "was not identified as the peer" in reading
+        assert "the peer answered at this address" not in reading
+        assert not reading.startswith("the peer")
+
+        # THE COUNTER-DIRECTION: the peer's own address keeps its claim.
+        real = reach[live]
+        assert real["ok"] is True
+        assert real["observed"]["outcome"] in ("connected", "connected_link")
+    finally:
+        listener.close()
+    server_b.stop()
+
+
+def test_a_verified_peer_answer_still_claims_the_peer(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The counter-cell to D1: the socket this report DIALED and identified.
+
+    No link exists yet, so the winner socket goes through the real handshake —
+    and only then does the row say the peer answered.
+    """
+    pair_devices: Devices = request.getfixturevalue("devices")
+    server_a, server_b, _host, _port = pair_devices
+    record, _h, _p = _pair(pair_devices, monkeypatch)
+    capsys.readouterr()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+    live = _bind_and_start(server_b, record)
+    _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
+
+    rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
+    assert rc == 1
+    row = _rows(payload, "reachability")[0]
+    assert row["ok"] is True
+    assert row["observed"]["outcome"] == "connected"
+    assert row["observed"]["winner_verified"] is True
+    assert readiness.reachability_reading(row) == "the peer answered at this address"
     server_b.stop()
 
 

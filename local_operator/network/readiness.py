@@ -175,7 +175,11 @@ def operator_fact() -> dict[str, Any]:
         }
     return {
         "level": _bounded(report.get("level") or "unreported", 60),
-        "reason": _bounded(report.get("reason") or "", 200),
+        # EVERY carried string goes through the shape guard, reasons included:
+        # the module's rule is "any text that merely LOOKS like a credential is
+        # withheld rather than sent", and a reason is text this device did not
+        # write (round 1, MINOR-2 — the sweep was narrower than the claim).
+        "reason": _safe_text(report.get("reason") or "", limit=200),
         "anchor_installed": bool(report.get("anchor_installed")),
         "anchor_root_owned": bool(report.get("anchor_root_owned")),
         "presence": bool(report.get("presence")),
@@ -289,7 +293,9 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
                 # credential-shaped thing); the value never travels.
                 held_name = str(name)
                 withheld.append(
-                    held_name if not _credential_shape(held_name) else f"a {shape} value"
+                    held_name
+                    if not _credential_shape(held_name)
+                    else f"a value shaped like {shape}"
                 )
                 continue
             has_row: bool | None = None
@@ -358,7 +364,7 @@ def default_model_fact(root: Path) -> dict[str, Any]:
             "hosting": "",
             "model_name": "",
             "resolved": False,
-            "reason": _bounded(str(exc), 200),
+            "reason": _safe_text(str(exc), limit=200),
         }
     except Exception as exc:  # noqa: BLE001 — a config that cannot be read is a fact
         # A DIFFERENT sentence, because it is a different problem: a corrupt or
@@ -368,11 +374,11 @@ def default_model_fact(root: Path) -> dict[str, Any]:
             "hosting": "",
             "model_name": "",
             "resolved": False,
-            "reason": f"its config could not be read ({exc.__class__.__name__})",
+            "reason": _safe_text(f"its config could not be read ({exc.__class__.__name__})"),
         }
     return {
-        "hosting": _bounded(hosting, 120),
-        "model_name": _bounded(model_name, 200),
+        "hosting": _safe_text(hosting, limit=120),
+        "model_name": _safe_text(model_name, limit=200),
         "resolved": True,
         "reason": "",
     }
@@ -426,7 +432,9 @@ def placement_fact(*, provider: str = "", mcp_url: str = "", root: Path) -> dict
     observation = PlacementState.load(network_id, root=root).observation(entry.key)
     return {
         "owner_device": entry.owner_device,
-        "owner_device_name": entry.owner_device_name,
+        # A name another device chose: through the shape guard like every other
+        # carried string (round 1, MINOR-2).
+        "owner_device_name": _safe_text(entry.owner_device_name, limit=120),
         "holders": [{"device": holder.device, "scope": holder.scope} for holder in entry.holders],
         "observation": _bounded_observation(observation),
     }
@@ -443,7 +451,7 @@ def _bounded_observation(row: Mapping[str, Any] | None) -> dict[str, Any]:
         return {}
     return {
         "status": _bounded(row.get("status") or "", 40),
-        "reason": _bounded(row.get("reason") or "", 200),
+        "reason": _safe_text(row.get("reason") or "", limit=200),
         "owner_device": _bounded(row.get("owner_device") or "", 80),
         "observed_at": row.get("observed_at"),
         "retry_after_ms": row.get("retry_after_ms"),
@@ -871,13 +879,17 @@ def mcp_servers_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -
     withheld = [str(item) for item in fact.get("withheld") or []]
     config_path = _bounded(fact.get("config_path") or "", 300) or "its mcp.json"
     if servers:
+        count = len(servers)
         detail = (
-            f"{peer_label} has {len(servers)} user-scope MCP server(s) declared in "
-            f"{config_path}"
+            f"{peer_label} has {count} user-scope MCP "
+            f"{'server' if count == 1 else 'servers'} declared in {config_path}"
         )
         if withheld:
             shown = ", ".join(withheld[:5])
-            detail += f" ({len(withheld)} row(s) withheld from this report: {shown})"
+            held = len(withheld)
+            detail += (
+                f" ({held} {'row' if held == 1 else 'rows'} withheld from this report: {shown})"
+            )
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -917,9 +929,14 @@ def _holder_names(placement: Mapping[str, Any]) -> list[str]:
 
 
 def _owner_label(placement: Mapping[str, Any], *, fallback: str = "") -> str:
+    # A name another device chose (it rides the placement document): through the
+    # shape guard like every other carried string (round 1, MINOR-2).
     return (
-        str(placement.get("owner_device_name") or "")
-        or str(placement.get("owner_device") or "")
+        _safe_text(
+            str(placement.get("owner_device_name") or "")
+            or str(placement.get("owner_device") or ""),
+            limit=120,
+        )
         or fallback
     )
 
@@ -1372,7 +1389,7 @@ def _mcp_credential_row(
         ok=False,
         code=CODE_NO_CREDENTIAL,
         detail=(
-            f"if {name} needs a sign-in, this device has no MCP login for {url} — run "
+            f"if the `{name}` server needs a sign-in, this device has no MCP login for {url} — run "
             f"'/mcp login {url}' here first"
         ),
         remedies=[
@@ -1421,25 +1438,55 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
     deliberately untouched (their pins stay exactly as they were); this function
     reads doctor's CODES (``detail``) plus the observed facts and composes the
     sentence this report owes.
+
+    PEER CLAIMS ARE VERIFIED CLAIMS (design round 1, D1). A TCP accept is not a
+    peer answer — any listener on a declared address satisfies it — so "the peer
+    answered" appears only for the socket this report DIALED and identified (or
+    an address) a completed handshake lives at (``connected_link``: the live
+    link's own address, identified when that link came up). An accept nobody
+    identified renders the observed fact and nothing more.
     """
     observed = row.get("observed")
     observed = observed if isinstance(observed, Mapping) else {}
     outcome = str(observed.get("outcome") or "")
     detail = str(row.get("detail") or "")
     winner = str(observed.get("winner") or "")
+    winner_verified = bool(observed.get("winner_verified"))
+    link_address = str(observed.get("link_address") or "")
     if row.get("probed") is False:
         # The no-relay fallback: nothing was dialled, and its ``detail`` is
         # already a sentence for a person ("not probed: no relay is running …").
         return detail or "not probed"
     if outcome == "connected":
         return "the peer answered at this address"
+    if outcome == "connected_link":
+        return "the peer's link runs at this address"
+    if outcome == "connected_unverified":
+        # THE D1 SENTENCE: something accepted a TCP connection, and nothing
+        # identified it as the peer. The link's address is still a true fact and
+        # helps the reader tell "a stranger holds this port" from "my peer is
+        # fine on another address".
+        sentence = (
+            "something accepted a TCP connection at this address; it was not "
+            "identified as the peer"
+        )
+        if link_address:
+            sentence += f" (the peer's link runs at {link_address})"
+        return sentence
     if outcome == "refused":
         return (
             "something answered this address and refused the connection — the host is up; "
             "nothing is listening on that port"
         )
     if outcome == "no_answer_elsewhere":
-        return f"the peer is up (it answered {winner}); this address did not answer"
+        if winner and winner_verified:
+            where = (
+                f"its link runs at {winner}" if winner == link_address else f"it answered {winner}"
+            )
+            return f"the peer is up ({where}); this address did not answer"
+        if link_address:
+            return f"the peer is up (its link runs at {link_address}); this address did not answer"
+        return "this address did not answer"
     if outcome == "no_answer":
         return "nothing answered this address before the budget ran out" + _observed_route_text(
             observed
@@ -1449,13 +1496,37 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
     if outcome == "resolve_failed":
         return "the address does not resolve from this device"
     if outcome == "handshake_failed":
-        return f"the address answered, but no link came up ({detail})"
+        # The dial REACHED the address and the link did not come up; the tail is
+        # a refusal code the peer's own build decides, so it reads in doctor's
+        # refusal words rather than as a bare wire token (round 1 reconciliation;
+        # "the link was refused" is doctor's own wording for exactly this family).
+        from local_operator.resume import doctor_detail_words
+
+        words = doctor_detail_words(detail) or detail
+        return f"the address answered, but no link came up ({words})"
     if outcome == "bad_endpoint":
         return "the address it publishes cannot be dialled"
     if outcome == "not_attempted":
         return "the report ran out of time before this address was tried"
+    if outcome == "no_endpoint":
+        # Doctor's own vocabulary for a member that published nothing (round 1,
+        # MINOR-1): the fall-through below printed the bare token into the human
+        # line and the agent digest.
+        return "no address published for it — nothing was dialled"
     if outcome == "connected_elsewhere":
-        return f"the peer answered on {winner or 'another endpoint'}"
+        sentence = (
+            "something accepted a TCP connection at this address; it was not "
+            "identified as the peer"
+        )
+        if winner and winner_verified:
+            sentence += (
+                f" (the peer's link runs at {winner})"
+                if winner == link_address
+                else f" (the peer answered on {winner})"
+            )
+        elif link_address:
+            sentence += f" (the peer's link runs at {link_address})"
+        return sentence
     return detail or "no reading for this row"
 
 
@@ -1488,13 +1559,22 @@ def _classify_outcome(detail: str, *, route_ok: bool, winner_elsewhere: bool) ->
 def _reachability_remedies(
     outcome: str, *, peer_label: str, observed: Mapping[str, Any]
 ) -> list[str]:
+    # WHOSE CLAIM IS IT: "the peer answered elsewhere" is advice built on a PEER
+    # fact, so it rides only on an identified answer — the socket this run
+    # dialled and handshaked, or the live link's own address (identified when
+    # that link came up). An accept nobody identified must not send anyone to
+    # "the working address" (design round 1, D1: a non-peer listener holding a
+    # candidate port produced exactly that advice).
+    winner = str(observed.get("winner") or "")
+    winner_verified = bool(observed.get("winner_verified"))
+    link_address = str(observed.get("link_address") or "")
+    where = winner if (winner and winner_verified) else link_address
     if outcome == "refused":
-        winner = str(observed.get("winner") or "")
-        if winner:
-            # The peer IS up — it answered on another endpoint — so "start the
-            # relay" would be the wrong advice about THIS address; the address
-            # is what needs fixing.
-            return [f"point {peer_label} at the working address: it answered on {winner}"]
+        if where:
+            # The peer IS up — it answered at an identified address — so "start
+            # the relay" would be the wrong advice about THIS address; the
+            # address is what needs fixing.
+            return [f"point {peer_label} at the working address: it answered on {where}"]
         return [f"start {peer_label}'s relay (`lop network start` there), then re-check"]
     if outcome == "no_answer":
         admits = ""
@@ -1511,10 +1591,13 @@ def _reachability_remedies(
             f"check that any firewall or security group on the path admits {admits}"
         ]
     if outcome == "no_answer_elsewhere":
-        winner = str(observed.get("winner") or "")
-        if not winner:
-            return ["re-check from the address that answered"]
-        return [f"point the peer at the working address: it answered on {winner}"]
+        if where:
+            return [f"point the peer at the working address: it answered on {where}"]
+        return [f"re-check once {peer_label} answers at this address"]
+    if outcome == "connected_unverified":
+        return [f"check that {peer_label}'s relay is what listens at this address, then re-check"]
+    if outcome == "connected_elsewhere":
+        return [f"if {peer_label} should serve this address, check nothing else has taken it"]
     if outcome == "no_route":
         return ["fix this device's routing or VPN for this address, then re-check"]
     if outcome == "resolve_failed":
@@ -1542,11 +1625,26 @@ def _reachability_rows(
     exists the probed winner socket is closed rather than dialled again —
     dialling would EVICT the live link (newest wins), and a read-only report
     must not churn the operator's link to learn what it already knows.
+
+    A TCP ACCEPT IS NOT A PEER ANSWER (design round 1, D1): any listener on a
+    declared address satisfies a bare connect — a non-peer process holding a
+    candidate port made this verb state the peer answered. So this loop tracks
+    WHICH socket was identified — the one this run dialled and handshaked
+    (``connected``), or an address a completed handshake already lives at, the
+    existing link's own address (``connected_link``). Everything else that
+    merely accepted renders as the observed fact (``connected_unverified`` /
+    ``connected_elsewhere``) and never as the peer; ``winner_verified`` /
+    ``link_address`` ride ``observed`` so the readings and remedies make the
+    same distinction this loop does.
     """
     from local_operator.network import relay as relay_mod
 
     peer_label = _label(member)
     link = server._link_for(member.device_id)  # noqa: SLF001 — the one link seam
+    # THE ONE ADDRESS THAT NEEDS NO NEW HANDSHAKE: a live link IS a completed
+    # handshake, recorded with the address it completed at (``PeerLink.peer_addr``
+    # — the dial's ``host`` for an outbound link).
+    prior_addr = str(link.peer_addr or "") if link is not None else ""
     endpoints = list(member.endpoints)
     if not endpoints:
         # NOTHING WAS DECLARED, so nothing was dialled — doctor's ``no_endpoint``
@@ -1581,6 +1679,7 @@ def _reachability_rows(
     )
     elapsed_ms = round((time.monotonic() - since) * 1000, 1)
     winner = probe.winner if probe.sock is not None else ""
+    winner_identified = False
     dial_failed = ""
     if probe.sock is not None:
         if link is not None:
@@ -1610,24 +1709,51 @@ def _reachability_rows(
                     link, reason = None, exc.code if isinstance(exc, MeshRefusal) else str(exc)
                 if link is None:
                     dial_failed = reason or "unreachable"
+            # IDENTIFIED means THIS run's handshake completed: the only socket
+            # whose acceptance may be called the peer's answer outright.
+            winner_identified = link is not None
+    # Does any PEER claim about the winner hold? The dialled socket identified
+    # it; the live link's own address was identified when that link came up.
+    winner_claim_ok = bool(winner) and (
+        winner_identified or (bool(prior_addr) and winner == prior_addr)
+    )
     rows: list[dict[str, Any]] = []
     for attempt in probe.attempts:
         route = _route_observation(*_split_endpoint(attempt.endpoint))
         route_ok = not route.get("error")
         winner_elsewhere = bool(winner) and attempt.endpoint != winner
-        if attempt.endpoint == winner:
-            if link is not None:
-                outcome = "connected"
-                detail = relay_mod.DETAIL_OK
-                ok = True
-            else:
-                outcome = "handshake_failed"
-                detail = dial_failed or "unreachable"
-                ok = False
+        is_winner = bool(winner) and attempt.endpoint == winner
+        is_link_addr = bool(prior_addr) and attempt.endpoint == prior_addr
+        if is_link_addr and attempt.connected:
+            # The live link's own address: identified when that link came up.
+            outcome = "connected_link"
+            detail = relay_mod.DETAIL_OK
+            ok = True
+        elif is_winner and winner_identified:
+            outcome = "connected"
+            detail = relay_mod.DETAIL_OK
+            ok = True
+        elif is_winner and link is not None:
+            # ACCEPTED, NEVER IDENTIFIED — the D1 state: a link existed, so the
+            # winner socket was closed un-dialled (no-churn), and nothing here
+            # may say the peer answered at this address.
+            outcome = "connected_unverified"
+            detail = "accepted_unverified"
+            ok = False
+        elif is_winner:
+            # The address answered but the dial did not come up: a refusal, or
+            # the report's budget expired before the handshake started.
+            outcome = "handshake_failed"
+            detail = dial_failed or "unreachable"
+            ok = False
         elif attempt.connected:
             outcome = "connected_elsewhere"
-            detail = relay_mod.doctor_link_elsewhere_detail(winner)
-            ok = True
+            detail = (
+                relay_mod.doctor_link_elsewhere_detail(winner)
+                if winner_claim_ok
+                else "accepted_unverified"
+            )
+            ok = False
         else:
             outcome = _classify_outcome(
                 attempt.detail, route_ok=route_ok, winner_elsewhere=winner_elsewhere
@@ -1643,8 +1769,14 @@ def _reachability_rows(
             "attempted": attempt.detail != relay_mod.DETAIL_NOT_ATTEMPTED,
             "last_seen_at": member.last_seen_at,
         }
-        if winner_elsewhere and winner:
+        if winner:
             observed["winner"] = winner
+            observed["winner_verified"] = bool(winner_claim_ok)
+        if prior_addr and attempt.endpoint != prior_addr:
+            # The one OTHER address this report may name as the peer's: the live
+            # link's own. Published so readings and remedies cite a verified
+            # elsewhere-answer instead of an accept.
+            observed["link_address"] = prior_addr
         rows.append(
             {
                 "check": "reachability",
@@ -1821,6 +1953,58 @@ def compose(server: "RelayServer", *, peer: str = "") -> dict[str, Any]:
         "identity_dir": str(store_mod.network_root(server.root)),
         "relay": f"running, pid {os.getpid()}",
     }
+
+
+#: Appended when a report ran without a device identity. ONE string for the
+#: CLI register and the agent digest (agent review round 1, NIT-2: the two
+#: surfaces had already drifted — "no device identity (identity_missing)" on
+#: one, "no mesh identity" on the other).
+NO_IDENTITY_LINE = (
+    "this device has no device identity (identity_missing): run `lop network init`, or "
+    "re-pair with a new invite"
+)
+
+#: The empty-report line, shared for the same reason.
+NOTHING_TO_CHECK_LINE = "nothing to check: no networks, or no other members yet"
+
+
+def render_check_lines(checks: Iterable[Mapping[str, Any]]) -> list[str]:
+    """The ``ready`` rows, one loop for BOTH surfaces (CLI register + digest).
+
+    The two surfaces built these rows separately and had already drifted in
+    spacing and in the no-identity sentence (agent review round 1, NIT-2) — a
+    drift class where an agent and the person beside it read different words
+    about one state. Reachability rows read through :func:`reachability_reading`
+    (this verb's register; doctor's renderer conflates a refusal with silence),
+    capability rows carry composed sentences, and every remedy indents under
+    its row the way the membership lines do.
+    """
+    from local_operator.resume import doctor_detail_words
+
+    lines: list[str] = []
+    for check in checks:
+        state = "ok " if check.get("ok") else "FAIL"
+        kind = str(check.get("check") or "")
+        label = str(check.get("device_name") or check.get("device_id") or "")
+        if kind == "readiness":
+            lines.append(
+                f"{state} {kind} {check.get('capability', '')} {label}: "
+                f"{check.get('detail', '')}".rstrip()
+            )
+        elif kind == "reachability":
+            lines.append(
+                f"{state} {kind} {label} {check.get('endpoint', '')}: "
+                f"{reachability_reading(check)}".rstrip()
+            )
+        else:
+            # identity / network / membership: doctor's grammar, doctor's words.
+            lines.append(
+                f"{state} {kind} {check.get('device_id', '')} "
+                f"{doctor_detail_words(str(check.get('detail', '')))}".rstrip()
+            )
+        for remedy in check.get("remedies") or ():
+            lines.append(f"    - {remedy}")
+    return lines
 
 
 def make_handler(server: "RelayServer") -> Any:
