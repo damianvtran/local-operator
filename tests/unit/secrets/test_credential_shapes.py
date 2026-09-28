@@ -81,12 +81,17 @@ from tests.unit.secrets.credential_shape_corpus import (
     COUNTER_USAGE_LINE,
     DUMP_COMMAND_CASES,
     FIXTURE_VALUE,
+    KEBAB_IDENTIFIER,
+    KEBAB_IDENTIFIER_FOUR_SEGMENT,
+    KEBAB_IDENTIFIER_WITH_DIGIT,
     NEGATIVE_CASES,
+    OPAQUE_UUID_VALUE,
     POSITIVE_CASES,
     PRE_ESCAPED_LINE,
     TYPE_ANNOTATION_NEGATIVES,
     TYPE_ANNOTATION_POSITIVES,
     Case,
+    _compact,
 )
 
 #: The angle brackets, assembled rather than spelled: this file is read by agents
@@ -1020,6 +1025,7 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
         "gcp-service-account-value",
         "gcp-service-account-value-open",
         "authorization-basic-bare",
+        "credential-query-param",
     }
 
     assignment = scrub_shapes("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")
@@ -1030,6 +1036,13 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
     assert "db.internal" in dsn, "the host must stay readable"
     assert "sh4pedSentinelPw" not in dsn
     assert dsn.startswith("mongodb+srv://svc_user:")
+
+    # The query rule's mask must also come from its group: the ambiguous-name
+    # release lives in the guard, and the mask keeps the name and everything —
+    # the next parameter here — around the value.
+    hex32 = "abcdef0123456789" + "abcdef0123456789"
+    query = scrub_shapes("https://h/v1?key=" + hex32 + "&page=2")
+    assert query == f"https://h/v1?key={REDACTION_MARKER}&page=2"
 
 
 def test_no_entropy_heuristic_is_applied() -> None:
@@ -6053,7 +6066,21 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    ``TYPE_ANNOTATION_POSITIVES`` moves 29 -> 34. Both counts are measured from the
 #:    assembled tuples. Every added row is 8 characters or longer ON PURPOSE, for the
 #:    floor reason recorded above.
-_CORPUS_GRADING_DIGEST = "21314d8fd9a7c0da42db2593e9cdc7fc357a68e0e82179234284fe5d26c51528"
+#:
+#: 9. **The corpus change is EIGHT additions, and they are the whole of the move.**
+#:    Five negatives pin the operator's kebab-case harm (a readable hyphen phrase
+#:    under a bare ``key``, the compact flag read, a ``?key=`` query, and the
+#:    ``flagKey`` argument that is never its own match); three positives are the
+#:    keep-masking controls for the release's boundary (a strong assignment name,
+#:    ``?token=``, and an opaque UUID under ``?key=``). ``POSITIVE_CASES`` moves
+#:    303 -> 306 and ``NEGATIVE_CASES`` 194 -> 199; ``TYPE_ANNOTATION_POSITIVES``
+#:    is unchanged at 34. Measured the way the history above asks: recomputing over
+#:    the 497 rows the constant above covered, under THIS module, reproduces that
+#:    constant byte for byte — so no pre-existing row moved in either direction,
+#:    and the module change this corpus grew for (the weak-name release's hyphen
+#:    join, plus the query rule's value judgement) is invisible to every row that
+#:    already existed.
+_CORPUS_GRADING_DIGEST = "a719a865e622f2d0c7e88d6394b421949fdffb9018addeffeb53e314feb005c5"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -7404,6 +7431,14 @@ def test_a_strong_name_or_a_real_shape_still_promotes(line: str, value: str) -> 
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         ),
         ("SORT_KEY=" + "aB3kL9mN2pQ7Zr4", "aB3kL9mN2pQ7Zr4"),
+        # ...and the same under the BARE ambiguous name the hyphen release is scoped
+        # to: the release is the readable class's, so an opaque value under `key`
+        # keeps its mask and its registration (verified in the fix's probe run).
+        (_compact(("key", OPAQUE_UUID_VALUE)), OPAQUE_UUID_VALUE),
+        (
+            _compact(("key", "abcdef0123456789" + "abcdef0123456789")),
+            "abcdef0123456789" + "abcdef0123456789",
+        ),
     ],
 )
 def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
@@ -7418,6 +7453,119 @@ def test_a_weak_name_still_masks_an_opaque_value(line: str, value: str) -> None:
     scrubbed, hits = scrub_shapes_with_hits(line)
     assert value not in scrubbed, f"{line!r} left {value!r} readable"
     assert hits, f"{line!r} produced no hit at all"
+
+
+# ---------------------------------------------------------------------------
+# The kebab-case identifier: a readable hyphen phrase under an ambiguous name
+# ---------------------------------------------------------------------------
+#
+# The reported harm (2026-09-28) is the promotion failure the section above
+# pins, on the class the underscore clause does not reach: a flag read arrives
+# as a compact JSON result whose ``key`` field carries a readable kebab-case
+# identifier, the assignment rule masked it, and the MASK REGISTERED the phrase
+# — so every later occurrence in the session, including the ``flagKey``
+# argument of the agent's own next call, came back as the marker. The
+# underscore spelling's value proof is the ruling (R2-2); these tests hold the
+# hyphen join to it and the release to its bounds.
+
+
+def test_a_readable_hyphen_phrase_under_a_weak_name_is_released_whole() -> None:
+    """No mask, no label, and NOTHING registered: the promotion stays closed.
+
+    The containment pin: ``scrub_shapes_with_hits`` must return NO hit for the
+    flag read, because a hit is what registers the phrase and makes it the
+    session's problem in every later result. A mask alone would corrupt the
+    read; the registration is what made the damage outlive the line.
+    """
+    line = _compact(("key", KEBAB_IDENTIFIER), ("name", "Example flag"))
+    scrubbed, hits = scrub_shapes_with_hits(line)
+    assert scrubbed == line
+    assert not hits
+    assert match_shape_names(line) == []
+    assert not _promotes(line, KEBAB_IDENTIFIER)
+    assert not _promotes("https://h/v1?key=" + KEBAB_IDENTIFIER, KEBAB_IDENTIFIER)
+
+
+def test_the_flag_read_survives_and_the_later_argument_is_not_rewritten() -> None:
+    """End to end through one store: the read, the later argument, and the control.
+
+    (a) the read arrives unmasked; (b) the phrase the agent copies back into a
+    later ``flagKey`` argument is not rewritten by containment; (c) the same
+    store still masks a real credential — a narrowing that leaked while
+    "fixing" (a)/(b) would fail (c).
+    """
+    store = VariableStore(cwd=".")
+    read = _compact(("key", KEBAB_IDENTIFIER), ("name", "Example flag"))
+    masked_read, report = store.redact_with_report(read)
+    assert masked_read == read, "the flag read was rewritten"
+    assert not report.labels and report.reached_model is False
+    later = _compact(("flagKey", KEBAB_IDENTIFIER))
+    assert store.redact(later) == later, "the later argument was rewritten"
+    opaque = "abcdef0123456789" + "abcdef0123456789"
+    payload = _compact(("api_key", opaque))
+    assert opaque not in store.redact(payload), "a real credential stopped masking"
+
+
+@pytest.mark.parametrize("spelling", ["key", "apikey", "api_key", "api-key"])
+def test_every_ambiguous_query_spelling_releases_the_readable_phrase(spelling: str) -> None:
+    """The query surface's half: the same class, on every ambiguous spelling.
+
+    ``?key=`` had no value judgement at all; it now makes the assignment
+    rule's weak-name one. The ``api[-_]?key`` spellings are strong names, so
+    the assignment rule must DEFER to the query surface for them (see
+    ``_is_an_ambiguous_query_param``) — which is why every spelling is
+    exercised rather than one.
+    """
+    text = "https://h/v1?" + spelling + "=" + KEBAB_IDENTIFIER
+    scrubbed, hits = scrub_shapes_with_hits(text)
+    assert scrubbed == text, f"the {spelling} query value was rewritten"
+    assert not hits, f"the {spelling} query value filed a hit"
+
+
+@pytest.mark.parametrize(
+    "value, masked",
+    [
+        (KEBAB_IDENTIFIER_WITH_DIGIT, False),
+        (KEBAB_IDENTIFIER_FOUR_SEGMENT, False),
+        (OPAQUE_UUID_VALUE, True),
+        ("abcdef0123456789" + "abcdef0123456789", True),
+    ],
+)
+def test_the_query_key_keeps_masking_every_opaque_value(value: str, masked: bool) -> None:
+    """The query release is the class's, and only the class's.
+
+    An opaque value under ``?key=`` keeps its mask: the caps are the whole
+    boundary (the UUID fails the start anchor and the digit cap; the hex
+    digest fails the separator requirement), and a cap that moved would fail
+    here.
+    """
+    text = "https://h/v1?key=" + value
+    scrubbed, _ = scrub_shapes_with_hits(text)
+    assert (scrubbed != text) == masked
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        _compact(("api_key", KEBAB_IDENTIFIER)),
+        _compact(("password", KEBAB_IDENTIFIER)),
+        "SECRET_KEY=" + KEBAB_IDENTIFIER,
+        "https://h/v1?token=" + KEBAB_IDENTIFIER,
+        "https://h/v1?password=" + KEBAB_IDENTIFIER,
+        "https://h/v1?secret=" + KEBAB_IDENTIFIER,
+    ],
+)
+def test_the_hyphen_release_is_confined_to_weak_and_ambiguous_names(line: str) -> None:
+    """The bounds: strong names and non-ambiguous query names keep masking.
+
+    The release's whole argument is that it is the SAME class the underscore
+    spelling releases, under the SAME kind of name. A widening past that —
+    a strong assignment name, ``?token=``/``?password=``/``?secret=`` — is
+    a leak, and these rows are what would catch it.
+    """
+    assert _promotes(line, KEBAB_IDENTIFIER), f"{line!r} stopped masking"
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert KEBAB_IDENTIFIER not in scrubbed
 
 
 #: The corpus the released class is MEASURED over — values already exercised through
@@ -7453,15 +7601,25 @@ _RELEASE_PROBE_VALUES = (
     #     test owns the condition — a green reading here is NOT coverage of it
     #     (agent review R7-1).
     #
-    # The hyphen is deliberately absent from the list: no masked corpus value
-    # contains one, and the hyphenated values are released through a separate
-    # clause, so no single-value probe can decide that arm (agent review round 7).
+    # The HYPHEN join carries its own probes since 2026-09-28, when the weak-name
+    # release gained that half of the class: the caps are shared, so every arm is
+    # measured on BOTH joins rather than one (the absence that used to be recorded
+    # here is now the reverse gap):
+    #   hyphen digit cap     -> "quick-brown-fox-123" (3 digits)
+    #   hyphen length cap    -> "mongo-primary-admin-passphrase-01" (33 chars)
+    #   hyphen alphabet      -> "us-East-1"
+    #   hyphen start anchor  -> "2fa-backup-codes"
+    #   hyphen separator     -> "bucketv4" too (refused by the missing "-")
     "quick_brown_fox_123",  # 3 digits -> the digit cap
     "bucketv4",  # no underscore -> the underscore rule
     "mongo_primary_admin_passphrase_01",  # 33 chars -> the length cap
     "primary_replica_connection_string_01",  # 36 chars -> the length cap
     "us_East_1",  # uppercase -> the alphabet
     "2fa_backup_codes",  # digit-leading -> the start anchor
+    "quick-brown-fox-123",  # 3 digits -> the hyphen digit cap
+    "mongo-primary-admin-passphrase-01",  # 33 chars -> the hyphen length cap
+    "2fa-backup-codes",  # digit-leading -> the hyphen start anchor
+    "us-East-1",  # uppercase -> the hyphen alphabet
     "bucket_v4",
     "bucket_v6",
     "schema_registry",
@@ -7495,6 +7653,10 @@ _RELEASE_PROBE_VALUES = (
     "cache_key_name",
     "swordfish",
     "correct-horse-battery",
+    "feature-flag-check-enabled",
+    "is-clm-2-enabled",
+    "rollout-check-2-v3",
+    "this-is-a-plain-kebab-slug",
     "hunter2x",
     "aB3kL9mN2pQ7Zr4",
     "abcdef0123456789abcdef0123456789",
@@ -7534,6 +7696,13 @@ def _released_values() -> set[str]:
 #: (R3-1) showed exactly what that was worth: it caught a SHRINK and nothing else, so
 #: the clause could be widened to three digits and release `db_password_1`-style
 #: values with the whole module still green. Measuring the class is the fix.
+#:
+#: The hyphen join's members were added on 2026-09-28 with the kebab-case
+#: release — the same declared class on its other join, under the same weak
+#: name ("KEY") this set is measured with. ``correct-horse-battery`` moved from
+#: masked to released by that change; the other four are the class's own
+#: boundary values. The commit carries the trade argument; this note is what
+#: records that ONE decision moved both directions' membership.
 _RELEASED_WORD_SHAPED = frozenset(
     (
         "admin_pw_01",
@@ -7543,13 +7712,16 @@ _RELEASED_WORD_SHAPED = frozenset(
         "bucket_v6",
         "ca_central_1",
         "cache_key_name",
+        "correct-horse-battery",
         "correct_horse_battery_staple",
         "db_pass",
         "db_password_1",
         "db_user_name",
+        "feature-flag-check-enabled",
         "grafana_admin_pass",
         "hunter2",
         "internal_token_2",
+        "is-clm-2-enabled",
         "kafka_sasl_secret",
         "ldap_bind_pw",
         "mq_secret_01",
@@ -7558,6 +7730,7 @@ _RELEASED_WORD_SHAPED = frozenset(
         "prod_db_pass_01",
         "rabbit_pass_01",
         "redis_auth_1",
+        "rollout-check-2-v3",
         "schema_registry",
         "sec1_ret",
         "server_password_2",
@@ -7565,6 +7738,7 @@ _RELEASED_WORD_SHAPED = frozenset(
         "smtp_pass_1",
         "staging_db_pass_02",
         "swordfish",
+        "this-is-a-plain-kebab-slug",
         "us_east_1",
         "user_1_pass",
         "vault_token_1",
