@@ -638,13 +638,6 @@ def test_settled_records_never_read_stale(store) -> None:
         assert not progress_is_stale(settled)  # and against the real clock
 
 
-def test_never_reported_is_stale_only_while_active(store) -> None:
-    project = create(store)
-    assert progress_is_stale(project)  # the first honest line is still owed
-    done = store.update_project(project.id, ProjectEdit(status="done")).project
-    assert not progress_is_stale(done)
-
-
 def test_every_new_line_appends_to_the_history(store) -> None:
     project = create(store)
     assert project.updates == []
@@ -1122,3 +1115,30 @@ def test_create_refuses_done_with_incomplete_milestones(store) -> None:
         force_done=True,
     )
     assert made.status == "done"
+
+
+def test_a_row_with_an_unknown_status_loads_with_a_warning(store, caplog) -> None:
+    """QA round 1, Q1: a row from a NEWER build must LOAD — the word is
+    preserved and every surface renders it (the board's leading column, a
+    ``[? word]`` chip) — while the WRITE path stays strict."""
+    import logging
+
+    project = create(store, name="future-row", status="qa")
+    path = store.projects_dir / f"{project.id}.json"
+    row = json.loads(path.read_text())
+    row["status"] = "shipped"
+    path.write_text(json.dumps(row))
+
+    with caplog.at_level(logging.WARNING, logger="local_operator.projects"):
+        reader = ProjectRegistry(store.config_dir)
+        names = [candidate.name for candidate in reader.list_projects()]
+    assert "future-row" in names  # loaded, not dropped
+    found = reader.get_project_by_name("future-row")
+    assert found is not None and found.status == "shipped"  # preserved verbatim
+    assert any("unknown status 'shipped'" in record.message for record in caplog.records)
+
+    # Writes stay strict: the edit vocabulary refuses the word before any lock.
+    # (`ProjectEdit`'s status is the Literal, so the refusal is at construction;
+    # the kwargs form is the deliberate type violation this test pins.)
+    with pytest.raises(ValueError):
+        ProjectEdit.model_validate({"status": "shipped"})

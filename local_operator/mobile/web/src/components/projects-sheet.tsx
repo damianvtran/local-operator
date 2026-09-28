@@ -58,7 +58,15 @@ import { Sheet } from "./ui/sheet";
     desktop_projects.py`; a script cannot import it, so this copy carries the
     pointer. An unknown status (a row from a newer build) gets its own trailing
     section rather than being dropped. */
-const STATUS_ORDER = ["active", "paused", "done", "archived"];
+const STATUS_ORDER = [
+	"planning",
+	"active",
+	"qa",
+	"validation",
+	"paused",
+	"done",
+	"archived",
+];
 
 type View =
 	| { name: "browse" }

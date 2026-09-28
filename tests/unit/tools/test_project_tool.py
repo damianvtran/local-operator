@@ -542,3 +542,21 @@ async def test_an_unknown_status_refusal_lists_the_vocabulary(context) -> None:
     await call(context, op="create", name="alpha")
     refused = await call(context, op="update", name="alpha", status="shipped")
     assert "planning" in refused and "validation" in refused and "archived" in refused
+
+
+@pytest.mark.asyncio
+async def test_a_forced_create_names_the_deliberate_close(context) -> None:
+    """N2: the update path's deliberate-act rule applies to create too."""
+    forced = await call(
+        context,
+        op="create",
+        name="alpha",
+        status="done",
+        milestones=[{"name": "open"}],
+        force_done=True,
+    )
+    assert "[done]" in forced
+    assert "status 'done' forced with milestones incomplete (force_done=true)" in forced
+    # An ordinary create claims nothing: no force clause without the force.
+    plain = await call(context, op="create", name="beta", status="done")
+    assert "force_done" not in plain
