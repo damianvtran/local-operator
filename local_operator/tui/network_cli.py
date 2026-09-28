@@ -93,6 +93,16 @@ _TUI_SPELLING = "/network "
 #: reader a word this front end then refuses.
 _NOT_TRANSLATED = frozenset({"join"})
 
+#: The ONE verb this family spells differently on each side: the shell's `init`
+#: and the composer's `new`, which is the only spelling ``NETWORK_SUBCOMMANDS``
+#: carries. A line naming the shell's word at a composer hands the reader a
+#: subcommand the caret's own table refuses — the D2 defect one token down from
+#: the verb :func:`tui_spelling` was written for — and the reader meets it in a
+#: REFUSAL as well as in a receipt, which is where a remedy is named (`lop
+#: network init <name>` is what the empty-network refusal now tells a shell
+#: reader to run). Read by :func:`tui_spelling` only.
+_CLI_VERB_ALIASES = {"init": "new"}
+
 
 def tui_spelling(line: str) -> str:
     """Rewrite a receipt's ``lop network <verb>`` into the composer's spelling.
@@ -114,6 +124,18 @@ def tui_spelling(line: str) -> str:
     rewriting them would advertise a word this front end refuses. ``join`` is the
     subtler half of the same rule and has its own comment above. An unrecognised
     verb, and any line naming no verb at all, is returned exactly as it came.
+
+    THIS RUNS OVER REFUSALS TOO, not only receipts. A refusal is where this family
+    names the remedy — the empty-network one now ends with the command that
+    creates the first network, and the join failures have ended that way for
+    rounds — and a remedy is exactly the thing the reader is meant to RUN, so the
+    spelling that reaches them has to be the one their caret accepts. The rule is
+    unchanged by that: only a carried verb is rewritten, so a refusal naming
+    ``lop network start`` still reads as the shell's.
+
+    THE VERB IS PART OF THE SPELLING, which is what :data:`_CLI_VERB_ALIASES`
+    carries: `init` becomes `new` before the vocabulary is consulted, so the two
+    rewrites cannot disagree about which front end a line is being read in.
     """
     from local_operator.slash_commands import NETWORK_SUBCOMMANDS
 
@@ -122,6 +144,10 @@ def tui_spelling(line: str) -> str:
         return line
     rest = line[at + len(_CLI_SPELLING) :]
     verb = rest.split(" ", 1)[0].split("\n", 1)[0].strip()
+    alias = _CLI_VERB_ALIASES.get(verb)
+    if alias is not None:
+        rest = alias + rest[len(verb) :]
+        verb = alias
     if verb not in NETWORK_SUBCOMMANDS or verb in _NOT_TRANSLATED:
         return line
     return line[:at] + _TUI_SPELLING + rest

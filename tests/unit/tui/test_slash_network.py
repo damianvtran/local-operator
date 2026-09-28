@@ -25,7 +25,9 @@ question is which argv the handler spells, which a fake answer answers exactly.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -233,6 +235,47 @@ def _painted(app: Any) -> str:
     ``test_slash_echo`` uses).
     """
     return "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+
+
+#: The cells a row may occupy in the narrowest card the band draws: `_card_width()`
+#: at 56x20, the smallest size `_BAND_SIZES` pins (43, measured on the frame below
+#: rather than recomputed from the percentage). It is named because two tests hold
+#: the first-run block to it and the wording cannot be allowed to drift past it.
+_NARROWEST_CARD = 43
+
+
+def _visible_body_rows(app: Any, screen: Any) -> list[str]:
+    """The panel's body rows AS PAINTED — clipped to the scroll viewport.
+
+    The distinction this exists for: ``render_lines_for_test()`` returns the block
+    the model holds, and the block holds these rows at every size — so a check
+    against it passes on a frame that has scrolled the device cue out of sight
+    (UX round 1, U5). The compositor's strips are the only place "is it on the
+    screen" is answerable, and the SCROLL's region is the rectangle of them that
+    is on the screen: the body widget's own region is the whole block, so slicing
+    by it walks past the viewport and reads the footer row that is docked under
+    it.
+
+    Trailing padding and the vertical scrollbar glyph are removed, because both
+    are painted OVER the row rather than part of it: every row is padded to the
+    body's width, and the bar's thumb is drawn in that padding. What is left is
+    the text as the reader sees it, which is what the assertions compare.
+    """
+    rows = _painted(app).split("\n")
+    scroll = screen.query_one("#network-scroll")
+    left = screen.query_one("#network-body").region.x
+    window = rows[scroll.region.y : scroll.region.y + scroll.region.height]
+    return [row[left:] if len(row) > left else "" for row in window]
+
+
+#: Textual's vertical scrollbar thumb, one glyph per position. Stripped from a
+#: painted row before it is compared: the bar is drawn in the row's padding.
+_SCROLLBAR_GLYPHS = "▁▂▃▄▅▆▇█"
+
+
+def _row_text(row: str) -> str:
+    """A painted body row as text: no padding, no scrollbar overlay."""
+    return row.rstrip().rstrip(_SCROLLBAR_GLYPHS).rstrip()
 
 
 @pytest.mark.asyncio
@@ -753,14 +796,36 @@ def test_a_section_does_not_promise_to_check_a_relay_known_to_be_down() -> None:
     assert "/network invite" not in peers, peers
 
 
-#: The sizes the unpaired empty state is expected to fit WHOLE: the card is 83
-#: cells at 100x30, 81 at 98x30, 79 at 96x30, 68 at 84x16 and 65 at 80x24, and no
-#: row of that frame is wider than 62 — the longest of them being the Networks
-#: line it shares with the paired frame. The three smaller sizes in
-#: ``_BAND_SIZES`` (56x20, 50x18, 40x20) are narrower than that shared row and
-#: wrap every line of this block, in both trees, so they are not the property
-#: under test here.
-_UNPAIRED_FIT_SIZES = ((100, 30), (98, 30), (96, 30), (84, 16), (80, 24))
+#: The sizes the unpaired empty state is expected to fit WHOLE. The card is 83
+#: cells at 100x30, 81 at 98x30, 79 at 96x30, 68 at 84x16, 65 at 80x24 and 43 at
+#: 56x20, and no row of that frame is wider than 41 — the longest of them being
+#: the This-device line.
+#:
+#: 56x20 IS IN THIS LIST NOW and was not before (UX round 1, U5): the block's rows
+#: were 62 and 60 cells, so every line of it wrapped at 43 — which is what put the
+#: device cue below the fold at the size a laptop in a split pane actually
+#: reports. At 41 cells the block fits the narrowest band, so the claim is made
+#: there rather than excluded from it. The two sizes below this one (50x18, body
+#: 38; 40x20, body 29) cannot hold a wording that names both commands at all, and
+#: `_UNPAIRED_HANG_SIZES` is the property asserted for them instead.
+_UNPAIRED_FIT_SIZES = ((100, 30), (98, 30), (96, 30), (84, 16), (80, 24), (56, 20))
+
+#: The sizes at which the pairing SEQUENCE has to be on the screen rather than
+#: merely in the body. MEASURED, per size, as the scroll viewport and the row the
+#: device cue lands on: 16 rows (cue at 6) at 100x30, 98x30 and 96x30, 11 at
+#: 80x24 (6), 8 at 60x20 (6) and 8 at 56x20 (6). The two sizes that are NOT here
+#: are excluded by measurement, not by convenience: 84x16's viewport is FOUR rows
+#: (the title block and the footer are docked inside sixteen rows, so the body
+#: gets 'This device', its identity row and the relay row), and 50x18's is six
+#: with the block itself at 38 cells — neither can show the sequence whatever it
+#: says, and the property asserted for them is the hang instead.
+_UNPAIRED_FOLD_SIZES = ((100, 30), (98, 30), (96, 30), (80, 24), (60, 20), (56, 20))
+
+#: The two sizes narrower than any wording that names both commands (`/network
+#: new <name>` and `/network invite` with the device cue are 39-40 cells with
+#: their lead, against a body of 38 and 29 here). There the block wraps — 15 and
+#: 17 body rows — so the property is that the WRAP keeps the row's indent.
+_UNPAIRED_HANG_SIZES = ((50, 18), (40, 20))
 
 #: The three of those whose BASE frame paints the empty state without a vertical
 #: scrollbar, and therefore the three the change must leave scrollbar-free: at
@@ -818,14 +883,21 @@ async def test_the_unpaired_empty_state_fits_its_card_at_every_legible_size() ->
                 assert not scroll.show_vertical_scrollbar, (size, scroll.virtual_size, scroll.size)
 
 
-def test_every_unpaired_row_is_measured_against_the_narrowest_card_it_fits() -> None:
-    """The two sequence rows are no wider than the row the paired frame shares.
+def test_every_unpaired_row_fits_the_narrowest_card_the_band_draws() -> None:
+    """EVERY ROW OF THE FIRST-RUN BLOCK FITS THE 43 CELLS OF THE NARROWEST BAND.
 
-    A guard on the invariant the fit test measures, so the reason a future
-    reword cannot grow past its budget is stated where the words are: this block
-    has ONE wrapping threshold because neither new row is wider than the shared
-    Networks line (62 cells). The failure this pins is a row that fits the
-    100-column frame and no other — the shape review round 1 caught.
+    WHAT THIS TESTED BEFORE, and why the replacement is stronger: the old
+    invariant was relative — no row wider than the Networks line they shared at
+    62 cells — so it let the block sit at a threshold that wrapped at 56x20 and
+    said nothing about the size a split pane reports. The budget is now the
+    narrowest card the panel is drawn in (43 cells, measured off the frame), the
+    rows are named here WHERE THE WORDS ARE so a reword cannot quietly grow past
+    it, and the failure it pins is unchanged: a row written against the 100-column
+    frame that no narrower size can hold.
+
+    It is a model-side check and it is honest about that — `cell_len` of the row
+    as built, not of the frame. The FOLD is what the painted test below measures;
+    this one states the budget that makes it possible.
     """
     from local_operator.tui.widgets.network_panel import (
         NetworkLocal,
@@ -833,12 +905,146 @@ def test_every_unpaired_row_is_measured_against_the_narrowest_card_it_fits() -> 
     )
 
     local = NetworkLocal(device_id="", device_name="", identity_present=False, relay_state="")
-    rows = [row for row in build_network_report(local).plain.splitlines() if row.strip()]
-    networks = next(row for row in rows if "no networks on this device" in row)
-    sequence = next(row for row in rows if "lop network join" in row)
+    # At the narrowest card, not at the default: a narrower width would PRE-BREAK
+    # the rows (that is `_hanging_row`'s job) and this test is about how wide one
+    # line of the block is when it is not broken at all.
+    rows = [
+        row
+        for row in build_network_report(local, width=_NARROWEST_CARD).plain.splitlines()
+        if row.strip()
+    ]
     identity = next(row for row in rows if "no identity yet" in row)
-    for row in (networks, sequence, identity):
-        assert cell_len(row) <= cell_len(networks), (cell_len(row), row)
+    networks = next(row for row in rows if "no networks yet" in row)
+    sequence = next(row for row in rows if "join on the peer" in row)
+    assert _NARROWEST_CARD == 43, _NARROWEST_CARD
+    for row in (identity, networks, sequence):
+        assert cell_len(row) <= _NARROWEST_CARD, (cell_len(row), row)
+
+
+@pytest.mark.asyncio
+async def test_the_pairing_sequence_survives_the_fold_at_every_size_that_can_hold_it() -> None:
+    """U5, AT THE FOLD: the sequence has to be ON THE SCREEN, not in the body.
+
+    Measured on the real frame before the fix (56x20: body 43 cells, viewport
+    eight rows): the two teaching rows were 62 and 60 cells, wrapped to four
+    lines inside that viewport, and the device cue — the half the row exists for,
+    `on the peer` — was the first row PAST the fold, on a frame whose body gave
+    no sign it scrolled. At 39 and 40 cells the block went 22 -> 19 virtual rows
+    and the cue paints at every size in `_UNPAIRED_FOLD_SIZES`, 56x20 included.
+
+    Asserted on the COMPOSITOR'S strips — the painted frame — because the body
+    holds these rows at every size: a model-side reading of the same block passes
+    on a frame that clips it, which is exactly how this reached review. The
+    assertion is the presence of the cue in the body's own visible rows, so a row
+    that exists and is scrolled out of the viewport fails it.
+    """
+    from local_operator.tui.widgets.network_panel import NetworkLocal, NetworkScreen
+
+    local = NetworkLocal(device_id="", device_name="", identity_present=False, relay_state="")
+    for size in _UNPAIRED_FOLD_SIZES:
+        app = _app_fixture()
+        async with app.run_test(size=size) as pilot:
+            screen = NetworkScreen(local)
+            app.push_screen(screen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.pause()
+            visible = _visible_body_rows(app, screen)
+            assert any("join on the peer" in row for row in visible), (size, visible)
+            assert any("/network new" in row for row in visible), (size, visible)
+            assert any("/network invite" in row for row in visible), (size, visible)
+
+
+def test_an_overlong_row_breaks_on_words_and_keeps_its_lead() -> None:
+    """The helper the two frame tests rest on, read directly.
+
+    ``_hanging_row`` is the one place a prose row is broken now, so its two
+    promises are pinned here rather than inferred from a frame: every line after
+    the first carries the row's lead, and the sentence survives the break intact —
+    no word is cut and none is lost. The second is the half that separates it from
+    :func:`_indented_value`, which cuts on exact CELLS because the value it breaks
+    has to re-join to the string it came from; a sentence that broke "creates"
+    across two rows would re-join with a space that was never in it.
+    """
+    from local_operator.tui.widgets.network_panel import _hanging_row
+
+    row = _hanging_row("  ", "no networks yet — /network new <name>", 30)
+    lines = row.split("\n")
+    assert len(lines) > 1, lines
+    assert all(line.startswith("  ") for line in lines), lines
+    assert " ".join(line.strip() for line in lines) == "no networks yet — /network new <name>"
+    # A row that fits comes back untouched, so applying it is never a change of
+    # wording — which is what lets the block keep its one-cell budget stable.
+    assert _hanging_row("  ", "no networks yet — /network new <name>", 43) == (
+        "  no networks yet — /network new <name>"
+    )
+    # …and the cell it keeps clear at the end is the SCROLLBAR's, so a row written
+    # to the card exactly still fits the body the card is painted over: at 50x18
+    # the card is 39 and the body 38, and a row of 39 would come back re-wrapped.
+    assert _hanging_row("  ", "no networks yet — /network new <name>", 39) == (
+        "  no networks yet — /network new\n  <name>"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_row_that_wraps_below_the_band_floor_keeps_its_indent() -> None:
+    """U5's first half, at the two sizes whose card cannot hold the whole block.
+
+    Below the fold sizes the block still wraps — the body is 38 cells at 50x18 and
+    29 at 40x20, against rows of 39-41 — and what the round measured there was
+    that the continuation landed at column 0, flush with the section headers, so
+    `mints it` and `<name> creates one` read as rows of their own. The mechanism is
+    now explicit (`_hanging_row` breaks each sentence itself, against the same
+    width the caller measures its rows in), and this is the assertion that ties it
+    to the frame: the identity row — the block's FIRST, so its wrapped lines are
+    inside the viewport at both sizes — is read back out of the painted frame, and
+    every line after its first has to carry the row's own two cells. It fails on
+    the pre-fix tree at the same assertion: the continuation was Rich's, so it
+    began at column 0.
+    """
+    from local_operator.tui.widgets.network_panel import NetworkLocal, NetworkScreen
+
+    local = NetworkLocal(device_id="", device_name="", identity_present=False, relay_state="")
+    for size in _UNPAIRED_HANG_SIZES:
+        app = _app_fixture()
+        async with app.run_test(size=size) as pilot:
+            screen = NetworkScreen(local)
+            app.push_screen(screen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.pause()
+            rows = [row for row in screen.render_lines_for_test() if row.strip()]
+            visible = [_row_text(row) for row in _visible_body_rows(app, screen) if row.strip()]
+            # The identity row is the block's FIRST, so its wrapped lines are
+            # inside the viewport at BOTH sizes — the witness this property needs,
+            # and the reason the assertion is about it rather than about the two
+            # teaching rows below it, which these sizes scroll off. It is read off
+            # the FRAME rather than off the model, because the model is not where
+            # the defect was: the row was one long line and the break was Rich's.
+            sentence = "no identity yet — /network new mints it"
+            first = next(i for i, row in enumerate(visible) if "no identity yet" in row)
+            lines: list[str] = []
+            for row in visible[first:]:
+                lines.append(row)
+                if " ".join(lines).split() == sentence.split():
+                    break
+            assert len(lines) > 1, (size, lines)
+            for row in lines[1:]:
+                assert row.startswith("  "), (size, visible)
+            assert " ".join(lines).split() == sentence.split(), (size, visible)
+            # The mechanism is shared, so the witness above carries the paint; this
+            # half says all three first-run rows go through it, which is what a row
+            # added to the block has to keep doing.
+            block = [
+                row
+                for row in rows
+                if row.lstrip().startswith(("no identity yet", "no networks yet", "then /network"))
+            ]
+            assert len(block) == 3, (size, block)
+            assert all(len(row) <= screen.query_one("#network-body").size.width for row in block), (
+                size,
+                block,
+            )
 
 
 def test_a_receipt_is_read_back_in_the_composers_spelling() -> None:
@@ -887,6 +1093,183 @@ def test_a_receipt_is_read_back_in_the_composers_spelling() -> None:
     ):
         assert tui_spelling(untranslated) == untranslated, untranslated
 
+    # THE VERB IS PART OF THE SPELLING (UX round 1, U4). `init` is the shell's word
+    # for the composer's `new`, and it is the word a REFUSAL now hands the reader as
+    # the way out (the empty-network refusal ends with it) — so a reader at a
+    # composer who is told to run `lop network init` is being handed a subcommand
+    # `NETWORK_SUBCOMMANDS` refuses, which is D2 one token down. Both directions are
+    # pinned here: renamed when it is carried, and left alone when it is not.
+    assert tui_spelling(
+        "name a network: this device is in none — `lop network init <name>` creates the first one"
+    ) == ("name a network: this device is in none — `/network new <name>` creates the first one")
+    assert tui_spelling("then run `lop network init devmesh` on the other device") == (
+        "then run `/network new devmesh` on the other device"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_printed_advice_runs_at_the_caret_that_printed_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U2: THE RECEIPT NAMES A COMMAND, AND THIS RUNS IT.
+
+    What the assertion above cannot do, and why this exists: it pins the STRING
+    `tui_spelling` returns and stops there — so the suite stayed green while
+    pasting that line verbatim answered ``✗ cli.py network invite: error: argument
+    --network: expected one argument``. The invite arm read `rest[0]` as the
+    network's name, handed argparse `--network --role`, and refused the very step
+    the receipt had just named, in argparse's vocabulary, on the surface this
+    family exists to keep plain. A guard that pins the text of an instruction
+    nobody executes cannot fail on the defect it is there for.
+
+    NOTHING HERE IS A STUB OR A FIXTURE. The `next:` line is the REAL CLI's output
+    from `network init` in an isolated root; the paste is driven through the real
+    editor into the real submit handler; the handler spawns the real `lop network
+    invite`. Both halves that have to agree — what the CLI prints and what the
+    composer accepts — are the shipped ones, and the assertion is the invite that
+    came back plus the token file it wrote, not the argv that was sent.
+    """
+    from local_operator.tui.network_cli import run_network, tui_spelling
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / ".local-operator"))
+
+    created = run_network(["init", "devmesh", "--no-start"])
+    assert created.ok, created.lines
+    advice = next(line for line in created.lines if line.startswith("next:"))
+    assert "lop network invite --role drive" in advice, advice
+    assert tui_spelling(advice) == (
+        "next: /network invite --role drive   (the token is written to a file, not printed)"
+    )
+    # What a reader copies out of that line: the command, without its parenthetical.
+    pasted = tui_spelling(advice).split("next:", 1)[1].split("  ", 1)[0].strip()
+    assert pasted == "/network invite --role drive", pasted
+
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, pasted)
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        painted = _painted(app)
+
+    assert "expected one argument" not in painted, painted
+    assert re.search(r"invite \S+ for role drive", painted), painted
+    # …and the invite's own effect, which is the channel the receipt sends the
+    # reader to: the token is written to a file and never printed here.
+    outbox = tmp_path / ".local-operator" / "network" / "outbox"
+    assert [path.suffix for path in sorted(outbox.iterdir())] == [".invite"], list(outbox.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_the_invite_arm_accepts_every_line_its_own_receipt_prints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The arm's grammar, shape by shape, against the CLI's OWN parser.
+
+    The test above proves the receipt's line RUNS; this one says which shapes the
+    arm accepts, and — the half no string assertion can see — that every argv it
+    builds parses under the real `lop network` parser, built here the way the CLI's
+    own tests build it. A shape the arm INVENTED would otherwise reach a user as an
+    argparse sentence, which is what the round measured.
+
+    The two refused shapes are refused BY THIS SURFACE: `/network invite --role`
+    has half a flag, and `/network invite devmesh --role admin` puts the flag where
+    the CLI's help does not print it. Both would be silently mistranslated if the
+    tail were passed through blind — the first as the network's NAME (the defect
+    this branch was filed for), the second as a dropped word — so the assertion is
+    that nothing ran AND that the sentence the user reads is this family's usage
+    line rather than argparse's.
+    """
+    import argparse
+
+    from local_operator.network import cli as net_cli
+    from tests.unit.network import conftest as net_fixtures
+
+    _isolated_network_store(monkeypatch, ("devmesh",))
+    run = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", run)
+    parser = argparse.ArgumentParser(prog="lop")
+    net_cli.add_parser(parser.add_subparsers(dest="subcommand"))
+
+    accepted = {
+        # The bare form, and the line `/network new` prints as its next step.
+        "/network invite": ["invite", "--role", "drive"],
+        "/network invite --role drive": ["invite", "--role", "drive"],
+        # A role the CLI offers and the composer does not pin: it is passed on
+        # rather than dropped (the minted token says what it is).
+        "/network invite --role admin": ["invite", "--role", "admin"],
+        # The named form: the first token that is not part of a flag pair.
+        "/network invite devmesh": ["invite", "--role", "drive", "--network", "devmesh"],
+    }
+    refused = ("/network invite --role", "/network invite devmesh --role admin")
+
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        for command, expected in accepted.items():
+            before = len(run.calls)
+            await _submit(pilot, app, command)
+            await app.workers.wait_for_complete()
+            assert run.calls[before:] == [expected], (command, run.calls[before:])
+            parser.parse_args(["network", *run.calls[before]])
+        for command in refused:
+            before = len(run.calls)
+            await _submit(pilot, app, command)
+            await app.workers.wait_for_complete()
+            assert run.calls[before:] == [], (command, run.calls[before:])
+        notices = "\n".join(_notices(app))
+        assert "--role needs a value" in notices, notices
+        assert "takes one network name and a leading --role" in notices, notices
+        assert "error: argument" not in notices, notices
+
+
+@pytest.mark.asyncio
+async def test_the_invite_refusal_names_a_remedy_the_caret_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U4: the refusal used to say what was missing and stop.
+
+    Measured on a device that had just been told to invite: ``✗ name a network:
+    this device is in none``. Every other refusal in this family ends with the
+    command that gets the reader out — the CLI's own join failures do (``mint one
+    on the other device with `lop network invite`, bring the file across, then run
+    …``) — and this one named no way forward on the surface where `invite` is a
+    one-word command away from the empty state that does not cover it.
+
+    The remedy is asserted WHERE IT IS ADDRESSED: the same sentence reaches a
+    shell and a composer, so the composer's copy has to name a command the caret
+    runs — `tui_spelling` renames the CLI's `init` to this front end's `new` — and
+    the remedy the frame carries is then handed to the real arm to prove it is
+    accepted. The create itself is not EXECUTED here: the composer's `new` arm
+    starts the relay (`_cmd_init` without `--no-start`), and a unit test must not
+    leave a daemon behind — the executed half is the receipt test above.
+    """
+    from local_operator.tui.network_cli import run_network, tui_spelling
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / ".local-operator"))
+
+    refused = run_network(["invite", "--role", "drive"])
+    assert not refused.ok, refused.lines
+    sentence = refused.lines[-1]
+    assert "name a network: this device is in none" in sentence, sentence
+    assert "lop network init <name>" in sentence, sentence
+    composer = tui_spelling(sentence)
+    assert composer.endswith("`/network new <name>` creates the first one"), composer
+
+    remedy = composer.split("`", 2)[1]
+    assert remedy == "/network new <name>", remedy
+    recorder = _Recorder()
+    monkeypatch.setattr("local_operator.tui.app.run_network", recorder)
+    app = _app_fixture()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, remedy.replace(" <name>", " devmesh"))
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert recorder.argv == ["init", "devmesh"], recorder.argv
+
 
 def test_the_unpaired_empty_state_teaches_the_whole_pairing_path() -> None:
     """A device with no identity and no networks is where every device starts,
@@ -904,6 +1287,18 @@ def test_the_unpaired_empty_state_teaches_the_whole_pairing_path() -> None:
     The device row is asserted NOT to repeat the Networks row's clause: two rows
     carrying the same remedy verb under two headings read as two steps, which is
     the defect the sequence above is meant to remove rather than to add to.
+
+    WHAT THE THIRD STEP IS ASSERTED BY, since UX round 1's U5 shortened these rows
+    to fit the narrowest card: the block still names both commands THIS device runs
+    (`/network new`, `/network invite`) in order, and the third step by the fact
+    that has no other home — WHICH DEVICE runs the join (`join on the peer`). The
+    CLI spelling of that command (`lop network join @<file>`) is the 23 cells that
+    did not fit beside the cue at 43, and it is printed by the side that runs it
+    (``invite``'s own receipt ends ``then, on the other device: lop network join
+    @<token-file>``). The replacement is not the weaker half: the cue is asserted
+    here AND at the fold — painted at every size in `_UNPAIRED_FOLD_SIZES` — while
+    the literal it replaced was clipped off the frame at 56x20 and never checked
+    for being on it.
     """
     from local_operator.tui.widgets.network_panel import (
         NetworkLocal,
@@ -911,17 +1306,90 @@ def test_the_unpaired_empty_state_teaches_the_whole_pairing_path() -> None:
     )
 
     local = NetworkLocal(device_id="", device_name="", identity_present=False, relay_state="")
-    text = build_network_report(local).plain
+    text = build_network_report(local, width=_NARROWEST_CARD).plain
 
     networks = text.split("Networks", 1)[1].split("Peers", 1)[0]
     create = networks.index("/network new")
     invite = networks.index("/network invite")
-    join = networks.index("lop network join")
-    assert create < invite < join, networks
+    cue = networks.index("join on the peer")
+    assert create < invite < cue, networks
 
     device_rows = [line for line in text.splitlines() if "no identity yet" in line]
     assert len(device_rows) == 1, text
     assert "creates one" not in device_rows[0], device_rows[0]
+
+
+def test_the_peers_row_names_the_next_command_once_a_network_exists() -> None:
+    """U3: the surface that taught step one went quiet at step two.
+
+    Measured on the real flow: `/network new devmesh` prints the network row and
+    the Peers block states a consequence (`no peers yet — a device you pair appears
+    here`) — design round 1's D1 wording, written for the frame where BOTH blocks
+    are empty states and `invite` is named one block up. One command later the
+    reader has a network and no peers, and the row that named `/network invite`
+    before this PR named nothing: a NET REMOVAL at the moment the command is next.
+    The consequence keeps the state D1 was about; the command comes back for the
+    state D1 does not cover, and both facts are already computed for the same
+    render (`_entries()` is what the Networks block above shows).
+    """
+    import json
+
+    from local_operator.tui.widgets.network_panel import (
+        NetworkEntry,
+        NetworkLocal,
+        NetworkRun,
+        NetworkScreen,
+    )
+
+    # SETTLED, because the row only paints once the relay has answered: the pending
+    # frame's Peers block is its own `checking with the relay…` line and nothing
+    # else (that is the D20 test above). A status answer saying the relay is not
+    # running is the state where the sections inherit the answer.
+    settled = NetworkRun(
+        ("status",),
+        0,
+        stdout=json.dumps({"installed": True, "identity_present": True, "relay_running": False}),
+    )
+
+    def peers_section(local: NetworkLocal) -> str:
+        screen = NetworkScreen(local)
+        screen.status_run = settled
+        text = "\n".join(screen.render_lines_for_test())
+        # Read as one line: the row wraps below the card width the screen uses
+        # before it is mounted, and this assertion is about the WORDS (the wrap is
+        # the two tests above).
+        return " ".join(text.split("Peers", 1)[1].split())
+
+    # A device with NO network: the consequence wording D1 was written for, where
+    # the Networks block above is an empty state whose own rows name `invite`.
+    empty = NetworkLocal(
+        device_id="d_self", device_name="this-mbp", identity_present=True, relay_state=""
+    )
+    peers = peers_section(empty)
+    assert "no peers yet — a device you pair appears here" in peers, peers
+    assert "/network invite" not in peers, peers
+
+    # One command later: a network on this device, still no peers. The Networks
+    # block above is a network ROW now, so naming the command here is not the
+    # duplication D1 was removing.
+    paired = NetworkLocal(
+        device_id="d_self",
+        device_name="this-mbp",
+        identity_present=True,
+        relay_state="",
+        networks=[
+            NetworkEntry(
+                network_id="n_3985570272c803eeb85a3e23",
+                name="devmesh",
+                epoch=1,
+                role="admin",
+                members=1,
+                trust="active",
+            )
+        ],
+    )
+    peers = peers_section(paired)
+    assert "no peers yet — /network invite mints a token" in peers, peers
 
 
 # ---------------------------------------------------------------------------

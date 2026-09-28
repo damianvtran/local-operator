@@ -788,14 +788,32 @@ def _resolve(target: str, root: Path | None = None) -> Any:
     """One network by id or name, refusing an ambiguous name rather than guessing."""
     from local_operator.network import store, types
 
+    # THE EMPTY CASE NAMES ITS REMEDY (UX round 1, U4). `name a network: this
+    # device is in none` was measured on a device that had just been told to
+    # invite and had nothing to invite to: it said what was missing and stopped,
+    # while every other refusal in this family ends with the command that gets the
+    # reader out (`no token was given … mint one on the other device with `lop
+    # network init`, bring the file across, then run …`). The sentence is composed
+    # here rather than appended by a front end because this is the one place that
+    # knows the list is EMPTY — with one network the name is optional, and with
+    # several the reader's problem is which one, not that none exists. The remedy
+    # is spelled in the CLI's own dialect; a composer reader gets this front end's
+    # spelling from ``tui_spelling``, which is what makes both readers able to
+    # paste it.
     records = store.list_networks(root)
     if not target:
         if len(records) == 1:
             return records[0]
+        if not records:
+            raise types.MeshRefusal(
+                "ambiguous_network",
+                "name a network: this device is in none — `lop network init <name>` "
+                "creates the first one",
+            )
         raise types.MeshRefusal(
             "ambiguous_network",
             "name a network: this device is in "
-            + (", ".join(f"{row.name} ({row.network_id})" for row in records) or "none"),
+            + ", ".join(f"{row.name} ({row.network_id})" for row in records),
         )
     matches = store.match_networks(records, target)
     if not matches:
