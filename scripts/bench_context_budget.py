@@ -519,7 +519,44 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: flag cannot deliberately replace), and the earlier ``memory_mb`` entry
 #: records that no other schema clause in the prefix is spare. The tighten
 #: band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 33_330
+#:
+#: RAISED 33,193 -> 33,533 for the S6d PROJECT DATA slice (the ``project``
+#: tool's ``owner`` / ``team`` / ``title`` fields, the bounded history tail,
+#: and ``attach``'s copy-in files — the fields every project surface reads).
+#: Stated with the arithmetic and only after the trim this block's ``secret``
+#: entry demands was taken: the first writing cost +396 billed, and moving the
+#: rationale into ``guide://projects`` (title's fallback phrasing, attach's
+#: "screenshots/evidence" note, the tool description's parenthetical) cut it to
+#: +340. Measured by running THIS script on the same host from two trees, one
+#: after the other:
+#:
+#:   baseline (origin/main fc7ec229a)      92,124 chars = ~33,138 billed
+#:   head (this branch)                    93,069 chars = ~33,478 billed
+#:     = +945 chars = +340 billed: five optional fields on ONE tool
+#:       (owner, team, title, attach, history) — a display name, the two
+#:       attribution labels and the two write/read handles the desktop detail
+#:       page consumes; the alternative was a second tool or surfaces that
+#:       cannot be addressed.
+#:
+#: The raise lands the ceiling at head + 55 — the headroom band the entries
+#: above keep — so the next addition finds the ratchet as tight as this one
+#: did, and the tighten band below (1,200) is not in play.
+#:
+#: MERGED (fold of main at bfc0bcf2a): the two raises above COMPOSE on this
+#: branch — main's ``replace_milestones`` guard and the S6d fields both live on
+#: the merged head — so the ceiling is re-measured on the merged trees rather
+#: than summed (some schema text both changes carried deduplicates through the
+#: fold):
+#:
+#:   baseline (origin/main bfc0bcf2a)      92,476 chars = ~33,265 billed
+#:   head (merged)                         93,421 chars = ~33,605 billed
+#:     = +945 chars = +340 billed — exactly the S6d delta its own entry above
+#:       records, because main's guard is IN the baseline; the fold adds no
+#:       surface of its own, only the merge.
+#:
+#: The merged ceiling lands at head + 55 — the band this file keeps — and the
+#: tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 33_660
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

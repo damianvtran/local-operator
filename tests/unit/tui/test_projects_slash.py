@@ -640,6 +640,64 @@ async def test_unreadable_store_recovers_on_the_live_surface(tmp_path: Path) -> 
         os.chmod(projects_dir, 0o755)
 
 
+def test_listing_rows_show_the_title_first_with_the_key() -> None:
+    from local_operator.projects import Project
+    from local_operator.slash_commands import project_listing_rows
+
+    titled = Project(id="a" * 32, name="payments-migration", title="Q4 Payments Migration")
+    untitled = Project(id="b" * 32, name="plain-key")
+    rows = project_listing_rows([titled, untitled])
+    assert rows[0].startswith("- Q4 Payments Migration (payments-migration) [active]")
+    assert rows[1].startswith("- plain-key [active]")  # fallback: the key is the label
+
+
+def test_show_receipt_states_title_key_owner_team_and_history() -> None:
+    from local_operator.slash_commands import project_show_receipt
+
+    view: dict[str, Any] = {
+        "project": {
+            "name": "payments-migration",
+            "title": "Q4 Payments Migration",
+            "owner": "Damian",
+            "team": "Platform",
+            "status": "active",
+            "description": "",
+            "progress": "second",
+            "progress_updated_at": None,
+            "progress_reported_by": "",
+            "tags": [],
+            "updates": [
+                {
+                    "at": "2026-09-27T21:00:00Z",
+                    "text": "first",
+                    "by": "ab12cd34ef56",
+                    "attachments": [
+                        {
+                            "name": "shot.png",
+                            "kind": "image",
+                            "path": "/tmp/x/shot.png",
+                            "bytes": 2048,
+                        }
+                    ],
+                },
+                {"at": "2026-09-27T21:05:00Z", "text": "second", "by": "", "attachments": []},
+            ],
+            "milestones": [],
+            "estimate": None,
+            "estimate_unit": "points",
+        },
+        "progress_stale": False,
+        "sessions": [],
+    }
+    receipt = project_show_receipt(view)
+    assert receipt.startswith("Q4 Payments Migration [active]\nkey: payments-migration")
+    assert "owner: Damian" in receipt
+    assert "team: Platform" in receipt
+    assert "history (2):" in receipt
+    assert "  - 2026-09-27T21:05:00Z: second" in receipt  # no reporter → no ` by`
+    assert "attachment: shot.png [image, 2.0 KB] /tmp/x/shot.png" in receipt
+
+
 # -- S3b: the nameless entries, the session-optional read, the page footer ----
 
 

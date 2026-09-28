@@ -276,10 +276,21 @@ def project_listing_rows(
     is context-free).
     """
     rows: list[str] = []
-    from local_operator.projects import progress_is_stale, reported_age, truncate_row
+    from local_operator.projects import (
+        display_name,
+        progress_is_stale,
+        reported_age,
+        truncate_row,
+    )
 
     for project in projects:
-        parts = [f"- {project.name} [{project.status}]"]
+        label = display_name(project)
+        if project.title:
+            # Title-first, key secondary: the key stays beside the label
+            # because it is what every slash verb and ``@project:<name>``
+            # takes, and this listing is where a reader meets the project.
+            label = f"{label} ({project.name})"
+        parts = [f"- {label} [{project.status}]"]
         if project.estimate is not None:
             suffix = "pt" if project.estimate_unit == "points" else "d"
             parts.append(f"est {project.estimate:g}{suffix}")
@@ -483,11 +494,17 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     project: Mapping[str, Any] = raw_project if isinstance(raw_project, dict) else {}
     # ``age_text``: the receipt holds a composed JSON row, not a ``Project``,
     # so it reads the raw-stamp arithmetic the model-side helper layers over.
-    from local_operator.projects import age_text
+    from local_operator.projects import age_text, display_name, history_lines
 
-    name = project.get("name") or "(unnamed)"
-    lines = [f"{name} [{project.get('status') or 'active'}]"]
+    key = project.get("name") or ""
+    lines = [f"{display_name(project) or '(unnamed)'} [{project.get('status') or 'active'}]"]
+    if project.get("title"):
+        # The title is the display name; the key is what addressing uses, so
+        # the key must stay in the record.
+        lines.append(f"key: {key or '(unnamed)'}")
     lines.append(f"description: {project.get('description') or '(unstated)'}")
+    lines.append(f"owner: {project.get('owner') or '(unstated)'}")
+    lines.append(f"team: {project.get('team') or '(unstated)'}")
     estimate = "no estimate"
     if project.get("estimate") is not None:
         suffix = "pt" if (project.get("estimate_unit") or "points") == "points" else "d"
@@ -513,6 +530,10 @@ def project_show_receipt(view: Mapping[str, Any], *, now: float | None = None) -
     reporter = project.get("progress_reported_by") or ""
     by = f" by {reporter}" if reporter else ""
     lines.append(f"progress ({freshness}{by}): {project.get('progress') or '—'}")
+    # The history section the project tool's `show` prints: one copy of the
+    # renderer (``history_lines``), reading the composed row — the same
+    # fields rule the tags line above states.
+    lines.extend(history_lines(project))
     milestones_value = project.get("milestones")
     milestones: list[Any] = milestones_value if isinstance(milestones_value, list) else []
     if milestones:
