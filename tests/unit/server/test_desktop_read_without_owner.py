@@ -251,9 +251,13 @@ async def test_a_healthy_owner_is_still_a_live_read(
 ) -> None:
     """The bounded attempt must not turn a working owner into a cold paint.
 
-    This is the half of the trade the design rejected a 0 s budget for: a healthy
-    owner's canonical state — a turn in flight, a pending gate — reaches the
-    panel's first frame exactly as it did before.
+    The first-frame timing half of the trade -- a healthy owner's attach lands
+    inside ``READ_FIRST_FRAME_GRACE_S`` -- is pinned deterministically by
+    ``test_a_healthy_owner_lands_inside_the_first_frame_grace`` (a fake owner
+    whose sync lands on connect). THIS test is the integration half: a real
+    in-process runtime must be REACHABLE -- the retained attempt lands and the
+    read that follows shows the owner live, never a conversation left cold
+    around a working runtime.
     """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     async with _Harness(tmp_path) as harness:
@@ -267,15 +271,31 @@ async def test_a_healthy_owner_is_still_a_live_read(
         await server.start_in_process()
         await asyncio.sleep(0.2)
         (directory / ".session.pid").write_text(str(registry.scan(tmp_path)[0][0].pid))
+        url = f"/v1/desktop/sessions/{harness.session_id}"
         try:
-            status, _elapsed, body = await _get(
-                harness.client, f"/v1/desktop/sessions/{harness.session_id}"
-            )
+            # HOLD THE BRIDGE WHILE THE ATTACH LANDS, then read on it. An
+            # unheld read is served cold whenever the dial outlasts
+            # ``READ_FIRST_FRAME_GRACE_S`` (CI run 36477789500 served cold
+            # here), and because the facade is detached at ``users == 0`` a
+            # per-request retry would re-roll the very grace it is waiting on.
+            # Held, the healthy owner's attempt is allowed to finish — it is
+            # single-flight and never cancelled by the read that started it
+            # (``wait``, not ``wait_for``) — and the read that follows must
+            # show it live.
+            async with harness.pool.session(harness.session_id, read=True):
+                deadline = time.monotonic() + READ_ATTACH_BUDGET_S + DEADLOCK_GUARD_S
+                while time.monotonic() < deadline:
+                    status, _elapsed, body = await _get(harness.client, url)
+                    assert status == 200, body
+                    payload = body["result"]["payload"]
+                    if payload["cold"] is False:
+                        break
+                    # A settled-failed attempt is re-armed by the next read;
+                    # a retained unsynced dial is left to deliver its sync.
+                    await asyncio.sleep(0.05)
         finally:
             await server.aclose()
 
-        assert status == 200, body
-        payload = body["result"]["payload"]
         assert payload["cold"] is False, "a healthy owner was served cold"
         assert payload["cold_reason"] is None
         assert payload["attaching"] is False
