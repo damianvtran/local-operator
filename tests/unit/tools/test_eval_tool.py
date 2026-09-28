@@ -23,6 +23,7 @@ import pytest_asyncio
 
 from local_operator import procstate
 from local_operator.harness.types import (
+    FAULT_KEY,
     AbortSignal,
     AgentToolUpdate,
     ToolContext,
@@ -320,6 +321,10 @@ async def test_abort_mid_run_still_interrupts_with_a_long_timeout(context) -> No
     assert result.is_error is True
     assert "aborted" in result.text
     assert elapsed < 10.0, f"abort took {elapsed:.1f}s to interrupt"
+    # The kernel-killed receipt is MARKED: the frontends settle it as the dim
+    # interruption rather than a red failure, and the ledger files it under
+    # `aborted` instead of counting the user's own stop as an execution fault.
+    assert (result.details or {}).get(FAULT_KEY) == "aborted"
 
 
 @pytest.mark.asyncio
@@ -345,6 +350,10 @@ async def test_preaborted_signal_never_spawns(context) -> None:
     assert result.is_error is True
     assert "aborted" in result.text
     assert eval_tool._KERNELS == {}
+    # Same class as the mid-run kill above — one spelling for both eval abort
+    # arms, pinned here so the receipt cannot silently lose its marker while
+    # the text stays right.
+    assert (result.details or {}).get(FAULT_KEY) == "aborted"
 
 
 # ---------------------------------------------------------------------------

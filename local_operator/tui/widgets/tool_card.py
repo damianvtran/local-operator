@@ -99,6 +99,7 @@ from rich.text import Text
 from textual.timer import Timer
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.harness.types import INTERRUPTED_FAULTS
 from local_operator.tui import bindings
 from local_operator.tui.glyphs import display_name, tool_icon
 from local_operator.tui.widgets.transcript import (
@@ -1617,7 +1618,9 @@ class ToolCard(ExpandableActionBlock):
         self._summary = self._compose_facts
         self._refresh_row()
 
-    def mark_not_run(self, reason: str, argument_bytes: int | None = None) -> None:
+    def mark_not_run(
+        self, reason: str, argument_bytes: int | None = None, kind: str | None = None
+    ) -> None:
         """The call will NEVER run: settle the row under the harness's reason.
 
         A call parked at planning (an unknown tool, invalid arguments, a
@@ -1627,13 +1630,29 @@ class ToolCard(ExpandableActionBlock):
         frame, the row announcing such a call therefore sat ``composing…`` until
         the TURN died and was then labelled ``interrupted``, which describes a
         call that was not interrupted. This settles it when the verdict exists,
-        in the harness's own words (``Tool not found: wake``), as the error
-        class it is.
+        in the harness's own words (``Tool not found: wake``).
+
+        ``kind`` is the verdict's FAULT_* class, and it decides WHICH ending
+        this is (``INTERRUPTED_FAULTS``): ``{skipped, aborted}`` means the
+        operator redirected or stopped the turn, so the row settles as the dim
+        ⊘ interruption the retirement pass already painted — never as a red
+        failure, which is what the operator reported seeing on a steering skip.
+        Every other class (and ``None``, the legacy/older-producer reading)
+        keeps the error settle, which is the shape a genuine planning fault
+        deserves.
 
         The summary keeps the ``never sent · N composed`` record the retirement
         path already used for a composing row: the call was never sent to a
         tool, and the size is how far the model got before it was told nothing
         would receive the call.
+
+        On the interrupted arm the reason does NOT ride the status cell — that
+        slot shows the constant word ``interrupted``, for the discrimination
+        reason :meth:`_outcome_runs` documents (a variable reason there is
+        dropped at narrow widths, so two different interruptions would paint
+        identically) — it is STORED to the expansion instead, so the harness's
+        sentence stays one gesture away. The error arm keeps today's shape: the
+        reason on the collapsed row.
 
         No ``measured_s``: nothing executed, so there is no interval — and the
         outcome column's blank is the honest reading rather than a lost number
@@ -1659,11 +1678,23 @@ class ToolCard(ExpandableActionBlock):
         size = _format_bytes(self._compose_bytes) if self._compose_bytes else "nothing"
         self._compose_facts = f"{size} composed"
         self._summary = f"never sent · {self._compose_facts}"
-        self._error = _strip_control_sequences(" ".join((reason or "").split())) or "not run"
         self._duration = None
-        self._state = "error"
-        self.remove_class("tool-running")
-        self.add_class("tool-error")
+        if kind in INTERRUPTED_FAULTS:
+            self._interrupt_label = "interrupted"
+            # Absorbed BEFORE the settle completes so `can_expand` is honest on
+            # the first frame: the reason is the row's whole content on this
+            # arm, and a row that dropped it would leave the operator with a ⊘
+            # and no sentence.
+            self._error = ""
+            self._absorb_result(reason, None)
+            self._state = "interrupted"
+            self.remove_class("tool-running", "tool-error")
+            self.add_class("tool-interrupted")
+        else:
+            self._error = _strip_control_sequences(" ".join((reason or "").split())) or "not run"
+            self._state = "error"
+            self.remove_class("tool-running")
+            self.add_class("tool-error")
         self._refresh_row()
         self._apply_open_on_settle()
         self.finalize()
@@ -1678,7 +1709,13 @@ class ToolCard(ExpandableActionBlock):
         self._refresh_row()
         self.finalize()
 
-    def mark_interrupted(self, *, cut_off: bool = False) -> None:
+    def mark_interrupted(
+        self,
+        *,
+        cut_off: bool = False,
+        reason: str = "",
+        measured_s: float | None = None,
+    ) -> None:
         """Turn ended before this tool completed: dim state, and WHY it ended.
 
         ``cut_off`` selects the word from the TURN's verdict, which is knowledge
@@ -1688,20 +1725,27 @@ class ToolCard(ExpandableActionBlock):
         (design review round 1, D2). The glyph and the dim tier do not move — the
         word was the ambiguity.
 
-        Takes NO ``measured_s``, unlike :meth:`mark_done` and
-        :meth:`mark_failed`, and the asymmetry is a property of the path rather
-        than an omission (design round 2, D7). Those two settle a card because
-        an END EVENT arrived, and that event carries the executor's measured
-        interval; this one settles a card because the turn died with no end
-        event for it at all. ``_retire_live_tool_cards`` reaches exactly the
-        cards still in the live registry, and ``on_tool_ended`` removes a card
-        from that registry the instant its result lands \u2014 so a card arriving
-        here has by construction never been told how long its call ran, and
-        there is no number available to fall back to. A blank duration on a row
-        adopted mid-execution is therefore the honest reading rather than a lost
-        one: nothing on this surface ever knew that call's zero. A row that
-        watched its own start still prints its own elapsed below, which is the
-        one clock here that is true.
+        ``measured_s`` is accepted for the END-EVENT settle and is a fallback
+        exactly as in :meth:`mark_done`/:meth:`mark_failed`: an end event
+        carries the executor's own interval, and a row this viewer adopted
+        mid-execution — whose ``_started`` is deliberately unset — would
+        otherwise settle to a blank column while a replay of the very same call
+        read the number off the persisted payload (the two-receipts asymmetry
+        #858). The retirement path passes nothing and keeps its documented
+        blank: ``_retire_live_tool_cards`` reaches exactly the cards still in
+        the live registry, and ``on_tool_ended`` removes a card from that
+        registry the instant its result lands — so a card arriving there has by
+        construction never been told how long its call ran. A row that watched
+        its own start still prints its own elapsed below, which is the one clock
+        here that is true.
+
+        ``reason`` is the harness's own sentence for why the call was cut short
+        (an abort receipt, a skip verdict). It is stored to the EXPANSION rather
+        than to the status cell for the reason :meth:`_outcome_runs` documents:
+        the cell keeps the constant word ``interrupted``/``cut off``, so two
+        different interruptions stay distinguishable at narrow widths, and the
+        variable text stays one gesture away instead of being dropped at the
+        width where a row most needs to say what happened.
         """
         was_composing = self._state in ("composing", "queued")
         self._settle_live()
@@ -1730,8 +1774,13 @@ class ToolCard(ExpandableActionBlock):
             self._duration = None
         else:
             # A row that watched its own START has a true interval, and prints
-            # it.
+            # it; one adopted mid-execution falls back to the executor's own
+            # measured interval, exactly as the other two settle paths do.
             self._duration = self._elapsed()
+            if self._duration is None:
+                self._duration = parse_duration(measured_s)
+        if reason:
+            self._absorb_result(reason, None)
         self._state = "interrupted"
         self._interrupt_label = "cut off" if cut_off else "interrupted"
         self.remove_class("tool-running")
@@ -1845,11 +1894,16 @@ class ToolCard(ExpandableActionBlock):
         whose result never reached the transcript.
 
         ``state`` is ``"success"``, ``"error"``, ``"interrupted"`` — the third
-        for a call whose result is not in the transcript, which is what a
-        session killed mid-turn leaves behind — or ``"running"``, or
-        ``"queued"`` for a call that was announced, dictated to completion and
-        never started (a batch queued behind a long sibling, or a turn that
-        died before its group ran).
+        for a call that did not complete under its own power: a row with no
+        result in the transcript, which is what a session killed mid-turn
+        leaves behind, or a MARKED abort whose receipt the caller passes back
+        in ``result_text``/``error`` — or ``"running"``, or ``"queued"`` for a
+        call that was announced, dictated to completion and never started (a
+        batch queued behind a long sibling, or a turn that died before its
+        group ran). On that third arm the receipt is stored to the EXPANSION:
+        the status cell keeps the constant word, and ``result_text``/``error``
+        would otherwise be dropped on the floor, so a resumed aborted row said
+        `⊘` and nothing else while the live row had shown the receipt.
 
         ``"running"`` exists for the same reason the other three do, one step
         further on. `subagent_view.entry_block` rebuilds a child's whole
@@ -1940,6 +1994,23 @@ class ToolCard(ExpandableActionBlock):
             self._absorb_result(result_text or error, details)
             self.add_class("tool-error")
         elif state == "interrupted":
+            # The reason the call ended, when the caller has one — a marked
+            # abort receipt read back from the transcript. To the EXPANSION,
+            # not the status cell: the cell keeps the constant word (see
+            # `mark_interrupted`), and before this the arm stored NOTHING, so a
+            # resumed aborted row said `⊘` and nothing else while the live row
+            # had shown the receipt.
+            #
+            # EXCEPT for a user-run row (bang-mode `!`), which must stay exactly
+            # as shut as the live one: `_abort_shell_command` marks its card
+            # interrupted, and the shell's own result handler deliberately never
+            # hands it the receipt afterwards (its `not signal.aborted` guard) —
+            # so the live row never grows an expansion. Storing the text here
+            # would grow one the operator never saw, and `user_run` cards arm
+            # open-on-settle, so the resumed row would even OPEN itself — the
+            # opposite of design round 1, D1's "stays shut".
+            if (result_text or error) and not self.user_run:
+                self._absorb_result(result_text or error, details)
             self.add_class("tool-interrupted")
         else:
             self._absorb_result(result_text, details)
@@ -3936,6 +4007,11 @@ class ToolCard(ExpandableActionBlock):
         # width that holds the word whole it is dropped, and the glyph column
         # carries the state alone — which it can, being distinguishable from
         # ✓ and ✗ with no colour at all.
+        #
+        # `word_tint` is None for every arm except `interrupted`, whose word
+        # splits from the glyph's ink (see that arm): the reason run falls back
+        # to `tint` and the arms that never set it are untouched.
+        word_tint: Style | None = None
         if self._state == "success":
             if self._partial:
                 # PARTIAL: the tool answered, but not about the whole tree it was
@@ -3977,9 +4053,14 @@ class ToolCard(ExpandableActionBlock):
                 abbreviates = True
         elif self._state == "interrupted":
             # `bindings.BY_ELEMENT["tool.status.interrupted"]` deliberately
-            # keeps `dim`, not a hue: see its note.
+            # keeps `dim`, not a hue: see its note. The WORD splits from the
+            # glyph's ink (review round 1, D1): `dim` measured 4.18:1 on
+            # `surface` — under the 4.5:1 text floor — and the word is the
+            # state's carrier, so it takes `muted` (7.93:1) while the ⊘ keeps
+            # `dim` (the 3:1 icon floor).
             glyph, reason = ICON_INTERRUPTED, self._interrupt_label
             tint = bindings.style("tool.status.interrupted")
+            word_tint = bindings.style("tool.status.interrupted_word")
             abbreviates = False
         else:
             danger = bindings.style("tool.status.error_glyph")
@@ -3987,6 +4068,7 @@ class ToolCard(ExpandableActionBlock):
             abbreviates = True
 
         runs: list[tuple[str, Style]] = []
+        word_ink = word_tint or tint
         if not terse and reason:
             if cap:
                 # Uncapped, the caller clamps downstream and the reason rides
@@ -4000,7 +4082,7 @@ class ToolCard(ExpandableActionBlock):
             # "there were words here". Drop it and give the cell back to the
             # columns that still mean something.
             if reason and reason != "…":
-                runs.append((f"{reason} ", tint))
+                runs.append((f"{reason} ", word_ink))
         runs.append((f"{glyph} ", tint))
         runs.append((duration, dim))
         return runs

@@ -734,7 +734,28 @@ _TOOL_ROW_BINDINGS: tuple[Binding, ...] = (
     # colourless frame, and interrupted stays on the neutral ramp so that
     # contract is not quietly walked back by a future palette author reaching
     # for a fourth outcome colour.
+    #
+    # The GLYPH keeps `dim`; the WORD splits to `tool.status.interrupted_word`
+    # below — review round 1, D1 measured the shared binding at 4.18:1 on
+    # `surface`, under the 4.5:1 text floor.
     Binding("tool.status.interrupted", "dim", "surface", Role.NEUTRAL, Surface.TOOL_ROW),
+    Binding(
+        "tool.status.interrupted_word",
+        "muted",
+        "surface",
+        Role.NEUTRAL,
+        Surface.TOOL_ROW,
+        note=(
+            "The WORD `interrupted`, one ramp step above its ⊘ (review round "
+            "1, D1). `dim` measures 4.18:1 on `surface` — under the 4.5:1 "
+            "text floor — and this word is the state's visible carrier, so it "
+            "must clear the text floor the way every other outcome word does "
+            "(`muted` measured 7.93:1 where the failure word sits at "
+            "6.34:1). The ⊘ itself stays `dim`: an icon clears the 3:1 icon "
+            "floor, and the pair stays on the neutral ramp — no hue (see "
+            "`tool.status.interrupted`)."
+        ),
+    ),
     Binding("tool.status.error_glyph", "danger", "tint-danger", Role.OUTCOME, Surface.TOOL_ROW),
     Binding(
         "tool.status.partial_glyph",

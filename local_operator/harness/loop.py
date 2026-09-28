@@ -51,8 +51,10 @@ from local_operator.harness.intent import (
 from local_operator.harness.redaction import tool_source
 from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
+    FAULT_ABORTED,
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
+    FAULT_SKIPPED,
     OUTPUT_LIMIT_ARGUMENTS,
     OUTPUT_LIMIT_KEY,
     OUTPUT_LIMIT_TURN,
@@ -255,17 +257,18 @@ NOT_RUN_REASON_MAX_CHARS = 200
 # three feed the tool-call validity figure — see ``analytics.model.MODEL_FAULTS``,
 # which owns that classification for the read side.
 #
-# ``FAULT_KEY`` and ``FAULT_INVALID_ARGUMENTS`` are re-exported from
-# ``harness.types`` rather than declared here: a tool BODY also needs to claim
-# the invalid-arguments class (see ``InvalidToolArgumentsError``), and tool
-# modules import ``harness.types`` while this module imports them indirectly.
-# Importing them keeps one spelling for the value the ledger stores.
+# ``FAULT_KEY``, ``FAULT_INVALID_ARGUMENTS``, ``FAULT_ABORTED`` and
+# ``FAULT_SKIPPED`` are declared in (and re-exported from) ``harness.types``
+# rather than declared here: tool BODIES now claim both the invalid-arguments
+# and the aborted class (see ``InvalidToolArgumentsError`` and the bash/eval
+# abort receipts), every display surface reads the {skipped, aborted} pair to
+# settle a row as ``interrupted``, and tool modules import ``harness.types``
+# while this module imports them indirectly. Importing them keeps one spelling
+# for the value the ledger stores.
 FAULT_UNKNOWN_TOOL = "unknown_tool"  # model named a tool that does not exist
 FAULT_DUPLICATE_ID = "duplicate_id"  # model emitted one call id twice
 FAULT_DENIED = "denied"  # refused at the gate (a user's no, or nobody could be asked)
 FAULT_GATE_FAILED = "gate_failed"  # our approval plumbing raised
-FAULT_ABORTED = "aborted"  # the user stopped the turn
-FAULT_SKIPPED = "skipped"  # steering redirected before this call ran
 FAULT_EXECUTION = "execution"  # the tool ran and failed (HTTP 500, missing file)
 # Backfill for empty tool results (coerceToolResult): Anthropic rejects an
 # empty ``is_error`` tool_result content with a 400, and other providers
@@ -1463,10 +1466,18 @@ class AgentLoop:
                                     # model learns the call did not run and may
                                     # re-issue it, which is strictly more
                                     # information than the call having vanished.
+                                    # Marked like the other abort emitters so
+                                    # the frontends settle the row as an
+                                    # interruption rather than a red failure: a
+                                    # dropped network is nobody's fault.
                                     await self._append_results(
                                         context,
                                         [
-                                            self._synthetic_result(call, ABORTED_RESULT_TEXT)
+                                            self._synthetic_result(
+                                                call,
+                                                ABORTED_RESULT_TEXT,
+                                                details={FAULT_KEY: FAULT_ABORTED},
+                                            )
                                             for call in assistant.tool_calls
                                         ],
                                         new_messages,
@@ -1799,8 +1810,20 @@ class AgentLoop:
                         # ``stream_error`` carries the provider's own refusal
                         # message, which is what lets the user decide whether
                         # to rephrase or switch models.
+                        #
+                        # ONLY the ABORT arm is marked with a fault class. A
+                        # refusal and a stream error both ride this branch and
+                        # are genuine failures — nothing was stopped, the
+                        # provider declined — so they keep today's unmarked
+                        # result. `aborted` is computed HERE rather than at the
+                        # event below because the markers must agree with it:
+                        # same verdict line, one reading.
+                        aborted = stop_reason == "aborted" or bool(signal and signal.aborted)
+                        placeholder_details = {FAULT_KEY: FAULT_ABORTED} if aborted else None
                         placeholders = [
-                            self._synthetic_result(call, ABORTED_RESULT_TEXT)
+                            self._synthetic_result(
+                                call, ABORTED_RESULT_TEXT, details=placeholder_details
+                            )
                             for call in assistant.tool_calls
                         ]
                         await self._append_results(
@@ -1810,7 +1833,6 @@ class AgentLoop:
                             redact=config.redact_tool_result,
                         )
                         yield TurnEndEvent(message=assistant, tool_results=[])
-                        aborted = stop_reason == "aborted" or bool(signal and signal.aborted)
                         yield AgentEndEvent(
                             messages=new_messages,
                             aborted=aborted,
@@ -2885,7 +2907,9 @@ class AgentLoop:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _not_run_compose_frame(call: ToolCall, reason: str) -> ToolCallComposeEvent:
+    def _not_run_compose_frame(
+        call: ToolCall, reason: str, kind: str | None = None
+    ) -> ToolCallComposeEvent:
         """The terminal compose frame for a call that will never START.
 
         A call parked at planning (an unknown tool, invalid arguments, a
@@ -2913,6 +2937,15 @@ class AgentLoop:
         budget text (``LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS``) — the whole
         synthetic result is the mistake this avoids.
 
+        ``kind`` is the FAULT_* CLASS of the verdict, for a consumer to route on
+        without parsing the reason's wording. Callers read it RAW from the
+        verdict's own ``details`` — never through ``_classify_fault``, whose job
+        is the ANALYTICS table and which would collapse
+        ``unknown_tool``/``invalid_arguments``/``duplicate_id`` to
+        ``execution`` here. ``None`` is the legacy meaning (no class), and the
+        only values that change a frontend's settle are the
+        ``INTERRUPTED_FAULTS`` pair.
+
         Only an ANNOUNCED call gets one: the compose surface exists solely for
         a call whose dictation reached a viewer, and a frame for a call nobody
         was shown would mount a row for something that was never on screen.
@@ -2932,17 +2965,20 @@ class AgentLoop:
             argument_bytes=len(call.raw_arguments or ""),
             dictation_complete=True,
             not_run_reason=text,
+            not_run_kind=kind,
         )
 
-    def _not_run_frames(self, calls: list[ToolCall], reason: str) -> list[ToolCallComposeEvent]:
-        """Terminal frames for a set of calls that will never START, one reason.
+    def _not_run_frames(
+        self, calls: list[ToolCall], reason: str, kind: str | None = None
+    ) -> list[ToolCallComposeEvent]:
+        """Terminal frames for a set of calls that will never START, one verdict.
 
         The steering skip's shape: every call it drops after the batch's first
-        slot shares one verdict, so they share one reason. The planning-failure
-        path above carries a per-call reason and calls
-        :meth:`_not_run_compose_frame` directly for that reason.
+        slot shares one verdict, so they share one reason AND one class
+        (``skipped``). The planning-failure path above carries a per-call reason
+        and calls :meth:`_not_run_compose_frame` directly for that reason.
         """
-        return [self._not_run_compose_frame(call, reason) for call in calls if call.name]
+        return [self._not_run_compose_frame(call, reason, kind=kind) for call in calls if call.name]
 
     async def _execute_tool_calls(
         self,
@@ -3013,7 +3049,19 @@ class AgentLoop:
         # be able to stop waiting for them at the moment the harness decided.
         for failure in plan:
             if failure.failure is not None:
-                yield self._not_run_compose_frame(failure.call, failure.failure.text)
+                # The verdict's own class, read RAW from the synthetic result's
+                # details: ``_classify_fault`` is the ANALYTICS reader (it
+                # collapses anything outside its table to ``execution``) and
+                # would lose ``unknown_tool``/``invalid_arguments``/
+                # ``duplicate_id`` on the way to the wire here. A failure that
+                # somehow carries no marker sends ``None`` = "no class", which
+                # every consumer keeps treating as legacy.
+                raw_kind = (failure.failure.details or {}).get(FAULT_KEY)
+                yield self._not_run_compose_frame(
+                    failure.call,
+                    failure.failure.text,
+                    kind=raw_kind if isinstance(raw_kind, str) and raw_kind else None,
+                )
         index = 0
         first_slot = True
         while index < len(plan):
@@ -3028,6 +3076,20 @@ class AgentLoop:
                 and self._peek_steering(config)
             ):
                 for remaining in plan[index:]:
+                    # A call whose planning failure was already parked (unknown
+                    # tool, duplicate id) pairs with THAT result, never a skip:
+                    # the model must not be told "skipped" right after being
+                    # told "Tool not found", and a durable consumer keyed by
+                    # call id takes the last result for the id, so a second one
+                    # relabels the row as an interruption on every replay
+                    # (desktop QA round 1, Q-1, against the sibling UI PR). The
+                    # frames below have excluded these calls since they were
+                    # written, for exactly this reason; this loop kept pairing
+                    # them with the wrong result because a batch the steering
+                    # never reached appended nothing of its own.
+                    if remaining.failure is not None:
+                        results.append(remaining.failure)
+                        continue
                     # Marked at the source like every other fault, though this
                     # site bypasses ``park`` and so is not recorded: a call
                     # steering skipped before it was ever scheduled is excluded
@@ -3058,6 +3120,7 @@ class AgentLoop:
                 for frame in self._not_run_frames(
                     [item.call for item in plan[index:] if item.failure is None],
                     SKIPPED_RESULT_TEXT,
+                    kind=FAULT_SKIPPED,
                 ):
                     yield frame
                 break
@@ -3976,7 +4039,18 @@ class AgentLoop:
             claimed: Counter[str] = Counter()
             for slot, item in enumerate(batch):
                 if results_by_slot[slot] is None:
-                    result = self._synthetic_result(item.call, ABORTED_RESULT_TEXT)
+                    # MARKED like every other abort emitter — this was the one
+                    # that forgot. It is the backfill for calls the abort
+                    # watcher cancelled before their own handler parked a
+                    # result; unmarked, the same turn's aborts read as
+                    # `execution` failures in the ledger AND as red failures on
+                    # the frontends, while a header-stopped sibling marked
+                    # elsewhere settled as an interruption. One turn, one
+                    # verdict, one class (review of the interrupted-vs-failed
+                    # workstream).
+                    result = self._synthetic_result(
+                        item.call, ABORTED_RESULT_TEXT, details={FAULT_KEY: FAULT_ABORTED}
+                    )
                     results_by_slot[slot] = result
                     if slot in started_at_by_slot and item.tool is not None:
                         # Only for calls that actually STARTED. A planning

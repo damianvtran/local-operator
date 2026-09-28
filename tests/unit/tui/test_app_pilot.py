@@ -3717,6 +3717,107 @@ async def test_a_failing_bang_card_settles_open_too() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_replayed_marked_abort_carries_its_receipt() -> None:
+    """A MARKED abort replays the same dim row as the live frame — plus the
+    receipt, which the legacy text-prefix arm could not attach.
+
+    The marker, not the wording, is the classifier: the persisted result is
+    error-shaped like any failure, but `details[__fault] = aborted` says the
+    user stopped it. The row settles `interrupted` (never red) and the abort's
+    own words stay one tap away — the resume twin of the legacy case above,
+    which must keep working for journals written before the markers existed.
+    """
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(
+            role="user", text="! sleep 30", tool_calls=None, content=[], custom_type=None
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[
+                SimpleNamespace(id="shell-1", name="bash", arguments={"command": "sleep 30"})
+            ],
+            custom_type=None,
+        ),
+        SimpleNamespace(
+            role="tool",
+            tool_call_id="shell-1",
+            text="aborted (interrupted): sleep 30",
+            is_error=True,
+            provider_payload={"details": {"__fault": "aborted"}, "duration_s": 2.4},
+            content=[],
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        cards: list[ToolCard] = []
+        for _ in range(200):
+            await pilot.pause()
+            cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+            if cards:
+                break
+        assert len(cards) == 1
+        # The bang row keeps its live contract even when the marker is what
+        # classified it: dim, shut, no red dressing — the expansion it never
+        # had live must not grow on resume (design round 1, D1).
+        assert cards[0]._state == "interrupted"
+        assert "tool-error" not in cards[0].classes
+        assert cards[0].expanded is False
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_marked_abort_of_a_model_call_shows_its_receipt() -> None:
+    """The marker arm carries the receipt for a MODEL-ISSUED call.
+
+    Unlike the bang row above, a model-issued call's live frame keeps the
+    abort receipt reachable (the end-event settle stores it), so the resumed
+    row must offer the same tap: `⊘ interrupted`, the interval the payload
+    persisted, and the abort text in the expansion. Before this arm existed,
+    the marked result fell through to the error branch only when its text
+    happened to start with `aborted (` — a wording dependency this pins out.
+    """
+    session = FakeSession()
+    session._history = [
+        SimpleNamespace(
+            role="user", text="run a server", tool_calls=None, content=[], custom_type=None
+        ),
+        SimpleNamespace(
+            role="assistant",
+            text="",
+            tool_calls=[
+                SimpleNamespace(id="call-1", name="bash", arguments={"command": "sleep 300"})
+            ],
+            custom_type=None,
+        ),
+        SimpleNamespace(
+            role="tool",
+            tool_call_id="call-1",
+            text="stopped before this command finished",
+            is_error=True,
+            provider_payload={"details": {"__fault": "aborted"}, "duration_s": 2.4},
+            content=[],
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(80, 24)) as pilot:
+        cards: list[ToolCard] = []
+        for _ in range(200):
+            await pilot.pause()
+            cards = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, ToolCard)]
+            if cards:
+                break
+        assert len(cards) == 1
+        card = cards[0]
+        assert card._state == "interrupted"
+        assert "tool-error" not in card.classes
+        # The marker classified it even though the text does NOT start with
+        # `aborted (`: the legacy sniff cannot be what settled this row.
+        assert "stopped before this command finished" in card._output
+        assert card._duration == pytest.approx(2.4)
+
+
+@pytest.mark.asyncio
 async def test_a_replayed_aborted_bang_card_stays_shut_and_dim() -> None:
     """The user's own Esc must not come back as a red failure on resume: the
     persisted abort result is an error-shaped message, but the live frame it

@@ -110,6 +110,8 @@ from local_operator.harness.rows import (
 # discipline protects. The aside builds the request-scoped turns it hands to
 # `complete_aside` out of these two.
 from local_operator.harness.types import (
+    FAULT_KEY,
+    INTERRUPTED_FAULTS,
     AgentMessage,
     AskQuestion,
     ImageContent,
@@ -14762,8 +14764,9 @@ class OperatorApp(App[None]):
         now hands the real outcome back to the SAME card instead of painting
         a new row (review round 4, MINOR-1). Same state derivation as
         ``_replay_tool_call`` — a call killed mid-execution persists as an
-        error result whose text starts with ``aborted (``, which the live
-        frame renders as ``interrupted``, not an error.
+        error result MARKED ``{skipped, aborted}`` (or, on rows written before
+        the markers existed, one whose text starts with ``aborted (``), both
+        of which the live frame renders as ``interrupted``, not an error.
 
         "Same derivation" includes the persisted ``duration_s``: this is the
         SECOND settled-replay path (``replay_history`` picks between it and
@@ -14782,16 +14785,28 @@ class OperatorApp(App[None]):
         # non-negative number degrades to the blank column rather than
         # crashing the formatter or inventing a `0.0s`.
         duration_s = parse_duration(payload.get("duration_s")) if is_dict else None
+        # The marker FIRST: a result this build wrote classifies by its own
+        # FAULT class, whatever its wording. `{skipped, aborted}` → the dim
+        # ``interrupted`` tier with the receipt kept reachable, symmetric with
+        # `on_tool_ended`'s live settle and with `replay_tool_call`.
+        fault = details.get(FAULT_KEY) if isinstance(details, dict) else None
+        if getattr(result, "is_error", False) and fault in INTERRUPTED_FAULTS:
+            card.restore(state="interrupted", result_text=result_text, duration_s=duration_s)
+            return
         if getattr(result, "is_error", False) and result_text.startswith("aborted ("):
-            # Symmetric with `replay_tool_call`'s aborted arm, including its
-            # limits — see the long note there for the provenance. In short:
-            # the parenthesised text is `execute_bash`/`eval`'s own, built by
-            # `_error(...)`, which stamps no `duration_s`; the loop's
-            # `ABORTED_RESULT_TEXT` has no paren and takes the error arm. So
-            # this restore is inert on every producer known today and exists
-            # so the row stays faithful if one ever carries the interval.
-            # The dim `interrupted ⊘` presentation stays (design round 1, D1).
-            card.restore(state="interrupted", duration_s=duration_s)
+            # LEGACY FALLBACK, kept forever because old journals are read
+            # forever: rows written before the abort markers existed are
+            # classified by their text. New transcripts reach the marker arm
+            # above and never this sniff. Symmetric with `replay_tool_call`'s
+            # aborted arm, including its limits — see the long note there for
+            # the provenance. In short: the parenthesised text is
+            # `execute_bash`/`eval`'s own, and the loop's
+            # `ABORTED_RESULT_TEXT` has no paren and takes the error arm. The
+            # dim `interrupted ⊘` presentation stays (design round 1, D1), and
+            # the receipt is now kept reachable in the expansion exactly as
+            # the marker arm keeps it — the two arms must not differ in what
+            # the operator can read.
+            card.restore(state="interrupted", result_text=result_text, duration_s=duration_s)
             return
         if getattr(result, "is_error", False):
             # Symmetric with `replay_tool_call`'s error arm, including the
@@ -48479,9 +48494,18 @@ class OperatorApp(App[None]):
             # in place, and the reconnect seed keeps one entry), so a row built
             # from it has never been through `set_composing` and would otherwise
             # claim the model composed nothing over a frame carrying the size.
+            #
+            # `not_run_kind` says WHICH ending this is — the row settles as
+            # the dim ⊘ interruption for `{skipped, aborted}` and as the error
+            # it always was for a planning fault (see `mark_not_run`).
+            # `getattr` again, for the bare-`AgentEvent` reason documented
+            # above: an owner whose build predates the field sends none, and
+            # an absent kind is the legacy reading (`None` → today's error
+            # settle), which is exactly the older-producer behaviour.
             card.mark_not_run(
                 str(not_run),
                 argument_bytes=int(getattr(event, "argument_bytes", 0) or 0),
+                kind=getattr(event, "not_run_kind", None),
             )
             self._refresh_working_activity()
             return
@@ -48651,7 +48675,18 @@ class OperatorApp(App[None]):
         measured_s = getattr(event, "duration_s", None)
         if measured_s is None:
             measured_s = getattr(getattr(event, "result", None), "duration_s", None)
-        if event.is_error:
+        # The call's FAULT class, when its emitter marked one, read RAW from the
+        # result's details — the same value the replay paths read, so a call
+        # cannot settle one way live and another on `/resume`. `{skipped,
+        # aborted}` is an INTERRUPTION (the user stopped the turn, or steering
+        # redirected the call away before it ran), and it settles as the dim ⊘
+        # row the turn-death pass already paints rather than the red failure
+        # `is_error` alone would draw — which is exactly the operator's report.
+        # Everything else, marker or none, keeps today's `mark_failed`.
+        fault = (details or {}).get(FAULT_KEY)
+        if fault in INTERRUPTED_FAULTS:
+            card.mark_interrupted(reason=result_text, measured_s=measured_s)
+        elif event.is_error:
             card.mark_failed(_first_line(result_text), result_text, details, measured_s=measured_s)
         else:
             card.mark_done(result_text, details, measured_s=measured_s)

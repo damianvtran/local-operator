@@ -116,6 +116,55 @@ def _faults(recorded) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
+async def test_a_user_stopped_bash_call_records_aborted_not_execution():
+    """Review round 1, m1: a killed call's recorded fault is ``aborted``.
+
+    The chain decides what the ledger's execution-fault figure counts —
+    ``analytics.model.EXCLUDED_FAULTS`` excludes ``aborted`` — so it is pinned
+    through the real path: the real ``execute_bash``, the real loop, into
+    ``record_tool_call``. The result a killed call is recorded from is the
+    runner's own abort park (the batch backfill fills the wire, but is never
+    recorded); deleting that park's marker turns this test red. Measured
+    against ``origin/main``, the recorded classification is unchanged for this
+    shape — the park was already marked — so this is a regression pin on the
+    chain, not a claim that a published number moved; see the PR's corrected
+    disclosure for where the new markers do and do not change the ledger.
+    """
+    from local_operator.tools.registry import create_tools
+
+    tool_context = ToolContext(session_id="s1")
+    bash = {tool.name: tool for tool in create_tools(tool_context)}["bash"]
+    recorded: list[tuple[str, str, str, float]] = []
+    config = LoopConfig(
+        model=MODEL,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=_Scripted(
+            [
+                _calls((0, "c1", "bash", '{"command": "sleep 30"}'))
+                + [StreamEndEvent(stop_reason="toolUse")],
+                [StreamEndEvent(stop_reason="stop")],
+            ]
+        ),
+        record_tool_call=lambda name, origin, fault, ms: recorded.append((name, origin, fault, ms)),
+        interrupt_mode="immediate",
+        has_steering_messages=lambda: False,
+    )
+    context = LoopContext(system_blocks=["sys"], tools=[bash], tool_context=tool_context)
+    signal = AbortSignal()
+
+    async def abort_soon() -> None:
+        await asyncio.sleep(0.5)
+        signal.abort("stop")
+
+    aborter = asyncio.ensure_future(abort_soon())
+    async for _event in AgentLoop().run([], context, config, signal):
+        pass
+    await aborter
+
+    assert _faults(recorded) == {"bash": "aborted"}
+
+
+@pytest.mark.asyncio
 async def test_a_clean_call_records_no_fault():
     recorded = await _run(
         _calls((0, "c1", "read", '{"path":"a"}')) + [StreamEndEvent(stop_reason="toolUse")],

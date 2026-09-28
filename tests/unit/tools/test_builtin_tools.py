@@ -32,6 +32,7 @@ from rich.cells import cell_len
 
 from local_operator import imaging, procstate
 from local_operator.harness.types import (
+    FAULT_KEY,
     AbortSignal,
     AgentTool,
     ImageContent,
@@ -284,6 +285,11 @@ async def test_bash_abort_kills_process_group(tools, context) -> None:
 
     assert result.is_error is True
     assert "aborted" in result.text and "stop" in result.text
+    # The abort receipt is MARKED, and that marker is what the frontends route
+    # on (dim ⊘, not a red failure) and what keeps the ledger's
+    # execution-fault rate clean of the user's own stop. Unmarked, the same
+    # turn reads as a tool failure on every surface that does not parse text.
+    assert (result.details or {}).get(FAULT_KEY) == "aborted"
 
     await asyncio.sleep(0.1)
     pid = int(Path(marker).read_text().strip())
@@ -303,6 +309,9 @@ async def test_bash_pre_aborted_signal_spawns_no_child(tools, context) -> None:
     assert result.is_error is True
     assert "aborted" in result.text
     assert not Path(marker).exists()  # the command never ran
+    # Pre-aborted and mid-run aborts are the same class: one spelling for the
+    # ledger and both frontends, whichever arm produced the receipt.
+    assert (result.details or {}).get(FAULT_KEY) == "aborted"
 
 
 @pytest.mark.asyncio
