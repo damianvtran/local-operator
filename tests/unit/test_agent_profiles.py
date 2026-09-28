@@ -21,7 +21,9 @@ from local_operator.agent_profiles import (
     READ_ONLY_TOOLS,
     SEED_SHA256_PREFIX,
     SEED_VERSION_PREFIX,
+    SEEDS_DIR,
     AgentProfile,
+    _split_frontmatter,
     filter_tools,
     install_seed,
     list_seeds,
@@ -205,6 +207,77 @@ def test_the_hands_on_roles_keep_the_full_inventory() -> None:
     for name in ("coder", "designer"):
         assert seed(name).tools is None, name
         assert filter_tools(ALL_TOOLS, seed(name)) == ALL_TOOLS, name
+
+
+def test_aida_goes_by_the_name_the_operator_configured() -> None:
+    """Her display name is the operator's (`aida.name`, default Aida): she
+    introduces and refers to herself by their name for her, while the `/aida`
+    command keeps its own name — a hard-baked name drifts from the configured
+    one the moment the operator renames her."""
+    text = seed("aida").instructions
+    assert "aida.name" in text
+    assert "/aida" in text
+
+
+def test_aida_hands_off_work_a_team_or_agent_should_own() -> None:
+    """The manager handoff: refresh the project, spawn the manager session
+    with the brief, let the manager drive it, and say the handoff out loud —
+    who owns it and when she will look again. Without these beats she sits in
+    the middle of work that a manager session should carry."""
+    flat = " ".join(seed("aida").instructions.split())
+    assert "spawn the manager session with the brief" in flat
+    assert "who owns it now" in flat
+
+
+def test_aida_routes_a_watch_to_the_session_that_owns_it() -> None:
+    """Her escalation tray is for HER cadence only: a watch that belongs to
+    someone else's work goes to a session with its own `wake` — stacking it
+    on her timetable leaves the owning session unaware the watch exists."""
+    flat = " ".join(seed("aida").instructions.split())
+    assert "not another line in your calendar" in flat
+    assert "a session with its own `wake`" in flat
+
+
+def test_aida_stewards_stalled_sessions_stale_projects_and_pending_asks() -> None:
+    """The check-in beats the revision added: a stalled session gets one
+    bounded wake, a stale project is noticed, and a pending ask from another
+    session is answered directly — or, for an operator's decision, surfaced to
+    them, never answered on their behalf."""
+    flat = " ".join(seed("aida").instructions.split())
+    assert "stalled on unfinished work" in flat
+    assert "what is going stale" in flat
+    assert "pending asks" in flat
+    assert "answer status, delegation and routing questions directly" in flat
+    assert "not answered for them" in flat
+
+
+def test_aida_learns_at_the_narrowest_scope_and_says_so() -> None:
+    """The learning loop: each kind of learning names its destination (the
+    operator's system prompt, a team's briefs, one agent's own prompt), edits
+    the files an EXISTING agent or team actually reads — seeds and templates
+    only shape future creations — measures the token cost of what it adds,
+    and proposes anything sweeping rather than applying it."""
+    text = seed("aida").instructions
+    flat = " ".join(text.split())
+    assert "Learning and continuous improvement" in text
+    assert "system_prompt.md" in text
+    assert "teams/<id>/instructions.md" in text
+    assert "agents/<id>/system_prompt.md" in text
+    assert "FUTURE creations" in flat
+    assert "token cost" in flat
+    assert "proposed, not applied" in flat
+
+
+def test_aidas_seed_reaches_the_loader_whole() -> None:
+    """The deploy guard for the revision: the loader truncates a body past
+    ``MAX_INSTRUCTIONS_CHARS`` (and the manifest generator refuses it), so a
+    seed must fit its budget un-truncated — this turns the next over-budget
+    addition into a red test instead of silently shipped-short guidance."""
+    text = (SEEDS_DIR / "aida.md").read_text(encoding="utf-8")
+    _meta, body = _split_frontmatter(text)
+    profile = seed("aida")
+    assert len(body) <= MAX_INSTRUCTIONS_CHARS
+    assert len(profile.instructions) == len(body), "the loader must not truncate her seed"
 
 
 def test_an_allowlist_naming_absent_tools_matches_nothing_rather_than_raising() -> None:
