@@ -1914,7 +1914,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # mkstemp temp in that SAME directory. The id is a uuid4 hex produced by the
     # store itself, never a caller-chosen component; `_atomic_write_text` has
     # exactly one caller (``_save_project_locked``, with a path it built from
-    # ``projects_dir``), and none of these four can name anything under
+    # ``projects_dir``), and none of these calls can name anything under
     # ``sessions/`` — deleting a project row never touches a session directory
     # by design.
     (
@@ -1939,6 +1939,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/projects.py::ProjectRegistry.delete_project",
         "<path>.unlink",
         "Removes ONE <config_dir>/projects/<id>.json row; session directories are " "never touched",
+    ),
+    (
+        "local_operator/projects.py::ProjectRegistry.delete_project",
+        "shutil.rmtree",
+        "Reclaims <config_dir>/projects/attachments/<id>/ — a directory SIBLING of "
+        "sessions/, never equal to or above one; <id> passed validate_project_id "
+        "(one safe path segment) and must match a loaded row before this runs",
+    ),
+    (
+        "local_operator/projects.py::ProjectRegistry._reclaim_attachment_files",
+        "<path>.unlink",
+        "Unlinks ONE stored attachment FILE per call, and only after the resolved "
+        "path is proven under <config_dir>/projects/attachments/ — a row pointing "
+        "anywhere else (including sessions/) is skipped, never removed",
     ),
     # The eval tool's cross-process restart marker (``tools/eval.py``): the same
     # atomic-write shape as ``registry._staged_write`` above — a
