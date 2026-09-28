@@ -325,6 +325,7 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
                 "transport": "http",
                 "auth_declared": True,
                 "has_row": False,
+                "has_placement": True,
             },
             {
                 "name": "shared-to-me",
@@ -332,6 +333,18 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
                 "transport": "sse",
                 "auth_declared": True,
                 "has_row": False,
+                "has_placement": True,
+            },
+            {
+                # SHARED ON THIS DEVICE'S BOOKS, NOT PULLED THERE: the owner's
+                # document says the peer is a holder, the peer's own answer says
+                # it has no placement entry — the row must report the GAP.
+                "name": "not-pulled",
+                "url": "https://i.example/mcp",
+                "transport": "http",
+                "auth_declared": True,
+                "has_row": False,
+                "has_placement": False,
             },
             {
                 "name": "unshared",
@@ -409,6 +422,10 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
                 "owner_device": VIEWER,
                 "holders": [{"device": THIRD, "scope": "session"}],
             },
+            "https://i.example/mcp": {
+                "owner_device": VIEWER,
+                "holders": [{"device": PEER, "scope": "session"}],
+            },
         },
         holds_urls={"https://e.example/mcp"},
     )
@@ -431,6 +448,10 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         "credential share mcp:https://d.example/mcp --with cloud-node-1"
         in by_server["unshared"]["remedies"][0]
     )
+    assert by_server["not-pulled"]["ok"] is False
+    assert by_server["not-pulled"]["code"] == readiness.CODE_NOT_SHARED
+    assert "has not pulled the placement" in by_server["not-pulled"]["detail"]
+    assert "lop network credentials" in by_server["not-pulled"]["remedies"][0]
     assert by_server["we-hold"]["ok"] is False
     assert "mcp:https://e.example/mcp" in by_server["we-hold"]["remedies"][0]
     assert (
@@ -556,6 +577,31 @@ def test_model_credential_verdicts(
     assert row["ok"] is ok, row
     haystack = row["detail"] + " ".join(row["remedies"])
     assert needle in haystack, row
+
+
+def test_a_share_that_has_not_been_pulled_is_not_denied() -> None:
+    """The harness's own finding, pinned: a borrower LEARNS a share on a pull.
+
+    ``pull_placement`` is paid on an explicit act (``lop network credentials``),
+    never on the provider path, so between the owner's ``share`` and the
+    borrower's pull the borrower's OWN answer carries no placement entry. A
+    report that stopped at "not shared" would deny a share that is on THIS
+    device's books and send the operator to run a command that already ran; the
+    row names the missing STEP instead.
+    """
+    viewer = _FakeViewer(
+        rows=["row"],
+        placement={
+            "owner_device": VIEWER,
+            "holders": [{"device": PEER, "scope": "session"}],
+        },
+    )
+    row = readiness.model_credential_row(
+        _member(), _facts(), viewer=viewer, peer_label="cloud-node-1"
+    )
+    assert row["ok"] is False and row["code"] == readiness.CODE_NOT_SHARED
+    assert "has not pulled the placement" in row["detail"]
+    assert "lop network credentials" in row["remedies"][0]
 
 
 def test_model_credential_row_reads_the_observation_memory() -> None:
