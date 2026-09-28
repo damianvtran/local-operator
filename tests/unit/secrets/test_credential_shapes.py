@@ -7590,3 +7590,43 @@ def test_the_released_word_shaped_class_is_measured_and_frozen() -> None:
         f"declaring it. newly released: {newly_released}; newly masked: {newly_masked}. "
         "If deliberate, update _RELEASED_WORD_SHAPED in the same commit and say why."
     )
+
+
+def test_the_shape_table_never_matches_its_own_source() -> None:
+    """The defining file must not trip the scanner it defines.
+
+    WHY THIS EXISTS. ``redaction_shapes.py`` names the credential shapes it knows in
+    its own prose: the examples that explain a rule are written in the shape the rule
+    matches. Before this guard, reading the file therefore MASKED it — its docstrings
+    came back to an agent with the examples replaced by the marker and, worse, a
+    handful of the matched spans were graded ``exposed``. ``reached_model`` is
+    ``any(hit.exposed …)``, so an agent that merely READ this file filed a rotation
+    demand for a credential that does not exist; a reviewer subagent was stopped
+    mid-round by exactly that. A file that documents the shapes has to stay legible to
+    the reader it documents them for, and reading documentation may never be an
+    incident.
+
+    WHAT IT PINS, and why zero rather than only "zero exposed". The primary
+    requirement is that no hit be ``exposed`` — nothing may reach the model as
+    readable credential material, and no notice may fire. This holds the whole table
+    to ZERO hits: an ordinary reader has no reason to see this file masked at all, and
+    a residual hit — even a contained one — is a spot where the prose is written as a
+    live example rather than a description. If a genuinely unmovable hit is ever
+    reintroduced (a rule that cannot be described without instantiating itself),
+    narrow this to the ``exposed`` half and record the residual here, which is a
+    decision rather than a silent widening.
+
+    The source is read from the installed module rather than a repository-relative
+    path, so the assertion follows the file this test's own interpreter loads.
+    """
+    source = Path(redaction_shapes.__file__).read_text()
+    _masked, hits = scrub_shapes_with_hits(source)
+    exposed = [hit.label for hit in hits if hit.exposed]
+    assert not exposed, (
+        "the shape table matches its own source as EXPOSED credential material, so an "
+        f"agent reading this file would file a rotation demand. labels: {exposed}"
+    )
+    assert not hits, (
+        "the shape table masks its own prose, leaving the file that documents the "
+        f"shapes illegible: {[(hit.label, hit.window) for hit in hits]}"
+    )

@@ -8,14 +8,14 @@ the session was handed, and it covers nothing else. A remote host's environment
 is precisely the set of secrets the harness has never seen: on 2026-09-18 a
 subagent ran ``kubectl exec -n backend-services <pod> -- sh -c 'env | grep -iE
 ...'`` against a production pod and the tool result came back carrying
-``MONGO_DSN=mongodb+srv://agent_runtime_model_worker:<pw>@mongodb-prod.…`` in
+``MONGO_DSN`` set to a ``mongodb+srv://`` DSN with a live password in
 full. The masking in that pipeline was the AGENT's own ``sed``, its pattern had
 no ``DSN``, and the harness had no fallback: nothing on the result path
 recognised a credential that was never handed to the session. The value was
 then plaintext in a transcript on disk, and a transcript is read by humans,
 copied into bug reports and replayed into later model calls.
 
-The response is a SHAPE pass: a pattern table that masks a value because of how
+The response is a SHAPE pass: a pattern table that masks a value from the way
 it is SPELLED — a DSN, a connection string, an ``AWS_SECRET_ACCESS_KEY=`` line,
 a PEM block, an issuer-prefixed token — not because the session knew it. It is
 deliberately the same policy the HTTP clients already shipped
@@ -223,9 +223,9 @@ _ASSIGNED_VALUE_MIN_CHARS = 8
 #: A value is any run of non-whitespace, bounded, TERMINATED by a delimiter.
 #:
 #: The old class EXCLUDED ``,;{}"'``, which meant a credential containing one of
-#: them was published in part (``PASSWORD=hunter2hunter2,hunter2`` →
-#: ``PASSWORD=[redacted],hunter2``) or in full (``{"password": "abcdef,ghij"}``,
-#: ``DB_PASSWORD=abc,defghij`` — nothing masked at all, because the group could
+#: them was published in part (the mask stopped at the comma, the tail after
+#: it staying readable) or in full (a JSON ``"password"`` value, whose quotes
+#: the group could not cross) — nothing masked at all, because the group could
 #: not reach its own floor). Excluding characters from a credential's charset is
 #: the wrong direction to bound a match in: the bound belongs in a LENGTH and a
 #: terminating delimiter, so the value keeps every character a real credential
@@ -234,8 +234,8 @@ _ASSIGNED_VALUE_GROUP = (
     # Greedy run of non-whitespace, whose LAST character must be a value
     # character (not a separator, a closer, a quote or a full stop) and which
     # must be followed by a delimiter or the end. Greedy is what makes
-    # ``PASSWORD=hunter2,hunter2`` mask the COMMA TOO rather than stopping at it;
-    # the last-character rule is what makes ``{"password": "abc,defghij"}`` stop
+    # a comma-containing value masks the COMMA TOO rather than stopping at it;
+    # the last-character rule is what makes ``{"password": "<value>"}`` stop
     # before the closing quote instead of swallowing it.
     #
     # There is deliberately NO UPPER BOUND on the value. A bound with a
@@ -444,12 +444,12 @@ _DSN_SCHEMES = (
 #: containing either character (``p@ssw0rd``, ``p/ssw0rd`` — both ordinary in
 #: base64 and generated secrets) was masked up to the first one and the REST WAS
 #: PUBLISHED, with an incident row then telling the model the credential had been
-#: masked. Measured before the fix: ``mongodb+srv://svc:p@ssw0rd@db/x`` came out
-#: ``svc:[redacted]@ssw0rd@db/x`` and ``postgres://svc:p/ssw0rd@db/app`` — whose
-#: name is not credential-shaped, so the assignment rule cannot rescue it — was
-#: not masked at all, with ZERO incidents. The class still refuses whitespace,
-#: quotes and ``:`` so an unterminated line cannot run away, and the authority
-#: part (``user``) still cannot contain ``:``/``@``.
+#: masked. Measured before the fix: a ``mongodb+srv://`` DSN whose userinfo
+#: password contains ``@`` was masked up to that first ``@`` while the rest was
+#: published, and a ``postgres://`` DSN whose name is not credential-shaped — so
+#: the assignment rule cannot rescue it — was not masked at all, with ZERO incidents.
+#: The class still refuses whitespace, quotes and ``:``, so an unterminated line cannot
+#: run away, and the authority part (``user``) still cannot contain ``:``/``@``.
 _DSN_PATTERN = re.compile(
     rf"(?i)\b((?:{_DSN_SCHEMES})://[^\s:/@\"']*:)(?!\[redacted\])"
     r"([^\s]*?)@(?=[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+(?:[/:?#]|$))"
@@ -751,8 +751,8 @@ _URL_USERINFO_PASSWORD = re.compile(
 #: spelling (``https://<key>@o1.ingest.sentry.io/2``), where the public key IS
 #: the credential. Hex/base64-ish and long, so an ordinary ``user@host`` URL is
 #: not caught by it.
-#: The same shape for a host with no dot (``mongodb://user:pw@host/db``,
-#: ``postgresql://u:pw@h/db``, ``rediss://default:pass@h:6380``). It is a SECOND
+#: The same shape for a host with no dot: a DSN whose userinfo is a user and a
+#: password ahead of a dotless host (``mongodb://``, ``postgresql://``). It is a SECOND
 #: rule rather than a relaxed lookahead on the first because the dotted form must
 #: be tried FIRST: with a dotless lookahead the lazy class settles on the earliest
 #: ``@``, which is right for a real host and wrong for a password containing one
@@ -1672,8 +1672,8 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
         return True
     # A USAGE COUNTER's value is the name of another local, and this arm is scoped
     # to the names that makes true for. Measured 2026-09-21 on a ``read`` of
-    # ``local_operator/providers/clients.py``: ``reasoning_tokens=<another local>``
-    # and ``extra_native_tokens=<another local>`` are counters whose TAIL is a
+    # ``local_operator/providers/clients.py``: ``reasoning_tokens=<other-counter>``
+    # and ``extra_native_tokens=<other-counter>`` are counters whose TAIL is a
     # credential word, so :func:`is_count_shaped` does not cover them — the tail is a
     # QUANTITY noun, which is a different test from that arm's first-segment
     # vocabulary — and the identifier on the right was read as a credential and
@@ -1791,7 +1791,7 @@ def _base64_value_guard(match: Match[str]) -> bool:
 #: fullmatched ``[a-z]+(?:_[a-z]+)+`` against the whole tail, failed on the ``=``,
 #: and announced the pair as an npm token. On 2026-09-21 that produced an
 #: ESCALATED rotation notice (session ``78e6409f2ba1``, the second firing of this
-#: class — the first is the ``--secret NAME`` case on :func:`_flag_value_guard`).
+#: class — the first is the ``--secret`` argument case on :func:`_flag_value_guard`).
 #: The escalation, not the mask, is what made it an incident: the tail is 48
 #: characters, ``_FRAGMENT_WINDOW`` is 6, and six-character fragments of an
 #: ordinary name (``config``, ``manage``, ``_versi``) are all over the prose
@@ -1913,8 +1913,8 @@ _CREDENTIAL_FLAG_WORDS = (
 #: token, so an assignment can never begin inside it.
 _CLI_CREDENTIAL_FLAG_BEFORE = re.compile(r"(?:^|[\s|;&])(?i:--" + _CREDENTIAL_FLAG_WORDS + r")\s+$")
 
-#: The same flag read as an ASSIGNMENT's NAME. ``--secret=NAME`` binds the flag to
-#: its argument with ``=``, so the assignment rules read ``--secret`` as the name
+#: The same flag read as an ASSIGNMENT's NAME. The ``--secret`` flag set with ``=``
+#: binds the flag to its argument, so the assignment rules read ``--secret`` as the name
 #: and the store's entry as the value; recognising the flag there is what gives the
 #: ``=`` spelling the verdict the space spelling gets from
 #: :func:`_flag_value_guard`.
@@ -1933,9 +1933,10 @@ def _is_a_name_in_the_store_grammar(token: str) -> bool:
     **A ONE-WORD store name is left masked, and that residual is stated rather than
     implied** (agent review R1-4). ``normalize_credential_key("prod")`` is ``PROD``: one
     word collapses to a single run of capitals, which is exactly the spelling the next
-    paragraph refuses, so ``lop secret run --secret prod`` is still masked and the
-    operator who names an entry with one word does not get the release this change is
-    for. ``PROD`` is pinned in the corpus as that residual, in the half that asserts the
+    paragraph refuses, so ``lop secret run`` with a one-word entry name is still masked,
+    and the operator who names an entry with one word does not get the release this
+    change is for. ``PROD`` is pinned in the corpus as that residual, in the half that
+    asserts the
     MASK, so a later round narrowing or widening it has a row to argue against. Case
     does not rescue it: a lower-case ``prod`` is refused for the separate reason below,
     and admitting a bare run of capitals released the five real credential values in
@@ -1943,8 +1944,8 @@ def _is_a_name_in_the_store_grammar(token: str) -> bool:
 
     **The underscore is the measured floor, not a stylistic preference.** A single run
     of capitals is a credential someone chose, and agent review R1-1 measured that
-    dropping the separator released ``--password PASSWORD``, ``--token TOKEN``,
-    ``--api-key KEY``, ``--api-key APIKEY`` and ``--secret DBPASSWORD`` — silently,
+    dropping the separator released the ``--password``, ``--token`` and
+    ``--api-key`` flags, and ``--secret`` — silently,
     with no mask and no notice, because no hit means no labels and no exposure.
 
     Lower case is deliberately NOT admitted, and that is the arm this judgement refuses
@@ -1989,7 +1990,7 @@ def _value_is_a_reference_to_a_credential(value: str) -> bool:
     that tool reads.
 
     **One predicate, two rules** (agent review R1-1). It is factored out because the
-    assignment rule sees the same text from inside: ``--secret NPM_TOKEN=NODE_AUTH_TOKEN``
+    assignment rule sees the same text from inside: a ``--secret`` two-part name argument
     is also an assignment whose name is ``NPM_TOKEN`` and whose value is the other NAME, and a mask
     there files an ESCALATED rotation demand for the guide's own documentation.
     Whichever rule sees it must reach the same verdict, so they share the clause rather
@@ -2007,14 +2008,14 @@ def _value_is_a_reference_to_a_credential(value: str) -> bool:
 
     **The two-part residual is WIDER than that one, and it is pinned too** (agent review
     R1-3). Because the halves are read by the env-name shape ALONE, the two-part spelling
-    does not need a separator in either half: ``--token ABCDEF=ABCDEF`` was masked before
-    this change and is released by it, where the one-part ``--token ABCDEF`` is still
+    does not need a separator in either half: the two-part ``--token`` spelling was masked before
+    this change and is released by it, where the one-part ``--token`` spelling is still
     masked for want of an underscore. That asymmetry is the grammar rather than an
     accident — the left half is a store entry's name, which need not carry a separator
     (``prod`` is a legal entry), and the right half is the child's variable, which
     conventionally does not (``PGPASSWORD``) — so it is stated and pinned as two corpus
     negatives, one with a separator in each half and one with none, instead of being
-    narrowed into breaking ``--secret prod=PGPASSWORD``.
+    narrowed into breaking a ``--secret`` argument that is a name=name pair.
     """
     if _is_a_name_in_the_store_grammar(value):
         return True
@@ -2076,13 +2077,13 @@ def _flag_value_guard(match: Match[str]) -> bool:
 
     **The SEPARATOR is required, and that is the whole of the narrowing.** Capitals
     alone is not enough: it also describes exactly the values this rule exists to catch
-    — ``--password PASSWORD``, ``--token TOKEN``, ``--api-key KEY``, ``--api-key
-    APIKEY``, ``--secret DBPASSWORD`` — and a first cut that omitted the underscore
+    — the ``--password``, ``--token`` and ``--api-key``
+    flags — and a first cut that omitted the underscore
     stopped masking all five (agent review R1, reproduced through the session hook: the
     values came back byte-identical with no mask and no notice at all).
 
     **The credential-word TAIL is no longer required, and that requirement was the
-    reported failure.** It masked ``--secret MINERVA_UI_NPROD_USERNAME`` in every tool result — a
+    reported failure.** It masked an entry name following ``--secret`` in every tool result — a
     name that ends in the SYSTEM it belongs to rather than in a credential word — and
     the masked text is what an agent then copies: the operator authored a publish script
     from the displayed output and the script asked the store for a secret literally
@@ -2254,8 +2255,8 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     if _is_a_credential_flags_argument(match):
         return False
     # ...and a credential FLAG's argument is a NAME this rule must not judge: on
-    # ``--secret=NAME`` the text left of the ``=`` is the flag itself, so this rule
-    # reads ``--secret`` as the assignment's NAME and the store's entry as its VALUE.
+    # the ``--secret`` flag set with ``=``, the text left of the ``=`` is the flag itself,
+    # so this rule reads ``--secret`` as the assignment's NAME and the store's entry as its VALUE.
     # Refusing here — and only when the value is name-shaped — hands the ``=``
     # spelling the verdict :func:`_flag_value_guard` reaches for the space spelling
     # (one verdict per argument, whichever character binds it) and keeps a
@@ -2339,7 +2340,7 @@ def _url_value_guard(match: Match[str]) -> bool:
 #: ORDER IS LOAD-BEARING and runs most-specific first:
 #:
 #: * the PEM block precedes the name rules, because a ``"private_key"``
-#:   assignment would otherwise mask the ``-----BEGIN`` header alone and leave
+#:   assignment would otherwise mask the bare PEM header alone and leave
 #:   the key material readable;
 #: * the DSN password precedes the ``*_URL`` rule, so ``MONGO_DSN=`` keeps its
 #:   user and host readable instead of being masked wholesale;
@@ -3161,13 +3162,13 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         ),
         REDACTION_MARKER,
     ),
-    # ``"private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE…"`` — the GCP
+    # ``"private_key"`` set to a JSON string that opens a PEM PRIVATE KEY header
     # service-account form. The escaped ``\n`` sequences sit inside the JSON
     # string, so the PEM rule above spans them too and this rule only has to
     # catch the header when the body was truncated before an END line arrived.
     Shape(
         "gcp-service-account-value",
-        # The ANCHORED spelling — `"private_key": "-----BEGIN …` — is masked to the
+        # The ANCHORED spelling — a JSON key followed by a PEM header — is masked to the
         # VALUE's closing quote, which is a real, bounded delimiter, instead of to a
         # line boundary. The line-bounded iteration is what round 6 broke: a body line
         # whose padding is followed by more base64 (`…, note`) or by an ANSI reset
@@ -3452,7 +3453,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         4,
         guard=_assignment_guard_quoted,
     ),
-    # ``.netrc``: ``machine api.example.com login robot password …``. A
+    # ``.netrc``: a machine/login/password line. A
     # whitespace-separated assignment, so the ``[:=]`` rules above never see it.
     # Anchored on the ``machine … login`` pair rather than on the bare word,
     # because "the password was rotated today" is ordinary prose and must not be
@@ -3526,7 +3527,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         "authorization-basic-bare",
         # The bare keyword with a BASE64-shaped value and no header name, which is
         # how a scrubbed log or a `curl -v` blob often shows it
-        # (``Basic dXNlcjpwYXNz`` is ``admin:pw``). The guard is what keeps the
+        # (``Basic`` followed by a base64 blob is a user:password pair). The guard is what keeps the
         # prose safe: ``Basic authentication`` is a word, and base64 carries case
         # or an explicit ``+``/``/``/``=``.
         re.compile(
@@ -3547,7 +3548,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         2,
     ),
     # --- CLI / ecosystem shapes ---------------------------------------------
-    # ``--password=hunter2``, ``--password hunter2``, ``--token …`` — how a CLI
+    # the ``--password`` flag with an ``=`` value or a spaced one, the ``--token`` flag — how a CLI
     # that takes a credential as a flag spells it. The flag name is the context
     # and the ``-``/whitespace after it is required, so ``--token-ttl=3600``
     # (a duration) is not one of these.
@@ -3560,7 +3561,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # easy to keep honest.
         #
         # The guard's NAME clause extends that judgement to the spelling real
-        # commands use — ``--secret MINERVA_UI_NPROD_USERNAME``, where the token after the
+        # commands use — an entry name after ``--secret``, where the token after the
         # flag is the NAME of a stored secret rather than a value. See
         # ``_flag_value_guard`` and ``_value_is_a_reference_to_a_credential`` for the
         # production incident that measured it.
@@ -3569,7 +3570,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         2,
         guard=_flag_value_guard,
     ),
-    # ``mysql -u root -phunter2``, ``psql -p…``. Anchored on the client binary
+    # ``mysql``/``psql`` with an inline password on ``-p``. Anchored on the client binary
     # because ``-p`` is a PORT on almost everything else (``docker run -p
     # 8080:80``, ``ssh -p 2222``) and masking a port would be both unhelpful and
     # wrong. The binary name is the only thing that distinguishes the two, which
@@ -3583,7 +3584,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         r"\1" + REDACTION_MARKER,
         2,
     ),
-    # ``.npmrc``: ``//registry.npmjs.org/:_authToken=npm_…``.
+    # ``.npmrc``: its registry key with an ``_authToken`` entry.
     Shape(
         "npmrc-auth-token",
         re.compile(
@@ -3593,7 +3594,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         r"\1" + REDACTION_MARKER,
         2,
     ),
-    # ``docker login -u robot -p <password>``. Anchored on ``docker login``
+    # ``docker login`` with a password on ``-p``. Anchored on ``docker login``
     # because ``-p`` is a PORT on ``docker run`` — the published-port case is in
     # the negative corpus, and one pattern cannot serve both.
     Shape(
@@ -3602,7 +3603,7 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         r"\1" + REDACTION_MARKER,
         2,
     ),
-    # ``curl -u user:password https://…`` — the credential is the userinfo of a
+    # ``curl`` with a userinfo credential on ``-u`` — the credential is the userinfo of a
     # flag rather than of a URL, so the DSN rule cannot see it. Anchored on the
     # curl binary for the same reason as ``-p`` above: ``-u`` means other things
     # to other programs.
@@ -3620,14 +3621,14 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         r"\1" + REDACTION_MARKER,
         2,
     ),
-    # ``openssl … -passin pass:<password>`` / ``-passout``. The flag IS the
+    # ``openssl`` with a ``-passin``/``-passout`` passphrase. The flag IS the
     # context; a bare ``pass:`` would be prose.
     Shape(
         "openssl-pass-phrase",
         # The FLAG, with its argument: ``-passw``/``-passphrase``/``-passin`` and
         # friends are how openssl takes a passphrase, and a bare ``-pass``
         # followed by any word matched prose ("the post-pass occupancy").
-        # Every spelling ``openssl`` takes, including the bare ``-pass val`` that
+        # Every spelling ``openssl`` takes, including the bare ``-pass`` form that
         # ``openssl enc --help`` documents. Prose protection is the LOOK-BEHIND,
         # not a narrower alternation: ``post-pass occupancy`` and ``pre-pass
         # usage`` are hyphenated nouns, where ``-pass`` follows a word character.
@@ -3751,7 +3752,7 @@ def is_registerable_component(value: str) -> bool:
     # Length only. The word-shape refusal was added to stop ``Basic
     # authentication`` poisoning a session, and the header rules now need their
     # context to fire at all; keeping it refused the REGISTRATION of a
-    # word-shaped credential a real rule had masked (`--password swordfish`,
+    # word-shaped credential a real rule had masked (``--password`` with a word value,
     # `-pswordfish`, a DSN whose password is a word) — masked in place, then free
     # to reappear in the next result.
     if is_placeholder_component(value):
@@ -4567,8 +4568,8 @@ _INCOMPLETE_MASK_RE = re.compile(
 
 
 #: The mirror case: a mask whose LEFT side is a readable run followed by a quote
-#: (``_authToken=npm_abcd'[redacted]``). The run is credential material the rule
-#: could not see, and it is masked for the same reason as the tail.
+#: (``_authToken=`` then a readable run and a closing quote). The run is credential
+#: material the rule could not see, and it is masked for the same reason as the tail.
 _INCOMPLETE_MASK_LEFT_RE = re.compile(
     # `^` as well as a delimiter: a credential at the start of a line has nothing
     # before it, and that is where a prefix-orphaning split lands most often.
