@@ -317,6 +317,62 @@ async def test_create_still_takes_its_milestone_list(context, registry) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refresh_and_a_deliberate_replace_both_say_so(context, registry, tmp_path) -> None:
+    """One call, two verbs: the stale-identical progress line refreshes AND the
+    milestone list is replaced — the refreshed receipt must still name the
+    replace (agent review round 1, M1)."""
+    await call(
+        context,
+        op="create",
+        name="alpha",
+        milestones=[{"name": "beta cut"}, {"name": "gamma review"}],
+    )
+    await call(context, op="update", name="alpha", progress="still true")
+    project = registry.get_project_by_name("alpha")
+    # Backdate the stamp ON DISK so the identical line REFRESHES instead of
+    # no-oping — every mutation reloads, so in-memory surgery would be lost.
+    path = tmp_path / "projects" / f"{project.id}.json"
+    payload = json.loads(path.read_text())
+    payload["progress_updated_at"] = time.time() - 3600
+    path.write_text(json.dumps(payload))
+
+    body = await call(
+        context,
+        op="update",
+        name="alpha",
+        progress="still true",
+        milestones=[{"name": "beta cut"}],
+        replace_milestones=True,
+    )
+    assert "refreshed project 'alpha'" in body
+    assert "milestones replaced deliberately" in body
+    assert "replace_milestones=true" in body
+    stored = registry.get_project_by_name("alpha")
+    assert [m.name for m in stored.milestones] == ["beta cut"]
+    assert stored.progress == "still true"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_null_milestones_is_a_no_op_not_a_refusal(context, registry) -> None:
+    """`milestones=null` is the store's "leave it": no refusal, no replace
+    claim, and the other fields the call carries still apply (M2)."""
+    await call(
+        context,
+        op="create",
+        name="alpha",
+        milestones=[{"name": "beta cut"}, {"name": "gamma review"}],
+    )
+    body = await call(
+        context, op="update", name="alpha", progress="2026-09-27 moved", milestones=None
+    )
+    assert "REPLACE" not in body
+    assert "updated project 'alpha'" in body
+    stored = registry.get_project_by_name("alpha")
+    assert stored.progress == "2026-09-27 moved"
+    assert [m.name for m in stored.milestones] == ["beta cut", "gamma review"]
+
+
+@pytest.mark.asyncio
 async def test_show_reports_the_record_and_its_linked_sessions(context) -> None:
     await call(
         context,
