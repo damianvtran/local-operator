@@ -448,6 +448,19 @@ def _collect_listing(config_dir: Path, limit: int, include_dormant: bool) -> dic
         session_dir = Path(config_dir) / "sessions" / session_id
         cwd = str(raw.get("cwd") or "")
         schedules = _schedule_rows(raw, now_ms, _is_stale_ms)
+        # A session whose ONLY rows are internal timers (patience waits) is not
+        # a wake-carrying session on any human surface: the entry would render
+        # as an empty row, and the user never armed anything it could show.
+        # The supervisor still reads the raw index unfiltered — only listings
+        # and counts exclude patience rows (design §8.2.2 item 5). An entry
+        # that shows zero rows without any being filtered is left as it was
+        # (a hand-written empty entry is the store's own "no wakes" shape and
+        # the listing has always carried it).
+        if not schedules and any(
+            isinstance(row, Mapping) and str(row.get("kind") or "") == "patience"
+            for row in raw.get("schedules") or ()
+        ):
+            continue
         entries.append(
             WakeEntry(
                 session_id=session_id,
@@ -487,6 +500,11 @@ def _schedule_rows(entry: Mapping[str, Any], now_ms: int, is_stale) -> list[Wake
     rows: list[WakeScheduleRow] = []
     for raw in entry.get("schedules") or ():
         if not isinstance(raw, Mapping):
+            continue
+        # HIDDEN patience waits never appear in a listing (design §8.2.2
+        # item 5): they are internal timers, filtered like every other human
+        # surface filters them. The supervisor reads the same index unfiltered.
+        if str(raw.get("kind") or "") == "patience":
             continue
         due = _as_int(raw.get("next_due_at"))
         if due is None:

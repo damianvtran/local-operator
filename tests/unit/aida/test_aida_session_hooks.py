@@ -27,9 +27,19 @@ MODEL = ModelSpec(provider="test", model_id="aida-model", context_window=100_000
 
 
 def make_session(root: Path, session_id: str) -> Session:
-    """A real session over ``root/sessions/<id>``, pointed at ``root``."""
+    """A real session over ``root/sessions/<id>``, pointed at ``root``.
+
+    Carries the attachment a real ``aida.bootstrap`` writes (``agent="aida"``):
+    the effective action class is read through it, and a session without one
+    reads reactive — which would quietly disable the very hooks these tests
+    exercise. For the id that is NOT in ``state.json`` the attachment changes
+    nothing (``is_aida_session`` compares ids).
+    """
+    from local_operator.resume import write_session_attachment
+
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
+    write_session_attachment(directory, team="", agent="aida", goal="")
     return Session(
         model=MODEL,
         model_source="config",

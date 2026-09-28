@@ -321,6 +321,16 @@ def _consumer_defaults() -> dict[str, object]:
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
     consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
     consumers["aida.onboarding.nudge_days"] = aida_onboarding.DEFAULT_NUDGE_DAYS
+
+    # The proactive class's bounds come from the engine module that reads them
+    # (``wakes/patience``) — the one place the delivery-time defaults exist.
+    from local_operator.wakes import patience as patience_engine
+
+    consumers["proactive.patience.default_ms"] = patience_engine.DEFAULT_WAIT_MS
+    consumers["proactive.patience.backoff"] = patience_engine.DEFAULT_BACKOFF
+    consumers["proactive.patience.max_attempts"] = patience_engine.DEFAULT_MAX_ATTEMPTS
+    consumers["proactive.patience.episode_ttl_ms"] = patience_engine.DEFAULT_TTL_MS
+    consumers["proactive.patience.max_pending"] = patience_engine.DEFAULT_MAX_PENDING
     return consumers
 
 

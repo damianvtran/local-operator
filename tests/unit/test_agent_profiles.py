@@ -34,7 +34,7 @@ from local_operator.agent_profiles import (
     seed_tags,
     sync_installed_seeds,
 )
-from local_operator.agents import AgentRegistry
+from local_operator.agents import AgentEditFields, AgentRegistry
 
 
 class _Tool:
@@ -931,3 +931,69 @@ def test_seed_version_reads_the_frontmatter_the_manifest_publishes() -> None:
     for name in list_seeds():
         assert load_seed_version(name), name
     assert load_seed_version("does-not-exist") == ""
+
+
+# ---------------------------------------------------------------------------
+# The proactive class (R29): frontmatter → tags → read-back
+# ---------------------------------------------------------------------------
+
+
+def test_the_class_frontmatter_round_trips_through_seed_tags() -> None:
+    from local_operator.action_class import PROACTIVE, REACTIVE
+    from local_operator.agent_profiles import _profile_from_text
+
+    proactive = _profile_from_text(
+        "companion",
+        "---\nname: companion\ndescription: d\nclass: proactive\n---\nhi",
+    )
+    assert proactive.action_class == PROACTIVE
+    assert "class:proactive" in seed_tags(proactive)
+
+    plain = _profile_from_text("plain", "---\nname: plain\ndescription: d\n---\nhi")
+    assert plain.action_class == REACTIVE
+    assert not any(
+        tag.strip().lower().startswith("class:") for tag in seed_tags(plain)
+    )
+
+
+def test_profile_from_agent_reads_the_class_tag_back(tmp_path) -> None:
+    from local_operator.action_class import PROACTIVE
+    from local_operator.agent_profiles import profile_from_agent
+
+    registry = AgentRegistry(tmp_path)
+    registry.create_agent(
+        AgentEditFields(name="steward", tags=["role", "class:proactive"])
+    )
+    row = registry.get_agent_by_name("steward")
+    assert row is not None
+    profile = profile_from_agent(registry, row)
+    assert profile.action_class == PROACTIVE
+
+    registry.create_agent(AgentEditFields(name="plain", tags=["role"]))
+    row = registry.get_agent_by_name("plain")
+    assert row is not None
+    assert profile_from_agent(registry, row).action_class == "reactive"
+
+
+def test_the_fingerprint_covers_the_class_field() -> None:
+    """A baseline that missed the class would call an edit to it "clean".
+
+    The class is a seed-written field (``seed_tags`` encodes it), so the same
+    argument the tools-allowlist widening scar settled applies: a fingerprint
+    that hashed only the prose would let a class flip read as untouched.
+    """
+    from local_operator.action_class import PROACTIVE, REACTIVE
+
+    seed = load_seed("reviewer")
+    assert seed is not None
+    baseline = seed_fingerprint(seed)
+    flipped = AgentProfile(
+        name=seed.name,
+        description=seed.when_to_use or seed.description,
+        instructions=seed.instructions,
+        tools=tuple(seed.tools) if seed.tools else None,
+        effort=seed.effort,
+        may_delegate=seed.may_delegate,
+        action_class=PROACTIVE if seed.action_class == REACTIVE else REACTIVE,
+    )
+    assert seed_fingerprint(flipped) != baseline

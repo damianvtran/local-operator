@@ -116,7 +116,21 @@ class WakePanel(Container):
         """
         try:
             scheduler = getattr(session, "wake_scheduler", None)
-            schedules = list(scheduler.schedules) if scheduler is not None else []
+            # HIDDEN rows (patience waits) never paint: the panel is a human
+            # surface, and the requirement is "no wake listing, no badge" for
+            # a timer the user was never told about (design §8.2.2 item 5).
+            # Filtering HERE — before the fingerprint — also means a
+            # patience-only session collapses the panel entirely, which is
+            # exactly what its empty state means.
+            schedules = (
+                [
+                    schedule
+                    for schedule in scheduler.schedules
+                    if getattr(schedule, "kind", "scheduled") != "patience"
+                ]
+                if scheduler is not None
+                else []
+            )
             monitors = self._monitor_rows(session)
             owed = self._owed(session)
             fingerprint = tuple(self._fingerprint(schedule, owed) for schedule in schedules)

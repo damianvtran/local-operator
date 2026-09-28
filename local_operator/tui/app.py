@@ -19446,6 +19446,12 @@ class OperatorApp(App[None]):
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
+        from local_operator.action_class import (
+            PROACTIVE,
+            class_from_tags,
+            normalize as normalize_action_class,
+        )
+
         rows: list[tuple[str, str, str]] = []
         seen: set[str] = set()
         if registry is not None and hasattr(registry, "list_agents"):
@@ -19468,16 +19474,28 @@ class OperatorApp(App[None]):
                         facts = "role"
                         # Model/effort are facts a user picks a hat by; the
                         # rest of the profile is what the attach applies.
+                        # The CLASS is a fact too (R36): the browse surface
+                        # must be honest about which agents may message the
+                        # user unprompted.
                         if profile.model:
                             facts += f" · {profile.model}"
                         if profile.effort:
                             facts += f" · effort {profile.effort}"
+                        if normalize_action_class(profile.action_class) == PROACTIVE:
+                            facts += " · proactive"
                         summary = (profile.when_to_use or profile.description or "").strip()
                         roles.append((profile.name, facts, summary))
                         seen.add(profile.name.lower())
                     elif is_specialist(agent):
                         summary = str(agent.description or "").strip()
-                        specialists.append((str(agent.name), "specialist", summary))
+                        class_fact = (
+                            " · proactive"
+                            if class_from_tags(agent.tags) == PROACTIVE
+                            else ""
+                        )
+                        specialists.append(
+                            (str(agent.name), f"specialist{class_fact}", summary)
+                        )
                         seen.add(str(agent.name).lower())
                 except Exception:
                     continue
@@ -19497,7 +19515,10 @@ class OperatorApp(App[None]):
             if profile is None:
                 continue
             summary = (profile.when_to_use or profile.description or "").strip()
-            seeds.append((profile.name, "role · packaged", summary))
+            seed_facts = "role · packaged"
+            if normalize_action_class(profile.action_class) == PROACTIVE:
+                seed_facts += " · proactive"
+            seeds.append((profile.name, seed_facts, summary))
         rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
         return rows
 
@@ -19575,6 +19596,117 @@ class OperatorApp(App[None]):
             return
         self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
 
+    def _cmd_agent_class(self, rest: str, notice: NoticeFn) -> None:
+        """``/agent class <name> [proactive|reactive]`` — the class switch (R36).
+
+        ``/agent class <name>`` REPORTS the current class; the second token
+        flips it. Mirrors ``/team chart``'s grammar, escapes included (see
+        ``_cmd_agent``'s subcommand comment): a leading ``=`` on the name is
+        the literal-name escape, and ``/agent class class …`` reaches an agent
+        literally named ``class`` through the grammar itself.
+
+        Runs in a worker: the flip writes the registry (disk), and the
+        best-effort cleanup that follows (pending patience rows, Aida's
+        cadence) touches the session's wake writer — neither may park the
+        event loop.
+        """
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        registry = getattr(session, "agent_registry", None)
+        if registry is None or not hasattr(registry, "get_agent_by_name"):
+            self._system_notice(
+                "agents are unavailable in this session. Ask the agent to create one.",
+                "warning",
+            )
+            return
+        self.run_worker(self._agent_class_worker(rest, notice), thread=False, group="session")
+
+    async def _agent_class_worker(self, rest: str, notice: NoticeFn) -> None:
+        from local_operator.action_class import (
+            PROACTIVE,
+            VALID_CLASSES,
+            normalize as normalize_action_class,
+        )
+        from local_operator.agent_profiles import resolve_profile
+
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        tokens = rest.split()
+        if not tokens or len(tokens) > 2:
+            notice(
+                "usage: /agent class <name> [proactive|reactive] — "
+                "omit the class to show it"
+            )
+            return
+        name = tokens[0].lstrip("=").strip()
+        target = tokens[1].strip().casefold() if len(tokens) > 1 else ""
+        if target and target not in VALID_CLASSES:
+            notice(f"class must be one of {' or '.join(VALID_CLASSES)}; got {target!r}.")
+            return
+        registry = getattr(session, "agent_registry", None)
+        try:
+            profile = resolve_profile(name, registry=registry)
+        except Exception:  # noqa: BLE001 — resolution failure reads as "not found"
+            profile = None
+        if profile is None:
+            self._system_notice(
+                f"no agent named {name!r}. Run /agent to list agents, "
+                "or ask the agent to create one.",
+                "warning",
+            )
+            return
+        current = normalize_action_class(profile.action_class)
+        if not target:
+            notice(
+                f"{profile.name}: class {current} "
+                f"(set with /agent class {profile.name} proactive|reactive)"
+            )
+            return
+        if target == current:
+            notice(f"{profile.name} is already {target}; nothing changed.")
+            return
+        from local_operator.action_class import set_registered_action_class
+
+        try:
+            resolved = await asyncio.to_thread(
+                set_registered_action_class, registry, name, target
+            )
+        except ValueError as error:
+            self._system_notice(str(error), "warning")
+            return
+        except Exception as error:  # noqa: BLE001 — a worker must not raise
+            logger.warning("agent class switch failed", exc_info=True)
+            self._system_notice(f"could not switch class: {error}", "warning")
+            return
+        # Best-effort immediate cleanup (R36): this session's pending patience
+        # rows now, and — for Aida — the cadence reconciled against the new
+        # class. Other sessions self-correct at their next delivery-time read.
+        clause = ""
+        cleanup = getattr(session, "cleanup_after_class_switch", None)
+        if callable(cleanup):
+            try:
+                outcome = await cleanup(resolved)
+                bits: list[str] = []
+                cancelled = outcome.get("patience_cancelled") or []
+                if cancelled:
+                    bits.append(f"{len(cancelled)} pending wait(s) cancelled")
+                if outcome.get("cadence_dropped"):
+                    bits.append("cadence disarmed")
+                clause = ("; " + ", ".join(bits)) if bits else ""
+            except Exception:  # noqa: BLE001 — best-effort by contract
+                logger.debug("agent class cleanup failed", exc_info=True)
+        if target == PROACTIVE:
+            notice(
+                f"agent {resolved} is now proactive — it may send proactive messages"
+                f"{clause}."
+            )
+        else:
+            notice(f"agent {resolved} is now reactive — proactive behaviour stopped{clause}.")
+
     def _cmd_agent(
         self,
         arg: str,
@@ -19616,9 +19748,31 @@ class OperatorApp(App[None]):
                 return
             self._append_block(self._agent_list_block(rows))
             return
+        # The first argument token is a small RESERVED subcommand namespace,
+        # exactly as `/team` reserves `chart` and `/aida` reserves pause/resume/
+        # status. One reserved word: `class`, the R36 proactive-class switch.
+        # It wins in first position, with the two `/team` escape hatches —
+        # `/agent class class <cls>` switches an agent literally named `class`
+        # (the second token is the name), and a leading `=` on the name
+        # (`/agent =class …`) means "literal name, never a subcommand". `=` is
+        # not a legal name character, so the escape cannot collide with a real
+        # profile.
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() == "class":
+            self._cmd_agent_class(rest.strip(), notice)
+            return
         name, _, request = arg.partition(" ")
         name = name.strip()
         request = request.strip()
+        # The `=` escape (see the subcommand comment above). The strip runs
+        # BEFORE the clear/none check below, so `/agent =none` DETACHES — it
+        # does not reach a profile literally named `none` (the old comment
+        # claimed otherwise; review round 5, behaviour intended). A name whose
+        # own spelling starts with `=` is reached by DOUBLING the escape
+        # (`/agent ==none` → the profile `=none`), and the bare words
+        # clear/none stay reserved by the detach verb.
+        if name.startswith("="):
+            name = name[1:]
         # ``clear``/``none`` are the DETACH verb, not a name to look up — the
         # mirror of ``/goal`` with no text clearing the objective. A real agent
         # literally named "clear" is a non-concern: profile names are curated,

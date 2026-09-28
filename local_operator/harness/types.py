@@ -1302,6 +1302,25 @@ class ToolContext(BaseModel):
     # Monitor scheduling — the wake field's twin. ``None`` means the host has
     # no monitor scheduler; the monitor tool is then not advertised at all.
     monitor_scheduler: MonitorSchedulerProtocol | None = None
+    #: The session's effective action class, resolved FRESH by the host each
+    #: time this context is built (``local_operator.action_class``). The
+    #: ``patience`` tool's createIf reads it (reactive sessions are never
+    #: offered it — rung 3, zero schema), and the host re-resolves at ARM time
+    #: too, so a class switch lands at the next decision point either way.
+    #: Default ``reactive`` because a context built without a session (bare
+    #: tool tests, reduced hosts) must not imply proactive machinery.
+    action_class: str = "reactive"
+    #: Whether an ENGINE hold (Aida's pause / disabled switch) currently
+    #: suppresses proactive arming for this session. Separate from the class:
+    #: pause is the temporary lever, class is the general one. The ``patience``
+    #: tool refuses to arm while held.
+    proactive_hold: bool = False
+    #: Called by the ``patience`` tool after a successful arm, with the new
+    #: row's id. The session uses it to collect rows whose ``armed_after``
+    #: should be flushed with the turn's own output id at turn end (the default
+    #: target — the id does not exist until the turn does). ``None`` when no
+    #: session is behind the context.
+    patience_sink: Callable[[str], None] | None = Field(default=None, exclude=True, repr=False)
     # Durable todo lists keyed by session id. A host that attaches one gets
     # todo state it can persist alongside the transcript; otherwise the tool
     # falls back to a process-local table.

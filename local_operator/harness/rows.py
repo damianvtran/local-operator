@@ -43,7 +43,7 @@ one renderer is a decision the other will not make.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 #: The severity vocabulary shared by the surfaces. A superset is deliberately
 #: NOT used: these are the tiers a *replayed* row can carry, and the TUI's
@@ -309,6 +309,38 @@ def _row_id(row: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _row_custom_type(row: Any) -> str:
+    value = (
+        row.get("custom_type") if isinstance(row, Mapping) else getattr(row, "custom_type", None)
+    )
+    return value if isinstance(value, str) else ""
+
+
+def _row_details(row: Any) -> Mapping[str, Any]:
+    value = row.get("details") if isinstance(row, Mapping) else getattr(row, "details", None)
+    return value if isinstance(value, Mapping) else {}
+
+
+def is_hidden_wake_delivery(row: Any) -> bool:
+    """Whether this row is a HIDDEN wake delivery (a patience fire).
+
+    Hidden deliveries must be invisible on every human surface while their text
+    stays in the model's context — the requirement is "no wake line, no card, no
+    badge, no timer notification". The marker is ``details.hidden`` on the
+    ``wake_prompt`` custom message (written by the delivery path), and it is
+    read here so the fold, the tail-snap walk, the replay receipt and the
+    desktop window all make ONE decision rather than four.
+    """
+    # Lazy import, the pattern :func:`is_harness_injection` documents: this
+    # module sits on both folds' import path, and the constant's owner
+    # (``harness/wake.py``) drags the scheduler's asyncio import with it.
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    return _row_custom_type(row) == WAKE_PROMPT_MESSAGE_TYPE and bool(
+        _row_details(row).get("hidden")
+    )
+
+
 def is_harness_notice_row(row: Any) -> bool:
     """Whether this row is harness-authored and must not paint as the user's words.
 
@@ -317,8 +349,14 @@ def is_harness_notice_row(row: Any) -> bool:
     context replay (where the row may be a stamped render or a copy a compaction
     marker carried) and the audit replay (where it is the stored row itself).
 
-    Two shapes answer True, and they need different evidence:
+    THREE shapes answer True now, and they need different evidence:
 
+    * **a HIDDEN wake delivery** (:func:`is_hidden_wake_delivery`) — a patience
+      fire is harness-internal by requirement; it must not paint as a wake
+      receipt, a user row, or a fold anchor. Checked FIRST because it is the
+      one shape the stamp below cannot recognise on the raw payload (the
+      stamp lands on the rendered user message, while the fold sometimes holds
+      the CustomMessage itself).
     * **the stamp** (:func:`is_harness_injection`) — the renderer minted the row
       from a ``CustomMessage`` in this process. The primary test, and the only
       provenance a live or freshly rendered row carries.
@@ -346,6 +384,8 @@ def is_harness_notice_row(row: Any) -> bool:
     """
     from local_operator.compaction.cutpoint import PRESERVED_TURN_ELISION_ID_PREFIX
 
+    if is_hidden_wake_delivery(row):
+        return True
     if is_harness_injection(row):
         return True
     if _row_id(row).startswith(PRESERVED_TURN_ELISION_ID_PREFIX):

@@ -11717,7 +11717,13 @@ def _wake_due_label(schedule: WakeSchedule) -> str:
 
 
 async def _wake_list(tool_call_id: str, scheduler: WakeSchedulerProtocol) -> ToolResult:
-    schedules = list(scheduler.schedules)
+    # Patience waits are filtered from EVERY listing surface (design §8.2.2 item
+    # 5): they are hidden internal timers, and the model manages them through
+    # the ``perience`` tool instead — showing them here would be a second
+    # listing to keep in sync for rows the agent did not create as wakes.
+    schedules = [
+        s for s in scheduler.schedules if getattr(s, "kind", "scheduled") != "patience"
+    ]
     if not schedules:
         return _text(
             tool_call_id,
@@ -11776,6 +11782,17 @@ async def _wake_cancel(
 ) -> ToolResult:
     if not params.id:
         return _error(tool_call_id, "wake", "'cancel' requires the schedule id (see wake list)")
+    # A patience wait has its own cancel surface; routing it here would work
+    # but would teach the model a second way to manage the same rows (and the
+    # wake listing no longer names their ids). One sentence, before any state
+    # is touched.
+    if str(params.id).startswith("patience-"):
+        return _error(
+            tool_call_id,
+            "wake",
+            f"'{params.id}' is a patience wait; cancel it with patience(op='cancel', "
+            f"id='{params.id}')",
+        )
     existing = list(scheduler.schedules)
     remaining = [s for s in existing if s.id != params.id]
     if len(remaining) == len(existing):
@@ -12174,6 +12191,265 @@ async def execute_monitor(
     return await _monitor_cancel(tool_call_id, params, scheduler)
 
 
+# patience — a hidden internal wait attached to a sent message (R30–R38)
+# ---------------------------------------------------------------------------
+#
+# Why this exists as its OWN tool rather than a flag on ``wake``: the two
+# differ in EVERY semantic — wake arms a visible recurring self-prompt that the
+# user can see and manage; patience attaches a one-shot hidden timer to a
+# message the agent already sent, is cancelled by a reply, backs off, and dies
+# at a TTL. Only the substrate is shared (``kind="patience"`` rows on the same
+# scheduler), which is exactly the split the design's §8.2.1 draws. The tool
+# is offered ONLY to a session whose attached profile is in the proactive
+# class (createIf — a reactive session sees no schema at all), and the arm
+# path re-reads the class at the moment it acts, because a class switch must
+# land on a running session (R36).
+
+
+class PatienceParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    op: Literal["arm", "cancel", "list"] = Field(
+        description=(
+            "arm: attach a hidden wait to the message you just sent (or are about "
+            "to send this turn, the default target); the wait fires only if no "
+            "reply arrives. cancel: drop one wait by id, or every pending wait "
+            "when id is omitted. list: show this session's pending waits."
+        )
+    )
+    timeout: str | None = Field(
+        default=None,
+        description=(
+            "arm: how long to wait before waking you, e.g. '5m' or '90s' "
+            "(default 5m; clamped 60s..24h). Later attempts in the same cycle "
+            "back off automatically (x3), so the default grows five, fifteen, "
+            "forty-five minutes across the cycle's three attempts."
+        ),
+    )
+    note: str | None = Field(
+        default=None,
+        description=(
+            "arm: optional reminder rendered into the wake note, so the future "
+            "you knows what to say if no reply arrived."
+        ),
+    )
+    after: str | None = Field(
+        default=None,
+        description=(
+            "arm: which outbound message the wait belongs to, e.g. "
+            "'message:<id>'. Omit for the default: this turn's output."
+        ),
+    )
+    id: str | None = Field(default=None, description="cancel: the wait id (from list).")
+
+
+async def _patience_arm(
+    context: ToolContext | None, *, requested_ms: int | None, note: str, after: str
+) -> tuple[Any, str]:
+    """The shared arm path for the ``patience`` tool and ``send(patience=…)``.
+
+    Returns ``(row, "")`` on success and ``(None, refusal)`` on any refusal —
+    the caller renders the string, because a refusal must reach the model as a
+    sentence (the wake tool's own contract). The class is re-resolved HERE, at
+    arm time, from the attachment sidecar + registry (never from a cached
+    per-turn value): R36's live-switch rule says the gate is read at the
+    delivery point of every proactive path, and arming is one.
+    """
+    from local_operator.paths import config_dir as _config_dir
+    from local_operator.wakes import patience
+
+    if context is None or context.wake_scheduler is None:
+        return None, "patience waits need a wake scheduler; this session has none attached."
+    session_dir = getattr(context, "session_dir", None)
+    if not session_dir:
+        return None, "this context has no session directory; patience waits cannot be stored."
+    from local_operator.action_class import PROACTIVE, session_action_class
+
+    current_class = session_action_class(session_dir, registry=context.agent_registry)
+    if current_class != PROACTIVE:
+        return None, (
+            "this session is reactive; switch its profile to the proactive class "
+            "first (/agent class <name> proactive) — patience waits are refused "
+            "for reactive sessions."
+        )
+    outcome = await patience.arm_patience(
+        context.wake_scheduler,
+        session_dir=session_dir,
+        config_dir=_config_dir(),
+        action_class=current_class,
+        now_ms=int(time.time() * 1000),
+        requested_ms=requested_ms,
+        note=note,
+        after=after,
+        suppressed=bool(getattr(context, "proactive_hold", False)),
+    )
+    if not outcome.ok:
+        return None, outcome.error
+    row = outcome.row
+    # The turn-end flush is only for waits with no explicit target: the default
+    # target IS this turn's output, whose id does not exist yet (the session
+    # stamps it when the turn completes).
+    if not str(getattr(row, "armed_after", "") or "") and context.patience_sink is not None:
+        try:
+            context.patience_sink(str(row.id))
+        except Exception:  # noqa: BLE001 — the sink is bookkeeping
+            logger.warning("patience: sink refused a row id", exc_info=True)
+    return row, ""
+
+
+def _patience_due_text(row: Any, *, now_ms: int) -> str:
+    from local_operator.harness.wake import format_duration
+
+    due = int(getattr(row, "next_due_at", 0) or 0)
+    return format_duration(max(due - now_ms, 0))
+
+
+@_guard("patience")
+async def execute_patience(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Arm / cancel / list hidden patience waits for this session."""
+    try:
+        params = PatienceParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "patience", exc)
+    from local_operator.wakes import patience
+
+    if context is None or context.wake_scheduler is None:
+        return _error(
+            tool_call_id,
+            "patience",
+            "patience waits are not available in this session (no scheduler attached).",
+        )
+    now_ms = int(time.time() * 1000)
+    scheduler = context.wake_scheduler
+
+    if params.op == "list":
+        rows = [r for r in scheduler.schedules if patience.is_patience_row(r)]
+        if not rows:
+            return _text(
+                tool_call_id,
+                "patience",
+                "No pending patience waits.",
+                useless=True,
+                details={"useless": True},
+            )
+        lines = []
+        for row in rows:
+            target = str(getattr(row, "armed_after", "") or "") or "this turn's output"
+            note = str(getattr(row, "note", "") or "")
+            lines.append(
+                f"- {getattr(row, 'id', '')}: attempt {getattr(row, 'attempt', 1)}, "
+                f"fires in {_patience_due_text(row, now_ms=now_ms)} (target: {target}"
+                + (f"; note: {note})" if note else ")")
+            )
+        return _text(
+            tool_call_id,
+            "patience",
+            f"{len(rows)} pending patience wait(s) (hidden; no one else sees these):\n"
+            + "\n".join(lines),
+        )
+
+    if params.op == "cancel":
+        cancelled, error = await patience.cancel_patience(scheduler, row_id=params.id or "")
+        if error:
+            return _error(tool_call_id, "patience", error)
+        if not cancelled:
+            return _text(
+                tool_call_id,
+                "patience",
+                "No pending patience wait to cancel.",
+                useless=True,
+                details={"useless": True},
+            )
+        return _text(
+            tool_call_id,
+            "patience",
+            "Cancelled patience wait(s): " + ", ".join(cancelled) + ".",
+            details={"cancelled": cancelled},
+        )
+
+    # op == "arm"
+    requested_ms: int | None = None
+    if params.timeout is not None and params.timeout.strip():
+        from local_operator.harness.wake import parse_wake_duration
+
+        requested_ms = parse_wake_duration(params.timeout.strip())
+        if requested_ms is None:
+            return _invalid_arguments(
+                tool_call_id,
+                "patience",
+                f"invalid timeout {params.timeout!r}; use a duration like '5m', '90s' or '2h'.",
+            )
+    after = (params.after or "").strip()
+    if after and not after.startswith("message:"):
+        return _invalid_arguments(
+            tool_call_id,
+            "patience",
+            "'after' must be 'message:<id>' — or omit it to attach to this turn's output.",
+        )
+    row, refusal = await _patience_arm(
+        context, requested_ms=requested_ms, note=(params.note or "").strip(), after=after
+    )
+    if refusal or row is None:
+        return _error(tool_call_id, "patience", refusal or "could not arm the wait")
+    attempt = int(getattr(row, "attempt", 1) or 1)
+    return _text(
+        tool_call_id,
+        "patience",
+        f"Patience armed ({getattr(row, 'id', '')}, attempt {attempt}): "
+        f"if no reply arrives in {_patience_due_text(row, now_ms=now_ms)}, you wake "
+        "with an internal note. Hidden — nothing appears in the conversation.",
+        details={
+            "id": str(getattr(row, "id", "")),
+            "next_due_at": int(getattr(row, "next_due_at", 0) or 0),
+            "attempt": attempt,
+        },
+    )
+
+
+def build_patience_tool(context: ToolContext) -> AgentTool | None:
+    """CreateIf: proactive class + a scheduler. Reactive sessions get no schema.
+
+    Rung 3 on the tool-footprint ladder: the world pays for this only where
+    the capability exists (a proactive session), matching ``wake``'s own
+    createIf stance. The value read here is the host's per-turn resolution;
+    the ARM path re-resolves so a switch mid-session cannot be raced.
+    """
+    from local_operator.action_class import PROACTIVE
+
+    if context.wake_scheduler is None:
+        return None
+    if str(getattr(context, "action_class", "reactive")) != PROACTIVE:
+        return None
+    return AgentTool(
+        name="patience",
+        label="Patience",
+        description=(
+            "Attach a hidden internal wait to a message you sent (arm/cancel/list). "
+            "If no reply arrives by the timeout you wake with a private note so you "
+            "can decide whether to follow up; a reply cancels it. The wait and its "
+            "fire are invisible to the user."
+        ),
+        parameters=PatienceParams.model_json_schema(),
+        # read tier: arming never starts an unattended turn on its own — the
+        # fire rides the session's own wake machinery, which the operator's
+        # class choice already sanctioned, and the tool only manages a timer
+        # (the ``wake`` tool's write tier covers starting autonomous work
+        # explicitly; patience is bounded, reply-cancelled and self-retiring).
+        approval_tier="read",
+        # arm/cancel rewrite the whole schedule list; two concurrent calls
+        # would lose one, so the tool runs exclusive (the wake tool's rule).
+        concurrency="exclusive",
+        interruptible=False,
+        execute=execute_patience,
+    )
+
+
 # ---------------------------------------------------------------------------
 # send — hand a message to another local lop session
 # ---------------------------------------------------------------------------
@@ -12238,6 +12514,15 @@ class SendParams(BaseModel):
         description=(
             "Steer the peer mid-turn instead of using the mailbox; opens a turn if "
             "the peer is idle."
+        ),
+    )
+    patience: str | None = Field(
+        default=None,
+        description=(
+            "Optional hidden patience wait attached to this message, e.g. '5m' "
+            "(defaults to the configured 5m; clamped 60s..24h). If the peer does "
+            "not reply in time you wake with a private note. Only for proactive- "
+            "class senders; the wait and its fire are invisible to the peer."
         ),
     )
 
@@ -12524,6 +12809,23 @@ async def execute_send(
     if params.message is None:
         return _error(tool_call_id, "send", "pass a message (or model= to switch the peer's model)")
 
+    # Parse the optional patience duration BEFORE resolving the peer or
+    # delivering anything: a malformed timeout must refuse the whole call, not
+    # deliver the message and then discover the wait cannot be armed. The
+    # message is the primary act and cannot be un-sent, so validation-first is
+    # the only ordering in which a half-applied call is impossible.
+    patience_ms: int | None = None
+    if params.patience is not None and params.patience.strip():
+        from local_operator.harness.wake import parse_wake_duration
+
+        patience_ms = parse_wake_duration(params.patience.strip())
+        if patience_ms is None:
+            return _invalid_arguments(
+                tool_call_id,
+                "send",
+                f"invalid patience {params.patience!r}; use a duration like '5m' or '90s'.",
+            )
+
     from local_operator.mobile.peer_send import (
         candidate_lines,
         live_scan_found_nothing,
@@ -12693,10 +12995,15 @@ async def execute_send(
         )
     if record is not None:
         name = record.conversation_name or record.session_id
+        clause = ""
+        if patience_ms is not None:
+            clause = await _arm_send_patience(
+                context, requested_ms=patience_ms, target_ref=f"peer:{name}"
+            )
         return _text(
             tool_call_id,
             "send",
-            f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}",
+            f"→ {name} (pid {record.pid}): {detail}{clause}{skipped_clause(skipped)}",
             details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
         )
     # A session with no runtime: the receipt names the session rather than a
@@ -12706,15 +13013,45 @@ async def execute_send(
     # live match that was merely unengaged returns the refusal instead — but it
     # is composed once for both receipts, so a future stored delivery cannot
     # silently drop the fact that a live namesake was skipped.
+    clause = ""
+    if patience_ms is not None:
+        clause = await _arm_send_patience(
+            context, requested_ms=patience_ms, target_ref=f"peer:{cold_session_id}"
+        )
     return _text(
         tool_call_id,
         "send",
-        f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}",
+        f"→ {cold_session_id} (not running): {detail}{clause}{skipped_clause(skipped)}",
         details={
             "session_id": cold_session_id,
             "mode": mode,
             "wake": bool(params.wake),
         },
+    )
+
+
+async def _arm_send_patience(
+    context: ToolContext | None, *, requested_ms: int, target_ref: str
+) -> str:
+    """Arm a peer-directed patience wait after a successful send.
+
+    Returns the receipt CLAUSE (leading space) in all cases. A refusal is a
+    clause rather than a failed call because the message is already delivered —
+    the send did happen, and a receipt that says so while naming what did not
+    happen is the honest one (the alternative, refusing the whole call, would
+    have to trust that delivery can be undone, which it cannot).
+    """
+    row, refusal = await _patience_arm(
+        context, requested_ms=requested_ms, note="", after=target_ref
+    )
+    if refusal or row is None:
+        return f" (patience wait not armed: {refusal or 'unknown refusal'})"
+    from local_operator.harness.wake import format_duration
+
+    due_in = max(int(getattr(row, "next_due_at", 0) or 0) - int(time.time() * 1000), 0)
+    return (
+        f" (patience armed, {getattr(row, 'id', '')}: follow up in "
+        f"{format_duration(due_in)} if no reply)"
     )
 
 

@@ -42,7 +42,16 @@ def _pin_cadence_away_from_now(root: Path, *, hours: float = 12) -> None:
 
 
 def _root_with_session(root: Path) -> Path:
-    (root / "sessions" / SESSION_ID).mkdir(parents=True)
+    # The ATTACHMENT is part of a real creation: ``aida.bootstrap`` writes
+    # ``agent="aida"`` beside the directory, and the effective action class is
+    # read through it (``action_class.session_action_class``). A helper that
+    # skips it builds a session no production path can produce — a classless
+    # one, which reads reactive and (correctly) arms nothing.
+    from local_operator.resume import write_session_attachment
+
+    session_dir = root / "sessions" / SESSION_ID
+    session_dir.mkdir(parents=True)
+    write_session_attachment(session_dir, team="", agent="aida", goal="")
     state.update_state(root, session_id=SESSION_ID)
     return root
 

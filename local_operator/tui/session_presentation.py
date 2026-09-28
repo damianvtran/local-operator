@@ -1157,6 +1157,15 @@ def project_settled_rows(
             # the user had typed it.
             if getattr(message, "custom_type", None) == WAKE_PROMPT_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
+                # A HIDDEN delivery (a patience fire) paints NOTHING: not a
+                # receipt, not a row, not a fold anchor — the requirement is
+                # "no wake line" for a wake the user was never told about. The
+                # fire's text still reaches the model (the renderer turns the
+                # custom message into a user turn either way); this branch is
+                # the display half, and it must not register the receipt key
+                # either, or a later replay would paint what this skipped.
+                if details.get("hidden"):
+                    continue
                 if not details.get("wake_catchup"):
                     key = (str(details.get("wake_id", "")), details.get("occurrence"))
                     # Skip a receipt this session already painted live —

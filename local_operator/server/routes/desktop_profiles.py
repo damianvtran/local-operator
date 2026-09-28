@@ -64,6 +64,12 @@ class ProfileEdit(Input):
     tools: list[str] | None = None
     effort: str | None = None
     delegate: bool | None = None
+    #: The proactive-class switch's editing path (design §8.1.3): the same
+    #: field the ``agent`` tool exposes, so the desktop Class control (UI-3)
+    #: writes through the ordinary profile update route. Additive and
+    #: optional: an older client simply never sends it, and an omitted field
+    #: never clears a class (the merge rule ``write_profile`` documents).
+    action_class: Literal["reactive", "proactive"] | None = None
 
 
 class ProfileCreate(Input):
@@ -75,6 +81,9 @@ class ProfileCreate(Input):
     tools: list[str] | None = None
     effort: str | None = None
     delegate: bool | None = None
+    #: See ProfileEdit. Creation defaults to reactive downstream when absent
+    #: (R37); naming ``proactive`` here is the explicit spare-use act.
+    action_class: Literal["reactive", "proactive"] | None = None
 
 
 class TeamEdit(Input):
@@ -231,7 +240,10 @@ async def save_profile(
     def mutate() -> dict[str, Any]:
         agents, _ = registries(request)
         agents.require_complete_metadata()
-        resolved, _kind = write_profile(agents, params, creating=creating)
+        # Three values since the class shipped; the third is only used by the
+        # tool's receipt, so the route discards it (its response carries the
+        # profile detail, class included).
+        resolved, _kind, _action_class = write_profile(agents, params, creating=creating)
         return profile_detail(agents, resolved)
 
     return reply(

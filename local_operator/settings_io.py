@@ -652,6 +652,18 @@ SECTIONS: tuple[Section, ...] = (
         "The name applies everywhere at once; edits are read at her next "
         "action, and /aida pause|resume act immediately.",
     ),
+    # The proactive CLASS's own bounds (R29–R38). Scope LIVE is the honest
+    # label here for once: every key is read at the moment a patience wait
+    # fires or re-arms — a delivery-time read by construction — so an edit
+    # lands on the next wait even in a running session.
+    Section(
+        "proactive",
+        "Proactive class",
+        Scope.LIVE,
+        "Bounds for the proactive agent class: how long a hidden patience wait "
+        "defaults to, how it backs off across re-attempts, and when a cycle "
+        "must end. Read at the moment a wait is armed or fires.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -3789,6 +3801,77 @@ SETTINGS: tuple[Setting, ...] = (
             "How rarely she may nudge about setting up an integration. Read from "
             "the onboarding slice."
         ),
+    ),
+    # -- proactive class ------------------------------------------------------
+    # Defaults are LITERALS here, not imports, for the same reason the aida
+    # block's are: this module is loaded on every CLI start. The consumer
+    # defaults the settings test pins live in ``local_operator/wakes/patience``
+    # (DEFAULT_WAIT_MS, DEFAULT_BACKOFF, DEFAULT_MAX_ATTEMPTS, DEFAULT_TTL_MS,
+    # DEFAULT_MAX_PENDING), so a drift between this table and the engine is a
+    # red test rather than a page that lies about what a fire will honour.
+    Setting(
+        key="proactive.patience.default_ms",
+        path=("proactive", "patience", "default_ms"),
+        section="proactive",
+        label="Default patience wait (ms)",
+        kind=Kind.INT,
+        default=300000,
+        minimum=60000,
+        maximum=86400000,
+        help=(
+            "How long a hidden wait defaults to when the agent does not size one "
+            "(milliseconds; 300000 = 5 min). Clamped 60 s..24 h."
+        ),
+    ),
+    Setting(
+        key="proactive.patience.backoff",
+        path=("proactive", "patience", "backoff"),
+        section="proactive",
+        label="Patience backoff factor",
+        kind=Kind.INT,
+        default=3,
+        minimum=1,
+        maximum=10,
+        help=(
+            "Each later wait in a cycle is at least this many times the first — "
+            "the default 5/15/45-minute progression."
+        ),
+    ),
+    Setting(
+        key="proactive.patience.max_attempts",
+        path=("proactive", "patience", "max_attempts"),
+        section="proactive",
+        label="Patience max attempts",
+        kind=Kind.INT,
+        default=3,
+        minimum=1,
+        maximum=10,
+        help=("How many outbound waits one cycle may hold before it must end (R35)."),
+    ),
+    Setting(
+        key="proactive.patience.episode_ttl_ms",
+        path=("proactive", "patience", "episode_ttl_ms"),
+        section="proactive",
+        label="Patience cycle TTL (ms)",
+        kind=Kind.INT,
+        default=7200000,
+        minimum=60000,
+        maximum=86400000,
+        help=(
+            "Hard stop for one cycle however the waits were sized (milliseconds; "
+            "7200000 = 2 h). A fire past it retires silently."
+        ),
+    ),
+    Setting(
+        key="proactive.patience.max_pending",
+        path=("proactive", "patience", "max_pending"),
+        section="proactive",
+        label="Pending waits per session",
+        kind=Kind.INT,
+        default=4,
+        minimum=0,
+        maximum=16,
+        help="How many hidden waits may be pending at once for one session.",
     ),
 )
 

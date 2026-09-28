@@ -519,6 +519,19 @@ def _capture_audit_window(
         limit=max_messages,
         prunes=prunes,
     )
+    # The audit phase serves stored rows verbatim, so a hidden wake delivery
+    # (a patience fire) survives here as its CustomMessage — subtract it by the
+    # same entry-id set the context phase uses. The context phase's own arm is
+    # above; both phases must agree about which rows a viewer never sees.
+    hidden_ids = _hidden_wake_entry_ids(transcript)
+    if hidden_ids:
+        kept = [
+            (message, index)
+            for message, index in zip(messages, indices)
+            if str(getattr(message, "id", "")) not in hidden_ids
+        ]
+        messages = [message for message, _ in kept]
+        indices = [index for _, index in kept]
     if hoisted:
         kept = [
             (message, index)
@@ -583,6 +596,33 @@ def _capture_audit_window(
     )
 
 
+def _hidden_wake_entry_ids(transcript: Transcript) -> frozenset[str]:
+    """Entry ids of every hidden wake delivery in this journal.
+
+    ONE scan feeding both display phases, so the context replay and the audit
+    replay cannot come to different answers about which rows a viewer never
+    sees. Keyed on entry ID because that is the identity the render carries
+    through (``convert_to_llm`` passes the custom message's id onto the user
+    message it mints, and the audit phase serves the stored row as-is).
+
+    O(journal) but only over in-memory entries, and only for journals that
+    contain one; the common case is a walk that finds nothing. Cheap enough to
+    run per page, which is what keeps it honest — a cached set would need
+    invalidation on every append.
+    """
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    ids: set[str] = set()
+    for entry in transcript._entries:
+        payload = entry.payload
+        if str(payload.get("custom_type", "")) != WAKE_PROMPT_MESSAGE_TYPE:
+            continue
+        details = payload.get("details")
+        if isinstance(details, dict) and details.get("hidden"):
+            ids.add(entry.id)
+    return frozenset(ids)
+
+
 def _capture_display_window(
     transcript: Transcript,
     *,
@@ -637,6 +677,18 @@ def _capture_display_window(
         history = transcript.build_llm_history(through_id=through_id) if through_id else []
     except ValueError:
         return DisplayHistoryWindow(status="reset", **envelope)
+    # HIDDEN WAKE DELIVERIES ARE SUBTRACTED FROM THE DISPLAY REPLAY, not from
+    # the model's (design §8.2.2 item 4). ``build_llm_history`` is the model's
+    # replay, in which a wake delivery legitimately appears as a user turn —
+    # that is how the fire reaches the agent — but a hidden (patience) fire
+    # must reach ONLY the agent. ``convert_to_llm`` carries the custom
+    # message's id onto the rendered user message, so the ids we collected off
+    # the journal find their renders here, one for one.
+    hidden_ids = _hidden_wake_entry_ids(transcript)
+    if hidden_ids:
+        history = [
+            message for message in history if str(getattr(message, "id", "")) not in hidden_ids
+        ]
     # These identities belong to the SAME durable cut as the page. Derive
     # them before discarding the full replay, including on an oversized page;
     # a subscribing session must not reconstruct history a second time.

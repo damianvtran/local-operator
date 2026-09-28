@@ -63,6 +63,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Sequence, TypeVar
 
+from local_operator.action_class import class_from_tags
+from local_operator.action_class import normalize as normalize_action_class
+from local_operator.action_class import PROACTIVE as PROACTIVE_CLASS
+from local_operator.action_class import TAG_KEY as CLASS_TAG_KEY
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.agents import AgentData, AgentRegistry
 
@@ -193,6 +198,13 @@ class AgentProfile:
     #: watching; a read-only role that delegates autonomous work is not
     #: read-only.
     may_delegate: bool = False
+    #: The agent's action class (``reactive`` | ``proactive``). Python cannot
+    #: name an attribute ``class``, hence ``action_class`` in code; the
+    #: user-facing word stays "class", the frontmatter key stays ``class:`` and
+    #: the tag encoding stays ``class:proactive``. Absent everywhere ⇒
+    #: ``reactive``, which is today's behaviour exactly — see
+    #: :mod:`local_operator.action_class` for the whole mechanism.
+    action_class: str = "reactive"
     #: Registry id when this profile came from a registered agent, else None
     #: for a packaged seed resolved without installing it.
     agent_id: str | None = None
@@ -274,6 +286,12 @@ def _profile_from_text(name: str, text: str, *, agent_id: str | None = None) -> 
     else:
         may_delegate = bool(delegate_raw)
 
+    # ``class:`` mirrors ``delegate``'s handling, including its tolerance: a
+    # seed file is hand-edited, so a bad spelling degrades to the default
+    # (reactive — the safe side, because an unrecognized class must never
+    # silently ENABLE proactive behaviour) rather than failing the parse.
+    action_class = normalize_action_class(meta.get("class"))
+
     return AgentProfile(
         name=_str("name") or name,
         description=_str("description"),
@@ -282,6 +300,7 @@ def _profile_from_text(name: str, text: str, *, agent_id: str | None = None) -> 
         tools=_as_tuple(meta.get("tools")),
         effort=_str("effort") or None,
         may_delegate=may_delegate,
+        action_class=action_class,
         agent_id=agent_id,
         model=_str("model"),
         hosting=_str("hosting"),
@@ -432,6 +451,9 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
         elif key == "delegate":
             may_delegate = value.lower() in {"1", "true", "yes", "on"}
 
+    # The class is read back from the SAME tags ``seed_tags`` writes, so an
+    # installed proactive row resolves proactive without a schema migration —
+    # and an absent tag reads reactive, which is what every pre-class row is.
     return AgentProfile(
         name=agent.name,
         description=str(agent.description or ""),
@@ -440,6 +462,7 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
         tools=tools,
         effort=effort,
         may_delegate=may_delegate,
+        action_class=class_from_tags(tags),
         agent_id=agent.id,
         model=str(agent.model or ""),
         hosting=str(agent.hosting or ""),
@@ -825,7 +848,21 @@ def matches_seed_text(profile: AgentProfile, seed: AgentProfile) -> bool:
 #: reports them and the fingerprint hashes them. One list so the two cannot
 #: drift: a field added to the comparison but not the fingerprint (or the
 #: reverse) would let sync call an edited row clean or an untouched row edited.
-_SEED_FIELDS: tuple[str, ...] = ("instructions", "description", "tools", "effort", "delegate")
+#:
+#: ``class`` rides here (rather than beside the seed-only ``version:`` stamp)
+#: because a seed CAN declare it (Aida ships ``class: proactive``) and the tag
+#: encoder writes it into the row — so it is a field the seed writes, the
+#: exact category this list is for. A user's switch to reactive therefore
+#: shows as divergence and ``reset`` restores the packaged class, the same
+#: deal as ``delegate``.
+_SEED_FIELDS: tuple[str, ...] = (
+    "instructions",
+    "description",
+    "tools",
+    "effort",
+    "delegate",
+    "class",
+)
 
 
 def _seed_field_values(profile: AgentProfile) -> tuple[Any, ...]:
@@ -846,6 +883,7 @@ def _seed_field_values(profile: AgentProfile) -> tuple[Any, ...]:
         tuple(profile.tools) if profile.tools else None,
         profile.effort or None,
         bool(profile.may_delegate),
+        normalize_action_class(profile.action_class),
     )
 
 
@@ -929,6 +967,11 @@ def seed_tags(profile: AgentProfile) -> tuple[str, ...]:
         tags.append(f"effort:{profile.effort}")
     if profile.may_delegate:
         tags.append("delegate:yes")
+    # SPARING encoding: only ``proactive`` is written; ``reactive`` is the
+    # absent tag, so pre-class rows and reactive profiles carry no marker and
+    # every read-back treats "no tag" as the default.
+    if normalize_action_class(profile.action_class) == PROACTIVE_CLASS:
+        tags.append(f"{CLASS_TAG_KEY}:{PROACTIVE_CLASS}")
     return tuple(tags)
 
 
