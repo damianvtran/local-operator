@@ -389,7 +389,10 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
     """
     path = index_path(config_dir, session_id)
     payload = {
-        "version": index.version,
+        # The LIVE constant, not ``index.version``: a cache must be stamped
+        # with the version this build writes, and reading it back compares
+        # against the same live constant (see ``_index_from_raw``).
+        "version": TRANSCRIPT_INDEX_VERSION,
         "sig": index.sig,
         "coverage": index.coverage,
         "checkpoints": [c.to_payload() for c in index.checkpoints],
@@ -854,7 +857,11 @@ class _Derivation:
                 continue
             outcomes[index] = marker_kind if eligible else None
 
-        last_marker_ordinal = self.markers[-1][0] if self.markers else -1
+        # Only markers bound to a run by token count as evidence: an orphan
+        # marker (no ``attention_started``) cannot say a run ended, and the tail
+        # rule below leans on that (S3 note 1's token discipline).
+        resolvable = [ordinal for ordinal, token, _, _ in self.markers if token in self.starts]
+        last_marker_ordinal = resolvable[-1] if resolvable else -1
         last_start_ordinal = max(self.starts.values(), default=-1)
         tail = len(self.users) - 1
 
