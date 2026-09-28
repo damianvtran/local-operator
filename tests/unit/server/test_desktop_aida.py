@@ -61,8 +61,12 @@ async def test_open_creates_and_answers_the_frozen_shape(client, isolated_root: 
         response = await http.post("/v1/desktop/aida", json={"op": "open"})
     assert response.status_code == 200
     result = response.json()["result"]
+    # THE OP SHAPE EXACTLY (freeze §4): `enabled` is GET's field — a POST only
+    # reaches here when it is true — so the answer carries three keys, no more
+    # (design/UI review round 1, nit).
+    assert set(result) == {"session_id", "paused", "greeted"}
     assert result["session_id"]
-    assert result["paused"] is False and result["enabled"] is True
+    assert result["paused"] is False
     assert (isolated_root / "sessions" / result["session_id"]).is_dir()
 
 

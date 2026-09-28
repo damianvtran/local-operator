@@ -15,8 +15,14 @@ second, exactly one writer). With no runtime, :func:`ensure_armed` writes throug
 :mod:`local_operator.wakes.arm` (the documented external writer). The two never
 run against the same session at the same time: ``arm.py`` refuses a session with
 a live owner, and the in-session path only ever sees sessions that have one. The
-single invariant is: **the engine is the only code that creates or drops
-``aida-*`` rows** — a reviewer looking for a second armer should find none.
+single invariant is: **the engine is the one RE-ARMER of ``aida-*`` rows and
+the only code that DROPS them.** Exactly one second armer exists and is
+documented rather than hidden: ``onboarding.greet`` adds the one-shot
+``aida-greeting`` at most once per install and never touches another row; the
+engine itself re-arms that row when it is owed (the ensure in :func:`reconcile`,
+and :func:`resume`), and it is the only code that DROPS rows — the earlier
+wording ("the only code that creates or drops") was falsified by the onboarding
+line and is corrected here (review round 1, m1).
 
 RE-ARM, AND WHY THE SESSION HOOKS RATHER THAN A TIMER. A one-shot retires when
 it fires. The next day's row therefore has to be created during (or after) the
@@ -426,6 +432,14 @@ def reconcile(
     notes: list[str] = []
     if not pol.enabled or pol.paused:
         kept = [s for s in original if not is_aida_row(s.id)]
+        if pol.paused and any(s.id == GREETING_WAKE_ID for s in original):
+            # THE ONE-TIME GREETING DIES WITH THE PAUSE (review round 1, m1).
+            # It is a one-shot with no retry of its own, so an armed-but-
+            # unfired row dropped here would be lost for good while
+            # ``greeted_at`` kept claiming it was delivered — and the paused
+            # greet receipt promises a resume delivers it. Un-stamp, and the
+            # resume (or the active branch below) arms it again.
+            _clear_greeted(config_dir)
         return ReconcileResult(schedules=kept, notes=notes, changed=kept != original)
     # ACTIVE: keep everything, including her existing rows. An extra she asked
     # for earlier is a request in flight — dropping it here would silently
@@ -437,10 +451,16 @@ def reconcile(
     kept = list(original)
 
     # -- escalation tray ----------------------------------------------------
-    requests = state.consume_escalations(config_dir)
-    if requests:
-        try:
-            with state.locked(config_dir):
+    # THE TRAY IS CONSUMED INSIDE THE LOCK (review round 1, M1b). Consuming
+    # first and locking second destroyed the whole batch whenever the lock was
+    # contended, and the note that came out of it claimed the opposite —
+    # "left unread" — about a file that had already been unlinked. Consuming
+    # under the lock means a contended acquisition leaves the tray exactly
+    # where it was, and the note below is now true.
+    try:
+        with state.locked(config_dir):
+            requests = state.consume_escalations(config_dir)
+            if requests:
                 ledger, armed = _extras_today(config_dir, now)
                 taken = 0
                 for request in requests:
@@ -489,9 +509,12 @@ def reconcile(
                     taken += 1
                 if taken:
                     state.update_state(config_dir, extras=dict(ledger, armed=armed + taken))
-        except Exception:  # noqa: BLE001 — a contended lock must not eat the turn
-            logger.warning("aida: escalation consume failed", exc_info=True)
-            notes.append("escalation tray left unread (another Aida operation is in flight).")
+    except Exception:  # noqa: BLE001 — a contended lock must not eat the turn
+        logger.warning("aida: escalation consume failed", exc_info=True)
+        # TRUE NOW, and it was not before (M1b): the tray is consumed inside
+        # the lock, so a contended acquisition leaves the file exactly where
+        # it was. The sentence is what makes the failure observable.
+        notes.append("escalation tray left unread (another Aida operation is in flight).")
 
     # -- cadence ------------------------------------------------------------
     if not any(row.id == CADENCE_ID for row in kept):
@@ -505,6 +528,33 @@ def reconcile(
         # engine deliberately has no second implementation of it.
         existing = next((row for row in original if row.id == CADENCE_ID), None)
         kept.append(existing if existing is not None else cadence_schedule(now, pol.at))
+
+    # -- the one-time greeting, on the same ensure rule as the cadence -------
+    # A live session is the ONLY writer that can arm it when the owner holds
+    # the rows (`arm_wake` refuses with a 503), so an owed greeting is
+    # re-armed here rather than left to a caller that cannot write (review
+    # round 1, m1). Owed means ``greeted_at is None`` — never armed, or
+    # un-stamped by the pause above — and the provider gate is the same one
+    # ``onboarding.greet`` applies, because the turn cannot run without one.
+    if not any(row.id == GREETING_WAKE_ID for row in kept):
+        from local_operator.aida import onboarding as _onboarding
+
+        if _onboarding.greeted_at(config_dir) is None and _onboarding.provider_configured(
+            config_dir
+        ):
+            kept.append(
+                WakeSchedule(
+                    id=GREETING_WAKE_ID,
+                    message=_onboarding.GREETING_MESSAGE,
+                    next_due_at=now,
+                    every_ms=None,
+                    created_at=now,
+                )
+            )
+            # And the ledger moves WITH the arm on this path too: without the
+            # stamp a later reconcile (the row retired after firing) would find
+            # no greeting row and arm a second one.
+            _onboarding.mark_greeted(config_dir, now)
     return ReconcileResult(schedules=kept, notes=notes, changed=kept != original)
 
 
@@ -553,6 +603,22 @@ def _row_ids(entry: Mapping[str, Any] | None) -> set[str]:
         if isinstance(raw, Mapping) and isinstance(raw.get("id"), str):
             ids.add(raw["id"])
     return ids
+
+
+#: The one-shot the onboarding greeting arms. It lives with `onboarding`
+#: (which owns its message and stamp) and is imported lazily so this module
+#: and that one do not form a load-time cycle.
+GREETING_WAKE_ID = "aida-greeting"
+
+
+def _clear_greeted(config_dir: Path | str) -> None:
+    """Un-stamp the greeting via `onboarding`, best-effort."""
+    try:
+        from local_operator.aida import onboarding as _onboarding
+
+        _onboarding.clear_greeted(config_dir)
+    except Exception:  # noqa: BLE001 — a stamp must not cost a pause/reconcile
+        logger.warning("aida: could not clear the greeting stamp", exc_info=True)
 
 
 def _aida_ids(entry: Mapping[str, Any] | None) -> list[str]:
@@ -678,14 +744,17 @@ async def _drain_tray_external(
     from local_operator.wakes import store as wake_store
     from local_operator.wakes.arm import WakeWriteError, arm_wake
 
-    requests = state.consume_escalations(root)
-    if not requests:
-        return []
     notes: list[str] = []
     entry = wake_store.read_entry(root, session_id)
     ids = _row_ids(entry)
     taken = 0
     with state.locked(root):
+        # CONSUMED INSIDE THE LOCK, like the in-session branch (review round
+        # 1, M1b): a contended lock must leave the tray untouched rather than
+        # eat it on the way to writing a note about a file that is gone.
+        requests = state.consume_escalations(root)
+        if not requests:
+            return []
         ledger, armed = _extras_today(root, now)
         due_rows: list[int] = [
             int(raw["next_due_at"])
@@ -733,15 +802,30 @@ async def _drain_tray_external(
                     now_ms=now,
                 )
             except WakeWriteError as exc:
-                # A 503 means an owner appeared mid-drain: stop quietly and
-                # leave the rest for that owner (its reconcile will run on the
-                # next tick and is the better writer anyway).
+                # A 503 means an owner appeared mid-drain. "Leave the rest for
+                # that owner" is only implementable by WRITING IT BACK (review
+                # round 1, M1a): the owner's reconcile reads the FILE, and this
+                # sweep unlinked it two dozen lines up — the first cut broke
+                # here and the consumed requests simply vanished, which is the
+                # silent loss the tray exists to make visible. The failed
+                # request goes back with the ones after it, and the handover is
+                # named in the notes so the outcome is observable rather than
+                # inferred from a later row count.
                 logger.debug("aida: external extra arm refused: %s", exc)
+                remaining = list(requests[requests.index(request) :])
+                state.restore_escalations(root, remaining)
+                notes.append(f"escalation request(s) left for her live session: {len(remaining)}")
                 break
             except Exception:  # noqa: BLE001 — one refusal must not stop the sweep
                 logger.warning("aida: external extra arm failed", exc_info=True)
                 continue
             ids.add(extra_id)
+            # THE SPACING SET GROWS WITH EACH ARM (QA round 1, Q1): this drain
+            # is the second writer of the same bound the in-session reconcile
+            # enforces against its growing `kept` list, and a set frozen at
+            # entry accepted `in 1m` + `in 2m` with a 90-minute floor between
+            # them — the two paths disagreed about the rule the README states.
+            due_rows.append(due)
             taken += 1
         if taken:
             state.update_state(root, extras=dict(ledger, armed=armed + taken))
@@ -862,6 +946,10 @@ async def pause(
     owner_blocked = False
     if aida_ids:
         cancelled, owner_blocked = await _cancel_ids(root, session_id, aida_ids, now_ms=now)
+    if GREETING_WAKE_ID in cancelled:
+        # Cancelled before it could fire: the greeting is OWED again, not
+        # delivered, and the resume re-arms it (review round 1, m1).
+        _clear_greeted(root)
     held = mark_held(root, session_id, now_ms=now)
     return PauseOutcome(cancelled=tuple(cancelled), owner_blocked=owner_blocked, held=held)
 
@@ -879,6 +967,17 @@ async def resume(config_dir: Path | str, session_id: str, *, now_ms: int | None 
         state.update_state(root, paused_at=None)
         _set_paused_config(root, False)
     clear_held(root, session_id)
+    # The greeting first, and best-effort: the cadence arm below is the
+    # load-bearing half of a resume. When a runtime owns the rows this refuses
+    # with "owner" and the owner's own reconcile arms it (the ensure in
+    # `reconcile`), which is what makes the paused greet receipt's promise —
+    # "/aida resume delivers it" — true on both paths (review round 1, m1).
+    try:
+        from local_operator.aida import onboarding as _onboarding
+
+        await _onboarding.greet(root, session_id, now_ms=now)
+    except Exception:  # noqa: BLE001 — a greeting must not fail the resume
+        logger.warning("aida: could not re-arm the greeting on resume", exc_info=True)
     return await ensure_armed(root, session_id, now_ms=now)
 
 

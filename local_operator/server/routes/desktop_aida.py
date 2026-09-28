@@ -66,9 +66,26 @@ class AidaOp(BaseModel):
 
 
 class AidaState(BaseModel):
-    """The frozen answer shape, shared by GET and every successful POST."""
+    """GET's answer: the full state, including the enable bit the discovery
+    loop reads to decide whether to render anything at all."""
 
     enabled: bool
+    session_id: str | None = None
+    paused: bool
+    greeted: bool
+
+
+class AidaOpState(BaseModel):
+    """Every successful POST's answer — WITHOUT ``enabled``.
+
+    The freeze (design §4) spells the two shapes separately and the difference
+    is load-bearing: a POST is only reachable when the feature is enabled (a
+    disabled backend answers 409 ``aida_disabled``), so an ``enabled`` field on
+    this answer can never be ``false`` and only invites a client to branch on a
+    constant. GET keeps it, because GET is the call a client makes BEFORE it
+    knows whether the feature is there at all.
+    """
+
     session_id: str | None = None
     paused: bool
     greeted: bool
@@ -109,6 +126,15 @@ def _reply(state: AidaState, message: str) -> CRUDResponse[AidaState]:
     return CRUDResponse(status=200, message=message, result=state)
 
 
+def _op_reply(state: AidaState, message: str) -> CRUDResponse[AidaOpState]:
+    """A POST's answer, in the frozen op shape (no ``enabled``; see `AidaOpState`)."""
+    return CRUDResponse(
+        status=200,
+        message=message,
+        result=AidaOpState(session_id=state.session_id, paused=state.paused, greeted=state.greeted),
+    )
+
+
 @router.get("/v1/desktop/aida", response_model=CRUDResponse[AidaState])
 async def get_aida(request: Request) -> CRUDResponse[AidaState]:
     """Her state. Never creates: a caller that wants her to exist POSTs ``open``."""
@@ -124,8 +150,8 @@ async def get_aida(request: Request) -> CRUDResponse[AidaState]:
     return _reply(_state(root), "Aida state retrieved.")
 
 
-@router.post("/v1/desktop/aida", response_model=CRUDResponse[AidaState])
-async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaState]:
+@router.post("/v1/desktop/aida", response_model=CRUDResponse[AidaOpState])
+async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaOpState]:
     """Run one op. Refuses with 409 ``aida_disabled`` on a disabled install."""
     from local_operator import aida
     from local_operator.aida import onboarding, proactive
@@ -136,7 +162,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaState]:
         raise _refuse_disabled(body.op)
 
     if body.op == "status":
-        return _reply(_state(root), "Aida state retrieved.")
+        return _op_reply(_state(root), "Aida state retrieved.")
 
     if body.op in ("open", "greet"):
         # BOTH ENSURE, per the contract: greet is a first-run conversation, and
@@ -170,12 +196,12 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaState]:
                     },
                 )
             if outcome == "paused":
-                return _reply(
+                return _op_reply(
                     state,
                     "Aida is paused, so the greeting is being held; /aida resume delivers it.",
                 )
             if outcome == "owner":
-                return _reply(
+                return _op_reply(
                     state,
                     "Aida is open in another window; it will say hello there.",
                 )
@@ -187,8 +213,8 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaState]:
                         "message": "The greeting could not be scheduled; try again (see the logs).",
                     },
                 )
-            return _reply(state, "Aida is introducing herself in her conversation.")
-        return _reply(_state(root), "Aida's conversation is ready.")
+            return _op_reply(state, "Aida is introducing herself in her conversation.")
+        return _op_reply(_state(root), "Aida's conversation is ready.")
 
     session_id = aida_state.session_id_of(root) or ""
     if body.op == "pause":
@@ -197,7 +223,7 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaState]:
         message = "Aida is paused; she will not check in proactively."
         if outcome.owner_blocked:
             message += " Her open session applies the hold within a moment."
-        return _reply(state, message)
+        return _op_reply(state, message)
 
     # resume
     arm = await proactive.resume(root, session_id)
@@ -205,7 +231,9 @@ async def post_aida(body: AidaOp, request: Request) -> CRUDResponse[AidaState]:
     if arm == "owner":
         # Correct and expected, not a failure: a live session owns its rows and
         # arms the next occurrence on its own watcher tick.
-        return _reply(state, "Aida is active again; her open session will arm the next check-in.")
+        return _op_reply(
+            state, "Aida is active again; her open session will arm the next check-in."
+        )
     if arm == "no-session":
-        return _reply(state, "Aida is active again; her next conversation arms the check-in.")
-    return _reply(state, "Aida is active again; the next check-in is armed.")
+        return _op_reply(state, "Aida is active again; her next conversation arms the check-in.")
+    return _op_reply(state, "Aida is active again; the next check-in is armed.")

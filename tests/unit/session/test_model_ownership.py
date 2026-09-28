@@ -16,7 +16,7 @@ import pytest
 
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher
-from local_operator.harness.types import ModelSpec
+from local_operator.harness.types import Message, ModelSpec
 from local_operator.session.attached import AttachedSession
 from local_operator.session.model_selection import read_model_selection
 from local_operator.session.session import Session
@@ -677,3 +677,50 @@ async def test_a_deliberate_flag_still_rescues_a_poisoned_journal(tmp_path):
     args = argparse.Namespace(resume="poisoned", hosting="test", model=A.model_id)
 
     assert resolve_hosting_model_with_source(None, args, config) == ("test", A.model_id, "flag")
+
+
+@pytest.mark.asyncio
+async def test_a_brand_new_conversation_of_metadata_rows_shows_no_migration_notice(tmp_path):
+    """U2: a metadata-only transcript must not read as a legacy migration.
+
+    Aida's bootstrap writes the name row, her birth marker and wake snapshots
+    before any model selection can exist, so `_restore_selected_model` took the
+    legacy branch and told the very first turn of a minutes-old conversation
+    "Saved model information is incomplete" — a fault about a selection that
+    was never there to be saved. The notice is for conversations that RAN or
+    CHOSE; both directions are pinned, because suppressing it too broadly would
+    hide the unusable-selection recovery it exists for.
+    """
+    directory = tmp_path / "sessions" / "fresh"
+    transcript = Transcript(directory)
+    await transcript.append_custom("conversation_name", {"name": "Aida"})
+    await transcript.append_custom("aida_session", {"role": "aida", "created_at": 0})
+    await transcript.append_custom("wake_schedules", {"schedules": []})
+    owner, _ = session(directory)
+    try:
+        assert not owner._model_migration_notice
+    finally:
+        await owner.dispose()
+
+    # CONTROL, one message: a conversation again, notice back.
+    chatted = tmp_path / "sessions" / "chatted"
+    chat_transcript = Transcript(chatted)
+    await chat_transcript.append_custom("conversation_name", {"name": "notes"})
+    await chat_transcript.append_message(Message.assistant("hello"))
+    other, _ = session(chatted)
+    try:
+        assert other._model_migration_notice
+    finally:
+        await other.dispose()
+
+    # CONTROL, an unusable saved selection: the recovery path keeps it too.
+    legacy = tmp_path / "sessions" / "legacy-empty"
+    legacy_transcript = Transcript(legacy)
+    await legacy_transcript.append_custom(
+        "selected_model", {"version": 2, "selector": "missing-provider/model"}
+    )
+    third, _ = session(legacy)
+    try:
+        assert third._model_migration_notice
+    finally:
+        await third.dispose()

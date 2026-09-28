@@ -374,6 +374,7 @@ from local_operator.tui.widgets.projects_view import (
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
+    AIDA_MARKER,
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
 )
@@ -17058,6 +17059,10 @@ class OperatorApp(App[None]):
                             "process, then resume again",
                             "warning",
                         )
+                        # The transition will not land, so a request waiting
+                        # for it ends here rather than firing on some later
+                        # adoption (U1's stale half).
+                        self._drop_pending_aida_request(concrete)
                         return
                     if (
                         record is not None
@@ -17135,9 +17140,11 @@ class OperatorApp(App[None]):
                 remaining = deadline - _resume_redial_clock()
                 if static is not None:
                     verdict(static_text())
+                    self._drop_pending_aida_request(concrete)
                     return
                 if attempt >= RESUME_CONNECT_ATTEMPTS or remaining <= 0:
                     verdict(gave_up_text(error))
+                    self._drop_pending_aida_request(concrete)
                     return
                 # STATED AS A BOUND, and in the composer's register for the same
                 # wait: no denominator the user cannot act on, no diagnosis the
@@ -17193,6 +17200,14 @@ class OperatorApp(App[None]):
             # The composer's refusal row describes the same state, so it ends
             # with the operation on every exit too.
             self._retire_composer_refusal()
+            # THE CANCELLATION/UNWIND EXIT OWES THE REQUEST ITS ENDING TOO.
+            # `settled` is False only when no verdict resolved this run (the
+            # cancellation arm above, or an unexpected unwind), and on a
+            # SUCCESSFUL dial it is True here — the adopt below spends the
+            # stash itself — so this fires exactly when the transition died
+            # without landing.
+            if not settled:
+                self._drop_pending_aida_request(concrete)
 
         # The retry row described a dial that is now over; leaving it up would
         # have the transcript promise a reconnect that already happened. The
@@ -17250,6 +17265,18 @@ class OperatorApp(App[None]):
         try:
             self._reset_ledger_for_swap()
             self._adopt_session(remote)
+            # HER STASHED REQUEST IS SPENT HERE TOO (UX round 1, U1). This is
+            # the adoption seam for an ALREADY-BUILT viewer — the attach path
+            # onto a live owner (`_attach_or_refuse`; the ordinary case once
+            # her runtime is up, from any prior open or her 09:00 cadence) and
+            # the mesh remote path — and it used to spend neither prompt seam,
+            # so `/aida hello` against a live her switched the conversation
+            # and silently dropped the words: no transcript row, no notice,
+            # nothing on disk. Spending it at the same moment every other
+            # adoption does is what makes R2's flow true wherever she is
+            # running; consuming clears the stash, so no other seam fires it
+            # twice.
+            self._submit_aida_prompt(remote)
             if attach_behind:
                 # The bind behind the paint: the same engage a cold boot runs,
                 # which finds this owner's record and attaches to it rather
@@ -41979,6 +42006,13 @@ class OperatorApp(App[None]):
         escape: ``/aida =pause …`` sends her a message that merely starts with
         the word (the ``=`` prefix, like ``/team =chart``).
 
+        A RESERVED WORD COUNTS ONLY AS THE WHOLE ARGUMENT (cross-host grammar
+        ruling, UI review round 1, MINOR-3). The first cut split on the first
+        space, so ``/aida pause and think`` ran the control word and silently
+        DROPPED the rest — a typed request, gone, under a receipt about
+        pausing. One grammar for both hosts now: the word alone is the
+        control; anything longer is a message for her, verbatim.
+
         Both halves run in workers: opening resolves (and on first use
         creates) her session off the loop, and the control words write config
         and wake files under the aida lock, which must not park the loop.
@@ -41991,10 +42025,12 @@ class OperatorApp(App[None]):
         escaped = text.startswith("=")
         if escaped:
             text = text[1:].lstrip()
-        word, _, _rest = text.partition(" ")
-        if not escaped and word.casefold() in AIDA_SUBCOMMANDS:
+        # WHOLE ARGUMENT, not first token (see the docstring): one grammar for
+        # the TUI and the desktop, so `/aida pause and think` reaches her as
+        # the message it looks like.
+        if not escaped and text.casefold() in AIDA_SUBCOMMANDS:
             self.run_worker(
-                self._aida_control(word.casefold(), notice), thread=False, group="session"
+                self._aida_control(text.casefold(), notice), thread=False, group="session"
             )
             return
         if self._resume_factory is None:
@@ -42022,16 +42058,16 @@ class OperatorApp(App[None]):
             session_id = await ensure_session()
         except Exception as error:  # noqa: BLE001 — a boot path never raises
             logger.warning("aida: ensure failed", exc_info=True)
-            self._system_notice(f"could not reach Aida: {error}", "warning")
+            self._system_notice(f"{AIDA_MARKER} could not reach Aida: {error}", "warning")
             return
         if session_id is None:
-            notice("Aida is disabled on this install (aida.enabled is false).")
+            notice(f"{AIDA_MARKER} Aida is disabled on this install (aida.enabled is false).")
             return
         if self._conversation_id() == session_id:
             if text:
                 self._submit_command_prompt(text, attachments)
             else:
-                notice("This conversation is Aida's — already open.")
+                notice(f"{AIDA_MARKER} This conversation is Aida's — already open.")
             return
         if text:
             self._pending_aida_prompt = (session_id, text, attachments)
@@ -42065,23 +42101,26 @@ class OperatorApp(App[None]):
                 outcome = await proactive.pause(root, session_id)
                 if outcome.owner_blocked:
                     notice(
-                        "Aida paused — her open session applies it within a couple of "
-                        "seconds. /aida resume re-arms her check-ins."
+                        f"{AIDA_MARKER} Aida: paused — her open session applies it within "
+                        "a couple of seconds. /aida resume re-arms her check-ins."
                     )
                 else:
-                    notice("Aida paused — no proactive check-ins. /aida resume re-arms them.")
+                    notice(
+                        f"{AIDA_MARKER} Aida: paused — no proactive check-ins. "
+                        "/aida resume re-arms them."
+                    )
                 return
             armed = await proactive.resume(root, session_id)
             when = self._aida_when(proactive.status(root))
             if armed == "owner":
                 notice(
-                    "Aida is active again — her open session will arm the next check-in "
-                    "within a couple of seconds."
+                    f"{AIDA_MARKER} Aida: active again — her open session will arm the "
+                    "next check-in within a couple of seconds."
                 )
             elif when:
-                notice(f"Aida is active again — next check-in {when}.")
+                notice(f"{AIDA_MARKER} Aida: active again — next check-in {when}.")
             else:
-                notice("Aida is active again; her next boot arms the check-in.")
+                notice(f"{AIDA_MARKER} Aida: active again — her next boot arms the check-in.")
         except Exception as error:  # noqa: BLE001 — the refusal is the receipt
             logger.warning("aida: control op failed", exc_info=True)
             self._system_notice(f"could not {word} Aida: {error}", "warning")
@@ -42103,15 +42142,48 @@ class OperatorApp(App[None]):
             word = "paused"
         else:
             word = "active"
-        parts = [f"Aida: {word}"]
+        parts = [f"{AIDA_MARKER} Aida: {word}"]
         when = OperatorApp._aida_when(st)
         if when:
             parts.append(f"next check-in {when}")
+        # PLAIN COPY, not budget jargon (design round 1, D3): "0/2" never said
+        # what counted as extra or what the ceiling was. The sentence keeps the
+        # status line's label voice.
+        # The count and its ceiling ride NON-BREAKING spaces (the "42\u00a0s"
+        # precedent in the attach narration): the receipt wraps in the narrow
+        # column a sidebar-open layout leaves, and "0 of\n2" split the pair
+        # that D3's copy exists to make plain.
         parts.append(
-            f"extra check-ins today {int(st.get('extras_today', 0))}"
-            f"/{int(st.get('max_extra_per_day', 0))}"
+            f"extra check-ins used today: {int(st.get('extras_today', 0))}\u00a0"
+            f"of\u00a0{int(st.get('max_extra_per_day', 0))}"
         )
         return " — ".join(parts)
+
+    def _drop_pending_aida_request(self, session_id: str) -> bool:
+        """Consume-and-drop a ``/aida <request>`` stash aimed at ``session_id``.
+
+        THE FAILURE ENDING of a transition that was supposed to spend it. A
+        request typed for her must not survive a transition that did not land:
+        the next adoption of her id would otherwise deliver words typed
+        minutes earlier into a fresh conversation, and the user would have
+        been told nothing either way. Consuming is id-scoped (a stash aimed
+        elsewhere is left for its own transition) and the drop is NARRATED,
+        because the one outcome worse than a dropped request is a dropped
+        request nobody hears about (UX round 1, U1: "never silence").
+
+        Returns whether a stash was dropped, so callers can keep their own
+        sentences to one row per event.
+        """
+        pending = self._pending_aida_prompt
+        if pending is None or pending[0] != session_id:
+            return False
+        self._pending_aida_prompt = None
+        self._system_notice(
+            f"{AIDA_MARKER} Request not sent — Aida's conversation did not open, "
+            "so nothing ran.",
+            "warning",
+        )
+        return True
 
     def _submit_aida_prompt(self, session: Any) -> None:
         """Consume a stashed ``/aida <request>`` once its session is adopted.
