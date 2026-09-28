@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -81,6 +81,11 @@ BOARD_STATUS_BUCKET: dict[str, str] = {
 #: "active · 4" over one true active was two things called active on one
 #: screen. "in flight · 4" is true of every card under it.
 BOARD_COLUMN_LABELS: dict[str, str] = {"active": "in flight"}
+
+#: Section label for the bucket of projects that name no team — said out loud
+#: (the page's honest-tail convention: `no dates`, `no progress`), and the name
+#: the ruler and the section jumps address that bucket by.
+NO_TEAM_LABEL = "no team"
 
 #: One glyph per status — the SHAPE channel, chosen because the ink channel
 #: cannot separate seven statuses out of the five semantic tokens that fit
@@ -150,6 +155,12 @@ class RenderResult:
     text: Text
     width: int
     height: int
+    #: The team-grouped section bands this canvas paints — ``(start_row,
+    #: end_row, label)`` in paint order with ``end_row`` EXCLUSIVE (S6d
+    #: parity). One description of where each section sits, read by the
+    #: section ruler, the jumps and the header clicks; empty when the canvas
+    #: is ungrouped, which is exactly when it paints as shipped.
+    sections: tuple[tuple[int, int, str], ...] = ()
 
 
 def _styles(style_for: StyleFor | None) -> StyleFor:
@@ -354,6 +365,56 @@ def auto_timeline_tier(
 # ---------------------------------------------------------------------------
 
 
+def _team_of(view: dict[str, Any]) -> str | None:
+    """The project's team as a trimmed name, or ``None`` when unknown."""
+    text = str(_row(view).get("team") or "").strip()
+    return text or None
+
+
+def sections_of(views: list[dict[str, Any]]) -> list[tuple[str, list[int]]] | None:
+    """``(label, project indexes)`` sections in paint order, or ``None``.
+
+    Grouping is automatic (S6d parity, design §6): a canvas groups by ``team``
+    when at least one PAINTED project carries one, and is byte-identical to
+    the shipped flat canvases otherwise. Teams sort case-insensitively A→Z and
+    the ``no team`` bucket is LAST (the page's honest-tail convention); within
+    a section the store's own order is kept, so grouping never becomes a
+    second sort. Indexes address ``views`` — the same list every surface
+    already uses.
+    """
+    rendered = views[:PROJECTS_MAX]
+    buckets: dict[str | None, list[int]] = {}
+    for index, view in enumerate(rendered):
+        buckets.setdefault(_team_of(view), []).append(index)
+    teams = sorted((team for team in buckets if team is not None), key=str.casefold)
+    if not teams:
+        return None
+    order: list[str | None] = [*teams, None]
+    return [
+        (team if team is not None else NO_TEAM_LABEL, buckets[team])
+        for team in order
+        if buckets.get(team)
+    ]
+
+
+def _section_header_text(label: str, count: int, width: int, style_for: StyleFor) -> Text:
+    """One painted section header row: ``── core · 4 ──…`` (design §6).
+
+    Dim dashes, the name in the canvases' name ink, the count dim, filled to
+    the canvas (list) or the section block (board/timeline) so the band reads
+    as a divider. Headers are NOT selectable — no marker column — and are
+    addressed only by the section jumps and a header click.
+    """
+    header = Text(no_wrap=True)
+    header.append("── ", style=style_for("dim"))
+    header.append(label, style=style_for("name"))
+    header.append(f" · {count} ", style=style_for("dim"))
+    pad = width - cell_len(header.plain)
+    if pad > 0:
+        header.append("─" * pad, style=style_for("dim"))
+    return header
+
+
 def _marker_cells(*, selected: bool, associated: bool) -> tuple[tuple[str, str], ...]:
     """The two-cell marker column: ``▸`` the selection, ``◆`` the session's set.
 
@@ -439,22 +500,37 @@ def render_project_list(
     ``cursor`` is the page's ONE selection (an index into ``views``), and
     ``associated`` names the project ids the calling session is linked to,
     whose rows carry the `◆` marker (S3b) — the same selection and the same
-    marker set the board and the timeline read.
+    marker set the board and the timeline read. With teams present the rows
+    group under painted section headers (S6d parity); without them this is
+    byte-identical to the shipped flat canvas.
     """
     resolver = _styles(style_for)
     mine = associated or frozenset()
-    lines: list[Text] = []
     rendered = views[:PROJECTS_MAX]
-    for index, view in enumerate(rendered):
-        lines.append(
-            _list_row(
-                view,
-                selected=index == cursor,
-                associated=str(_row(view).get("id") or "") in mine,
-                now=now,
-                style_for=resolver,
-            )
+    rows = [
+        _list_row(
+            view,
+            selected=index == cursor,
+            associated=str(_row(view).get("id") or "") in mine,
+            now=now,
+            style_for=resolver,
         )
+        for index, view in enumerate(rendered)
+    ]
+    lines: list[Text] = []
+    bands: list[tuple[int, int, str]] = []
+    groups = sections_of(rendered)
+    if groups is None:
+        lines.extend(rows)
+    else:
+        # A header row per team, filled to the canvas's own width (the widest
+        # row), then that section's rows in the store's order.
+        fill_width = max((cell_len(row.plain) for row in rows), default=0)
+        for label, indexes in groups:
+            start = len(lines)
+            lines.append(_section_header_text(label, len(indexes), fill_width, resolver))
+            lines.extend(rows[index] for index in indexes)
+            bands.append((start, len(lines), label))
     if len(views) > PROJECTS_MAX:
         lines.append(
             Text(
@@ -468,7 +544,31 @@ def render_project_list(
         lines.append(Text(project_empty_text(), style=resolver("dim")))
     width = max(cell_len(line.plain) for line in lines)
     text = Text("\n").join(lines)
-    return RenderResult(text=text, width=width, height=len(lines))
+    return RenderResult(text=text, width=width, height=len(lines), sections=tuple(bands))
+
+
+def list_position(views: list[dict[str, Any]], cursor: int) -> int | None:
+    """Canvas row of ``views[cursor]``'s list row, or ``None`` (past the cap).
+
+    The grouped list interleaves header rows, so a cursor's canvas row is no
+    longer its index; this mirrors the painter's walk exactly (the reveal and
+    the hit tests read it, and tests cross-check it against the painted
+    lines).
+    """
+    rendered = views[:PROJECTS_MAX]
+    if not (0 <= cursor < len(rendered)):
+        return None
+    groups = sections_of(rendered)
+    if groups is None:
+        return cursor
+    y = 0
+    for _label, indexes in groups:
+        y += 1  # the header row
+        for index in indexes:
+            if index == cursor:
+                return y
+            y += 1
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +648,17 @@ def _card_lines(
     return [name, facts, fresh]
 
 
-def _columns_of(views: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+def _columns_of(
+    views: list[dict[str, Any]], *, skip_empty: bool = False
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """The board's columns: the fixed three, plus ``archived`` when non-empty.
+
+    ``skip_empty`` drops columns carrying no cards — the grouped board's
+    per-section rule (a stacked block paints only the columns that carry
+    cards; an empty ``paused · 0`` header under a populated ``core · 4`` header
+    is double-counted emptiness, design §6). The ungrouped board passes it
+    False and keeps the shipped fixed-three shape byte-identically.
+    """
     by_status: dict[str, list[dict[str, Any]]] = {name: [] for name in BOARD_COLUMNS}
     for view in views:
         status = str(_row(view).get("status") or "active")
@@ -568,6 +678,8 @@ def _columns_of(views: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, A
     archived = by_status.get(BOARD_EXTRA_COLUMN) or []
     if archived:
         columns.append((BOARD_EXTRA_COLUMN, archived))
+    if skip_empty:
+        columns = [column for column in columns if column[1]]
     return columns
 
 
@@ -592,28 +704,20 @@ def _painted_cards(
     return visible, hidden, extra
 
 
-def render_project_board(
-    views: list[dict[str, Any]],
+def _board_blocks(
+    columns: list[tuple[str, list[dict[str, Any]]]],
     *,
-    cursor: int | None = None,
-    associated: frozenset[str] | None = None,
-    now: float | None = None,
-    style_for: StyleFor | None = None,
-) -> RenderResult:
-    """Status columns painted side by side; cards of three lines, fixed width.
+    selected_id: str | None,
+    mine: frozenset[str],
+    now: float | None,
+    resolver: StyleFor,
+) -> list[list[Text]]:
+    """One block of lines per column: header, cards, the overflow note.
 
-    ``cursor`` selects the ONE card the page's selection points at (an index
-    into ``views``; the cards are grouped by status, so the index is resolved
-    to an id) and ``associated`` marks the calling session's own set — both
-    painted in the card's marker column (S3b), never shifting the grid.
+    Shared by the flat board and the grouped one (S6d parity) so a column
+    paints identically in both; ``selected_id``/``mine`` are the page's one
+    selection and marker set.
     """
-    resolver = _styles(style_for)
-    mine = associated or frozenset()
-    rendered = views[:PROJECTS_MAX]
-    selected_id: str | None = None
-    if cursor is not None and 0 <= cursor < len(rendered):
-        selected_id = str(_row(rendered[cursor]).get("id") or "")
-    columns = _columns_of(rendered)
     blocks: list[list[Text]] = []
     for status, rows in columns:
         block: list[Text] = []
@@ -664,16 +768,11 @@ def render_project_board(
                 )
             )
         blocks.append(block)
-    if len(views) > PROJECTS_MAX:
-        blocks[0].append(Text(""))
-        blocks[0].append(
-            Text(f"… +{len(views) - PROJECTS_MAX} more not shown", style=resolver("dim"))
-        )
-    if not rendered:
-        from local_operator.slash_commands import project_empty_text
+    return blocks
 
-        empty = Text(project_empty_text(), style=resolver("dim"))
-        return RenderResult(text=empty, width=cell_len(empty.plain), height=1)
+
+def _stack_board_blocks(blocks: list[list[Text]]) -> list[Text]:
+    """Stack column blocks side by side, cell-padded and trailing-trimmed."""
     height = max((len(block) for block in blocks), default=1)
     lines: list[Text] = []
     for index in range(height):
@@ -692,8 +791,85 @@ def render_project_board(
         if trailing:
             line.right_crop(trailing)
         lines.append(line)
+    return lines
+
+
+def render_project_board(
+    views: list[dict[str, Any]],
+    *,
+    cursor: int | None = None,
+    associated: frozenset[str] | None = None,
+    now: float | None = None,
+    style_for: StyleFor | None = None,
+) -> RenderResult:
+    """Status columns painted side by side; cards of three lines, fixed width.
+
+    ``cursor`` selects the ONE card the page's selection points at (an index
+    into ``views``; the cards are grouped by status, so the index is resolved
+    to an id) and ``associated`` marks the calling session's own set — both
+    painted in the card's marker column (S3b), never shifting the grid. With
+    teams present each team paints as a stacked column-block under its own
+    header row, holding only the columns that carry cards (S6d parity, design
+    §6); with none the flat board is byte-identical to the shipped one.
+    """
+    resolver = _styles(style_for)
+    mine = associated or frozenset()
+    rendered = views[:PROJECTS_MAX]
+    selected_id: str | None = None
+    if cursor is not None and 0 <= cursor < len(rendered):
+        selected_id = str(_row(rendered[cursor]).get("id") or "")
+    if not rendered:
+        from local_operator.slash_commands import project_empty_text
+
+        empty = Text(project_empty_text(), style=resolver("dim"))
+        return RenderResult(text=empty, width=cell_len(empty.plain), height=1)
+    groups = sections_of(rendered)
+    if groups is None:
+        blocks = _board_blocks(
+            _columns_of(rendered),
+            selected_id=selected_id,
+            mine=mine,
+            now=now,
+            resolver=resolver,
+        )
+        if len(views) > PROJECTS_MAX:
+            blocks[0].append(Text(""))
+            blocks[0].append(
+                Text(f"… +{len(views) - PROJECTS_MAX} more not shown", style=resolver("dim"))
+            )
+        lines = _stack_board_blocks(blocks)
+        width = max(cell_len(line.plain) for line in lines)
+        return RenderResult(text=Text("\n").join(lines), width=width, height=len(lines))
+    overflow = (
+        f"… +{len(views) - PROJECTS_MAX} more not shown" if len(views) > PROJECTS_MAX else None
+    )
+    lines: list[Text] = []
+    bands: list[tuple[int, int, str]] = []
+    for label, indexes in groups:
+        section_views = [rendered[index] for index in indexes]
+        blocks = _board_blocks(
+            _columns_of(section_views, skip_empty=True),
+            selected_id=selected_id,
+            mine=mine,
+            now=now,
+            resolver=resolver,
+        )
+        if overflow is not None:
+            # The PROJECTS_MAX overflow row rides the FIRST painted column of
+            # the first section — the shipped placement, kept per the design.
+            blocks[0].append(Text(""))
+            blocks[0].append(Text(overflow, style=resolver("dim")))
+            overflow = None
+        body = _stack_board_blocks(blocks)
+        fill_width = max((cell_len(line.plain) for line in body), default=0)
+        start = len(lines)
+        lines.append(_section_header_text(label, len(indexes), fill_width, resolver))
+        lines.extend(body)
+        bands.append((start, len(lines), label))
     width = max(cell_len(line.plain) for line in lines)
-    return RenderResult(text=Text("\n").join(lines), width=width, height=len(lines))
+    return RenderResult(
+        text=Text("\n").join(lines), width=width, height=len(lines), sections=tuple(bands)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -872,6 +1048,48 @@ def _split_dated(
     return dated, undated
 
 
+def _tail_entries(
+    undated: list[dict[str, Any]],
+    *,
+    selected_id: str | None,
+    mine: frozenset[str],
+    resolver: StyleFor,
+    offset: int = 0,
+) -> tuple[Text, list[tuple[int, int, str]]]:
+    """One tail line's items: the text, and each name's ``(x0, x1, id)`` range.
+
+    The tail is free-form (no fixed name column to align), so a marked name
+    carries its marker cells and an unmarked one stays bare — the shipped
+    rule. The cell RANGES (markers included, ``x1`` exclusive) are what let a
+    click select the item it landed on: the grouped tail paints one line per
+    team, and one line lists several projects. ``offset`` shifts the recorded
+    ranges onto the painted line's canvas coordinates — the prefix
+    (``no dates (…)``) is not part of the entries text, but clicks see it.
+    """
+    line = Text()
+    ranges: list[tuple[int, int, str]] = []
+    for index, view in enumerate(undated):
+        if index:
+            line.append(", ", style=resolver("dim"))
+        row_id = str(_row(view).get("id") or "")
+        start = cell_len(line.plain)
+        marked = (selected_id is not None and row_id == selected_id) or row_id in mine
+        if marked:
+            # The tail is free-form (no fixed name column to align), so a
+            # marked name carries its cells and an unmarked one stays bare.
+            for glyph, key in _marker_cells(
+                selected=selected_id is not None and row_id == selected_id,
+                associated=row_id in mine,
+            ):
+                line.append(glyph, style=resolver(key) if key != "dim" else resolver("dim"))
+        line.append(
+            display_name(_row(view)) or "(unnamed)",
+            style=resolver("name") if marked else resolver("dim"),
+        )
+        ranges.append((offset + start, offset + cell_len(line.plain), row_id))
+    return line, ranges
+
+
 def render_project_timeline(
     views: list[dict[str, Any]],
     *,
@@ -888,7 +1106,10 @@ def render_project_timeline(
     fabricated schedule: they land in the trailing ``no dates`` section, which
     is the honest degradation the design asks for. ``cursor`` marks the page's
     selection in the name column and ``associated`` the calling session's own
-    rows (S3b), both inside the fixed name field.
+    rows (S3b), both inside the fixed name field. With teams present the dated
+    rows group under painted section headers and the tail prints one line per
+    team (S6d parity, design §6); with none the chart is byte-identical to the
+    shipped one.
     """
     resolver = _styles(style_for)
     moment = today or date.today()
@@ -901,63 +1122,158 @@ def render_project_timeline(
         selected_id = str(_row(rendered[cursor]).get("id") or "")
     span = timeline_span(rendered, today=moment)
     dated, undated = _split_dated(rendered)
+    groups = sections_of(rendered)
 
     lines: list[Text] = []
+    bands: list[tuple[int, int, str]] = []
+    axis_cells = 0
+    axis_start: date | None = None
     if span is not None and dated:
-        start, end = span
-        axis_cells = timeline_axis_cells(start, end, tier)
+        axis_start, end = span
+        axis_cells = timeline_axis_cells(axis_start, end, tier)
         lines.append(
             _timeline_axis(
-                start, end, axis_cells=axis_cells, tier=tier, today=moment, style_for=resolver
+                axis_start, end, axis_cells=axis_cells, tier=tier, today=moment, style_for=resolver
             )
         )
+
+    def paint_dated(view: dict[str, Any]) -> Text:
+        row_id = str(_row(view).get("id") or "")
+        return _timeline_row(
+            view,
+            start=cast(date, axis_start),
+            axis_cells=axis_cells,
+            tier=tier,
+            today=moment,
+            selected=selected_id is not None and row_id == selected_id,
+            associated=row_id in mine,
+            style_for=resolver,
+        )
+
+    if groups is None:
         for view in dated:
-            lines.append(
-                _timeline_row(
-                    view,
-                    start=start,
-                    axis_cells=axis_cells,
-                    tier=tier,
-                    today=moment,
-                    selected=selected_id is not None
-                    and str(_row(view).get("id") or "") == selected_id,
-                    associated=str(_row(view).get("id") or "") in mine,
-                    style_for=resolver,
-                )
-            )
+            lines.append(paint_dated(view))
+    else:
+        # Grouped (S6d parity, design §6): section header rows interrupt the
+        # dated rows, filled to the section block's width, and the `no dates`
+        # tail prints one line PER TEAM present among the undated so the team
+        # structure survives the tail.
+        dated_ids = {str(_row(view).get("id") or "") for view in dated}
+        for label, indexes in groups:
+            section_dated = [
+                rendered[index]
+                for index in indexes
+                if str(_row(rendered[index]).get("id") or "") in dated_ids
+            ]
+            if not section_dated:
+                continue
+            rows = [paint_dated(view) for view in section_dated]
+            fill_width = max(cell_len(row.plain) for row in rows)
+            start = len(lines)
+            lines.append(_section_header_text(label, len(section_dated), fill_width, resolver))
+            lines.extend(rows)
+            bands.append((start, len(lines), label))
+
     if undated:
         if lines:
             lines.append(Text(""))
-        # The tail is ONE line, and the markers live ON it: an undated project
-        # is still selectable and still part of the session's set, so both
-        # glyphs are painted beside its name — otherwise `↵` would aim at a
-        # row with no visible selection at all (agent review round 1, F1).
-        tail = Text()
-        tail.append(f"no dates ({len(undated)}): ", style=resolver("dim"))
-        for index, view in enumerate(undated):
-            if index:
-                tail.append(", ", style=resolver("dim"))
-            row_id = str(_row(view).get("id") or "")
-            marked = (selected_id is not None and row_id == selected_id) or row_id in mine
-            if marked:
-                # The tail is free-form (no fixed name column to align), so a
-                # marked name carries its cells and an unmarked one stays bare.
-                for glyph, key in _marker_cells(
-                    selected=selected_id is not None and row_id == selected_id,
-                    associated=row_id in mine,
-                ):
-                    tail.append(glyph, style=resolver(key) if key != "dim" else resolver("dim"))
-            tail.append(
-                display_name(_row(view)) or "(unnamed)",
-                style=resolver("name") if marked else resolver("dim"),
+        if groups is None:
+            # The tail is ONE line, and the markers live ON it: an undated
+            # project is still selectable and still part of the session's set,
+            # so both glyphs are painted beside its name — otherwise `↵` would
+            # aim at a row with no visible selection at all (agent review
+            # round 1, F1).
+            tail = Text()
+            tail.append(f"no dates ({len(undated)}): ", style=resolver("dim"))
+            entries, _ranges = _tail_entries(
+                undated, selected_id=selected_id, mine=mine, resolver=resolver
             )
-        lines.append(tail)
+            tail.append_text(entries)
+            lines.append(tail)
+        else:
+            undated_ids = {str(_row(view).get("id") or "") for view in undated}
+            for label, indexes in groups:
+                section_undated = [
+                    rendered[index]
+                    for index in indexes
+                    if str(_row(rendered[index]).get("id") or "") in undated_ids
+                ]
+                if not section_undated:
+                    continue
+                start = len(lines)
+                tail = Text()
+                tail.append(f"no dates ({label}, {len(section_undated)}): ", style=resolver("dim"))
+                entries, _ranges = _tail_entries(
+                    section_undated, selected_id=selected_id, mine=mine, resolver=resolver
+                )
+                tail.append_text(entries)
+                lines.append(tail)
+                bands.append((start, len(lines), label))
     if not lines:
         from local_operator.slash_commands import project_empty_text
 
         lines.append(Text(project_empty_text(), style=resolver("dim")))
     width = max(cell_len(line.plain) for line in lines)
-    return RenderResult(text=Text("\n").join(lines), width=width, height=len(lines))
+    return RenderResult(
+        text=Text("\n").join(lines), width=width, height=len(lines), sections=tuple(bands)
+    )
+
+
+def _board_card_position(
+    columns: list[tuple[str, list[dict[str, Any]]]],
+    target: str,
+    *,
+    y_base: int,
+) -> tuple[int, int] | None:
+    """``(x, y)`` of ``target``'s card name line within one column block.
+
+    One section's arithmetic, shared by the flat and the grouped reveals so a
+    section shift cannot drift the two apart; ``y_base`` is where this block's
+    first header line sits (0 for the flat board, the section header + 1 when
+    grouped).
+    """
+    x = 0
+    for _status, rows in columns:
+        visible, hidden, extra = _painted_cards(rows, target)
+        for index, view in enumerate(visible):
+            if str(_row(view).get("id") or "") == target:
+                # Each card is a blank line and three content lines under the
+                # column header: its name line sits at 2 + index * 4.
+                return (x * BOARD_COLUMN_WIDTH, y_base + 2 + index * 4)
+        if extra is not None and str(_row(extra).get("id") or "") == target:
+            # Past the cap the selected card is painted after the overflow
+            # note (or straight after the last card, when nothing is hidden):
+            # 4 lines per visible card, then the note's blank + line when one
+            # is painted, then this card's blank — its NAME line lands at
+            # 4 + 4 * V with a note and 2 + 4 * V without one.
+            y = (4 if hidden else 2) + 4 * len(visible)
+            return (x * BOARD_COLUMN_WIDTH, y_base + y)
+        x += 1
+    return None
+
+
+def _board_block_height(
+    columns: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    selected_id: str | None,
+    extra_note: bool,
+) -> int:
+    """Lines one stacked column-block paints — the painter's own arithmetic.
+
+    ``1 + 4V + 2(when cards are hidden) + 4(when a past-cap selected card is
+    painted)`` per column (the card/note arithmetic above), maxed across the
+    columns; ``extra_note`` adds the PROJECTS_MAX overflow row's blank + line
+    to the FIRST column, where the painter places it.
+    """
+    heights: list[int] = []
+    for _status, rows in columns:
+        visible, hidden, extra = _painted_cards(rows, selected_id)
+        heights.append(
+            1 + 4 * len(visible) + (2 if hidden else 0) + (4 if extra is not None else 0)
+        )
+    if extra_note and heights:
+        heights[0] += 2
+    return max(heights, default=1)
 
 
 def board_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] | None:
@@ -968,28 +1284,29 @@ def board_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, int] 
     a cell no reader can see (design round 1, D2's rule, applied to the board).
     The point is the card's NAME line, where the marker column lives, so a
     reveal that lands there shows the selection itself and not just its card.
+    Grouped canvases add each section's header row and the height of the
+    sections above (``_board_block_height``), so the reveal lands on the card
+    the painter drew.
     """
     rendered = views[:PROJECTS_MAX]
     if not (0 <= cursor < len(rendered)):
         return None
     target = str(_row(rendered[cursor]).get("id") or "")
-    x = 0
-    for _status, rows in _columns_of(rendered):
-        visible, hidden, extra = _painted_cards(rows, target)
-        for index, view in enumerate(visible):
-            if str(_row(view).get("id") or "") == target:
-                # Each card is a blank line and three content lines under the
-                # column header: its name line sits at 2 + index * 4.
-                return (x * BOARD_COLUMN_WIDTH, 2 + index * 4)
-        if extra is not None and str(_row(extra).get("id") or "") == target:
-            # Past the cap the selected card is painted after the overflow
-            # note (or straight after the last card, when nothing is hidden):
-            # 4 lines per visible card, then the note's blank + line when one
-            # is painted, then this card's blank — its NAME line lands at
-            # 4 + 4 * V with a note and 2 + 4 * V without one.
-            y = (4 if hidden else 2) + 4 * len(visible)
-            return (x * BOARD_COLUMN_WIDTH, y)
-        x += 1
+    groups = sections_of(rendered)
+    if groups is None:
+        return _board_card_position(_columns_of(rendered), target, y_base=0)
+    y_base = 0
+    for index, (_label, indexes) in enumerate(groups):
+        section_views = [rendered[position] for position in indexes]
+        columns = _columns_of(section_views, skip_empty=True)
+        found = _board_card_position(columns, target, y_base=y_base + 1)
+        if found is not None:
+            return found
+        y_base += 1 + _board_block_height(
+            columns,
+            selected_id=target,
+            extra_note=index == 0 and len(views) > PROJECTS_MAX,
+        )
     return None
 
 
@@ -998,8 +1315,10 @@ def timeline_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, in
 
     Dated projects are one row each under the axis; the undated tail is ONE
     line naming them all, so an undated selection answers with THAT line's
-    ``y`` — its name is on it. ``None`` means the index is past
-    ``PROJECTS_MAX`` or its project has no painted line at all.
+    ``y`` — its name is on it. Grouped canvases add each section's header row
+    and the section's rows above (and, for the tail, one line per team).
+    ``None`` means the index is past ``PROJECTS_MAX`` or its project has no
+    painted line at all.
     """
     rendered = views[:PROJECTS_MAX]
     if not (0 <= cursor < len(rendered)):
@@ -1007,19 +1326,428 @@ def timeline_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, in
     target = str(_row(rendered[cursor]).get("id") or "")
     dated, undated = _split_dated(rendered)
     span = timeline_span(rendered)
+    groups = sections_of(rendered)
+    if groups is None:
+        y = 0
+        if span is not None and dated:
+            y = 1  # the axis line; the rows follow it one per dated project
+            for view in dated:
+                if str(_row(view).get("id") or "") == target:
+                    return (0, y)
+                y += 1
+        if undated:
+            if y:
+                y += 1  # the blank line between the chart and the tail
+            if any(str(_row(view).get("id") or "") == target for view in undated):
+                return (0, y)
+        return None
+    dated_ids = {str(_row(view).get("id") or "") for view in dated}
+    undated_ids = {str(_row(view).get("id") or "") for view in undated}
     y = 0
     if span is not None and dated:
-        y = 1  # the axis line; the rows follow it one per dated project
-        for view in dated:
-            if str(_row(view).get("id") or "") == target:
-                return (0, y)
-            y += 1
+        y = 1
+        for _label, indexes in groups:
+            section_dated = [
+                index
+                for index in indexes
+                if str(_row(rendered[index]).get("id") or "") in dated_ids
+            ]
+            if not section_dated:
+                continue
+            y += 1  # the section header row
+            for index in section_dated:
+                if str(_row(rendered[index]).get("id") or "") == target:
+                    return (0, y)
+                y += 1
     if undated:
         if y:
-            y += 1  # the blank line between the chart and the tail
-        if any(str(_row(view).get("id") or "") == target for view in undated):
-            return (0, y)
+            y += 1
+        for _label, indexes in groups:
+            section_undated = [
+                index
+                for index in indexes
+                if str(_row(rendered[index]).get("id") or "") in undated_ids
+            ]
+            if not section_undated:
+                continue
+            if any(
+                str(_row(rendered[index]).get("id") or "") == target for index in section_undated
+            ):
+                return (0, y)
+            y += 1
     return None
+
+
+# ---------------------------------------------------------------------------
+# Canvas hit tests and the section ruler (S6d parity)
+# ---------------------------------------------------------------------------
+# These are the INVERSE of the painters above and read the same primitives
+# (`sections_of`, `_columns_of`, `_painted_cards`, `_split_dated`, the card
+# height arithmetic), so what answers is what was painted; tests cross-check
+# every position against the painted lines.
+
+
+def _bands_for(
+    views: list[dict[str, Any]],
+    view_type: str,
+    *,
+    cursor: int | None = None,
+) -> tuple[tuple[int, int, str], ...]:
+    """The section bands ``render_*`` paints, recomputed for hit tests.
+
+    ``(start_row, end_row, label)`` with ``end`` EXCLUSIVE, in paint order.
+    ``cursor`` matters on the board (a past-cap SELECTED card is painted past
+    the cap, which shifts later sections) — the same term the painters read.
+    Empty on an ungrouped canvas.
+    """
+    rendered = views[:PROJECTS_MAX]
+    groups = sections_of(rendered)
+    if groups is None:
+        return ()
+    selected_id: str | None = None
+    if cursor is not None and 0 <= cursor < len(rendered):
+        selected_id = str(_row(rendered[cursor]).get("id") or "")
+    if view_type == "list":
+        bands: list[tuple[int, int, str]] = []
+        y = 0
+        for label, indexes in groups:
+            start = y
+            y += 1 + len(indexes)
+            bands.append((start, y, label))
+        return tuple(bands)
+    if view_type == "board":
+        bands = []
+        y = 0
+        for index, (label, indexes) in enumerate(groups):
+            section_views = [rendered[position] for position in indexes]
+            columns = _columns_of(section_views, skip_empty=True)
+            start = y
+            y += 1 + _board_block_height(
+                columns,
+                selected_id=selected_id,
+                extra_note=index == 0 and len(views) > PROJECTS_MAX,
+            )
+            bands.append((start, y, label))
+        return tuple(bands)
+    if view_type == "timeline":
+        dated, undated = _split_dated(rendered)
+        dated_ids = {str(_row(view).get("id") or "") for view in dated}
+        undated_ids = {str(_row(view).get("id") or "") for view in undated}
+        span = timeline_span(rendered)
+        bands = []
+        y = 1 if (span is not None and dated) else 0
+        for label, indexes in groups:
+            section_dated = [
+                index
+                for index in indexes
+                if str(_row(rendered[index]).get("id") or "") in dated_ids
+            ]
+            if not section_dated:
+                continue
+            start = y
+            y += 1 + len(section_dated)
+            bands.append((start, y, label))
+        if undated:
+            if y:
+                y += 1  # the blank line between the chart and the tail
+            for label, indexes in groups:
+                section_undated = [
+                    index
+                    for index in indexes
+                    if str(_row(rendered[index]).get("id") or "") in undated_ids
+                ]
+                if not section_undated:
+                    continue
+                bands.append((y, y + 1, label))
+                y += 1
+        return tuple(bands)
+    return ()
+
+
+def _board_card_at(
+    views_list: list[dict[str, Any]],
+    columns: list[tuple[str, list[dict[str, Any]]]],
+    x: int,
+    y: int,
+    *,
+    y_base: int,
+    selected_id: str | None,
+) -> int | None:
+    """Index (into ``views_list``) of the card at ``(x, y)`` in one block."""
+    if x < 0 or x % BOARD_COLUMN_WIDTH >= BOARD_COLUMN_WIDTH - 1:
+        return None  # the one-cell gutter between columns is not a card
+    column_index = x // BOARD_COLUMN_WIDTH
+    if column_index >= len(columns):
+        return None
+    _status, rows = columns[column_index]
+    visible, hidden, extra = _painted_cards(rows, selected_id)
+    index_by_id = {
+        str(_row(view).get("id") or ""): position for position, view in enumerate(views_list)
+    }
+    for position, view in enumerate(visible):
+        name_y = y_base + 2 + position * 4
+        if name_y <= y < name_y + 3:
+            return index_by_id.get(str(_row(view).get("id") or ""))
+    if extra is not None:
+        name_y = y_base + (4 if hidden else 2) + 4 * len(visible)
+        if name_y <= y < name_y + 3:
+            return index_by_id.get(str(_row(extra).get("id") or ""))
+    return None
+
+
+def project_at(
+    views: list[dict[str, Any]],
+    view_type: str,
+    x: int,
+    y: int,
+    *,
+    cursor: int | None = None,
+    associated: frozenset[str] | None = None,
+) -> int | None:
+    """Index into ``views`` of the painted project at canvas cell ``(x, y)``.
+
+    THE click map's one lookup: list rows address their whole row (x carries
+    nothing a row does not), board cards their three content lines (the blank
+    above a card and the `… +N more` notes are not cards), the timeline its
+    rows and its per-team tail lines — where x picks the NAME the click landed
+    on, because one tail line lists several projects. ``None`` for header
+    rows, blanks, fillers and the truncation row; ``cursor``/``associated`` are
+    the page's selection and marker set, so a past-cap selected card (which IS
+    painted) answers too.
+    """
+    rendered = views[:PROJECTS_MAX]
+    if y < 0:
+        return None
+    mine = associated or frozenset()
+    if view_type == "list":
+        groups = sections_of(rendered)
+        if groups is None:
+            return y if 0 <= y < len(rendered) else None
+        row = 0
+        for _label, indexes in groups:
+            row += 1  # the section header
+            for index in indexes:
+                if row == y:
+                    return index
+                row += 1
+        return None
+    if view_type == "board":
+        selected_id: str | None = None
+        if cursor is not None and 0 <= cursor < len(rendered):
+            selected_id = str(_row(rendered[cursor]).get("id") or "")
+        groups = sections_of(rendered)
+        if groups is None:
+            return _board_card_at(
+                rendered, _columns_of(rendered), x, y, y_base=0, selected_id=selected_id
+            )
+        y_base = 0
+        for index, (_label, indexes) in enumerate(groups):
+            section_views = [rendered[position] for position in indexes]
+            columns = _columns_of(section_views, skip_empty=True)
+            found = _board_card_at(
+                section_views, columns, x, y, y_base=y_base + 1, selected_id=selected_id
+            )
+            if found is not None:
+                return indexes[found]
+            y_base += 1 + _board_block_height(
+                columns,
+                selected_id=selected_id,
+                extra_note=index == 0 and len(views) > PROJECTS_MAX,
+            )
+        return None
+    if view_type == "timeline":
+        selected_id = None
+        if cursor is not None and 0 <= cursor < len(rendered):
+            selected_id = str(_row(rendered[cursor]).get("id") or "")
+        index_by_id = {
+            str(_row(view).get("id") or ""): position for position, view in enumerate(rendered)
+        }
+        groups = sections_of(rendered)
+        dated, undated = _split_dated(rendered)
+        date_ids = {str(_row(view).get("id") or "") for view in dated}
+        undated_ids = {str(_row(view).get("id") or "") for view in undated}
+        span = timeline_span(rendered)
+        row = 0
+        if span is not None and dated:
+            row = 1
+            if groups is None:
+                for view in dated:
+                    if row == y:
+                        return index_by_id.get(str(_row(view).get("id") or ""))
+                    row += 1
+            else:
+                for _label, indexes in groups:
+                    section_dated = [
+                        index
+                        for index in indexes
+                        if str(_row(rendered[index]).get("id") or "") in date_ids
+                    ]
+                    if not section_dated:
+                        continue
+                    row += 1  # the section header row
+                    for index in section_dated:
+                        if row == y:
+                            return index
+                        row += 1
+        if undated:
+            if row:
+                row += 1  # the blank line between the chart and the tail
+            if groups is None:
+                if row == y:
+                    prefix = f"no dates ({len(undated)}): "
+                    _line, ranges = _tail_entries(
+                        undated,
+                        selected_id=selected_id,
+                        mine=mine,
+                        resolver=_styles(None),
+                        offset=cell_len(prefix),
+                    )
+                    for x0, x1, row_id in ranges:
+                        if x0 <= x < x1:
+                            return index_by_id.get(row_id)
+                return None
+            for _label, indexes in groups:
+                section_undated = [
+                    index
+                    for index in indexes
+                    if str(_row(rendered[index]).get("id") or "") in undated_ids
+                ]
+                if not section_undated:
+                    continue
+                if row == y:
+                    prefix = f"no dates ({_label}, {len(section_undated)}): "
+                    _line, ranges = _tail_entries(
+                        [rendered[index] for index in section_undated],
+                        selected_id=selected_id,
+                        mine=mine,
+                        resolver=_styles(None),
+                        offset=cell_len(prefix),
+                    )
+                    for x0, x1, row_id in ranges:
+                        if x0 <= x < x1:
+                            return index_by_id.get(row_id)
+                    return None
+                row += 1
+        return None
+    return None
+
+
+def section_at(
+    views: list[dict[str, Any]],
+    view_type: str,
+    x: int,
+    y: int,
+    *,
+    cursor: int | None = None,
+) -> str | None:
+    """The label of the section band containing canvas ``(x, y)``, or ``None``.
+
+    Bands are full-width — a row belongs to a section regardless of x — and
+    run from the section's header row through its last painted row (or tail
+    line), the span the ruler tracks and the jumps address.
+    """
+    for start, end, label in _bands_for(views, view_type, cursor=cursor):
+        if start <= y < end:
+            return label
+    return None
+
+
+def section_header_at(
+    views: list[dict[str, Any]],
+    view_type: str,
+    x: int,
+    y: int,
+    *,
+    cursor: int | None = None,
+) -> str | None:
+    """The label when ``(x, y)`` is exactly a section HEADER row, else ``None``.
+
+    Headers are the click targets that jump to a section (`section_at` would
+    also match a project row, which clicks handle as a selection).
+    """
+    for start, _end, label in _bands_for(views, view_type, cursor=cursor):
+        if start == y:
+            return label
+    return None
+
+
+def section_ruler(
+    views: list[dict[str, Any]],
+    view_type: str,
+    *,
+    top_row: int,
+    cursor: int | None,
+    width: int,
+    style_for: StyleFor | None = None,
+) -> Text | None:
+    """The rule row as a section ruler: ``── core · 4 ─────`` or ``None``.
+
+    ``None`` means "no section at the viewport top" — an ungrouped canvas, the
+    axis row, a blank separator, the truncation row — and the caller paints
+    the shipped plain rule (design D2: the sticky counterpart is this ZERO-row
+    ruler, never faked motion). When the cursor sits in a DIFFERENT section
+    than the one at the viewport top, a dim ``· sel {team}`` clause says so.
+    Shed order (design §6): the sel clause first, then the count, then — only
+    below the label's own fit — the label truncated with an ellipsis; the team
+    name never simply vanishes.
+    """
+    resolver = _styles(style_for)
+    rendered = views[:PROJECTS_MAX]
+    groups = sections_of(rendered)
+    if groups is None:
+        return None
+    label_at: str | None = None
+    for start, end, label in _bands_for(rendered, view_type, cursor=cursor):
+        if start <= top_row < end:
+            label_at = label
+            break
+    if label_at is None:
+        return None
+    counts = {label: len(indexes) for label, indexes in groups}
+    cursor_label: str | None = None
+    if cursor is not None and 0 <= cursor < len(rendered):
+        for label, indexes in groups:
+            if cursor in indexes:
+                cursor_label = label
+                break
+
+    def fill(line: Text) -> Text:
+        pad = width - cell_len(line.plain)
+        if pad > 0:
+            line.append("─" * pad, style=resolver("dim"))
+        return line
+
+    def build(*, with_sel: bool, with_count: bool, label_text: str) -> Text:
+        line = Text(no_wrap=True)
+        line.append("── ", style=resolver("dim"))
+        line.append(label_text, style=resolver("name"))
+        tail = ""
+        if with_count:
+            tail += f" · {counts.get(label_at, 0)} "
+        if with_sel and cursor_label is not None and cursor_label != label_at:
+            tail += f"· sel {cursor_label} "
+        if not tail:
+            # With the count (and sel) shed, keep a space so the label does
+            # not run into the fill (`── core───` reads as one word).
+            tail = " "
+        line.append(tail, style=resolver("dim"))
+        return fill(line)
+
+    for candidate in (
+        build(with_sel=True, with_count=True, label_text=label_at),
+        build(with_sel=False, with_count=True, label_text=label_at),
+        build(with_sel=False, with_count=False, label_text=label_at),
+    ):
+        if cell_len(candidate.plain) <= width:
+            return candidate
+    room = width - cell_len("── ") - 1
+    if room <= 0:
+        return fill(Text(no_wrap=True))
+    line = Text(no_wrap=True)
+    line.append("── ", style=resolver("dim"))
+    line.append(truncate_row(label_at, cap=room), style=resolver("name"))
+    line.append(" ", style=resolver("dim"))
+    return fill(line)
 
 
 # ---------------------------------------------------------------------------

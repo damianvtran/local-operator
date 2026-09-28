@@ -52,9 +52,14 @@ from local_operator.tui.projects_render import (
     auto_timeline_tier,
     board_position,
     detail_footer,
+    list_position,
+    project_at,
     render_project_board,
     render_project_list,
     render_project_timeline,
+    section_header_at,
+    section_ruler,
+    sections_of,
     timeline_position,
     timeline_span,
 )
@@ -226,6 +231,12 @@ class ProjectsView(Vertical):
         # `↵` opens the SELECTED project's conversation (S3b) — the one action
         # that reaches outside the page, and the same key in every view.
         Binding("enter", "jump", "Open", show=False),
+        # Section jumps (S6d parity): the selection moves to the next/previous
+        # team section's first row — clamped at the ends and inert while the
+        # canvas is ungrouped (one binding list; the actions no-op where they
+        # do not apply, the zoom pattern).
+        Binding("shift+down", "next_section", "Next section", show=False),
+        Binding("shift+up", "prev_section", "Previous section", show=False),
         Binding("escape", "leave", "Back", show=False),
     ]
 
@@ -498,7 +509,7 @@ class ProjectsView(Vertical):
         self._title.update(title)
 
         width = max(self.size.width - 2, 1)
-        self._rule.update(Text("─" * width, style=dim))
+        self._paint_rule(width)
 
         # The footer fits the DETAIL box's own measured width, not the page's
         # minus its padding: the two differ by the box's position in the
@@ -525,6 +536,39 @@ class ProjectsView(Vertical):
                 )
             )
         self._paint_hints()
+
+    def _paint_rule(self, width: int | None = None) -> None:
+        """The rule row: the shipped plain rule, or the section ruler.
+
+        Grouped canvases turn the rule into the sticky counterpart (design
+        D2): the zero-row ruler names the section at the VIEWPORT's top, and
+        the dim `sel` clause names the cursor's section when the two differ.
+        Ungrouped — and off any section (the axis row, a blank separator, the
+        truncation row) — this is exactly the shipped dim rule.
+        """
+        if width is None:
+            width = max(self.size.width - 2, 1)
+        ruler = section_ruler(
+            self._views,
+            self._view,
+            top_row=int(self._body.scroll_offset.y),
+            cursor=self._cursor if self._views else None,
+            width=width,
+            style_for=_style_resolver(),
+        )
+        if ruler is None:
+            ruler = Text("─" * width, style=Style(color=theme_mod.semantic_color("dim")))
+        self._rule.update(ruler)
+
+    def _scroll_changed(self, *_args: Any) -> None:
+        """The ruler tracks the viewport (design D2), not the cursor.
+
+        Fired by the body's ``scroll_y`` watch for every scroll path; a plain
+        rule never changes with scrolling, so it is skipped there.
+        """
+        if self._last is None or not self._last.sections:
+            return
+        self._paint_rule()
 
     def _paint_hints(self) -> None:
         """Lay out the footer hints, shedding WHOLE hints until the row fits.
@@ -682,6 +726,12 @@ class ProjectsView(Vertical):
         # view's recorded bug), and the advertised keys would go to the inert
         # composer. Repaint after focus so the first frame is the settled one.
         self._repaint()
+        # The rule row is a section ruler on a grouped canvas and must track
+        # the VIEWPORT (design D2) — nothing else repaints when a wheel
+        # scrolls, and a ruler frozen on the section the reader scrolled away
+        # from is worse than none. The subagent page's watch shape, same
+        # reason.
+        self.watch(self._body, "scroll_y", self._scroll_changed, init=False)
         try:
             self.focus()
         except Exception:
@@ -791,6 +841,49 @@ class ProjectsView(Vertical):
 
     def action_cycle_view(self) -> None:
         self._set_view(VIEWS[(VIEWS.index(self._view) + 1) % len(VIEWS)])
+
+    # -- sections (S6d parity) ---------------------------------------------
+    def action_next_section(self) -> None:
+        self._section_jump(1)
+
+    def action_prev_section(self) -> None:
+        self._section_jump(-1)
+
+    def _section_jump(self, direction: int) -> None:
+        """``shift+↓``/``shift+↑``: the neighbouring section's first row.
+
+        Clamped at the ends (a canvas is several viewports tall; the bottom is
+        a destination — the same clamp the arrows state) and inert while the
+        canvas is ungrouped.
+        """
+        groups = sections_of(self._views)
+        if groups is None or not self._views:
+            return
+        target: list[int] | None = None
+        for position, (_label, indexes) in enumerate(groups):
+            if self._cursor in indexes:
+                neighbour = position + direction
+                if 0 <= neighbour < len(groups):
+                    target = groups[neighbour][1]
+                break
+        if not target:
+            return
+        self._select_index(min(target[0], max(self._painted_count() - 1, 0)))
+
+    def _select_index(self, index: int) -> None:
+        """Land the selection on a project (a click, a header, a section jump).
+
+        The exact `_move` steps — clamp, repaint, reveal — so the mouse and
+        the keyboard cannot diverge about what is selected.
+        """
+        if not self._views:
+            return
+        position = max(0, min(index, max(self._painted_count() - 1, 0)))
+        if position == self._cursor:
+            return
+        self._cursor = position
+        self._repaint()
+        self._scroll_cursor_into_view()
 
     def action_jump(self) -> None:
         """``↵``: ask the host to open the selected project's conversation.
@@ -967,7 +1060,9 @@ class ProjectsView(Vertical):
         offset_y = self._body.scroll_offset.y
         if self._view == "list":
             x: int | None = None  # the list scrolls vertically only
-            y = self._cursor
+            y = list_position(self._views, self._cursor)
+            if y is None:
+                return
         else:
             position = self._position_for(self._cursor)
             if position is None:
@@ -1054,6 +1149,70 @@ class ProjectsView(Vertical):
     def _focus_canvas(self) -> None:
         """Focus the view so the arrow/scroll keys land here (hint click)."""
         self.focus()
+
+    # -- mouse (S6d parity): rows, cards, header clicks --------------------
+    def _canvas_cell(self, event: Any) -> tuple[int, int] | None:
+        """Canvas ``(x, y)`` of a mouse event, or ``None`` outside the viewport.
+
+        Resolved from the scroll viewport plus the scroll offset — never the
+        painted Static's own ``region``, which layout recomputes and which
+        lags a scroll by a frame (the analytics page's measured lesson).
+        """
+        viewport = self._body.scrollable_content_region
+        if not viewport.contains(event.screen_x, event.screen_y):
+            return None
+        x = event.screen_x - viewport.x + int(self._body.scroll_offset.x)
+        y = event.screen_y - viewport.y + int(self._body.scroll_offset.y)
+        return (x, y)
+
+    def on_click(self, event: Any) -> None:
+        """The canvas click map (design §4): select + reveal; a second click
+        activates the shipped action (``↵``); a header row jumps to its section.
+
+        One gesture acts on one surface: the handler claims the event only
+        when the click WAS on the canvas — the hint buttons and the page's
+        own chrome keep their gestures.
+        """
+        if getattr(event, "button", 1) != 1:
+            return
+        if event.widget is not self._canvas:
+            return
+        cell = self._canvas_cell(event)
+        if cell is None:
+            return
+        x, y = cell
+        index = project_at(
+            self._views,
+            self._view,
+            x,
+            y,
+            cursor=self._cursor,
+            associated=self._associated,
+        )
+        if index is not None:
+            event.stop()
+            if getattr(event, "chain", 1) == 2:
+                # The double-click IS `↵`: select first, then act — the
+                # acting gesture moves the caret, so the hint and the action
+                # cannot disagree about which row is current.
+                self._select_index(index)
+                self.action_jump()
+                return
+            self._select_index(index)
+            return
+        header = section_header_at(self._views, self._view, x, y, cursor=self._cursor)
+        if header is not None:
+            event.stop()
+            self._jump_to_section(header)
+
+    def _jump_to_section(self, label: str) -> None:
+        groups = sections_of(self._views)
+        if groups is None:
+            return
+        for group_label, indexes in groups:
+            if group_label == label and indexes:
+                self._select_index(min(indexes[0], max(self._painted_count() - 1, 0)))
+                return
 
     # -- leaving ------------------------------------------------------------
     def action_leave(self) -> None:
