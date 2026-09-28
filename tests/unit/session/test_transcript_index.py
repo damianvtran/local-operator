@@ -13,6 +13,7 @@ import asyncio
 import json
 import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,7 +36,7 @@ def journal_path(root: Path) -> Path:
     return root / "sessions" / SID / "transcript.jsonl"
 
 
-def write_rows(root: Path, rows: list[dict]) -> None:
+def write_rows(root: Path, rows: list[dict[str, Any]]) -> None:
     path = journal_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
@@ -43,7 +44,7 @@ def write_rows(root: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, separators=(",", ":")) + "\n")
 
 
-def user(id_: str, ts: float, text: str = "hello") -> dict:
+def user(id_: str, ts: float, text: str = "hello") -> dict[str, Any]:
     return {
         "id": id_,
         "ts": ts,
@@ -52,14 +53,16 @@ def user(id_: str, ts: float, text: str = "hello") -> dict:
     }
 
 
-def assistant(id_: str, ts: float, text: str = "answer", tool_calls: bool = False) -> dict:
-    payload: dict = {"kind": "message", "role": "assistant", "content": [{"text": text}]}
+def assistant(
+    id_: str, ts: float, text: str = "answer", tool_calls: bool = False
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"kind": "message", "role": "assistant", "content": [{"text": text}]}
     if tool_calls:
         payload["tool_calls"] = [{"id": "c1", "name": "bash", "arguments": {}}]
     return {"id": id_, "ts": ts, "type": "message", "payload": payload}
 
 
-def tool(id_: str, ts: float, text: str = "tool output") -> dict:
+def tool(id_: str, ts: float, text: str = "tool output") -> dict[str, Any]:
     return {
         "id": id_,
         "ts": ts,
@@ -70,7 +73,7 @@ def tool(id_: str, ts: float, text: str = "tool output") -> dict:
 
 def inject(
     id_: str, ts: float, custom_type: str = "hub_message", text: str = "peer says hi"
-) -> dict:
+) -> dict[str, Any]:
     return {
         "id": id_,
         "ts": ts,
@@ -79,7 +82,7 @@ def inject(
     }
 
 
-def start(id_: str, ts: float, token: str) -> dict:
+def start(id_: str, ts: float, token: str) -> dict[str, Any]:
     return {
         "id": id_,
         "ts": ts,
@@ -93,8 +96,8 @@ def start(id_: str, ts: float, token: str) -> dict:
 
 def marker(
     id_: str, ts: float, token: str, *, kind: str | None = "complete", eligible: bool = True
-) -> dict:
-    details: dict = {
+) -> dict[str, Any]:
+    details: dict[str, Any] = {
         "conversation_id": f"session/{SID}",
         "token": token,
         "eligible": eligible,
@@ -118,6 +121,14 @@ def outcomes(index: ti.TranscriptIndex) -> list[tuple[str, str | None]]:
     return [(c.id, c.outcome) for c in index.checkpoints]
 
 
+def refreshed(root: Path) -> ti.TranscriptIndex:
+    """``refresh_index`` for tests that hold a journal: it returns ``None``
+    only for a session with no transcript, and every caller here has one."""
+    index = ti.refresh_index(root, SID)
+    assert index is not None
+    return index
+
+
 # ---------------------------------------------------------------------------
 # Derivation
 # ---------------------------------------------------------------------------
@@ -135,7 +146,7 @@ def test_scan_derives_user_and_completion_checkpoints_with_outcomes(tmp_path):
             marker("m1", 1.5, "t1"),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index is not None
     assert kinds(index) == [("user", "u1"), ("completion", "a2")]
     assert outcomes(index) == [("u1", None), ("a2", "complete")]
@@ -162,7 +173,7 @@ def test_injected_rows_are_docs_not_checkpoints(tmp_path):
             assistant("a2", 1.3),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert kinds(index) == [("user", "u1"), ("completion", "a2")]
     docs = {m.id: m for m in index.messages}
     assert docs["i1"].injected is True and docs["i1"].role == "user"
@@ -172,7 +183,7 @@ def test_injected_rows_are_docs_not_checkpoints(tmp_path):
 
 def test_completion_needs_span_content(tmp_path):
     write_rows(tmp_path, [user("u1", 1.0), user("u2", 1.1), assistant("a1", 1.2)])
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     # u1's span holds no non-user entry: no completion tick for turn 1.
     assert kinds(index) == [("user", "u1"), ("user", "u2"), ("completion", "a1")]
     assert index.checkpoints[-1].turn == 2
@@ -192,7 +203,7 @@ def test_marker_resolves_the_last_user_row_of_the_run(tmp_path):
             marker("m1", 1.5, "t1"),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert outcomes(index) == [("u1", None), ("a1", None), ("u2", None), ("a2", "complete")]
     # Two completion ticks: one per turn — the mid-run steer closes turn 1.
     turns = [(c.kind, c.turn) for c in index.checkpoints]
@@ -201,17 +212,17 @@ def test_marker_resolves_the_last_user_row_of_the_run(tmp_path):
 
 def test_orphan_marker_is_ignored(tmp_path):
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1), marker("m1", 1.2, "ghost")])
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert kinds(index) == [("user", "u1"), ("completion", "a1")]
     assert index.checkpoints[-1].outcome == "open"  # nothing settled the tail
 
 
 def test_tail_open_until_a_marker_lands(tmp_path):
     write_rows(tmp_path, [start("s1", 1.0, "t1"), user("u1", 1.1), assistant("a1", 1.2)])
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index.checkpoints[-1].outcome == "open"
     write_rows(tmp_path, [marker("m1", 1.3, "t1")])
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index.checkpoints[-1].outcome == "complete"
 
 
@@ -219,7 +230,7 @@ def test_tail_settles_on_a_later_run_with_no_user_row(tmp_path):
     """A hub/wake run after the tail user row settles the conversation without
     carrying a kind (S3 note 2); the tail is NOT left open forever."""
     write_rows(tmp_path, [start("s1", 1.0, "t1"), user("u1", 1.1), assistant("a1", 1.2)])
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index.checkpoints[-1].outcome == "open"
     write_rows(
         tmp_path,
@@ -230,7 +241,7 @@ def test_tail_settles_on_a_later_run_with_no_user_row(tmp_path):
             marker("m2", 2.3, "h1"),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     # Settled by the later run: no kind to attach, and the hub run adds no
     # checkpoint of its own — the tail completion tracks the span's last row.
     assert index.checkpoints[-1].outcome is None
@@ -248,7 +259,7 @@ def test_the_tail_keeps_its_own_outcome_when_later_runs_follow(tmp_path):
             marker("m1", 1.3, "t1", kind="error"),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index.checkpoints[-1].outcome == "error"
     write_rows(
         tmp_path,
@@ -259,7 +270,7 @@ def test_the_tail_keeps_its_own_outcome_when_later_runs_follow(tmp_path):
             marker("m2", 2.3, "h1"),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     # The turn's OWN marker's kind survives; the completion still tracks the
     # span's last message row (the conversation's current end).
     assert index.checkpoints[-1].outcome == "error"
@@ -276,7 +287,7 @@ def test_eligible_false_settles_without_an_outcome(tmp_path):
             marker("m1", 1.3, "t1", kind=None, eligible=False),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index.checkpoints[-1].outcome is None
 
 
@@ -286,7 +297,7 @@ def test_malformed_rows_are_dropped_and_ordinals_still_count(tmp_path):
     with path.open("a", encoding="utf-8") as handle:
         handle.write("{not json\n")
     write_rows(tmp_path, [assistant("a3", 1.3)])
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert [c.id for c in index.checkpoints if c.kind == "completion"] == ["a3"]
     assert index.checkpoints[-1].seq == 4  # the malformed line still took an ordinal
 
@@ -299,7 +310,7 @@ def test_text_caps(tmp_path):
             assistant("a1", 1.1, "assistant words " * 4000),
         ],
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     user_cp = next(c for c in index.checkpoints if c.kind == "user")
     assert len(user_cp.text) == ti.CHECKPOINT_TEXT_CAP
     doc = next(m for m in index.messages if m.role == "assistant")
@@ -313,7 +324,7 @@ def test_text_caps(tmp_path):
 
 def test_fresh_cache_is_reused_without_any_scan(tmp_path, monkeypatch):
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
-    first = ti.refresh_index(tmp_path, SID)
+    first = refreshed(tmp_path)
     assert first is not None
 
     def explode(*args, **kwargs):
@@ -321,7 +332,7 @@ def test_fresh_cache_is_reused_without_any_scan(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ti, "_scan_full", explode)
     monkeypatch.setattr(ti, "_scan_incremental", explode)
-    second = ti.refresh_index(tmp_path, SID)
+    second = refreshed(tmp_path)
     assert second is not None
     assert [(c.id, c.outcome) for c in second.checkpoints] == [
         (c.id, c.outcome) for c in first.checkpoints
@@ -356,7 +367,7 @@ def test_incremental_append_matches_a_full_rescan(tmp_path, tmp_path_factory, mo
         ],
     )
     calls = _scanners(monkeypatch)
-    base = ti.refresh_index(tmp_path, SID)
+    base = refreshed(tmp_path)
     assert calls == {"full": 1, "incremental": 0}
 
     write_rows(
@@ -368,7 +379,7 @@ def test_incremental_append_matches_a_full_rescan(tmp_path, tmp_path_factory, mo
             marker("m2", 2.3, "t2", kind="error"),
         ],
     )
-    grown = ti.refresh_index(tmp_path, SID)
+    grown = refreshed(tmp_path)
     assert calls == {"full": 1, "incremental": 1}
 
     # The reference: the same bytes scanned fresh in another root.
@@ -376,7 +387,7 @@ def test_incremental_append_matches_a_full_rescan(tmp_path, tmp_path_factory, mo
     write_rows(
         other, [json.loads(line) for line in journal_path(tmp_path).read_text().splitlines()]
     )
-    reference = ti.refresh_index(other, SID)
+    reference = refreshed(other)
 
     assert [(c.id, c.kind, c.turn, c.seq, c.text, c.outcome) for c in grown.checkpoints] == [
         (c.id, c.kind, c.turn, c.seq, c.text, c.outcome) for c in reference.checkpoints
@@ -390,9 +401,9 @@ def test_incremental_append_matches_a_full_rescan(tmp_path, tmp_path_factory, mo
 def test_incremental_replaces_the_open_tail_endpoint(tmp_path, monkeypatch):
     write_rows(tmp_path, [start("s1", 1.0, "t1"), user("u1", 1.1), assistant("a1", 1.2, "first")])
     calls = _scanners(monkeypatch)
-    ti.refresh_index(tmp_path, SID)
+    refreshed(tmp_path)
     write_rows(tmp_path, [assistant("a2", 1.3, "final answer")])
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert calls["incremental"] == 1
     completion = next(c for c in index.checkpoints if c.kind == "completion")
     assert completion.id == "a2" and completion.text == "final answer"
@@ -400,7 +411,7 @@ def test_incremental_replaces_the_open_tail_endpoint(tmp_path, monkeypatch):
 
 def test_a_rewrite_that_shrinks_rescans(tmp_path, monkeypatch):
     write_rows(tmp_path, [user("u1", 1.0, "hello " * 500), assistant("a1", 1.1, "answer " * 500)])
-    ti.refresh_index(tmp_path, SID)
+    refreshed(tmp_path)
     calls = _scanners(monkeypatch)
     # Simulate a compaction rewrite: same rows, smaller bytes, new mtime.
     rows = [json.loads(line) for line in journal_path(tmp_path).read_text().splitlines()]
@@ -408,7 +419,7 @@ def test_a_rewrite_that_shrinks_rescans(tmp_path, monkeypatch):
     journal_path(tmp_path).write_text(
         "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows)
     )
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert calls == {"full": 1, "incremental": 0}
     assert index.checkpoints[0].text == "hello"
 
@@ -426,11 +437,11 @@ async def test_compact_file_rewrite_rescans(tmp_path, monkeypatch):
     await transcript.append_message(
         Message(role="assistant", content=[TextContent(text="done")], id="a1")
     )
-    ti.refresh_index(tmp_path, SID)
+    refreshed(tmp_path)
     calls = _scanners(monkeypatch)
     await transcript.append_prune("x1", "[pruned]")
     assert await transcript.compact_file(min_reclaim_bytes=0) > 0
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert calls == {"full": 1, "incremental": 0}
     assert [c.id for c in index.checkpoints] == ["u1", "a1"]
     assert index.scan.offset == journal_path(tmp_path).stat().st_size
@@ -457,7 +468,7 @@ async def test_a_compact_that_left_the_file_longer_still_rescans(tmp_path, monke
     await transcript.append_message(
         Message(role="assistant", content=[TextContent(text="done")], id="a1")
     )
-    first = ti.refresh_index(tmp_path, SID)
+    first = refreshed(tmp_path)
     assert first.scan.offset == journal_path(tmp_path).stat().st_size
     calls = _scanners(monkeypatch)
     # A notice much longer than the one-byte body it replaces, and a prune row
@@ -468,21 +479,20 @@ async def test_a_compact_that_left_the_file_longer_still_rescans(tmp_path, monke
     )
     assert await transcript.compact_file(min_reclaim_bytes=0) > 0
     assert journal_path(tmp_path).stat().st_size > first.scan.offset
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert calls == {"full": 1, "incremental": 0}
     assert [c.id for c in index.checkpoints] == ["u1", "a1"]
 
 
 def test_version_bump_discards_scans_and_preserves_naming(tmp_path, monkeypatch):
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
-    ti.refresh_index(tmp_path, SID)
+    refreshed(tmp_path)
     # Put a naming item under the live turn key, then bump the cache version.
     ti.patch_naming(tmp_path, SID, {"u1": {"name": "Do the thing", "summary": "It was done."}})
     monkeypatch.setattr(ti, "TRANSCRIPT_INDEX_VERSION", 2)
-    refreshed = ti.refresh_index(tmp_path, SID)
-    assert refreshed is not None
-    assert [c.id for c in refreshed.checkpoints] == ["u1", "a1"]
-    assert refreshed.naming["items"]["u1"]["name"] == "Do the thing"
+    rebuilt = refreshed(tmp_path)
+    assert [c.id for c in rebuilt.checkpoints] == ["u1", "a1"]
+    assert rebuilt.naming["items"]["u1"]["name"] == "Do the thing"
     # The stale-version cache was RESCANNED and rewritten under the new
     # version — not served as-is.
     assert json.loads(ti.index_path(tmp_path, SID).read_text())["version"] == 2
@@ -491,7 +501,7 @@ def test_version_bump_discards_scans_and_preserves_naming(tmp_path, monkeypatch)
     # RESCAN (a fresh cache is served as-is; the filter belongs to preservation).
     ti.patch_naming(tmp_path, SID, {"gone": {"name": "Stale"}})
     write_rows(tmp_path, [assistant("a2", 1.2)])  # grown journal forces a rescan
-    again = ti.refresh_index(tmp_path, SID)
+    again = refreshed(tmp_path)
     assert set(again.naming["items"]) == {"u1"}
 
 
@@ -500,7 +510,7 @@ def test_corrupt_cache_is_rebuilt_and_missing_journal_is_none(tmp_path):
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
     ti.index_path(tmp_path, SID).parent.mkdir(parents=True, exist_ok=True)
     ti.index_path(tmp_path, SID).write_text("{corrupt")
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index is not None and len(index.checkpoints) == 2
     assert ti.read_index(tmp_path, SID) is not None
 
@@ -512,12 +522,12 @@ def test_torn_tail_is_not_scanned_until_completed(tmp_path):
         handle.write(
             '{"id":"a2","ts":1.2,"type":"message","payload":{"kind":"message","role":"assistant"'
         )  # no newline
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index.coverage["complete"] is False
     assert [c.id for c in index.checkpoints] == ["u1", "a1"]
     with path.open("a", encoding="utf-8") as handle:
         handle.write(',"content":[{"text":"late"}]}}\n')
-    index = ti.refresh_index(tmp_path, SID)
+    index = refreshed(tmp_path)
     assert index.coverage["complete"] is True
     assert [c.id for c in index.checkpoints] == ["u1", "a2"]
 
@@ -526,7 +536,7 @@ def test_probe_reports_missing_ready_and_stale(tmp_path):
     assert ti.probe_index(tmp_path, SID).state == "missing"
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
     assert ti.probe_index(tmp_path, SID).state == "stale"
-    ti.refresh_index(tmp_path, SID)
+    refreshed(tmp_path)
     assert ti.probe_index(tmp_path, SID).state == "ready"
     write_rows(tmp_path, [assistant("a2", 1.2)])
     assert ti.probe_index(tmp_path, SID).state == "stale"
