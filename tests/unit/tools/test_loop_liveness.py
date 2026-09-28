@@ -447,11 +447,11 @@ async def test_ripgrep_skipped_count_walk_stays_off_loop(
     spy.assert_all_off_loop()
 
 
-def _cyclic_heap(pairs: int) -> list:
+def _cyclic_heap(pairs: int) -> list[Any]:
     """A bounded cyclic heap; the cycles are why a gen-2 pass must walk it all."""
-    heap: list = []
+    heap: list[Any] = []
     for i in range(pairs):
-        node: dict = {"i": i}
+        node: dict[str, Any] = {"i": i}
         node["self"] = node
         heap.append([node, {"peer": node, "n": i}])
     return heap
@@ -500,7 +500,13 @@ async def test_a_stretch_beside_a_gc_pause_is_still_caught() -> None:
     The red this bound exists for — a decode put back on the loop — is work,
     not a collection interval, so it lands in the sample even when a gen-2
     collection happens inside the same window. Forced here so the claim is
-    test-local rather than argued.
+    test-local rather than argued; the CI failure this test itself took on its
+    first landing is why the deadline is taken AFTER the collection and why
+    the stretch's own progress is asserted: a collection's cost scales with
+    the WORKER'S heap, and a deadline charged before it can cancel the stretch
+    outright (measured on CI: ``worst=0.000276s`` reported as "the deduction
+    is eating real work" when the burn had never run — the fixed ordering
+    burns the full budget and trips the bound).
     """
     heap = _cyclic_heap(50_000)
     burn_s = MAX_LOOP_CPU_S * 2  # clear of the bound even after any deduction
@@ -508,16 +514,25 @@ async def test_a_stretch_beside_a_gc_pause_is_still_caught() -> None:
     probe.start()
     try:
         await asyncio.sleep(HEARTBEAT_S)
-        deadline = time.thread_time() + burn_s
         gc.collect(2)
+        # AFTER the collection, never before: see the docstring.
+        burn_start = time.thread_time()
+        deadline = burn_start + burn_s
         while time.thread_time() < deadline:  # synchronous stretch, the shape
             pass
+        burned = time.thread_time() - burn_start
         await asyncio.sleep(HEARTBEAT_S * 3)
     finally:
         await probe.stop()
     del heap
 
     assert probe.samples, "heartbeat never woke"
+    assert (
+        burned >= burn_s * 0.9
+    ), f"the stretch never ran: only {burned:.4f}s of thread CPU were burned"
+    assert (
+        max(probe.raw_samples) >= burn_s * 0.9
+    ), "the stretch never landed in a sample window — the probe cannot see it"
     assert probe.worst >= MAX_LOOP_CPU_S, (
         f"a {burn_s:.2f}s synchronous stretch beside a GC pause produced only "
         f"{probe.worst:.4f}s — the deduction is eating real work"
