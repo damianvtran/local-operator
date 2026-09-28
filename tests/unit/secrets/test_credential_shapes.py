@@ -6080,7 +6080,24 @@ _CORPUS_GRADING_DIGEST = "a755ab0e8960419f719323ae343ef725e9f8662f278b1bfc66ba0e
 #:    and the module change this corpus grew for (the weak-name release's hyphen
 #:    join, plus the query rule's value judgement) is invisible to every row that
 #:    already existed.
-_CORPUS_GRADING_DIGEST = "a719a865e622f2d0c7e88d6394b421949fdffb9018addeffeb53e314feb005c5"
+#: 10. **The MODULE change moved NOTHING, measured before the corpus grew, and the corpus
+#:    change is EIGHT additions that are the whole of the move.** The module half (agent
+#:    review R1-1/R1-2): the assignment rule's deference to a query spelling now judges the
+#:    phrase over the QUERY entry's OWN value boundary (the first ``&``, ``#``, quote or
+#:    whitespace — one ``_QUERY_VALUE_STOP`` shared with the query rule's value class)
+#:    instead of this rule's own ``[^\s]{4,200}`` run, and ``_is_readable_hyphen_phrase``
+#:    refuses values the vendor rule's own ``_VENDOR_PATTERN`` covers. Recomputing over the
+#:    505 rows the constant above covered, under THIS module, reproduces that constant byte
+#:    for byte — so no pre-existing row moved in either direction, which is what makes the
+#:    boundary and the exclusion invisible to every row that already existed. The corpus
+#:    change: FOUR negatives are the R1-1 boundary rows (the readable phrase with a trailing
+#:    ``&env=prod`` / ``&page=2`` / ``#section``, and an ``api_key`` spelling), and FOUR
+#:    positives are the keep-masking controls (the opaque value with a trailing ``&page=2``,
+#:    ``key=glpat-<name>``, ``?key=sk-<name>``, and an unbroken issuer tail whose label the
+#:    R1 head had moved to the vendor rule). ``POSITIVE_CASES`` moves 306 -> 310 and
+#:    ``NEGATIVE_CASES`` 199 -> 203; ``TYPE_ANNOTATION_POSITIVES`` is unchanged at 34.
+#:    Counts measured from the assembled tuples.
+_CORPUS_GRADING_DIGEST = "f1707c1f7bc4b8448998f19e32988b55fdbbb313f76f9ff7ae46de984c708211"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -7566,6 +7583,95 @@ def test_the_hyphen_release_is_confined_to_weak_and_ambiguous_names(line: str) -
     assert _promotes(line, KEBAB_IDENTIFIER), f"{line!r} stopped masking"
     scrubbed, _ = scrub_shapes_with_hits(line)
     assert KEBAB_IDENTIFIER not in scrubbed
+
+
+@pytest.mark.parametrize("spelling", ["key", "apikey", "api_key", "api-key"])
+@pytest.mark.parametrize("trailer", ["&env=prod", "&page=2", "#section", "&"])
+def test_a_readable_query_value_releases_past_its_own_boundary(spelling: str, trailer: str) -> None:
+    """R1-1: the trailing segment is not part of the value, and nothing eats it.
+
+    The assignment rule's run is ``[^\\s]{4,200}`` and crossed the query entry's
+    boundary, so ``?key=<phrase>&env=prod`` was judged as one compound: the
+    release missed and the fallback mask swallowed the trailing parameter. The
+    fixed reading judges the phrase over the query entry's OWN boundary (first
+    ``&``, ``#``, quote or whitespace), and ``nothing past the boundary may sit
+    inside a mask``.
+    """
+    text = "https://h/v1/flags?" + spelling + "=" + KEBAB_IDENTIFIER + trailer
+    scrubbed, hits = scrub_shapes_with_hits(text)
+    assert scrubbed == text, f"{text!r} was rewritten"
+    assert not hits, f"{text!r} filed a hit"
+    assert match_shape_names(text) == []
+    assert not _promotes(text, KEBAB_IDENTIFIER)
+
+
+def test_a_trailing_query_segment_is_not_swallowed_or_registered() -> None:
+    """The store half of R1-1: no compound registration, boundary intact.
+
+    A mask would register what it matched; the regression's mask registered the
+    COMPOUND (phrase + trailing parameter), so every later occurrence of that
+    compound — and of the phrase — would have been rewritten. Asserted through
+    the store: the line keeps its boundary, and neither the phrase nor the
+    compound is contained afterwards.
+    """
+    store = VariableStore(cwd=".")
+    text = "https://h/v1/flags?key=" + KEBAB_IDENTIFIER + "&env=prod"
+    assert store.redact(text) == text
+    compound = KEBAB_IDENTIFIER + "&env=prod"
+    assert store.redact(compound) == compound, "the compound was registered"
+    assert store.redact(KEBAB_IDENTIFIER) == KEBAB_IDENTIFIER
+
+
+@pytest.mark.parametrize(
+    "line, value, labels",
+    [
+        (
+            "key=glpat-" + KEBAB_IDENTIFIER,
+            "glpat-" + KEBAB_IDENTIFIER,
+            {"credential-assignment"},
+        ),
+        (
+            "key=sk-" + KEBAB_IDENTIFIER,
+            "sk-" + KEBAB_IDENTIFIER,
+            {"credential-assignment"},
+        ),
+        (
+            "https://h/v1/flags?key=glpat-" + KEBAB_IDENTIFIER,
+            "glpat-" + KEBAB_IDENTIFIER,
+            {"credential-query-param"},
+        ),
+        (
+            "https://h/v1/flags?key=sk-" + KEBAB_IDENTIFIER,
+            "sk-" + KEBAB_IDENTIFIER,
+            {"credential-query-param"},
+        ),
+        (
+            "key=sk-" + "abcdefghijklmnopqrstuvwxyz",
+            "sk-" + "abcdefghijklmnopqrstuvwxyz",
+            {"credential-assignment"},
+        ),
+        (
+            "key=glpat-" + "abcdefghijklmnopqrstuvwxyz",
+            "glpat-" + "abcdefghijklmnopqrstuvwxyz",
+            {"credential-assignment"},
+        ),
+    ],
+)
+def test_an_issuer_prefixed_value_keeps_its_mask_and_its_label(
+    line: str, value: str, labels: set[str]
+) -> None:
+    """R1-2: the release must not steal the issuer prefixes' values.
+
+    Judging the class on spelling alone moved ``key=glpat-<name>`` and
+    ``key=sk-<name>`` from masked to released, and moved an unbroken tail's
+    LABEL from the assignment rule to the vendor rule. The exclusion reuses the
+    vendor rule's own pattern, so the values stay masked and the labels match
+    the base spelling.
+    """
+    assert _promotes(line, value), f"{line!r} stopped masking"
+    scrubbed, _ = scrub_shapes_with_hits(line)
+    assert value not in scrubbed
+    assert set(match_shape_names(line)) == labels, f"{line!r} label moved"
 
 
 #: The corpus the released class is MEASURED over — values already exercised through
