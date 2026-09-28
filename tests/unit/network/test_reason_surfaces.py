@@ -71,6 +71,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the relay's own sentence — the 4th read is the model receipt's detail, which "
         "says why a requested model was not applied",
     ),
+    # The move's arrival engage, when the caller asked for one (``engage_on_arrival``).
+    # ``detail`` is the ENGAGE PATH'S OWN SENTENCE — ``RelayServer.engage_session``
+    # answers in ``net_session_engage``'s vocabulary and ``_engage_failure_detail``
+    # composes it as prose for a person (it curates the device name IN and the spawned
+    # child's traceback OUT) — so the CLI prints it as the reason a runtime did not
+    # start, which is what the caller needs to tell an engagement failure from a move.
+    # Same class as ``_cmd_sessions`` above, and declared for the same reason.
+    (
+        "local_operator/cli.py",
+        "_sessions_move_words",
+        "detail",
+    ): (1, "the engage path's own sentence, printed as why the runtime did not start"),
     # The push's per-peer report: ``reason`` here is the CONFLICT's own sentence (the
     # peer composed it), printed verbatim so a person learns why a row was refused.
     # The refusal/conflict SENTENCES this module composes around the peer's own
