@@ -83,6 +83,11 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     # provider-visible array prefix, which is what the prompt cache keys on.
     "project": lambda context: build_project_tool(context),
     "project_delete": lambda context: build_project_delete_tool(context),
+    # createIf: returns None without a monitor scheduler, so a session that
+    # cannot arm a monitor pays no schema for it (footprint rung 3, like
+    # `wake`). Appended at the end of both tables for the same cache-prefix
+    # reason the two rows above are (design monitor-tool.md §19.1).
+    "monitor": lambda context: builtin.build_monitor_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -120,6 +125,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "network",
     "project",
     "project_delete",
+    "monitor",
 ]
 
 

@@ -2363,13 +2363,13 @@ async def _construct_child_session(
     # inherits its parent's, so a parent that held ``task`` may hand it down
     # and a parent that did not hands down nothing.
     #
-    # What still never crosses any boundary: ``wake``, for every child — a
-    # child session ends after one prompt, so a wake armed there would be
-    # silently lost. Scouts lose the whole set: a read-only agent that
-    # delegates autonomous work is not read-only. And a role that does not
-    # delegate (a reviewer, a coder) loses it at every depth, including as a
-    # grandchild of a manager: it does the work itself, which is what the
-    # harness's own refusal message tells it.
+    # What still never crosses any boundary: ``wake`` and ``monitor``, for
+    # every child — a child session ends after one prompt, so a wake or a
+    # monitor armed there would be silently lost. Scouts lose the whole set: a
+    # read-only agent that delegates autonomous work is not read-only. And a
+    # role that does not delegate (a reviewer, a coder) loses it at every
+    # depth, including as a grandchild of a manager: it does the work itself,
+    # which is what the harness's own refusal message tells it.
     #
     # ``refresh_tools`` rather than touching ``_tools``: it is the committed
     # hook and it keeps the loop's ``context.tools`` in step.
@@ -2383,7 +2383,7 @@ async def _construct_child_session(
     if agent == "scout" or not may_delegate:
         drop = merged_in
     else:
-        drop = {name for name in merged_in if name == "wake"}
+        drop = {name for name in merged_in if name in ("wake", "monitor")}
     # ``jobs`` is the OBSERVE/CONTROL surface over this child's OWN background
     # jobs (peek at output, cancel) — it spawns nothing (that's ``task``) and
     # dies with the child's job manager, so it crosses no boundary the prune

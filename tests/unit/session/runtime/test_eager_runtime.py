@@ -706,6 +706,81 @@ async def test_is_pristine_reads_the_wake_index_not_only_the_live_scheduler(
 
 
 @pytest.mark.asyncio
+async def test_is_pristine_reads_the_monitor_index_not_only_the_live_scheduler(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The monitors twin of the wake-index rule (§10.5): a monitor row on
+    disk alone makes a session real — a cold resume would re-arm it."""
+    from local_operator.monitors.store import write_entry
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    directory = tmp_path / "sessions" / "s1"
+    directory.mkdir(parents=True)
+    write_entry(
+        tmp_path,
+        "s1",
+        cwd=str(tmp_path),
+        monitors=[{"id": "m1", "name": "w", "tool": "bash", "next_due_at": 4_102_444_800_000}],
+    )
+
+    class _Session:
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+        session_id = "s1"
+
+        def __init__(self) -> None:
+            self._transcript = Transcript(directory, defer_materialise=True)
+            self.wake_scheduler = None
+            self.monitor_scheduler = None  # disposed / absent: reports nothing
+
+        def history(self):  # noqa: ANN202
+            return []
+
+    handle = object.__new__(ServingSessionHandle)
+    handle._session = _Session()  # type: ignore[attr-defined]
+    object.__setattr__(handle, "is_busy", lambda: False)
+
+    assert handle.next_monitor_due_at() is None, "the live scheduler sees nothing"
+    assert handle.is_pristine() is False, "the monitor index row must still count"
+
+
+@pytest.mark.asyncio
+async def test_next_monitor_due_at_reads_the_live_scheduler(tmp_path: Path, monkeypatch) -> None:
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from local_operator.session.transcript import Transcript
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    class _Scheduler:
+        disposed = False
+
+        def next_monitor_due_at(self) -> int:
+            return 42
+
+    class _Session:
+        owns_runtime = True
+        outcome_is_synchronous = True
+        runtime_locality: RuntimeLocality = "this-process"
+        session_id = "s1"
+
+        def __init__(self) -> None:
+            self._transcript = Transcript(tmp_path / "sessions" / "s1", defer_materialise=True)
+            self.wake_scheduler = None
+            self.monitor_scheduler = _Scheduler()
+
+        def history(self):  # noqa: ANN202
+            return []
+
+    handle = object.__new__(ServingSessionHandle)
+    handle._session = _Session()  # type: ignore[attr-defined]
+    object.__setattr__(handle, "is_busy", lambda: False)
+    assert handle.next_monitor_due_at() == 42
+
+
+@pytest.mark.asyncio
 async def test_a_provider_without_a_model_name_still_engages(tmp_path: Path, monkeypatch) -> None:
     """Review round 2, MAJOR-1: an empty `model_name` is not "unconfigured".
 
