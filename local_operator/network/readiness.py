@@ -38,7 +38,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol, Sequence
 
 from local_operator.network import wire
 
@@ -412,12 +412,18 @@ def placement_fact(*, provider: str = "", mcp_url: str = "", root: Path) -> dict
     instead of guessing from reachability.
     """
     from local_operator.network.credentials import placement as placement_mod
+    from local_operator.network.credentials.state import PlacementState
 
     found = placement_mod.placement_entries_for(provider=provider, mcp_url=mcp_url, root=root)
     if found is None:
         return {}
     network_id, entry = found
-    observation = placement_mod.PlacementState.load(network_id, root=root).observation(entry.key)
+    # ``PlacementState`` lives in its own module (the state file is the client's
+    # durable memory); reached through ``credentials.placement`` it resolves at
+    # runtime but not for the type checker, which is why every other caller
+    # imports it from ``credentials.state`` directly (cli.py's credentials arm
+    # is the precedent).
+    observation = PlacementState.load(network_id, root=root).observation(entry.key)
     return {
         "owner_device": entry.owner_device,
         "owner_device_name": entry.owner_device_name,
@@ -471,6 +477,27 @@ def collect_peer_facts(root: Path, *, home: Path | None = None) -> dict[str, Any
 # ---------------------------------------------------------------------------
 # This side's own credential facts (the composer's half)
 # ---------------------------------------------------------------------------
+
+
+class Viewer(Protocol):
+    """What a verdict builder needs of THIS device's facts.
+
+    A Protocol rather than the concrete :class:`ViewerFacts`, because the unit
+    matrix drives every builder with small handwritten doubles (they pin which
+    QUESTION a verdict asks, not how the answer is stored) — and a nominal
+    parameter type turned each of those doubles into a type-check error instead
+    of a test. ``ViewerFacts`` is the production implementation; nothing else
+    should implement this accidentally. ``close()`` is deliberately absent: the
+    composer owns lifetime and calls it on the concrete class.
+    """
+
+    device_id: str
+
+    def provider_rows(self, provider: str) -> list[Any] | None: ...
+
+    def holds_mcp_login(self, url: str) -> bool | None: ...
+
+    def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]: ...
 
 
 class ViewerFacts:
@@ -934,7 +961,7 @@ def model_credential_row(
     member: Any,
     facts: Mapping[str, Any],
     *,
-    viewer: ViewerFacts,
+    viewer: Viewer,
     peer_label: str,
 ) -> dict[str, Any]:
     """(e) Can the peer's default model be served — own login or a borrow?"""
@@ -1155,7 +1182,7 @@ def mcp_credential_rows(
     member: Any,
     facts: Mapping[str, Any],
     *,
-    viewer: ViewerFacts,
+    viewer: Viewer,
     peer_label: str,
 ) -> list[dict[str, Any]]:
     """(f) Per user-scope HTTP/SSE server: does a login path exist for the peer?"""
@@ -1193,7 +1220,7 @@ def _mcp_credential_row(
     url: str,
     name: str,
     server: Mapping[str, Any],
-    viewer: ViewerFacts,
+    viewer: Viewer,
     peer_label: str,
 ) -> dict[str, Any]:
     has_row = server.get("has_row")
@@ -1674,7 +1701,7 @@ def _peer_checks(
     *,
     record: Any,
     server: "RelayServer",
-    viewer: ViewerFacts,
+    viewer: Viewer,
     deadline: float | None,
 ) -> list[dict[str, Any]]:
     """Every readiness row for ONE member: reachability, then capabilities."""
