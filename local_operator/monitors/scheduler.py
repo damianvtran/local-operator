@@ -3,10 +3,17 @@
 In-process only: no supervisor, no daemon, no cold engagement (§10.4 — a
 session that goes cold has dormant monitors; they resume with it). The
 scheduler owns the armed timer, the per-monitor runtime state, and the
-tick → run → normalize → compare → deliver loop. Everything with a session in
-it — resolving the tool, executing the call, delivering the delta, persisting
-the list — arrives as a callback, so this module is testable without a
-session and the session is testable without timers.
+tick → run → normalize → compare → classify → deliver loop. Everything with a
+session in it — resolving the tool, executing the call, delivering the delta,
+persisting the list — arrives as a callback, so this module is testable
+without a session and the session is testable without timers.
+
+The classify leg (§8) is one of those callbacks and the only OPTIONAL one:
+absent, every detected change is delivered; present, its verdict runs the
+§8.4 fork (deliver, or suppress + count), and a call that raises or answers
+``None`` fails OPEN to a delivery. The call is issued OUTSIDE the write lock
+and serialised across the session's monitors — see
+:meth:`MonitorScheduler._classify_change`.
 
 It preserves the ``WakeScheduler`` load-bearing properties because they were
 paid for once already:
