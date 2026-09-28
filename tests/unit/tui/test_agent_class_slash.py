@@ -104,3 +104,56 @@ async def test_a_bad_class_word_is_refused_before_any_write(tmp_path: Path) -> N
 
     assert any("must be one of" in text for text in notices), notices
     assert AgentRegistry(tmp_path).get_agent_by_name("aida") is None
+
+
+@pytest.mark.asyncio
+async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) -> None:
+    """The browse surface is honest about the class (design §8.1.3).
+
+    ``_agent_profile_rows`` is the ONE enumeration feeding both the settings
+    page's Agents pane and the ``/agent`` argument picker, so the class riding
+    its facts string is what lets a user see, while browsing, which profiles
+    may message them unprompted. Pinned because the pane showed only
+    ``role``/model/effort before this slice, and a regression there would be
+    invisible: the pane is read-only and nothing else asserts its text.
+    """
+    from local_operator.agents import AgentEditFields
+
+    registry = AgentRegistry(tmp_path)
+    registry.create_agent(
+        AgentEditFields(
+            name="steadier",
+            description="Reaches out when something needs the operator.",
+            tags=["role", "class:proactive"],
+        )
+    )
+    session = FakeSession()
+    session.agent_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        rows = app._agent_profile_rows()
+
+    facts = {name: kind for name, kind, _summary in rows}
+    assert "proactive" in facts.get("steadier", ""), facts
+    # The control: absence of the tag must NOT invent a marker.
+    registry.create_agent(
+        AgentEditFields(
+            name="plainrole",
+            description="A reactive role.",
+            tags=["role"],
+        )
+    )
+    app2 = OperatorApp(lambda: _factory(session))
+    async with app2.run_test(size=(120, 40)) as pilot2:
+        for _ in range(40):
+            await pilot2.pause()
+            if app2._session is not None:
+                break
+        rows2 = app2._agent_profile_rows()
+    facts2 = {name: kind for name, kind, _summary in rows2}
+    assert "plainrole" in facts2, facts2
+    assert "proactive" not in facts2["plainrole"], facts2
