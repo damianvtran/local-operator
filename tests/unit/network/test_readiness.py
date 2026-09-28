@@ -663,7 +663,7 @@ def _row(  # noqa: PLR0913 — one builder for the reading matrix's rows
     winner: str = "",
     winner_verified: bool = False,
     link_address: str = "",
-    link_inbound: bool = False,
+    link_unpinned: bool = False,
 ) -> dict[str, Any]:
     observed: dict[str, Any] = {
         "outcome": outcome,
@@ -681,10 +681,11 @@ def _row(  # noqa: PLR0913 — one builder for the reading matrix's rows
         observed["winner_verified"] = winner_verified
     if link_address:
         observed["link_address"] = link_address
-    if link_inbound:
+    if link_unpinned:
         # Mirrors the composer: a live link this report cannot pin to a declared
-        # address (round 2, R2-1/Q-3) publishes the fact, never a source socket.
-        observed["link_inbound"] = True
+        # address (round 2, R2-1/Q-3). The key names the CONDITION, never a
+        # direction (round 3, R3-2).
+        observed["link_unpinned"] = True
     return {
         "check": "reachability",
         "device_id": PEER,
@@ -780,16 +781,17 @@ def test_a_bare_accept_is_never_reported_as_the_peer() -> None:
     assert "the peer answered" not in elsewhere_unverified
 
 
-def test_an_inbound_link_reads_as_the_link_fact_not_an_address() -> None:
-    """Round 2, R2-1/Q-3: when the PEER dialled us, its link records the
-    dialer's ephemeral source socket — an address nobody can be pointed at.
+def test_an_unpinned_link_reads_as_the_link_fact_not_an_address() -> None:
+    """Round 2, R2-1/Q-3: a live link whose address cannot be pinned to a
+    declared endpoint (an inbound source socket; round 3, R3-2 renamed the
+    condition straight).
 
     The row presents the LINK fact (the peer is up) with no address named,
     and the accept is not turned into a peer-answer claim either — a false red
     on the peer's own reachable address is the defect this pins shut.
     """
     reading = readiness.reachability_reading(
-        _row("connected_inbound", detail="accepted_inbound_link", ok=True)
+        _row("connected_unpinned", detail="accepted_unpinned_link", ok=True)
     )
     assert reading == ("the peer is up (its link is live); this address accepted a TCP connection")
     assert "the peer answered" not in reading
@@ -797,7 +799,7 @@ def test_an_inbound_link_reads_as_the_link_fact_not_an_address() -> None:
 
     # The same state on an address that did NOT answer names no address either.
     silent = readiness.reachability_reading(
-        _row("no_answer_elsewhere", detail="no_answer", link_inbound=True)
+        _row("no_answer_elsewhere", detail="no_answer", link_unpinned=True)
     )
     assert silent == "the peer is up (its link is live); this address did not answer"
 
@@ -880,18 +882,37 @@ def test_remedies_do_not_point_at_unverified_addresses() -> None:
     assert "re-check once cloud-node-1 answers at this address" in nothing[0]
 
 
-def test_an_inbound_link_pivots_the_address_remedies_off_the_ephemeral() -> None:
+def test_an_unpinned_link_pivots_the_address_remedies_off_the_ephemeral() -> None:
     """Round 2, R2-1/Q-3: the peer is up (its link is live) but the link names
     no address this report may cite — so no remedy cites one, and "start the
     relay" is not advice for a peer that is demonstrably running."""
     for outcome in ("refused", "no_answer_elsewhere"):
         remedies = readiness._reachability_remedies(
-            outcome, peer_label="cloud-node-1", observed={"link_inbound": True}
+            outcome, peer_label="cloud-node-1", observed={"link_unpinned": True}
         )
         joined = " ".join(remedies)
         assert "its link is live" in joined, outcome
         assert "start" not in joined, outcome
         assert "127." not in joined and "10." not in joined, outcome
+
+
+def test_a_report_budget_remedy_says_re_run_not_the_peers_handshake() -> None:
+    """Round 3, D6: when the tail says the report's OWN budget ran out, the
+    remedy must not send anyone to the peer's relay — the address answered."""
+    from local_operator.network import relay as relay_mod
+
+    re_run = readiness._reachability_remedies(
+        "handshake_failed",
+        peer_label="cloud-node-1",
+        observed={"dial_stage": relay_mod.HANDSHAKE_NOT_ATTEMPTED},
+    )
+    assert "re-run this report" in re_run[0]
+    assert "relay answers a handshake" not in re_run[0]
+
+    refusal = readiness._reachability_remedies(
+        "handshake_failed", peer_label="cloud-node-1", observed={"dial_stage": "unreachable"}
+    )
+    assert "re-check once cloud-node-1's relay answers a handshake again" in refusal[0]
 
 
 def test_reachability_remedies_name_the_discriminating_checks() -> None:
