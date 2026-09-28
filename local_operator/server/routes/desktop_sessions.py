@@ -50,6 +50,7 @@ from local_operator.server.models.desktop_sessions import (
     NotificationClaim,
     PinState,
     PresenceReceipt,
+    SessionFind,
     SessionList,
     SessionSearch,
     SessionSnapshot,
@@ -2488,6 +2489,43 @@ async def checkpoints(session_id: str, request: Request):
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         return reply(await bridge.checkpoints())
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/find",
+    response_model=CRUDResponse[SessionFind],
+)
+async def find(
+    session_id: str,
+    request: Request,
+    q: str = Query(..., min_length=1, max_length=256),
+    limit: int = Query(default=100, ge=1, le=200),
+):
+    """In-thread find: messages of THIS conversation matching ``q``, best first.
+
+    A READ like ``history`` and ``checkpoints`` beside it, and on a draft the
+    empty answer is the correct one rather than a 404: there are no messages
+    to search, which is exactly why the overlay renders "No matches".
+
+    ``q`` is required and bounded at 256 characters (D9): it is only ever a
+    user's typing, and every extra character is projected into every doc
+    comparison. ``limit`` is 1..200 — find is a navigation surface, not an
+    export, and the response's ``truncated`` says when the list was cut.
+
+    The answer is served from the per-session transcript index
+    (``session/transcript_index.py``, through ``session/transcript_find.py``):
+    a warm index answers ``ready`` with ranked hits; a cold or stale one
+    answers ``building`` inside the D3 first-paint budget (with the previous
+    scan's hits marked ``partial``) while the background scan runs, and the
+    renderer polls — the rail's own discipline. For a peer conversation the
+    answer is ``state: "unsupported"`` (D4): the index reads this device's
+    journal, and a peer's is elsewhere.
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        return reply(await bridge.find(q, limit))
 
 
 @router.get(
