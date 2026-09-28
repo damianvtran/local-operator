@@ -17,7 +17,6 @@ import pytest
 
 from local_operator.config import ConfigManager
 from local_operator.server.app import app
-
 from tests.unit.aida.conftest import isolated_root_path, write_config
 
 TOKEN = "aida-route-token"
