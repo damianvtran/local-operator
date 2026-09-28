@@ -5,7 +5,7 @@ completed their whole interaction -- one through the completion gate and
 scored -- and sealed ``status: failed, steps: 0`` because a single record write
 met ENOSPC mid-run; ``record_sink``'s module docstring carries the
 measurements. Each test below pins one of the four properties that fix that,
-plus the two run-level regressions that would have caught it:
+plus the run-level regressions that would have caught it:
 
 * a volume too small for a record refuses BEFORE ``launch`` (no spend);
 * a failed write truncates back to the last complete line (a partial record
@@ -250,6 +250,34 @@ class TestWrites:
             "d",
         ]
         sink.close()
+
+    def test_a_failed_truncate_is_named_in_the_failure_sentence(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Review round 1 (R1-N2): the truncate-back is best effort, and a dead
+        # volume can refuse the fixup itself. That case is not silent -- the
+        # failure sentence says the file ends in a torn fragment, because a
+        # reader cannot tell a cut that happened from one that did not.
+        sink = RecordSink(tmp_path / "events.jsonl")
+        sink.write("a", {"n": 1})
+        complete = sink.bytes_written
+
+        torn = _TornWrite(record_sink._CALLS.write)
+        monkeypatch.setattr(record_sink._CALLS, "write", torn)
+
+        def denying_truncate(_fd: int, _size: int) -> None:
+            raise OSError(errno.EIO, "the fixup met a dead volume")
+
+        monkeypatch.setattr(record_sink._CALLS, "ftruncate", denying_truncate)
+        torn.armed = True
+        sink.write("b", {"n": 2})
+
+        assert sink.failure is not None
+        assert "ran out of room" in sink.failure.sentence
+        assert "torn fragment" in sink.failure.sentence
+        # The half-written tail is still on disk: the sentence is the only
+        # thing that can carry the fact on this volume.
+        assert (tmp_path / "events.jsonl").stat().st_size > complete
 
     def test_a_non_space_failure_is_not_classified_as_out_of_room(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -610,3 +638,49 @@ class TestTornRecordKeepsTheOutcome:
         kinds = [line["kind"] for line in _parse_lines(record_root / "events.jsonl")]
         assert "record_incomplete" not in kinds
         assert "agent_event" in kinds
+
+    @pytest.mark.asyncio
+    async def test_a_failed_outcome_seal_still_reports_the_record_incomplete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, short_scratch: Path
+    ) -> None:
+        # Review round 1 (R1-F3): the disk copy of the summary is part of the
+        # archive ``record_incomplete`` describes, so a failed OUTCOME seal must
+        # reach the returned outcome rather than stopping at stderr. Injected at
+        # the arm's own call site -- the sink's ENOSPC ladder has its unit tests
+        # above -- and only for the outcome target, so the score seal still
+        # exercises the real path.
+        run, _, _ = _runner(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scratch_root=short_scratch,
+            events=[ReasoningDeltaEvent(message_id="m0", delta="short")],
+        )
+
+        real_seal = RecordSink.seal_write
+
+        def refusing_seal(self: RecordSink, target: Path, text: str) -> None:
+            if Path(target).name == "outcome.json":
+                raise RecordSinkError(
+                    f"the seal artifact {target} could not be written: the volume "
+                    "holding it ran out of room (ENOSPC) with the seal reserve "
+                    "already spent",
+                    path=Path(target),
+                    out_of_room=True,
+                )
+            real_seal(self, target, text)
+
+        monkeypatch.setattr(RecordSink, "seal_write", refusing_seal)
+        outcome = await run()
+
+        assert outcome.status == "agent_stop", outcome.diagnostic
+        assert outcome.record_incomplete is True
+        assert outcome.record_diagnostic is not None
+        assert "ran out of room" in outcome.record_diagnostic
+        record_root = outcome.record_root
+        assert record_root is not None
+        # The OTHER seal artifact still landed, the disk copy of the outcome is
+        # the thing that did not, and the reserve is released either way -- all
+        # three facts the outcome above now carries instead of hiding.
+        assert (record_root / "score.json").exists()
+        assert not (record_root / "outcome.json").exists()
+        assert not (record_root / SEAL_RESERVE_NAME).exists()

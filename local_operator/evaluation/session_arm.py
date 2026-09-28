@@ -1404,18 +1404,35 @@ async def run_session_episode(
             },
         )
     record.close()
+    seal_error: RecordSinkError | None = None
     try:
         record.seal_write(
             record_root / "outcome.json",
             json.dumps(_outcome_json(outcome), indent=2, sort_keys=True) + "\n",
         )
     except RecordSinkError as error:
+        # A failed outcome seal is not a stderr-only note: the disk copy of the
+        # summary is part of the archive ``record_incomplete`` describes, so the
+        # fact re-enters the outcome below -- the object the runner prints and
+        # returns -- rather than stopping at the console (review round 1,
+        # R1-F3). ``SessionArmOutcome`` is frozen, so this is a ``replace``.
+        seal_error = error
         print(
             f"the episode outcome could not be written to {record_root}: {error.sentence}",
             file=sys.stderr,
         )
     finally:
         record.release_reserve()
+    if seal_error is not None:
+        # An EARLIER record failure stays the diagnostic when there is one (it
+        # is the classified root cause; this is its consequence); the seal
+        # failure's own sentence is used only when the record path was clean up
+        # to the seal.
+        outcome = replace(
+            outcome,
+            record_incomplete=True,
+            record_diagnostic=outcome.record_diagnostic or _record_diagnostic(seal_error),
+        )
     return outcome
 
 

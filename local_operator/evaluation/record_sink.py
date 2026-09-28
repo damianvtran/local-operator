@@ -35,10 +35,13 @@ FOUR GUARANTEES, each one a measured failure turned into a property:
    the seal's moment of need (:meth:`RecordSink.seal_write`), which is what
    converts "dies at 99%" into "the record stops at 100% minus the margin, and
    the seal still lands on top of it".
-3. LINE-COMPLETE, INCREMENTAL WRITES. Every record line is one append; a failed
-   write is truncated back to the last complete line, so the file on disk is
-   always parseable line by line and a partial record is USABLE -- the exact
-   property whose absence made ``steps=0`` unreadable as an artifact.
+3. LINE-COMPLETE, INCREMENTAL WRITES. Every record line is one append, and a
+   failed write is truncated back to the last complete line; a truncate that
+   itself fails (a dying volume) is not swallowed -- the failure sentence says
+   the file ends in a torn fragment, because a reader cannot tell a cut that
+   happened from one that did not. So every COMPLETE line on disk is parseable
+   and a partial record is USABLE -- the exact property whose absence made
+   ``steps=0`` unreadable as an artifact.
 4. A LEGIBLE, CLASSIFIED FAILURE. :attr:`RecordSink.failure` carries a
    :class:`RecordSinkError` whose sentence separates "the environment ran out of
    room" (``out_of_room``, naming the volume and how many bytes did land) from
@@ -90,9 +93,10 @@ SEAL_RESERVE_NAME = "seal.reserve"
 
 #: The record size pre-flight expects, and refuses to start without.
 #: Derived: the two completed records measured 64.86 MB and 79.77 MB
-#: (76.07 MiB) for 46-63 model turns, so 128 MiB is 1.6x the larger one --
-#: room for roughly twice the longest measured run before the size itself
-#: would refuse. This is a FLOOR: it refuses only a volume that cannot hold
+#: (76.07 MiB) for 46-63 model turns, so 128 MiB is 1.68x the larger record
+#: and 2.07x the smaller one -- ~54 MB of growth room, about 40 further turns
+#: at the measured 1.3-1.4 MB/turn, before the size itself would refuse.
+#: This is a FLOOR: it refuses only a volume that cannot hold
 #: one full-length record plus the reserve (129 MiB total), because refusing a
 #: run that could plausibly complete would waste the wall time the benchmark is
 #: actually short of, while the reserve and the line-complete sink are what
@@ -345,8 +349,10 @@ class RecordSink:
         itself a failure to record, classified like any other), then appended
         in ONE logical write, and the file's offset advances only after the
         line is fully on disk. A failure truncates the file back to the last
-        complete line, so every byte a reader can see is a line it can parse --
-        the property that makes a partial record analyzable instead of a void.
+        complete line -- and a fixup that itself fails leaves a torn tail the
+        failure sentence NAMES -- so a reader gets either a clean cut or a
+        stated torn tail, never a silent one: the property that makes a
+        partial record analyzable instead of a void.
         """
 
         if self._closed:
@@ -505,6 +511,17 @@ class RecordSink:
             raise
 
     def _note_failure(self, error: BaseException, *, last_complete: int) -> None:
+        # The truncate runs FIRST so the failure sentence can tell the truth
+        # about it: the fixup is best effort -- a dying volume can refuse it
+        # too -- and a file left with a torn tail must SAY so rather than read
+        # as a clean cut (review round 1, R1-N2).
+        fd = self._fd
+        torn_tail = False
+        if fd is not None:  # pragma: no cover - write() refuses a closed sink first
+            try:
+                self._calls.ftruncate(fd, last_complete)
+            except Exception:  # noqa: BLE001 - the fixup is best effort; named below
+                torn_tail = True
         if self._failure is None:
             if space_error(error):
                 sentence = (
@@ -517,6 +534,11 @@ class RecordSink:
                     f"the record file {self._path} could not be written: "
                     f"{type(error).__name__}: {error}"
                 )
+            if torn_tail:
+                sentence += (
+                    "; the trailing partial line could not be removed, so the file "
+                    "ends in a torn fragment a reader must drop"
+                )
             self._failure = RecordSinkError(
                 sentence,
                 path=self._path,
@@ -525,13 +547,6 @@ class RecordSink:
                 bytes_written=last_complete,
             )
         self._failures += 1
-        fd = self._fd
-        if fd is None:  # pragma: no cover - write() refuses a closed sink first
-            return
-        try:
-            self._calls.ftruncate(fd, last_complete)
-        except Exception:  # noqa: BLE001 - best effort; readers skip a torn final line
-            pass
 
     def _seal_failure(self, target: Path, error: OSError) -> RecordSinkError:
         if space_error(error):

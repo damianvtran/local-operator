@@ -538,6 +538,14 @@ def _verdict(refusal: dict[str, Any], current: dict[str, Any]) -> dict[str, bool
         and lines.get("torn_lines") == 0
         and "score.json" in (current.get("artifacts") or [])
         and "outcome.json" in (current.get("artifacts") or [])
+        # The outcome-side facts this repro exists to preserve: a real score,
+        # the tool inventory the run actually used, and a diagnostic that names
+        # the VOLUME rather than the run (review round 1, R1-F2). Without these
+        # the demo could pass while the sealed summary lied about what the
+        # spend bought.
+        and current_outcome.get("score") is not None
+        and bool(current_outcome.get("tool_names"))
+        and "ran out of room" in (current_outcome.get("record_diagnostic") or "")
     )
     return {"refusal": refusal_ok, "survives": survives}
 
@@ -556,7 +564,12 @@ def _legacy_voided(legacy: dict[str, Any]) -> bool:
     diagnostic = f"{outcome.get('diagnostic') or ''} {raised}"
     voided = outcome.get("status") == "failed" and outcome.get("steps") == 0
     signature = "record sink" in diagnostic or "No space left on device" in diagnostic
-    return bool(raised) or (voided and signature)
+    # The signature gates BOTH arms (review round 1, R1-F1). An exception on
+    # its own is not this defect -- the first draft of this check counted an
+    # isolation refusal as the void, the "green number that measures nothing"
+    # the docstring above warns about -- so a raise only counts when its message
+    # names the sink or the full volume.
+    return signature and (bool(raised) or voided)
 
 
 def main() -> int:
