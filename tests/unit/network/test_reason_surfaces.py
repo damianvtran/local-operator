@@ -112,9 +112,10 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "_render",
         "detail",
     ): (
-        2,
-        "the peer's own sentence for a session op, rendered verbatim; the second read "
-        "is the readiness digest's row sentence, composed FOR a person in readiness.py",
+        1,
+        "the peer's own sentence for a session op, rendered verbatim (doctor's "
+        "rows gloss through doctor_detail_words; the readiness rows moved to "
+        "readiness.render_check_lines)",
     ),
     # The readiness report's own sentences. Capability rows are COMPOSED as prose in
     # ``readiness.py`` (the machine token rides ``code``, which no surface here
@@ -126,9 +127,14 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "classifier input; the returned sentences are authored here, never echoed",
     ),
-    ("local_operator/network/cli.py", "_ready_lines", "detail"): (
+    (
+        "local_operator/network/readiness.py",
+        "render_check_lines",
+        "detail",
+    ): (
         1,
-        "the row's own composed sentence; the machine token stays in `code`",
+        "the ONE render loop both surfaces use (round 1, NIT-2); the row's own "
+        "composed sentence, the machine token stays in `code`",
     ),
     ("local_operator/network/cli.py", "_ready_failure", "detail"): (
         2,

@@ -459,7 +459,7 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
         and by_server["unreadable"]["code"] == readiness.CODE_UNKNOWN
     )
     assert "'/mcp login https://g.example/mcp' here first" in by_server["declared"]["detail"]
-    assert by_server["soft"]["detail"].startswith("if soft needs a sign-in")
+    assert by_server["soft"]["detail"].startswith("if the `soft` server needs a sign-in")
     for row in by_server.values():
         assert row["capability"] == readiness.CAPABILITY_MCP_CREDENTIAL
 
@@ -648,7 +648,25 @@ def _row(  # noqa: PLR0913 — one builder for the reading matrix's rows
     source: str | None = "203.0.113.7",
     interface: str | None = "utun4",
     winner: str = "",
+    winner_verified: bool = False,
+    link_address: str = "",
 ) -> dict[str, Any]:
+    observed: dict[str, Any] = {
+        "outcome": outcome,
+        "source_address": source,
+        "interface": interface,
+        "elapsed_ms": 3000.2,
+        "budget_s": 3.0,
+        "attempted": True,
+        "last_seen_at": 170,
+    }
+    # Mirrors the composer: the winner keys exist only when something won, and
+    # ``winner_verified`` only ever rides with a winner (design round 1, D1).
+    if winner:
+        observed["winner"] = winner
+        observed["winner_verified"] = winner_verified
+    if link_address:
+        observed["link_address"] = link_address
     return {
         "check": "reachability",
         "device_id": PEER,
@@ -656,16 +674,7 @@ def _row(  # noqa: PLR0913 — one builder for the reading matrix's rows
         "endpoint": "198.51.100.7:7777",
         "ok": ok,
         "detail": detail,
-        "observed": {
-            "outcome": outcome,
-            "source_address": source,
-            "interface": interface,
-            "elapsed_ms": 3000.2,
-            "budget_s": 3.0,
-            "attempted": True,
-            "last_seen_at": 170,
-            "winner": winner,
-        },
+        "observed": observed,
     }
 
 
@@ -686,11 +695,34 @@ def test_reachability_reading_distinguishes_refused_from_silence() -> None:
     )
     assert "this device routes" not in silent_no_route_facts
 
-    elsewhere = readiness.reachability_reading(
-        _row("no_answer_elsewhere", detail="no_answer", winner="10.0.0.9:4097")
+    verified_elsewhere = readiness.reachability_reading(
+        _row(
+            "no_answer_elsewhere",
+            detail="no_answer",
+            winner="10.0.0.9:4097",
+            winner_verified=True,
+        )
     )
-    assert "the peer is up (it answered 10.0.0.9:4097)" in elsewhere
-    assert "this address did not answer" in elsewhere
+    assert "the peer is up (it answered 10.0.0.9:4097)" in verified_elsewhere
+    assert "this address did not answer" in verified_elsewhere
+
+    # AN UNVERIFIED WINNER CLAIMS NOTHING (design round 1, D1): a bare accept
+    # is not a peer answer, so the row says only what the row knows.
+    unverified_elsewhere = readiness.reachability_reading(
+        _row("no_answer_elsewhere", detail="no_answer", winner="192.0.2.9:4097")
+    )
+    assert unverified_elsewhere == "this address did not answer"
+
+    link_elsewhere = readiness.reachability_reading(
+        _row(
+            "no_answer_elsewhere",
+            detail="no_answer",
+            winner="10.0.0.9:4097",
+            winner_verified=True,
+            link_address="10.0.0.9:4097",
+        )
+    )
+    assert "the peer is up (its link runs at 10.0.0.9:4097)" in link_elsewhere
 
     no_route = readiness.reachability_reading(_row("no_route", detail="connect_failed:OSError"))
     assert "routing said the address is unreachable" in no_route
@@ -700,6 +732,91 @@ def test_reachability_reading_distinguishes_refused_from_silence() -> None:
 
     bad = readiness.reachability_reading(_row("bad_endpoint", detail="bad_endpoint"))
     assert "cannot be dialled" in bad
+
+
+def test_a_bare_accept_is_never_reported_as_the_peer() -> None:
+    """Design round 1, D1: any listener satisfies a TCP connect.
+
+    The unverified states render the observed fact — "something accepted a TCP
+    connection at this address; it was not identified as the peer" — and the
+    verified states keep their peer claims, so the counter-direction is pinned
+    in the same cell.
+    """
+    unverified_winner = readiness.reachability_reading(
+        _row("connected_unverified", winner="192.0.2.9:4097", link_address="10.0.0.9:4097")
+    )
+    assert "was not identified as the peer" in unverified_winner
+    assert "the peer answered" not in unverified_winner
+    assert "(the peer's link runs at 10.0.0.9:4097)" in unverified_winner
+
+    elsewhere = readiness.reachability_reading(
+        _row("connected_elsewhere", winner="10.0.0.9:4097", winner_verified=True)
+    )
+    assert "was not identified as the peer" in elsewhere
+    assert "(the peer answered on 10.0.0.9:4097)" in elsewhere
+
+    elsewhere_unverified = readiness.reachability_reading(
+        _row("connected_elsewhere", winner="192.0.2.9:4097")
+    )
+    assert "was not identified as the peer" in elsewhere_unverified
+    assert "the peer answered" not in elsewhere_unverified
+
+    link_row = readiness.reachability_reading(_row("connected_link", ok=True))
+    assert link_row == "the peer's link runs at this address"
+
+    verified = readiness.reachability_reading(_row("connected", ok=True))
+    assert verified == "the peer answered at this address"
+
+    no_endpoint = readiness.reachability_reading(_row("no_endpoint", detail="no_endpoint"))
+    assert no_endpoint == "no address published for it — nothing was dialled"
+
+
+def test_a_refused_handshake_reads_in_words_not_a_wire_code() -> None:
+    """Round 1 reconciliation: doctor's own refusal words, never a bare code.
+
+    ``epoch_stale`` is a ``handshake.REASON_*`` identifier — a refusal from a
+    peer that ANSWERED — and a bare wire token on a human line is what doctor's
+    renderer exists to avoid.
+    """
+    row = readiness.reachability_reading(_row("handshake_failed", detail="epoch_stale"))
+    assert "no link came up" in row
+    assert "epoch_stale" not in row
+
+
+def test_remedies_do_not_point_at_unverified_addresses() -> None:
+    """Design round 1, D1: the "point it at the working address" advice is a
+    PEER claim, so it rides only on an identified answer."""
+    unverified = readiness._reachability_remedies(
+        "refused",
+        peer_label="cloud-node-1",
+        observed={"winner": "192.0.2.9:4097"},
+    )
+    assert unverified == ["start cloud-node-1's relay (`lop network start` there), then re-check"]
+
+    verified = readiness._reachability_remedies(
+        "refused",
+        peer_label="cloud-node-1",
+        observed={"winner": "10.0.0.9:4097", "winner_verified": True},
+    )
+    assert "point cloud-node-1 at the working address: it answered on 10.0.0.9:4097" in verified[0]
+
+    link_only = readiness._reachability_remedies(
+        "no_answer_elsewhere",
+        peer_label="cloud-node-1",
+        observed={
+            "winner": "10.0.0.9:4097",
+            "winner_verified": True,
+            "link_address": "10.0.0.9:4097",
+        },
+    )
+    assert "point the peer at the working address: it answered on 10.0.0.9:4097" in link_only[0]
+
+    nothing = readiness._reachability_remedies(
+        "no_answer_elsewhere",
+        peer_label="cloud-node-1",
+        observed={"winner": "192.0.2.9:4097"},
+    )
+    assert "re-check once cloud-node-1 answers at this address" in nothing[0]
 
 
 def test_reachability_remedies_name_the_discriminating_checks() -> None:

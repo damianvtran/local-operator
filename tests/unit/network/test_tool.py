@@ -614,6 +614,110 @@ def test_a_pasted_token_goes_to_a_private_file_and_does_not_survive_the_call(
 # ---------------------------------------------------------------------------
 
 
+#: A ready payload with the shape the live verb produces when rows fail: the
+#: reviewer's Q-1 repro (operator_authority + mcp_credential red), used to pin
+#: that the agent path keeps the rows and remedies the CLI/--json already had.
+_UNHEALTHY_READY: dict[str, Any] = {
+    "ok": False,
+    "code": "unhealthy",
+    "message": (
+        "operator_authority: operator authority is not installed on cloud-node-1 "
+        "(no anchor is installed, so the runtime trusts no key yet): an approval that "
+        "needs the operator — a write or command offloaded there — parks until someone "
+        "installs it; mcp_credential: if the `files` server needs a sign-in, this "
+        "device has no MCP login for https://mcp.example.test/files"
+    ),
+    "identity_present": True,
+    "checks": [
+        {
+            "check": "reachability",
+            "device_id": "d_1",
+            "device_name": "cloud-node-1",
+            "endpoint": "127.0.0.1:4097",
+            "ok": True,
+            "detail": "ok",
+            "observed": {"outcome": "connected", "winner_verified": True},
+            "remedies": [],
+        },
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "device_id": "d_1",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "not_installed",
+            "detail": (
+                "operator authority is not installed on cloud-node-1 (no anchor is "
+                "installed, so the runtime trusts no key yet): an approval that needs "
+                "the operator — a write or command offloaded there — parks until someone "
+                "installs it"
+            ),
+            "remedies": [
+                "run `lop operator install` on cloud-node-1 (one privileged step), then "
+                "approvals for offloaded work can be answered from this device"
+            ],
+            "source": "peer",
+        },
+        {
+            "check": "readiness",
+            "capability": "mcp_credential",
+            "device_id": "d_1",
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "no_credential",
+            "detail": (
+                "if the `files` server needs a sign-in, this device has no MCP login for "
+                "https://mcp.example.test/files — run '/mcp login "
+                "https://mcp.example.test/files' here first"
+            ),
+            "remedies": [
+                "run '/mcp login https://mcp.example.test/files' here, then `lop network "
+                "credential share mcp:https://mcp.example.test/files --with cloud-node-1`"
+            ],
+            "source": "local",
+        },
+    ],
+}
+
+
+def test_a_ready_report_against_an_empty_store_is_an_error_with_its_rows() -> None:
+    """The real CLI, through the tool: a fresh store is an unhealthy report.
+
+    The gate must keep the rows on this path too — the report IS the product,
+    and ``is_error`` is how the loop knows the verb did not come back green.
+    """
+    result = _call("ready")
+    assert result.is_error
+    assert "FAIL" in _text(result)
+    assert _payload(result).get("code") == "unhealthy"
+
+
+def test_the_ready_digest_keeps_fail_rows_and_remedies_on_an_unhealthy_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QA round 1, Q-1: an unhealthy report IS the report.
+
+    The gate sent ``ok:false`` payloads down the generic refusal branch, whose
+    text is ``code: message`` — so the FAIL rows and their remedies, the whole
+    product of this verb, never reached an agent while the hint promised them.
+    The stub returns the live shape (the reviewer's repro); the real-CLI cell
+    above covers the same gate end to end.
+    """
+
+    async def fake_cli(argv: list[str], timeout: float) -> tuple[int, str, str]:
+        assert argv[:2] == ["network", "ready"]
+        return 1, json.dumps(_UNHEALTHY_READY), ""
+
+    monkeypatch.setattr(net_tool, "_run_cli", fake_cli)
+    result = _call("ready", peer="cloud-node-1")
+    assert result.is_error
+    text = _text(result)
+    assert "FAIL readiness operator_authority cloud-node-1" in text
+    assert "lop operator install" in text
+    assert "mcp login https://mcp.example.test/files" in text
+    assert _payload(result)["code"] == "unhealthy"
+
+
 def test_a_read_on_an_empty_store_reports_rather_than_raises() -> None:
     result = _call("ls")
     assert not result.is_error

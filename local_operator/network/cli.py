@@ -4816,41 +4816,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _ready_lines(checks: list[dict[str, Any]]) -> list[str]:
-    """The human rows for ``ready``, in this verb's own register.
+    """The human rows for ``ready`` — the shared renderer, this verb's reading.
 
-    Reachability rows keep doctor's vocabulary and get THIS verb's reading
-    (:func:`readiness.reachability_reading`): doctor's own renderer maps every
-    ``connect_failed:`` stage — including a REFUSED connection — to "nothing
-    answered", which is exactly the conflation this report exists to end (a
-    refusal means the host is up and nothing is listening). Doctor's output and
-    its tables are deliberately untouched. Capability rows carry complete
-    sentences already (composed in ``readiness``); remedies render under their
-    row the way the membership lines do.
+    The loop itself lives in :func:`readiness.render_check_lines`, shared with
+    the agent digest so the two surfaces cannot drift (agent review round 1,
+    NIT-2). The reachability READING is this verb's own — doctor's renderer
+    conflates a refusal with silence, which is the conflation this report
+    exists to end — and doctor's own output and tables stay untouched.
     """
     from local_operator.network import readiness as readiness_mod
-    from local_operator.resume import doctor_detail_words
 
-    lines: list[str] = []
-    for check in checks:
-        state = "ok " if check.get("ok") else "FAIL"
-        kind = str(check.get("check", ""))
-        label = str(check.get("device_name") or check.get("device_id") or "")
-        if kind == "readiness":
-            # ``state check capability device: <sentence>`` — the design's row.
-            body = str(check.get("detail", ""))
-            lines.append(f"{state} {kind} {check.get('capability', '')} {label}: {body}".rstrip())
-        elif kind == "reachability":
-            reading = readiness_mod.reachability_reading(check)
-            lines.append(f"{state} {kind} {label} {check.get('endpoint', '')}: {reading}".rstrip())
-        else:
-            # identity / network / membership: doctor's grammar, doctor's words.
-            lines.append(
-                f"{state} {kind} {check.get('device_id', '')} "
-                f"{doctor_detail_words(str(check.get('detail', '')))}".rstrip()
-            )
-        for remedy in check.get("remedies") or ():
-            lines.append(f"    - {remedy}")
-    return lines
+    return readiness_mod.render_check_lines(checks)
 
 
 def _ready_failure(check: Mapping[str, Any]) -> str:
@@ -4879,6 +4855,8 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     asks it: with the 5 s default it would time out on its own work and the
     fallback — which cannot dial — would answer instead.
     """
+    from local_operator.network import readiness as readiness_mod
+
     live = _relay_call(
         "peer_readiness", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
     )
@@ -4886,12 +4864,9 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     checks = list(payload.get("checks") or [])
     lines = _ready_lines(checks)
     if not lines:
-        lines.append("nothing to check: no networks, or no other members yet")
+        lines.append(readiness_mod.NOTHING_TO_CHECK_LINE)
     if not payload.get("identity_present", True):
-        lines.append(
-            "this device has no device identity (identity_missing): run `lop network init`, or "
-            "re-pair with a new invite"
-        )
+        lines.append(readiness_mod.NO_IDENTITY_LINE)
     failures = [_ready_failure(check) for check in checks if not check.get("ok")]
     healthy = not failures and bool(payload.get("identity_present", True))
     answer: dict[str, Any] = {**payload, "ok": healthy}
