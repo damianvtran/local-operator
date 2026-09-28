@@ -309,6 +309,19 @@ def test_mcp_servers_row_names_the_missing_file(tmp_path: Path) -> None:
     assert any("/mcp add" in remedy for remedy in row["remedies"])
 
 
+@pytest.mark.parametrize(("count", "phrase"), [(1, "1 row withheld"), (2, "2 rows withheld")])
+def test_mcp_servers_row_pluralises_its_withheld_tail(
+    tmp_path: Path, count: int, phrase: str
+) -> None:
+    """Round 2, D5: the withheld tail is a person-facing register — "1 row",
+    never "1 row(s)" (the same class as D4, one branch below it)."""
+    fact = readiness.mcp_servers_fact(tmp_path / "none")
+    fact["withheld"] = [f"shaped-{index}" for index in range(count)]
+    row = readiness.mcp_servers_row(_member(), _facts(mcp=fact), peer_label="cloud-node-1")
+    assert phrase + " from this report" in row["detail"]
+    assert "row(s)" not in row["detail"]
+
+
 def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
     servers = {
         "servers": [
@@ -650,6 +663,7 @@ def _row(  # noqa: PLR0913 — one builder for the reading matrix's rows
     winner: str = "",
     winner_verified: bool = False,
     link_address: str = "",
+    link_inbound: bool = False,
 ) -> dict[str, Any]:
     observed: dict[str, Any] = {
         "outcome": outcome,
@@ -667,6 +681,10 @@ def _row(  # noqa: PLR0913 — one builder for the reading matrix's rows
         observed["winner_verified"] = winner_verified
     if link_address:
         observed["link_address"] = link_address
+    if link_inbound:
+        # Mirrors the composer: a live link this report cannot pin to a declared
+        # address (round 2, R2-1/Q-3) publishes the fact, never a source socket.
+        observed["link_inbound"] = True
     return {
         "check": "reachability",
         "device_id": PEER,
@@ -761,6 +779,49 @@ def test_a_bare_accept_is_never_reported_as_the_peer() -> None:
     assert "was not identified as the peer" in elsewhere_unverified
     assert "the peer answered" not in elsewhere_unverified
 
+
+def test_an_inbound_link_reads_as_the_link_fact_not_an_address() -> None:
+    """Round 2, R2-1/Q-3: when the PEER dialled us, its link records the
+    dialer's ephemeral source socket — an address nobody can be pointed at.
+
+    The row presents the LINK fact (the peer is up) with no address named,
+    and the accept is not turned into a peer-answer claim either — a false red
+    on the peer's own reachable address is the defect this pins shut.
+    """
+    reading = readiness.reachability_reading(
+        _row("connected_inbound", detail="accepted_inbound_link", ok=True)
+    )
+    assert reading == ("the peer is up (its link is live); this address accepted a TCP connection")
+    assert "the peer answered" not in reading
+    assert "not identified" not in reading
+
+    # The same state on an address that did NOT answer names no address either.
+    silent = readiness.reachability_reading(
+        _row("no_answer_elsewhere", detail="no_answer", link_inbound=True)
+    )
+    assert silent == "the peer is up (its link is live); this address did not answer"
+
+
+def test_a_report_budget_tail_reads_in_this_verbs_clock_not_the_doctors() -> None:
+    """Round 2, R2-2: the clock that expired is THIS report's.
+
+    Doctor's gloss for the same state names the doctor's own budget ("the
+    doctor ran out of time before the handshake"), which would send the reader
+    to the wrong command; the ready register composes its own sentence from
+    its own clock, while REFUSAL tails keep reading in doctor's refusal words.
+    """
+    from local_operator.network import relay as relay_mod
+
+    detail = relay_mod.handshake_not_attempted_reason("203.0.113.7:4097", budget="report")
+    reading = readiness.reachability_reading(_row("handshake_failed", detail=detail))
+    assert reading == "the address answered, but the report ran out of time before the handshake"
+    assert "doctor" not in reading
+
+    refusal = readiness.reachability_reading(
+        _row("handshake_failed", detail="handshake_refused:TimeoutError")
+    )
+    assert "the link was refused" in refusal
+
     link_row = readiness.reachability_reading(_row("connected_link", ok=True))
     assert link_row == "the peer's link runs at this address"
 
@@ -817,6 +878,20 @@ def test_remedies_do_not_point_at_unverified_addresses() -> None:
         observed={"winner": "192.0.2.9:4097"},
     )
     assert "re-check once cloud-node-1 answers at this address" in nothing[0]
+
+
+def test_an_inbound_link_pivots_the_address_remedies_off_the_ephemeral() -> None:
+    """Round 2, R2-1/Q-3: the peer is up (its link is live) but the link names
+    no address this report may cite — so no remedy cites one, and "start the
+    relay" is not advice for a peer that is demonstrably running."""
+    for outcome in ("refused", "no_answer_elsewhere"):
+        remedies = readiness._reachability_remedies(
+            outcome, peer_label="cloud-node-1", observed={"link_inbound": True}
+        )
+        joined = " ".join(remedies)
+        assert "its link is live" in joined, outcome
+        assert "start" not in joined, outcome
+        assert "127." not in joined and "10." not in joined, outcome
 
 
 def test_reachability_remedies_name_the_discriminating_checks() -> None:

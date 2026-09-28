@@ -903,7 +903,13 @@ def mcp_servers_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -
         "work that needs MCP tooling cannot run there"
     )
     if withheld:
-        detail += f" ({len(withheld)} row(s) withheld from this report as credential-shaped)"
+        held = len(withheld)
+        # Pluralisation, not "row(s)": this is the register a person reads (round
+        # 2, D5 — the same class as D4, on the rare branch below it).
+        detail += (
+            f" ({held} {'row' if held == 1 else 'rows'} withheld from this report "
+            "as credential-shaped)"
+        )
     return _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
@@ -1444,7 +1450,11 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
     answered" appears only for the socket this report DIALED and identified (or
     an address) a completed handshake lives at (``connected_link``: the live
     link's own address, identified when that link came up). An accept nobody
-    identified renders the observed fact and nothing more.
+    identified renders the observed fact and nothing more — EXCEPT under a link
+    the PEER established, whose recorded source is an ephemeral socket rather
+    than any address: there the peer claim rides the link fact (the peer is up;
+    ``connected_inbound``) with no address named at all, and the peer's own
+    reachable address is not reddened because of direction (round 2, R2-1/Q-3).
     """
     observed = row.get("observed")
     observed = observed if isinstance(observed, Mapping) else {}
@@ -1461,6 +1471,11 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
         return "the peer answered at this address"
     if outcome == "connected_link":
         return "the peer's link runs at this address"
+    if outcome == "connected_inbound":
+        # R2-1/Q-3: the accept is the observed fact; the peer claim rides the
+        # live link the peer established (its recorded source socket is not an
+        # address this report may name, so none is named).
+        return "the peer is up (its link is live); this address accepted a TCP connection"
     if outcome == "connected_unverified":
         # THE D1 SENTENCE: something accepted a TCP connection, and nothing
         # identified it as the peer. The link's address is still a true fact and
@@ -1486,6 +1501,10 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
             return f"the peer is up ({where}); this address did not answer"
         if link_address:
             return f"the peer is up (its link runs at {link_address}); this address did not answer"
+        if observed.get("link_inbound"):
+            # The link fact without an address (R2-1/Q-3): the peer IS up; only
+            # this address failed.
+            return "the peer is up (its link is live); this address did not answer"
         return "this address did not answer"
     if outcome == "no_answer":
         return "nothing answered this address before the budget ran out" + _observed_route_text(
@@ -1500,8 +1519,15 @@ def reachability_reading(row: Mapping[str, Any]) -> str:
         # a refusal code the peer's own build decides, so it reads in doctor's
         # refusal words rather than as a bare wire token (round 1 reconciliation;
         # "the link was refused" is doctor's own wording for exactly this family).
+        # ONE family reads in THIS VERB's words instead: doctor's gloss for the
+        # report-budget state names the doctor's own clock ("the doctor ran out
+        # of time before the handshake"), and the clock that actually expired
+        # here is this report's (round 2, R2-2).
+        from local_operator.network import relay as relay_mod
         from local_operator.resume import doctor_detail_words
 
+        if detail.partition(":")[0] == relay_mod.HANDSHAKE_NOT_ATTEMPTED:
+            return "the address answered, but the report ran out of time before the handshake"
         words = doctor_detail_words(detail) or detail
         return f"the address answered, but no link came up ({words})"
     if outcome == "bad_endpoint":
@@ -1575,6 +1601,15 @@ def _reachability_remedies(
             # the relay" would be the wrong advice about THIS address; the
             # address is what needs fixing.
             return [f"point {peer_label} at the working address: it answered on {where}"]
+        if observed.get("link_inbound"):
+            # The peer is up (its link is live) but the link names no address
+            # this report may cite (R2-1/Q-3), so the advice is about the
+            # address alone — and never "start the relay" for a peer that is
+            # demonstrably running.
+            return [
+                f"the peer is up (its link is live), so this address is stale — "
+                f"fix or drop it on {peer_label}"
+            ]
         return [f"start {peer_label}'s relay (`lop network start` there), then re-check"]
     if outcome == "no_answer":
         admits = ""
@@ -1593,6 +1628,11 @@ def _reachability_remedies(
     if outcome == "no_answer_elsewhere":
         if where:
             return [f"point the peer at the working address: it answered on {where}"]
+        if observed.get("link_inbound"):
+            return [
+                f"the peer is up (its link is live); this address looks stale — "
+                f"fix or drop it on {peer_label}"
+            ]
         return [f"re-check once {peer_label} answers at this address"]
     if outcome == "connected_unverified":
         return [f"check that {peer_label}'s relay is what listens at this address, then re-check"]
@@ -1636,16 +1676,32 @@ def _reachability_rows(
     ``connected_elsewhere``) and never as the peer; ``winner_verified`` /
     ``link_address`` ride ``observed`` so the readings and remedies make the
     same distinction this loop does.
+
+    AND A LINK'S ADDRESS MUST PIN TO A DECLARED ENDPOINT (round 2, R2-1/Q-3).
+    Only an outbound link records the dialled host; a link the PEER established
+    records its source socket — an ephemeral port that is nobody's address and
+    dies with the connection. Such a link is presented as the link fact alone
+    (``connected_inbound``: the peer is up; no address named), and the peer's
+    own reachable address is not reddened merely because the peer was the
+    dialer.
     """
     from local_operator.network import relay as relay_mod
 
     peer_label = _label(member)
     link = server._link_for(member.device_id)  # noqa: SLF001 — the one link seam
-    # THE ONE ADDRESS THAT NEEDS NO NEW HANDSHAKE: a live link IS a completed
-    # handshake, recorded with the address it completed at (``PeerLink.peer_addr``
-    # — the dial's ``host`` for an outbound link).
-    prior_addr = str(link.peer_addr or "") if link is not None else ""
     endpoints = list(member.endpoints)
+    # THE ONE ADDRESS THAT NEEDS NO NEW HANDSHAKE: a link's recorded address may
+    # name the peer only when the link CAME UP at one of the member's DECLARED
+    # endpoints — the outbound case (``relay.py`` records the dialled host). An
+    # inbound link records the dialer's SOURCE socket (``register_link`` writes
+    # ``f"{addr[0]}:{addr[1]}"`` on the accepting side): an ephemeral port that
+    # its owner cannot be pointed at and that dies with the connection. So the
+    # recorded address is published only on a declared-endpoint match, and an
+    # unpinnable live link is presented as the LINK FACT alone — the peer is up
+    # — with no address anywhere (round 2, R2-1/Q-3).
+    raw_link_addr = str(link.peer_addr or "") if link is not None else ""
+    prior_addr = raw_link_addr if raw_link_addr in endpoints else ""
+    link_inbound = link is not None and not prior_addr
     if not endpoints:
         # NOTHING WAS DECLARED, so nothing was dialled — doctor's ``no_endpoint``
         # vocabulary (the renderer is this verb's, see ``reachability_reading``).
@@ -1733,6 +1789,16 @@ def _reachability_rows(
             outcome = "connected"
             detail = relay_mod.DETAIL_OK
             ok = True
+        elif attempt.connected and link_inbound:
+            # ACCEPTED while the peer's own link is live and unpinnable
+            # (R2-1/Q-3): the accept is still un-identified — nothing here says
+            # the peer answered AT this address — but the live link proves the
+            # PEER is up, and rendering the peer's own reachable address as
+            # unverified merely because the peer was the dialer would be a
+            # false red. The link fact is presented with no address at all.
+            outcome = "connected_inbound"
+            detail = "accepted_inbound_link"
+            ok = True
         elif is_winner and link is not None:
             # ACCEPTED, NEVER IDENTIFIED — the D1 state: a link existed, so the
             # winner socket was closed un-dialled (no-churn), and nothing here
@@ -1772,6 +1838,11 @@ def _reachability_rows(
         if winner:
             observed["winner"] = winner
             observed["winner_verified"] = bool(winner_claim_ok)
+        if link_inbound:
+            # A live link this report cannot pin to a declared address: the peer
+            # established it (inbound), so only the LINK FACT may travel — never
+            # its recorded source socket (round 2, R2-1/Q-3).
+            observed["link_inbound"] = True
         if prior_addr and attempt.endpoint != prior_addr:
             # The one OTHER address this report may name as the peer's: the live
             # link's own. Published so readings and remedies cite a verified
