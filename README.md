@@ -168,7 +168,7 @@ schedules, and configuration, and adds the surfaces a terminal cannot draw.
   <img src="./static/ui-desktop-app.png" alt="The desktop app on the Invoices workspace session: the rail (New chat, Search, Aida, Agents, Projects, Schedules, Browser, Agent hub, Mesh) above the Agents and Teams sections; the transcript's reconcile request, Read invoices/march.csv and Ran python reconcile.py receipts, and the streamed write-up; the Run details pane with two subagents running (one drafting the summary, one auditing) and the shared to-do list; and the composer holding a draft." width="720">
 </p>
 
-<p align="center"><i>The desktop app on a real session: the rail with its chats, agents, teams, and mesh; the transcript's tool receipts and streamed write-up; two subagents running beside the shared to-do list; and the composer holding a draft.</i></p>
+<p align="center"><i>The desktop app on the Invoices workspace: the rail with its chats, agents, teams, and mesh; the transcript's tool receipts and streamed write-up; two subagents running above the shared to-do list; and the composer holding a draft. Fixture-driven like the mesh figures below — the real interface over the app's own fixtures, not a live session.</i></p>
 
 What the app adds:
 
@@ -192,7 +192,7 @@ What the app adds:
   <img src="./static/ui-media-in-conversation.png" alt="A desktop app conversation carrying images: a chart card at the top ('March invoices — who still owes us?'), the assistant noting it is plotting the amounts, a Ran python plot_outstanding.py receipt, the bar chart it rendered ('Outstanding at the end of March': Contoso 4,820, Fabrikam 1,150), and the closing write-up." width="720">
 </p>
 
-<p align="center"><i>A conversation where images are part of the turn: a chart pasted into the session, and the bar chart the agent plotted and showed inline beside its write-up.</i></p>
+<p align="center"><i>A conversation where images are part of the turn: a chart pasted into the session, and the bar chart the agent plotted and showed inline above its write-up.</i></p>
 
 **Easiest install — the desktop build.** Download the installer for your
 platform from the [downloads page](https://local-operator.com/download)
@@ -518,13 +518,6 @@ Work keeps moving after you walk away.
   `lop config edit display.time_format 24h` for a 24-hour clock (`12h` restores
   the default). This changes display only; stored timestamps and JSON output
   remain epoch milliseconds, and existing transcript confirmations are not rewritten.
-
-<p align="center">
-  <img src="./static/ui-schedules.png" alt="The desktop app's Schedules page listing recurring wakes by conversation — Invoices workspace (a nightly ledger sync and a morning report), Release crew ops (a nightly CI queue check), Standup notes, and Weekly finance digest — each with its cadence, run count, and next fire time, above the page's note that wakes fire whether or not the window is open." width="720">
-</p>
-
-<p align="center"><i>The Schedules page: the recurring wakes a workspace runs, and the desktop app's reminder that they fire whether or not the window is open.</i></p>
-
 - **Background jobs that report back on their own.** `task` always runs in
   the background and `bash` can (`background=true`); a long command
   interrupted by a steer detaches instead of dying; and every settled job
@@ -545,6 +538,12 @@ Work keeps moving after you walk away.
   interactive session registers with it, and you watch, steer, and start
   sessions from your phone. See [Phone Access](#-phone-access-mobile-relay).
   `lop update` restarts the daemon when the LaunchAgent is installed.
+
+<p align="center">
+  <img src="./static/ui-schedules.png" alt="The desktop app's Schedules page listing recurring wakes by conversation — Invoices workspace (a nightly ledger sync and a morning report), Release crew ops (a nightly CI queue check), Standup notes, and Weekly finance digest — each with its cadence, run count, and next fire time, above the page's note that wakes fire whether or not the window is open." width="720">
+</p>
+
+<p align="center"><i>The Schedules page: the recurring wakes a workspace runs, and the desktop app's reminder that they fire whether or not the window is open.</i></p>
 
 ## 💳 Subscriptions
 
