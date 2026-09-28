@@ -10,9 +10,14 @@ module:
 - :mod:`local_operator.aida.state`      — her files and their cross-process lock
 - :mod:`local_operator.aida.bootstrap`  — :func:`ensure_session`, the ONE creator
 - :mod:`local_operator.aida.proactive`  — the cadence engine (arm / pause / resume)
-- :mod:`local_operator.aida.onboarding` — the one-time greeting baseline
+- :mod:`local_operator.aida.onboarding` — the greeting baseline, the first-run
+  predicate and the R25 nudge ledger
+- :mod:`local_operator.aida.activation` — who may auto-activate her at boot
+  (terminal / desktop-managed daemon, never plain cloud/automation)
 - :mod:`local_operator.aida.naming`     — her display name (``aida.name``) and
   the sync between it and her conversation's title
+- :mod:`local_operator.aida.profile`    — the guarded write path for the profile
+  notes she records into the operator's custom instructions (``lop aida note``)
 
 DISABLING HER. ``aida.enabled = false`` in config, or
 ``LOCAL_OPERATOR_NO_AIDA=1`` in the environment, is a supported steady state:
