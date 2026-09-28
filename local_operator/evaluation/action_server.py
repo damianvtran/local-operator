@@ -47,6 +47,7 @@ from dataclasses import asdict, fields
 from typing import Any, Mapping, Sequence
 
 from local_operator.evaluation.action_surface import ActionSurface
+from local_operator.evaluation.protocol import MAX_ENVELOPE_BYTES
 from local_operator.evaluation.runner.action_tool import (
     ACTION_TOOL_DESCRIPTION,
     ACTION_TOOL_NAME,
@@ -64,6 +65,18 @@ SERVER_NAME = "episode-actions"
 #: first frame rather than behave plausibly; the checks live in
 #: :func:`decode_call` / :func:`decode_response` and are shared by the bridge.
 WIRE_PROTOCOL = 1
+
+#: Read limit for one wire frame, on BOTH ends of the socket. A reply carries
+#: the observation's images base64-encoded, so one reply routinely exceeds
+#: asyncio's 64 KiB default line limit: measured on the paid session arm
+#: 2026-09-28 (task_017), a 476 KiB frame produced a reply whose read raised
+#: "Separator is not found, and chunk exceed the limit", and every EXECUTED
+#: batch was answered to the model as unreachable -- while the desktop had
+#: already acted. Sized off the protocol's own envelope cap (20x the measured
+#: frame, with room for base64 inflation), still bounded so a rogue reply
+#: cannot read unbounded: the client opens its connection with this and the
+#: bridge binds its server with it.
+WIRE_READ_LIMIT_BYTES = MAX_ENVELOPE_BYTES + 4096
 
 #: How long one forwarded call may wait for its reply. Deliberately generous:
 #: an executed batch is funded by the adapter's own per-call deadlines (a batch
@@ -232,7 +245,7 @@ async def forward_call(
     """One call, one connection, one reply: the whole client half of the wire."""
 
     try:
-        reader, writer = await asyncio.open_unix_connection(endpoint)
+        reader, writer = await asyncio.open_unix_connection(endpoint, limit=WIRE_READ_LIMIT_BYTES)
     except OSError as error:
         raise ActionBridgeUnreachable(
             f"the episode's action bridge is not reachable at {endpoint!r} ({error})"

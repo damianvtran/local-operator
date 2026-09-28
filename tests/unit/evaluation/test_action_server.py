@@ -26,6 +26,7 @@ import pytest
 from local_operator.evaluation.action_server import (
     SERVER_NAME,
     WIRE_PROTOCOL,
+    WIRE_READ_LIMIT_BYTES,
     ActionBridgeUnreachable,
     build_mcp_server,
     decode_call,
@@ -39,6 +40,7 @@ from local_operator.evaluation.action_server import (
     surface_to_json,
 )
 from local_operator.evaluation.action_surface import ActionSurface
+from local_operator.evaluation.protocol import MAX_ENVELOPE_BYTES
 from local_operator.evaluation.runner.action_tool import (
     ACTION_TOOL_NAME,
     action_tool_parameters,
@@ -216,6 +218,49 @@ class TestForwardCall:
             await stub.wait_closed()
         assert reply["content"][0]["text"] == "ok:9"
         assert reply["details"] == {"echo": {"marker": "9"}}
+
+    @pytest.mark.asyncio
+    async def test_a_reply_the_size_of_one_observation_round_trips(self, tmp_path: Path) -> None:
+        """Replies carry the observation's images, so they exceed 64 KiB by design.
+
+        Regression, measured on the paid session arm 2026-09-28 (task_017): a
+        476 KiB frame produced a reply whose read raised "Separator is not
+        found, and chunk exceed the limit" -- asyncio's default line limit --
+        so every executed batch was reported to the model as unreachable
+        while the desktop had already acted. The connection is opened with
+        the wire's own limit; this pins that a reply that size reads back.
+        """
+        big = base64.b64encode(b"\x00" * (700 * 1024)).decode("ascii")
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await reader.readline()
+                writer.write(
+                    encode_response(
+                        [
+                            TextContent(text="observed"),
+                            ImageContent(data=big, mime_type="image/png"),
+                        ]
+                    )
+                )
+                await writer.drain()
+            finally:
+                writer.close()
+
+        endpoint = str(tmp_path / "big.sock")
+        server = await asyncio.start_unix_server(handle, path=endpoint)
+        try:
+            reply = await forward_call(endpoint, {}, timeout=5.0)
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert reply["content"][0]["text"] == "observed"
+        assert reply["content"][1]["data"] == big
+
+    def test_the_read_limit_covers_a_full_protocol_envelope(self) -> None:
+        # The sizing rule, pinned: the reader must not be a smaller contract
+        # than the protocol's own cap.
+        assert WIRE_READ_LIMIT_BYTES >= MAX_ENVELOPE_BYTES
 
     @pytest.mark.asyncio
     async def test_missing_endpoint_raises_reachability(self, tmp_path: Path) -> None:
