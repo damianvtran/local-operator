@@ -320,15 +320,46 @@ def _flags(
     short: str,
     *,
     valued_short: str = "",
+    opt_short: str = "",
     long: str = "",
     valued_long: str = "",
+    opt_long: str = "",
+    glued_long: str = "",
+    consume_long: str = "",
 ) -> dict[str, Any]:
-    """One command's complete flag set; default-deny beyond it."""
+    """One command's complete flag set; default-deny beyond it.
+
+    The value-taking kinds mirror each program's REAL argument semantics
+    (round-1 review F1: git's ``--pretty`` is optional-argument — the separate
+    spelling ``git log --pretty --output=/tmp/x`` does NOT feed ``--output`` to
+    ``--pretty``, so a model that consumed the next token let a refused flag
+    ride through to live git, which wrote the file):
+
+    - ``valued_*``: the value is REQUIRED; glued and separate spellings both
+      carry it, the separate form consumes the next token as data, and a
+      missing next token is refused (fail-closed, matching the tools, which
+      all error on a dangling value).
+    - ``opt_*``: the value is OPTIONAL and GLUED-only where a value exists
+      (git OPTARG: ``--pretty``, ``--color``, ``-U``, ``--short``, ``-u``);
+      the bare form is the flag, and the next token is ALWAYS judged as its
+      own word — never consumed.
+    - ``glued_long``: the value is required but only git's ``=`` form is a
+      flag at all (``--format=<fmt>``; a bare ``--format`` reaches git as an
+      unrecognized word), so bare and separate are refused.
+    - ``consume_long``: the value is optional but the program DOES consume the
+      next token when one is present (``git branch --merged [<commit>]``
+      takes ``--merged main`` AND ``--merged --format=…`` — probed against
+      git 2.55.0); bare at end of line is the flag.
+    """
     return {
         "short": set(short),
         "short_valued": set(valued_short),
+        "short_opt": set(opt_short),
         "long": set(long.split()),
         "long_valued": set(valued_long.split()),
+        "long_opt": set(opt_long.split()),
+        "long_glued": set(glued_long.split()),
+        "long_consume": set(consume_long.split()),
     }
 
 
@@ -371,9 +402,9 @@ _FLAG_TABLE: dict[str, dict[str, Any]] = {
 _GIT_SUBCOMMAND_FLAGS: dict[str, dict[str, Any]] = {
     "status": _flags(
         "sb",
-        valued_short="u",
+        opt_short="u",
         long="short porcelain ignored no-renames",
-        valued_long="untracked-files",
+        opt_long="untracked-files",
     ),
     "log": _flags(
         "ps",
@@ -382,27 +413,32 @@ _GIT_SUBCOMMAND_FLAGS: dict[str, dict[str, Any]] = {
             "oneline graph stat name-only name-status decorate no-decorate "
             "abbrev-commit no-merges merges follow all no-patch"
         ),
-        valued_long="format pretty date since until",
+        valued_long="date since until",
+        opt_long="pretty",
+        glued_long="format",
     ),
     "diff": _flags(
         "wb",
-        valued_short="U",
+        opt_short="U",
         long="stat name-only name-status numstat shortstat cached staged no-index",
-        valued_long="color",
+        opt_long="color",
     ),
     "show": _flags(
-        "s", long="stat name-only name-status abbrev-commit no-patch", valued_long="format pretty"
+        "s",
+        long="stat name-only name-status abbrev-commit no-patch",
+        opt_long="pretty",
+        glued_long="format",
     ),
     "blame": _flags("wp", valued_short="L", long="porcelain line-porcelain", valued_long="date"),
     "rev-parse": _flags(
         "",
-        valued_short="short",
         long="verify abbrev-ref show-toplevel is-inside-work-tree is-bare-repository",
+        opt_long="short",
     ),
     "ls-files": _flags("scomdc", long="stage others modified deleted cached exclude-standard"),
     "grep": _flags("niIlLcwEF", valued_short="eABC", long="cached untracked"),
     # list forms ONLY; no operands (a ref argument CREATES or edits).
-    "branch": _flags("var", long="list all remotes", valued_long="format merged no-merged"),
+    "branch": _flags("var", long="list all remotes", consume_long="format merged no-merged"),
 }
 
 #: gh/glab: subcommand families and the complete flag set.
@@ -639,9 +675,11 @@ def _check_flag(
 ) -> tuple[str | None, int]:
     """One flag token. Returns ``(refusal | None, tokens consumed)``.
 
-    Matching is by base flag name and covers the glued and separate spellings
-    alike: ``-L2``/``-L 2`` for shorts, ``--format=x``/``--format x`` for
-    longs. The value is consumed as data.
+    Matching is by base flag name and covers the glued and separate
+    spellings. Whether the SEPARATE form exists at all, and whether it
+    consumes the next token, is per-flag-kind (``_flags``): a required value
+    consumes, an optional value never does, a glued-only value has no
+    separate form. Tokens consumed as a value are data — judged by no rule.
     """
     # Special refusals are keyed by the command FAMILY ("gh", not "gh pr
     # view"): the hazard belongs to the tool, not to one subcommand.
@@ -653,15 +691,33 @@ def _check_flag(
         # The special-refusal keys keep their dashes; the allow-list tables are
         # keyed by the bare flag name ("oneline", not "--oneline").
         name = base[2:]
+        if name in table["long_glued"]:
+            if sep:
+                return None, 1
+            return f'"{base}" only accepts a value glued to it ("{base}=…").', 1
         if name in table["long_valued"]:
-            return None, 1 if sep else 2
+            if sep:
+                return None, 1
+            if index + 1 >= len(tokens):
+                # Fail-closed (round-1 review F5): every allow-listed tool
+                # errors on a dangling value; refusing at arm time names the
+                # flag instead of counting a mystery failure at check time.
+                return f'"{base}" expects a value.', 1
+            return None, 2
+        if name in table["long_opt"]:
+            return None, 1
+        if name in table["long_consume"]:
+            if sep:
+                return None, 1
+            return None, 2 if index + 1 < len(tokens) else 1
         if name in table["long"]:
             if sep:
                 return f'"{base}" does not take a value.', 1
             return None, 1
         return f'"{base}" is not an allowed flag of {cmd}.', 1
-    # short cluster: every letter individually allowed; a value-taking letter
-    # consumes the rest of the token (glued) or the next token (separate).
+    # short cluster: every letter individually allowed; a required-value letter
+    # consumes the rest of the token (glued) or the next token (separate); an
+    # optional-value letter never consumes the next token.
     if token in special:
         return f'"{token}" {special[token]}.', 1
     body = token[1:]
@@ -669,7 +725,13 @@ def _check_flag(
     while position < len(body):
         ch = body[position]
         if ch in table["short_valued"]:
-            return None, 1 if position + 1 < len(body) else 2
+            if position + 1 < len(body):
+                return None, 1
+            if index + 1 >= len(tokens):
+                return f'"-{ch}" expects a value.', 1
+            return None, 2
+        if ch in table["short_opt"]:
+            return None, 1
         if ch in table["short"]:
             position += 1
             continue
@@ -693,12 +755,23 @@ def _git_reason(tokens: list[str]) -> str | None:
         reason = _flags_reason("git branch", rest, table)
         if reason is not None:
             return reason
-        for token in rest:
-            if not token.startswith("-"):
-                return (
-                    f'"{token}" is an operand — "git branch" is list-only here: '
-                    "creating, moving or deleting a ref is not read-only."
-                )
+        # The operand scan must SKIP the tokens a value-flag consumed: the
+        # flags' own values are data the flag owns (`--merged main`,
+        # `--format '%(refname)'` — both are the §6.4 branch row's list
+        # forms), not ref operands that create or edit anything. Only tokens
+        # no flag claimed can be operands. (Round-1 review F3: the scan
+        # walked every token, so it rejected the flags' own values.)
+        index = 0
+        while index < len(rest):
+            token = rest[index]
+            if token.startswith("-") and token != "-":
+                _, consumed = _check_flag("git branch", token, rest, index, table)
+                index += consumed
+                continue
+            return (
+                f'"{token}" is an operand — "git branch" is list-only here: '
+                "creating, moving or deleting a ref is not read-only."
+            )
         return None
     return _flags_reason(f"git {sub}", rest, table)
 

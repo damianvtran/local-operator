@@ -142,6 +142,16 @@ def test_first_check_lands_in_the_first_check_window(harness: Harness) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_create_outcome_carries_the_first_check_instant(harness: Harness) -> None:
+    """§4.5: the id and the instant ride the create receipt (F4)."""
+    outcome = await harness.scheduler.create(
+        {"tool": "bash", "arguments": {"command": "date -u"}}, cwd="/w"
+    )
+    assert outcome.get("created") is True
+    assert outcome["next_due_at"] == NOW + 1_000  # uniform picks low
+
+
+@pytest.mark.asyncio
 async def test_jitter_is_positive_and_capped(harness: Harness) -> None:
     harness.scheduler.load([spec(every_ms=30_000)])  # cap = min(5s, 3s) = 3s
     harness.results.append({"text": "A", "error": None})
@@ -399,6 +409,9 @@ async def test_the_ladder_disables_and_names_the_reason(tmp_path: Any) -> None:
         counters = harness.counters()
         assert counters["disabled"] is True
         assert counters["disabled_reason"] == "check timed out after 120s"
+        # No next check is due for a disabled monitor (§10.3): the counters
+        # state it rather than keeping a stale instant (QA round-1 obs. 2).
+        assert counters["next_due_at"] is None
         assert harness.scheduler.next_monitor_due_at() is None
         row = harness.scheduler.index_rows()[0]
         assert row["disabled"] is True and row["disabled_reason"]
@@ -427,6 +440,7 @@ async def test_reactivating_resets_failures_and_keeps_the_snapshot(tmp_path: Any
             {"tool": "bash", "arguments": {"command": "date -u"}, "every": "60s"}, cwd="/w"
         )
         assert outcome.get("reactivated") is True
+        assert outcome["next_due_at"] == harness.now_ms + 1_000  # fresh counters, first check
         counters = harness.counters()
         assert counters["disabled"] is False and counters["consecutive_failures"] == 0
         # The blob survived, so the next check diffs against the old baseline.

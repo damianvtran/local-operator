@@ -572,7 +572,32 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:
 #: The raise lands at head + 55 — the band this file keeps — and the tighten
 #: band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 33_760
+#:
+#: RAISED 33,760 -> 34,587 for the MONITOR tool (docs/design/monitor-tool.md
+#: §19.1 slice 1 — delta-watch over repeated read-only calls). Measured
+#: same-host, one tree after the other; the baseline tree is ``origin/main``
+#: AFTER this file's own last raise, so the delta is this change and nothing
+#: else:
+#:
+#:   baseline (origin/main 283e4ff3b)      93,699 chars = ~33,705 billed
+#:                                          (30 tools — the tool does not
+#:                                           exist on main)
+#:   head (this branch)                    95,999 chars = ~34,532 billed
+#:                                          (31 tools)
+#:     = +2,300 chars = +827 billed: the tool's own schema (``MonitorParams``)
+#:       plus its inventory line, and the system.md sentences that teach
+#:       wake-vs-monitor (§13) — the ladder's rung 5 tax, stated rather than
+#:       implied. The tool is GATED on the session's monitor scheduler
+#:       (createIf), and a bare ``ToolContext`` therefore gates it OFF, which
+#:       is why ``scripts/real_tool_surface.py`` gains the stub in this same
+#:       change: without it the benchmark measures 30 of 31 tools and reports
+#:       headroom no real session has — the same green-by-fiction the
+#:       projects raise above records.
+#:
+#: The raise lands at head + 55 — the band this file keeps, and together with
+#: the known CI-vs-local offset (~25 billed) it clears CI rather than this
+#: machine alone — and the tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 34_587
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
