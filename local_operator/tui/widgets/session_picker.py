@@ -526,6 +526,40 @@ NEEDS_YOU_MARKER = "!"
 #: in the rendered frame, not by a test.
 WAKE_MARKER = "◷"
 
+#: HER mark: the built-in chief of staff, wherever a list names her.
+#:
+#: ``⇈`` (U+21C8 UPWARDS PAIRED ARROWS) is the closest single-cell glyph to
+#: the product mark (two chevrons up, R4): the column already speaks a
+#: doubled-arrow language (``›``/``»`` are the one-cell cursor pair and ``⇉``
+#: means delegated work), and this is that doubling pointed up — Aida's own
+#: direction. ONE CELL for the reason WAKE_MARKER documents at length.
+#:
+#: WHERE IT PAINTS, and the deviation is deliberate (design round 1, D1): as a
+#: prefix on her NAME (the ``[fork]``/``[exec]`` precedent for per-row
+#: qualifiers), not a new fixed column. A new column would shift every row's
+#: title column; a name prefix shifts only her own row's title, and the mark
+#: is permanent for her — it never appears or disappears, so nothing reflows.
+AIDA_MARKER = "⇈"
+
+
+def aida_row_id(config_dir: Path | None = None) -> str | None:
+    """Her session id for the LIST surfaces, or ``None`` on a bare install.
+
+    One small-file read per LIST BUILD, never per row — the same rule the
+    archive index states for itself. Best-effort by contract: an identity mark
+    is decoration, so any failure answers ``None`` and every row renders
+    exactly as it did before her.
+    """
+    try:
+        from local_operator.aida import state as aida_state
+        from local_operator.paths import config_dir as resolve_config_dir
+
+        root = config_dir if config_dir is not None else resolve_config_dir()
+        return aida_state.session_id_of(root)
+    except Exception:  # noqa: BLE001 — decoration, never a render dependency
+        return None
+
+
 #: An attached session — another terminal is already watching it. Resuming is
 #: still fine (that is what a viewer IS now), but the user should know they
 #: will not be alone in there.
@@ -1273,6 +1307,7 @@ def render_rows(
     show_id: bool | None = None,
     soft_gutter: bool = False,
     exact_matched: AbstractSet[str] = frozenset(),
+    aida_id: str | None = None,
 ) -> list[Text]:
     """One line per session: cursor, name, age, id.
 
@@ -1507,6 +1542,11 @@ def render_rows(
                 _pad_cells(glyph, state_col),
                 style=row_bg + Style(color=theme_mod.semantic_color(ink)),
             )
+        if aida_id is not None and row.id == aida_id:
+            # Her identity mark rides the NAME, not a column (see
+            # `AIDA_MARKER`): prefixed before truncation so a narrow column
+            # eats the title, never the mark.
+            name = f"{AIDA_MARKER} {name}"
         line.append(
             _pad_cells(truncate_cells(name, name_col), name_col),
             style=row_bg + Style(color=name_colour),
@@ -1723,6 +1763,10 @@ class SessionPickerScreen(ModalScreen[str | None]):
     ) -> None:
         super().__init__()
         self._all = list(rows)
+        #: Her id, read ONCE per list build (see `aida_row_id`): the row
+        #: builder prefixes her name with `AIDA_MARKER` and every other row is
+        #: untouched.
+        self._aida_id = aida_row_id()
         self._now = now
         self._query = ""
         self._selected = 0
@@ -3274,6 +3318,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
                 show_id=self._layout().show_id,
                 soft_gutter=bool(query),
                 exact_matched=self._body_matches,
+                aida_id=self._aida_id,
             )
         ):
             if index:

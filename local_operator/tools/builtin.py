@@ -17367,9 +17367,10 @@ class ConsoleParams(BaseModel):
     )
     secret_ref: str = Field(
         default="",
-        description="'input': the NAME of a stored secret to type instead of 'text' (e.g. "
-        "'SUDO_PASSWORD'). Resolved from the encrypted store; never shown in the result, a "
-        "trace or a log, and registered for redaction.",
+        description="'input': the NAME of a secret to type instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'). Resolved session-first (the `ask` answer, /credential), then "
+        "the encrypted store; never shown in the result, a trace or a log, and "
+        "registered for redaction.",
     )
     paste: bool = Field(
         default=False,
@@ -17928,17 +17929,28 @@ def _console_input_params(
 ) -> ToolResult | None:
     """Resolve a `secret_ref` into the wire payload, or explain why it could not be.
 
-    The value is resolved HERE, in the session, from the same encrypted store the
-    `secret` tool writes (`§11.3`), and it is put on the wire in this one call's
-    params — the app is the only process that can write to a pty. Two things happen
-    around it, and both are the reason the ref exists at all:
+    The value is resolved HERE, in the session, and it is put on the wire in this
+    one call's params — the app is the only process that can write to a pty. Two
+    things happen around it, and both are the reason the ref exists at all:
 
     * **The model's argument is the ref, not the value**, so the tool call in the
       transcript says `secret_ref: "SUDO_PASSWORD"`;
     * **the value is registered with the session's redaction sink**
-      (:meth:`VariableStore.register_redaction`) BEFORE the call is made, so any
-      later appearance of it — in a rendered trace, a tool result, or a transcript
-      write — comes back as `[redacted]` (`§11.3`, `redaction_shapes.py`).
+      (:meth:`VariableStore.register_redaction`) BEFORE the call is made, for
+      BOTH sources below, so any later appearance of it — in a rendered trace, a
+      tool result, or a transcript write — comes back as `[redacted]` (`§11.3`,
+      `redaction_shapes.py`).
+
+    **Two sources, and the SESSION store is checked FIRST — a pinned precedence.**
+    (1) The session credential store: the value the user typed into an `ask`
+    `secret: true` question (or handed over with `/credential`). It wins because it
+    is what the user just handed over, for this task — their entry into the
+    question is the consent to use it for the command it was asked against — and
+    because session scope keeps it off disk: a relayed `sudo` password does not
+    become a stored artifact just because one command needed it. (2) The encrypted
+    long-term store (`retrieve_secret`, the same store the `secret` tool writes):
+    the fallback, for a value the user chose to persist, reached only when the
+    session store has no such key.
 
     Returns `None` when the wire payload is ready, and the error result to hand back
     when it is not. The error path names the secret and the failure, never a byte of
@@ -17984,18 +17996,59 @@ def _console_input_params(
             "app records no keystrokes), or use `bash` with $(lop secret get "
             f"{ref}) which announces the value to the session before it is used.",
         )
-    try:
-        from local_operator.secrets.access import retrieve_secret
+    # Session credentials FIRST, deliberately (the docstring carries why): the
+    # value the user just handed over through `ask` beats a same-named value in
+    # the long-term store. `credential_env` is read defensively the way the bash
+    # injector and `_stream_redaction_values` read theirs — a duck-typed store
+    # whose accessor raises or returns something other than a dict must degrade
+    # to "no session value" and fall through to the encrypted store, because
+    # this resolver's contract is a typed `_error`, never an unhandled exception
+    # out of `execute_console` (M1, review round 1). The cast is for the type
+    # checker only: `getattr` yields `object` once `callable` narrows it.
+    credential_env = cast(
+        Callable[[], dict[str, str]] | None,
+        getattr(store, "credential_env", None),
+    )
+    session_values: dict[str, str] | None = None
+    if callable(credential_env):
+        try:
+            fetched = credential_env()
+        except Exception:  # noqa: BLE001 - a misbehaving store, not a wiring fault
+            logger.warning("session credential store could not be read", exc_info=True)
+            fetched = None
+        if isinstance(fetched, dict):
+            session_values = fetched
+    value: str | None = None
+    if session_values is not None:
+        value = session_values.get(ref)
+        if value is None:
+            # The ask result reports the normalized key, but `secret_ref` is
+            # model-authored text: apply the same collapse the store applied on
+            # write, so `sudo-password` finds `SUDO_PASSWORD` too.
+            from local_operator.variables import normalize_credential_key
 
-        value = retrieve_secret(ref).decode("utf-8", errors="surrogateescape")
-    except Exception as exc:  # noqa: BLE001 - every failure here is reportable, none fatal
-        return _error(
-            tool_call_id,
-            "console",
-            f"could not resolve secret_ref {ref!r}: {exc}. Store the value with the `secret` "
-            "tool (or have the user type it into the surface) and retry — do not put the "
-            "value itself in `text`.",
-        )
+            normalized = normalize_credential_key(ref)
+            if normalized is not None:
+                value = session_values.get(normalized)
+    if value is None:
+        try:
+            from local_operator.secrets.access import retrieve_secret
+
+            value = retrieve_secret(ref).decode("utf-8", errors="surrogateescape")
+        except Exception as exc:  # noqa: BLE001 - every failure here is reportable, none fatal
+            # The failure's own words, normalised to exactly one closing period:
+            # `SecretNotFound`'s text already ends in one and this sentence
+            # appends its own, which printed `...in this store.. Get the value...`
+            # before (QA round 1, Q2).
+            detail = str(exc).strip().rstrip(".") or "no reason was reported"
+            return _error(
+                tool_call_id,
+                "console",
+                f"could not resolve secret_ref {ref!r}: {detail}. Get the value from the user "
+                "with an `ask` secret question (their entry into it is the approval), store "
+                "it with the `secret` tool, or have the user type it into the surface, then "
+                "retry — do not put the value itself in `text`.",
+            )
     register(value)
     wire["text"] = value
     return None
@@ -20857,6 +20910,19 @@ ASK_UNANSWERED_TEXT = (
 )
 
 
+#: What a batch reports when the user closed it and at least ONE question was
+#: a secret one. Distinct from ASK_UNANSWERED_TEXT because that text is wrong
+#: here twice over: a secret question has no recommended option to fall back
+#: on, and "carry on" is exactly what must not happen when the thing that did
+#: not come back is the credential a privileged command was waiting for — the
+#: user's Escape IS the answer, a decline (UX round 1, U3).
+ASK_SECRET_UNANSWERED_TEXT = (
+    "The user did not hand over the credential — do not run anything that "
+    "needed it; report what was left undone. Do not ask again: a declined "
+    "secret is an answer."
+)
+
+
 #: What a secret question reports when the user declined or the store refused.
 ASK_SECRET_NOT_PROVIDED = "<not provided>"
 
@@ -21099,6 +21165,16 @@ async def execute_ask(
         # a mapping with nothing in it (confirmed an empty multi-select): the
         # user chose nothing, and splitting that into two results would give the
         # model a distinction it cannot act on differently.
+        #
+        # EXCEPT a secret question, where the outcomes genuinely differ: there
+        # is no recommended option to fall back on, and "carry on" is the exact
+        # wrong instruction when the missing thing is the credential a
+        # privileged command was waiting for. The user's Escape there IS the
+        # answer — a decline — so the batch reports that instead (UX round 1,
+        # U3). A partially answered mixed batch keeps the normal path, where a
+        # declined secret is already reported as ASK_SECRET_NOT_PROVIDED.
+        if any(question.secret for question in params.questions):
+            return _text(tool_call_id, "ask", ASK_SECRET_UNANSWERED_TEXT)
         return _text(tool_call_id, "ask", ASK_UNANSWERED_TEXT)
     # Secret answers are stored by the host and reported as the KEY NAME
     # only. The raw value must never ride the tool result: that text is

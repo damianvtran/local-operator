@@ -8,6 +8,9 @@ test failure.
 
 from __future__ import annotations
 
+import re
+import shutil
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,13 +19,18 @@ from local_operator.agent_profiles import (
     MAX_INSTRUCTIONS_CHARS,
     READ_ONLY_NETWORK_TOOLS,
     READ_ONLY_TOOLS,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
     AgentProfile,
     filter_tools,
     install_seed,
     list_seeds,
     load_seed,
+    load_seed_version,
     resolve_profile,
+    seed_fingerprint,
     seed_tags,
+    sync_installed_seeds,
 )
 from local_operator.agents import AgentRegistry
 
@@ -428,3 +436,412 @@ def test_a_non_role_exact_match_does_not_shadow_the_operators_own_role(tmp_path)
     assert profile is not None
     assert profile.agent_id == role.id, "the operator's own role must win"
     assert profile.instructions == "HOUSE RULES"
+
+
+# -- update checks: sync_installed_seeds -------------------------------------
+#
+# The package is the thing that MOVES in these tests, so each one rewrites a
+# scratch copy of the seed catalogue and redirects ``SEEDS_DIR`` at it. The
+# verdict table is exercised against that moved package, never against a
+# hand-stamped row pretending to be one — the stamps installed here are the
+# ones install_seed itself writes.
+
+
+@pytest.fixture()
+def scratch_seeds(tmp_path, monkeypatch) -> Path:
+    """A writable copy of the packaged seeds, so a test can move the package."""
+
+    import local_operator.agent_profiles as agent_profiles
+
+    destination = tmp_path / "agent_seeds"
+    shutil.copytree(Path(agent_profiles.SEEDS_DIR), destination)
+    monkeypatch.setattr(agent_profiles, "SEEDS_DIR", destination)
+    return destination
+
+
+def move_seed(seeds_dir: Path, name: str, *, version: str, body: str | None = None) -> None:
+    """Rewrite one packaged seed: a new ``version:`` and new body text.
+
+    Both move together because that is the update sync exists for: a body
+    change ships with a version bump (the manifest's byte-identity test owns
+    that rule), and sync's whole verdict table is defined over the pair.
+    """
+
+    path = seeds_dir / f"{name}.md"
+    text = path.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    assert len(parts) == 3, f"{name}.md has no frontmatter"
+    parts[1] = re.sub(r"^version:.*$", f"version: {version}", parts[1], flags=re.M)
+    parts[2] = f"\n\n{body or f'Guidance for {name} as of {version}.'}\n"
+    path.write_text("---".join(parts), encoding="utf-8")
+
+
+def _install(registry: AgentRegistry, name: str = "reviewer"):
+    installed = install_seed(name, registry=registry)
+    assert installed is not None
+    row = registry.get_agent_by_name(name)
+    assert row is not None
+    return row
+
+
+def test_an_untouched_copy_of_an_unmoved_starter_is_up_to_date(scratch_seeds, tmp_path) -> None:
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    before = list(row.tags)
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "up-to-date"
+    assert verdict.applied is False
+    assert verdict.installed_version == verdict.packaged_version
+    after = registry.get_agent_by_name("reviewer")
+    assert after is not None
+    assert list(after.tags) == before
+
+
+def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds, tmp_path) -> None:
+    """The headline path: update local-operator, run sync, the starter updates.
+
+    This is exactly the case a version+divergence-only check cannot classify
+    (the row differs from the NEW packaged text whether or not it was edited),
+    which is why install records a fingerprint of what it wrote.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    before_prompt = registry.get_agent_system_prompt(row.id)
+    move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean"
+    assert verdict.applied is True
+    assert verdict.installed_version == "1.0.0"
+    assert verdict.packaged_version == "2.0.0"
+    assert verdict.diverged_fields == ("instructions",)
+    # The echo: recoverable by copy-paste, the same guarantee reset gives.
+    assert verdict.replaced_instructions == before_prompt
+    after = registry.get_agent_by_name("reviewer")
+    assert after is not None
+    assert registry.get_agent_system_prompt(after.id).strip() == "REVIEWER v2 GUIDANCE"
+    assert "seed_version:2.0.0" in after.tags
+    # A second run has nothing left to do — and does not re-echo.
+    (again,) = sync_installed_seeds(registry)
+    assert again.verdict == "up-to-date"
+
+
+def test_an_edited_copy_refuses_and_force_replaces_it(scratch_seeds, tmp_path) -> None:
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    registry.set_agent_system_prompt(row.id, "MY EDITED PROMPT")
+    move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-diverged"
+    assert verdict.applied is False
+    assert verdict.diverged_fields == ("instructions",)
+    assert "force" in verdict.detail
+    # The refusal is a real one: the edit is still there.
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
+    (forced,) = sync_installed_seeds(registry, force=True)
+
+    assert forced.verdict == "outdated-diverged"
+    assert forced.applied is True
+    assert forced.replaced_instructions == "MY EDITED PROMPT"
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+def test_a_current_but_edited_copy_is_not_a_sync_target(scratch_seeds, tmp_path) -> None:
+    """The packaged starter has not moved, so there is nothing to PULL.
+
+    Sync must not turn into a silent reset of local edits: it reports the row
+    as current (v2's drift is visible in ``show``, which owns that surface)
+    and leaves the text alone.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    registry.set_agent_system_prompt(row.id, "MY EDITED PROMPT")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "up-to-date"
+    assert "local edits" in verdict.detail
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
+
+def test_a_row_from_before_the_markers_is_refused_when_its_starter_moved(
+    scratch_seeds, tmp_path
+) -> None:
+    """``seed_origin``'s safe direction, applied to updates.
+
+    An old row has no recorded baseline, so \"unedited\" cannot be proven once
+    the packaged text moves; the refusal (force to apply) is the direction that
+    cannot destroy a person's work. When the text has NOT moved, the row still
+    matches the package and sync leaves it alone.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    # Strip exactly the sync markers, keeping the profile tags a real old row
+    # carries (dropping a ``tools:`` tag would be a different scenario — an
+    # edit — and would confuse this test with the refusal one above).
+    registry.update_agent(
+        row.id,
+        _edit_fields(
+            tags=[
+                tag
+                for tag in row.tags
+                if not tag.startswith((SEED_VERSION_PREFIX, SEED_SHA256_PREFIX))
+            ]
+        ),
+    )
+
+    (still_current,) = sync_installed_seeds(registry)
+    assert still_current.verdict == "up-to-date"
+
+    move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+    (verdict,) = sync_installed_seeds(registry)
+    assert verdict.verdict == "outdated-diverged"
+    assert verdict.applied is False
+
+    (forced,) = sync_installed_seeds(registry, force=True)
+    assert forced.applied is True
+
+
+def _move_seed_body_without_bumping(seeds_dir: Path, name: str, *, body: str) -> None:
+    """Rewrite one packaged seed's BODY, leaving ``version:`` alone.
+
+    ``move_seed`` keeps the pair together by convention, but nothing enforces
+    that pairing: the generator derives the body's ``instructions_sha256`` and
+    the frontmatter's ``version`` as independent fields, so a body shipped
+    under a stale version is a real (if careless) package move — and the case
+    that used to be mis-classified as a local edit because the versions still
+    matched (agent review round 1, M1).
+    """
+
+    path = seeds_dir / f"{name}.md"
+    text = path.read_text(encoding="utf-8")
+    parts = text.split("---", 2)
+    assert len(parts) == 3, f"{name}.md has no frontmatter"
+    parts[2] = f"\n\n{body}\n"
+    path.write_text("---".join(parts), encoding="utf-8")
+
+
+def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> None:
+    """Classification is the FINGERPRINT's job, not the version string's.
+
+    Comparing versions first called this move "this copy has local edits": the
+    row was reported up to date and was un-updateable even with ``force``
+    (agent review round 1, M1).
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    before_prompt = registry.get_agent_system_prompt(row.id)
+    _move_seed_body_without_bumping(
+        scratch_seeds, "reviewer", body="REVIEWER, SAME VERSION, NEW TEXT"
+    )
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean"
+    assert verdict.applied is True
+    assert verdict.installed_version == verdict.packaged_version == "1.0.0"
+    assert verdict.replaced_instructions == before_prompt
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
+
+
+def test_an_unbumped_body_change_refuses_a_local_edit_but_force_applies(
+    scratch_seeds, tmp_path
+) -> None:
+    """The same move with an edit in the way: refusal, then force."""
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    registry.set_agent_system_prompt(row.id, "MY EDITED PROMPT")
+    _move_seed_body_without_bumping(
+        scratch_seeds, "reviewer", body="REVIEWER, SAME VERSION, NEW TEXT"
+    )
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-diverged"
+    assert verdict.applied is False
+    assert verdict.diverged_fields == ("instructions",)
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
+    (forced,) = sync_installed_seeds(registry, force=True)
+
+    assert forced.applied is True
+    assert forced.replaced_instructions == "MY EDITED PROMPT"
+
+
+def test_a_row_with_no_install_record_says_what_it_cannot_tell(scratch_seeds, tmp_path) -> None:
+    """A pre-marker row is evidence of neither a move nor an edit.
+
+    With no recorded baseline both readings produce the same difference, so the
+    report must not assert either one — the old wording announced an update
+    the row had no way to know about, and pointed at ``force``, which would
+    have reverted the user's own text (agent review round 1, M1). The refusal
+    itself is unchanged: force is the explicit way to take the packaged text.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    registry.set_agent_system_prompt(row.id, "MY EDITED PROMPT")
+    registry.update_agent(
+        row.id,
+        _edit_fields(
+            tags=[
+                tag
+                for tag in row.tags
+                if not tag.startswith((SEED_VERSION_PREFIX, SEED_SHA256_PREFIX))
+            ]
+        ),
+    )
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-diverged"
+    assert verdict.applied is False
+    assert "no install record" in verdict.detail
+    assert "cannot tell" in verdict.detail
+    assert registry.get_agent_system_prompt(row.id) == "MY EDITED PROMPT"
+
+
+def test_a_package_move_backward_still_applies_and_shows_both_versions(
+    scratch_seeds, tmp_path
+) -> None:
+    """The intended direction semantics (QA round 1, Q-1).
+
+    ``sync`` means "make this copy match the starter THIS build ships", so a
+    package moving from a newer version back to an older one (a ``lop``
+    downgrade, a channel switch, a reverted starter) is the same update in the
+    other direction. Both versions and the replaced text ride in the receipt,
+    so the move is visible and never silent — pinned here as intended rather
+    than incidental.
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    move_seed(scratch_seeds, "reviewer", version="1.0.1", body="REVIEWER v1.0.1 GUIDANCE")
+    sync_installed_seeds(registry)
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v1.0.1 GUIDANCE"
+
+    move_seed(scratch_seeds, "reviewer", version="0.9.0", body="REVIEWER v0.9.0 GUIDANCE")
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean"
+    assert verdict.applied is True
+    assert (verdict.installed_version, verdict.packaged_version) == ("1.0.1", "0.9.0")
+    assert verdict.replaced_instructions is not None
+    assert verdict.replaced_instructions.strip() == "REVIEWER v1.0.1 GUIDANCE"
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v0.9.0 GUIDANCE"
+
+
+def test_a_case_renamed_row_is_updated_in_place_not_duplicated(scratch_seeds, tmp_path) -> None:
+    """Discovery folds names; the apply must resolve through the same fold.
+
+    The desktop update route can rename a row (``reviewer`` → ``Reviewer``).
+    Folded discovery found it, the exact-case install lookup missed it, and
+    ``create_agent`` minted a second ``reviewer`` beside it — reported as an
+    update while the duplicate appeared (agent review round 1, M2).
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    row = _install(registry)
+    registry.update_agent(row.id, _edit_fields(name="Reviewer"))
+    move_seed(scratch_seeds, "reviewer", version="2.0.0", body="REVIEWER v2 GUIDANCE")
+
+    (verdict,) = sync_installed_seeds(registry)
+
+    assert verdict.verdict == "outdated-clean"
+    assert verdict.applied is True
+    names = sorted(agent.name for agent in registry.list_agents())
+    assert names == ["Reviewer"], "the rename must survive; no duplicate row"
+    assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER v2 GUIDANCE"
+
+
+def test_install_does_not_mint_a_case_duplicate(scratch_seeds, tmp_path) -> None:
+    """The same fold on the install verb: a renamed row IS the row.
+
+    ``op='install'`` and ``reset`` run through this lookup; exact-case-only
+    meant asking to install ``reviewer`` beside a renamed ``Reviewer`` created
+    a rival row holding the packaged text (agent review round 1, M2).
+    """
+
+    registry = AgentRegistry(tmp_path / "config")
+    role = registry.create_agent(_edit_fields(name="Reviewer", description="house", tags=["role"]))
+    registry.set_agent_system_prompt(role.id, "HOUSE RULES")
+
+    installed = install_seed("reviewer", registry=registry)
+
+    assert installed is not None
+    names = sorted(agent.name for agent in registry.list_agents())
+    assert names == ["Reviewer"], "no second row under the packaged spelling"
+    assert (
+        registry.get_agent_system_prompt(role.id) == "HOUSE RULES"
+    ), "a non-overwriting install writes nothing"
+
+
+def test_sync_by_name_reports_what_is_not_an_update_target(scratch_seeds, tmp_path) -> None:
+    registry = AgentRegistry(tmp_path / "config")
+
+    (missing,) = sync_installed_seeds(registry, names=["reviewer"])
+    assert missing.verdict == "not-installed"
+    assert "op='install'" in missing.detail
+    (unknown,) = sync_installed_seeds(registry, names=["nope"])
+    assert unknown.verdict == "not-installed"
+    assert "no installed role of this name" in unknown.detail
+
+    # A hand-authored role under a starter's name is NOT a copy of the starter
+    # and must never be rewritten: the not-installed verdict says which verb
+    # actually applies.
+    registry.create_agent(_edit_fields(name="reviewer", description="mine", tags=["role"]))
+    (authored,) = sync_installed_seeds(registry, names=["reviewer"])
+    assert authored.verdict == "not-installed"
+    assert "not installed from a packaged starter" in authored.detail
+
+
+def test_sync_by_name_only_processes_the_named_seed(scratch_seeds, tmp_path) -> None:
+    registry = AgentRegistry(tmp_path / "config")
+    _install(registry, "reviewer")
+    _install(registry, "coder")
+
+    verdicts = sync_installed_seeds(registry, names=["coder"])
+
+    assert [verdict.name for verdict in verdicts] == ["coder"]
+
+
+def test_the_fingerprint_covers_the_fields_the_seed_writes() -> None:
+    """A baseline that missed a field would call an edit to it \"clean\".
+
+    The allowlist is the one with a scar: a widened ``tools:`` tag is a
+    capability change the restore path exists to protect, so a fingerprint
+    that hashed only the prose would silently overwrite it.
+    """
+
+    seed = load_seed("reviewer")
+    assert seed is not None
+    baseline = seed_fingerprint(seed)
+
+    widened = AgentProfile(
+        name=seed.name,
+        description=seed.when_to_use or seed.description,
+        instructions=seed.instructions,
+        tools=tuple(seed.tools or ()) + ("write",),
+        effort=seed.effort,
+        may_delegate=seed.may_delegate,
+    )
+    assert seed_fingerprint(widened) != baseline
+
+
+def test_seed_version_reads_the_frontmatter_the_manifest_publishes() -> None:
+    """One version, two readers: the manifest and the install stamp."""
+
+    for name in list_seeds():
+        assert load_seed_version(name), name
+    assert load_seed_version("does-not-exist") == ""

@@ -362,7 +362,7 @@ async def _one_run(variant: str, index: int) -> dict[str, Any]:
     """One cold engage in a fresh HOME + config dir, with every mark recorded."""
     from local_operator.mobile.attach_client import find_runtime_record
     from local_operator.session.attached import AttachedSession
-    from local_operator.session.runtime.registry import run_dir
+    from local_operator.session.runtime.registry import ensure_run_dir
 
     root = Path(tempfile.mkdtemp(prefix=f"lop-bench-{variant}-"))
     config_dir = root / ".local-operator"
@@ -399,7 +399,7 @@ async def _one_run(variant: str, index: int) -> dict[str, Any]:
     cwd = str(root)
     timeline = Timeline()
     _CURRENT[:] = [timeline]
-    watcher = RecordWatcher(run_dir(config_dir))
+    watcher = RecordWatcher(ensure_run_dir(config_dir))
     watcher.start()
     watcher.ready.wait(2.0)
     timeline.mark("parent.watcher_ready")

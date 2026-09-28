@@ -957,36 +957,34 @@ def _loaded_names(node: ast.AST) -> set[str]:
     }
 
 
-def _assignment_value(source: str) -> ast.expr:
-    """The right-hand side of a one-line probe assignment in ``source``.
+def _call_name(node: ast.Call) -> str:
+    """The name a call goes by: the attribute's last leg, or the bare name.
 
-    A probe rather than an inline ``ast.parse(...).body[0].value`` so the
-    expression has a home the type checker can read ``.value`` from: the parsed
-    body is a statement, and only an ``ast.Assign`` exposes one.
+    ``self._owner.make_client(...)`` and ``make_client(...)`` both answer
+    ``make_client``; anything else answers what it is spelled as.
     """
-    node = ast.parse(source).body[0]
-    assert isinstance(node, ast.Assign), "the probe source must be one assignment"
-    return node.value
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return getattr(func, "id", "")
 
 
 def _slashed_consumer_dials(source: str) -> list[ast.expr]:
-    """Every expression ``source`` passes as a ``slash_consumers=`` keyword."""
+    """Every expression a CLIENT CONSTRUCTION passes as a ``slash_consumers=``.
+
+    SCOPED TO ``make_client(...)`` since review round 1's MAJOR-2: the facade now
+    hands a declaration ON to the constructor (``cold()``'s pass-through, which is
+    what makes a one-shot viewer able to narrow it), and that hop is not the auth
+    frame. Counting it would report the ONE declaration site as two while nothing
+    about what the client dials with had changed.
+    """
     return [
         keyword.value
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call)
         for keyword in node.keywords
-        if keyword.arg == "slash_consumers"
+        if keyword.arg == "slash_consumers" and _call_name(node) == "make_client"
     ]
-
-
-#: The declaration the auth frame must dial with, as a PARSED SHAPE rather than
-#: as source text (review round 3, NIT-1): ``black`` re-wraps that call — it
-#: already sits at the argument-width boundary — without changing the fact it
-#: states, and a substring match failed on the re-wrap alone. ``ast.dump``
-#: compares the expression, so line breaks, trailing commas and comments under it
-#: are all free.
-_EXPECTED_DIAL = ast.dump(_assignment_value("_dialed = list(ATTACHED_SLASH_CONSUMERS)"))
 
 
 def test_the_command_handler_routes_its_decision_through_the_helper() -> None:
@@ -1073,11 +1071,18 @@ def test_the_client_declares_every_action_receipt_this_route_claims() -> None:
 
     ``desktop_viewer_must_submit`` answers "this host declared it" by reading
     ``ATTACHED_SLASH_CONSUMERS`` — the list ``AttachedSession`` really puts in its
-    auth frame. If a future edit narrowed that declaration, this host would stand
-    down for the missing types (correctly) while the docstring still claimed the
-    whole vocabulary, and the symptom would be a receipt nobody completes: the
-    very drop this route was written to repair. A subset declaration is therefore
-    a test failure, from whichever side it is introduced.
+    auth frame. If a future edit narrowed that DEFAULT declaration, this host would
+    stand down for the missing types (correctly) while the docstring still claimed
+    the whole vocabulary, and the symptom would be a receipt nobody completes: the
+    very drop this route was written to repair. Narrowing the default is therefore
+    still a test failure, from whichever side it is introduced.
+
+    A viewer whose declaration is narrowed for ITSELF is a different thing and is
+    now a supported client kind (review round 1, MAJOR-2): a ONE-SHOT viewer
+    renders no receipt, so it declares ``()`` and lets the runtime submit the
+    request — narrowed deliberately, by the caller, at the one site this cell
+    reads. So the fact asserted below is the DEFAULT branch, which is the half
+    this route's assumption rests on.
 
     It also pins the DISCOVERY of the previous shape: the declaration must not be
     written out as a second literal, which is one more list to forget.
@@ -1095,10 +1100,35 @@ def test_the_client_declares_every_action_receipt_this_route_claims() -> None:
     # also the point — a second one is a declaration the route reads but the
     # client does not send.
     dials = _slashed_consumer_dials(attached_source)
-    assert [ast.dump(dial) for dial in dials] == [_EXPECTED_DIAL], (
-        "the auth frame must declare the shared constant exactly once — "
-        "``slash_consumers=list(ATTACHED_SLASH_CONSUMERS)``; a second literal "
-        "here is a declaration the route reads but the client does not send"
+    assert len(dials) == 1, (
+        "the auth frame must declare ``slash_consumers`` exactly once; a second "
+        "keyword is a declaration the route reads but the client does not send"
+    )
+    # THE DECLARATION IS A PASS-THROUGH since review round 1's MAJOR-2: the client is
+    # dialled with whatever the viewer was CONSTRUCTED with, so a ONE-SHOT viewer
+    # (``network/cli.py``'s pilot verbs) can declare ``()`` — which is what makes the
+    # runtime submit an action receipt's request itself instead of standing down for
+    # a viewer that prints the notice and exits. The protection this cell had is
+    # carried by two facts that still hold:
+    #
+    # * the dial expression names no receipt type of its own (no second literal to
+    #   forget — the vocabulary lives in ``ATTACHED_SLASH_CONSUMERS`` alone), and
+    # * the DEFAULT a viewer with a composer dials is STILL the shared constant,
+    #   which now lives on the constructor rather than in that expression.
+    literals = {
+        child.value
+        for child in ast.walk(dials[0])
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    }
+    assert not literals, (
+        "the dial expression must not spell receipt types itself; the vocabulary "
+        f"belongs to the shared constant, not to {sorted(literals)}"
+    )
+    kwdefaults = getattr(attached_module.AttachedSession.__init__, "__kwdefaults__", None) or {}
+    default = kwdefaults.get("slash_consumers")
+    assert default == ATTACHED_SLASH_CONSUMERS, (
+        "a viewer that renders receipts must dial the shared constant BY DEFAULT; "
+        f"the constructor's default is {default!r}"
     )
 
 

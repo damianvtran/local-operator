@@ -3,30 +3,48 @@
 # Read `.github/helpdesk/README.md` first: it carries the design, the security
 # model, and the maintenance notes. The short version of the choices here:
 #
-# * `pull_request` (NOT `pull_request_target`): a fork PR never gets repository
-#   secrets on its own events. Fork PRs are excluded on EVERY path — the
-#   `pull_request` clause checks the head repo in the payload, and the
-#   comment/dispatch paths run a guard step that resolves the head repo (and
-#   the PR's state) through the API before anything is checked out, because a
-#   mention comment or a dispatch is NOT a fork event and would otherwise run
-#   with secrets while the fork's code sits in the workspace.
-# * The bot reviews a PR once, automatically, when it is opened non-draft or
-#   marked ready for review. Later heads — and a reopened PR, which gets no
-#   automatic pass — are reviewed on demand: a write-access user comments a
-#   mention (see each job's `issue_comment` clause; `@aida` / `@Aida` are
-#   legacy aliases kept so threads from before the rename keep working).
-#   Pushes and reopens do NOT re-trigger by design — the PR's own CI carries
-#   the per-push signal, and every engagement spends provider tokens.
-#   `cancel-in-progress` is true only for `pull_request`-event runs, and the
-#   two lanes carry distinct concurrency groups (`-auto` / `-manual`): a
-#   ready_for_review run supersedes an in-flight opened run on the same PR,
-#   while a comment- or dispatch-triggered run neither cancels nor can be
-#   cancelled by an automatic run. The bot's own comments must not re-trigger
-#   it either: Bot actors (and bot-authored content) never start runs — keep
-#   that invariant on every path, now that comments are posted with the app
-#   token (app-token events CAN start runs where workflow-token events cannot
-#   — which is why the trigger clauses test the event actor's type, not only
-#   the content author's).
+# * The bot DEFERS: it engages a pull request only when the PR is due, and the
+#   sweep decides what is due. A `schedule: */15` reconciler (the `reconcile`
+#   job) enumerates open PRs and DISPATCHES this same workflow once per
+#   engagement (`workflow_dispatch` with `-f pr=… -f mode=review|verdict -f
+#   source=sweep`), so every engagement keeps ONE execution path — its own
+#   run, log and timeout. `pull_request` is no longer a trigger at all: a
+#   push, a reopen or a draft flip never starts the model; the sweep is the
+#   only automatic path, and it waits 30 minutes (a PR's own rounds should
+#   appear first) with `reconcile.sh` as the single decision point — it also
+#   defers a verdict whose rounds predate the current head and dedupes
+#   attempts per family state (this file's `run-name:` is what makes an
+#   attempt recognizable).
+# * Review mode is the concise guidelines-compliance pass for a PR with no
+#   contributor rounds yet; verdict mode is the terminal ✅/❌ compliance
+#   verdict once the contributor's own rounds have settled and read terminal —
+#   one verdict per head, and NOTHING is posted while a thread is still
+#   moving. Both briefs live in `.github/helpdesk/prompts/`.
+# * Sweep-dispatched runs re-check that the engagement is still due
+#   (`reconcile.sh check`) before checking anything out — it can become moot
+#   between the decision and the run. The recovery paths are unchanged
+#   mechanics: a write-access mention (`@sir-knight…` / legacy `@aida`) runs a
+#   review pass regardless of the sweep's gates, and a manual
+#   `workflow_dispatch` runs either mode (`-f mode=verdict`); manual runs pass
+#   an empty `source`, which is what bypasses the already-engaged gate. Issue
+#   triage stays immediate on `issues [opened]` for any non-bot author:
+#   issues do not wait.
+# * The sweep job is the ONLY place `actions: write` exists, and it is safe
+#   there BY CONSTRUCTION: it runs no model code, mints no app token, checks
+#   out only the default branch, and its one write is `gh workflow run
+#   helpdesk.yml` with fixed inputs. The model never holds that token.
+# * There is no `pull_request`/`pull_request_target` trigger: a fork PR never
+#   gets repository secrets on its own events, and fork PRs are excluded on
+#   EVERY path — the sweep skips them (head owner/name mismatch), and
+#   comment/dispatch runs resolve the head repo (and the PR's state) through
+#   the API before anything is checked out, because a mention comment or a
+#   dispatch is NOT a fork event and would otherwise run with secrets while
+#   the fork's code sits in the workspace.
+# * The bot's own comments must not re-trigger it: Bot actors (and
+#   bot-authored content) never start runs — keep that invariant on every
+#   path, now that comments are posted with the app token (app-token events
+#   CAN start runs where workflow-token events cannot — which is why the
+#   trigger clauses test the event actor's type, not only the content author's).
 # * The provider key (`RADIENT_API_KEY`) is a deployment switch: with it unset
 #   the run skips the engagement with a warning and a run-summary note — no
 #   comment and no red check — because a repository that has not yet configured
@@ -41,11 +59,26 @@
 #   approval (harness/subagent.py copies both to child sessions).
 name: Sir Knight Lop the Second
 
+# Run titles ARE the attempt dedupe's and the daily budget's input: the sweep
+# recognizes an engagement by its title (`… — <mode> PR #<n>`, ` (sweep)`
+# appended on sweep dispatches) — see `attempt_skip_reason` and
+# `sweep_dispatched_24h` in reconcile.sh; keep them in step. The expression
+# covers every event that runs this workflow: the sweep itself, issue triage,
+# PR mentions, and dispatches.
+run-name: >-
+  ${{ (github.event_name == 'schedule' && 'Sir Knight Lop the Second — sweep')
+      || ((inputs.issue != '' || github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request))
+          && format('Sir Knight Lop the Second — triage issue #{0}', inputs.issue || github.event.issue.number))
+      || ((inputs.pr != '' || github.event.pull_request.number || github.event.issue.number)
+          && format('Sir Knight Lop the Second — {0} PR #{1}{2}', inputs.mode || 'review', inputs.pr || github.event.pull_request.number || github.event.issue.number, inputs.source == 'sweep' && ' (sweep)' || ''))
+      || 'Sir Knight Lop the Second — dispatch' }}
+
 on:
-  pull_request:
-    # Reviewed once at creation/ready; later heads and re-opened PRs on demand
-    # (a mention), because pushes and reopens do not re-trigger by design.
-    types: [opened, ready_for_review]
+  schedule:
+    # The sweep. Its cadence is the wait's granularity: an engagement fires
+    # after REVIEW_DELAY_MINUTES (or VERDICT_SETTLE_MINUTES), plus at most one
+    # sweep interval of scheduling slack.
+    - cron: '*/15 * * * *'
   issues:
     types: [opened]
   issue_comment:
@@ -60,6 +93,18 @@ on:
         description: Issue number to triage
         required: false
         type: string
+      mode:
+        description: Engagement mode for a PR — review (default) or verdict
+        required: false
+        type: choice
+        options:
+          - review
+          - verdict
+        default: review
+      source:
+        description: 'Internal: the sweep sets "sweep" so the run re-checks the already-engaged gate; leave empty for a manual run.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -68,37 +113,128 @@ permissions:
   # block is `none`, not "default": on the fallback identity, without these
   # three the prompts' `gh pr checks` call 403s with "Resource not accessible
   # by integration". (Under the app token the reads work on public
-  # repositories — see the README's security model.)
+  # repositories — see the README's security model. The `reconcile` job
+  # overrides this block job-wide; see its comment.)
   actions: read
   checks: read
   statuses: read
   issues: write
   pull-requests: write
 
-concurrency:
-  # `-auto` / `-manual` keep the lanes apart so their cancellation rules can
-  # differ: an automatic (`pull_request`) run supersedes an in-flight automatic
-  # run on the same PR, while a comment- or dispatch-triggered run neither
-  # cancels an in-flight review nor can be cancelled by an automatic run.
-  group: helpdesk-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr || inputs.issue || github.run_id }}-${{ github.event_name == 'pull_request' && 'auto' || 'manual' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
+  reconcile:
+    name: Sweep open PRs
+    # The sweep: scheduled every 15 minutes, it decides which open PRs are due
+    # an engagement (`.github/helpdesk/reconcile.sh sweep`) and dispatches this
+    # workflow once per engagement. `schedule` runs always use the default
+    # branch's copy, so this job never executes PR code; it runs no model and
+    # mints no app token.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Job-level `permissions:` REPLACES the workflow block, so everything this
+    # job needs is listed. `actions: write` is the one scope beyond read, and
+    # it is what lets `gh workflow run` dispatch helpdesk.yml; it is safe HERE
+    # by construction: no model code runs in this job (no `lop exec`, no PR
+    # checkout), the job only reads this repository and dispatches helpdesk.yml
+    # with fixed inputs — so the model never holds this token.
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      actions: write
+    concurrency:
+      # A sweep is an idempotent decider: the newest one wins, and a stuck one
+      # is replaced rather than queued behind itself. It must not share the
+      # engagement group — a sweep must never cancel, nor be cancelled by, a
+      # model engagement.
+      group: helpdesk-sweep
+      cancel-in-progress: true
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      # The key is a deployment switch, not a run failure: an unconfigured
+      # repository skips with a warning and a run-summary note, so it cannot
+      # red-X every PR. Real failures once enabled stay loud — the notice step
+      # below still fires on failure().
+      - name: Check the provider key (skip with a warning when unset)
+        id: key
+        # Step-scoped, not job-scoped: of the sweep's steps only this check
+        # reads the key, so the mapping lives here — the checkout, sweep and
+        # dispatch steps never hold the spend credential (the review/triage
+        # jobs map it job-wide because their `lop exec` step needs it).
+        # Load-bearing: without a mapping in scope the check always saw an
+        # unset key and every scheduled sweep took the disabled path —
+        # reconcile.test.sh guards that regression.
+        env:
+          RADIENT_API_KEY: ${{ secrets.RADIENT_API_KEY }}
+        run: |
+          if [ -z "${RADIENT_API_KEY:-}" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RADIENT_API_KEY is not set; Sir Knight Lop the Second is disabled for this repository until it is. Add it under Settings -> Secrets and variables -> Actions (see .github/helpdesk/README.md, setup item 1)."
+            {
+              echo "## Sir Knight Lop the Second is disabled"
+              echo
+              echo "RADIENT_API_KEY is not set for ${GITHUB_REPOSITORY}, so this run did nothing. Add the secret under Settings -> Secrets and variables -> Actions to enable Sir Knight Lop the Second (see \`.github/helpdesk/README.md\`)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      # The reconciler is committed at `.github/helpdesk/reconcile.sh`, and a
+      # `schedule` run reads the default branch's copy — exactly the copy whose
+      # decision the dispatch carries forward.
+      - name: Check out the default branch (the reconciler)
+        if: steps.key.outputs.enabled == 'true'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - name: Sweep — decide which engagements are due
+        id: sweep
+        if: steps.key.outputs.enabled == 'true'
+        run: |
+          # stdout from the sweep is exactly one `review <n>` / `verdict <n>`
+          # line per due engagement; the decision detail goes to the run log
+          # (stderr) and the step summary.
+          actions="$(bash .github/helpdesk/reconcile.sh sweep)"
+          echo "${actions}"
+          {
+            echo 'actions<<HELPDESK_SWEEP'
+            echo "$actions"
+            echo 'HELPDESK_SWEEP'
+          } >> "$GITHUB_OUTPUT"
+      - name: Dispatch one run per engagement
+        if: steps.key.outputs.enabled == 'true' && steps.sweep.outputs.actions != ''
+        env:
+          ACTIONS: ${{ steps.sweep.outputs.actions }}
+        run: |
+          # One dispatch per action, with the workflow token: workflow_dispatch
+          # events always create runs even when dispatched with GITHUB_TOKEN.
+          while read -r mode pr; do
+            [ -n "${mode:-}" ] || continue
+            gh workflow run helpdesk.yml -f pr="$pr" -f mode="$mode" -f source=sweep
+            echo "::notice::Sir Knight Lop the Second dispatched a ${mode} engagement for PR #${pr}."
+          done <<< "$ACTIONS"
+
   review:
     name: Review pull request
-    # Runs for: a non-draft same-repo PR event (the first review); a mention
-    # comment on a PR by someone with write access; a manual dispatch carrying a
-    # PR number.
-    # Mention aliases: the current trigger is `@sir-knight-lop-the-second`;
-    # `@aida` and `@Aida` stay in the condition as legacy aliases, so threads
-    # from before the rename keep working.
+    # Runs for: a mention comment on a PR by someone with write access; a
+    # manual dispatch carrying a PR number; a sweep dispatch (the automatic
+    # path — `workflow_dispatch` with `-f pr=… -f mode=… -f source=sweep`). There is no
+    # `pull_request` trigger, so pushes, reopens and draft flips never start a
+    # run: the sweep is the only automatic path, and each engagement costs
+    # provider tokens.
+    # The mention filter is PAIRED — keep the pair in sync whenever the
+    # accepted spellings change: the `if:` below is the deliberately BROADER
+    # prefilter (`contains()` over the accepted spellings, so unrelated
+    # comments never start a job at all), and the `Guard the target` step
+    # narrows to the exact forms as TOKENS (its `mention_re=` pattern), so a
+    # lookalike like "@aidan" cannot buy an engagement. The job side must
+    # stay a SUPERSET of the guard. Mention aliases: the current trigger is
+    # `@sir-knight-lop-the-second`; `@aida` and `@Aida` stay in the condition
+    # as legacy aliases, so threads from before the rename keep working.
     if: >-
-      (github.event_name == 'pull_request'
-        && github.event.pull_request.draft == false
-        && github.event.pull_request.head.repo.full_name == github.repository
-        && github.event.pull_request.user.type != 'Bot'
-        && github.event.sender.type != 'Bot')
-      || (github.event_name == 'issue_comment'
+      (github.event_name == 'issue_comment'
         && github.event.issue.pull_request
         && (contains(github.event.comment.body, '@sir-knight-lop-the-second')
           || contains(github.event.comment.body, '@aida')
@@ -108,8 +244,18 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.pr != '')
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    concurrency:
+      # All engagements serialize per PR and mode: a review and a verdict may
+      # run concurrently (distinct groups), and a second engagement of the
+      # same PR+mode queues behind the first instead of cancelling it — each
+      # one is a token spend the sweep decided is due. (The old auto/manual
+      # lane split is gone with the `pull_request` trigger.)
+      group: helpdesk-pr-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}-${{ inputs.mode || 'review' }}
+      cancel-in-progress: false
     env:
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+      MODE: ${{ inputs.mode || 'review' }}
+      SOURCE: ${{ inputs.source }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RADIENT_API_KEY: ${{ secrets.RADIENT_API_KEY }}
@@ -165,15 +311,38 @@ jobs:
         run: echo "::warning::No app token was minted (BOT_APP_ID/BOT_APP_PRIVATE_KEY missing or stale, or the app is not installed) — this run posts as github-actions[bot]. See .github/helpdesk/README.md, setup item 2."
       # Comment and dispatch runs are not fork events: repository secrets ARE
       # available and refs/pull/N/merge would deliver the fork's code. Resolve
-      # the head repo, the state and the mergeability through the API, and skip
-      # all of the job's work for anything that is not an open, same-repo,
-      # mergeable PR. (On `pull_request` runs the job-level `if` has already
-      # checked the payload; a skipped step leaves `skip` empty, and empty !=
-      # 'true'.)
-      - name: Guard the target (open, same-repo PR only)
-        if: steps.key.outputs.enabled == 'true' && github.event_name != 'pull_request'
+      # the head repo, the state, the mergeability and the draft flag through
+      # the API, and skip all of the job's work for anything that is not an
+      # open, same-repo, non-conflicting, non-draft PR. (Drafts are skipped on
+      # every path as defense in depth: one can be flipped between the sweep's
+      # decision and this run, and a mention re-engages once it is ready.)
+      - name: Guard the target (open, same-repo, non-draft PR only)
+        if: steps.key.outputs.enabled == 'true'
         id: guard
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
+          # The PR number arrives from a dispatch: validate it before it
+          # reaches an API path, so a typo fails with a clear error instead
+          # of a 404.
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              echo "::error::PR_NUMBER must be a positive integer, got '${PR_NUMBER}' (pass -f pr=<number>)."
+              exit 1
+              ;;
+          esac
+          # The precise half of the paired mention filter (see the job `if:`):
+          # the job-level `contains()` is deliberately BROADER (a raw substring
+          # test), so for a comment run re-check that an accepted form appears
+          # as a TOKEN — "@aidan" or an email path must not buy an engagement.
+          # Keep `mention_re` in sync with the accepted spellings above and in
+          # the triage job.
+          mention_re='(^|[^A-Za-z0-9_-])(@sir-knight-lop-the-second|@aida|@Aida)([^A-Za-z0-9_-]|$)'
+          if [ "${GITHUB_EVENT_NAME}" = "issue_comment" ] && ! grep -Eq "$mention_re" <<<"${COMMENT_BODY:-}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sir Knight Lop the Second skips PR #${PR_NUMBER}: the comment carries no accepted mention form."
+            exit 0
+          fi
           # `|| true`: an empty API response makes `read` return 1 at EOF, and
           # under `bash -e` that aborts the step with no message — the checks
           # below must be what name the cause. A conflicted PR (`mergeable` is
@@ -181,17 +350,41 @@ jobs:
           # resolve the conflict, then comment a mention to re-run (pushes do
           # not re-trigger). "null" just means GitHub has not finished
           # computing mergeability, and must not skip.
-          read -r head state mergeable < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.repo.full_name // "unknown", .state, (.mergeable | tostring)] | @tsv') || true
+          read -r head state mergeable draft < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '[.head.repo.full_name // "unknown", .state, (.mergeable | tostring), (.draft | tostring)] | @tsv') || true
           if [ -z "$head" ] || [ -z "$state" ]; then
             echo "::error::could not resolve pull request #${PR_NUMBER} through the API"
             exit 1
           fi
-          if [ "$head" != "$GITHUB_REPOSITORY" ] || [ "$state" != "open" ] || [ "$mergeable" = "false" ]; then
+          if [ "$head" != "$GITHUB_REPOSITORY" ] || [ "$state" != "open" ] || [ "$mergeable" = "false" ] || [ "$draft" = "true" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::Sir Knight Lop the Second skips PR #${PR_NUMBER}: head='${head}', state='${state}', mergeable='${mergeable}'."
+            echo "::notice::Sir Knight Lop the Second skips PR #${PR_NUMBER}: head='${head}', state='${state}', mergeable='${mergeable}', draft='${draft}'."
           fi
+      # The already-engaged gate, for sweep dispatches only: between the
+      # sweep's decision and this run, a bot review (mode=review) or a verdict
+      # for this head (mode=verdict) may have appeared — e.g. the contributor
+      # commented a round — and then the engagement is moot and spends nothing.
+      # It runs BEFORE the checkout, deliberately: a gated-out run must not
+      # even materialize the PR's code in the workspace, and the check runs the
+      # reconciler from the ref THIS RUN was dispatched from (`github.sha`) —
+      # the same copy the sweep decided with, not the PR's merge-ref copy.
+      - name: Already engaged? (sweep-dispatched runs only)
+        id: engaged
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && inputs.source == 'sweep'
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/contents/.github/helpdesk/reconcile.sh?ref=${GITHUB_SHA}" --jq '.content' | tr -d '\n' | base64 -d > "$RUNNER_TEMP/reconcile.sh"
+          if ! result="$(bash "$RUNNER_TEMP/reconcile.sh" check --pr "$PR_NUMBER" --mode "$MODE" 2>&1)"; then
+            echo "::error::reconcile.sh check failed for PR #${PR_NUMBER} (${MODE}): ${result}"
+            exit 1
+          fi
+          echo "${result}"
+          case "$result" in
+            skip*)
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Sir Knight Lop the Second skips PR #${PR_NUMBER} (${MODE}): ${result}"
+              ;;
+          esac
       - name: Check out the pull request
-        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         uses: actions/checkout@v7
         with:
           ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}/merge
@@ -199,27 +392,64 @@ jobs:
           # (`gh pr diff`, `gh api compare`); a full fetch of this repo's ~1 GB
           # history is minutes of runner time for nothing.
           fetch-depth: 1
+      # The engagement's helpdesk surface — this directory: prompts, team,
+      # roles, setup.sh — always comes from the DEFAULT BRANCH, never from the
+      # PR checkout above. Why, in order:
+      #   (a) the checkout is `refs/pull/<n>/merge`, which can be stale: a PR
+      #       whose merge ref predates a helpdesk change carries the old
+      #       prompts and none of the new ones (a verdict run crashed on a
+      #       missing `prompts/pr-verdict.md` — `cat: .github/helpdesk/prompts/
+      #       pr-verdict.md: No such file or directory`, lo run 36329557453);
+      #   (b) the reviewed PR must not steer its own review by editing
+      #       `.github/helpdesk/**` (prompts, team, setup.sh) in its merge ref;
+      #   (c) behaviour is then defined by main — the same copy the sweep
+      #       decides with, and the same copy this workflow file runs from.
+      # The surface is EXTRACTED to a temp dir and used FROM THERE, never
+      # overlaid onto the checkout: the old overlay rewrote and STAGED
+      # `.github/helpdesk/**` in the worktree, and a live review engagement
+      # flagged the pre-staged files as unrelated diff noise (lo run
+      # 36336021019: "two pre-staged files unrelated to this diff"). The
+      # archive carries the whole directory, so the PR checkout keeps its own
+      # copy for the record and nothing the model diffs changes shape. The
+      # fetch authenticates with the credentials actions/checkout persists.
+      # The PR checkout still provides the code under review; the model's
+      # diffs come from the API anyway. reconcile.test.sh guards this step,
+      # its order, and the absence of the old overlay.
+      - name: Extract the helpdesk surface from the default branch
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/surface"
+          git fetch --depth=1 origin main
+          git archive FETCH_HEAD .github/helpdesk | tar -x -C "$RUNNER_TEMP/surface"
       - name: Set up Python
-        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install the pinned harness
-        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
       - name: Install the helpdesk team and roles into the runner's lop config
-        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
-        run: bash .github/helpdesk/setup.sh
-      - name: Run the review
-        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
+        run: bash "$RUNNER_TEMP/surface/.github/helpdesk/setup.sh"
+      - name: Run the engagement
+        if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         timeout-minutes: 35
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
+          # `mode` selects the brief: pr-review.md is the concise
+          # guidelines-compliance review for a PR with no contributor rounds;
+          # pr-verdict.md is the terminal verdict for a settled thread. The
+          # brief comes from the temp surface (main's copy), not the checkout.
+          prompt_file="$RUNNER_TEMP/surface/.github/helpdesk/prompts/pr-review.md"
+          if [ "$MODE" = "verdict" ]; then
+            prompt_file="$RUNNER_TEMP/surface/.github/helpdesk/prompts/pr-verdict.md"
+          fi
           {
-            cat .github/helpdesk/prompts/pr-review.md
-            printf '\n\n## This run\n- Repository: %s\n- Pull request: #%s\n- Trigger: %s\n- Run log: %s/%s/actions/runs/%s\n' \
-              "$GITHUB_REPOSITORY" "$PR_NUMBER" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            cat "$prompt_file"
+            printf '\n\n## This run\n- Repository: %s\n- Pull request: #%s\n- Mode: %s\n- Source: %s\n- Trigger: %s\n- Run log: %s/%s/actions/runs/%s\n' \
+              "$GITHUB_REPOSITORY" "$PR_NUMBER" "$MODE" "${SOURCE:-(none — a mention or a manual dispatch)}" "$GITHUB_EVENT_NAME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             if [ -n "${COMMENT_BODY:-}" ]; then
               printf '\nThe comment that triggered this run:\n\n%s\n' "$COMMENT_BODY"
             fi
@@ -228,10 +458,89 @@ jobs:
             --hosting radient --model auto \
             --team helpdesk \
             --tools bash,read,write,glob,grep,eval,todo,web_search,web_read,web_fetch,task,wait,jobs,hub,list_variables,read_variable \
-            --name "Sir Knight Lop the Second review: PR #${PR_NUMBER}" \
+            --name "Sir Knight Lop the Second ${MODE}: PR #${PR_NUMBER}" \
             "$(cat "$RUNNER_TEMP/helpdesk-prompt.txt")"
+      # What the engagement spent, straight from the recorded ledger: the
+      # same on-disk store `/analytics` summarises ($HOME/.local-operator/
+      # analytics.db), one `calls` row per provider call with cost priced at
+      # record time (`cost_micro`, USD x 1e6, `cost_known` marks an unpriced
+      # model). `always()`, so a failed engagement still reports what it
+      # spent; the enabled/guard gates match the engagement step, so skipped
+      # runs report nothing. Best-effort by contract: a missing ledger is a
+      # no-op, an unreadable one is a note — this step runs after the
+      # engagement and must never fail the run or mask its result.
+      - name: Report the engagement's token spend
+        if: always() && steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
+        run: |
+          python3 - <<'PY' || true
+          # Report the engagement's token spend from local-operator's recorded
+          # ledger (stdlib only; read-only). A partial `cost_known` is a LOWER
+          # bound and carries the `+` marker in `cost_usd`.
+          import os
+          import sqlite3
+          import sys
+
+          DB = os.path.join(os.environ.get("HOME", ""), ".local-operator", "analytics.db")
+          SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY", "")
+
+
+          def emit(line=""):
+              print(line)
+              if SUMMARY:
+                  try:
+                      with open(SUMMARY, "a", encoding="utf-8") as fh:
+                          fh.write(line + "\n")
+                  except OSError:
+                      pass
+
+
+          def spend_line(label, calls, inp, out, cache_read, cost_micro, known):
+              usd = f"${cost_micro / 1e6:.4f}" + ("" if known == calls else "+")
+              return (
+                  f"{label}: {calls:,} calls; input {inp:,}; output {out:,}; "
+                  f"cache_read {cache_read:,}; cost_usd {usd}; cost_known {known:,}/{calls:,}"
+              )
+
+
+          def report():
+              if not os.path.exists(DB):
+                  emit(f"no analytics recorded — {DB} is not present.")
+                  return
+              try:
+                  con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+                  try:
+                      rows = con.execute(
+                          "SELECT provider || '/' || model_id, COUNT(*), "
+                          "COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), "
+                          "COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cost_micro), 0), "
+                          "COALESCE(SUM(cost_known), 0) "
+                          "FROM calls GROUP BY provider, model_id ORDER BY provider, model_id"
+                      ).fetchall()
+                  finally:
+                      con.close()
+              except sqlite3.Error as exc:
+                  emit(f"analytics spend unavailable ({DB}): {exc}")
+                  return
+              if not rows:
+                  emit("no analytics recorded — the ledger holds no calls.")
+                  return
+              emit("Sir Knight Lop the Second — engagement spend")
+              total = [0, 0, 0, 0, 0, 0]
+              for (label, calls, inp, out, cache_read, cost_micro, known) in rows:
+                  for i, value in enumerate((calls, inp, out, cache_read, cost_micro, known)):
+                      total[i] += value
+                  emit("  " + spend_line(label, calls, inp, out, cache_read, cost_micro, known))
+              emit(spend_line("spend", *total))
+
+
+          try:
+              report()
+          except Exception as exc:  # never fail the run, whatever happens
+              emit(f"analytics spend unavailable: {exc}")
+          sys.exit(0)
+          PY
       - name: Report a failed run
-        if: failure() && steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
+        if: failure() && steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         env:
           # Step env is merged after the $GITHUB_ENV write the prefer step made
           # (@actions/runner applies step env last), so the notice still posts
@@ -241,19 +550,26 @@ jobs:
           # Heading + sentence, through a body file so the blank line is real
           # (`--body` would collapse it).
           printf '%s\n\n%s\n' \
-            "### Sir Knight Lop the Second — review run failed" \
-            "Sir Knight Lop the Second's review run failed on the bot side — the pull request is unaffected. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            "### Sir Knight Lop the Second — ${MODE} run failed" \
+            "Sir Knight Lop the Second's ${MODE} run failed on the bot side — the pull request is unaffected. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             > "$RUNNER_TEMP/helpdesk-notice.md"
           gh pr comment "${PR_NUMBER}" -R "${GITHUB_REPOSITORY}" --body-file "$RUNNER_TEMP/helpdesk-notice.md"
 
   triage:
     name: Triage issue
-    # Runs for: an opened issue (any author except bots); a mention comment on
-    # an issue by someone with write access; a manual dispatch with an issue
-    # number.
-    # Mention aliases: the current trigger is `@sir-knight-lop-the-second`;
-    # `@aida` and `@Aida` stay in the condition as legacy aliases, so threads
-    # from before the rename keep working.
+    # Runs for: an opened issue (any author except bots) — immediately, by
+    # design: the wait that defers pull-request engagements does not apply to
+    # issues; a mention comment on an issue by someone with write access; a
+    # manual dispatch with an issue number.
+    # The mention filter is PAIRED — keep the pair in sync whenever the
+    # accepted spellings change: the `if:` below is the deliberately BROADER
+    # prefilter (`contains()` over the accepted spellings, so unrelated
+    # comments never start a job at all), and the `Guard the target` step
+    # narrows to the exact forms as TOKENS (its `mention_re=` pattern), so a
+    # lookalike like "@aidan" cannot buy an engagement. The job side must
+    # stay a SUPERSET of the guard. Mention aliases: the current trigger is
+    # `@sir-knight-lop-the-second`; `@aida` and `@Aida` stay in the condition
+    # as legacy aliases, so threads from before the rename keep working.
     if: >-
       (github.event_name == 'issues'
         && github.event.issue.user.type != 'Bot'
@@ -268,6 +584,11 @@ jobs:
       || (github.event_name == 'workflow_dispatch' && inputs.issue != '')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    concurrency:
+      # Triage engagements serialize per issue; nothing cancels an engagement
+      # someone asked for.
+      group: helpdesk-issue-${{ github.event.issue.number || inputs.issue }}
+      cancel-in-progress: false
     env:
       ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue }}
       GH_TOKEN: ${{ github.token }}
@@ -329,7 +650,20 @@ jobs:
       - name: Guard the target (open issue only)
         if: steps.key.outputs.enabled == 'true' && github.event_name != 'issues'
         id: guard
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
+          # The precise half of the paired mention filter (see the job `if:`):
+          # the job-level `contains()` is deliberately BROADER (a raw substring
+          # test), so for a comment run re-check that an accepted form appears
+          # as a TOKEN. Keep `mention_re` in sync with the accepted spellings
+          # above and in the review job.
+          mention_re='(^|[^A-Za-z0-9_-])(@sir-knight-lop-the-second|@aida|@Aida)([^A-Za-z0-9_-]|$)'
+          if [ "${GITHUB_EVENT_NAME}" = "issue_comment" ] && ! grep -Eq "$mention_re" <<<"${COMMENT_BODY:-}"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Sir Knight Lop the Second skips issue #${ISSUE_NUMBER}: the comment carries no accepted mention form."
+            exit 0
+          fi
           # `|| true`: an empty API response must reach the emptiness check
           # below instead of aborting the step with no message (see the review
           # job's guard for the full note).

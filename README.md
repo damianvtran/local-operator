@@ -223,7 +223,8 @@ vetted review guidance *and loses the tools to edit code*. It can read and run
 tests, but it has no way to alter what it reviews. A restricted role cannot
 enable new MCP tools either, and the restriction is inherited by everything
 it delegates to, at any depth. Packaged starters for `reviewer`, `coder`,
-`architect`, `manager`, `designer`, and `scout` ship in the package:
+`architect`, `manager`, `designer`, `scout`, `ux-reviewer`, `tui-designer`, and
+`copy-reviewer` ship in the package:
 `task(agent=…)` and `/team` use them even on a fresh install, and
 `agent install` copies one into your registry so you can edit it.
 `lop agents list` shows what's installed, so a fresh install prints "No agents
@@ -438,17 +439,35 @@ a peer owns up to date without opening it, and `lop sessions move <id> --to
 local --from-replica` recovers that copy as a new session for when the device
 that held it is gone.
 
-**A note on what is not here yet.** Credentials are brokered rather than copied:
-`lop network credential share <provider> --with <device>` lets a peer borrow a
-login *this* device holds, for a bounded grant
-(`network.credentials.grant_ttl_s`, fifteen minutes by default), and
-`lop network credentials` shows who owns what and what this device borrows.
-`kimi` is the one provider that can never be lent — its grants are signed with
-the fingerprint of the device that made them. The desktop app has no mesh view
-yet: that screen belongs to
-[damianvtran/local-operator-ui](https://github.com/damianvtran/local-operator-ui),
-beside the sessions it lists — that repository, not this one, describes what its
-build carries. Nothing above documents a command that does not run today.
+<p align="center">
+  <img src="./static/ui-mesh-recall.png" alt="The desktop app's Mesh tab with a peer's device panel open on the right — cloud-node-1's memberships, its conversations and an Invite to a network button — the whole tab dimmed behind a scrim, and over it the 'Recall to this device' dialog, whose subtitle reads 'The copy on cloud-node-1 is deleted once this device has it.' above a selected 'Recall to this device' choice and a 'Copy here, leave it there' alternative" width="720">
+</p>
+
+<p align="center"><i>Recalling a conversation from a peer, and the <code>--keep</code> distinction in a single dialog: the recall deletes the copy on the device the conversation leaves — the subtitle names it, <code>cloud-node-1</code> — while the other choice copies it and leaves the original running. The tab behind the dialog sits under a scrim (measured: about 40% of its brightness), so the choice is the only live thing on screen. Fixture-driven like the canvas below — the real page over <a href="https://github.com/damianvtran/local-operator-ui">local-operator-ui</a>'s own fixtures, not a live mesh.</i></p>
+
+**Credentials are brokered, not copied.** `lop network credential share
+<provider> --with <device>` lets a peer borrow a login *this* device holds, for a
+bounded grant (`network.credentials.grant_ttl_s`, fifteen minutes by default),
+and `lop network credentials` shows who owns what and what this device borrows.
+A refresh belongs to the device that owns the credential — it lends a short-lived
+access token and never its refresh token, which is why a token is never refreshed
+on a device that does not own it. `kimi` is the one provider that can never be
+lent: its grants are signed with the fingerprint of the device that made them.
+
+**The desktop app has its own view of it.**
+[`local-operator-ui`](https://github.com/damianvtran/local-operator-ui) mounts a
+**Mesh** tab beside the sessions it lists: the networks this device is paired
+with, the devices in each, and what each of them is holding. The tab appears once
+this device is in a mesh — a device in none shows no Mesh row at all, so pairing
+comes first.
+
+<p align="center">
+  <img src="./static/ui-mesh-canvas.png" alt="The desktop app's Mesh tab: a summary line reading '1 network · 2 devices · this device is damians-MacBook-Pro' above a canvas whose damian-mesh network node joins by one edge each to cloud-node-1 (4 conv · seen 4m ago) and to this device, marked 'this device' and 'no conversations here', with a Canvas/List toggle at the top right" width="720">
+</p>
+
+<p align="center"><i>The mesh in the desktop app: the networks this device is paired with, the devices in each, and what each of them is holding. It is also where a move is made by hand — a conversation is dragged from one device's node onto another's, which a still cannot show, and the dialog above is what that drag asks before it commits. From <a href="https://github.com/damianvtran/local-operator-ui">local-operator-ui</a>'s committed Mesh-tab evidence set — the real page over that repository's own fixtures, so the shapes are the backend's and the values are not a live mesh.</i></p>
+
+Nothing above documents a command that does not run today.
 
 The design set behind all of it is in
 [`docs/design/mesh-network.md`](./docs/design/mesh-network.md) — the spine, with
@@ -1280,6 +1299,25 @@ lop agents push --name "My Agent"
 lop agents pull --id "<agent_id>"     # no key needed to pull
 ```
 
+- **Organization sharing**: share agents and teams privately inside a Radient
+  organization. These commands act as the signed-in person, so sign in first;
+  `--org` names the organization (pass the `tenant_id` the picker prints):
+
+```bash
+lop login radient
+lop teams push --org <tenant_id> <team>
+lop teams pull --org <tenant_id> <team_id>
+lop agents push --name "My Agent" --org <tenant_id>
+lop agents pull --id "<agent_id>" --org <tenant_id>
+```
+
+Without `--org` every command behaves exactly as before (the public registry
+path), and `lop teams push` without it lists your organizations and asks for
+the flag rather than guessing one. Organization calls carry your signed-in
+account's token, so they address the Radient cloud API only -- to point them
+at a local or QA hub deliberately, opt in per shell with
+`RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1`.
+
 ## 🔒 Safety Model
 
 - **Approval tiers.** Read-only tools run automatically; anything that writes
@@ -1361,6 +1399,16 @@ their authors and contributors for building in the open.
   [Mario Zechner (`mariozechner`)](https://github.com/mariozechner). Its
   approach to agent orchestration and harness ergonomics inspired aspects of our
   subagent and tooling implementation.
+- **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)**
+  (`dsh`): an open-source agent harness by
+  [DeepSeek AI](https://deepseek.com), built on an everything-is-a-plugin
+  architecture over [Cordis](https://github.com/cordiverse/cordis). Its web
+  client's UI and interaction design informed parts of our desktop app: a single
+  sidebar carrying navigation alongside the agent, team, and session lists,
+  section-level view controls, progressive disclosure for long lists, and a
+  width-constrained conversation whose resize handles reveal themselves on
+  hover. We studied the design and built our own implementation; DeepSeek AI has
+  not reviewed, endorsed, or contributed to this project.
 
 Inspiration drawn from these projects informed our own independent
 implementation; any mistakes here are our own.

@@ -8,7 +8,9 @@ running headless in GitHub Actions. This session is attached to the saved team
 exactly once.
 
 Your job: triage the issue named in "This run" — is it actionable for this
-project, how should it be classified, and what should happen next?
+project, how should it be classified, and what should happen next? Issues are
+engaged immediately by design — the wait that defers the bot's pull-request
+engagements does not apply here.
 
 ## Ground rules — non-negotiable
 

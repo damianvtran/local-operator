@@ -450,21 +450,37 @@ would diagnose or fix it.
 
 The agent-facing path (§3) must drive pairing without a TTY, and R3 needs a
 human to compare a code. Resolution, and it is the interface both the CLI and
-the guide use:
+the guide use: **phase one holds the socket and waits, and phase two is the
+person's to run.**
+
+This section used to spell the alternative — `join` exits `3`, a second dial
+finishes it with `--confirm` — and that cannot work as written, for the one
+property the code exists to provide: the six digits are derived from the live
+transcript (`wire.sas_code` salts them with the transcript hash), so a second
+dial is a **different** ceremony with a **different** code, and a resumed phase
+two could only compare a code against a stale derivation. The ceremony therefore
+stays in the process that dialled it:
 
 ```sh
-lop network join lop-inv-… --json
-#  → {"status":"awaiting_confirmation","sas":"K7QF-2M4D","peer_name":"damian-mbp",
-#     "expires_at":1789400600.0}      # exit code 3: "needs a human"
-lop network join --confirm K7QF-2M4D --json
+lop network join @<token-file> --park --json
+#  → {"status":"awaiting_confirmation","sas":"481926","shown":"481 926",
+#     "name":"damian-mbp","expires_at":1789400600.0,
+#     "sentence":"Ask the user to read back the code 481 926 from the other
+#     device, then confirm it with `lop network join --confirm <code>`."}
+#    this call WAITS, up to the same window the prompt uses
+lop network join --confirm 481926 --json
 #  → {"status":"joined","device_id":"9f2c…","network_id":"n_4a1c","epoch":7}
 ```
 
-Phase one writes nothing durable except the pending join (in the join state file,
-0600). Phase two refuses a mismatched or expired code by name. A TTY session
-gets the same two steps with the code printed and a `y/n` prompt in between;
-`--yes` exists for scripts but is **not** accepted with `--confirm` omitted, so
-nothing can join a network without either a human or a code the human read.
+**Exit `3` is what a park nobody answered returns** (`pairing_unanswered`), not
+what a phase one that needs a human returns: with the socket held, the question
+is settled in the process that asked it. Phase two refuses a mismatched or
+expired code by name — `sas_mismatch` leaves the ceremony open and the invite
+unspent — and a TTY gets the same steps with the code printed and a prompt in
+between. The second command is **run by the person**, and it is the one step
+with no flag on the agent's tool (§3.2): `join` takes no `--yes` at all, so
+nothing can join a network without a code a human read, whether the caller is a
+person or a shell.
 
 ### 1.5 Incident controls: one step, never by accident
 
@@ -1146,7 +1162,10 @@ class NetworkParams(BaseModel):
     ]
     network: str = ""      # a network name or id
     token: str = ""        # for `join`; never echoed back
-    sas: str = ""          # for the join's confirm step, read from the OTHER device by the user
+    # NO `sas`/`confirm` FIELD, and its absence is the interlock: the join's second
+    # phase is the person's own command at their own terminal. A field here would be
+    # answerable with the code the tool itself printed, and since both devices derive
+    # the same digits that satisfies the comparison by construction.
     role: Literal["read", "drive", "admin"] = "read"
     device: str = ""       # for `member_rm`
     since: str = ""        # for `log`
@@ -1158,18 +1177,26 @@ these, because the CLI's own guards are what stop the dangerous ones* —
 
 | Action | Why it cannot complete from a tool alone |
 |---|---|
-| `join` | R3's human step is the CLI's own two-phase contract (§1.4.3): phase one exits `3` with `status: "awaiting_confirmation"` and the SAS, and `--confirm <sas>` is what finishes it. **The tool must never synthesise `--confirm`** — it returns the code and the sentence `Ask the user to read back the code K7QF-2M4D from the other device, then confirm it.` |
+| `join` | R3's human step is the CLI's own two-phase contract (§1.4.3): phase one **parks** the ceremony (`--park`), holds the socket and returns `status: "awaiting_confirmation"` with the code and the sentence. **The tool has no `--confirm` field at all**: not a guarded one, not a synthesised one — answering a park is the person's own command at their own terminal, which is what keeps the comparison in §1.4.3 a check rather than a formality (the digits both devices derive are the same ones, so a tool able to echo the code it printed would satisfy it by construction). The tool returns the code and the sentence `Ask the user to read back the code K7QF-2M4D from the other device, then confirm it.` and the person runs that command |
 | `panic`, `disconnect`, `member_rm` | R17's controls require the typed confirmation (§1.5) — the network's name, or a `y/n` at a TTY. **The tool must never pass `--yes`**, and a non-TTY invocation returns the confirmation sentence rather than acting |
 | `--force` of any kind, and any credential entry | the CLI refuses it; the tool has no flag for it, and the guide's §5/§8 sections say why |
 
 Two further invariants, both from §12.5 and both worth restating because they are
 easy to break in an implementation that "just shells the CLI":
 
-* **The invite token and the SAS never appear in the whole result set**, in any
-  field, in any log line, and in any error message — the token is single-use
-  network credential material, and a tool result is the most-copied text in the
-  system (it goes into the transcript, the analytics ledger's sizes, and the
-  session's own history).
+* **The invite token never appears in the whole result set**, in any field, in any
+  log line, and in any error message — it is single-use network credential
+  material, and a tool result is the most-copied text in the system (it goes into
+  the transcript, the analytics ledger's sizes, and the session's own history).
+  The SAS is the exception and it is a deliberate one: the tool returns it as the
+  code the USER has to read out and compare, which is what phase one is for. It is
+  not credential material and it is not protected by secrecy — both devices derive
+  the same digits, the transcribing device sends them inside a frame **sealed**
+  with the session key (`handshake.pair_ready_frame`), and what makes the exchange
+  trustworthy is that a person read them off the other device's screen. Saying the
+  SAS "never travels" (as an earlier revision of this document and of the tool's
+  own docstring did) was false, and the truth is the stronger statement because it
+  is the one the code enforces.
 * **Output is parsed, never passed through.** The tool returns structured fields
   from the CLI's `--json`; a raw stdout blob would put a token in the transcript
   the moment a command printed one.

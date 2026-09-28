@@ -11,6 +11,7 @@ runs once an SDK-validated content block has actually arrived.
 
 from __future__ import annotations
 
+import base64
 import copy
 import re
 from collections.abc import Sequence
@@ -19,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 from local_operator.harness.intent import INTENT_FIELD, apply_intent_schema
 from local_operator.harness.types import (
     AgentTool,
+    Content,
+    ImageContent,
     TextContent,
     ToolContext,
     ToolExecuteFn,
@@ -162,17 +165,16 @@ def prepare_outbound_args(
 
 
 def _dict_block_text(block: dict[str, Any]) -> str | None:
-    """Render one raw-JSON content block, or ``None`` for kinds we drop.
+    """Render one raw-JSON TEXT-bearing content block, or ``None`` when dropped.
 
     Servers that answer ``tools/call`` with unvalidated JSON (and the tool
-    cache) hand us plain dicts rather than SDK models, so both wire shapes of
-    the image mime key are accepted.
+    cache) hand us plain dicts rather than SDK models. Image blocks never
+    reach here -- :func:`_block_image` routes them before this -- so the kinds
+    this handles are text and embedded resources.
     """
     block_type = block.get("type")
     if block_type == "text":
         return block.get("text") or ""
-    if block_type == "image":
-        return f"[Image: {block.get('mimeType') or block.get('mime_type') or 'image'}]"
     if block_type == "resource":
         raw_resource = block.get("resource")
         resource: dict[str, Any] = raw_resource if isinstance(raw_resource, dict) else {}
@@ -183,15 +185,14 @@ def _dict_block_text(block: dict[str, Any]) -> str | None:
 
 
 def _model_block_text(block: ContentBlock) -> str | None:
-    """Render one SDK content block, or ``None`` for kinds we drop.
+    """Render one SDK TEXT-bearing content block, or ``None`` for kinds we drop.
 
     Audio and resource links carry nothing a text transcript can show, so
-    they contribute no part at all rather than an empty one.
+    they contribute no part at all rather than an empty one. Images are
+    routed through :func:`_block_image` before this is consulted.
     """
     if block.type == "text":
         return block.text or ""
-    if block.type == "image":
-        return f"[Image: {block.mime_type}]"
     if block.type == "resource":
         # Only the text variant of an embedded resource has inline content;
         # blob resources are base64 payloads we summarize by URI alone.
@@ -201,6 +202,65 @@ def _model_block_text(block: ContentBlock) -> str | None:
         text = resource.text if isinstance(resource, TextResourceContents) else None
         return f"[Resource: {resource.uri}]\n{text}" if text else f"[Resource: {resource.uri}]"
     return None
+
+
+def _image_content(data: str, mime_type: str) -> ImageContent | None:
+    """One image block as model content, or ``None`` when it may not be shown.
+
+    Two checks stand between a server's payload and the conversation, and a
+    payload that fails either falls back to the text placeholder:
+
+    * the bytes must DECODE. Forwarding a corrupt payload as an image block
+      earns a provider-side ``Could not process image`` 400 with the block
+      already in history -- ``imaging`` refuses the same thing at its own
+      boundary for the same reason -- and the decode is cheap (bounded by the
+      cap below).
+    * the decoded size must fit :data:`~local_operator.imaging.IMAGE_MAX_BYTES`,
+      the bound a local image read honours, imported inside the branch so
+      text-only traffic never pays for the imaging module. Without a bound,
+      one content block from an arbitrary configured server could claim an
+      unbounded slice of a session's context.
+
+    Bytes that fit are forwarded VERBATIM. Re-encoding someone else's media
+    here would make the harness a second definition of what a server
+    published -- and for evaluation frames it would silently break the
+    adapter's own pixel geometry, which clicks are calibrated against.
+    """
+    if not data or not mime_type:
+        return None
+    from local_operator.imaging import IMAGE_MAX_BYTES
+
+    try:
+        decoded = base64.b64decode(data, validate=True)
+    except ValueError:
+        return None
+    if len(decoded) > IMAGE_MAX_BYTES:
+        return None
+    return ImageContent(data=data, mime_type=mime_type)
+
+
+def _block_image(block: Any) -> tuple[ImageContent | None, str | None]:
+    """Classify one content block, both wire shapes, as image or not.
+
+    Returns ``(image, placeholder)``: ``(content, None)`` for an image that
+    may be inlined, ``(None, text)`` for an image that must fall back to a
+    placeholder (missing or oversized payload), and ``(None, None)`` for a
+    block of any other kind -- the caller renders those as text.
+    """
+    if isinstance(block, dict):
+        if block.get("type") != "image":
+            return None, None
+        mime = str(block.get("mimeType") or block.get("mime_type") or "image")
+        data = block.get("data")
+    else:
+        if block.type != "image":
+            return None, None
+        mime = block.mime_type or "image"
+        data = block.data
+    placeholder = f"[Image: {mime}]"
+    if isinstance(data, str) and data:
+        return _image_content(data, mime), placeholder
+    return None, placeholder
 
 
 def _without_redundant_content_text(server_result: dict[str, Any]) -> dict[str, Any]:
@@ -239,7 +299,9 @@ def format_mcp_result(
     """Flatten an MCP ``tools/call`` result into a harness ``ToolResult``.
 
     Content blocks are joined text with separators: text blocks pass through,
-    image blocks become ``[Image: <mime>]`` placeholders, embedded resources
+    image blocks become ``[Image: <mime>]`` placeholders ONLY when their payload
+    is absent or over the inline cap; a payload that fits is forwarded as a
+    real :class:`ImageContent` block the model can see. Embedded resources
     become ``[Resource: <uri>]`` plus their text when present. ``isError``
     maps to ``is_error`` (with an ``Error:`` prefix, matching the established behavior).
 
@@ -259,14 +321,22 @@ def format_mcp_result(
         server_result = result.model_dump()
 
     parts: list[str] = []
+    images: list[ImageContent] = []
     for block in blocks:
+        image, placeholder = _block_image(block)
+        if placeholder is not None:
+            if image is not None:
+                images.append(image)
+            else:
+                parts.append(placeholder)
+            continue
         rendered = _dict_block_text(block) if isinstance(block, dict) else _model_block_text(block)
         if rendered is not None:
             parts.append(rendered)
 
     text = "\n\n".join(parts)
     if is_error:
-        text = f"Error: {text}"
+        text = f"Error: {text}" if text else "Error"
 
     details: dict[str, Any] = {"server_result": server_result}
     if context is not None:
@@ -281,10 +351,21 @@ def format_mcp_result(
             if server_result is not None:
                 details["server_result"] = _without_redundant_content_text(server_result)
 
+    content: list[Content] = []
+    if text:
+        content.append(TextContent(text=text))
+    # Images ride AFTER the text: the text is their caption, the same order a
+    # local image read uses. An image-only result carries no text block at all
+    # -- every provider renderer here already anticipates that shape (the
+    # OpenAI tool renderer exists in part to keep image-only results from
+    # flattening to an empty string).
+    content.extend(images)
+    if not content:
+        content.append(TextContent(text=text))
     return ToolResult(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
-        content=[TextContent(text=text)],
+        content=content,
         is_error=is_error,
         details=details,
     )

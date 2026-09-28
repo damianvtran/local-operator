@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from local_operator.classification.context import Candidate
+from local_operator.classification.context import KIND_DROP_ORDER, Candidate
 from local_operator.classification.recommend import (
     DEFAULT_MAX_RECOMMENDATIONS,
     NONE_OPTION,
     NONE_OPTION_TEXT,
+    QUESTION_KIND_ORDER,
     Recommendation,
     build_decision_request,
     build_questions,
@@ -63,6 +64,54 @@ def test_one_choice_question_per_kind_with_candidates() -> None:
 def test_a_kind_with_no_candidates_gets_no_question() -> None:
     plan = build_questions([candidate("tunnel", kind="guide")])
     assert [question.id for question in plan.questions] == ["recommend_guide"]
+
+
+def test_a_project_gets_a_question_and_the_kind_rides_last() -> None:
+    """§8: existing projects become a candidate kind of their own.
+
+    The question text is the same template with the kind's own label — "Which
+    project, if any, would actually help…" — and the kind rides LAST in the
+    order (``QUESTION_KIND_ORDER``): it is the kind the state's ladder drops
+    first, so the reading order and the budget order agree.
+    """
+    assert QUESTION_KIND_ORDER[-1] == "project"
+    # …and the claim is a mirror image, pinned (sir-knight round 1, finding 3,
+    # taken as the reviewer's one-line nice-to-have): a kind dropped FIRST by
+    # the state's ladder is asked LAST here.
+    assert QUESTION_KIND_ORDER == tuple(reversed(KIND_DROP_ORDER))
+    plan = build_questions(
+        three_kinds()
+        + [
+            candidate(
+                "payments-migration",
+                kind="project",
+                description="active · Payments migration across core",
+                resource_url="project:payments-migration",
+            )
+        ]
+    )
+    assert [question.id for question in plan.questions] == [
+        "recommend_skill",
+        "recommend_guide",
+        "recommend_mcp",
+        "recommend_project",
+    ]
+    question = plan.questions[-1]
+    assert question.instructions.startswith("Which project, if any, would actually help")
+    criteria = criteria_of(question)
+    assert criteria["payments-migration"] == (
+        "payments-migration: active · Payments migration across core"
+    )
+    assert criteria[NONE_OPTION] == NONE_OPTION_TEXT
+    assert plan.kind_of("recommend_project") == "project"
+
+
+def test_no_project_candidates_means_no_project_question() -> None:
+    """The "kind with no candidates is omitted" property, stated for projects:
+    an operator with an empty store pays nothing and sees no question."""
+    plan = build_questions(three_kinds())
+    assert "recommend_project" not in plan.kinds
+    assert "recommend_project" not in plan.options
 
 
 def test_every_question_ends_with_an_explicit_none() -> None:
@@ -273,6 +322,51 @@ def test_the_block_is_additive_prose_and_never_imperative() -> None:
         assert word not in block
 
 
+def test_a_project_line_carries_its_own_state_after_the_url() -> None:
+    """§8's kind-aware line: ``project:`` has no reader, so the block's line is
+    the one place the model can see what the project IS.
+
+    The wiring composes ``"<status> · <description>"`` into the row's
+    description; the renderer appends that text verbatim — the same two pieces,
+    no second vocabulary to parse back out.
+    """
+    block = render_block(
+        [
+            candidate(
+                "payments-migration",
+                kind="project",
+                description="active · Payments migration across core",
+                resource_url="project:payments-migration",
+            )
+        ]
+    )
+    assert block == (
+        "<resource_recommendations>\n"
+        "These may help with this request — read the ones that actually fit, ignore the rest:\n"
+        "- project:payments-migration — active · Payments migration across core\n"
+        "</resource_recommendations>"
+    )
+
+
+def test_every_other_kind_still_renders_as_its_url_alone() -> None:
+    """The kind-aware line is PROJECTS ONLY: for every other kind the URL is the
+    whole line, exactly as before the kind existed."""
+    for kind in ("skill", "guide", "mcp"):
+        row = candidate("x", kind=kind, description="does a thing", resource_url=f"{kind}://x")
+        block = render_block([row])
+        assert f"- {kind}://x\n" in block
+        assert "does a thing" not in block
+
+
+def test_a_project_with_no_description_renders_as_its_url_alone() -> None:
+    """An empty description must not leave a dangling separator on the line."""
+    block = render_block(
+        [candidate("bare", kind="project", description="", resource_url="project:bare")]
+    )
+    assert "- project:bare\n" in block
+    assert "- project:bare —" not in block
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
@@ -316,8 +410,8 @@ def test_questions_are_only_choice_so_a_score_question_is_never_built_here() -> 
     """The kind exists in the vendor contract; the resource questions do not use it.
 
     Asserted so that a future "let's also score relevance" edit has to change a
-    test and read why: the three questions are the token budget (§ the module
-    docstring), and a fourth question would be a deliberate cost decision.
+    test and read why: the resource questions are the token budget (§ the module
+    docstring), and another question would be a deliberate cost decision.
     """
     plan = build_questions(three_kinds())
     assert all(

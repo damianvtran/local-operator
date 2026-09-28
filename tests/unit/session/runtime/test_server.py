@@ -2016,7 +2016,7 @@ async def test_the_record_directory_is_fixed_when_the_runtime_starts(tmp_path, m
                 break
             await asyncio.sleep(0.02)
         assert found, "the runtime must publish into the config dir it started in"
-        stray = registry.run_dir(moved_to) / f"{server._record.pid}.json"
+        stray = registry.ensure_run_dir(moved_to) / f"{server._record.pid}.json"
         assert not stray.exists(), (
             "a thread that runs late must not publish where the config dir has "
             "since moved — that filename belongs to another session"
@@ -2056,7 +2056,7 @@ async def test_the_record_directory_is_fixed_for_an_in_process_runtime(
     try:
         live = [rec for rec, state in registry.scan(started_in) if state == "live"]
         assert live, "the runtime must publish into the config dir it started in"
-        stray = registry.run_dir(moved_to) / f"{server._record.pid}.json"
+        stray = registry.ensure_run_dir(moved_to) / f"{server._record.pid}.json"
         assert not stray.exists(), (
             "an in-process runtime must not publish where the config dir has "
             "since moved — that filename belongs to another session"

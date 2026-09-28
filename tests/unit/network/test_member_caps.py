@@ -69,12 +69,14 @@ def _audit_records(root: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _args(verb: str, network: str, *caps: str, json_out: bool = False) -> Namespace:
+def _args(
+    verb: str, network: str, *caps: str, json_out: bool = False, device: str = PEER
+) -> Namespace:
     return Namespace(
         network_command="member",
         member_command=verb,
         network=network,
-        device=PEER,
+        device=device,
         capabilities=list(caps),
         json=json_out,
     )
@@ -244,6 +246,90 @@ def test_the_cli_refusal_carries_code_and_sentence(
     body = json.loads(captured.out)
     assert body == {"ok": False, "code": "not_admin", "message": body["message"]}
     assert "only an admin device" in captured.err
+
+
+def test_the_member_verb_takes_the_name_every_other_surface_prints(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AUDIT ROUND 2, F4: ``<device>`` is a NAME here too.
+
+    ``lop network show``/``peers`` print names, and ``credential share --with
+    <name>`` resolves one — but this verb handed whatever it was given straight to
+    the row writer, so a valid member name came back as
+    "laptop is not an active member of home-net": false, and it points the operator
+    at the network instead of at the argument. Measured on the two-device rig.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    server = _server(root)
+    record = _with_peer(server)  # the peer's name is "laptop"
+    server.stop()
+
+    assert net_cli.main(_args("grant", record.name, "move", json_out=True, device="laptop")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["device_id"] == PEER and payload["added"] == ["move"]
+    assert "move" in _caps(root, record.network_id)
+
+    # An unambiguous id TAIL still resolves, and the exact id is unchanged.
+    assert net_cli.main(_args("revoke", record.name, "move", json_out=True, device=PEER[-6:])) == 0
+    assert "move" not in json.loads(capsys.readouterr().out)["capabilities"]
+
+    # An unknown name refuses with the sentence that names the member list, rather
+    # than denying a device that exists.
+    assert (
+        net_cli.main(_args("grant", record.name, "move", json_out=True, device="not-a-device")) == 1
+    )
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["code"] == "unknown_member"
+    assert "is not a device in home-net" in captured.err
+
+
+def test_member_rm_takes_the_same_name_spelling(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """REVIEW ROUND 1, R3: ``member rm`` was the third verb with a raw-id argument.
+
+    ``member grant|revoke`` were fixed in round 1 of the audit; ``rm`` kept handing
+    ``args.device`` to the row writer, so the SAME valid name answered
+    "laptop is not a member of home-net" (``relay.remove_member``'s refusal) — a false
+    statement about a member that is one. One resolver, and the refusal names the
+    member list rather than denying the device exists.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    server = _server(root)
+    try:
+        record = _with_peer(server)  # the peer's name is "laptop"
+        server.bind_control()
+        server.start()
+        args = Namespace(
+            network_command="member",
+            member_command="rm",
+            network=record.name,
+            device="laptop",
+            capabilities=[],
+            json=True,
+        )
+        assert net_cli.main(args) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["removed"] == PEER, payload
+        # The tombstone is the observable side effect: the member is gone from the
+        # active set on this device, and the removal is recorded.
+        removed = store.load(record.network_id, root).member(PEER)
+        assert removed is not None and not removed.active, removed
+
+        args = Namespace(
+            network_command="member",
+            member_command="rm",
+            network=record.name,
+            device="not-a-device",
+            capabilities=[],
+            json=True,
+        )
+        assert net_cli.main(args) == 1
+        captured = capsys.readouterr()
+        assert json.loads(captured.out)["code"] == "unknown_member"
+        assert "is not a device in home-net" in captured.err
+    finally:
+        server.stop()
 
 
 def test_the_parser_takes_grant_and_revoke_and_the_bare_group_names_all_verbs(

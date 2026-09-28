@@ -1,0 +1,121 @@
+# Aida — the built-in chief of staff
+
+Aida ships with local-operator; there is no setup step. She is one long-lived
+conversation you reach with `/aida` (TUI or desktop composer), and she wakes
+herself once a day to review the state of your world and report what needs you.
+This document is the operator-facing summary: what she writes to disk, how to
+pause her, and how to switch her off entirely.
+
+## Using her
+
+- `/aida` — open her conversation (creating it on first use).
+- `/aida <message>` — open her and send the message as your next turn.
+- `/aida pause` — stop her proactive output for now (see Pausing below).
+- `/aida resume` — allow it again; the cadence re-arms at the next cadence time.
+- `/aida status` — what state she is in (enabled / paused / next cadence / budget).
+- `/aida =pause ...` — the `=` prefix is the escape hatch for messages that
+  start with a reserved word (same grammar as `/team =chart`).
+
+She is an ordinary session otherwise: `/resume`, the sidebar and the phone all
+list her like any conversation, and every runtime feature (tools, teams,
+projects, subagents, wakes) works normally.
+
+## The proactive cadence
+
+Once a day, at `aida.cadence.at` (default `09:00`, your local time), a wake
+fires in her conversation: she reviews sessions, projects, scheduled wakes and
+usage signals, and reports only what you must act on. If there is nothing
+actionable she stays quiet in substance (her instructions say so explicitly).
+The wake row is re-armed for the next day by her own runtime; the cadence works
+with every terminal closed because arming also installs the wake supervisor.
+
+**Escalation (bounded).** During a turn she can ask for an extra proactive
+check-in by writing `<config>/aida/escalate.json`:
+
+```json
+{"wakes": [{"in": "4h", "message": "re-check the failing deploy"}, "at 14:00"]}
+```
+
+Each entry is either an object (`in`/`at` plus optional `message`) or a bare
+time string. The engine arms each as an `aida-extra-N` one-shot, subject to:
+
+- `aida.cadence.max_extra_per_day` (default 2; `0` disables escalation),
+- `aida.cadence.min_gap_minutes` (default 90 — minimum spacing from another
+  Aida wake, measured across every request armed in the same drain),
+- the generic 16-schedules-per-session cap. NOTE: the 60 s wake floor is NOT
+  among them — it bounds a recurring interval (`every_ms`) and a one-shot
+  `{"in": "1s"}` arms about a second out; only the cap, the budget and the
+  spacing floor apply to extras (review round 1, n1).
+
+Requests beyond a bound are dropped with a note, so the bound is observable
+rather than silent. WHERE the note lands depends on the writer: the in-session
+reconcile journals it to her transcript (the requesting turn can read it
+there); the external drain — a runtime-less `resume`, or boot recovery for a
+tray left by a process that died mid-turn — has no transcript writer and logs
+it instead (`logger.warning`, module `local_operator.aida.proactive`). The
+level is WARNING, not INFO, deliberately (QA round 2, Q3): every note here is a
+request that did not take effect or was handed to another writer, and `lop
+serve` configures its console logging at WARNING by default — info-level lines
+were exactly the lines a default-daemon operator could not see.
+
+## Pausing
+
+`/aida pause` (or the desktop's Aida control) sets `aida.cadence.paused = true`:
+
+- her `aida-*` wake rows are cancelled through whichever writer owns them,
+- `held_at` is stamped on her wake-index entry, so the wake supervisor skips
+  her entirely while paused (no runtime is even started) — when the entry
+  survives the cancel; with only her rows the entry is pruned and the
+  supervisor skips by its absence all the same,
+- an unfired one-time greeting is un-stamped by the cancel, so the resume
+  arms it again instead of losing it (the paused greet receipt promises
+  exactly that),
+- a session opened while paused does not arm her rows at all, and a row that
+  somehow comes due while paused is dropped instead of delivered.
+
+`/aida resume` clears the flag and re-arms at the next cadence time. While
+paused she does not run the internal cadence and does not send proactive
+output; ordinary conversation with her works normally.
+
+## Switching her off (R17/R18)
+
+Two switches, either one disables her completely — this is the supported switch
+for harness-only or automation installs (no TUI, no desktop):
+
+- config: `aida.enabled = false`
+- environment: `LOCAL_OPERATOR_NO_AIDA=1`
+
+Disabled means **zero footprint**: `ensure_session` returns before any path is
+joined, so no session is created, no state file is written, no wake is armed
+and no supervisor is installed. Re-enabling restores everything on the next
+boot or `/aida`.
+
+## What she writes to disk
+
+Everything lives under `<config>/aida/` (default `~/.local-operator/aida/`),
+plus the standard session directory:
+
+| path | what it is |
+|---|---|
+| `aida/state.json` | which session id is hers, when she was last paused, today's escalation budget |
+| `aida/onboarding.json` | the one-time greeting ledger (`greeted_at`) |
+| `aida/escalate.json` | her escalation in-tray (written by her, consumed by the engine) |
+| `aida/ensure.lock` | the cross-process lock serialising all of the above |
+| `sessions/<id>/` | her conversation — a normal session directory (transcript, attachment sidecar naming the `aida` role, the "Aida" title) |
+| `wakes/<id>.json` | the standard wake index entry for her session |
+
+None of these is a config key: they are runtime-managed bookkeeping, not
+settings a user authors.
+
+## Configuration keys
+
+| key | default | meaning |
+|---|---|---|
+| `aida.enabled` | `true` | master switch (read at boot and by `/aida`) |
+| `aida.cadence.at` | `"09:00"` | daily cadence time, `HH:MM` local |
+| `aida.cadence.paused` | `false` | the pause flag (written by `/aida pause|resume`) |
+| `aida.cadence.max_extra_per_day` | `2` | escalation budget (`0` disables escalation) |
+| `aida.cadence.min_gap_minutes` | `90` | minimum spacing between Aida wakes |
+| `aida.onboarding.nudge_days` | `14` | integration-nudge bound (used by the onboarding slice) |
+
+All six are editable from `/settings` (section "Aida") and `lop config`.

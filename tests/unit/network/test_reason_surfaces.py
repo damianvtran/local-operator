@@ -94,8 +94,23 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     ): (1, "the ack's own payload key, not a rendered reason"),
     # The refusing device's code and sentence, handed to ``refusal_from_pairing``, whose
     # code-to-sentence map is what a person reads (Q-R3-3).
-    ("local_operator/network/cli.py", "_join_one", "detail"): (1, "input to the sentence map"),
-    ("local_operator/network/cli.py", "_join_one", "reason"): (1, "input to the sentence map"),
+    ("local_operator/network/cli.py", "_finish_pairing", "detail"): (
+        1,
+        "input to the sentence map (the read moved here when the joining half was "
+        "split from the parking half)",
+    ),
+    ("local_operator/network/cli.py", "_finish_pairing", "reason"): (
+        1,
+        "input to the sentence map (moved with the abort frame it reads)",
+    ),
+    # The tool's digest of a session VERB: the owner's own sentence for the op
+    # ("runtime joining", "nothing to stop"), carried verbatim exactly as the CLI's
+    # receipt carries it, because a flag and its English translation on two lines is
+    # the duplication UX round 3 removed.
+    ("local_operator/network/tool.py", "_render", "detail"): (
+        1,
+        "the peer's own sentence for a session op, rendered verbatim",
+    ),
     # The credential listing's `skipped` rows (review round 5, NIT 2). THIS VOCABULARY
     # IS THIS DEVICE'S OWN, which is why the token is shown rather than glossed or
     # mapped to prose: `pull_placement` BUILDS the list in-process (`busy`,

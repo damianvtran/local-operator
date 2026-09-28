@@ -71,7 +71,12 @@ def _consumer_defaults() -> dict[str, object]:
     # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
     # page advertising a number the accept loop will not honour.
     from local_operator.network.credentials import GRANT_TTL_S
-    from local_operator.network.relay import DEFAULT_MAX_HANDSHAKES
+    from local_operator.network.relay import (
+        DEFAULT_ADVERTISE_HOSTS,
+        DEFAULT_LISTEN_ADDRESS,
+        DEFAULT_MAX_HANDSHAKES,
+        DEFAULT_PORT,
+    )
 
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
@@ -175,6 +180,13 @@ def _consumer_defaults() -> dict[str, object]:
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
+        "network.advertise_hosts": list(DEFAULT_ADVERTISE_HOSTS),
+        # Compared as a LIST because that is how the registry stores a LIST;
+        # ``DEFAULT_ADVERTISE_HOSTS`` is the reader's tuple and ``[] == ()`` is
+        # False, so a bare restatement would fail on the SHAPE rather than on the
+        # value. The other two are the reader's own constants, verbatim.
+        "network.listen_address": DEFAULT_LISTEN_ADDRESS,
+        "network.port": DEFAULT_PORT,
         "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
         "network.sync.debounce_s": SYNC_DEBOUNCE_S,
         "network.sync.tick_s": SYNC_TICK_S,
@@ -271,6 +283,21 @@ def _consumer_defaults() -> dict[str, object]:
         consumers[f"providers.{provider}.base_url"] = endpoint
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
     consumers.update(_classification_consumer_defaults())
+    # The Aida keys, asked of the package that reads them. The registry rows
+    # above carry literals on purpose (``settings_io`` must stay off the aida
+    # package's import path — it is loaded on every CLI start), and this block
+    # is the half that turns a drifted literal into a red test rather than a
+    # page that lies about what the engine will do.
+    from local_operator.aida import onboarding as aida_onboarding
+    from local_operator.aida import proactive as aida_proactive
+    from local_operator.aida.bootstrap import DEFAULT_ENABLED
+
+    consumers["aida.enabled"] = DEFAULT_ENABLED
+    consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
+    consumers["aida.cadence.paused"] = aida_proactive.DEFAULT_PAUSED
+    consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
+    consumers["aida.cadence.min_gap_minutes"] = aida_proactive.DEFAULT_MIN_GAP_MINUTES
+    consumers["aida.onboarding.nudge_days"] = aida_onboarding.DEFAULT_NUDGE_DAYS
     return consumers
 
 
@@ -347,6 +374,14 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
         "tui/settings.py derives its defaults from this registry"
     ),
     "display.dock": "tui/settings.py derives its defaults from this registry",
+    "display.composer.band": "tui/settings.py derives its defaults from this registry",
+    "display.composer.chevron": "tui/settings.py derives its defaults from this registry",
+    "display.composer.model": "tui/settings.py derives its defaults from this registry",
+    "display.composer.cwd": "tui/settings.py derives its defaults from this registry",
+    "display.composer.context": "tui/settings.py derives its defaults from this registry",
+    "display.composer.rate": "tui/settings.py derives its defaults from this registry",
+    "display.composer.cost": "tui/settings.py derives its defaults from this registry",
+    "display.composer.duration": "tui/settings.py derives its defaults from this registry",
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
@@ -2430,3 +2465,30 @@ class TestConfigEditStoresACascadeAsAMapping:
         chain = resolve_chain(selector, chains)
         assert chain is not None, "no chain resolved for the configured selector"
         assert expand_fallback_targets(selector, chain) == []
+
+
+def test_declared_endpoints_must_be_host_port_pairs() -> None:
+    """The row's help promises "every entry needs its port"; ``validate`` enforces it.
+
+    Through the SCHEMA rather than through one command, because this is the check every
+    writer shares — the page, ``lop config edit`` and ``PATCH /v1/settings`` all reach
+    ``validate`` before anything is stored. A declared entry is carried into every invite
+    this device mints, so an entry a peer cannot dial is a lie the device tells on the
+    operator's behalf (review round 1, M1).
+    """
+    setting = settings_io.BY_KEY["network.advertise_hosts"]
+
+    assert settings_io.validate(setting, ["tunnel.example.com:4100"], None) is None
+    assert (
+        settings_io.validate(setting, ["203.0.113.7:4097", "tunnel.example.com:4100"], None) is None
+    )
+
+    for bad in (
+        ["203.0.113.7"],
+        ["tunnel.example.com:70000"],
+        ["tunnel.example.com:"],
+        ["x:0"],
+        "not-a-list",
+    ):
+        problem = settings_io.validate(setting, bad, None)
+        assert problem and "host:port" in problem, (bad, problem)

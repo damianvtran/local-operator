@@ -5687,12 +5687,11 @@ class ServingSessionHandle(SessionHandle):
         if command == "agent":
             return self._agent_slash(session, args, SlashResult)
         if command == "project":
-            # SLICE 1 STAND-IN, the TUI twin's shape: the listing answers from
-            # the store, every other reserved verb names the surfaces that act
-            # today. A command advertised as `authoritative_session` MUST be
-            # dispatchable here (tests/unit/session/runtime
-            # /test_capability_surface.py routes by that rule), and the
-            # full-page view ships in a later slice.
+            # Every reserved verb runs (slice 3), through the same runner the
+            # TUI's own `_cmd_project` calls. A command advertised as
+            # `authoritative_session` MUST be dispatchable here
+            # (tests/unit/session/runtime/test_capability_surface.py routes by
+            # that rule).
             return self._project_slash(session, args, SlashResult)
         if command == "mcp":
             return await self._mcp_slash(session, args, SlashResult, locality)
@@ -6326,47 +6325,49 @@ class ServingSessionHandle(SessionHandle):
         )
 
     def _project_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        """The routed ``/project`` — the read-only listing; the verbs are slice 3.
+        """The routed ``/project`` — the same verbs, receipts and refusals as the TUI.
 
-        SLICE 1 STAND-IN, named as one and shared with the TUI twin
-        (``app.py::_cmd_project``) down to the sentences
-        (``slash_commands.project_*_text``), so the owner and the viewer cannot
-        report different things about one store: `Session.project_registry` is
-        session state, so the listing is answered here, where that state lives.
-        Nothing here mutates anything.
+        ``Session.project_registry`` is session state, so the owner answers
+        here for callers with no page to paint (a phone's typed `/project`, a
+        routed attach). The RECEIPTS come from the one shared runner
+        (``slash_commands.run_project_slash_op``) the TUI's ``_cmd_project``
+        calls too, so the two front ends cannot print two different answers —
+        the rule the slice-1 stand-in already established for the listing.
+
+        ``show`` answers as bounded TEXT here (the fields plus one row per
+        linked session); the TUI intercepts ``show`` first and opens its
+        full-page view instead, which is a presentation difference, not a
+        second answer — both read the same ``build_project_view`` composition.
+
+        Synchronous reads, like every other routed listing: the store caches
+        its snapshot and the composition is bounded by the row/link caps.
         """
+        from local_operator.paths import config_dir
         from local_operator.slash_commands import (
-            PROJECT_SUBCOMMANDS,
-            project_listing_text,
             project_unavailable_text,
-            project_unimplemented_text,
-            project_unknown_word_text,
+            run_project_slash_op,
         )
 
         registry = getattr(session, "project_registry", None)
         if registry is None or not hasattr(registry, "list_projects"):
             return SlashResult(kind="notice", text=project_unavailable_text(), style="warning")
-        word = arg.split(maxsplit=1)[0].casefold() if arg.split() else ""
-        if word in {"", "list"}:
-            try:
-                projects = list(registry.list_projects())
-            except Exception as exc:  # noqa: BLE001 — a listing is never worth an error
-                return SlashResult(
-                    kind="notice", text=f"could not list projects: {exc}", style="warning"
-                )
-            if not projects:
-                return SlashResult(
-                    kind="notice",
-                    text="no projects yet. Ask the agent to create one with the project "
-                    "tool; it links this session automatically.",
-                    style="info",
-                )
-            return SlashResult(kind="notice", text=project_listing_text(projects), style="info")
-        if word in PROJECT_SUBCOMMANDS:
-            return SlashResult(
-                kind="notice", text=project_unimplemented_text(word), style="warning"
-            )
-        return SlashResult(kind="notice", text=project_unknown_word_text(word), style="warning")
+        parts = arg.split(maxsplit=1)
+        word = parts[0] if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        # The registry's OWN config dir: the composition reads the store and
+        # the session directories from one root, and on an attach whose config
+        # dir differs from this process's, the process-global one would compose
+        # a view of the wrong machine's sessions (agent review round 1,
+        # finding 11).
+        registry_dir = getattr(registry, "config_dir", None) or config_dir()
+        text, style = run_project_slash_op(
+            word,
+            rest,
+            registry=registry,
+            config_dir=registry_dir,
+            session_id=str(getattr(session, "session_id", "") or "") or None,
+        )
+        return SlashResult(kind="notice", text=text, style=style)
 
     def _team_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """The routed ``/team``: list, and ATTACH, from the SESSION's registry.

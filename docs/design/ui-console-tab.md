@@ -1728,10 +1728,11 @@ becomes either annoying or unsafe:
    to a JSON dump"), and it names the surface, the session and the exact bytes
    or keys about to be written.
 2. **The user's consent for the privileged command itself** — this is R19's
-   `ask`. The tool's description tells the agent the rule explicitly: *before
-   running a command that needs administrator rights, use `ask` with the exact
-   command and what it will change; do not attempt a password yourself.* The
-   reason this is `ask`-based rather than approval-tier-based is scope: the
+   `ask`, and for a sudo command it carries the password handover too: the
+   question states the exact command and what it will change, and the user
+   answering it with a `secret: true` entry *is* the approval to run it — the
+   agent then relays the value with `secret_ref` (§11.3) without ever seeing it.
+   The reason this is `ask`-based rather than approval-tier-based is scope: the
    harness gate authorises *the tool call*, while the user is being asked to
    authorise *a root-level change to their machine*, and those happen at
    different moments (the agent may type the command minutes after the call was
@@ -1742,9 +1743,10 @@ Three shell-side affordances make the admin path usable rather than aspirational
 - The pane's new-surface control offers a **"Run with admin"** variant that
   starts the surface as the user's shell (never as root) so the `sudo` prompt
   arrives in the surface where the user can type it.
-- **`sudo`'s password prompt is typed by the human into the surface, or supplied
-  by the secret path (§11.3), and never by the agent's own text** — the tool
-  description forbids it and §11.3 gives the structural alternative.
+- **`sudo`'s password prompt is answered by the user's own entry — typed into
+  the surface, or handed over through `ask` and relayed by the secret path
+  (§11.3) — and never by the agent's own text** — the tool description forbids
+  the literal and §11.3 gives the structural alternative.
 - `console_status` reports whether the surface's process is still waiting on
   input (`waiting_for_input`, derived from "the pty has emitted output and then
   received no input for N ms while the last line ends in a prompt-ish byte" —
@@ -1765,16 +1767,25 @@ wrong answer with confidence.
 
 | path | allowed? | why |
 |---|---|---|
-| the human types it into the surface | **yes, and it is the recommended path** | nothing records keystrokes (§11.4) |
+| the user's entry — typed into the surface, or handed over through `ask` and relayed by `secret_ref` | **yes, and it is the recommended path** | nothing records keystrokes (§11.4); an `ask` handover lives in session memory, not on disk (§11.3) |
 | the agent types a **literal** credential via `console_input` | **forbidden by policy, not prevented by construction** | the harness cannot know a string is a credential; §11.5 states the residual and the mitigations |
-| the agent passes a **`secret_ref`** naming a stored credential | **yes** | the value never enters the model's context or a trace (§11.3) |
+| the agent passes a **`secret_ref`** naming a credential | **yes** | resolved session-first (the `ask` answer, `/credential`), then from the encrypted store; the value never enters the model's context or a trace (§11.3) |
 
 ### 11.3 The exact-value path: `secret_ref`
 
 - `console_input {surface, secret_ref: "SUDO_PASSWORD"}`. The **Python tool**
-  resolves the ref from the encrypted secret store (the same store the `secret`
-  tool uses, `local_operator/tools/secret_tool.py:95 build_secret_tool`), which
-  is where a value the user entrusted to the harness already lives.
+  resolves the ref from two sources, **session first**: (1) the session
+  credential store — the value the user typed into an `ask` secret question, or
+  handed over with `/credential`. It is checked first because it is what the
+  user just handed over for this task, and because session scope keeps it off
+  disk: a relayed `sudo` password does not become a stored artifact because one
+  command needed it. A same-named value in the long-term store is the older
+  decision, so the fresh handover wins. (2) The encrypted secret store
+  (`retrieve_secret`, the same store the `secret` tool uses,
+  `local_operator/tools/secret_tool.py:95 build_secret_tool`), for a value the
+  user chose to persist — reached only when the session store has no such key.
+  The `ask` entry is also the approval (§11.1): this path relays a value the
+  user just agreed to give; it does not solicit one.
 - **The value is never returned and never echoed.** The tool's result is
   `{accepted: true, bytes: <count>}`; the value is not in the result, not in the
   error path, and not in any log line.

@@ -709,10 +709,11 @@ the list must agree) and nothing when it does not.
 
 ## Radient: narrow proxy, not another authentication authority
 
-POST `/v1/desktop/radient` selects one of 25 closed operations: account/prices,
+POST `/v1/desktop/radient` selects one of 30 closed operations: account/prices,
 credits/usage, provision/application.create, agent catalogue/detail/CRUD,
-like/favourite/count controls, comments/CRUD and account.agents. Paths are assembled
-server-side from bounded identifiers. Query/payload keys are allowlisted per
+like/favourite/count controls, comments/CRUD, account.agents and the organization
+reads (memberships.list, org_agents.list, org_teams.list, org_team.get). Paths are
+assembled server-side from bounded identifiers. Query/payload keys are allowlisted per
 operation. Mutations require stable request_id; DELETE additionally requires
 confirmation. Redirects and oversized/upstream error bodies are refused. The id is
 spent by the attempt that carried it — including an attempt ANSWERED WITH A REFUSAL —
@@ -730,6 +731,11 @@ alongside this path.
 
 Every refusal of that proxy answers `{"code", "message", "details"}` in `detail`,
 and `code` is what separates the remedies — classify on `code`, never on status.
+The organization reads (`memberships.list`, `org_agents.list`, `org_teams.list`,
+`org_team.get`) carry the hub's frozen membership refusals through under their own
+codes — `not_a_member`, `insufficient_role` (with `details.required` naming the
+rank) and `team_plan_required` — because none of those is fixed by signing in
+again; every other unrecognized 403 keeps `radient_credential_refused`.
 `radient_no_credential` (nothing is stored) and `radient_credential_refused`
 (Radient refused this account's sign-in — including a grant the store knows is dead,
 which carries `details.reason = "grant_invalid"`) both mean "sign in to Radient

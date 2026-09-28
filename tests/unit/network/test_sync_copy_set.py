@@ -80,6 +80,7 @@ def _entry_owners() -> dict[str, str]:
         TURN_JOURNAL_NAME,
     )
     from local_operator.session_lease import LEASE_NAME, MIRROR_NAME, RECOVERY_LOCK_NAME
+    from local_operator.tools.eval import KERNEL_MARKER_NAME
     from local_operator.wakes.lock import WAKE_LOCK_NAME
 
     return {
@@ -102,6 +103,9 @@ def _entry_owners() -> dict[str, str]:
         RECOVERY_LOCK_NAME: "session_lease",
         WAKE_LOCK_NAME: "wakes.lock",
         RESOURCE_NAME: "browser_bridge.resources",
+        # The eval kernel's restart marker (``tools.eval``): carried so a moved
+        # session's first cell still learns its namespace was left behind.
+        KERNEL_MARKER_NAME: "local_operator.tools.eval",
         # The copy machinery's own two: a replica's cursor (never inside a session)
         # and the move's boot marker, which lives in a staging directory and is
         # deleted by the promote (a crash can leave one inside a promoted session,
@@ -255,6 +259,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
     "local_operator/evaluation/runner/action_tool.py": (1, "the action tool's name"),
+    "local_operator/evaluation/action_server.py": (
+        1,
+        "``SERVER_NAME``: the MCP server's name — the identifier-not-a-path case, "
+        "matching the reply-channel and action-tool precedents above",
+    ),
     "local_operator/agents.py": (
         1,
         "``_DEFAULT_EXPORT_STEM``: the stem an ``lop agents export`` file is written "
@@ -267,6 +276,20 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "from a filename",
     ),
     "local_operator/references.py": (1, "a THREAD name for reference reads"),
+    # Aida's own store lives at the CONFIG root (``<config>/aida/``), beside
+    # ``sessions/`` rather than inside one: her state, onboarding stamp,
+    # escalation tray and ensure lock are this INSTALL's records, and a session
+    # directory travelling between devices carries none of them.
+    "local_operator/aida/state.py": (
+        5,
+        "``AIDA_DIRNAME``/``STATE_NAME``/``ONBOARDING_NAME``/``ESCALATE_NAME``/"
+        "``LOCK_NAME``: her store under the config root, never an entry of a session",
+    ),
+    "local_operator/aida/bootstrap.py": (
+        1,
+        "``ROLE_NAME``: the packaged seed's NAME (an identifier resolved through the "
+        "agent registry), not a file in a session directory",
+    ),
     "local_operator/providers/oauth/zai.py": (1, "a keychain entry's name, not a path"),
     "local_operator/providers/oauth/kimi.py": (
         1,

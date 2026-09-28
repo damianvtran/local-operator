@@ -116,6 +116,21 @@ class MCPStdioServerConfig(BaseModel):
             "Default false (lazy); opt in only when the run's workflow names its tools."
         ),
     )
+    #: Reserve this server's tools for the OWNING session's own turn: a
+    #: delegated child neither inherits them (``harness.subagent`` refuses to
+    #: carry or re-activate them) nor can execute them (the manager refuses a
+    #: call whose ``ToolContext`` carries a ``job_id``). The motivating
+    #: consumer is an action surface whose effects ARE the measurement -- an
+    #: episode a child could otherwise drive or end. Default off: every
+    #: existing server keeps today's inheritance.
+    own_turn_only: bool = Field(
+        default=False,
+        alias="ownTurnOnly",
+        description=(
+            "Reserve this server's tools for the owning session's own turn: delegated "
+            "children neither inherit nor can execute them."
+        ),
+    )
     timeout: float | None = None  # milliseconds; 0 disables client-side timeout
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -147,6 +162,9 @@ class MCPHttpServerConfig(BaseModel):
     #: workflow names its tools, and ``enabled_tools`` still gates what is
     #: exposed.
     preload_tools: bool = Field(default=False, alias="preloadTools")
+    #: See ``MCPStdioServerConfig.own_turn_only``: reserve this server's tools
+    #: for the owning session's own turn.
+    own_turn_only: bool = Field(default=False, alias="ownTurnOnly")
     timeout: float | None = None
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -179,6 +197,9 @@ class MCPSseServerConfig(BaseModel):
     #: workflow names its tools, and ``enabled_tools`` still gates what is
     #: exposed.
     preload_tools: bool = Field(default=False, alias="preloadTools")
+    #: See ``MCPStdioServerConfig.own_turn_only``: reserve this server's tools
+    #: for the owning session's own turn.
+    own_turn_only: bool = Field(default=False, alias="ownTurnOnly")
     timeout: float | None = None
     auth: MCPAuthConfig | None = None
     oauth: MCPOAuthConfig | None = None
@@ -409,6 +430,20 @@ def tool_enabled_by_config(cfg: Any, tool_name: str) -> bool:
         return False
     allowed = getattr(cfg, "enabled_tools", []) or []
     return not allowed or any(fnmatchcase(tool_name, pattern) for pattern in allowed)
+
+
+def server_own_turn_only(cfg: Any) -> bool:
+    """Whether ``cfg`` reserves its tools for the owning session's own turn.
+
+    ``None``/unreadable answers ``False`` -- the same "no config says nothing"
+    posture :func:`tool_enabled_by_config` keeps -- so the wiring's test doubles,
+    which carry the lookup surface, work without a config build. The flag's two
+    consequences live at its call sites: a delegated child neither inherits nor
+    re-activates such a server (``harness.subagent``), and an execution on
+    behalf of a background job is refused (``McpManager._execute_tool_call``).
+    """
+
+    return bool(getattr(cfg, "own_turn_only", False))
 
 
 def load_all_mcp_configs(

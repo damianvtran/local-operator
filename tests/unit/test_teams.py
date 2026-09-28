@@ -25,6 +25,7 @@ from local_operator.teams import (
     TeamRegistry,
     TeamRegistryLockTimeout,
     TeamRegistryRecoveryError,
+    hub_team_document,
     parse_members,
 )
 
@@ -277,6 +278,40 @@ def test_manager_preamble_layers_briefs(registry: TeamRegistry) -> None:
     member = team.member_preamble("coder")
     assert "You are coder on this team" in member
     assert "Do not merge without review." in member
+
+
+def test_manager_preamble_states_the_projects_tracking_duty(registry: TeamRegistry) -> None:
+    """The team-manager half of the projects prompt change (§V2.G.2), pinned as
+    the exact sentence: a manager that never hears it is exactly the manager
+    whose project row goes stale."""
+    team = registry.create_team(
+        TeamEditFields(name="tracked", manager="manager", members=[TeamMember(role="coder")])
+    )
+    assert (
+        "Track this team's workstream with the `project` tool and keep its "
+        "progress current; keep the todo list updated the same way."
+    ) in team.manager_preamble()
+
+
+def test_the_two_manager_prompts_agree_on_the_projects_duty(registry: TeamRegistry) -> None:
+    """The duty is stated twice BY DESIGN (the seed §V2.G.1, the team preamble
+    §V2.G.2) and the two populations are not fully disjoint — a
+    ``task(agent='manager')`` outside a team sees only the seed, a team with a
+    custom manager sees only the preamble — so the pair must stay aligned on
+    the facts that matter without collapsing the texts."""
+    from local_operator.agent_profiles import load_seed
+
+    seed = load_seed("manager")
+    assert seed is not None
+    team = registry.create_team(
+        TeamEditFields(name="aligned", manager="manager", members=[TeamMember(role="coder")])
+    )
+    preamble = team.manager_preamble()
+
+    for text in (seed.instructions, preamble):
+        assert "`project` tool" in text
+    assert "in real time" in seed.instructions
+    assert "keep its progress current" in preamble
 
 
 def test_oversized_briefs_are_refused(registry: TeamRegistry) -> None:
@@ -2152,3 +2187,245 @@ def test_construction_never_raises_and_defers_the_error_to_first_use(
     monkeypatch.undo()
     recovered = TeamRegistry(tmp_path).get_team_by_name("survivor")
     assert recovered is not None
+
+
+# --- Agent Hub org sharing: the published document and the pull (design §1.6/§8.3) ---
+
+
+def test_hub_team_document_carries_exactly_the_local_fields(tmp_path: Path) -> None:
+    """The published document is one-way and complete -- and nothing else (§1.6)."""
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(
+            name="release-crew",
+            description="Ships the release.",
+            manager="manager",
+            members=parse_members(["coder:2", "team:pod"]),
+            instructions="You ship the release.",
+            project="rad-1",
+        )
+    )
+
+    assert hub_team_document(team) == {
+        "name": "release-crew",
+        "description": "Ships the release.",
+        "manager": "manager",
+        "members": [
+            {"role": "coder", "kind": "agent", "count": 2},
+            {"role": "pod", "kind": "team", "count": 1},
+        ],
+        "instructions": "You ship the release.",
+        "project": "rad-1",
+        "version": "1.0.0",
+    }
+
+
+def test_import_hub_team_reconstructs_the_row(tmp_path: Path) -> None:
+    """A pull stores a fresh-id local team carrying the published content."""
+    registry = TeamRegistry(tmp_path)
+    document = {
+        "id": "hub-team-1",
+        "tenant_id": "org-a",
+        "name": "release-crew",
+        "description": "Ships the release.",
+        "manager": "manager",
+        "members": [
+            {"role": "coder", "kind": "agent", "count": 2},
+            {"role": "pod", "kind": "team", "count": 1},
+        ],
+        "instructions": "You ship the release.",
+        "project": "rad-1",
+        "version": "1.0.0",
+    }
+
+    outcome = registry.import_hub_team(document)
+
+    assert outcome.renamed_from is None
+    assert outcome.invalid_name is False
+    team = outcome.team
+    # A hub id is a foreign namespace; the local row gets its own address.
+    assert team.id != "hub-team-1"
+    assert team.name == "release-crew"
+    assert [(m.role, m.kind, m.count) for m in team.members] == [
+        ("coder", "agent", 2),
+        ("pod", "team", 1),
+    ]
+    # The briefs are real values, not metadata-only placeholders.
+    assert team.instructions == "You ship the release."
+    assert team.project == "rad-1"
+    assert registry.get_team(team.id).instructions == "You ship the release."
+
+
+def test_import_hub_team_suffixes_a_taken_name(tmp_path: Path) -> None:
+    """A collision takes the agents' rename-with-suffix convention, case-insensitively."""
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="release-crew"))
+
+    outcome = registry.import_hub_team(
+        {"name": "Release-Crew", "members": [], "instructions": "You ship."}
+    )
+
+    assert outcome.team.name == "Release-Crew-2"
+    assert outcome.renamed_from == "Release-Crew"
+    assert outcome.invalid_name is False
+
+
+def test_import_hub_team_maps_a_published_spelling_to_a_local_name(tmp_path: Path) -> None:
+    """A published name the local rule cannot hold is mapped, visibly."""
+    registry = TeamRegistry(tmp_path)
+
+    outcome = registry.import_hub_team(
+        {"name": "Feature Release Crew", "members": [], "instructions": "You ship."}
+    )
+
+    assert outcome.team.name == "Feature-Release-Crew"
+    assert outcome.renamed_from == "Feature Release Crew"
+    assert outcome.invalid_name is True
+
+
+def test_import_hub_team_combines_spelling_and_collision(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="Feature-Release-Crew"))
+
+    outcome = registry.import_hub_team(
+        {"name": "Feature Release Crew", "members": [], "instructions": "You ship."}
+    )
+
+    assert outcome.team.name == "Feature-Release-Crew-2"
+    assert outcome.renamed_from == "Feature Release Crew"
+    assert outcome.invalid_name is True
+
+
+def test_import_hub_team_reads_unknown_kinds_as_agent_slots(tmp_path: Path) -> None:
+    """The hub stores what the author wrote; the pull side decides what it recognises.
+
+    The design vocabulary spells a person slot ``member`` and the local model
+    ``agent``; anything that is not the nested-team marker reads as an agent
+    slot rather than failing the whole pull.
+    """
+    registry = TeamRegistry(tmp_path)
+
+    outcome = registry.import_hub_team(
+        {
+            "name": "crew",
+            "members": [{"role": "coder", "kind": "member", "count": 3}],
+            "instructions": "You ship.",
+        }
+    )
+
+    assert [(m.role, m.kind, m.count) for m in outcome.team.members] == [("coder", "agent", 3)]
+
+
+def test_import_hub_team_refuses_a_count_outside_the_local_band(tmp_path: Path) -> None:
+    """A roster the pull would silently rewrite is refused, not clamped."""
+    registry = TeamRegistry(tmp_path)
+
+    with pytest.raises(ValueError):
+        registry.import_hub_team(
+            {
+                "name": "crew",
+                "members": [{"role": "coder", "kind": "agent", "count": 0}],
+                "instructions": "You ship.",
+            }
+        )
+
+
+def test_hub_team_document_round_trips_through_import(tmp_path: Path) -> None:
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(
+            name="release-crew",
+            description="Ships the release.",
+            manager="manager",
+            members=parse_members(["coder:2", "team:pod"]),
+            instructions="You ship the release.",
+            project="rad-1",
+        )
+    )
+
+    # A second registry: the round trip is about the DOCUMENT, and importing into
+    # the registry that holds the original would only test the collision suffix.
+    other = TeamRegistry(tmp_path / "other")
+    outcome = other.import_hub_team(hub_team_document(team))
+
+    assert outcome.renamed_from is None
+    assert outcome.team.name == team.name
+    assert [(m.role, m.kind, m.count) for m in outcome.team.members] == [
+        (m.role, m.kind, m.count) for m in team.members
+    ]
+    assert outcome.team.instructions == "You ship the release."
+    assert outcome.team.project == "rad-1"
+
+
+def test_import_hub_team_strips_a_trailing_separator_the_mapping_left(tmp_path: Path) -> None:
+    """A name this mapping MINTs must itself survive a later re-push (R1-5).
+
+    ``Crew!`` maps its invalid run to ``-``, which would leave ``Crew-`` --
+    locally legal (``_NAME_RE`` allows a trailing hyphen) but refused by the
+    hub's ``-``/``.`` endpoint rule, so a pull-then-push round trip would fail.
+    The length cut can leave the same artifact; both are stripped. A published
+    name never ends in either character, so the strip can only remove what the
+    mapping introduced -- an already-legal ending is untouched.
+    """
+    registry = TeamRegistry(tmp_path)
+
+    outcome = registry.import_hub_team(
+        {"name": "Crew!", "members": [], "instructions": "You ship."}
+    )
+
+    assert outcome.invalid_name is True
+    assert outcome.team.name == "Crew"
+
+    truncated = registry.import_hub_team(
+        {"name": "x" * 63 + "!", "members": [], "instructions": "You ship."}
+    )
+    assert truncated.team.name == "x" * 63
+
+    kept = registry.import_hub_team({"name": "Crew-2", "members": [], "instructions": "You ship."})
+    assert kept.team.name == "Crew-2"
+
+
+def test_import_hub_team_retries_the_next_suffix_on_a_name_race(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A stale first probe converges through create_team's under-lock authority.
+
+    The collision probe reads the SNAPSHOT only (``_find_cached_team_by_name``,
+    the module's rule for mutation paths); when another writer wins a name
+    between probe and lock, ``create_team`` raises and the import must take the
+    next suffix instead of surfacing a spurious error (review round 1, R1-3).
+    Simulated here by making the first probe lie, as a stale cache would.
+    """
+    registry = TeamRegistry(tmp_path)
+    registry.create_team(TeamEditFields(name="crew"))
+
+    real = TeamRegistry._find_cached_team_by_name
+    calls = {"n": 0}
+
+    def stale_once(self: TeamRegistry, name: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None  # the race: the snapshot had not seen the winner yet
+        return real(self, name)
+
+    monkeypatch.setattr(TeamRegistry, "_find_cached_team_by_name", stale_once)
+
+    outcome = registry.import_hub_team({"name": "crew", "members": [], "instructions": "You ship."})
+
+    assert outcome.team.name == "crew-2"
+    assert calls["n"] >= 2
+
+
+def test_import_hub_team_re_raises_a_refusal_a_suffix_cannot_fix(tmp_path: Path) -> None:
+    """Only a name race is retried; an oversized brief still fails fast (R1-3).
+
+    The retry loop distinguishes "the name was taken" (the candidate is visible
+    in the refreshed snapshot) from every other ``ValueError`` -- otherwise a
+    document that can never be created would spin the suffix forever.
+    """
+    registry = TeamRegistry(tmp_path)
+
+    with pytest.raises(ValueError):
+        registry.import_hub_team({"name": "crew", "members": [], "instructions": "x" * 9000})
+
+    assert registry.list_teams() == []

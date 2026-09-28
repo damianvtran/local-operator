@@ -80,6 +80,7 @@ from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_ON_SIGNAL,
+    RUNTIME_RECORD_KIND,
     SIGNAL_DRAIN_CAUSE,
     SIGNAL_DRAIN_S,
     UPDATE_UNNAMED_PAIR,
@@ -101,7 +102,9 @@ REAP_CHECK_S = 0.25
 #: quiescent. This is a drain for newly arriving work, not a reconnect grace.
 DEFAULT_GRACE_S = 3.0
 
-#: HOW LONG A RUNTIME A VIEWER HAS LEFT STAYS RESIDENT (``runtime.keep_alive_seconds``).
+#: HOW LONG A RUNTIME A PERSON IS INVOLVED WITH STAYS RESIDENT after the last
+#: thing they did, in either of the two ways that can happen
+#: (``runtime.keep_alive_seconds``).
 #:
 #: The 3 s drain above is deliberately NOT a reconnect grace, and that is the gap
 #: this fills: closing a conversation and opening it a minute later paid a cold
@@ -111,16 +114,28 @@ DEFAULT_GRACE_S = 3.0
 #: session and 55/101 ms on a 48 MB one at load ~98). The policy it states: a
 #: runtime that has been LOOKED AT is a runtime that will be looked at again.
 #:
-#: IT APPLIES ONLY WHERE A VIEWER HAS LEFT, never to a runtime nobody watched —
-#: an ``exec``, a wake delivery, a phone-only session — because that population
-#: is exactly what the 3 s drain was written for. That is why the window is keyed
-#: on the record's ``detached_at`` (:func:`_detached_at`) rather than on "is this
-#: runtime idle": the two are the same question only for a runtime a person has
-#: looked at.
+#: ITS SIBLING STATEMENT, and the second way in: a runtime that has been ASKED
+#: FOR is one somebody is on their way to. That is what an engage is
+#: (``net_session_engage`` over the mesh, a draft's first keystroke locally —
+#: both ``launch.WarmErrand``), and the runtime knows it was asked for from the
+#: spawn (``types.ENGAGED_ENV`` → ``SessionRecord.engaged_at``). WITHOUT THAT
+#: TERM A WARM WAS WASTED: the warmed runtime had no viewer to hold it, so it
+#: took the ordinary drain and left about 3 s after the engage answered, which
+#: left the peer's ``--engage`` promising a runtime that had already gone and
+#: made the next attach pay the cold start the warm existed to avoid.
+#:
+#: IT APPLIES TO A RUNTIME HOLDING A CLAIM, and to no other — neither of the two
+#: statements above is true of an ``exec``, a wake delivery or a phone-only
+#: session, which is exactly the population the 3 s drain was written for. That
+#: is why the window is keyed on the record's claims (``_claim_stamp``) rather
+#: than on "is this runtime idle": the two are the same question only for a
+#: runtime a person is involved with.
 #:
 #: 0 DISABLES IT. That is the escape hatch for an operator who would rather pay a
 #: cold start than hold memory, and it is not a special case in the arithmetic: a
-#: window of 0 simply leaves the ordinary drain.
+#: window of 0 simply leaves the ordinary drain. It declines held engaged
+#: runtimes too, which is the reading of the preference an operator who set it
+#: meant: hold nothing warm.
 DEFAULT_KEEP_ALIVE_SECONDS = 300
 
 #: HOW MANY IDLE CLIENTLESS RUNTIMES ONE INSTALL KEEPS WARM
@@ -129,17 +144,21 @@ DEFAULT_KEEP_ALIVE_SECONDS = 300
 #: The window above is per process and unbounded in aggregate, so a user who
 #: visits eight conversations would hold eight resident processes for five
 #: minutes each. This is the machine-wide bound: a runtime inside its keep-alive
-#: window that is NOT among the ``keep_alive_max`` most recently detached idle
+#: window that is NOT among the ``keep_alive_max`` most recently CLAIMED idle
 #: records leaves at once, so the fleet settles at the cap rather than at
 #: "however many the user happened to open". The cost it bounds is measured at
-#: ~73-130 MB of RSS per idle runtime, in ``test_runtime_keep_alive``.
+#: ~73-130 MB of RSS per idle runtime, in ``test_runtime_keep_alive``. Both ways
+#: of claiming a slot are charged — a departed viewer and an engage — because the
+#: bound has to see every process the window can hold, and an engage is the one
+#: way a peer can make them in bulk.
 #:
 #: WHY AN LRU AND NOT A CLOCK OR A QUEUE. The runtime cannot know which
-#: conversation the user will open next, but detach ORDER is the best proxy
-#: available: the session just left is the one most likely to be returned to, and
-#: the one left twenty minutes ago is the least. Oldest-first or FIFO would evict
-#: exactly the wrong one, which is why the record carries WHICH MOMENT a runtime
-#: became detached (``SessionRecord.detached_at``) and not merely that it is.
+#: conversation the user will open next, but claim ORDER is the best proxy
+#: available: the session just left (or just asked for) is the one most likely to
+#: be returned to, and the one from twenty minutes ago is the least. Oldest-first
+#: or FIFO would evict exactly the wrong one, which is why the record carries
+#: WHICH MOMENT a runtime acquired its claim (``SessionRecord.detached_at``,
+#: ``SessionRecord.engaged_at``) and not merely that it holds one.
 #:
 #: ONLY IDLE, CLIENTLESS RECORDS COUNT — "no attach client is connected", the
 #: same term the reaper's own viewer predicate is built on — and that is the
@@ -781,11 +800,16 @@ def _detached_at(runtime: object) -> float | None:
     """When this runtime's LAST viewer left, or ``None`` if none ever has.
 
     Term 3 above asks whether a viewer is attached NOW; this asks whether one
-    ever was, which is the question the keep-alive window is keyed on. The stamp
-    is written by ``RuntimeServer._republish_detached`` at the 1->0 transition
-    and cleared at 0->1, so it is NOT "when this runtime last became idle": a
-    runtime nobody has watched carries ``None`` for its whole life and keeps the
-    ordinary 3 s drain, which is the population that drain was written for.
+    ever was, which is half of the question the keep-alive window is keyed on.
+    The stamp is written by ``RuntimeServer._republish_detached`` at the 1->0
+    transition and cleared at 0->1, so it is NOT "when this runtime last became
+    idle": a runtime nobody has watched carries ``None`` for its whole life.
+
+    THE OTHER HALF IS THE ENGAGE CLAIM (``SessionRecord.engaged_at``, set once at
+    boot from the spawn), and the two are
+    read together by :func:`_claim_stamp` — the window is drawn for a runtime
+    holding either one, and the ordinary 3 s drain is written for the population
+    holding neither.
 
     Read off the server's own record object, which is where the stamp is
     written; a reduced runtime (an older host, a test double) has no record and
@@ -802,8 +826,40 @@ def _detached_at(runtime: object) -> float | None:
     return float(stamp)
 
 
+def _claim_stamp(record: object) -> float | None:
+    """The newest warm-window claim a RECORD carries, or ``None``.
+
+    ONE DEFINITION OF THE CLAIM, and it is a function of the record rather than
+    of the running runtime because the reaper both asks about ITSELF
+    (:func:`_warm_claim_at`, off the server's live record) and about every OTHER
+    record on the install (``registry.scan``, in ``_keep_alive_candidates``). Two
+    readings of "does this runtime hold a claim" would drift exactly where the
+    LRU's arithmetic is load-bearing, so both come from here.
+
+    THE NEWER OF THE TWO WINS, and the two claims are the same fact stated at
+    different moments: a person is involved with this runtime, and the window runs
+    from when they were last known to be. A viewer who left at T is a fresher
+    statement than an engage at T-n, and a runtime with both is held from the
+    later one rather than from whichever field happens to be read first.
+    """
+    stamps: list[float] = []
+    for name in ("detached_at", "engaged_at"):
+        stamp = getattr(record, name, None)
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        stamps.append(float(stamp))
+    return max(stamps) if stamps else None
+
+
+def _warm_claim_at(runtime: object) -> float | None:
+    """The claim THIS runtime holds on the warm window, or ``None`` (see
+    :func:`_claim_stamp`; this is the same question asked of the live record).
+    """
+    return _claim_stamp(getattr(runtime, "_record", None))
+
+
 def _keep_alive_candidates() -> list[tuple[float, int]]:
-    """This install's idle, clientless runtimes as ``(detached_at, pid)`` pairs.
+    """This install's idle, clientless runtimes as ``(claim_stamp, pid)`` pairs.
 
     THE POPULATION IS THE REAPER'S OWN, and the ``watching`` term is what makes
     it so (review round 1, F1). A record used to be charged on ``detached``
@@ -821,6 +877,13 @@ def _keep_alive_candidates() -> list[tuple[float, int]]:
     runtime published — and such a record with a viewer on screen would be
     charged without the visibility term. Both, then: a slot is charged only to a
     record that is neither visible nor attached.
+
+    THE STAMP IS THE CLAIM, not the detach alone (``_claim_stamp``): a runtime a
+    viewer has LEFT and one somebody ENGAGED and has not yet attached to are both
+    holding the same window, so both are charged for it. Charging only the
+    detached half would let an engaged runtime hold a window the LRU cannot see —
+    i.e. the memory bound this cap exists to be would stop bounding exactly the
+    population a warm engage can create in bulk.
 
     THE SCOPE IS ONE CONFIG ROOT, not the host (QA round 1, Q-5): this scans
     ``registry.scan()`` with the default root, i.e. the store the runtime itself
@@ -855,10 +918,10 @@ def _keep_alive_candidates() -> list[tuple[float, int]]:
             continue
         if getattr(record, "busy", False):
             continue
-        stamp = getattr(record, "detached_at", None)
-        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        stamp = _claim_stamp(record)
+        if stamp is None:
             continue
-        out.append((float(stamp), record.pid))
+        out.append((stamp, record.pid))
     return out
 
 
@@ -936,12 +999,13 @@ def _exit_requested(runtime: object) -> bool:
 def _keep_alive_victim(runtime: object, cap: int) -> bool:
     """Is this runtime outside the machine-wide keep-alive LRU?
 
-    True means: another ``cap`` runtimes were detached more recently than this
-    one, so this one gives up its window and exits now. The comparison is on
-    ``detached_at`` descending, with the pid breaking ties so the ordering is
-    total — a tie at the boundary therefore resolves by pid, which is arbitrary
-    but STABLE, and the design accepts the resulting N±1 (see
-    :data:`DEFAULT_KEEP_ALIVE_MAX`).
+    True means: another ``cap`` runtimes acquired their claim on a window more
+    recently than this one, so this one gives up its window and exits now. A
+    claim is acquired by having a viewer LEAVE or by being ENGAGED (see
+    ``_claim_stamp``), and both are compared on the same stamp, descending, with
+    the pid breaking ties so the ordering is total — a tie at the boundary
+    therefore resolves by pid, which is arbitrary but STABLE, and the design
+    accepts the resulting N±1 (see :data:`DEFAULT_KEEP_ALIVE_MAX`).
 
     EVERY FAILURE TO ANSWER KEEPS THE RUNTIME, including the important one: a
     scan that does not contain OUR OWN record cannot say we are outside the cap,
@@ -950,7 +1014,7 @@ def _keep_alive_victim(runtime: object, cap: int) -> bool:
     themselves still preempt themselves — while the other direction is a runtime
     exiting because its record was momentarily unreadable.
     """
-    mine = _detached_at(runtime)
+    mine = _warm_claim_at(runtime)
     if mine is None:
         return False
     try:
@@ -972,22 +1036,26 @@ def _drain_window_s(base_s: float, runtime: object) -> tuple[float, int]:
 
     ``base_s`` is the ordinary drain (``DEFAULT_GRACE_S``, or the operator's
     ``LOP_SESSION_GRACE_S``). It is replaced by the keep-alive window for a
-    runtime a viewer has LEFT, and never shortened by it: an operator who
-    widened the drain gets the wider of the two, because the runtime a person was
-    just looking at is the LAST one that should leave sooner than an unwatched
-    one.
+    runtime that HOLDS A CLAIM — a viewer has LEFT it, or somebody ENGAGED it
+    (see ``_claim_stamp``) — and never shortened by it: an operator who widened
+    the drain gets the wider of the two, because the runtime a person is involved
+    with is the LAST one that should leave sooner than one nobody is.
 
     ``lru_cap`` of 0 means "no LRU check" and is returned exactly when the
-    keep-alive does not apply (no viewer ever left, or the window is disabled),
-    which is what keeps the registry scan off every runtime that has no claim to
-    a window in the first place.
+    keep-alive does not apply (no claim, or the window is disabled), which is what
+    keeps the registry scan off every runtime that has no claim to a window in the
+    first place — an ``exec``, a wake delivery, a phone-only session: the ordinary
+    3 s drain's own population, unchanged.
 
     THE POLICY IS READ HERE, AT THE MOMENT THE WINDOW IS DRAWN, and that is the
     whole reason this is a function rather than a value captured at reaper
-    start: ``detached_at`` does not exist until a viewer leaves, so a policy
-    read at boot would be a policy about a runtime nobody had looked at yet.
+    start: the DETACH half of the claim does not exist until a viewer leaves, so a
+    policy read at boot would be a policy about a runtime nobody had looked at
+    yet. (The engage half is known at boot — that is the point of it — but it is
+    read through the same call so one place answers "does this runtime hold a
+    claim".)
     """
-    if _detached_at(runtime) is None:
+    if _warm_claim_at(runtime) is None:
         return base_s, 0
     keep_alive_s = _keep_alive_seconds()
     if keep_alive_s <= 0:
@@ -1305,14 +1373,15 @@ def _clear_boot_record() -> None:
     not one per runtime ever spawned.
 
     THE GUARD IS NOT AN OPTIMISATION. Nothing is attempted when this process
-    never published a record, and that is load-bearing twice over. The exit path
-    is TIMED by the reaper's own tests (``test_process_reaper`` measures the
-    spread of ``_clean_exit`` elapsed times to 40 ms), so an instrument must not
-    add work to it for a host that has no record to withdraw — an in-process
-    session, a reduced handle, every test that never binds instrumentation.
-    And the withdrawal is not free even when it does nothing: it resolves
-    ``run_dir()``, which MKDIRS the namespace, so an unconditional call would
-    make every clean exit create a directory it has nothing to put in.
+    never published a record, and the exit path is TIMED by the reaper's own tests
+    (``test_process_reaper`` measures the spread of ``_clean_exit`` elapsed times
+    to 40 ms), so an instrument must not add work to it for a host that has no
+    record to withdraw — an in-process session, a reduced handle, every test that
+    never binds instrumentation. (The other half of this reasoning is gone: the
+    withdrawal used to resolve ``run_dir()``, which MKDIRS the namespace, so an
+    unconditional call also created a directory it had nothing to put in. Since
+    #1666's review round 1, R1-1 the resolvers are pure and only the WRITERS'
+    ``ensure_*`` spellings create, so the call is now free of that side effect.)
     """
     if _boot_record_pid != os.getpid():
         return
@@ -1443,11 +1512,13 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             continue
         if not _should_exit(handle, runtime):
             continue
-        # THE WINDOW IS DRAWN HERE, not once at reaper start: for a runtime a
-        # viewer has LEFT it is the keep-alive window rather than the ordinary
-        # drain, and ``detached_at`` does not exist until that viewer leaves —
-        # see ``_drain_window_s``. An ineligible runtime gets the old grace and
-        # an ``lru_cap`` of 0, which keeps the registry scan off it entirely.
+        # THE WINDOW IS DRAWN HERE, not once at reaper start, because the
+        # question it answers can change while this runtime lives: a keep-alive
+        # claim is acquired by a viewer LEAVING (``detached_at`` does not exist
+        # until then) or by being ENGAGED at boot, and it can be re-drawn from a
+        # later departure inside one drain. See ``_drain_window_s`` and
+        # ``_claim_stamp``. A runtime holding neither claim gets the old grace
+        # and an ``lru_cap`` of 0, which keeps the registry scan off it entirely.
         window_s, lru_cap = _drain_window_s(grace_s, runtime)
         deadline = time.monotonic() + window_s
         next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S if lru_cap > 0 else None
@@ -1455,10 +1526,17 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         preempted = False
         requested = False
         idle_since = time.monotonic()
-        #: The detach stamp this window was drawn from. A DIFFERENT one means a
-        #: viewer attached and left again inside this drain, and the window then
-        #: has to be drawn again from that departure (see the tick).
-        drawn_from = _detached_at(runtime)
+        #: The CLAIM this window was drawn from — the same value
+        #: ``_drain_window_s`` keyed it on (``_claim_stamp``), so the two cannot
+        #: disagree about what the window is anchored to. A DIFFERENT one means the
+        #: claim MOVED inside this drain: a viewer attached and left again, which is
+        #: a fresher statement than the engage the window may have been drawn from,
+        #: and the window then has to be drawn again from that departure (see the
+        #: tick). Watching the detach stamp alone was the same reading only while
+        #: nothing else could move the claim — a fact that would stop being true the
+        #: moment ``engaged_at`` acquired a second writer, and silently (agent review
+        #: round 1, finding 4).
+        drawn_from = _warm_claim_at(runtime)
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
@@ -1484,9 +1562,9 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
                 # stay (review round 2, R2-4).
                 requested = True
                 break
-            stamp = _detached_at(runtime)
+            stamp = _warm_claim_at(runtime)
             if stamp is not None and stamp != drawn_from:
-                # A VIEWER THAT CAME AND WENT INSIDE ONE TICK, or a second
+                # THE CLAIM MOVED INSIDE ONE TICK: a viewer that came and went,
                 # attach/detach later in the same drain, leaves this drain
                 # holding a window drawn BEFORE the departure it is meant to
                 # serve: the tick that would have cancelled the drain saw a
@@ -1511,12 +1589,12 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
                 next_lru_check = time.monotonic() + KEEP_ALIVE_SCAN_S
                 if _keep_alive_victim(runtime, lru_cap):
                     # NOT A FAILURE AND NOT A DEADLINE: the machine has ``lru_cap``
-                    # more recently detached runtimes, so this window is the one to
-                    # give up. The exit that follows is the ordinary idle exit
-                    # (the predicate still holds and nothing is in flight); only
-                    # the reason it stopped waiting is different.
+                    # runtimes that acquired their claim more recently, so this window
+                    # is the one to give up. The exit that follows is the ordinary
+                    # idle exit (the predicate still holds and nothing is in flight);
+                    # only the reason it stopped waiting is different.
                     logger.info(
-                        "session runtime: not among the %d most recently detached idle "
+                        "session runtime: not among the %d most recently claimed idle "
                         "runtimes; giving up the keep-alive window",
                         lru_cap,
                     )
@@ -4415,7 +4493,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
         except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
-    runtime = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
+    runtime = RuntimeServer(handle, kind=RUNTIME_RECORD_KIND, operator_cap=operator_cap)
     # EVERY WAY THIS RUNTIME CAN BE ASKED TO LEAVE IS ARMED HERE, BEFORE THE
     # SERVING PLANE CAN MAKE IT ADDRESSABLE. That order is the fix for a
     # measured race, not tidiness.

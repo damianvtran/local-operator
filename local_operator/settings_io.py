@@ -604,9 +604,25 @@ SECTIONS: tuple[Section, ...] = (
         "network",
         "Mesh network",
         Scope.NEW_LAUNCH,
-        "Bounds for `lop network`: audit retention, how many unauthenticated "
-        "connections the relay will hold at once, session-copy cadence and how long "
-        "a borrowed login lives. All take effect when the relay restarts.",
+        "Where this device listens, what it tells peers to dial, and the bounds for "
+        "`lop network`: audit retention, how many unauthenticated connections the "
+        "relay will hold at once, session-copy cadence and how long a borrowed login "
+        "lives. All take effect when the relay restarts.",
+    ),
+    # The Aida keys. Scope LIVE, with the caveats stated in the description
+    # rather than hidden behind a dishonest label: the pause flag is delivered
+    # to every live process by the config watcher on its 2 s tick (that IS the
+    # mechanism that reaches a session running in another terminal), and the
+    # others are read at her next action — a boot, `/aida`, or the next fire —
+    # which for an always-on assistant is the same thing in practice. The one
+    # sentence a user needs before pressing Enter is written there.
+    Section(
+        "aida",
+        "Aida",
+        Scope.LIVE,
+        "Your chief of staff's proactive cadence: when she checks in, how much "
+        "she may escalate, and the pause switch. Edits are read at her next "
+        "action; /aida pause|resume act immediately.",
     ),
     Section(
         "retired",
@@ -1039,6 +1055,30 @@ def _bash_shell_help(windows: bool) -> str:
 
 #: This host's spelling, baked into the row below at import.
 _BASH_SHELL_HELP = _bash_shell_help(_IS_WINDOWS)
+
+
+def _validate_advertise_hosts(value: object) -> object:
+    """Every entry is ``host:port`` — the shape this row's help already promises.
+
+    Enforced at the WRITE facade rather than at the relay because this is the only place
+    a person types an endpoint, and every writer funnels through :func:`validate` (the
+    page, `lop config edit`, the server's `PATCH /v1/settings`). An entry with no port
+    (``203.0.113.7``) or an impossible one (``tunnel.example.com:70000``) was accepted,
+    persisted into ``listen.advertised``, and then carried into every invite — where it
+    reads as an address a joiner can dial and is not, which is the class of lie the rest
+    of this change is about (review round 1, M1).
+    """
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Advertised endpoints must be a list of host:port entries.")
+    for entry in value:
+        text = str(entry).strip()
+        host, _, port = text.rpartition(":")
+        if not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise ValueError(
+                f"not a dialable host:port: {text} — every entry needs a port, "
+                "for example tunnel.example.com:4100"
+            )
+    return value
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -1802,6 +1842,105 @@ SETTINGS: tuple[Setting, ...] = (
             Choice("summary", "summary", "a one-line count"),
             Choice("hidden", "hidden", "not shown"),
         ),
+    ),
+    # -- the composer widget-visibility family (operator request, 2026-09-27) --
+    #
+    # One BOOL per composable piece of the composer: the status band and the
+    # prompt chevron as whole widgets, plus one key per band segment. All
+    # default True, which IS today's shape — the family exists to REMOVE
+    # pieces, so "unset" must mean "the band as shipped". LIVE like the rest of
+    # their section: the segment keys are read on the paint path
+    # (`tui/settings.py` -> `status_line._composer_hidden_segments`) and the
+    # two widget keys are applied by `OperatorApp._apply_composer_settings` off
+    # the config watcher, so an edit lands on a running TUI without a relaunch.
+    #
+    # Flat-dotted like every `display.*` key above (see the block comment at
+    # `display.shimmer`): the dot is part of a literal top-level key, so each
+    # `path` is the ONE-element tuple holding the whole key.
+    Setting(
+        key="display.composer.band",
+        path=("display.composer.band",),
+        section="appearance",
+        label="Status band",
+        kind=Kind.BOOL,
+        default=True,
+        # The disclosure leads, because the tail is the point (design review
+        # round 1, D1): hiding the band also hides its STANDING alerts — the
+        # disarmed-gate `!`, a parked connector, the MCP-failure lamp — and a
+        # help that lists the segments first clips that clause off first.
+        # Measured 67 cells, which paints whole at both 100 and 80 columns.
+        help="Also the standing alerts. Model, dir, context, cost, rate, elapsed.",
+        choices=_bool_choices("show the band", "hide it"),
+    ),
+    Setting(
+        key="display.composer.chevron",
+        path=("display.composer.chevron",),
+        section="appearance",
+        label="Prompt chevron",
+        kind=Kind.BOOL,
+        default=True,
+        help="The prompt mark at the left edge of the input row.",
+        choices=_bool_choices("show the mark", "hide it"),
+    ),
+    Setting(
+        key="display.composer.model",
+        path=("display.composer.model",),
+        section="appearance",
+        label="Band: model",
+        kind=Kind.BOOL,
+        default=True,
+        help="The model-label segment in the status band.",
+        choices=_bool_choices("show the model", "hide it"),
+    ),
+    Setting(
+        key="display.composer.cwd",
+        path=("display.composer.cwd",),
+        section="appearance",
+        label="Band: working dir",
+        kind=Kind.BOOL,
+        default=True,
+        help="The working-directory segment in the status band.",
+        choices=_bool_choices("show the directory", "hide it"),
+    ),
+    Setting(
+        key="display.composer.context",
+        path=("display.composer.context",),
+        section="appearance",
+        label="Band: context",
+        kind=Kind.BOOL,
+        default=True,
+        help="The context-usage segment in the status band.",
+        choices=_bool_choices("show context usage", "hide it"),
+    ),
+    Setting(
+        key="display.composer.rate",
+        path=("display.composer.rate",),
+        section="appearance",
+        label="Band: decode rate",
+        kind=Kind.BOOL,
+        default=True,
+        help="The tok/s segment — the last completed call's throughput.",
+        choices=_bool_choices("show the rate", "hide it"),
+    ),
+    Setting(
+        key="display.composer.cost",
+        path=("display.composer.cost",),
+        section="appearance",
+        label="Band: session cost",
+        kind=Kind.BOOL,
+        default=True,
+        help="The session-cost segment in the status band.",
+        choices=_bool_choices("show the cost", "hide it"),
+    ),
+    Setting(
+        key="display.composer.duration",
+        path=("display.composer.duration",),
+        section="appearance",
+        label="Band: elapsed",
+        kind=Kind.BOOL,
+        default=True,
+        help="The elapsed-time segment in the status band.",
+        choices=_bool_choices("show the elapsed time", "hide it"),
     ),
     Setting(
         key="tui.sidebar_visible",
@@ -3092,6 +3231,92 @@ SETTINGS: tuple[Setting, ...] = (
         # saying why. Rejecting it here keeps the user in front of the field.
         validate_value=_validate_desktop_launch_command,
     ),
+    # -- network: where peers reach this device -------------------------------
+    # THE TRIO THE DESIGN'S OWN TABLE NAMES. mesh-transport-identity.md §10.4 lists
+    # `network.listen_address`, `network.port` and `network.advertise_hosts` among
+    # the keys every one of which "needs its Setting, its module-level default
+    # beside the reader, and its _consumer_defaults() entry". They were the three
+    # that never got one, and the cost was not cosmetic: with no row, no surface in
+    # the product could show or write them, so the only documented way to declare
+    # an address was to hand-edit `config.yml` — and that edit went nowhere. A
+    # top-level `network:` block (beside `values:`, which is how a dotted key reads)
+    # is invisible to `get_nested_value`, which walks `values`, AND is deleted by
+    # the next launch's cleanup migration, whose rewrite serialises only
+    # metadata/values/version. So the operator's spelling was silently ignored and
+    # then silently destroyed, while `init --advertise-host` looked like an
+    # alternative that only worked once, at creation. Registering them is what
+    # makes the canonical location `values.network.*` the one /settings shows and
+    # writes, i.e. the one `get_nested_value` reads back.
+    Setting(
+        key="network.listen_address",
+        path=("network", "listen_address"),
+        section="network",
+        label="Listen address",
+        kind=Kind.TEXT,
+        default="0.0.0.0",
+        help=(
+            # 53 CELLS, and the number is a constraint rather than a style: the detail
+            # line is ONE row that sheds (help · clause · key → help · clause → …), and
+            # the rung that matters is `help · clause` at 80 columns — 74 cells of
+            # budget, less this row's 16-cell `default: 0.0.0.0` and the 3-cell joiner,
+            # so the room is 55 and this string leaves 2 cells of it. The old 132-cell
+            # sentence was dropped WHOLE off-default, so the reader who had set a mesh
+            # address got the key path and no explanation of the field (design review
+            # round 1, D1).
+            "127.0.0.1 = dial-only; 0.0.0.0 = all; or one address."
+        ),
+    ),
+    # INT with the port range enforced, because the value is a socket bind and a
+    # typo stored here would surface later as a relay that will not start — the
+    # page and `lop config edit` both reach this, so the bound belongs on the row.
+    Setting(
+        key="network.port",
+        path=("network", "port"),
+        section="network",
+        label="Mesh port",
+        kind=Kind.INT,
+        default=4097,
+        minimum=1,
+        maximum=65535,
+        help=(
+            # 50 cells: same rung and the same reason as `listen_address` above — this
+            # row's clause is 13 cells (`default: 4097`) against the 74-cell budget and
+            # the 3-cell joiner, so the room is 58 and this string leaves 8 of it.
+            # Anything past the room sheds the help whole at 80 columns.
+            "The port peers dial; endpoints without one use it."
+        ),
+    ),
+    # LIST over an OPEN namespace — deliberately no `members`. The vocabulary is
+    # hostnames, addresses and ports, which are the operator's and not this repo's;
+    # a closed list would reject every address that matters. Empty means "no
+    # opinion" (publish whatever the interface table shows), so the row clears
+    # rather than failing, exactly as `NetworkSettings.from_config` reads an absent
+    # key.
+    Setting(
+        key="network.advertise_hosts",
+        path=("network", "advertise_hosts"),
+        section="network",
+        label="Advertised endpoints",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            # 58 cells, the tightest of the three rows: its clause is `default: —` (10)
+            # and the joiner is 3, against 74 at 80 columns — 3 cells of slack, and no
+            # more, because the rung below (`clause · key`) drops the help ENTIRELY.
+            # THE PORT RULE IS THE PART THAT MUST SURVIVE: `config edit` refuses a bare
+            # address with exactly that rule, so a reader who never sees the help learns
+            # it only by failing. The 204-cell sentence it replaces never rendered its
+            # last sentence at ANY usable width, not even 200 columns (design review
+            # round 1, D1).
+            "Empty = detected. Others: host:port, e.g. 203.0.113.7:4097"
+        ),
+        # THE BARE ADDRESS LEADS. The ghost clips rather than wraps, and the example a
+        # reader most needs is the one that shows an address WITH its port; the hostname
+        # example it used to lead with ate the row and hid this one (design round 1, D4).
+        placeholder="203.0.113.7:4097, tunnel.example.com:4100",
+        empty_unsets=True,
+        validate_value=_validate_advertise_hosts,
+    ),
     # -- network (the mesh audit log) ---------------------------------------
     # Defaults mirror ``local_operator/network/audit.py``'s module constants, which
     # is what ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins: a
@@ -3209,6 +3434,80 @@ SETTINGS: tuple[Setting, ...] = (
             "The longest a device may use a login it borrowed from its owner before "
             "asking again, and so how long a revoked or offline owner's login keeps "
             "working elsewhere. Never longer than the token itself."
+        ),
+    ),
+    # -- aida --------------------------------------------------------------
+    # Defaults are LITERALS here, not imports: this module deliberately keeps the
+    # aida package off its import path (it is loaded on every CLI start), and
+    # `_consumer_defaults()` in tests/unit/test_settings_io.py imports the real
+    # constants from ``local_operator/aida/`` to pin that these cannot drift.
+    Setting(
+        key="aida.enabled",
+        path=("aida", "enabled"),
+        section="aida",
+        label="Aida enabled",
+        kind=Kind.BOOL,
+        default=True,
+        choices=_bool_choices("enabled", "disabled"),
+        help="Read at boot and by /aida; a disabled install never creates her session.",
+    ),
+    Setting(
+        key="aida.cadence.at",
+        path=("aida", "cadence", "at"),
+        section="aida",
+        label="Daily check-in time",
+        kind=Kind.TEXT,
+        default="09:00",
+        placeholder="09:00",
+        help="Local wall-clock HH:MM. An invalid value falls back to 09:00 at the next arm.",
+    ),
+    Setting(
+        key="aida.cadence.paused",
+        path=("aida", "cadence", "paused"),
+        section="aida",
+        label="Cadence paused",
+        kind=Kind.BOOL,
+        default=False,
+        choices=_bool_choices("paused", "running"),
+        help=(
+            "Written by /aida pause|resume, which also hold her wakes; editing it "
+            "here works the same way at her next tick."
+        ),
+    ),
+    Setting(
+        key="aida.cadence.max_extra_per_day",
+        path=("aida", "cadence", "max_extra_per_day"),
+        section="aida",
+        label="Extra check-ins / day",
+        kind=Kind.INT,
+        default=2,
+        minimum=0,
+        maximum=12,
+        help="How many escalation check-ins she may arm per day. 0 disables escalation.",
+    ),
+    Setting(
+        key="aida.cadence.min_gap_minutes",
+        path=("aida", "cadence", "min_gap_minutes"),
+        section="aida",
+        label="Minimum gap (minutes)",
+        kind=Kind.INT,
+        default=90,
+        minimum=0,
+        maximum=1440,
+        help="Minimum spacing between one Aida wake and the next; closer requests are refused.",
+    ),
+    Setting(
+        key="aida.onboarding.nudge_days",
+        path=("aida", "onboarding", "nudge_days"),
+        section="aida",
+        label="Integration nudge interval (days)",
+        kind=Kind.INT,
+        default=14,
+        minimum=1,
+        maximum=365,
+        help=(
+            "How rarely she may nudge about setting up an integration. Read from "
+            "the onboarding slice."
         ),
     ),
 )

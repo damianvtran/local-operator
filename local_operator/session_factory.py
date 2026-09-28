@@ -1478,6 +1478,14 @@ class _KnowledgeHooks:
     #: before any connection work. Read by the classification roster, which needs
     #: the server id for a candidate and never its tools.
     mcp_server_names: tuple[str, ...] = ()
+    #: The projects store behind the ``project``/``project_delete`` tools, read by
+    #: the classification roster as the ``project`` kind's source and by the roster
+    #: cache key as the projects fingerprint (§8 of the projects design). ``None``
+    #: on a hooks object built without one (tests, or a boot whose store could not
+    #: be read): the roster then offers no project rows and the cache key's term
+    #: simply never moves, which is the layer's pre-projects behaviour rather than
+    #: a degraded one.
+    project_registry: Any | None = None
     #: The classification seam (docs/design/classification-layer.md §7): an
     #: object exposing ``async recommend_resources(request) -> Recommendation``.
     #: ONE method — the seam used to publish ``notice(recommendation)`` as well, and
@@ -1499,9 +1507,10 @@ class _KnowledgeHooks:
     #: on every turn is what would push the wiring's added latency toward the
     #: per-message budget (see :func:`_classification_roster`).
     classification_roster: tuple[Any, ...] | None = None
-    #: ``(index, row count, mcp server names)`` — the identity of the inputs the
-    #: cached roster was built from. The index OBJECT, not just its size: a
-    #: rebuild replaces it, and its ``skills`` list is never mutated in place.
+    #: ``(index, row count, mcp server names, skill-tree fingerprint, projects
+    #: fingerprint)`` — the identity of the inputs the cached roster was built
+    #: from. The index OBJECT, not just its size: a rebuild replaces it, and its
+    #: ``skills`` list is never mutated in place.
     classification_roster_key: tuple[Any, ...] | None = None
     #: The skill tree's signature (roots + per-file ``(mtime_ns, size)``; see
     #: ``skills/discovery.roots_fingerprint``) as of the last roster build and of the
@@ -1587,11 +1596,13 @@ class _ClassificationCandidate:
     real types.
 
     ``description`` is HARNESS-OWNED text only (§6): a skill's or guide's own
-    description as discovered from the local filesystem, or an MCP server's name
-    plus a release-owned capability hint. Config-authored or remote-authored
-    prose here would re-open the prompt-injection surface ``mcp/resources.py``
-    deliberately excludes — the option text is the one part of the request the
-    model reads as a rubric.
+    description as discovered from the local filesystem, an MCP server's name
+    plus a release-owned capability hint, or — for a ``project`` row — the
+    operator's OWN stored project metadata routed back to the operator's own
+    model (the same accepted case the package ``Candidate`` docstring names).
+    Config-authored or remote-authored prose here would re-open the
+    prompt-injection surface ``mcp/resources.py`` deliberately excludes — the
+    option text is the one part of the request the model reads as a rubric.
     """
 
     kind: str
@@ -1981,6 +1992,31 @@ def _skills_fingerprint(hooks: _KnowledgeHooks) -> tuple[object, ...] | None:
         return None
 
 
+def _projects_fingerprint(hooks: _KnowledgeHooks) -> tuple[int, float] | None:
+    """The projects store's change-detector: ``(count, max(updated_at))`` (§8).
+
+    ``None`` means "no store to watch" — a hooks object built without a registry
+    (the unit tests' doubles, a boot whose store could not be read) — and, like
+    the skill fingerprint, this is an optimisation and a change signal, never a
+    gate: a read fault reads as "cannot tell" and the roster keeps what it has.
+
+    The pair is the design's own key, and it moves for every store mutation a
+    session must notice: a create moves the count, an update moves
+    ``updated_at``, a delete moves at least one of the two — while an update the
+    store itself refused as a no-op (identical text on a fresh record) writes
+    nothing and correctly changes nothing here.
+    """
+    registry = hooks.project_registry
+    if registry is None:
+        return None
+    try:
+        projects = registry.list_projects()
+    except Exception:  # noqa: BLE001 — a fingerprint is an optimisation, never a gate
+        logger.debug("classification: project fingerprint failed", exc_info=True)
+        return None
+    return (len(projects), max((project.updated_at for project in projects), default=0.0))
+
+
 def _refresh_knowledge_freshness(hooks: _KnowledgeHooks) -> tuple[object, ...] | None:
     """Re-open the frozen knowledge block when the skill tree changed under it.
 
@@ -2034,6 +2070,14 @@ def _classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandi
     "that changed" signal, so a skill authored mid-conversation is a candidate on
     the very next message, in the parent session and in any child started
     afterwards.
+
+    THE FIFTH IS THE PROJECTS STORE (§8 of the projects design). Projects are
+    written from OUTSIDE this session's turn — the ``project`` tool, the desktop,
+    a sibling session — so the same rule applies: ``(count, max(updated_at))``
+    over the store (``_projects_fingerprint``, one stat when warm) is the signal
+    that makes a create/update/delete a roster change on the very next message,
+    without a session restart. A hooks object with no registry carries a stable
+    ``None`` term, so nothing here fires for a host without a store.
     """
     index = hooks.index
     fingerprint = _skills_fingerprint(hooks)
@@ -2042,6 +2086,7 @@ def _classification_roster(hooks: _KnowledgeHooks) -> tuple[_ClassificationCandi
         len(getattr(index, "skills", ()) or ()),
         hooks.mcp_server_names,
         fingerprint,
+        _projects_fingerprint(hooks),
     )
     if hooks.classification_roster is not None and hooks.classification_roster_key == key:
         return hooks.classification_roster
@@ -2160,7 +2205,70 @@ def _build_classification_roster(hooks: _KnowledgeHooks) -> tuple[_Classificatio
                 "mcp", name, _mcp_capability_hint(name), resource_url("mcp", name)
             )
         )
+    rows.extend(_project_roster_rows(hooks))
     return tuple(rows)
+
+
+#: How many project rows one roster carries (§8): the newest twelve, by
+#: ``updated_at`` desc — the kind the ladder drops first when the state is over
+#: budget (``context.KIND_DROP_ORDER``). Recency IS the selection order, so the
+#: cap is applied here, where the rows are ordered: past it, older projects are
+#: simply not offered, even when a message names one — the roster never exceeds
+#: the layer's per-kind cap, so the message-aware shortlist never sees more than
+#: it can carry. §8 chose recency over reachability for this kind (review round
+#: 1 / QA round 1).
+_PROJECT_ROSTER_LIMIT = 12
+
+#: One project roster row's description bound (§8's "(truncated)"; the design
+#: states the cap exists and not its size). 160 is this repo's one scannable-row
+#: precedent — ``_ROW_CAP`` in the team/agent/project tools, cited by the design
+#: for `/project list` — applied so a 240-char project description cannot crowd
+#: the other kinds' lines out of the state before the ladder's own trimming runs.
+_PROJECT_ROSTER_DESCRIPTION_LIMIT = 160
+
+
+def _project_roster_rows(hooks: _KnowledgeHooks) -> list[_ClassificationCandidate]:
+    """The ``project`` kind's rows: the operator's newest projects (§8).
+
+    ``updated_at`` desc, ties broken by name (deterministic across runs), capped
+    at :data:`_PROJECT_ROSTER_LIMIT`. The description is ``"<status> · <desc>"``
+    — the status leads because it is what a decision usually turns on (a
+    ``done``/``archived`` project is rarely where a message's work goes) — and a
+    project with no description is its status alone, never a dangling separator.
+
+    The description is COLLAPSED to one line (``" ".join(text.split())``), not
+    merely stripped: it is the first free text any candidate kind carries, and a
+    description containing a newline would forge a block line — one carrying
+    ``</resource_recommendations>`` would close the advisory block and spill the
+    rest into the prompt as top-level text (review round 1, blocker). Collapsing
+    makes the row exactly one line, so the tag can never be closed from inside;
+    the 160-char bound is applied AFTER the collapse so it bounds what travels.
+
+    Provenance: operator-authored text routed back to the operator's own model —
+    the §6-accepted case of a user skill's description (see
+    ``_ClassificationCandidate``) — never remote-authored.
+    """
+    registry = hooks.project_registry
+    if registry is None:
+        return []
+    try:
+        projects = registry.list_projects()
+    except Exception:  # noqa: BLE001 — one unreadable store must not fail the roster
+        logger.debug("classification: project roster read failed", exc_info=True)
+        return []
+    ordered = sorted(projects, key=lambda project: (-project.updated_at, project.name.casefold()))
+    rows: list[_ClassificationCandidate] = []
+    for project in ordered[:_PROJECT_ROSTER_LIMIT]:
+        summary = " ".join((project.description or "").split())
+        description = f"{project.status} · {summary}" if summary else str(project.status)
+        if len(description) > _PROJECT_ROSTER_DESCRIPTION_LIMIT:
+            description = description[: _PROJECT_ROSTER_DESCRIPTION_LIMIT - 1].rstrip() + "…"
+        rows.append(
+            _ClassificationCandidate(
+                "project", project.name, description, f"project:{project.name}"
+            )
+        )
+    return rows
 
 
 def _mcp_capability_hint(server: str) -> str:
@@ -2465,6 +2573,29 @@ async def _classification_recommendation(
     return recommendation
 
 
+def _recommendation_line(resource: Any) -> str:
+    """One body line of the advisory block: the URL, plus a project's own state.
+
+    Every kind but one renders as its URL — the URL is what the model reads
+    next. A project has no reader behind ``project:<name>`` (it is a token for
+    the ``project`` tool, not a document), so its line also carries the roster
+    row's ``"<status> · <description>"`` text, which is what lets the model
+    judge whether the project fits the request at all.
+
+    A deliberate second copy of the package's rule
+    (``classification.recommend._recommendation_line``): the turn path must not
+    import the package, so the two exist and
+    ``tests/unit/classification/test_block_parity.py`` compares their renderers'
+    outputs line for line.
+    """
+    url = str(getattr(resource, "resource_url", "") or "")
+    if str(getattr(resource, "kind", "") or "") == "project":
+        description = str(getattr(resource, "description", "") or "")
+        if description:
+            return f"- {url} — {description}"
+    return f"- {url}"
+
+
 def _classification_block(
     hooks: _KnowledgeHooks,
     recommendation: Any,
@@ -2513,6 +2644,7 @@ def _classification_block(
     if budget <= 0:
         return ""
     urls: list[str] = []
+    body: list[str] = []
     for resource in getattr(recommendation, "resources", ()) or ():
         url = str(getattr(resource, "resource_url", "") or "")
         if not url or url in rendered or url in urls:
@@ -2523,6 +2655,7 @@ def _classification_block(
         if catalogue and url in catalogue:
             continue
         urls.append(url)
+        body.append(_recommendation_line(resource))
         if len(urls) >= budget:
             break
     if not urls:
@@ -2532,7 +2665,7 @@ def _classification_block(
     lines = [
         _RECOMMENDATION_BLOCK_OPEN,
         _RECOMMENDATION_BLOCK_PREAMBLE,
-        *(f"- {url}" for url in urls),
+        *body,
         _RECOMMENDATION_BLOCK_CLOSE,
     ]
     return "\n".join(lines)
@@ -3797,6 +3930,13 @@ async def _prepare(
             f"\033[1;33mWarning: projects are unavailable this session: {exc}\033[0m",
             file=sys.stderr,
         )
+    # The classification roster's ``project`` kind reads the store THROUGH this
+    # hook, and the roster cache's projects fingerprint is derived from the same
+    # object (§8 of the projects design). Assigned here because the hooks object
+    # is built earlier (``_setup_knowledge``) than the registries; ``None`` (a
+    # store this boot could not read) leaves the kind empty and nothing else
+    # changes.
+    hooks.project_registry = project_registry
     tool_context = ToolContext(
         cwd=effective_cwd,
         session_id=transcript_dir.name,

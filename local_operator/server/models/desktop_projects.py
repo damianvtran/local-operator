@@ -12,9 +12,10 @@ its ``target_date`` has passed, else ``upcoming``. The derivation is
 and every other reader calls — so a chip on a card and a line in a tool result
 cannot disagree about which milestone is late.
 
-**``progress_stale`` is server-computed**, from the one 30-minute constant in
-:mod:`local_operator.projects`, so the UI's stale badge and the completion check
-can never disagree about one record.
+**``progress_stale`` is server-computed**, from the one staleness constant in
+:mod:`local_operator.projects` — four hours, and only for ``active`` rows
+(settled records never read stale) — so the UI's stale badge and the completion
+check can never disagree about one record.
 
 **``extra="allow"`` on the view models**, matching the other desktop payloads: a
 field added by a later build crosses additively and an older renderer ignores
@@ -27,7 +28,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from local_operator.projects import Project, milestone_status, progress_is_stale
+from local_operator.projects import (
+    DESCRIPTION_MAX,
+    PROGRESS_MAX,
+    Project,
+    ProjectStatus,
+    milestone_status,
+    progress_is_stale,
+)
 
 
 class ProjectMilestoneView(BaseModel):
@@ -41,6 +49,31 @@ class ProjectMilestoneView(BaseModel):
     status: Literal["completed", "overdue", "upcoming"]
 
 
+class ProjectAttachmentView(BaseModel):
+    """One stored attachment on a history entry.
+
+    ``path`` is the stored copy's location — resolvable on the machine that
+    serves the payload — and ``kind`` is the classification made when the
+    file was copied (``image`` for screenshots and image formats, ``data``
+    otherwise).
+    """
+
+    name: str = ""
+    kind: str = "data"
+    path: str = ""
+    bytes: int = 0
+    added_at: str = ""
+
+
+class ProjectUpdateView(BaseModel):
+    """One append-only history entry, newest last (the log's own order)."""
+
+    at: str = ""
+    text: str = ""
+    by: str = ""
+    attachments: list[ProjectAttachmentView] = Field(default_factory=list)
+
+
 class ProjectView(BaseModel):
     """The full record — what ``GET .../{key}`` and every write returns."""
 
@@ -49,6 +82,9 @@ class ProjectView(BaseModel):
     id: str
     name: str
     description: str = ""
+    owner: str | None = None
+    team: str | None = None
+    title: str | None = None
     status: str
     progress: str = ""
     progress_updated_at: float | None = None
@@ -65,6 +101,10 @@ class ProjectView(BaseModel):
     estimate: float | None = None
     estimate_unit: str = "points"
     milestones: list[ProjectMilestoneView] = Field(default_factory=list)
+    #: The append-only history (newest last) — the full log as the row holds
+    #: it, bounded at the store's cap. Detail-only: the LISTING (summary)
+    #: must not carry it (one row's log is not a list-row's payload).
+    updates: list[ProjectUpdateView] = Field(default_factory=list)
 
 
 class ProjectSummary(BaseModel):
@@ -81,6 +121,9 @@ class ProjectSummary(BaseModel):
     id: str
     name: str
     description: str = ""
+    owner: str | None = None
+    team: str | None = None
+    title: str | None = None
     status: str
     tags: list[str] = Field(default_factory=list)
     start_date: str | None = None
@@ -138,6 +181,89 @@ class ProjectDeleted(BaseModel):
     deleted: bool = True
 
 
+#: The fixed board order, and therefore both listings' sort: ``archived`` last,
+#: a status the board only draws when non-empty. An unknown status (a row from a
+#: newer build) sorts after them all rather than crashing the sort. ONE copy:
+#: the desktop routes and the mobile daemon both import it from here, and the
+#: phone's compile-time section order mirrors it (``STATUS_ORDER`` in
+#: ``mobile/web/src/components/projects-sheet.tsx``, which cannot import
+#: Python).
+STATUS_RANK = {"active": 0, "paused": 1, "done": 2, "archived": 3}
+
+
+class _Request(BaseModel):
+    """Base for the write bodies, mirroring the desktop routes' ``Input``.
+
+    ``Input`` itself lives in ``routes/desktop_sessions.py`` and cannot be
+    imported here — this module stays importable without the server's HTTP
+    stack, and the mobile daemon reads it — so the one rule it carries,
+    ``extra="forbid"``, is restated. Request models live in THIS module rather
+    than beside their handlers so both surfaces can derive their accepted keys
+    from one source: the mobile daemon validates its flat bodies against
+    ``tuple(Model.model_fields)`` (round-1 review, [m]3).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ProjectCreate(_Request):
+    """``POST`` body — the design's frozen create contract (§4.1).
+
+    Dates, the estimate and milestones are set afterwards via ``PATCH`` and the
+    milestone routes; the tool's ``create`` accepts them in one call because it
+    is a different surface with a different budget.
+    """
+
+    name: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
+    status: ProjectStatus | None = None
+    tags: list[str] | None = None
+
+
+class ProjectPatch(_Request):
+    """``PATCH`` body — every field optional; omitted fields are untouched.
+
+    ``""`` CLEARS a date (or the progress snippet); omitting the key leaves it
+    alone. That tri-state is why the route forwards only the keys the caller
+    actually sent (``model_fields_set``) into :class:`ProjectEdit`.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX)
+    owner: str | None = None
+    team: str | None = None
+    title: str | None = None
+    status: ProjectStatus | None = None
+    progress: str | None = Field(default=None, max_length=PROGRESS_MAX)
+    tags: list[str] | None = None
+    start_date: str | None = None
+    target_date: str | None = None
+    completed_at: str | None = None
+    estimate: float | None = None
+    estimate_unit: str | None = None
+
+
+class ProjectDelete(_Request):
+    """``DELETE`` body — the project's NAME, typed, is the confirmation.
+
+    A mismatch is a 422 rather than a silent success: the body is the whole
+    request, and a client that sends the wrong name is not asking for this
+    deletion (the same ladder ``ConfirmDeletion`` climbs for sessions).
+    """
+
+    confirm: str = Field(min_length=1, max_length=64)
+
+
+class LinkMutation(_Request):
+    session_id: str = Field(min_length=1, max_length=64)
+
+
+class MilestoneMutation(_Request):
+    name: str = Field(min_length=1, max_length=80)
+    target_date: str | None = None
+    completed: bool | None = None
+
+
 def project_view(project: Project) -> ProjectView:
     """The full wire view of one row, with derived milestone statuses."""
 
@@ -145,6 +271,9 @@ def project_view(project: Project) -> ProjectView:
         id=project.id,
         name=project.name,
         description=project.description,
+        owner=project.owner,
+        team=project.team,
+        title=project.title,
         status=project.status,
         progress=project.progress,
         progress_updated_at=project.progress_updated_at,
@@ -168,6 +297,24 @@ def project_view(project: Project) -> ProjectView:
             )
             for item in project.milestones
         ],
+        updates=[
+            ProjectUpdateView(
+                at=entry.at,
+                text=entry.text,
+                by=entry.by,
+                attachments=[
+                    ProjectAttachmentView(
+                        name=attachment.name,
+                        kind=attachment.kind,
+                        path=attachment.path,
+                        bytes=attachment.bytes,
+                        added_at=attachment.added_at,
+                    )
+                    for attachment in entry.attachments
+                ],
+            )
+            for entry in project.updates
+        ],
     )
 
 
@@ -178,6 +325,9 @@ def project_summary(project: Project, *, live_sessions: int) -> ProjectSummary:
         id=project.id,
         name=project.name,
         description=project.description,
+        owner=project.owner,
+        team=project.team,
+        title=project.title,
         status=project.status,
         tags=list(project.tags),
         start_date=project.start_date,

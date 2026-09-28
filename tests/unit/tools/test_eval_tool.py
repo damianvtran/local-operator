@@ -4,13 +4,18 @@ Each acceptance property of the tool is exercised against the REAL worker
 subprocess (spawned exactly as the tool spawns it): persistence across
 calls, trailing-expression results, output budget/spill, display() routing,
 clean syntax errors, honest state-loss on timeout/crash with fresh restart,
-and per-session kernel isolation.
+per-session kernel isolation, and the retirement contract — a kernel that was
+reaped, evicted or died is replaced by a RUNNING call whose result leads with
+a reset notice (never the old "Code was NOT run" refusal), while a kernel
+owned by a live runtime is never reaped at all.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -36,6 +41,7 @@ async def _clean_kernel_registry():
     eval_tool._LOST_KERNELS.clear()
     eval_tool._ACTIVE_KERNELS.clear()
     eval_tool._CLOSE_ON_RETURN.clear()
+    eval_tool._SERVED_KERNEL_KEYS.clear()
     yield
     for kernel in list(eval_tool._KERNELS.values()):
         await eval_tool._close_kernel(kernel)
@@ -47,6 +53,22 @@ async def _clean_kernel_registry():
 @pytest.fixture
 def context(tmp_path) -> ToolContext:
     return ToolContext(cwd=str(tmp_path), session_id="eval-unit")
+
+
+@pytest.fixture
+def managed_context(tmp_path) -> ToolContext:
+    """A context shaped the way a real Session builds one: a session directory
+    (where the eval tool's cross-process restart marker lives) and the
+    runtime-ownership declaration that stops the eval-side idle reaper — the
+    pairing whose absence caused the 18.7-minute-gap incident."""
+    session_dir = tmp_path / "sessions" / "managed-1"
+    session_dir.mkdir(parents=True)
+    return ToolContext(
+        cwd=str(tmp_path),
+        session_id="managed-1",
+        session_dir=str(session_dir),
+        kernel_managed_by_session=True,
+    )
 
 
 async def _call(
@@ -354,14 +376,24 @@ async def test_kernel_lru_cap_evicts_oldest_session(tmp_path) -> None:
     assert len(eval_tool._KERNELS) == eval_tool.MAX_KERNELS
     assert "cap-0" not in eval_tool._KERNELS
     assert "cap-4" in eval_tool._KERNELS
-    # A namespace reset is surfaced before code can take a wrong branch or
-    # repeat a side effect against an unexpectedly empty namespace.
-    sentinel = tmp_path / "must-not-run"
-    reset = await _call(contexts[0], f"open({str(sentinel)!r}, 'w').write('bad')")
-    assert reset.is_error
-    assert (reset.details or {}).get("kernel_reset")
-    assert (reset.details or {}).get("code_executed") is False
-    assert not sentinel.exists()
+    # The evicted session's next call RUNS on a fresh kernel — refusing it
+    # stranded the caller mid-task — with the eviction named on the first line
+    # and the machine-readable half on the details.
+    sentinel = tmp_path / "ran-fresh"
+    recovered = await _call(contexts[0], f"open({str(sentinel)!r}, 'w').write('ok')")
+    assert not recovered.is_error
+    assert recovered.text.startswith(
+        "Session state was reset (kernel evicted to make room for other active sessions)"
+        " — this call ran on a FRESH kernel."
+    )
+    assert (recovered.details or {}).get("kernel_reset") is True
+    assert (recovered.details or {}).get("reset_reason") == (
+        "kernel evicted to make room for other active sessions"
+    )
+    assert (recovered.details or {}).get("code_executed") is True
+    # The reset cell really ran: the side effect the old refusal suppressed is
+    # the proof, and the rebuilt namespace answers on the next call.
+    assert sentinel.read_text() == "ok"
     rebuilt = await _call(contexts[0], "n = 123; n")
     assert not rebuilt.is_error
     assert "result: 123" in rebuilt.text
@@ -432,17 +464,22 @@ async def test_dispose_during_exchange_cannot_repopulate_idle_pool(context, monk
 
 
 @pytest.mark.asyncio
-async def test_dead_idle_kernel_reports_reset_before_any_new_code(context, tmp_path) -> None:
+async def test_dead_idle_kernel_reports_reset_and_runs(context, tmp_path) -> None:
     await _call(context, "state = 123")
     kernel = eval_tool._KERNELS[context.session_id]
     kernel.process.kill()
     await kernel.process.wait()
-    sentinel = tmp_path / "must-not-execute"
-    result = await _call(context, f"open({str(sentinel)!r}, 'w').write('bad')")
-    assert result.is_error
-    assert (result.details or {}).get("code_executed") is False
-    assert "idle Python kernel exited" in result.text
-    assert not sentinel.exists()
+    sentinel = tmp_path / "ran-on-fresh"
+    result = await _call(context, f"open({str(sentinel)!r}, 'w').write('ok')")
+    # The call RUNS on a fresh kernel, and the death of the old one is named in
+    # the same result the model reads, before any decision that depends on it.
+    assert not result.is_error
+    assert result.text.startswith(
+        "Session state was reset (idle Python kernel exited) — this call ran on a FRESH kernel."
+    )
+    assert (result.details or {}).get("kernel_reset") is True
+    assert (result.details or {}).get("code_executed") is True
+    assert sentinel.read_text() == "ok"
     recovered = await _call(context, "'state' in globals()")
     assert not recovered.is_error
     assert "False" in recovered.text
@@ -450,21 +487,202 @@ async def test_dead_idle_kernel_reports_reset_before_any_new_code(context, tmp_p
 
 @pytest.mark.asyncio
 async def test_idle_kernel_is_reaped_on_access(context) -> None:
-    await _call(context, "a = 1")
+    """The no-session fallback keeps its timer: a kernel with no owning
+    runtime has no lifetime to anchor to, so 5 minutes is still the policy —
+    but the reaped session's next call RUNS, with the reset named."""
+    await _call(context, "stale_var = 1")
     key = next(iter(eval_tool._KERNELS))
     stale_pid = eval_tool._KERNELS[key].process.pid
     # Simulate the 5-minute idle window without waiting for it.
     eval_tool._KERNELS[key].last_used -= eval_tool.KERNEL_IDLE_SECONDS + 1
-    result = await _call(context, "a = 2")
-    assert result.is_error is True
-    assert (result.details or {}).get("code_executed") is False
-    assert "idle kernel expired" in result.text
-    result = await _call(context, "a = 2")
+    result = await _call(context, "probe = 2")
     assert result.is_error is False
+    assert result.text.startswith(
+        "Session state was reset (idle kernel expired) — this call ran on a FRESH kernel."
+    )
+    assert (result.details or {}).get("kernel_reset") is True
+    assert (result.details or {}).get("code_executed") is True
     fresh = eval_tool._KERNELS[key]
     assert fresh.process.pid != stale_pid
     # The reaped kernel's state is gone too — a NEW process answered.
-    assert "result:" not in result.text
+    gone = await _call(context, "'stale_var' in globals()")
+    assert "False" in gone.text
+
+
+# ---------------------------------------------------------------------------
+# runtime-aware lifecycle: managed kernels, restart marker, notice ordering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_managed_kernel_survives_a_beyond_window_gap(managed_context) -> None:
+    """The incident: an ACTIVE session with a long gap between cells (measured
+    at 18.7 minutes mid-turn) must keep its namespace. The runtime owns the
+    kernel, so the eval-side 5-minute clock must not strike — same pid, state
+    intact, and NO reset notice on the returning call."""
+    first = await _call(managed_context, "x = 41")
+    assert not first.is_error
+    kernel = eval_tool._KERNELS[managed_context.session_id]
+    pid = kernel.process.pid
+    assert kernel.managed is True
+    # Compress the window: simulate a gap far past KERNEL_IDLE_SECONDS while
+    # the runtime stays alive.
+    kernel.last_used -= eval_tool.KERNEL_IDLE_SECONDS * 100
+    second = await _call(managed_context, "x + 1")
+    assert not second.is_error
+    assert "result: 42" in second.text
+    assert "Session state was reset" not in second.text
+    assert (second.details or {}).get("kernel_reset") is None
+    assert eval_tool._KERNELS[managed_context.session_id].process.pid == pid
+
+
+@pytest.mark.asyncio
+async def test_restart_notice_comes_from_the_marker_file(managed_context) -> None:
+    """A restarted runtime has an empty in-memory ledger, so the restart is
+    announced from the session directory's marker file instead. Simulated by
+    writing the marker a previous runtime would have left behind, starting
+    from the empty registry + served-set the autouse fixture guarantees."""
+    marker = Path(managed_context.session_dir) / "eval-kernel.json"
+    marker.write_text('{"generation": "deadbeef", "written_at_ms": 1}')
+    result = await _call(managed_context, "1 + 1")
+    assert not result.is_error
+    assert result.text.startswith(
+        "Session state was reset (the session runtime restarted) — this call ran on a FRESH kernel."
+    )
+    assert (result.details or {}).get("kernel_reset") is True
+    assert (result.details or {}).get("reset_reason") == "the session runtime restarted"
+    assert (result.details or {}).get("code_executed") is True
+    assert "result: 2" in result.text
+    # The new generation rewrites the marker, so a LATER restart is still seen.
+    payload = json.loads(marker.read_text())
+    assert payload["generation"] == eval_tool._KERNELS[managed_context.session_id].generation
+    # And the notice fires ONCE per restart: the next call is a plain call.
+    second = await _call(managed_context, "2 + 2")
+    assert "Session state was reset" not in second.text
+
+
+@pytest.mark.asyncio
+async def test_busy_refusal_does_not_consume_the_reset_receipt(context) -> None:
+    """A call that never ran must leave the notice for the call that does: the
+    receipt is consumed only once this call is past every refusal path."""
+    eval_tool._record_reset(context.session_id, "idle kernel expired")
+    eval_tool._ACTIVE_KERNELS.add(context.session_id)
+    busy = await _call(context, "1")
+    assert busy.is_error
+    assert "busy" in busy.text
+    assert eval_tool._LOST_KERNELS.get(context.session_id) == "idle kernel expired"
+    eval_tool._ACTIVE_KERNELS.discard(context.session_id)
+    ran = await _call(context, "21 * 2")
+    assert not ran.is_error
+    assert ran.text.startswith(
+        "Session state was reset (idle kernel expired) — this call ran on a FRESH kernel."
+    )
+    assert "result: 42" in ran.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_failure_re_records_the_receipt(context, monkeypatch) -> None:
+    """The receipt is consumed only by a call that RUNS: if the fresh kernel
+    cannot even start, the notice must be re-recorded for the next attempt."""
+    reason = "kernel evicted to make room for other active sessions"
+    eval_tool._record_reset(context.session_id, reason)
+
+    async def dead_spawn(*args, **kwargs):
+        raise OSError("no kernel for you")
+
+    monkeypatch.setattr(eval_tool, "_spawn", dead_spawn)
+    failed = await _call(context, "1")
+    assert failed.is_error
+    assert "failed to start Python kernel" in failed.text
+    assert eval_tool._LOST_KERNELS.get(context.session_id) == reason
+    monkeypatch.undo()
+    ran = await _call(context, "1")
+    assert not ran.is_error
+    assert ran.text.startswith(f"Session state was reset ({reason})")
+
+
+@pytest.mark.asyncio
+async def test_reset_notice_survives_spill_truncation(managed_context) -> None:
+    """>8 KiB results are spill-truncated head-biased; the notice leads the body,
+    so the model reads the reset before the truncated tail it cannot see."""
+    marker = Path(managed_context.session_dir) / "eval-kernel.json"
+    marker.write_text('{"generation": "deadbeef", "written_at_ms": 1}')
+    result = await _call(managed_context, "print('x' * 20_000)\n'answer'")
+    assert not result.is_error
+    assert result.text.startswith(
+        "Session state was reset (the session runtime restarted) — this call ran on a FRESH kernel."
+    )
+    assert "truncated" in result.text or "SAVED at spill://" in result.text
+    assert len(result.text) <= builtin.TOOL_OUTPUT_LIMIT_CHARS + 700
+
+
+@pytest.mark.asyncio
+async def test_corrupt_or_absent_marker_is_tolerated(managed_context) -> None:
+    """The marker can decorate a result, never break one: garbage reads as "no
+    marker", the call runs, and the success tail replaces the garbage with a
+    valid marker for the next restart."""
+    marker = Path(managed_context.session_dir) / "eval-kernel.json"
+    marker.write_bytes(b"\x00not json{{")
+    result = await _call(managed_context, "'ran'")
+    assert not result.is_error
+    assert "Session state was reset" not in result.text
+    assert "result: 'ran'" in result.text
+    payload = json.loads(marker.read_text())
+    assert payload["generation"] == eval_tool._KERNELS[managed_context.session_id].generation
+    # Absent marker (a session that never ran code): same silence, fresh key.
+    fresh_dir = Path(managed_context.session_dir).parent / "managed-2"
+    fresh_dir.mkdir()
+    fresh = ToolContext(
+        cwd=str(managed_context.cwd),
+        session_id="managed-2",
+        session_dir=str(fresh_dir),
+        kernel_managed_by_session=True,
+    )
+    absent = await _call(fresh, "'ran'")
+    assert not absent.is_error
+    assert "Session state was reset" not in absent.text
+
+
+@pytest.mark.asyncio
+async def test_marker_written_after_first_exchange_once_per_generation(managed_context) -> None:
+    marker = Path(managed_context.session_dir) / "eval-kernel.json"
+    assert not marker.exists()
+    await _call(managed_context, "1")
+    payload = json.loads(marker.read_text())
+    kernel = eval_tool._KERNELS[managed_context.session_id]
+    assert payload["generation"] == kernel.generation
+    assert isinstance(payload["written_at_ms"], int)
+    # One write per generation: a second exchange leaves the file untouched.
+    mtime = marker.stat().st_mtime_ns
+    await _call(managed_context, "2")
+    assert marker.stat().st_mtime_ns == mtime
+
+
+@pytest.mark.asyncio
+async def test_mid_run_loss_reports_on_killing_call_and_next_call_is_silently_fresh(
+    managed_context,
+) -> None:
+    """Preserved contract: a call that had to KILL state mid-run reports it on
+    the killing call, and the next call starts fresh WITHOUT a reset notice —
+    the marker must not re-announce a loss this process already reported.
+
+    The successful exchange FIRST is load-bearing (review round 1, R1-2): it is
+    what writes the restart marker, and with no marker on disk the two calls
+    below cannot tell the guard from its absence — a neutralised
+    ``_SERVED_KERNEL_KEYS`` reads no file either way, so the old body passed
+    against a guard that was deleted. With the marker written, a neutralised
+    guard reads it back and paints the spurious notice this test refuses.
+    """
+    warm = await _call(managed_context, "x = 1")
+    assert not warm.is_error
+    assert (Path(managed_context.session_dir) / eval_tool.KERNEL_MARKER_NAME).is_file()
+    killed = await _call(managed_context, "import time\ntime.sleep(10)", timeout=1.0)
+    assert killed.is_error
+    assert "TIMEOUT" in killed.text
+    again = await _call(managed_context, "3 * 3")
+    assert not again.is_error
+    assert "Session state was reset" not in again.text
+    assert "result: 9" in again.text
 
 
 # ---------------------------------------------------------------------------

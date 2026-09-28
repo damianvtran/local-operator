@@ -140,8 +140,12 @@ ICON_CONTEXT = "▦"
 #: spinner already reads as, and the gauge-like ``▬``/``▭`` would claim a scale this
 #: reading does not have. ``▢`` is unused, cell-width 1 and inside the tofu-safe
 #: U+25xx block. DESIGN ROUND, not decoration: the segment is retrospective and the
-#: glyph must not imply a live reading, which is why the WORD beside it is the part
-#: that carries the meaning (see :data:`ICON_COST`'s neighbour, the ``last`` word).
+#: glyph must not imply a live reading. The ``last`` WORD that used to label the
+#: value was dropped at the operator's request (2026-09-27) for compactness — the
+#: distinction it drew (this turn's speed vs the last call's) did not stop
+#: mattering, but four cells of a fixed one-row band were no longer where to spend
+#: it. The reading is unchanged — the last COMPLETED call's — and the glyph stays
+#: its retrospective mark.
 ICON_LAST_RATE = "▢"
 
 ICON_COST = "◈"
@@ -649,6 +653,49 @@ def drop_ladder(
     if context_estimated:
         return _DROP_LADDER_QUIET_ESTIMATE if quiet else _DROP_LADDER_ESTIMATE
     return _DROP_LADDER_QUIET if quiet else _DROP_LADDER
+
+
+#: ``display.composer.<name>`` flag -> the drop-ladder id of the segment it
+#: hides. The ids are the LADDER's names, not the keys': ``rate`` maps to
+#: ``last-rate``, which names the READING (the last completed call's
+#: throughput) rather than the label the segment used to carry, and ``model``
+#: is the same id the parked ladder uses for the label. Do not "fix" a
+#: spelling mismatch here — renaming a rung breaks the ladders built on it.
+#:
+#: Only the six BAND segments are listed. ``display.composer.band`` and
+#: ``.chevron`` hide whole widgets and are applied by the app
+#: (``OperatorApp._apply_composer_settings``), not through this set.
+_COMPOSER_HIDES: tuple[tuple[str, str], ...] = (
+    ("model", "model"),
+    ("cwd", "cwd"),
+    ("context", "context"),
+    ("rate", "last-rate"),
+    ("cost", "cost"),
+    ("duration", "duration"),
+)
+
+
+def _composer_hidden_segments() -> frozenset[str]:
+    """Ladder ids the user's ``display.composer.*`` flags force off this frame.
+
+    One BOOL per segment, default True = the shipped band (the registry rows
+    live in ``settings_io``; the prose in ``tui/settings.py``'s
+    ``_DEFAULT_NOTES``). ``_render`` reads this ONCE per frame and unions it
+    into each walk's starting ``dropped`` set, so a hidden segment paints on no
+    rung and spends no width in the fit — absence, not a blank or a dash.
+
+    A missing or unreadable config resolves to the defaults, whose True values
+    mean an isolated capture or a bare test host paints the shipped band rather
+    than an empty one. Imported function-locally: this module sits on the
+    paint path and ``tui.settings`` pulls the config reader.
+    """
+    from local_operator.tui.settings import settings_get
+
+    return frozenset(
+        ladder_id
+        for name, ladder_id in _COMPOSER_HIDES
+        if not settings_get(f"display.composer.{name}", True)
+    )
 
 
 # Re-exported from `session.frontend_state`, which is import-light: a
@@ -1889,7 +1936,13 @@ class StatusLine:
             # band cuts its conversation name one way and not two.
             right = Text(truncate_name(self._conversation_name, spare), style=dim)
             return self._compose(left, right, width, dim)
-        fitted = self._fit(width, dim, muted, seam, accent)
+        # The frame's ``display.composer.*`` force-drops are read ONCE here and
+        # ride both of this render's walks plus the irreducible row below: one
+        # frame must not consult two settings snapshots, and a hidden segment
+        # must be absent from the last-resort row exactly as it is from every
+        # ladder row.
+        hidden = _composer_hidden_segments()
+        fitted = self._fit(width, dim, muted, seam, accent, hidden=hidden)
         if fitted is not None:
             dropped, left, right = fitted
             # Recorded so a caller can ask whether the band actually SAID
@@ -1923,6 +1976,16 @@ class StatusLine:
         # width takes off it, the ellipsis at the end of this method takes off the
         # TAIL of it, the same way the model label is truncated here. It yields
         # only to the spinner, which is one cell of "a turn is live".
+        #
+        # The tail is a shipped row too, so the frame's forced set is recorded
+        # here exactly as the ladder path records it: `_dropped` used to be
+        # written only when a ladder row shipped, and this path then answered
+        # `is_showing` from the constructor's seed — a hidden ``model`` reported
+        # SHOWN off a row that painted the park alarm and nothing else (review
+        # round 1, MINOR). The union deliberately leaves this path's own
+        # pre-existing staleness alone: a label the tail RE-admits is still
+        # reported dropped until the next ladder row ships.
+        self._dropped = self._dropped | hidden
         tail = Text()
         if self._streaming:
             from local_operator.tui.shimmer import shimmer_enabled
@@ -1962,7 +2025,12 @@ class StatusLine:
             if model_label
             else ""
         )
-        if label:
+        # A hidden ``display.composer.model`` leaves this row too. This path
+        # exists for widths no ladder row fits, and it re-admits the label
+        # after every ladder row has shed it — a segment the user hid must not
+        # reappear here either. What remains is the spinner and (while a park
+        # stands) the alarm, which are not composer segments.
+        if label and "model" not in hidden:
             tail.append(f"{ICON_MODEL} ", style=dim)
             tail.append(
                 truncate_cells(label, max(1, width - cell_len(tail.plain))),
@@ -1972,12 +2040,23 @@ class StatusLine:
         return tail
 
     def _fit(
-        self, width: int, dim: Style, muted: Style, seam: Style, accent: Style
+        self,
+        width: int,
+        dim: Style,
+        muted: Style,
+        seam: Style,
+        accent: Style,
+        *,
+        hidden: frozenset[str] = frozenset(),
     ) -> tuple[frozenset[str], Text, Text] | None:
         """The row this width gets: ``(dropped, left, right)``, or ``None``.
 
         ``None`` means not even the last rung fitted, and :meth:`_render` falls
         back to the irreducible tail.
+
+        ``hidden`` is the frame's ``display.composer.*`` force-dropped set
+        (:func:`_composer_hidden_segments`); each walk starts from it, so a
+        hidden segment neither paints nor spends a cell in the fit.
 
         Two walks at most, and the second one is the point of this method. A walk
         is monotone — it sheds down the ladder and can never take a concession
@@ -2005,7 +2084,7 @@ class StatusLine:
             # ladder gives the model label a rung just ahead of the alarm (D10).
             parked=getattr(self, "_tunnel_parked", False),
         )
-        fitted = self._walk(ladder, width, dim, muted, seam, accent)
+        fitted = self._walk(ladder, width, dim, muted, seam, accent, hidden=hidden)
         if fitted is None or "name" not in fitted[0]:
             return fitted
         restart = self._walk(
@@ -2016,6 +2095,7 @@ class StatusLine:
             seam,
             accent,
             forgo_name=True,
+            hidden=hidden,
         )
         if restart is None:
             return fitted
@@ -2031,6 +2111,7 @@ class StatusLine:
         accent: Style,
         *,
         forgo_name: bool = False,
+        hidden: frozenset[str] = frozenset(),
     ) -> tuple[frozenset[str], Text, Text] | None:
         """One monotone pass down ``ladder``, stopping at the first row that fits.
 
@@ -2050,6 +2131,12 @@ class StatusLine:
         :data:`NAME_CELLS`'s own comment.
         """
         dropped: set[str] = {"name"} if forgo_name else set()
+        # The frame's hidden segments start dropped: the emission gates below
+        # then leave them out of every row this walk builds, and the fit test
+        # spends none of their cells. They stay in the returned frozenset, so
+        # the shipped row's ``_dropped`` (and therefore ``is_showing``) reports
+        # them as not shown — which is what they are.
+        dropped |= hidden
         short: set[str] = set()
         flexed = False
         for step in (None, *ladder):
@@ -2381,16 +2468,19 @@ class StatusLine:
                         ),
                     )
                 )
-        # LABELLED, always: an unlabelled rate beside a live context reading reads
-        # as this turn's speed, and this one is the last COMPLETED call's (design
-        # round: ``last`` is the 4-cell floor, and ``last call`` buys nothing). The
-        # word is the label's whole cost, which is why the glyph above is
-        # content-free. ABSENT rather than ``—`` when the last call measured no
-        # window: ``—`` is a table-column convention and in a numeric slot it reads
-        # as a broken reading, while absence is what this band already does for an
-        # unpriced ``cost``.
+        # UNLABELLED since 2026-09-27, at the operator's request. The segment
+        # carried ``last`` because an unlabelled rate beside a live context
+        # reading can read as this turn's speed, and this one is the last
+        # COMPLETED call's — that distinction did not stop mattering, it stopped
+        # being worth four cells of a fixed one-row band, so the glyph
+        # (:data:`ICON_LAST_RATE`) is the retrospective mark now. The reading is
+        # unchanged, and so is the ladder id: ``last-rate`` names the reading,
+        # not the label. ABSENT rather than ``—`` when the last call measured no
+        # window: ``—`` is a table-column convention and in a numeric slot it
+        # reads as a broken reading, while absence is what this band already
+        # does for an unpriced ``cost``.
         if self._last_rate and "last-rate" not in dropped:
-            parts.append((ICON_LAST_RATE, f"last {self._last_rate}", dim))
+            parts.append((ICON_LAST_RATE, self._last_rate, dim))
         cost = self._shown_cost()
         if cost and "cost" not in dropped:
             parts.append((ICON_COST, cost, Style(color=theme_mod.semantic_color("warning"))))

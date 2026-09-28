@@ -39,13 +39,18 @@ import pytest
 
 from local_operator.agent_profiles import (
     ROLE_TAG,
+    SEED_ORIGIN_PREFIX,
+    SEED_SHA256_PREFIX,
+    SEED_VERSION_PREFIX,
     SEEDS_DIR,
     AgentProfile,
     _split_frontmatter,
     install_seed,
     list_seeds,
     load_seed,
+    load_seed_version,
     seed_divergence,
+    seed_fingerprint,
     seed_origin,
     seed_tags,
 )
@@ -195,14 +200,16 @@ def test_the_manifest_is_package_data_a_wheel_would_carry():
     assert Path(str(packaged)).resolve() == MANIFEST_PATH.resolve()
 
 
-def test_the_seed_version_key_is_inert_in_the_product(tmp_path):
-    """``version:`` exists for the manifest and nothing else.
+def test_the_seed_version_key_rides_the_installed_row_as_a_stamp(tmp_path):
+    """``version:`` has three readers and no more, and none of them is a profile field.
 
-    It must not become a profile field (nothing would read it), a tag (a
-    registry row would carry a marker no code understands), or a divergence
-    (every installed role would report as edited). The last one is the
-    dangerous one: a reset that always looks needed is a reset that silently
-    overwrites an operator's edits.
+    It exists for (a) the published manifest, (b) the ``seed_version:`` stamp
+    ``install_seed`` writes so sync can see a starter moved, and (c) the
+    ``seed_sha256:`` fingerprint beside it, which is what makes "has this row
+    been edited since install?" decidable at all. It must NOT become a profile
+    field (nothing resolves against it), a divergence (every installed role
+    would report as edited), or a second writer's value: the stamp is written
+    by install and by nothing else.
     """
 
     assert "version" not in AgentProfile.__dataclass_fields__
@@ -216,14 +223,37 @@ def test_the_seed_version_key_is_inert_in_the_product(tmp_path):
         row = registry.get_agent_by_name(name)
         assert row is not None
         assert seed_origin(row) == name
-        assert all(not tag.startswith("version:") for tag in row.tags), row.tags
+        # The exact marker set, in the order install writes it: role field
+        # tags, then provenance. An exact list (not a subset) is what fails on
+        # a stray second writer.
+        stamped_version = load_seed_version(name)
+        assert stamped_version, name
+        assert list(row.tags) == [
+            *seed_tags(profile),
+            f"{SEED_ORIGIN_PREFIX}{name}",
+            f"{SEED_SHA256_PREFIX}{seed_fingerprint(profile)}",
+            f"{SEED_VERSION_PREFIX}{stamped_version}",
+        ], name
+        # The stamp is provenance, never a divergence: a fresh install still
+        # reports clean, and re-installing is the idempotent no-op on the tags.
         seed = load_seed(name)
         assert seed is not None
         assert seed_divergence(profile, seed) == (), name
-        # Installing it again is the idempotent path, and it must stay a no-op
-        # on the tags: the seed's version is not a registry field.
         before = list(row.tags)
         install_seed(name, registry=registry)
         again = registry.get_agent_by_name(name)
         assert again is not None
         assert again.tags == before, name
+
+
+def test_the_installed_version_stamp_matches_the_published_manifest(manifest, tmp_path):
+    """One version, two readers: what install stamps is what the manifest publishes.
+
+    They come from the same frontmatter through the same parser, but only a
+    test keeps them that way — a generator reading one source and the stamp
+    another is exactly how a drift the hub cannot see would ship.
+    """
+
+    published = {entry["name"]: entry["version"] for entry in manifest["seeds"]}
+    for name in list_seeds():
+        assert load_seed_version(name) == published[name], name

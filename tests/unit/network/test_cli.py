@@ -223,10 +223,46 @@ def test_sas_stdin_is_a_test_seam_and_says_so(monkeypatch: pytest.MonkeyPatch) -
 def test_join_without_a_person_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """No terminal, no prompt — and a CODE, because ``--json`` carries it.
+
+    The refusal is a ``MeshRefusal`` rather than a bare ``ValueError``: the raw
+    exception reached an agent as a non-answer with no machine code, and the sentence
+    it now carries names the two-phase pair, which is the path a caller with no
+    terminal actually has. The refusal itself STAYS: a prompt needs a person, and the
+    park is a deliberate, explicit alternative rather than something this call does
+    for you.
+    """
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    with pytest.raises(ValueError) as excinfo:
+    with pytest.raises(types.MeshRefusal) as excinfo:
         net_cli._read_code(Namespace(sas_stdin=False, verify=False), "481926", "FP")  # noqa: SLF001
-    assert "person at a keyboard" in str(excinfo.value)
+    assert excinfo.value.code == "join_needs_tty"
+    assert "person at a keyboard" in excinfo.value.sentence
+    # The sentence has to name the way OUT, or the refusal is a dead end.
+    assert "--park" in excinfo.value.sentence and "--confirm" in excinfo.value.sentence
+
+
+def test_who_answered_is_claimed_only_where_a_person_could_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``answered_by`` is a CLAIM about a person, so it is made only where one could be.
+
+    Agent review round 1 (semantic finding 3) found this field writing ``human`` for a
+    machine-supplied code: the rule was "not ``--sas-stdin``, therefore human", and the
+    tool's phase two passed no seam, so a script's answer was recorded as a person's —
+    into the parked record, the relay frame and the audit, where the question it answers
+    is exactly "did a person read this back?". The rule is now the MECHANISM rather than
+    the absence of a flag: the explicit pipe seam is the harness, a piped invocation
+    that did not announce itself is the harness too (no person can be behind a pipe),
+    and only a terminal makes the answer a person's.
+    """
+    args = Namespace(sas_stdin=False)
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    assert net_cli._answered_by(args) == "human"  # noqa: SLF001 — the predicate under test
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: False)
+    assert net_cli._answered_by(args) == "harness"  # noqa: SLF001
+    args.sas_stdin = True
+    monkeypatch.setattr(net_cli, "_has_terminal", lambda: True)
+    assert net_cli._answered_by(args) == "harness"  # noqa: SLF001
 
 
 def test_verify_makes_the_fingerprint_the_compared_value(
@@ -1016,3 +1052,91 @@ def test_a_failed_audit_write_reads_degraded_before_anything_else_on_the_block(
     out = capsys.readouterr().out
     assert "audit:      DEGRADED" in out, out
     assert log.degraded_reason in out, (log.degraded_reason, out)
+
+
+def test_join_accepts_the_advertise_host_the_config_route_used_to_own() -> None:
+    """``join --advertise-host``: the joiner can name its own address, like ``init`` can.
+
+    The asymmetry was the bug's other face. ``init --advertise-host`` could declare a
+    tunnel or public address at creation, and the mesh docs' remedy for anyone else
+    was to hand-edit ``network.advertise_hosts`` into ``config.yml`` — a key with no
+    registry row that took no effect and was deleted by the next launch. The device
+    that most needs this is the JOINER: it is usually joining precisely because it has
+    no dialable address of its own, and without declaring one its member row carried
+    nothing every peer could dial (``no_endpoint``).
+
+    The parser is asserted here, and ``_join_one``'s use of it is proven end to end by
+    the two-device pairing run on this PR: ``declared_hosts`` is threaded into
+    ``advertise_endpoints``, whose ordering is pinned in ``test_addresses``.
+    """
+    parsed = _parser().parse_args(
+        ["network", "join", "tok", "--advertise-host", "203.0.113.7:4097"]
+    )
+
+    assert parsed.advertise_hosts == ["203.0.113.7:4097"]
+    # REPEATABLE, and the default is empty: an operator with two reachable paths (a
+    # tunnel and a LAN address) declares both, in the order they should be tried.
+    both = _parser().parse_args(
+        [
+            "network",
+            "join",
+            "tok",
+            "--advertise-host",
+            "tunnel.example.com:4100",
+            "--advertise-host",
+            "203.0.113.7:4097",
+        ]
+    )
+    assert both.advertise_hosts == ["tunnel.example.com:4100", "203.0.113.7:4097"]
+    assert _parser().parse_args(["network", "join", "tok"]).advertise_hosts == []
+
+
+def test_the_printed_join_command_does_not_pin_an_endpoint_the_token_carries(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """The receipt must print a command that WORKS when it is followed verbatim.
+
+    It used to print ``join @token --host {hosts[0]}``, and ``hosts[0]`` is the record's
+    own snapshot — the entry kept ahead of the live ones by design, which can name a port
+    the listener does not hold. Following the advice therefore dialled the dead entry with
+    a pin, while the plain ``join @token`` (which walks the whole list) succeeded: the
+    product instructed the operator to run a failing command (QA round 2, Q-3).
+    ``--host`` is an override, so the receipt no longer re-types an endpoint the token
+    already carries; the placeholder stays for the state where the token names none,
+    because there the flag is exactly what the join asks for.
+
+    The command also names the token FILE rather than the path it happens to have on this
+    machine: the line is addressed to another device, which does not share this one's
+    ``$HOME`` (design review round 1, D3).
+    """
+    token = tmp_path / "inv1.invite"
+    token.write_text("TOKEN", encoding="utf-8")
+    payload = {
+        "invite_id": "inv1",
+        "path": str(token),
+        "role": "read",
+        "expires_in_s": 600.0,
+        "hosts": ["127.0.0.1:4197", "192.168.0.155:47800"],
+    }
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: dict(payload))
+
+    args = Namespace(
+        network="", role="read", expires=600.0, hosts="", device="", print_token=False, json=False
+    )
+    assert net_cli._cmd_invite(args) == 0  # noqa: SLF001
+    printed = capsys.readouterr().out
+    # THE JOIN LINE IS A PLACEHOLDER, and the inviter's own `$HOME` must not appear under
+    # the words "on the other device": that device does not have this path, and printing it
+    # as though the two shared a filesystem hands one device's home directory to another
+    # (design review round 1, D3). The concrete path stays exactly ONCE — on the line above,
+    # advice for the machine that really holds the file.
+    assert "then, on the other device: lop network join @<token-file>" in printed, printed
+    assert printed.count(str(token)) == 1, printed
+    assert "--host 127.0.0.1:4197" not in printed, printed
+    assert "--host" not in printed, printed
+
+    # NOTHING NAMES AN ENDPOINT: the flag is what the join will ask for, so it is named.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: {**payload, "hosts": []})
+    assert net_cli._cmd_invite(args) == 0  # noqa: SLF001
+    empty = capsys.readouterr().out
+    assert "--host <this device's address:port>" in empty, empty

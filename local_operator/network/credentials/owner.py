@@ -656,11 +656,23 @@ class MeshCredentialBroker:
                 message=exc.__class__.__name__,
             )
         token = str(getattr(tokens, "access_token", "") or "")
-        if not token:
-            # The row exists but has no live access token: only an interactive login
-            # can produce one, and that login can only happen HERE. The peer is told
-            # `interactive_required` and the owner's operator gets a notice — never
-            # the other way round, because the borrower has no browser flow to offer.
+        expiry = storage.stored_token_expiry()
+        if not token or _already_expired(expiry):
+            # The row exists but holds no USABLE access token: either it has none, or
+            # the token it has died and the refresh above could not replace it (no
+            # reachable authorization server, a grant the server already rejected).
+            # Only an interactive login can produce a live one, and that login can
+            # only happen HERE. The peer is told `interactive_required` and the owner's
+            # operator gets a notice — never the other way round, because the borrower
+            # has no browser flow to offer.
+            #
+            # WHY AN EXPIRED TOKEN IS A REFUSAL AND NOT A GRANT (audit round 2): the
+            # owner can see the expiry it is about to lend, and serving it would hand
+            # the peer a bearer its own record calls dead — a 401 at the MCP server
+            # with no repair path for the operator, which is exactly the state §4.7's
+            # `interactive_required` row exists to prevent. Measured on the rig with a
+            # genuinely expired row (`tokens_obtained_at` two hours back, `expires_in`
+            # 3600): before this, the peer received the dead bearer and read a bare 401.
             self._audit(
                 "credential.report",
                 actor=self.self_device,
@@ -680,7 +692,6 @@ class MeshCredentialBroker:
                 owner_device_name=self.self_device_name,
                 message=render_repair_notice(self.self_device_name or self.self_device, key),
             )
-        expiry = storage.stored_token_expiry()
         return self._mint_grant(
             key=key,
             provider=provider,
@@ -1168,6 +1179,19 @@ class MeshCredentialBroker:
     def close(self) -> None:
         """Stop the broker's loop. For tests and for a relay shutting down."""
         self._loop.close()
+
+
+def _already_expired(expiry: float | None, *, now: float | None = None) -> bool:
+    """Whether a stored token's own recorded expiry is in the past.
+
+    ``None`` means "no opinion" (no row, no token, or a server that quoted no
+    lifetime) and must NEVER read as expired: forcing a re-authorisation on a
+    provider that issues non-expiring tokens is the failure
+    ``McpTokenStorage.stored_token_expiry`` documents at its own definition.
+    """
+    if expiry is None:
+        return False
+    return float(expiry) <= (now if now is not None else time.time())
 
 
 def remote_block_scope(claimed: str, model_id: str) -> str:

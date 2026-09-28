@@ -254,6 +254,70 @@ async def test_start_is_ready_by_durable_id_and_phone_viewers_hold_actual_child(
 
 
 @pytest.mark.asyncio
+async def test_a_daemon_that_inherited_a_warm_claim_does_not_pass_it_on(
+    tmp_path, monkeypatch, fixture_children
+):
+    """The DAEMON's spawn scrubs the claim too (review round 1, M1).
+
+    ``launch._spawn_runtime`` scrubs the claim from every non-warm spawn, and on
+    its own that is not enough: the variable sits in a WARM child's environment,
+    so every process descended from one inherits it — including this daemon when
+    it was started from inside a session, which the updater documents as a
+    supported way to run it. The daemon builds its session child's environment by
+    hand (``dict(os.environ)`` plus the Start request's overrides) and already
+    pops the sibling ``LOP_RUNTIME_DEFER_MATERIALISE`` for exactly this reason. A
+    phone Start is a deliberate request for a runtime with real work to do, so
+    without the same pop every session the daemon starts records an engage nobody
+    made: the keep-alive window (``process._drain_window_s``) bought by a fact
+    that is not true of it.
+
+    The claim is set in the DAEMON's own environment and the child is inspected
+    at the spawn boundary, so this asserts the environment the child is actually
+    exec'd with rather than a helper's return value. The fixture's inert child
+    still runs the product's registrant and reaper, and its own assertions on the
+    argv contract run first.
+    """
+    from local_operator.session.runtime.types import ENGAGED_ENV
+
+    inner = asyncio.create_subprocess_exec
+    envs: list[dict[str, str]] = []
+
+    async def recording(*args, **kwargs):
+        envs.append(dict(kwargs["env"]))
+        return await inner(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
+    monkeypatch.setenv(ENGAGED_ENV, "1")
+
+    daemon = MobileDaemon(password="pw")
+    app = build_app(daemon)
+    try:
+        async with (
+            asyncio.timeout(20),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://fixture",
+                cookies={COOKIE_NAME: sign_cookie("pw")},
+            ) as client,
+        ):
+            response = await client.post(
+                "/api/sessions/start",
+                json={
+                    "cwd": str(tmp_path),
+                    "provider": "radient",
+                    "model_id": "fixture/chosen",
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert envs, "the daemon did not spawn a session child"
+            child_env = envs[-1]
+            assert child_env["LOP_MOBILE_CHILD_RESUME"] == response.json()["session_id"]
+            assert ENGAGED_ENV not in child_env, "a phone-start child inherited a warm claim"
+    finally:
+        await stop_fixture(daemon, fixture_children)
+
+
+@pytest.mark.asyncio
 async def test_abandoned_browser_handoff_releases_child(tmp_path, fixture_children):
     daemon = MobileDaemon(password="pw")
     try:

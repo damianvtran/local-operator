@@ -1,9 +1,7 @@
 id: bf638dae-4f51-43e2-a76d-b8a50b1637d7
 name: helpdesk
 created_date: '2026-09-25T22:29:43.401238Z'
-description: "Sir Knight Lop the Second \u2014 the always-on review and triage team\
-  \ for local-operator and local-operator-ui: reviews pull requests for merit and\
-  \ implementation quality, triages issues, and reports on GitHub as a comment."
+description: "Sir Knight Lop the Second — the always-on review and triage team for local-operator and local-operator-ui: verifies contribution requirements (evidence, rounds, security) on pull requests, defers to the contributor's own rounds, posts the terminal verdict, and triages issues on GitHub."
 manager: manager
 members:
 - role: architect

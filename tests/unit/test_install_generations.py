@@ -434,12 +434,30 @@ class TestInstallIntoGeneration:
         Without them uv installs into the shared default tool dir and rewrites
         the tree the running fleet imports from — the incident this layout
         exists to end. They are per-generation and absolute.
+
+        The argv is asserted here too, and it carries the version PIN and
+        ``--refresh-package`` (2026-09-26): ``lop update`` fetches the version
+        fresh, while an unpinned uv resolves "latest" from its cached copy of
+        the simple index — up to ten minutes of cache lifetime in which the two
+        reads can disagree, which is how a 0.63.3 update built a 0.63.2 tree.
+        The pin makes the installer resolve EXACTLY the checked version (the
+        other end — a tree that still disagrees — is
+        ``test_a_tree_that_reports_another_version_is_refused_before_the_flip``),
+        and the refresh forces that read against the live index.
         """
         fake = FakeUv(version="0.52.0")
         generation = update_mod.install_into_generation(runner=fake, version="0.52.0")
         assert len(fake.calls) == 1
         argv, env = fake.calls[0]
-        assert argv == ["uv", "tool", "install", "--force", "local-operator"]
+        assert argv == [
+            "uv",
+            "tool",
+            "install",
+            "--force",
+            "--refresh-package",
+            "local-operator",
+            "local-operator==0.52.0",
+        ]
         assert env["UV_TOOL_DIR"] == str(generation / "tools")
         assert env["UV_TOOL_BIN_DIR"] == str(generation / "bin")
         # The real ~/.local/bin must never be uv's target: its entries are this
@@ -447,6 +465,12 @@ class TestInstallIntoGeneration:
         assert env["UV_TOOL_BIN_DIR"] != str(Path.home() / ".local" / "bin")
 
     def test_a_snapshot_source_rides_as_from(self, home: Path) -> None:
+        """A source install resolves the tree it was HANDED, so the PyPI
+        defences must not ride along: ``--refresh-package`` names a PyPI
+        distribution and an ``==`` pin names a PyPI version, neither of which is
+        a question a local directory answers. The exact argv is the assertion,
+        so their absence is what a future edit fails on.
+        """
         fake = FakeUv(version="0.52.0")
         update_mod.install_into_generation(
             "/tmp/some-tree", runner=fake, version="0.52.0", commit="a" * 40, ref="main"
@@ -461,6 +485,39 @@ class TestInstallIntoGeneration:
             "/tmp/some-tree",
             "local-operator",
         ]
+
+    def test_a_tree_that_reports_another_version_is_refused_before_the_flip(
+        self, home: Path
+    ) -> None:
+        """THE 2026-09-26 INCIDENT AS A GUARD: a stale resolution must not go current.
+
+        On that date ``lop update`` fetched PyPI fresh, announced 0.63.3, and
+        the unpinned installer resolved 0.63.2 out of uv's cached index
+        metadata; the run ended exit 0 with ``current`` flipped onto a 0.63.2
+        tree whose marker claimed ``pypi 0.63.3``. The tree's own dist-info is
+        where the two claims meet, so the install verifies it BEFORE the marker
+        and the flip: a tree that disagrees is refused and removed instead.
+        """
+        stale = FakeUv(version="0.63.2")
+        with pytest.raises(UpdateError) as refused:
+            update_mod.install_into_generation(runner=stale, version="0.63.3")
+        message = str(refused.value)
+        assert "0.63.2" in message and "0.63.3" in message, message
+        assert "nothing was made current" in message, message
+        assert update_mod.current_generation() is None, "nothing was made current"
+        assert not update_mod.pointer_path().is_symlink()
+        assert list(update_mod.generations_dir().iterdir()) == [], "the refused tree is gone"
+
+    def test_a_matching_tree_flips_and_records_the_pypi_marker(self, home: Path) -> None:
+        """The success side of the same guard: agreement flips, and the marker
+        names the verified version — ``pypi 0.63.3``, the exact pair the
+        incident run printed while its tree carried 0.63.2."""
+        generation = update_mod.install_into_generation(
+            runner=FakeUv(version="0.63.3"), version="0.63.3"
+        )
+        marker = generation / "tools" / "local-operator" / ".lop-source"
+        assert marker.read_text(encoding="utf-8") == "pypi 0.63.3\n"
+        assert update_mod.current_generation() == generation.resolve()
 
     def test_the_marker_is_written_before_the_pointer_moves(self, home: Path) -> None:
         language = _install("0.52.0", commit="c" * 40, ref="main")

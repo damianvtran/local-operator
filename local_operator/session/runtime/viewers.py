@@ -251,27 +251,40 @@ class ViewerRecord:
 
 
 def viewer_run_dir(root: Path | None = None) -> Path:
-    """The viewer record directory, created 0700 on first use.
+    """The viewer record directory AS A PATH — creates NOTHING; see below.
 
-    Creating is the WRITER's business, but readers reach it too and a missing
-    directory is an ordinary answer (no viewer has ever run here), so this
-    stays mkdir-on-read like ``registry.run_dir`` rather than raising.
+    This used to mkdir on every call, on the reasoning that "readers reach it too
+    and a missing directory is an ordinary answer" — which is true about the
+    ANSWER and wrong about the WRITE: a reader that materialises the namespace it
+    reads is the shape this project ruled on in ``server/utils/desktop_feed.py``
+    (review round 1, MAJOR 1 / QA Q2) and again for the network plane on #1666.
+    Measured: ``GET /v1/desktop/runtimes`` → ``reclaim.read_fleet`` →
+    ``scan_viewers`` created ``run/viewers`` on a machine that had never had one
+    (review round 1, R1-1).
+
+    The creator is :func:`ensure_viewer_run_dir`, and only the writer
+    (:func:`publish_viewer`) calls it.
     """
-    path = (root or config_dir()) / VIEWER_RUN_DIRNAME
+    return (root or config_dir()) / VIEWER_RUN_DIRNAME
+
+
+def ensure_viewer_run_dir(root: Path | None = None) -> Path:
+    """``viewer_run_dir``, created 0700 on first use — the WRITERS' spelling."""
+    path = viewer_run_dir(root)
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
     return path
 
 
 def viewer_record_path(pid: int, root: Path | None = None) -> Path:
-    """Where one viewer's record lives."""
+    """Where one viewer's record lives. A PATH; nothing is created."""
     return viewer_run_dir(root) / f"{pid}.json"
 
 
 def publish_viewer(record: ViewerRecord, root: Path | None = None) -> Path:
     """Write (or refresh) a viewer record, staged so a scanner reads either the
     old file or the new one and never a half-written one."""
-    directory = viewer_run_dir(root)
+    directory = ensure_viewer_run_dir(root)
     record.heartbeat_at = time.time()
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{record.pid}.", suffix=".tmp")
     try:
@@ -323,6 +336,11 @@ def scan_viewers(root: Path | None = None, *, reap: bool = True) -> list[ViewerR
     the reaping caller sees, minus the removals.
     """
     directory = viewer_run_dir(root)
+    if not directory.is_dir():
+        # A READ MUST NOT CREATE THE NAMESPACE IT READS (see :func:`viewer_run_dir`).
+        # "No viewer has ever run here" is an ordinary answer, not a reason to
+        # build the directory that would have held one.
+        return []
     now = time.time()
     out: list[ViewerRecord] = []
     for path in sorted(directory.glob("*.json")):

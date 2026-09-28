@@ -2153,7 +2153,8 @@ def test_download_agent_from_radient(tmp_path: Path):
     # Mock radient_client
     radient_client = MagicMock()
 
-    def fake_download(agent_id, dest_path):
+    def fake_download(agent_id, dest_path, *, with_credential=False):
+        assert with_credential is False  # the public pull stays anonymous
         dest_path.write_bytes(zip_bytes)
 
     radient_client.download_agent_from_marketplace.side_effect = fake_download
@@ -2165,6 +2166,37 @@ def test_download_agent_from_radient(tmp_path: Path):
     assert renamed_from == "DownloadAgent"
     original = registry.get_agent_by_name("DownloadAgent")
     assert original is not None and original.id == agent.id
+
+
+def test_download_agent_from_radient_forwards_the_credential_flag(tmp_path: Path) -> None:
+    """An org pull asks the client to prove membership; the default stays anonymous.
+
+    The hub answers an ORGANIZATION row 404 unless the request proves a member
+    (design §8.2), so the org pull path must be able to send the signed-in
+    person's bearer (§8.3) without changing what the public pull sends
+    (§11 R-6).
+    """
+    from unittest.mock import MagicMock
+
+    from local_operator.agents import AgentEditFields, AgentRegistry
+
+    registry = AgentRegistry(tmp_path)
+    agent = registry.create_agent(AgentEditFields.model_validate({"name": "OrgPullSource"}))
+    with registry.exported_agent_archive(agent.id) as (zip_path, _):
+        zip_bytes = zip_path.read_bytes()
+
+    seen: dict[str, object] = {}
+
+    def fake_download(agent_id, dest_path, *, with_credential=False):
+        seen["agent_id"] = agent_id
+        seen["with_credential"] = with_credential
+        dest_path.write_bytes(zip_bytes)
+
+    client = MagicMock()
+    client.download_agent_from_marketplace.side_effect = fake_download
+    registry.download_agent_from_radient(client, "hub-id", with_credential=True)
+
+    assert seen == {"agent_id": "hub-id", "with_credential": True}
 
 
 def test_set_agent_system_prompt(temp_agents_dir: Path):

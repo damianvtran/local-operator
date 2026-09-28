@@ -20,8 +20,14 @@ Three notices close that, and each is a different fact:
   viewer re-engages a fresh one silently; a busy one earns one info line
   saying it will move over when its work finishes. No notice ever tells the
   user to ``/stop`` (design-runtime-autorefresh §3.3/§3.5).
-* **owner predates reporting** — the runtime cannot say what it runs, which by
-  construction makes it older than a terminal that can read the field.
+* **owner predates reporting** — a runtime ON THIS MACHINE cannot say what it
+  runs, which by construction makes it older than a terminal that can read the
+  field. That inference does NOT carry to a runtime on another device: a
+  federated row carries no build, so there an absent stamp is UNOBSERVABLE and
+  ``_check_build_skew`` returns before the absent-version copy
+  (``test_a_peer_owned_runtime_is_not_reported_as_predating_the_field``), while a
+  peer that DOES report a stamp takes the ordinary comparison
+  (``test_a_peer_with_a_stamp_still_gets_the_owner_notice``).
 
 All three are ADVISORY. Nothing here may refuse a command or an attach: both
 builds keep working, and a diagnostic that blocks work is worse than the skew
@@ -717,6 +723,82 @@ async def test_a_cold_viewer_is_not_reported_as_a_prehistoric_runtime(
         notices = _notices(app)
 
     assert not [n for n in notices if OWNER_UNKNOWN in n]
+
+
+@pytest.mark.asyncio
+async def test_a_peer_owned_runtime_is_not_reported_as_predating_the_field(
+    monkeypatch, tmp_path
+) -> None:
+    """A runtime on ANOTHER DEVICE is not a build this window can weigh.
+
+    QA-3, measured on the two-device loopback rig: A's TUI opened a viewer onto a
+    session living on B — BOTH on 0.63.2, from one worktree — and painted
+    ::
+
+        “qa3-live” is running an older version than this window — it will switch to
+        the new version when it is next idle.
+
+    The stamp is empty for a reason that has nothing to do with the peer's age:
+    it is read off the RUNTIME'S discovery record on this device, and a peer's
+    runtime publishes no such record here — the federated row (``PeerRow``) does
+    not carry a build at all, so ``RemoteSessionFacts.version`` is never filled.
+    Empty therefore means UNOBSERVABLE, and the ``owner is None`` branch below
+    reads it as PROOF OF AGE. Two falsehoods come out of that: the peer is not
+    older, and the promise ("it will switch to the new version when it is next
+    idle") is about THIS install's generation reaper, which has no jurisdiction
+    over another device's runtime.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        stamp = BuildStamp(version="0.63.2")
+        app._loaded_build = stamp
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
+        peer = _BoundViewer(runtime_version="")
+        peer.runtime_locality = "another-machine"
+        app._session = peer
+        app._check_build_skew(reason="bind-remote")
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert not [n for n in notices if OWNER_UNKNOWN in n], notices
+    assert not [n for n in notices if MOVES_OVER in n], notices
+
+
+@pytest.mark.asyncio
+async def test_a_peer_with_a_stamp_still_gets_the_owner_notice(monkeypatch, tmp_path) -> None:
+    """The guard is scoped to the ABSENCE, not to the locality.
+
+    The cell the suite lacked (agent review round 1, finding 3; the prior
+    independent review's finding 4): with the peer's stamp carried, a genuinely
+    stale runtime on another device must still earn its notice. Nothing pinned
+    that, so a later rewrite keying on locality ALONE would keep every existing
+    cell green while the one property the guard's comment claims to preserve
+    stopped being exercised at all — the second conjunct is what makes the guard
+    a scope on an unobservable fact rather than a blanket silence about peers.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await pilot.pause()
+        stamp = BuildStamp(version="0.63.2")
+        app._loaded_build = stamp
+        app._skew_notice_shown.clear()
+        import local_operator.update as update_mod
+
+        monkeypatch.setattr(update_mod, "disk_build", lambda *_a, **_k: stamp)
+        peer = _BoundViewer(runtime_version="0.46.23")
+        peer.runtime_locality = "another-machine"
+        app._session = peer
+        app._check_build_skew(reason="bind-remote-stamped")
+        await pilot.pause()
+        notices = _notices(app)
+
+    assert [n for n in notices if MOVES_OVER in n], notices
 
 
 @pytest.mark.asyncio

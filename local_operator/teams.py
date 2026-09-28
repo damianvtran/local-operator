@@ -55,9 +55,10 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Literal
+from typing import Any, Iterable, Iterator, Literal, Mapping
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -287,6 +288,14 @@ class Team(BaseModel):
         if self.description.strip():
             parts.append(self.description.strip())
         parts.append("You are the manager of this team. You coordinate; you do not implement.")
+        # The other "built-in manager prompt" beside ``agent_seeds/manager.md``
+        # (design §V2.G.2, exact text). It sits here — ahead of the
+        # delegation mechanics — because it states the manager's standing
+        # duties before the roster says who does the work.
+        parts.append(
+            "Track this team's workstream with the `project` tool and keep its "
+            "progress current; keep the todo list updated the same way."
+        )
         parts.append(
             "Delegate with task(agent='<role>') using the roster below. "
             "Each member already carries this team's collaboration and project "
@@ -345,6 +354,97 @@ def validate_team_name(name: str) -> str:
             "manager": "manager",
         }
     ).name
+
+
+#: The name length ceiling ``_NAME_RE`` encodes (1 leading character + 63).
+_TEAM_NAME_MAX_CHARS = 64
+
+
+def hub_team_document(team: Team) -> dict[str, Any]:
+    """The published team document for a local ``Team`` (design §1.6).
+
+    One way and complete: every field the hub stores is one the local model
+    owns, and nothing else about the team (its id, its created date, the files
+    behind its briefs) travels. ``version`` is the author's content version --
+    the local model has none, so a push sends the same constant the agent
+    publication path starts from (``"1.0.0"``); a per-push value would make
+    every round trip look like a new revision to anything comparing versions.
+
+    The roster rides as ``{role, kind, count}`` slots: ``kind`` keeps the local
+    spelling (``agent``/``team``) because the hub deliberately does not enums
+    it (its decoder stores what the author wrote; see ``requests.TeamMemberSlot``
+    in agent-server), and the pull side decides what it recognises.
+    """
+    return {
+        "name": team.name,
+        "description": team.description,
+        "manager": team.manager,
+        "members": [
+            {"role": member.role, "kind": member.kind, "count": member.count}
+            for member in team.members
+        ],
+        "instructions": team.instructions,
+        "project": team.project,
+        "version": "1.0.0",
+    }
+
+
+def _local_name_for_published(name: str) -> tuple[str, bool]:
+    """A published team name as a local team name, and whether it had to change.
+
+    A local name is also a slash-command argument, so ``_NAME_RE`` holds it to
+    letters, digits, dot, underscore and hyphen (1..64, starting alphanumeric).
+    A published name follows the hub's agent-name rule instead -- after its
+    whitespace normalisation it may hold spaces and characters the local rule
+    refuses -- so a pull cannot store every published spelling verbatim. Runs
+    of invalid characters become one ``-`` (``Feature Release Crew`` reads as
+    ``Feature-Release-Crew``), the leading run is dropped so the result can
+    start, the length is capped, and a trailing separator the mapping left
+    behind is stripped so the result also satisfies the hub's ``-``/``.``
+    endpoint rule -- a name this mapping mints must survive a later re-push
+    (review round 1, R1-5). Deterministic, so the same document always
+    reconstructs the same name and the collision suffix stays stable.
+    """
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip())
+    candidate = re.sub(r"^[^A-Za-z0-9]+", "", candidate)
+    candidate = candidate[:_TEAM_NAME_MAX_CHARS]
+    # A published name never ends in ``-``/``.`` (the hub refuses it), so this
+    # strip can only remove what the mapping itself introduced.
+    candidate = candidate.rstrip("-.")
+    if not candidate:
+        candidate = "team"
+    return candidate, candidate != (name or "").strip()
+
+
+def _suffixed_team_name(name: str, suffix: int) -> str:
+    """``name`` with a ``-N`` collision suffix that still fits the local rule.
+
+    The hyphen spelling and the keep-the-suffix truncation are the convention
+    ``agents.py::_collision_free_name`` set for imports: the suffix is what
+    makes the name free, so a name at the length ceiling has its BASE cut,
+    never the tail.
+    """
+    tail = f"-{suffix}"
+    keep = max(1, _TEAM_NAME_MAX_CHARS - len(tail))
+    return name[:keep] + tail
+
+
+@dataclass(frozen=True)
+class HubTeamImport:
+    """A team reconstructed from a published hub document, and what changed.
+
+    ``renamed_from`` is the published name whenever the stored name differs
+    from it -- one cause or both. ``invalid_name`` says the difference includes
+    a spelling the local name rules cannot hold; the other cause (and the
+    suffix that resolves it) is a local name collision. The two read
+    differently to the person who asked for "that team" by the name they saw on
+    the hub, which is why they are reported separately instead of folded into
+    one message.
+    """
+
+    team: Team
+    renamed_from: str | None = None
+    invalid_name: bool = False
 
 
 def _try_lock_exclusive(fd: int) -> bool:
@@ -1301,6 +1401,101 @@ class TeamRegistry:
                 shutil.rmtree(team_dir)
             self._teams.pop(team_id)
             self._briefs_loaded.discard(team_id)
+
+    def import_hub_team(self, document: Mapping[str, Any]) -> HubTeamImport:
+        """Reconstruct one local team from a published hub-team document.
+
+        The document is what ``GET /v1/teams/:teamid`` answers (design §4.5);
+        this is the PULL side of :func:`hub_team_document`. The local row gets
+        a fresh uuid -- a hub id is a foreign namespace, and nothing local
+        should address rows by it -- and the NAME is the published name
+        whenever the local rules can hold it. Two adjustments exist, both
+        reported through :class:`HubTeamImport` rather than applied silently:
+
+        - a published spelling the local name rule cannot hold is mapped to one
+          it can (see :func:`_local_name_for_published`);
+        - a name a local row already holds takes the existing
+          rename-with-suffix convention (``name-2``, ``-3``, ... --
+          ``agents.py::resolve_import_name``). Collisions are found with the
+          registry's own rule (casefold name equality), so a local ``Feature``
+          blocks an incoming ``feature`` exactly as the registry's own writer
+          would refuse it.
+
+        Roster slots: ``kind == "team"`` is the one nested-team marker the
+        local model recognises; every other value (the hub deliberately stores
+        what the author wrote -- the design vocabulary says ``member``, the
+        local model spells it ``agent``) reads as an agent slot. A count
+        outside the local 1..16 band is refused rather than clamped: a roster
+        the pull silently rewrites is a lie about what will run.
+        """
+        published = str(document.get("name") or "")
+        local_name, invalid = _local_name_for_published(published)
+
+        members: list[TeamMember] = []
+        raw_members = document.get("members")
+        for slot in raw_members if isinstance(raw_members, list) else []:
+            if not isinstance(slot, Mapping):
+                continue
+            role = str(slot.get("role") or "").strip()
+            if not role:
+                continue
+            kind: Literal["agent", "team"] = (
+                "team" if str(slot.get("kind") or "").strip() == "team" else "agent"
+            )
+            raw_count = slot.get("count")
+            try:
+                count = int(raw_count) if raw_count is not None else 1
+            except (TypeError, ValueError):
+                raise ValueError(f"team member {role!r} has a non-numeric count") from None
+            if not 1 <= count <= 16:
+                raise ValueError(
+                    f"team member {role!r} has count {count}; local rosters hold 1-16 copies"
+                )
+            members.append(TeamMember(role=role, count=count, kind=kind))
+
+        # Snapshot-only probe for the common case (`_find_cached_team_by_name`):
+        # mutation paths must not refresh or hydrate through the public getter
+        # (that getter's own documented rule), and a stale snapshot is safe
+        # here because `create_team` re-checks uniqueness under the writer lock
+        # -- the retry below is what converges a race (review round 1, R1-3).
+        candidate = local_name
+        suffix = 2
+        while self._find_cached_team_by_name(candidate) is not None:
+            candidate = _suffixed_team_name(local_name, suffix)
+            suffix += 1
+
+        while True:
+            try:
+                team = self.create_team(
+                    TeamEditFields(
+                        name=candidate,
+                        description=str(document.get("description") or ""),
+                        manager=str(document.get("manager") or "").strip() or "manager",
+                        members=members,
+                        instructions=str(document.get("instructions") or ""),
+                        project=str(document.get("project") or ""),
+                    )
+                )
+                break
+            except ValueError:
+                # `create_team` is the authority: its uniqueness check runs
+                # under the lock against a FRESH snapshot, so a name another
+                # writer just took is visible (in the refreshed cache) exactly
+                # when that is what it refused -- take the next suffix. Any
+                # other ValueError (an oversized brief, say) is re-raised,
+                # because a retry cannot fix it.
+                if self._find_cached_team_by_name(candidate) is None:
+                    raise
+                candidate = _suffixed_team_name(local_name, suffix)
+                suffix += 1
+        return HubTeamImport(
+            team=team,
+            # One field for both causes: the caller reports the rename, and
+            # ``invalid_name`` separates the spelling adjustment from a pure
+            # collision so the message can name the right reason.
+            renamed_from=published if candidate != published else None,
+            invalid_name=invalid,
+        )
 
 
 def parse_members(raw: Iterable[str] | None) -> list[TeamMember]:

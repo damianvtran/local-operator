@@ -2865,7 +2865,11 @@ against a hang rather than a stall, that is the file to read.
   other end of the list reads as the list resetting itself.
 
   **Documented exception — a list that IS the whole page clamps its arrows
-  too. Today that is `/settings` and nothing else.** The wrap rule is written
+  too. Today that is `/settings` and the full-page projects view
+  (`/project show`: its list cursor clamps, its board and timeline canvases
+  clamp every scroll, and Home/End are cursor ends on the list and canvas
+  corners on the other two views) — and
+  nothing else.** The wrap rule is written
   for a picker: a short list overlaid on a screen the user is still looking at,
   where coming round is a shortcut to a row already visible. It does not
   transfer to a full-page mode whose list is several times its viewport

@@ -2000,6 +2000,93 @@ Screen.settings #input-dock #prompt-chevron {
 }
 
 
+/* ── full-page projects view ───────────────────────────────────────────── *
+ *
+ * The fourth sibling MODE (see the org-chart and settings blocks above):
+ * opened by `/project show`, it takes the transcript's region and leaves the
+ * dock greyed, so the page reads as the same app looking somewhere else.
+ * Five rows: title, rule, the canvas body (`1fr`), the detail footer, hints.
+ *
+ * The body scrolls on BOTH axes, like the org chart's: the board is N columns
+ * wide and the timeline is a time axis, so horizontal scroll is legitimate
+ * here (unlike the settings list, which truncates its rows and hides X). The
+ * canvas Static is pinned in Python to the painted grid, so the container's
+ * virtual size equals the canvas and the scrollbars appear exactly when the
+ * content overflows. */
+.projects-view {
+    height: 1fr;
+    padding: 1 1 1 1;
+}
+
+.projects-view-title {
+    height: 1;
+}
+
+.projects-view-rule {
+    height: 1;
+}
+
+/* Both-axes scroll around the canvas. One row of air under the rule, the org
+ * chart's reason: without it the rule rests on the first canvas row and reads
+ * as part of the content. */
+.projects-view-body {
+    height: 1fr;
+    padding: 1 0 0 0;
+    overflow: auto;
+    /* The SAME block `SettingsView` declares, at the same 1 cell against the
+     * same `$lo-*` ramp — the stock Textual scrollbar is a saturated column
+     * that appears in none of the app's evidence frames (see
+     * `.settings-view-body`'s note). */
+    scrollbar-size-vertical: 1;
+    scrollbar-size-horizontal: 1;
+    scrollbar-gutter: stable;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+/* The canvas is sized in Python to the painted grid (width AND height), which
+ * is what makes the body's virtual size equal the canvas and the scrollbars
+ * appear exactly when the content overflows. `auto` here would collapse it to
+ * the handed content with no room to scroll. */
+.projects-view-canvas {
+    width: auto;
+    height: auto;
+}
+
+/* The pinned footer: the highlighted project's detail in the list view, the
+ * aggregate counts elsewhere. ALWAYS one row plus its quiet lead-in, even when
+ * empty: a footer that appeared and disappeared would move the canvas on every
+ * view switch. */
+.projects-view-detail {
+    height: 2;
+    padding: 1 0 0 0;
+}
+
+/* One quiet row above the hints, same as every sibling footer: without it the
+ * hints sit flush on the last canvas row and read as one more row of it. */
+.projects-view-hints {
+    height: 2;
+    width: 1fr;
+    padding: 1 0 0 0;
+}
+
+/* The dock in projects mode: PRESENT and RECEDED, never removed — the exact
+ * treatment `Screen.settings` and `Screen.org-chart` give it, and for the same
+ * reason (what recedes is what is inert; the band stays live because it still
+ * carries the session's state). `text-opacity`, not `color`, because these
+ * paint rich `Text` whose ink is already chosen. */
+Screen.projects #prompt-chevron,
+Screen.projects #todo-panel {
+    text-opacity: 45%;
+}
+
+Screen.projects #input-dock #prompt-chevron {
+    color: $lo-dim;
+}
+
+
 /* ── /copy picker ──────────────────────────────────────────────────────── *
  *
  * The same centred card over a dimmed transcript as `/resume` and

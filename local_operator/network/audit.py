@@ -84,7 +84,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from local_operator.network.store import audit_path, network_root
+from local_operator.network.store import audit_path
 
 SCHEMA = "lop.mesh.audit.v1"
 
@@ -1078,8 +1078,3 @@ def write_event(
     log = AuditLog(root)
     log.record(AuditEvent(event=event, **fields))
     log.close()
-
-
-def root_dir(root: Path | None = None) -> Path:
-    """The network root — re-exported so callers of this module need one import."""
-    return network_root(root)

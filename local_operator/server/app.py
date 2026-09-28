@@ -42,6 +42,7 @@ from local_operator.server.routes import (
     chat,
     config,
     credentials,
+    desktop_aida,
     desktop_catalogues,
     desktop_claim,
     desktop_lifecycle,
@@ -159,6 +160,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Initialize AgentRegistry with a refresh interval of 3 seconds to ensure
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
+    # AIDA'S BOOT ENSURE — SCHEDULED, NEVER AWAITED HERE. A headless install
+    # (no TUI ever opened) must still have her session, pinned and with the
+    # cadence armed, so the wake supervisor can start her at 09:00 and the
+    # desktop finds her already there. What that takes on a first run is real
+    # work — a session is built and files are written, and the wake supervisor
+    # is installed through a subprocess — and awaiting it parked the whole
+    # server's READINESS behind all of it. Measured in CI as boot-bound e2e
+    # tests failing on the ubuntu legs only, whose readiness window is turns
+    # of the loop rather than seconds (`assert server.started`), while every
+    # behaviour was correct, just later. The daemon's readiness is worth more
+    # than her session existing a beat sooner, so the ensure runs as a task:
+    # kept on `app.state` so it cannot be garbage-collected mid-flight, and
+    # BEST-EFFORT exactly as before — a failure is a log line, never the
+    # daemon's (a raise here would fail startup).
+
+    async def _aida_boot_ensure() -> None:
+        try:
+            from local_operator.aida import ensure_session
+
+            await ensure_session(config_dir)
+        except Exception:  # noqa: BLE001 — a bootstrap must never fail the daemon
+            logger.warning("aida: boot ensure failed", exc_info=True)
+
+    app.state.aida_boot_task = asyncio.create_task(_aida_boot_ensure())
     app.state.job_manager = JobManager()
     # The SSE fan-out. One instance per process: it is the ONLY streaming
     # transport the server offers (the deprecated /v1/ws socket surface was
@@ -465,12 +490,20 @@ app = FastAPI(
 #: ``test_managed_gate_covers_every_control_surface_route`` walks the ROUTERS
 #: rather than the prefixes and fails when a route like this appears without an
 #: entry here.
+#:
+#: ``/v1/memberships`` joined for the same class of reason as
+#: ``/v1/agent-name-availability``: it is EGRESS this machine performs on the
+#: caller's behalf — the hub is asked, with the operator's stored OAuth access
+#: token, which organizations the signed-in account belongs to — and the path
+#: spells no prefix family. The team surfaces are gated wholesale by their own
+#: prefix below, because both of them spend that same token.
 _LEGACY_CONTROL_PATHS = frozenset(
     {
         "/v1/agent-name-availability",
         "/v1/config",
         "/v1/config/system-prompt",
         "/v1/credentials",
+        "/v1/memberships",
         "/v1/models",
         "/v1/tools/speech",
         "/v1/transcriptions",
@@ -492,7 +525,13 @@ _LEGACY_CONTROL_PATHS = frozenset(
 #: unauthenticated cross-origin caller reaching either one is arbitrary code
 #: execution on a delay, not a defaced field, so this family cannot sit at a
 #: weaker posture than the agent inventory it schedules work against.
-_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules")
+#:
+#: ``/v1/teams`` is the organization-sharing family's (team publish and pull):
+#: both routes are EGRESS this machine makes with the operator's stored Radient
+#: OAuth access token — they read and publish organization content through the
+#: hub as the signed-in PERSON — so they cannot sit at a weaker posture than the
+#: agent routes that spend the same credential.
+_LEGACY_GATED_PREFIXES = ("/v1/agents", "/v1/jobs", "/v1/schedules", "/v1/teams")
 
 #: The ONLY routes under :data:`_LEGACY_GATED_PREFIXES` left open in managed
 #: mode, each with the reason it is safe. Keyed ``"METHOD /path/template"`` using
@@ -634,6 +673,11 @@ async def desktop_validation_error(request: Request, error: RequestValidationErr
 
 
 app.include_router(capabilities.router)
+# Aida's two routes, beside the capabilities that advertise them. Registered
+# unconditionally (the handlers answer `enabled: false` themselves): hiding
+# the routes on the env switch would make the desktop's discovery loop read a
+# 404 as a broken backend rather than a switched-off feature.
+app.include_router(desktop_aida.router)
 # The way IN to a daemon the desktop app did not start. It carries no
 # `require_desktop` dependency on purpose (that is the deadlock the design
 # names): the gate is the record's 0600 key, checked inside the route.

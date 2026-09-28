@@ -28,6 +28,7 @@ import {
 	type Ref,
 } from "react";
 import { getDirectories, setSessionPin } from "../api";
+import { ProjectsSheet } from "../components/projects-sheet";
 import { Sheet } from "../components/ui/sheet";
 import { Spinner } from "../components/spinner";
 import { navigate } from "../router";
@@ -506,6 +507,12 @@ export function SessionListScreen() {
 	const pinMarks = usePinMarks();
 	const [home, setHome] = useState("");
 	const [themeOpen, setThemeOpen] = useState(false);
+	/* The Projects sheet lives over THIS screen (the design's "reachable from the
+	   sessions screen"), next to the other footer entries. Its state is local:
+	   nothing on the list changes when the sheet opens, and the sheet re-reads
+	   the store on every open, so a project another surface created meanwhile is
+	   never missed. */
+	const [projectsOpen, setProjectsOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	/* The row whose pin action sheet is open, or NONE. Held as the id rather than
 	   the summary so a list repaint while the sheet is open cannot leave the
@@ -910,6 +917,13 @@ export function SessionListScreen() {
 				</button>
 				<button
 					type="button"
+					onClick={() => setProjectsOpen(true)}
+					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted select-none active:bg-elevated"
+				>
+					projects
+				</button>
+				<button
+					type="button"
 					onClick={() => setThemeOpen(true)}
 					aria-label="choose theme"
 					className="flex min-h-11 min-w-11 items-center justify-center rounded-md border border-control bg-surface text-ink-muted select-none active:bg-elevated"
@@ -918,6 +932,7 @@ export function SessionListScreen() {
 				</button>
 			</footer>
 			<ThemePicker open={themeOpen} onClose={() => setThemeOpen(false)} />
+			<ProjectsSheet open={projectsOpen} onClose={() => setProjectsOpen(false)} />
 			{/* THE PIN ACTION SHEET. Long-press opened it, so it is where the gesture's
 			    meaning is spelled out rather than left to be discovered — the row shows
 			    a ★ once pinned, and this sheet is how a reader learns the gesture that

@@ -237,9 +237,12 @@ NO_RETRY = -1
 #: The numbers are the design's §3.2 table, and the two that matter are the
 #: extremes: ``owner_offline`` is SHORT (15 s — the owner may come back at any
 #: moment, and the borrower's own grant keeps working meanwhile), and
-#: ``not_a_holder``/``revoked``/``grant_invalid`` are LONG (300 s — nothing the
-#: borrower can do changes them, and a short TTL here is a retry storm aimed at a
-#: device that has already said no).
+#: ``revoked``/``grant_invalid`` are LONG (300 s — nothing the borrower can do
+#: changes them, and a short TTL here is a retry storm aimed at a device that has
+#: already said no). ``not_a_holder`` sits between the two at 60 s, which is its own
+#: judgement: a re-share on the owner's side IS something the operator can do, so it is
+#: worth re-asking sooner than a revocation is (review round 2, NIT-1 — this comment
+#: said 300 s while the table said 60 s).
 BROKER_ERROR_TTL_MS: dict[str, int] = {
     "no_local_credential": 300_000,
     "owner_offline": 15_000,

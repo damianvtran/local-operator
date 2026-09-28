@@ -35,7 +35,12 @@ rendering is not a contract.
    override the rest).
 3. Mint the invite on that device: `lop network invite --role drive --json`.
    Add `--network <name>` when the device is in more than one network, `--role
-   read` for a viewer, `--expires 30m` to change the ten-minute default. The
+   read` for a viewer, `--expires 30m` to change the ten-minute default. `drive`
+   is the right default for a device that will PROMPT from here and never hold
+   anything: it may list, view, prompt, steer, stop and slash, and it may not
+   take a session (`move`), delete one on a peer (`delete`) or borrow a login
+   (`broker_credential`). Grant those to a device you trust to carry work — see
+   "Moving a session between devices". The
    token is written to a **file** and the JSON gives you `path`, never the token;
    hand that file to the other machine out of band — AirDrop, a shared directory,
    or the user's own copy at a terminal they control. Never into a chat
@@ -66,13 +71,53 @@ rendering is not a contract.
    codes, and answering it records the person's decision for the waiting pairing
    loop. It refuses without a TTY — a foreground `lop network serve` is the
    alternative on that side.
-   **You cannot do this step.** There is deliberately no flag that completes a
-   pairing, and the code is read at the joining device's own prompt — that is
-   what makes the interlock real rather than a round trip. Hand over the file and
-   the command, and let the user run it. The one non-interactive spelling,
-   `--sas-stdin`, is refused unless `LOP_NETWORK_TEST_MODE=1` is set: it is the
-   e2e harness's seam, and setting that variable to finish a real pairing would
-   turn the human check into a formality. Never set it.
+
+   THE TWO-PHASE PAIR, which is how you do this step WITHOUT a terminal. When the
+   person is not sitting at the joining device's keyboard, start the ceremony and
+   park it:
+
+   ```bash
+   lop network join @<token-file> --park --json
+   # → {"status":"awaiting_confirmation","sas":"481926","shown":"481 926",
+   #    "fingerprint":…,"expires_at":…,"seconds_left":…,"sentence":…}   exit code 0
+   ```
+
+   (`sas` is the compact spelling, `shown` and the `sentence` carry the spaced one —
+   the same six digits either way. A ceremony nobody answers exits `3`
+   (`pairing_unanswered`), having sent nothing.)
+
+   The first call prints this device's code and then WAITS (up to the same window the
+   prompt does). Show the user the code and the `sentence` it carries, and ask them to
+   read the code off the OTHER device's screen. The ceremony's socket belongs to the
+   parked process, so leave it running: do not kill it, and do not start a second park
+   for the same invite.
+
+   **You cannot do this step.** The second phase is the user's, run at their own
+   terminal:
+
+   ```bash
+   lop network join --confirm <code> --json      # the code THEY read, never one you chose
+   # → {"ok":true,"status":"joined","network_id":…,"epoch":…}
+   ```
+
+   Hand them that command and the code, and let them run it. There is deliberately no
+   flag on the `network` tool that completes a pairing: the digits both devices derive
+   are the SAME ones, so an agent able to answer with the code it just printed would
+   satisfy the very comparison that exists to catch a substitution — the interlock is
+   real only because the second phase is not the agent's to run. If the user cannot
+   read the code, that is the interlock working, not a problem to route around. A wrong
+   code is refused with `sas_mismatch` and leaves the ceremony open (the invite is not
+   spent).
+   The one non-interactive spelling of the PROMPT, `--sas-stdin`, is refused unless
+   `LOP_NETWORK_TEST_MODE=1` is set: it is the e2e harness's seam, and setting that
+   variable to finish a real pairing would turn the human check into a formality.
+   Never set it.
+
+   The `network` tool PARKS a pairing (`action="join"` with `token`) and reports the
+   code, the sentence and the window for the user; it has no `confirm` field, so no
+   argument combination lets an agent answer a park. The inviter's half
+   (`lop network confirm`) is deliberately NOT in that tool either: a full pairing
+   always needs one person, and that is the side where their comparison decides.
 5. Verify from both sides: `lop network peers --json` must show the other device
    with `reachable: true`, and `lop network ls --json` must agree on the epoch
    and member count. `peers` exits 1 and returns
@@ -163,6 +208,44 @@ over a paired mesh. From a shell:
 | `lop network sessions --peer <id> --archive <session>` | hide it on the device that holds it |
 | `lop network sessions --peer <id> --unarchive <session>` | restore it there |
 | `lop network sessions --peer <id> --delete <session> [--yes]` | delete it where it lives — a dry run until `--yes` |
+| `lop network sessions --peer <id> --send <session> <text>` | deliver a TURN to a conversation that is already there, and wait for its outcome |
+| `lop network sessions --peer <id> --steer <session> <text>` | inject into the turn that session is running there |
+| `lop network sessions --peer <id> --slash <session> /<command> [args]` | run a slash command in that session, ON its device |
+
+THE THREE PILOT VERBS DRIVE A CONVERSATION THAT ALREADY EXISTS (`--create` is the
+one that starts a new one). They open the same viewer the TUI's sidebar pick and `lop
+--resume <a peer's id>` open, so what they act on is the OWNER's runtime: a routed
+slash changes the peer's own record (a rename is visible in that device's listing),
+and `--send` waits for the owner's terminal turn outcome rather than returning on
+admission. The text is the positional — or stdin, for a body with newlines in it —
+and, like every verb here, the tail may also be typed as `/network sessions …` from
+inside a session. `--send` exits 0 only for a turn that REACHED its end; a turn that
+failed there, is still running, or was queued for a retiring runtime exits 1 with
+`outcome` naming which (`failed`, `running`, `queued`) so a script cannot read a
+delivery as a completion.
+
+THE TEXT IS WHAT FOLLOWS THE LAST FLAG THIS COMMAND READS, taken as-is to the end
+of the command line. A prompt that talks about flags is delivered whole —
+`--send <session> check the --name field` sends those five words — because nothing
+after the first plain word is re-read as a flag. The boundary is the parser's own
+and it is worth knowing exactly: **a token that IS one of this command's flags is
+still that flag**, so `--send <session> --json is the field` delivers `is the field`
+with JSON output on, and this command's own flags therefore go BEFORE the session
+id. `--` is the separator for text that starts with a dash, in either direction
+(`--send <session> -- --json is the field I mean`), and a flag that only describes a
+NEW session — `--model`, `--hosting`, `--run-in`, `--name`, `--cwd`, `--prompt`,
+`--profile`, `--team`, `--effort`, `--agent`, `--agent-name`, `--agent-id` — is
+**refused** when an act is present rather than accepted and dropped, which was the
+other way words went missing here (review round 2, MINOR-1).
+
+EVERY SUCCESS RECEIPT NAMES THE DEVICE THE ACT RAN ON, and `--peer` is not that
+name — the session id is what routes the act, so the receipt answers from the
+session's own row and costs no extra read. `peer` is therefore the device
+(`cloud-node-1`), not whatever `--peer` was typed; when the two disagree, the
+caller's own word is carried beside it as `peer_named` and the human run says so in
+a line of its own. A receipt you can trust to name the machine that did the work is
+the point: before this, `--peer no-such-device --send <id> hello` answered
+`peer: no-such-device` with exit 0 while the turn really ran elsewhere.
 
 EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
 acting on one (QA round 5, Q-R5-1):
@@ -179,10 +262,29 @@ acting on one (QA round 5, Q-R5-1):
 - `peer_unreachable` — the relay ANSWERED, and the DEVICE NAMED is the reason: it
   is not in the network, or it is in it and did not answer. An unreachable peer is a
   `doctor` question and not an error to retry (`lop network doctor --json`).
-- `stop_unreported` / `engage_unreported` / `create_unreported` — a receipt arrived
-  without the field it is a receipt for, so whether the peer acted is UNKNOWN:
-  restart the relay and ask again, and do not read the answer as a failure of the
-  act.
+- `stop_unreported` / `engage_unreported` / `create_unreported` / `slash_unreported`
+  — a receipt arrived without the field it is a receipt for, so whether the peer
+  acted is UNKNOWN: restart the relay and ask again, and do not read the answer as a
+  failure of the act. `slash_unreported` is the routed-slash case: the owner's
+  `SlashResult` is `kind`/`text`/`style`/`data`, and one whose `style` this build
+  does not know (including a receipt with no `style` at all, which used to read as
+  success) cannot be read as an outcome.
+- `turn_not_running` — a `--steer` reached a session that is not running a turn
+  there, so there was nothing for it to correct. The sentence names the two ways
+  forward (`--send` to start a turn, `--slash` to change the session); nothing was
+  written to the peer.
+- `session_unknown` — the named device ANSWERED and holds no such conversation (its
+  own listing is the sentence's second half). Distinct from `peer_unreachable` on
+  purpose: one means "ask again when it is back", the other means "that id is not
+  there".
+- `session_unreachable` — the peer accepted the act and then its runtime stopped
+  answering WITHIN THE TIME THIS VERB ALLOWS: a bind that ran out of its own budget
+  (that runtime may be starting, or wedged), or the act as a whole running out of
+  `PILOT_ACT_TIMEOUT_S`. The peer's own sentence is carried verbatim, and nothing on
+  this side changed. A dial that produced NO stream at all is `peer_unreachable` (or
+  `relay_unavailable` with no local relay) even when the rung that noticed was the
+  bind: the two codes answer "which side of the open died", not "which sentence did
+  I get", because a stopped device and a stopped runtime look identical from here.
 
 `--all-peers` merges the rows it could read and NAMES the peers it could not
 (`<device>: unreachable (<reason>)` on stderr), so a partial listing is never
@@ -267,6 +369,24 @@ lop sessions move <id> --to <peer> --keep   # copy it and leave the original run
 THE DIRECTION IS THE PROTOCOL: the device that will HOLD the conversation issues
 the move, so `--to <peer>` is this device asking the peer to pull and `--to local`
 is this device pulling. There is no push verb.
+
+RECEIVING A CONVERSATION IS ITS OWN CAPABILITY, AND `drive` DOES NOT HAVE IT. The
+peer must hold `move` ON THE DEVICE THAT HOLDS THE WORK, or the move is refused
+before anything is copied — `code: not_authorised`, naming the peer and the remedy.
+A `--role drive` device (what the setup above mints, and the right default for a
+laptop you only want to prompt from) may list, view, prompt, steer, stop and slash;
+taking ownership of a conversation, deleting one on a peer and borrowing a login
+are the three it may not. Grant one of them, on the device that owns the work:
+
+```bash
+lop network member grant <network> <device-id> move     # may take sessions from here
+lop network member grant <network> <device-id> delete   # may delete sessions here
+```
+
+or pair that device with `--role admin`. The device id is the one the refusal
+prints (a name will not resolve for this verb). Read the `code` before retrying:
+the identical move succeeds unchanged once the grant is in place, and re-pairing to
+"fix" it burns the device id instead.
 
 THE DEFAULT IS A MOVE, NOT A COPY. Without `--keep` the conversation keeps its id
 and the copy on the device it left is deleted once the handoff commits — which is
@@ -429,8 +549,9 @@ lop network identity rotate --json    # for a suspected key compromise
 - Do not edit anything under the network directory by hand (identity, network
   records, secrets, outbox) — one writer owns each file, and a hand edit is a
   state no code path expects.
-- Do not run the join step for the user, and never type a code you did not see
-  on the other device.
+- Do not run the join step for the user, and never type a code you did not see on
+  the other device. `--confirm` takes the value the USER read back from the other
+  screen: never the code this device printed, never a value you derived.
 - Do not print an invite token, or read the token file into a result: it is a
   single-use bearer credential, and a tool result is the most-copied text in the
   system.
@@ -448,10 +569,10 @@ lop network identity rotate --json    # for a suspected key compromise
 that answered and did not act, such as a stop whose `outcome` is `skipped` — with
 the sentence on stderr, which is the sentence to show the user (read `outcome`, not
 the code alone: a receipt is not a success); `2` a usage error, including `--print`
-together with `--json` and `--force` without `--stop`. The design reserves `3` for
-a "human decision is required"; this build never emits it — the one human step
-(`join`) is a prompt on the joining device rather than a two-phase command, so
-there is no `--confirm` flag to reach for.
+together with `--json` and `--force` without `--stop`; `3` a human decision is
+required and did not arrive — a parked pair (`join --park`) whose window closed with
+nobody answering, reported as `pairing_unanswered`. Nothing is joined in that case,
+the invite is untouched, and the ceremony is not resumed: park a new one.
 
 **Commands.**
 
@@ -469,7 +590,9 @@ lop network init <name> --json
 lop network rename <network> <name> --json
 lop network rm <network> --json
 lop network invite --role drive --json
-lop network join @<token-file>
+lop network join @<token-file>      # a terminal: prompts for the code, then joins
+lop network join @<token-file> --park --json   # no terminal: park and print the code
+lop network join --confirm <code> --json       # answer the parked ceremony
 lop network confirm --list          # a pairing parked on THIS device, with both codes
 lop network confirm <invite-id>     # answer it (--decline refuses; needs a TTY)
 lop network member rm <network> <device> --json

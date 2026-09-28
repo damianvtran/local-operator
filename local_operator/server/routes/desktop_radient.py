@@ -272,12 +272,38 @@ class RadientRequest(Input):
         "comments.update",
         "comments.delete",
         "account.agents",
+        # Organization operations (design §4.7/§8.4): the org selector's list,
+        # the org workspace's agent list, and team reads. ADDITIVE like
+        # `agents.statuses` -- an older server refuses the unknown operation at
+        # validation rather than mis-serving it, so a UI newer than its server
+        # loses the surface, never correctness. Each of them spends the
+        # account's stored bearer on THIS side, exactly like the operations
+        # above: the renderer still never holds one.
+        #
+        # The names and shapes are a three-way contract with the desktop's
+        # `RadientOperation` union and `agents-api.ts` (design §4.7; extended in
+        # local-operator-ui):
+        #   memberships.list  {}                          -> GET /me/memberships
+        #   org_agents.list   {tenant_id, query?}         -> GET /tenants/{id}/agents
+        #                     (query: page/per_page/name/description/categories/
+        #                      tags/account_id/sort/order; visibility=org is
+        #                      pinned server-side, see the request shaper)
+        #   org_teams.list    {tenant_id}                 -> GET /tenants/{id}/teams
+        #   org_team.get      {team_id}                   -> GET /teams/{team_id}
+        "memberships.list",
+        "org_agents.list",
+        "org_team.get",
+        "org_teams.list",
     ]
     request_id: RequestID | None = None
     tenant_id: Identifier | None = None
     account_id: Identifier | None = None
     agent_id: Identifier | None = None
     comment_id: Identifier | None = None
+    #: The HUB team id an `org_team.get` pull names. A hub id, not a local
+    #: registry row's id: the pull names the published document (§8.3), and the
+    #: local team it reconstructs gets its own fresh id.
+    team_id: Identifier | None = None
     query: dict[str, str | int] = Field(default_factory=dict)
     payload: dict[str, Any] = Field(default_factory=dict)
     confirmed: StrictBool = False
@@ -289,8 +315,8 @@ class RadientRequest(Input):
             raise ValueError("Mutations require a request identifier")
         if method == "DELETE" and not self.confirmed:
             raise ValueError("Confirm this removal")
-        query_fields = (
-            {
+        if self.operation in {"agents.list", "account.agents"}:
+            query_fields = {
                 "page",
                 "per_page",
                 "categories",
@@ -302,28 +328,37 @@ class RadientRequest(Input):
                 "sort",
                 "order",
             }
-            if self.operation in {"agents.list", "account.agents"}
-            else (
-                {"agent_ids"}
-                if self.operation == "agents.statuses"
-                else (
-                    {"page", "per_page"}
-                    if self.operation == "comments.list"
-                    else (
-                        {
-                            "start_date",
-                            "end_date",
-                            "application_id",
-                            "usage_type",
-                            "provider",
-                            "rollup",
-                        }
-                        if self.operation == "usage"
-                        else set()
-                    )
-                )
-            )
-        )
+        elif self.operation == "org_agents.list":
+            # The org workspace's list (§4.4) accepts the filters `agents.list`
+            # accepts, minus `tenant_id`: the organization travels in the PATH,
+            # and a query spelling of it would only be a second place the
+            # target could be wrong.
+            query_fields = {
+                "page",
+                "per_page",
+                "categories",
+                "tags",
+                "account_id",
+                "name",
+                "description",
+                "sort",
+                "order",
+            }
+        elif self.operation == "agents.statuses":
+            query_fields = {"agent_ids"}
+        elif self.operation == "comments.list":
+            query_fields = {"page", "per_page"}
+        elif self.operation == "usage":
+            query_fields = {
+                "start_date",
+                "end_date",
+                "application_id",
+                "usage_type",
+                "provider",
+                "rollup",
+            }
+        else:
+            query_fields = set()
         if self.query.keys() - query_fields or any(
             len(str(value)) > 1024 for value in self.query.values()
         ):
@@ -432,6 +467,26 @@ def endpoint(body: RadientRequest) -> tuple[str, str]:
         if not body.account_id:
             raise ValueError("Choose an account")
         return "GET", f"/accounts/{body.account_id}/agents"
+    if op == "memberships.list":
+        # §4.1: the person's own rows; nothing else names them.
+        return "GET", "/me/memberships"
+    if op == "org_agents.list":
+        if not body.tenant_id:
+            raise ValueError("Choose an organization")
+        # §4.4: the route lists exactly one namespace and refuses `public`, so
+        # `visibility=org` is pinned by `_operation_params` below rather than
+        # demanded of every caller's query.
+        return "GET", f"/tenants/{body.tenant_id}/agents"
+    if op == "org_teams.list":
+        if not body.tenant_id:
+            raise ValueError("Choose an organization")
+        return "GET", f"/tenants/{body.tenant_id}/teams"
+    if op == "org_team.get":
+        if not body.team_id:
+            raise ValueError("Choose a team")
+        # The org-agnostic pull path: the id names the document, exactly as the
+        # CLI's `teams pull` addresses it (§4.5).
+        return "GET", f"/teams/{body.team_id}"
     if op in {"agents.list", "agents.create"}:
         return ("GET" if op == "agents.list" else "POST"), "/agents"
     if not body.agent_id:
@@ -465,6 +520,22 @@ def endpoint(body: RadientRequest) -> tuple[str, str]:
     }
     method, tail = suffixes[op.removeprefix("agents.")]
     return method, path + tail
+
+
+def _operation_params(body: RadientRequest) -> dict[str, str | int]:
+    """The upstream query params one operation sends.
+
+    Almost every operation forwards the renderer's ``query`` verbatim -- the
+    closed vocabulary in :meth:`RadientRequest.validate_request` already
+    vetted it. ``org_agents.list`` is the exception: the hub answers that route
+    only for ``visibility=org`` and refuses ``public`` as invalid input (§4.4),
+    so the one value the operation's own name fixes is pinned here rather than
+    demanded of every caller; the rest of the query (pagination, filters) still
+    travels untouched.
+    """
+    if body.operation == "org_agents.list":
+        return {**body.query, "visibility": "org"}
+    return body.query
 
 
 def base_url() -> str:
@@ -541,6 +612,88 @@ def _upstream_refusal(status: int, **details: Any) -> HTTPException:
         "radient_upstream_failed",
         REFUSAL_MESSAGE,
         **details,
+    )
+
+
+#: The organization operations (design §4.7): the closed set whose refusals
+#: carry the hub's own membership codes. Spelled beside the Literal's four
+#: entries on purpose -- this is the dispatch that decides which refusals get
+#: the code-preserving reading below -- and pinned by the request tests so the
+#: two lists cannot silently diverge.
+ORG_OPERATIONS = frozenset(
+    {"memberships.list", "org_agents.list", "org_teams.list", "org_team.get"}
+)
+
+#: The hub's frozen membership refusals (§4.4/§4.5), carried through verbatim:
+#: the renderer's next step differs per code -- ask an admin
+#: (`insufficient_role`, whose `details.required` names the rank), get invited
+#: (`not_a_member`), or activate the plan (`team_plan_required`) -- and none of
+#: them is fixed by signing in again, so folding them into
+#: `radient_credential_refused` would send the user to the wrong remedy
+#: (review round 1, major 2).
+_ORG_REFUSAL_CODES = frozenset({"not_a_member", "insufficient_role", "team_plan_required"})
+
+#: The sentence each carried code gets on THIS plane. The codes and their
+#: `details` travel as the hub sent them; only the prose is restated here, in
+#: the desktop vocabulary.
+_ORG_REFUSAL_MESSAGES = {
+    "not_a_member": "You are not a member of this organization",
+    "insufficient_role": "Your organization role does not allow this action",
+    "team_plan_required": "This organization needs an active team plan",
+}
+
+
+def _org_refusal_code(operation: str, envelope: Any) -> str | None:
+    """The frozen org code a designed envelope carries, or ``None`` to fall back."""
+    if operation not in ORG_OPERATIONS or not isinstance(envelope, dict):
+        return None
+    code = envelope.get("code")
+    return code if isinstance(code, str) and code in _ORG_REFUSAL_CODES else None
+
+
+async def _upstream_refusal_for(operation: str, response: Any, token: str | None) -> HTTPException:
+    """One upstream refusal, with the org family's codes preserved.
+
+    ``_upstream_refusal`` classes 401/403/429 as a credential refusal: the right
+    ACTION for an unrecognised 403, but the wrong WORD for the three frozen
+    membership refusals the org operations receive, which signing in again
+    cannot fix. For those operations the hub's designed envelope is read --
+    size-bounded, and masked with this call's bearer -- and its code/details
+    carried exactly as the local org routes carry them; every other answer, and
+    every operation outside the org family, keeps the one generic reading so
+    nothing else changes shape.
+    """
+    import json
+
+    import httpx
+
+    if operation not in ORG_OPERATIONS:
+        return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+
+    content = bytearray()
+    try:
+        async for chunk in response.aiter_bytes():
+            content.extend(chunk)
+            if len(content) > MAX_UPSTREAM_BYTES:
+                return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+    except httpx.HTTPError:
+        return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+
+    try:
+        envelope = json.loads(content) if content else {}
+    except ValueError:
+        envelope = None
+    code = _org_refusal_code(operation, envelope)
+    if code is None:
+        return _upstream_refusal(response.status_code, upstream_status=response.status_code)
+
+    details = envelope.get("details") if isinstance(envelope, dict) else None
+    carried = public_data(details, [token] if token else []) if isinstance(details, dict) else {}
+    return _failure(
+        response.status_code,
+        code,
+        _ORG_REFUSAL_MESSAGES[code],
+        **{**carried, "upstream_status": response.status_code},
     )
 
 
@@ -1092,7 +1245,7 @@ async def radient(
                 async with client.stream(
                     method,
                     base_url() + path,
-                    params=body.query,
+                    params=_operation_params(body),
                     json=body.payload if method in {"POST", "PATCH"} else None,
                     headers={"Authorization": "Bearer " + token} if token else {},
                 ) as response:
@@ -1104,9 +1257,7 @@ async def radient(
                             upstream_status=response.status_code,
                         )
                     if response.status_code >= 400:
-                        raise _upstream_refusal(
-                            response.status_code, upstream_status=response.status_code
-                        )
+                        raise await _upstream_refusal_for(body.operation, response, token)
                     content = bytearray()
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)

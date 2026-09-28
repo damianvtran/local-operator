@@ -1643,3 +1643,43 @@ def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be(
     assert "audit.jsonlholds" not in text.replace(" ", ""), text
     # And the numbers are never invented for it: no counter survives a null relay.
     assert "recorded," not in text, text
+
+
+# ---------------------------------------------------------------------------
+# the argv the runner builds
+# ---------------------------------------------------------------------------
+
+
+def test_the_json_flag_lands_before_any_payload_the_tail_carries() -> None:
+    """The pilot verbs take their text as an argparse REMAINDER, so a flag APPENDED
+    to a tail that carries an act becomes part of the prompt: `--send <s> hi --json`
+    would send the words "hi --json" and leave the payload channel empty — and this
+    runner is the one that appends it (`json_output=True`, added here so no caller
+    can forget it).
+
+    Asserted on the argv rather than through a spawned child: the PLACEMENT is the
+    behaviour, and a subprocess cell would be measuring the parser that the pilot
+    suites already pin.
+    """
+    from local_operator.tui.network_cli import _argv_for
+
+    argv = _argv_for(
+        ["sessions", "--peer", "cloud-node-1", "--send", "abc", "hi", "there"],
+        json_output=True,
+    )
+    start = argv.index("sessions")
+    # Directly after the subcommand: where `network sessions` declares it, and where
+    # nothing after it can read it as text.
+    assert argv[start + 1] == "--json", argv
+    assert argv[start + 2 :] == [  # noqa: E203 — black's slice spacing
+        "--peer",
+        "cloud-node-1",
+        "--send",
+        "abc",
+        "hi",
+        "there",
+    ], argv
+
+    # And a call that did not ask for JSON is untouched.
+    plain = _argv_for(["sessions", "--peer", "cloud-node-1"], json_output=False)
+    assert "--json" not in plain, plain
