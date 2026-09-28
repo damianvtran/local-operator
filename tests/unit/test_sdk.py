@@ -26,6 +26,7 @@ launchd episode does, so the cache check passes the honest way.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import os
@@ -100,6 +101,11 @@ def _mock_spec(**overrides: Any) -> SessionSpec:
     values: dict[str, Any] = {"hosting": "test", "model": "mock"}
     values.update(overrides)
     return SessionSpec(**values)
+
+
+async def _never_gate(tool_name: str, description: str) -> bool:  # pragma: no cover
+    """An attach-refused callback gate: reaching it at all is the failure."""
+    raise AssertionError("a refused attach spec's gate must never be consulted")
 
 
 # --- same machinery --------------------------------------------------------------
@@ -673,11 +679,142 @@ async def test_one_root_per_process_unless_opted_out(scratch: SessionRoots, tmp_
                 pass
         with pytest.raises(SessionIsolationError):
             await sdk.deliver("x", roots=other, errand=launch_mod.PromptErrand(text="hi"))
+        with pytest.raises(SessionIsolationError):
+            await sdk.spawn_session(
+                SessionSpec(resume="abc123def456"),
+                roots=other,
+                errand=launch_mod.SteerErrand(text="hi"),
+            )
         async with sdk.open_session(_mock_spec(), roots=other, allow_multi_root=True):
             pass
 
     async with sdk.open_session(_mock_spec(), roots=other):
         pass
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_in_flight_holds_its_root_against_another(
+    scratch: SessionRoots, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2, cross-root: a delivery is a live root while it runs.
+
+    The reproduced interleave: ``gather(deliver(A), open_session(B))`` used to
+    run BOTH — B was not refused (a delivery never registered its root) and
+    A's engage then read B's environment mid-flight. Registration is one
+    synchronous step before the first await, so a second, different-root
+    operation must now be refused while the delivery is in flight — and the
+    delivery's engage must always read its OWN root.
+    """
+    import local_operator.resume as resume_mod
+    import local_operator.session.runtime.launch as launch_mod
+
+    other = SessionRoots(
+        config_dir=tmp_path / "other" / ".local-operator",
+        agent_home=tmp_path / "other",
+        cwd=tmp_path / "other",
+        allow_volatile=True,
+    )
+    for directory in (other.config_path, other.agent_home_path, other.cwd_path):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        resume_mod, "resolve_resume_id", lambda config_dir, requested: "held12345678"
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    seen: list[str | None] = []
+
+    async def held_engage(session_id, cwd, work, *, config_dir, **kwargs):
+        seen.append(os.environ.get("LOCAL_OPERATOR_CONFIG_DIR"))
+        entered.set()
+        await release.wait()
+        return launch_mod.EngageOutcome(session_id=session_id, detail="accepted")
+
+    monkeypatch.setattr(launch_mod, "engage_runtime", held_engage)
+    delivery = asyncio.create_task(
+        sdk.deliver("held12345678", roots=scratch, errand=launch_mod.SteerErrand(text="hold"))
+    )
+    await entered.wait()
+    assert seen == [str(scratch.config_path)], "the engage must read its own root"
+
+    with pytest.raises(SessionIsolationError, match="one SessionRoots per process"):
+        async with sdk.open_session(_mock_spec(), roots=other):
+            pass
+
+    release.set()
+    outcome = await delivery
+    assert outcome.session_id == "held12345678"
+
+
+@pytest.mark.asyncio
+async def test_overlapping_same_root_scopes_restore_the_environment_exactly(
+    scratch: SessionRoots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2, same-root half: interleaved scopes compose; nothing leaks.
+
+    Two deliveries on the SAME root may overlap (one root, two scopes) and may
+    exit out of order: A holds its scope, B enters, then A exits while B is
+    still in flight. Under a save/restore pair the earlier exit restores
+    values captured before the sibling entered — the sibling then reads
+    pre-scope values mid-flight and the later exit leaks scope values past
+    both. Asserted: mid-flight the live scope's values still hold; after both
+    close, EVERY tracked key is exactly its pre-scope value.
+    """
+    import local_operator.resume as resume_mod
+    import local_operator.session.runtime.launch as launch_mod
+
+    monkeypatch.setenv("CMUX_WORKSPACE_ID", "ws-original")
+    monkeypatch.setenv("LOP_MOBILE_CHILD_SESSION", "child-original")
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    tracked = (
+        "HOME",
+        "LOCAL_OPERATOR_CONFIG_DIR",
+        "LOCAL_OPERATOR_HOME",
+        "LOCAL_OPERATOR_NO_NOTIFICATIONS",
+        "CMUX_WORKSPACE_ID",
+        "LOP_MOBILE_CHILD_SESSION",
+    )
+    before = {key: os.environ.get(key) for key in tracked}
+
+    monkeypatch.setattr(
+        resume_mod, "resolve_resume_id", lambda config_dir, requested: "inter1234567"
+    )
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    calls = 0
+
+    async def held_engage(session_id, cwd, work, *, config_dir, **kwargs):
+        nonlocal calls
+        index = calls
+        calls += 1
+        entered[index].set()
+        await release[index].wait()
+        return launch_mod.EngageOutcome(session_id=session_id, detail="accepted")
+
+    monkeypatch.setattr(launch_mod, "engage_runtime", held_engage)
+    errand = launch_mod.SteerErrand(text="hold")
+
+    task_a = asyncio.create_task(sdk.deliver("a", roots=scratch, errand=errand))
+    await entered[0].wait()
+    task_b = asyncio.create_task(sdk.deliver("b", roots=scratch, errand=errand))
+    await entered[1].wait()
+
+    # Non-LIFO, the order a save/restore pair gets wrong: the FIRST scope
+    # exits while the second is still in flight.
+    release[0].set()
+    await task_a
+    mid = {key: os.environ.get(key) for key in tracked}
+    assert mid["LOCAL_OPERATOR_CONFIG_DIR"] == str(scratch.config_path)
+    assert mid["LOCAL_OPERATOR_HOME"] == str(scratch.agent_home_path)
+    assert mid["HOME"] == str(scratch.agent_home_path)
+    assert mid["CMUX_WORKSPACE_ID"] is None, "a live scope's strip must survive its sibling"
+    assert mid["LOP_MOBILE_CHILD_SESSION"] is None
+    assert mid["LOCAL_OPERATOR_NO_NOTIFICATIONS"] == "1"
+
+    release[1].set()
+    await task_b
+    after = {key: os.environ.get(key) for key in tracked}
+    assert after == before, "both scopes closed: every key returns to its pre-scope value"
 
 
 # --- attach mode ------------------------------------------------------------------
@@ -742,6 +879,84 @@ async def test_attach_returns_the_viewer_and_cold_ids_get_a_remedy(
             SessionSpec(team="release").with_resume("abc"), roots=scratch, mode="attach"
         ):
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "approvals",
+    [
+        ApprovalPolicy.refuse(),
+        ApprovalPolicy.auto(),
+        ApprovalPolicy.declared(["read"]),
+        ApprovalPolicy.callback(_never_gate),
+    ],
+    ids=["refuse", "auto", "declared", "callback"],
+)
+async def test_attach_refuses_every_non_default_approval_policy(
+    scratch: SessionRoots,
+    monkeypatch: pytest.MonkeyPatch,
+    approvals: ApprovalPolicy,
+) -> None:
+    """A policy attach cannot install must be refused, never silently inert.
+
+    ``mode="attach"`` returns before ``_install_approval_policy``, so the only
+    policy it may accept is the default ``refuse()`` (the preset of a spec
+    that never mentioned approvals). Every other enum value is refused BEFORE
+    any construction — one parametrized case per preset, because a check that
+    only works for one of them is exactly the bug this test pins — and the
+    private preflight is exercised directly, which is where the fix lives.
+    """
+    from local_operator import session_factory
+
+    created: list[dict[str, Any]] = []
+
+    class FakeViewer:
+        owns_runtime = False
+
+        async def dispose(self) -> None:
+            pass
+
+    async def fake_create(session_args, *managers, **kwargs):
+        created.append(dict(kwargs))
+        return FakeViewer()
+
+    monkeypatch.setattr(session_factory, "create_session", fake_create)
+    spec = SessionSpec(resume="abc123def456", approvals=approvals)
+
+    if approvals == ApprovalPolicy.refuse():
+        async with sdk.open_session(spec, roots=scratch, mode="attach") as attached:
+            assert isinstance(attached, FakeViewer)
+        assert created, "the default policy must leave attach usable"
+        return
+
+    with pytest.raises(SessionSpecError, match="Offending fields: approvals"):
+        sdk._refuse_attach_extras(spec)
+    with pytest.raises(SessionSpecError, match="approval policies"):
+        async with sdk.open_session(spec, roots=scratch, mode="attach"):
+            pass
+    assert not created, "the refusal must land before any construction"
+
+
+@pytest.mark.asyncio
+async def test_attach_in_a_root_without_hosting_names_both_blockers(
+    scratch: SessionRoots,
+) -> None:
+    """Q-2 (QA round 1): the attach remedy must survive a hosting-less root.
+
+    ``create_session``'s cold-attach fall-through hits the hosting preflight
+    BEFORE the viewer check can produce "no live runtime is serving …", so in
+    a root with nothing to start a runtime with, the refusal must still say
+    BOTH facts — the id has no live runtime, and this root cannot start one —
+    not just the lower-level "Hosting platform is not configured."
+    """
+    with pytest.raises(SessionSpecError, match="no live runtime is serving") as raised:
+        async with sdk.open_session(
+            SessionSpec().with_resume("abc123def456"), roots=scratch, mode="attach"
+        ):
+            pass
+    message = str(raised.value)
+    assert "cannot start" in message
+    assert "Hosting platform is not configured" in message, "the cause stays in the message"
 
 
 # --- events adapter ---------------------------------------------------------------

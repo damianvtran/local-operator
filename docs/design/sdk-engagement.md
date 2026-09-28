@@ -183,7 +183,7 @@ inputs (`tests/unit/session/test_spec.py`).
 | 1 | Context compaction | **Exposed**: automatic every turn; `compact_now()`; events | Consumer does nothing; a compaction change reaches all surfaces alike. |
 | 2 | Guides (`guide://`) | **Exposed**: automatic | Wired in `_prepare`. |
 | 3 | Skills (`skill://`) | **Exposed**: automatic; roots under the session root | `LOCAL_OPERATOR_SKILL_EXTRA_ROOTS` remains the escape. |
-| 4 | MCP servers | **Exposed via roots/config** | The sanctioned way an out-of-tree consumer extends tools (footprint ladder rung 4). |
+| 4 | MCP servers | **Exposed via config — cwd-scoped, not root-scoped** | Discovery reads the session's **cwd** first (`<cwd>/.local-operator/mcp.json`, `<cwd>/.mcp.json`), then the scoped-HOME user config (`$LOCAL_OPERATOR_CONFIG_DIR/mcp.json`, `~/.claude.json`, `~/.cursor/`, `~/.codex/`), plus `<cwd>`-relative foreign imports (`.claude/`, `.vscode/`). The boundary is the session CWD: an episode held at the operator's home reads and dials their REAL `mcp.json` — root-scoping alone overstates the isolation (found in QA round 1). Sanctioned extension point (footprint ladder rung 4). **PR 2 checklist: the episode cwd stays inside the episode scratch** (see §5). |
 | 5 | `task`/`team`/`hub` delegation | **Exposed, unchanged**: full subagent engine incl. roles/teams | The point of the exercise. Children are composed by the harness; the SDK must not touch that. |
 | 6 | Jobs | **Exposed via tools + events** | No duplicate ledger API. |
 | 7 | Todos | **Exposed via tool + events** | |
@@ -280,7 +280,12 @@ pretended.
 2. **PR 2 — the benchmark pilot arm.** A new arm entrypoint runs episodes
    through `sdk.open_session` with the shipped roles/teams and the full tool
    surface; the existing arm stays untouched. First milestone: 10 tasks,
-   compared against the current arm.
+   compared against the current arm. **Environment checklist (QA round 1,
+   non-negotiable): the episode's `cwd` stays inside the episode scratch.**
+   MCP discovery is cwd-scoped (§3 row 4), so an episode held at the
+   operator's home enumerates and dials their real servers; assert the MCP
+   configuration sources (`load_all_mcp_configs`'s `sources`) resolve inside
+   the scratch root.
 3. **PR 3 — optional, after the pilot**: collapse the triplicated namespace
    literals into `SessionSpec`-based builders. Mechanical, parity-pinned.
    **The TUI never changes.**

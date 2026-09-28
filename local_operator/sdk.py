@@ -73,7 +73,7 @@ import asyncio
 import importlib
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -181,11 +181,15 @@ class SessionOpenRefused(RuntimeError):
 #: keeps its import graph small.
 _NO_NOTIFICATIONS_ENV = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
 
-#: One entry per session-root group currently OPEN in this process (root →
+#: One entry per session-root group currently LIVE in this process (root →
 #: refcount). The single-root rule (§4.3 of the design) is enforced against
 #: THIS table rather than declared: a process must not host sessions from two
 #: different roots simultaneously, because components resolve ``paths.*`` at
 #: call time and the environment can only be scoped to one root at a time.
+#: ``open_session`` registers for its whole ``async with`` body; ``deliver``
+#: and ``spawn_session`` register for the engagement's duration — their scope
+#: holds the process environment across awaits too, so they must make a
+#: concurrent different-root call refuse exactly as a live session does.
 _ACTIVE_ROOTS: dict[Path, int] = {}
 
 #: Stream terminator. A sentinel rather than ``None`` so a session can never
@@ -216,13 +220,15 @@ def _guard_agent_shell() -> None:
 def _check_single_root(roots: SessionRoots, *, allow_multi_root: bool) -> None:
     """Refuse a second, different root while another one is live.
 
-    Checked against :data:`_ACTIVE_ROOTS`, which tracks roots with OPEN
-    sessions; a process that has finished every session may move on to another
-    root. ``allow_multi_root=True`` is the deliberate escape for a caller that
-    knows what it is doing (a test harness for two stores, or a migration
-    tool); it is a parameter rather than a default because the failure it
-    prevents is silent — two live roots' lazy resolvers disagreeing about which
-    store they are reading.
+    Checked against :data:`_ACTIVE_ROOTS`, which tracks the roots of live
+    operations — open sessions and in-flight deliveries alike; a process that
+    has finished every one of them may move on to another root. Registration
+    goes through :func:`_live_root` (never a bare call to this), so the check
+    and the registration stay one synchronous step. ``allow_multi_root=True``
+    is the deliberate escape for a caller that knows what it is doing (a test
+    harness for two stores, or a migration tool); it is a parameter rather
+    than a default because the failure it prevents is silent — two live
+    roots' lazy resolvers disagreeing about which store they are reading.
     """
     mine = roots.config_path
     others = sorted(str(path) for path in _ACTIVE_ROOTS if path != mine)
@@ -236,6 +242,91 @@ def _check_single_root(roots: SessionRoots, *, allow_multi_root: bool) -> None:
 
 
 @contextmanager
+def _live_root(roots: SessionRoots, *, allow_multi_root: bool) -> Iterator[None]:
+    """Register ``roots`` as live for the duration; refuse a second, different root.
+
+    Every path that scopes the process environment to a root enters through
+    here — ``open_session`` for its ``async with`` body, ``deliver`` and
+    ``spawn_session`` for the engagement — because the environment can carry
+    one root at a time, and a delivery's scope holds it across awaits exactly
+    as a live session does. The check and the registration are ONE synchronous
+    step (nothing may ``await`` between them), which is what makes two
+    different roots live at once unreachable rather than unlikely. Refcounted
+    per root: same-root overlap is allowed — the environment layers compose
+    (see :func:`_scoped_process_env`) — and the last exit clears the entry.
+    """
+    _check_single_root(roots, allow_multi_root=allow_multi_root)
+    key = roots.config_path
+    _ACTIVE_ROOTS[key] = _ACTIVE_ROOTS.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        _ACTIVE_ROOTS[key] -= 1
+        if _ACTIVE_ROOTS[key] <= 0:
+            del _ACTIVE_ROOTS[key]
+
+
+#: The sentinel a scope layer uses when a key must be ABSENT for its duration
+#: (the ``CMUX_*``/``LOP_*`` strips) — not ``None``, a real snapshot value
+#: meaning "was absent" on :data:`_ENV_BASE`.
+_ENV_REMOVE: Any = object()
+
+#: Per-key layers of every live ``_scoped_process_env`` scope: key → [(scope,
+#: desired value or ``_ENV_REMOVE``), ...] in entry order. A scope is NOT a
+#: plainly nested ``with`` — same-root operations overlap across ``await``
+#: points and may exit out of order (a delivery finishing while a sibling is
+#: mid-flight is ordinary), and under a save/restore pair the earlier exit
+#: would restore values captured before the sibling entered: the sibling then
+#: reads a root it did not declare, and the later exit leaks it past both
+#: scopes. Each scope therefore owns a layer and the effective value is the
+#: TOPMOST layer's, so exits compose exactly in any order. Different-root
+#: overlap never reaches here — :func:`_live_root` refuses it first.
+_ENV_LAYERS: dict[str, list[tuple["_EnvScope", Any]]] = {}
+
+#: The value each layered key returns to once its LAST layer is gone (``None``
+#: = the key was absent). Captured at the first layer's entry — the only value
+#: every exit ordering agrees on.
+_ENV_BASE: dict[str, str | None] = {}
+
+
+def _apply_env_layer(key: str) -> None:
+    """Set ``key`` from its topmost live layer, or its base value once none live."""
+    layers = _ENV_LAYERS[key]
+    desired: Any = layers[-1][1] if layers else _ENV_BASE[key]
+    if desired is _ENV_REMOVE or desired is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = desired
+
+
+class _EnvScope:
+    """One environment-scope layer; see :data:`_ENV_LAYERS` for the model."""
+
+    __slots__ = ("desired",)
+
+    def __init__(self) -> None:
+        self.desired: dict[str, Any] = {}
+
+    def __enter__(self) -> "_EnvScope":
+        for key, desired in self.desired.items():
+            if key not in _ENV_LAYERS:
+                _ENV_BASE[key] = os.environ.get(key)
+                _ENV_LAYERS[key] = []
+            _ENV_LAYERS[key].append((self, desired))
+            _apply_env_layer(key)
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        for key in self.desired:
+            layers = _ENV_LAYERS[key]
+            layers[:] = [entry for entry in layers if entry[0] is not self]
+            _apply_env_layer(key)
+            if not layers:
+                del _ENV_LAYERS[key]
+                del _ENV_BASE[key]
+
+
+@contextmanager
 def _scoped_process_env(
     roots: SessionRoots, *, for_child: bool = False, notifications: bool | None = None
 ):
@@ -245,8 +336,10 @@ def _scoped_process_env(
     ``paths.config_dir()``/``paths.agent_home_dir()`` at call time (skill roots,
     caches, profile seeds): scope, let the real resolvers answer, and assert the
     answers. The scope is the PROCESS environment, so it must be held by one
-    root at a time — that is what :func:`_check_single_root` enforces, and it is
-    why this helper is private.
+    root at a time — that is what :func:`_live_root` enforces — and it keeps a
+    refcounted per-key layer (see :data:`_ENV_LAYERS`) rather than a
+    save/restore pair, because more than one same-root operation may be
+    suspended inside its scope at once.
 
     ``for_child=True`` additionally prepares the environment a SPAWNED child
     will inherit — engage spawns the runtime itself, so this is the only place
@@ -262,36 +355,29 @@ def _scoped_process_env(
       (AGENTS.md §Isolating a run: a headless TUI that inherits
       ``CMUX_WORKSPACE_ID`` renames the operator's real cmux workspaces, and
       ``LOP_MOBILE_CHILD_*`` silently steers which session a child believes it
-      is). Both are re-established deliberately by the spawn path below.
+      is). Both are re-established deliberately by the spawn path below. The
+      strip masks every such key a LIVE sibling layer knows about, not only
+      the ones present at this scope's entry, so a sibling exiting first
+      cannot un-strip the child mid-flight.
     * ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` is set unless the caller opted in —
       "nobody is watching" is the honest default for a spawned SDK session, and
       the switch is read fresh by every notify leg in the child.
     """
-    saved: dict[str, str | None] = {}
-    removed: dict[str, str] = {}
-    try:
-        for key, value in (
-            (CONFIG_DIR_ENV, str(roots.config_path)),
-            (AGENT_HOME_ENV, str(roots.agent_home_path)),
-        ):
-            saved[key] = os.environ.get(key)
-            os.environ[key] = value
-        if for_child:
-            saved["HOME"] = os.environ.get("HOME")
-            os.environ["HOME"] = str(roots.agent_home_path)
-            for key in [k for k in os.environ if k.startswith(("CMUX_", "LOP_"))]:
-                removed[key] = os.environ.pop(key)
-            if notifications is not True:
-                saved[_NO_NOTIFICATIONS_ENV] = os.environ.get(_NO_NOTIFICATIONS_ENV)
-                os.environ[_NO_NOTIFICATIONS_ENV] = "1"
+    scope = _EnvScope()
+    scope.desired[CONFIG_DIR_ENV] = str(roots.config_path)
+    scope.desired[AGENT_HOME_ENV] = str(roots.agent_home_path)
+    if for_child:
+        scope.desired["HOME"] = str(roots.agent_home_path)
+        # The strip's key set: everything matching the two prefixes in the
+        # environment now OR in a live layer — the second half is what keeps a
+        # key masked after the sibling that first removed it exits.
+        for key in {*os.environ, *_ENV_LAYERS}:
+            if key.startswith(("CMUX_", "LOP_")):
+                scope.desired[key] = _ENV_REMOVE
+        if notifications is not True:
+            scope.desired[_NO_NOTIFICATIONS_ENV] = "1"
+    with scope:
         yield
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        os.environ.update(removed)
 
 
 def _under(path: Path, parent: Path) -> bool:
@@ -464,7 +550,7 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.exec_startup import declared_tool_inventory, resolve_startup
-    from local_operator.session_factory import create_session
+    from local_operator.session_factory import HostingNotConfiguredError, create_session
 
     runner_args = spec.to_runner_args()
     # Resolves the team/profile names against the SCOPED config dir, so a
@@ -479,13 +565,30 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
     # ``attach_agent_profile``, ``set_tool_inventory``) are concrete-Session
     # members the protocol deliberately omits — ``exec_session.apply_startup``
     # takes the same view for the same reason.
-    session: Any = await create_session(
-        spec.to_namespace(),
-        config_manager,
-        agent_registry,
-        has_ui=(mode == "attach"),
-        cwd=str(roots.cwd_path),
-    )
+    try:
+        session: Any = await create_session(
+            spec.to_namespace(),
+            config_manager,
+            agent_registry,
+            has_ui=(mode == "attach"),
+            cwd=str(roots.cwd_path),
+        )
+    except HostingNotConfiguredError as error:
+        if mode != "attach":
+            raise
+        # The factory's hosting preflight runs BEFORE the attach branch below
+        # can read ``owns_runtime`` (a cold id falls through to the full local
+        # build), so in a root with no hosting configured the remedy the attach
+        # contract promises would never run. Refused with both facts: no live
+        # runtime is serving the id, and this root cannot start one until its
+        # hosting is configured — which is also why spawn_session()/deliver()
+        # cannot be the next step here yet.
+        raise SessionSpecError(
+            f"no live runtime is serving {spec.resume!r}, and this root cannot start "
+            f"one: {error} Configure hosting for this root (its config.yml), then "
+            "engage the id with spawn_session()/deliver() and attach once a runtime "
+            "exists."
+        ) from error
 
     if mode == "attach":
         # A viewer, or nothing. create_session(has_ui=True) hands back an
@@ -578,8 +681,8 @@ async def open_session(
     The environment is scoped to ``roots`` for the whole ``async with`` body:
     construction, the caller's turns, and every lazy resolver in between see
     the same root, and it is restored on exit. One process may hold one root at
-    a time (``allow_multi_root=True`` to override) — see
-    :func:`_check_single_root`.
+    a time (``allow_multi_root=True`` to override) — an in-flight delivery
+    holds its root the same way; see :func:`_live_root`.
 
     Exit ``dispose()``s the session. For an owner that ends the turn loop and
     releases the claim (as closing exec does); for a viewer it drops the
@@ -595,11 +698,7 @@ async def open_session(
         _guard_agent_shell()
 
     roots.assert_durable()
-    _check_single_root(roots, allow_multi_root=allow_multi_root)
-
-    key = roots.config_path
-    _ACTIVE_ROOTS[key] = _ACTIVE_ROOTS.get(key, 0) + 1
-    try:
+    with _live_root(roots, allow_multi_root=allow_multi_root):
         with _scoped_process_env(roots):
             _check_resolved_roots(roots)
             session = await _build_session(spec, roots, mode=mode)
@@ -609,21 +708,20 @@ async def open_session(
                 yield session
             finally:
                 await session.dispose()
-    finally:
-        _ACTIVE_ROOTS[key] -= 1
-        if _ACTIVE_ROOTS[key] <= 0:
-            del _ACTIVE_ROOTS[key]
 
 
 def _refuse_attach_extras(spec: SessionSpec) -> None:
     """Attach opens a viewer; nothing but ``resume`` may be set on the spec.
 
     A viewer observes and steers a session someone else owns. Attaching a team,
-    bounding tools, or naming the conversation are OWNER edits, and installing
-    an approval gate here would install it on the facade, where exec's own
-    flows never put one for a viewer. Refused with the remedy named rather than
-    ignored: a caller who believes they set a policy and finds it inert is the
-    failure shape this SDK refuses to have.
+    bounding tools, naming the conversation, or carrying an approval policy are
+    OWNER edits: the attach path returns before ``_install_approval_policy``,
+    so a non-default policy accepted here would never be installed and the
+    caller would be left believing in a gate nothing consults. Refused with the
+    remedy named rather than ignored: a caller who believes they set a policy
+    and finds it inert is the failure shape this SDK refuses to have. The one
+    policy attach accepts is the default ``refuse()`` — the preset of a spec
+    that never mentioned approvals — and every other preset is refused.
     """
     set_fields = [
         name
@@ -641,11 +739,18 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         )
         if value is not None
     ]
+    # Value equality, deliberately: ``refuse()`` is the default, so a caller
+    # who spells it out is indistinguishable from one who does not — and every
+    # other preset (auto/declared/callback) is refused, each enum value covered
+    # by the parametrized attach test.
+    if spec.approvals != ApprovalPolicy.refuse():
+        set_fields.append("approvals")
     if spec.yolo or spec.train or spec.workstream or set_fields:
         raise SessionSpecError(
             "mode='attach' opens a viewer for spec.resume; it does not attach teams, "
-            "profiles, tools, names or goals — that is the owner's side. Set only "
-            f"resume on this spec (or use mode='own'). Offending fields: "
+            "profiles, tools, names, goals or approval policies — that is the "
+            f"owner's side. Set only resume on this spec (or use mode='own'). "
+            f"Offending fields: "
             f"{', '.join(set_fields) if set_fields else 'yolo/train/workstream'}."
         )
 
@@ -752,55 +857,56 @@ async def spawn_session(
     """
     _guard_agent_shell()
     roots.assert_durable()
-    _check_single_root(roots, allow_multi_root=allow_multi_root)
-    _refuse_spawn_extras(spec)
+    with _live_root(roots, allow_multi_root=allow_multi_root):
+        _refuse_spawn_extras(spec)
 
-    from local_operator.resume import resolve_resume_id
-    from local_operator.session.runtime.launch import WarmErrand, engage_runtime
+        from local_operator.resume import resolve_resume_id
+        from local_operator.session.runtime.launch import WarmErrand, engage_runtime
 
-    if spec.resume is None:
-        # A HALF model pair is not routable to a new child: the birth sample
-        # must carry provider and model together (see ``_model_sample``), and
-        # dropping either silently would leave the caller believing the child
-        # was born on their selection. Refused with the remedies named.
-        if (spec.hosting is None) != (spec.model is None):
-            raise SessionSpecError(
-                "spawn_session() routes hosting/model to a NEW runtime as one birth "
-                "sample; state both, or neither (the child then resolves its model "
-                "from the root's config)."
-            )
-        if spec.birth_effort and not (spec.hosting and spec.model):
-            raise SessionSpecError(
-                "birth_effort for a new spawned session rides the birth sample and "
-                "needs the hosting/model pair alongside it; state all three, or "
-                "open the session in-process (open_session) to set a birth level "
-                "without a model pair."
-            )
-        session_id = uuid.uuid4().hex[:12]
-    else:
-        # '@latest' resolves here, against THIS root, so the id the child
-        # adopts is a concrete directory name — never a sentinel.
-        session_id = resolve_resume_id(roots.config_path, spec.resume)
-
-    kwargs: dict[str, Any] = {"config_dir": roots.config_path}
-    if deadline_s is not None:
-        kwargs["deadline_s"] = deadline_s
-
-    with _scoped_process_env(roots, for_child=True, notifications=spec.notifications):
-        _check_resolved_roots(roots)
         if spec.resume is None:
-            sample = _model_sample(spec)
-            await engage_runtime(
-                session_id,
-                str(roots.cwd_path),
-                WarmErrand(
-                    initial_model=sample,
-                    model_selection_override=bool(spec.hosting or spec.model),
-                ),
-                **kwargs,
-            )
-        outcome = await engage_runtime(session_id, str(roots.cwd_path), errand, **kwargs)
-    return outcome
+            # A HALF model pair is not routable to a new child: the birth
+            # sample must carry provider and model together (see
+            # ``_model_sample``), and dropping either silently would leave the
+            # caller believing the child was born on their selection. Refused
+            # with the remedies named.
+            if (spec.hosting is None) != (spec.model is None):
+                raise SessionSpecError(
+                    "spawn_session() routes hosting/model to a NEW runtime as one birth "
+                    "sample; state both, or neither (the child then resolves its model "
+                    "from the root's config)."
+                )
+            if spec.birth_effort and not (spec.hosting and spec.model):
+                raise SessionSpecError(
+                    "birth_effort for a new spawned session rides the birth sample and "
+                    "needs the hosting/model pair alongside it; state all three, or "
+                    "open the session in-process (open_session) to set a birth level "
+                    "without a model pair."
+                )
+            session_id = uuid.uuid4().hex[:12]
+        else:
+            # '@latest' resolves here, against THIS root, so the id the child
+            # adopts is a concrete directory name — never a sentinel.
+            session_id = resolve_resume_id(roots.config_path, spec.resume)
+
+        kwargs: dict[str, Any] = {"config_dir": roots.config_path}
+        if deadline_s is not None:
+            kwargs["deadline_s"] = deadline_s
+
+        with _scoped_process_env(roots, for_child=True, notifications=spec.notifications):
+            _check_resolved_roots(roots)
+            if spec.resume is None:
+                sample = _model_sample(spec)
+                await engage_runtime(
+                    session_id,
+                    str(roots.cwd_path),
+                    WarmErrand(
+                        initial_model=sample,
+                        model_selection_override=bool(spec.hosting or spec.model),
+                    ),
+                    **kwargs,
+                )
+            outcome = await engage_runtime(session_id, str(roots.cwd_path), errand, **kwargs)
+        return outcome
 
 
 async def deliver(
@@ -826,20 +932,19 @@ async def deliver(
     """
     _guard_agent_shell()
     roots.assert_durable()
-    _check_single_root(roots, allow_multi_root=allow_multi_root)
+    with _live_root(roots, allow_multi_root=allow_multi_root):
+        from local_operator.resume import resolve_resume_id
+        from local_operator.session.runtime.launch import engage_runtime
 
-    from local_operator.resume import resolve_resume_id
-    from local_operator.session.runtime.launch import engage_runtime
+        resolved_id = resolve_resume_id(roots.config_path, session_id)
+        kwargs: dict[str, Any] = {"config_dir": roots.config_path}
+        if deadline_s is not None:
+            kwargs["deadline_s"] = deadline_s
 
-    resolved_id = resolve_resume_id(roots.config_path, session_id)
-    kwargs: dict[str, Any] = {"config_dir": roots.config_path}
-    if deadline_s is not None:
-        kwargs["deadline_s"] = deadline_s
-
-    with _scoped_process_env(roots, for_child=True):
-        _check_resolved_roots(roots)
-        outcome = await engage_runtime(resolved_id, str(roots.cwd_path), errand, **kwargs)
-    return outcome
+        with _scoped_process_env(roots, for_child=True):
+            _check_resolved_roots(roots)
+            outcome = await engage_runtime(resolved_id, str(roots.cwd_path), errand, **kwargs)
+        return outcome
 
 
 # ---------------------------------------------------------------------------
