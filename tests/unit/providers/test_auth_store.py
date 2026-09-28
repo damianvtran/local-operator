@@ -227,7 +227,7 @@ async def test_cross_process_refresh_lease_lets_only_one_store_post(
 async def test_force_refresh_failure_blocks_and_raises(
     store: AuthStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store.upsert_credential("openai", _oauth())
+    row = store.upsert_credential("openai", _oauth())
 
     async def bad_refresh(creds: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("idp down")
@@ -235,6 +235,10 @@ async def test_force_refresh_failure_blocks_and_raises(
     monkeypatch.setattr(store, "_refresh_fn", lambda provider: bad_refresh)
     with pytest.raises(AuthStoreError):
         await store.get_api_key("openai", force_refresh=True)
+    # The half this test's own name promised and never asserted: the refusal
+    # takes the row out of rotation for the block window. Only a completed
+    # write may lift that (see the login-lifts test below).
+    assert store.is_blocked(row.id, "openai")
 
 
 async def test_session_stickiness(store: AuthStore) -> None:
@@ -256,6 +260,83 @@ async def test_blocking_backoff(store: AuthStore) -> None:
     assert await store.get_api_key("openai") is None  # only credential blocked
     store.clear_blocks(row.id)
     assert await store.get_api_key("openai") == "k1"
+
+
+async def test_a_completed_login_lifts_the_rows_backoff_blocks(store: AuthStore) -> None:
+    """The deferred root of local-operator-ui#583, as the store's contract.
+
+    A re-login that lands inside the block window its own predecessor wrote
+    must supersede that block: every ``auth_credential_blocks`` row is a
+    verdict about the material the write replaced. Without the lift, the
+    completion's commissioned read is answered 502 ``credential_unavailable``
+    with zero upstream calls until the window passes.
+    """
+    row = store.upsert_credential("openai", _oauth(refresh="r1", access="access-1"))
+    sibling = store.upsert_credential(
+        "openai", {**_oauth(refresh="rs", access="sib-access"), "email": "sib@example.com"}
+    )
+    assert sibling.id != row.id
+    store.block_credential(row.id, "openai", block_ms=60_000)
+    store.block_credential(row.id, "openai", block_scope="model:family-x", block_ms=60_000)
+    store.block_credential(sibling.id, "openai", block_ms=60_000)
+    assert await store.get_api_key("openai") is None  # hidden by its own block
+
+    store.upsert_credential("openai", _oauth(refresh="r2", access="access-2"))
+
+    assert not store.is_blocked(row.id, "openai")
+    assert not store.is_blocked_for_model(row.id, "openai", "family-x-model")
+    # The lift is the written row's alone: a sibling keeps its own verdict.
+    assert store.is_blocked(sibling.id, "openai")
+    # No waiting out the window -- the next read is served immediately, on
+    # the OAuth surface the Radient account read and the model cascade use.
+    assert await store.get_api_key("openai") == "access-2"
+    served = await store.get_oauth_access("openai")
+    assert served is not None and served.access_token == "access-2"
+
+
+async def test_a_read_does_not_weaken_the_block(store: AuthStore) -> None:
+    """Reads and enumerations OBSERVE a block; none of them lifts it.
+
+    The lift belongs to the completed write alone; a read that lifted one
+    would make the block a no-op the first time anyone looked, and the
+    refusal it stands for would never cost what it prices.
+    """
+    row = store.upsert_credential("openai", _oauth(refresh="r1"))
+    store.block_credential(row.id, "openai", block_ms=60_000)
+
+    assert await store.get_api_key("openai") is None
+    assert await store.get_oauth_access("openai") is None
+    await store.list_oauth_accesses("openai")  # blocked rows are REPORTED, not filtered
+    store.list_credentials("openai")
+    store.list_oauth_identities("openai")
+    assert store.get_credential(row.id) is not None
+
+    assert store.is_blocked(row.id, "openai")
+    assert await store.get_api_key("openai") is None
+
+
+async def test_a_landed_refresh_leaves_the_block_standing(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a completed write lifts a block; a refresh that lands does not.
+
+    The refresh path writes the row directly (``_ensure_oauth_fresh``) and
+    never reaches the write funnel, so this pins the seam: routing a refresh
+    through the funnel, or clearing from the refresh, would let the very
+    retry loop the backoff exists to stop re-open by itself.
+    """
+    import time
+
+    row = store.upsert_credential("openai", _oauth(expires=0))
+    store.block_credential(row.id, "openai", block_ms=60_000)
+
+    async def good_refresh(creds: dict[str, Any]) -> dict[str, Any]:
+        return {"access": "fresh-access", "expires": int(time.time() * 1000) + 3600_000}
+
+    monkeypatch.setattr(store, "_refresh_fn", lambda provider: good_refresh)
+    data = await store.ensure_oauth_fresh(row.id)
+    assert data is not None and data["access"] == "fresh-access"
+    assert store.is_blocked(row.id, "openai")
 
 
 async def test_a_blocked_row_returns_to_service_when_its_window_passes(

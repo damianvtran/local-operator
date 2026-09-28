@@ -38,6 +38,9 @@ def _view(
     project = {
         "id": f"id-{name}",
         "name": name,
+        "title": None,
+        "owner": None,
+        "team": None,
         "status": "active",
         "description": "",
         "progress": "",
@@ -131,6 +134,16 @@ def test_list_row_caps_a_long_description_at_the_tool_budget() -> None:
     assert result.text.plain.endswith("…")
 
 
+def test_list_row_shows_the_title_first_with_the_key_secondary() -> None:
+    titled = _view("payments-migration", title="Q4 Payments Migration")
+    plain = render_project_list([titled], cursor=0, now=NOW).text.plain
+    assert plain.startswith("▸ Q4 Payments Migration (payments-migration) [active]")
+
+    # No title → the key is the label (every surface's fallback).
+    fallback = render_project_list([_view("plain-key")], cursor=0, now=NOW).text.plain
+    assert fallback.startswith("▸ plain-key [active]")
+
+
 def test_list_truncates_past_the_render_cap_naming_the_count() -> None:
     views = [_view(f"p{i:03d}") for i in range(PROJECTS_MAX + 3)]
     result = render_project_list(views, cursor=0, now=NOW)
@@ -205,6 +218,16 @@ def test_board_truncates_every_cell_to_the_fixed_column_width() -> None:
     assert "n" * 80 not in result.text.plain
 
 
+def test_board_adds_the_key_only_when_the_column_holds_title_and_key() -> None:
+    short = _view("k", title="Short")
+    long = _view("payments-migration", title="Q4 Payments Migration")
+    result = render_project_board([short, long], now=NOW)
+    plain = result.text.plain
+    assert "Short (k)" in plain  # both fit in 31 cells
+    assert "Q4 Payments Migration" in plain
+    assert "(payments-migration)" not in plain  # too wide — the title wins alone
+
+
 def test_board_empty_store_uses_the_shared_sentence() -> None:
     from local_operator.slash_commands import project_empty_text
 
@@ -265,6 +288,21 @@ def test_timeline_completed_project_bars_to_completed_at() -> None:
     assert body.count("█") == 2
 
 
+def test_timeline_adds_the_key_only_when_the_name_column_holds_both() -> None:
+    short = _view("k", title="Tiny", start_date="2026-01-05", target_date="2026-03-05")
+    long = _view(
+        "payments-migration",
+        title="Q4 Payments Migration",
+        start_date="2026-01-05",
+        target_date="2026-03-05",
+    )
+    result = render_project_timeline([short, long], tier="month", today=date(2026, 2, 1), now=NOW)
+    plain = result.text.plain
+    assert "Tiny (k)" in plain  # 8 cells <= TIMELINE_NAME_WIDTH
+    assert "Q4 Payments Migration" in plain
+    assert "(payments-migration)" not in plain  # too wide — the title wins alone
+
+
 def test_timeline_lists_undated_projects_in_its_own_section() -> None:
     result = render_project_timeline(
         [_view("ship", start_date="2026-01-05", target_date="2026-03-05"), _view("someday")],
@@ -273,6 +311,16 @@ def test_timeline_lists_undated_projects_in_its_own_section() -> None:
         now=NOW,
     )
     assert "no dates (1): someday" in result.text.plain
+
+
+def test_timeline_undated_section_shows_the_display_name() -> None:
+    result = render_project_timeline(
+        [_view("someday", title="Someday Maybe")],
+        tier="month",
+        today=date(2026, 3, 1),
+        now=NOW,
+    )
+    assert "no dates (1): Someday Maybe" in result.text.plain
 
 
 def test_timeline_with_no_dated_projects_is_only_the_section() -> None:
@@ -328,6 +376,23 @@ def test_detail_footer_names_progress_reporter_and_staleness() -> None:
     assert "alpha [active]" in text
     assert "progress reported 2h ago by 4e92693767fa · stale: cutover done" in text
     assert "no linked sessions" in text
+
+
+def test_detail_footer_shows_title_first_with_the_key() -> None:
+    view = _view("payments-migration", title="Q4 Payments Migration")
+    text = detail_footer(view, now=NOW).plain
+    assert text.startswith("Q4 Payments Migration (payments-migration) [active]")
+
+
+def test_detail_footer_trades_the_key_away_before_the_title() -> None:
+    view = _view("payments-migration", title="Q4 Payments Migration")
+    # Wide: both. Too tight for both but enough for title + chip: the key
+    # sheds first (`title wins when only one fits`), the chip survives whole.
+    wide = detail_footer(view, now=NOW, width=200).plain
+    assert "Q4 Payments Migration (payments-migration) [active]" in wide
+    tight = detail_footer(view, now=NOW, width=30).plain
+    assert "(payments-migration)" not in tight
+    assert tight.startswith("Q4 Payments Migration [active]")
 
 
 def test_detail_footer_omits_unknown_counts_instead_of_zeroing_them() -> None:
@@ -580,6 +645,39 @@ def test_footer_keeps_the_status_chip_whole_when_the_name_overflows() -> None:
     assert text.endswith("[paused]")  # the chip is the survivor, the name gives way
 
 
+def test_detail_footer_sheds_the_key_before_the_milestone_rollup() -> None:
+    """D1: the key has another home; the rollup does not — so the key goes first."""
+    view = _view(
+        "payments-migration",
+        title="Q4 Payments Migration",
+        milestones=[
+            {"name": "prototype", "target_date": None, "completed_at": "2026-01-01"},
+            {"name": "cutover", "target_date": "2026-10-01", "completed_at": None},
+        ],
+    )
+    # 96 cells is the 100x30 footer box (the D1 measurement): the rollup stays,
+    # the key sheds.
+    tight = detail_footer(view, width=96).plain
+    assert "Q4 Payments Migration [active]" in tight
+    assert "M 1/2" in tight and "[completed]" in tight
+    assert "(payments-migration)" not in tight
+    # Wide enough for identity-with-key plus the rollup, the key returns.
+    wide = detail_footer(view, width=140).plain
+    assert "Q4 Payments Migration (payments-migration) [active]" in wide
+    assert "M 1/2" in wide
+
+
+def test_detail_footer_marks_shed_content_down_to_the_bare_identity() -> None:
+    """D4: the marker now reaches the keyless rung; only the chip tight band stays bare."""
+    view = _view("payments-migration", title="Q4 Payments Migration")
+    marked = detail_footer(view, width=40).plain
+    assert marked == "Q4 Payments Migration [active] …"
+    # Below the bare identity the chip already spends the width (the tight
+    # rebuild) — the marker-less band is only 27-32 cells now (was 27-49).
+    bare = detail_footer(view, width=31).plain
+    assert bare == "Q4 Payments Migration [active]"
+
+
 # -- S3b: the marker column and the reveal's geometry -------------------------
 
 
@@ -710,3 +808,17 @@ def test_the_cap_note_disappears_when_nothing_is_left_hidden() -> None:
     assert position is not None
     assert position[1] == 2 + 4 * BOARD_CARDS_MAX
     assert f"p{selected_index:02d}" in canvas.splitlines()[position[1]]
+
+
+def test_board_key_budget_counts_the_marker_column() -> None:
+    """D5: the two marker cells share the name cell, so `label (key)` has 29."""
+    from local_operator.tui.projects_render import cell_len
+
+    kept = _view("keeptest", title="A" * 18)
+    shed = _view("shedtest", title="B" * 19)
+    assert cell_len("A" * 18 + " (keeptest)") == 29
+    assert cell_len("B" * 19 + " (shedtest)") == 30
+    plain = render_project_board([kept, shed], now=NOW).text.plain
+    assert "A" * 18 + " (keeptest)" in plain  # exactly the budget: key kept
+    assert " (shedtest)" not in plain  # one past it: the title wins alone
+    assert "B" * 19 in plain

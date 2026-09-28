@@ -46,6 +46,7 @@ from rich.text import Text
 
 from local_operator.projects import PROJECT_ROW_CAP
 from local_operator.projects import age_text as derived_age_text
+from local_operator.projects import display_name
 from local_operator.projects import milestone_state as derived_milestone_state
 from local_operator.projects import truncate_row
 
@@ -330,7 +331,12 @@ def _list_row(
     row = Text(no_wrap=True)
     for glyph, key in _marker_cells(selected=selected, associated=associated):
         row.append(glyph, style=style_for(key) if key != "dim" else Style())
-    row.append(str(project.get("name") or "(unnamed)"), style=style_for("name"))
+    row.append(display_name(project) or "(unnamed)", style=style_for("name"))
+    if project.get("title"):
+        # Title-first, key secondary (muted): the key is how the project is
+        # ADDRESSED (slash verbs, ``@project:<name>``), so a titled row keeps
+        # it visible beside the label the reader knows.
+        row.append(f" ({project.get('name') or ''})", style=style_for("dim"))
     status = str(project.get("status") or "active")
     row.append(f" [{status}]", style=_status_style(style_for, status))
     extras: list[tuple[str, str]] = []
@@ -435,7 +441,19 @@ def _card_lines(
     name = Text(no_wrap=True, style=style_for("name"))
     for glyph, key in _marker_cells(selected=selected, associated=associated):
         name.append(glyph, style=style_for(key) if key != "dim" else style_for("dim"))
-    name.append(str(project.get("name") or "(unnamed)"))
+    label = display_name(project) or "(unnamed)"
+    name.append(label)
+    key = str(project.get("name") or "")
+    if project.get("title") and key and 2 + cell_len(f"{label} ({key})") <= BOARD_COLUMN_WIDTH - 1:
+        # The key joins the title only when the fixed 32-cell column can hold
+        # BOTH — and the two-cell marker column is painted FIRST, so the budget
+        # for ``label (key)`` is BOARD_COLUMN_WIDTH - 3 (31 cells minus the two
+        # markers), the same shape as the timeline's ``- 2``. Without the
+        # marker term a 30-31-cell ``label (key)`` passed this check and then
+        # clipped the key mid-token at the cell edge, which the rule's own
+        # comment names as corruption (design review round 2, D5). Title wins
+        # otherwise; the key stays recoverable in the footer/detail.
+        name.append(f" ({key})", style=style_for("dim"))
     facts = Text(no_wrap=True)
     bits: list[str] = []
     estimate = estimate_text(project)
@@ -623,7 +641,14 @@ def _timeline_row(
     # frame measured against it) does not move (S3b).
     for glyph, key in _marker_cells(selected=selected, associated=associated):
         row.append(glyph, style=style_for(key) if key != "dim" else style_for("dim"))
-    name = Text(str(project.get("name") or "(unnamed)"), style=style_for("name"))
+    label = display_name(project) or "(unnamed)"
+    key = str(project.get("name") or "")
+    name = Text(label, style=style_for("name"))
+    if project.get("title") and key and cell_len(f"{label} ({key})") <= TIMELINE_NAME_WIDTH - 2:
+        # Same rule as the board card: both only when the fixed name column
+        # holds them (here minus the two marker cells); the title wins a tight
+        # fit.
+        name.append(f" ({key})", style=style_for("dim"))
     name.truncate(TIMELINE_NAME_WIDTH - 2, overflow="ellipsis", pad=True)
     row.append_text(name)
     row.append(" ", style=style_for("dim"))
@@ -845,7 +870,7 @@ def render_project_timeline(
                 ):
                     tail.append(glyph, style=resolver(key) if key != "dim" else resolver("dim"))
             tail.append(
-                str(_row(view).get("name") or "(unnamed)"),
+                display_name(_row(view)) or "(unnamed)",
                 style=resolver("name") if marked else resolver("dim"),
             )
         lines.append(tail)
@@ -974,10 +999,13 @@ def detail_footer(
     shed WHOLE, tail-first among equals, in a fixed preference order, and the
     row never clips mid-word — the Rich ``ellipsis`` this Text declares is
     inert under the widget's default fold, so the fitting is done here
-    (UX round 1, U1). The order keeps the footer's stated purpose longest:
-    the identity always, the milestones and the session rollup before the
-    (long, and duplicated by the canvas row) progress body. When even the
-    identity does not fit it is ellipsized explicitly, never cut silently.
+    (UX round 1, U1). The order keeps the footer's stated purpose longest, the
+    identity always surviving: the progress body goes first (its age is also
+    on the canvas row), then the session rollup, then the identity's ``(key)``
+    span — painted on the canvas row and recoverable in the detail/receipts,
+    while the milestone rollup has no other home (design review round 1, D1)
+    — and the milestones last. When even the bare identity does not fit it is
+    ellipsized explicitly, never cut silently.
     """
     resolver = _styles(style_for)
     project = _row(view)
@@ -991,11 +1019,25 @@ def detail_footer(
 
     clauses: dict[str, Text] = {}
     identity = Text(no_wrap=True)
-    name_text = str(project.get("name") or "(unnamed)")
+    # Title-first, key secondary. The key span is its own SHEDDABLE piece: it
+    # is also painted on the canvas row and recoverable in the detail and
+    # receipts, while the milestone rollup has no other home — so the ladder
+    # trades the key away before the rollup (design review round 1, D1).
+    name_text = display_name(project) or "(unnamed)"
     status = str(project.get("status") or "active")
+    key = str(project.get("name") or "")
+    keyed_identity = bool(project.get("title") and key)
     identity.append(name_text, style=resolver("name"))
+    if keyed_identity:
+        identity.append(f" ({key})", style=resolver("dim"))
     identity.append(f" [{status}]", style=chip(status))
     clauses["identity"] = identity
+    if keyed_identity:
+        keyless_identity = Text(no_wrap=True)
+        keyless_identity.append(name_text, style=resolver("name"))
+        keyless_identity.append(f" [{status}]", style=chip(status))
+    else:
+        keyless_identity = identity
 
     progress = Text(no_wrap=True)
     age = progress_age_text(view, now=now)
@@ -1078,35 +1120,44 @@ def detail_footer(
     )
     # Preference ladder, longest first, by PROGRESSIVE shedding in the order
     # the docstring states: the progress body goes first (its age is also on
-    # the canvas row), then the session rollup, then the milestones — so the
-    # 192-235-cell band keeps the rollup instead of the body (agent review
-    # round 2: the rollup used to shed before the body, against this ladder's
-    # own statement). Every rung keeps the identity.
-    rungs: list[tuple[str, ...]] = [order]
-    remaining = order
-    for shed in ("progress", "sessions", "milestones"):
-        candidate = tuple(key for key in remaining if key != shed)
-        if candidate != remaining:
-            rungs.append(candidate)
-        remaining = candidate
+    # the canvas row), then the session rollup, then the identity's KEY span
+    # (also on the canvas row, recoverable in the detail/receipts — design
+    # review round 1, D1), then the milestones — so the 192-235-cell band
+    # keeps the rollup instead of the body (agent review round 2), and a
+    # titled identity at a 96-cell box keeps the rollup instead of shedding
+    # the whole milestone clause (D1). Every rung keeps the (bare) identity.
+    no_progress = tuple(key for key in order if key != "progress")
+    no_sessions = tuple(key for key in no_progress if key != "sessions")
+    no_milestones = tuple(key for key in no_sessions if key != "milestones")
+    rungs: list[tuple[tuple[str, ...], bool]] = [
+        (order, True),
+        (no_progress, True),
+        (no_sessions, True),
+        (no_sessions, False),
+        (no_milestones, True),
+        (no_milestones, False),
+    ]
 
-    def compose(keys: tuple[str, ...]) -> Text:
+    def compose(keys: tuple[str, ...], with_key: bool = True) -> Text:
         row_text = Text(no_wrap=True)
         for index, key in enumerate(keys):
             if index:
                 row_text.append("  ·  ", style=resolver("dim"))
-            row_text.append_text(clauses[key])
-        if len(keys) < len(order):
-            # Say that more exists; a footer that stopped at a clause boundary
-            # with no marker reads as if it were the whole story.
+            if key == "identity" and not with_key:
+                row_text.append_text(keyless_identity)
+            else:
+                row_text.append_text(clauses[key])
+        if keys != order or (keyed_identity and not with_key):
+            # Say that more exists; a footer that stopped at a clause (or key)
+            # boundary with no marker reads as if it were the whole story.
             row_text.append(" …", style=resolver("dim"))
         return row_text
 
     if width is None:
         return compose(order)
     fitted = compose(order)
-    for keys in rungs:
-        candidate = compose(keys)
+    for keys, with_key in rungs:
+        candidate = compose(keys, with_key=with_key)
         if cell_len(candidate.plain) <= width:
             fitted = candidate
             break
