@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -57,9 +58,9 @@ def make_session(
     )
 
 
-def pat_row(**overrides) -> WakeSchedule:
+def pat_row(**overrides: Any) -> WakeSchedule:
     now = int(time.time() * 1000)
-    base = dict(
+    base: dict[str, Any] = dict(
         id="patience-1",
         message="",
         next_due_at=now + 300_000,

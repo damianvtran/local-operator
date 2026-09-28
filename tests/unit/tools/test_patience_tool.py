@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,7 +24,7 @@ from local_operator.tools import builtin
 class FakeScheduler:
     def __init__(self, schedules=()):
         self._schedules = list(schedules)
-        self.updates: list[list] = []
+        self.updates: list[list[Any]] = []
 
     @property
     def schedules(self):

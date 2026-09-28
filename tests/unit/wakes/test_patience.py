@@ -12,6 +12,7 @@ of these — delivery, cancel-on-reply, the turn-end flush — lives in
 from __future__ import annotations
 
 import time
+from typing import Any
 
 import pytest
 import yaml
@@ -25,8 +26,8 @@ from local_operator.wakes import patience as P
 NOW = 1_800_000_000_000
 
 
-def policy(**overrides):
-    base = dict(
+def policy(**overrides: Any):
+    base: dict[str, Any] = dict(
         default_ms=300_000,
         backoff=3,
         max_attempts=3,
@@ -37,8 +38,8 @@ def policy(**overrides):
     return P.PatiencePolicy(**base)
 
 
-def patience_row(**overrides) -> WakeSchedule:
-    base = dict(
+def patience_row(**overrides: Any) -> WakeSchedule:
+    base: dict[str, Any] = dict(
         id="patience-1",
         message="",
         next_due_at=NOW + 300_000,

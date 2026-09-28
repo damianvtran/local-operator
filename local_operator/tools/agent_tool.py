@@ -1094,7 +1094,7 @@ async def _op_sync(
     return _text(tool_call_id, "agent", text, details=spill or None)
 
 
-def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tuple[str, str]:
+def write_profile(registry: Any, params: AgentParams, *, creating: bool) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
     Returning structured identity keeps transport adapters out of tool prose.

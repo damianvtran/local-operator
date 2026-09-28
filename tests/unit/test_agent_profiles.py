@@ -958,14 +958,38 @@ def test_profile_from_agent_reads_the_class_tag_back(tmp_path) -> None:
     from local_operator.action_class import PROACTIVE
     from local_operator.agent_profiles import profile_from_agent
 
+    def fields(**overrides: Any):
+        """``AgentEditFields`` with every field spelled out (strict mode)."""
+        base: dict[str, Any] = dict(
+            name=None,
+            description=None,
+            tags=None,
+            categories=None,
+            security_prompt=None,
+            hosting=None,
+            model=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        )
+        base.update(overrides)
+        return AgentEditFields(**base)
+
     registry = AgentRegistry(tmp_path)
-    registry.create_agent(AgentEditFields(name="steward", tags=["role", "class:proactive"]))
+    registry.create_agent(fields(name="steward", tags=["role", "class:proactive"]))
     row = registry.get_agent_by_name("steward")
     assert row is not None
     profile = profile_from_agent(registry, row)
     assert profile.action_class == PROACTIVE
 
-    registry.create_agent(AgentEditFields(name="plain", tags=["role"]))
+    registry.create_agent(fields(name="plain", tags=["role"]))
     row = registry.get_agent_by_name("plain")
     assert row is not None
     assert profile_from_agent(registry, row).action_class == "reactive"

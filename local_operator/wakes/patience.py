@@ -513,6 +513,9 @@ def open_episode(
             pending_row=pending,
         )
 
+    # ``fire`` is non-None here: the pending-row branch above returned, and
+    # the guard that chose this branch asserts it.
+    assert fire is not None
     started = fire.episode_started_at_ms or fire.ts_ms
     if now_ms - started > pol.ttl_ms:
         return None

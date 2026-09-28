@@ -1561,8 +1561,12 @@ async def test_show_prints_the_class_and_update_flips_it(context, registry) -> N
 async def test_a_bad_class_spelling_is_refused_by_the_schema(context) -> None:
     from pydantic import ValidationError
 
+    # Unpacked through a dict so the bad spelling reaches the VALIDATOR rather
+    # than tripping the type checker on a literal it exists to reject.
     with pytest.raises(ValidationError):
-        AgentParams(op="create", name="x", instructions="i", action_class="sideways")
+        AgentParams(
+            **{"op": "create", "name": "x", "instructions": "i", "action_class": "sideways"}
+        )
 
 
 @pytest.mark.asyncio

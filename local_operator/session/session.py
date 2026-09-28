@@ -18025,14 +18025,20 @@ class Session:
         # paint the expandable wake line ahead of the work it triggered —
         # without it the transcript showed the agent starting to work with no
         # record that a wake was the cause.
-        await self._emit(
-            WakeDeliveredEvent(
-                text=text,
-                catchup=False,
-                wake_id=due.schedule.id,
-                occurrence=due.occurrence,
+        # HIDDEN deliveries never emit a receipt (design §8.2.2 item 1). The
+        # kind branch at the top of this method already routes patience fires
+        # to their own delivery, so this gate is defence in depth rather than
+        # the only guard: any row that ever carries ``hidden`` reaches the
+        # model and no front end, whichever path it arrives by.
+        if not due.schedule.hidden:
+            await self._emit(
+                WakeDeliveredEvent(
+                    text=text,
+                    catchup=False,
+                    wake_id=due.schedule.id,
+                    occurrence=due.occurrence,
+                )
             )
-        )
         if busy:
             # Busy: ride the next successful tool boundary instead of racing
             # the turn — and mark the message COURTESY so the immediate-

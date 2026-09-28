@@ -11,6 +11,8 @@ in their own files.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.action_class import (
@@ -24,6 +26,33 @@ from local_operator.action_class import (
 )
 from local_operator.agents import AgentRegistry
 from local_operator.resume import write_session_attachment
+
+
+def _fields(**overrides: Any):
+    """``AgentEditFields`` with every field spelled out (strict mode)."""
+    from local_operator.agents import AgentEditFields
+
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
 
 
 class TestNormalize:
@@ -123,13 +152,11 @@ class TestSetRegisteredActionClass:
         assert row is not None and class_from_tags(row.tags) == REACTIVE
 
     def test_conversational_rows_are_refused(self, tmp_path) -> None:
-        from local_operator.agents import AgentEditFields
-
         registry = AgentRegistry(tmp_path)
         # An ordinary conversational row: named, but neither a role nor a
         # specialist — the switch must not adopt it (the fail-open hijack the
         # role tag exists to stop).
-        registry.create_agent(AgentEditFields(name="chatty"))
+        registry.create_agent(_fields(name="chatty"))
         with pytest.raises(ValueError, match="no agent named"):
             set_registered_action_class(registry, "chatty", PROACTIVE)
 
@@ -145,11 +172,9 @@ class TestSetRegisteredActionClass:
             set_registered_action_class(registry, "nobody", PROACTIVE)
 
     def test_a_specialist_can_be_switched(self, tmp_path) -> None:
-        from local_operator.agents import AgentEditFields
-
         registry = AgentRegistry(tmp_path)
         registry.create_agent(
-            AgentEditFields(name="laner", description="a small lane", categories=["specialist"])
+            _fields(name="laner", description="a small lane", categories=["specialist"])
         )
         resolved = set_registered_action_class(registry, "laner", PROACTIVE)
         assert resolved == "laner"
