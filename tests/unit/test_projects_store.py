@@ -1059,8 +1059,8 @@ def test_done_needs_complete_milestones_or_force_done(store) -> None:
     project = create(
         store,
         milestones=[
-            {"name": "beta cut"},
-            {"name": "gamma review", "completed_at": "2026-01-01"},
+            ProjectMilestone(name="beta cut"),
+            ProjectMilestone(name="gamma review", completed_at="2026-01-01"),
         ],
     )
     with pytest.raises(ValueError) as excinfo:
@@ -1083,7 +1083,7 @@ def test_done_is_allowed_when_the_plan_is_complete_or_empty(store) -> None:
     complete = create(
         store,
         name="complete-plan",
-        milestones=[{"name": "one", "completed_at": "2026-01-01"}],
+        milestones=[ProjectMilestone(name="one", completed_at="2026-01-01")],
     )
     assert store.update_project(complete.id, ProjectEdit(status="done")).project.status == "done"
     empty = create(store, name="plan-less")
@@ -1091,10 +1091,13 @@ def test_done_is_allowed_when_the_plan_is_complete_or_empty(store) -> None:
 
 
 def test_a_same_call_replace_to_a_complete_list_passes_the_gate(store) -> None:
-    project = create(store, milestones=[{"name": "open"}])
+    project = create(store, milestones=[ProjectMilestone(name="open")])
     outcome = store.update_project(
         project.id,
-        ProjectEdit(status="done", milestones=[{"name": "closed", "completed_at": "2026-01-01"}]),
+        ProjectEdit(
+            status="done",
+            milestones=[ProjectMilestone(name="closed", completed_at="2026-01-01")],
+        ),
         reporter=SESSION_A,
     )
     assert outcome.project.status == "done"
@@ -1103,12 +1106,18 @@ def test_a_same_call_replace_to_a_complete_list_passes_the_gate(store) -> None:
 def test_create_refuses_done_with_incomplete_milestones(store) -> None:
     with pytest.raises(ValueError) as excinfo:
         store.create_project(
-            ProjectEdit(name="born-done", status="done", milestones=[{"name": "open"}]),
+            ProjectEdit(
+                name="born-done", status="done", milestones=[ProjectMilestone(name="open")]
+            ),
             sessions=[SESSION_A],
         )
     assert "force_done=true" in str(excinfo.value)
     made = store.create_project(
-        ProjectEdit(name="born-done-forced", status="done", milestones=[{"name": "open"}]),
+        ProjectEdit(
+            name="born-done-forced",
+            status="done",
+            milestones=[ProjectMilestone(name="open")],
+        ),
         sessions=[SESSION_A],
         force_done=True,
     )
