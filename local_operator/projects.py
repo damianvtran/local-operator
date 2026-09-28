@@ -130,7 +130,8 @@ _IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"})
 #: the nudge can never disagree about a record: a work turn yielding within this
 #: window of the last report is not asked to re-report; anything older is. Four
 #: hours is the operator's window ("stale only when not updated in more than 4
-#: hours"), and only ``active`` records are ever stale at all (see
+#: hours"), and only the LIVE statuses (``planning``/``active``/``qa``/
+#: ``validation`` — :data:`PROJECT_LIVE_STATUSES`) are ever stale at all (see
 #: :func:`progress_is_stale`: settled rows never read stale).
 PROJECT_PROGRESS_STALE_S: float = 14400.0
 
@@ -598,7 +599,14 @@ class Project(BaseModel):
     #: listings show it first with the key as secondary. Optional by design —
     #: absent falls back to ``name`` on every surface (:func:`display_name`).
     title: str | None = None
-    status: ProjectStatus = "active"
+    #: NOT typed as the strict ``ProjectStatus`` literal: a row written by a
+    #: NEWER build must still LOAD (QA round 1, Q1) — the word is preserved
+    #: verbatim and rendered everywhere (the board's leading column, a
+    #: ``[? word]`` chip). The WRITE surfaces constrain the vocabulary instead
+    #: (``ProjectEdit``, the tool params and the routes all type it
+    #: ``ProjectStatus``), so an unknown word can never be SET — only carried
+    #: through untouched.
+    status: str = "active"
     progress: str = Field(default="", max_length=PROGRESS_MAX)
     progress_updated_at: float | None = None
     #: Session id, ``"operator"`` (a surface with no session), or ``""``.
@@ -1271,6 +1279,17 @@ class ProjectRegistry:
                         project.id,
                     )
                     continue
+                if project.status not in PROJECT_STATUSES:
+                    # QA round 1, Q1: an unknown status is a row from a NEWER
+                    # build — it loads (the field is intentionally permissive)
+                    # and renders in the board's leading column, but the drift
+                    # is ANNOUNCED, because a silent load is how a vocabulary
+                    # gap goes unnoticed until a surface misbehaves.
+                    logger.warning(
+                        "project row %s carries unknown status %r; loading it as-is",
+                        child.name,
+                        project.status,
+                    )
                 loaded[project.id] = project
             except FileNotFoundError:
                 # The row was replaced between the scan and this open — the

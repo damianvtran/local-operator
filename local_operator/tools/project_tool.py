@@ -436,6 +436,16 @@ async def _op_create(
         return _error(tool_call_id, "project", readable_error(exc))
     except Exception as exc:  # noqa: BLE001
         return _error(tool_call_id, "project", f"could not save project: {exc}")
+    forced = ""
+    if (
+        params.force_done
+        and project.status == "done"
+        and any(milestone.completed_at is None for milestone in project.milestones)
+    ):
+        # The update path's deliberate-act rule applies to the other path too
+        # (agent review round 1, N2): a creation that closed over open
+        # milestones must say so, or the receipt reads as an ordinary create.
+        forced = "status 'done' forced with milestones incomplete (force_done=true). "
     if session_id:
         receipt = (
             f"created project {project.name!r} [{project.status}] and linked this session "
@@ -450,6 +460,7 @@ async def _op_create(
         tool_call_id,
         "project",
         receipt
+        + forced
         + "Update status/progress with op='update' as the work moves; read guide://projects.",
     )
 
