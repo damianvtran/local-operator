@@ -385,35 +385,54 @@ fields do not answer, and this module is where their answer lives.
 
 A command qualifies only if it is **a single logical line** that parses to a
 pipeline of simple commands — judged on the words a shell will actually
-receive. **Tokenisation comes first** (round-2 review R2-F1): the line is
-word-split shell-faithfully (`shlex`, POSIX mode — the same quote and
-backslash resolution the executing `bash -c` applies), and every rule below
-judges the RESOLVED words, so quoting is not an escape hatch —
-`rg '--pre=<cmd>' .` resolves to the word `--pre=<cmd>` and is denied;
-`file '-C'` resolves to `-C`, denied; `ls \-la` resolves to `-la`, the
-allowed cluster it literally is. Refusals are layered so each is checked
-where it is visible (round-3 review R3-F1/R3-F2):
+receive. **Stage lexing comes first** (round-4 review R4-F1), then
+**tokenisation** (round-2 review R2-F1). The raw line is scanned once,
+character-wise — like the shell, not from shlex tokens — tracking single and
+double quotes and backslash escapes, and is split into pipeline stages at
+every UNQUOTED `|`, spacing-independent: `ls x|rm y` and `ls x | rm y` lex
+identically, and each stage is validated individually by every rule below
+(its command word against the allow-list, its flags, its operands) — so
+`ls x|rm y` is two stages and stage 2 (`rm`) is off the allow-list, while
+`ls x|grep foo` is two allowed read stages. An unquoted `|` directly
+followed by an unquoted `|` or `&` is a refusal rather than a split (`||`,
+`|&` — v1's grammar admits exactly one operator, the plain `|`), as is an
+empty stage. A `|` inside quotes or escaped stays a literal character
+(`rg 'a|b' f` is one stage). Each stage is then word-split shell-faithfully
+(`shlex`, POSIX mode — the same quote and backslash resolution the executing
+`bash -c` applies), and every rule below judges the RESOLVED words, so
+quoting is not an escape hatch — `rg '--pre=<cmd>' .` resolves to the word
+`--pre=<cmd>` and is denied; `file '-C'` resolves to `-C`, denied;
+`ls \-la` resolves to `-la`, the allowed cluster it literally is. Refusals
+are layered so each is checked where it is visible (round-3 review
+R3-F1/R3-F2, extended round 4):
 
-- **before tokenisation** — a raw newline or carriage return anywhere in
-  the line (a shell runs the remainder as a second command, and shlex
-  folds it into whitespace, so only this layer can see it) and `{`/`}`
-  anywhere in the line (bash brace-expands before word splitting,
-  inventing words the tokeniser never sees; quoted braces are included —
-  a small, deliberate over-strictness) — each refused with the position
-  named;
-- **at resolution** — any word containing `$` (variable expansion is a
-  second evaluation pass the evaluator cannot see);
-- **on failure** — a line the tokeniser cannot parse (unbalanced quote,
-  trailing backslash) is rejected fail-closed, with the parse error
-  named.
+- **before tokenisation, character-wise on the raw line** — a raw newline
+  or carriage return anywhere in the line (a shell runs the remainder as a
+  second command, and shlex folds it into whitespace, so only this layer can
+  see it); `{`/`}` anywhere in the line (bash brace-expands before word
+  splitting, inventing words the tokeniser never sees; quoted braces are
+  included — a small, deliberate over-strictness); and the operator
+  characters `;`, `&`, `&&`, `||`, `|&`, `<`, `>` while UNQUOTED and
+  unescaped — the same posture as braces and newlines, so no unspaced
+  spelling escapes: `ls x;rm y`, `ls x&&rm y`, `ls x||rm y` and `ls x|&rm y`
+  are all refused at this layer. Quoted or escaped, these characters are
+  inert in bash and arrive only as data in a resolved word (`rg 'a|b' f`).
+  Each refusal names the position;
+- **at resolution** — any word containing `$` or a backtick: both are
+  refused in ANY word, quoted or not, because double quotes leave them live
+  (every other operator character is suppressed by a quote);
+- **on failure** — a stage the tokeniser cannot parse (unbalanced quote,
+  trailing backslash) is rejected fail-closed, with the parse error named.
 
 The rules:
 
-1. **No shell metacharacters beyond `|` and ordinary word characters**: no
-   `;`, `&&`, `||`, `&`, backticks, `$(`, `<`, `>`, `>>`, `2>` (newlines
-   and carriage returns are refused pre-tokenisation, above), no variable
-   assignments before the command word, no `env`/`sudo`/`xargs`/`sh -c`
-   wrappers. (These are rejected with the offending token named.)
+1. **No shell metacharacters beyond `|` and ordinary word characters**: the
+   operator characters (`;`, `&`, `&&`, `||`, `|&`, `<`, `>`, `>>`, `2>`)
+   are refused character-wise while UNQUOTED (stage lexing, above — `2>` is
+   the unquoted `>` it contains, and `$(` its `$`); `$` and backticks are
+   refused in any resolved word (above); no variable assignments before the
+   command word; no `env`/`sudo`/`xargs`/`sh -c` wrappers. (These are
+   refused with the position or word named.)
 2. **Every command word is on the v1 allow-list** (below), matched by
    basename, with no path prefix (`/bin/ls` and `./script` are rejected).
 3. **Flags are DEFAULT-DENY** (round-1 review F1: an enumerated deny-list let
@@ -505,19 +524,21 @@ per-command list failed to omit) is still a write vector; the mitigations
 are stated, not immunity: the lists stay small, and every named hole is a
 matrix row (§6.9).
 
-**Refused by construction, listed once (round-3 review):** quoting and
-backslash escapes are resolved to the words the shell will receive;
-`$`-bearing words are refused; `{` and `}` are refused; raw newlines and
-carriage returns are refused; `--` and every other `-`-leading word that
-is not an allowed flag is refused; the rule-1 metacharacters are refused;
-and an unparseable line fails closed. **Exactly one remaining channel can
+**Refused by construction, listed once (round-3 review; extended round 4):**
+quoting and backslash escapes are resolved to the words the shell will
+receive; `$`-bearing and backtick-bearing words are refused; `{` and `}` are
+refused; raw newlines and carriage returns are refused; unquoted operator
+characters (`;`, `&`, `&&`, `||`, `|&`, `<`, `>`) are refused
+character-wise; `--` and every other `-`-leading word that is not an allowed
+flag is refused; and an unparseable stage fails closed. **Exactly one remaining channel can
 falsify a verdict: shell filename-glob expansion** — an unquoted `*`/`?`/`[`
 word is expanded by the shell *after* this evaluator passed it, and a
-directory entry beginning with `-` can land in flag position. Globs are not
-refused because after resolution the evaluator cannot tell an inert quoted
-glob from an expanding unquoted one, and refusing every glob-bearing word
-would strip the quoted pattern operand `find`/`grep` monitors legitimately
-use (the matrix's own accept rows quote their patterns). Everything else
+directory entry beginning with `-` can land in flag position. The
+quote-aware scan makes quoted and unquoted globs distinguishable, so
+accepting unquoted globs is now a deliberate usability call, not an
+inability: `ls *.md` is the common read-only idiom, and refusing every
+glob-bearing word would strip the pattern operand `find`/`grep` monitors
+legitimately use (the matrix's accept rows quote their patterns). Everything else
 the shell expands either is refused above or cannot falsify a verdict:
 tilde expansion rewrites an operand's spelling (`~/x`) and can produce
 neither a leading `-` nor a write. The kernel-level alternative (seatbelt)
@@ -610,14 +631,23 @@ line's final character) — both refused with the position named.
 Reject — unparseable, fail-closed (QA round-3 Q1): `ls 'unclosed` →
 `monitor can't watch "ls 'unclosed": the command line does not parse —
 unterminated quote starting at position 4. Fix the quoting.`
+Reject — unspaced pipeline operators (round-4 review R4-F1): `ls x|rm y`
+(stage 2 `rm` is off the allow-list), `ls /dev/null|sed 1p` (same — `sed`
+is not on the list), `ls x;rm y` and `ls x&&rm y` (unquoted `;`/`&` refused
+character-wise), `ls x||rm y` and `ls x|&rm y` (`||`/`|&` are not v1
+operators — refused at the scan); accept `ls x|grep foo` (two allowed read
+stages), `rg 'a|b' f` (the pipe is quoted — a literal pattern character),
+and the spaced `cat f | grep x | wc -l` (spacing is irrelevant to the
+split).
 Each case asserts the exact refusal sentence's discriminating phrase, so a
 reordered message fails a test rather than drifting.
 
 **This matrix is the assurance mechanism, not a sample:** the flag sets are
 maintained by adversarial review rounds, and every construct a round finds
 is either rejected by construction (§6.4's refused-by-construction list —
-quotes resolved; `$`; braces; raw newlines/CRs; unallowed `-`-leading
-words; parse errors fail-closed) or added here as a row — the coverage is
+quotes resolved; `$`/backticks; braces; raw newlines/CRs; unquoted operator
+characters; unallowed `-`-leading words; parse errors fail-closed) or added
+here as a row — the coverage is
 auditable one row at a time. The one channel not refused — filename-glob
 expansion — is named in §6.4 and owned by §21 item 7.
 
