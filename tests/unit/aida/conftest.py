@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -46,7 +47,7 @@ def tree(root: Path) -> set[str]:
     return {str(path.relative_to(root)) for path in root.rglob("*")}
 
 
-def write_config(root: Path, values: dict) -> None:
+def write_config(root: Path, values: dict[str, Any]) -> None:
     """Merge ``values`` into ``<root>/config.yml``'s ``values:`` mapping.
 
     The shape ``ConfigManager`` actually reads (see its written files), which

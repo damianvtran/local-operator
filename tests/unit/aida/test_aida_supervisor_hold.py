@@ -9,6 +9,7 @@ the supervised process stays up for one.
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from local_operator.wakes import supervisor
 from local_operator.wakes.store import is_held
@@ -16,7 +17,7 @@ from local_operator.wakes.store import is_held
 NOW = int(time.time() * 1000)
 
 
-def _entry(due_ms: int, **extra: int) -> dict:
+def _entry(due_ms: int, **extra: int) -> dict[str, Any]:
     return {
         "session_id": "s" * 12,
         "cwd": "/tmp",

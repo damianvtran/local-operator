@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,14 +29,14 @@ def _root_with_session(root: Path) -> Path:
     return root
 
 
-def _entry(root: Path, schedules: list[dict]) -> dict:
+def _entry(root: Path, schedules: list[dict[str, Any]]) -> dict[str, Any]:
     wake_store.write_entry(
         root, SESSION_ID, cwd=str(root / "sessions" / SESSION_ID), schedules=schedules
     )
     return wake_store.read_entry(root, SESSION_ID) or {}
 
 
-def _row(wake_id: str, due_ms: int, message: str = "x") -> dict:
+def _row(wake_id: str, due_ms: int, message: str = "x") -> dict[str, Any]:
     return {
         "id": wake_id,
         "message": message,

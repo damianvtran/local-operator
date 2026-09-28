@@ -102,10 +102,10 @@ def config_enabled(config_dir: Path | str | None = None) -> bool:
         return False
     try:
         from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir as resolve_config_dir
 
-        raw = ConfigManager(config_dir=Path(config_dir) if config_dir else None).get_nested_value(
-            ("aida", "enabled"), DEFAULT_ENABLED
-        )
+        root = Path(config_dir) if config_dir is not None else resolve_config_dir()
+        raw = ConfigManager(config_dir=root).get_nested_value(("aida", "enabled"), DEFAULT_ENABLED)
     except Exception:  # noqa: BLE001 — an unreadable config must not enable-or-crash
         logger.warning("aida: could not read aida.enabled; treating as enabled")
         return True
