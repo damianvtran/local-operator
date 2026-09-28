@@ -6225,7 +6225,20 @@ class ServingSessionHandle(SessionHandle):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         stored = setter(name)
         self._publish_name()
-        return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
+        shown = stored or name
+        # HER conversation is her NAME (the `aida.name` coupling, UX round 1
+        # U3): the receipt says the side effect where the expectation forms,
+        # beside the `applied: aida.name` config row. `is_her_session` keeps
+        # this and the TUI's own receipt from drifting on what "hers" means.
+        from local_operator.aida import naming as aida_naming
+
+        if aida_naming.is_her_session(session):
+            return SlashResult(
+                kind="notice",
+                text=f"renamed to {shown} — she is now called {shown} everywhere",
+                style="info",
+            )
+        return SlashResult(kind="notice", text=f"renamed to {shown}", style="info")
 
     async def _title_refresh_slash(self, session: Any, SlashResult: Any) -> Any:
         """``/title refresh`` on a detached runtime.

@@ -3607,7 +3607,11 @@ SETTINGS: tuple[Setting, ...] = (
         key="aida.enabled",
         path=("aida", "enabled"),
         section="aida",
-        label="Aida enabled",
+        # ROLE-NAMED, not persona-named (design round 1, D4): "Aida enabled"
+        # read as the old name beside a configured `Display name: Nova`, while
+        # every sibling row in the section is a role term. The section title
+        # stays "Aida" — that one is the config namespace (`aida.*`).
+        label="Chief of staff enabled",
         kind=Kind.BOOL,
         default=True,
         choices=_bool_choices("enabled", "disabled"),
@@ -3623,8 +3627,11 @@ SETTINGS: tuple[Setting, ...] = (
         placeholder="Aida",
         validate_value=_validate_aida_name,
         help=(
-            "What she is called on every surface. Renaming her conversation — or "
-            "/aida rename <name> — updates this."
+            # ≤94 cells, the detail line's budget at 100x30 (design round 1,
+            # D2): the previous wording truncated at "upd…", eating exactly
+            # the clause that says the rename APPLIES.
+            "What she is called everywhere. Renaming her conversation or "
+            "/aida rename <name> updates it."
         ),
     ),
     Setting(
@@ -3670,7 +3677,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=90,
         minimum=0,
         maximum=1440,
-        help="Minimum spacing between one Aida wake and the next; closer requests are refused.",
+        help="Minimum spacing between her wakes; closer requests are refused.",
     ),
     Setting(
         key="aida.onboarding.nudge_days",

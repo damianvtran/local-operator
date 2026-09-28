@@ -188,3 +188,17 @@ async def test_ensure_reconciles_a_stale_title(isolated_root: Path) -> None:
     assert stored_session_title(isolated_root / "sessions" / her_id) == "Sovereign"
     journal = read_latest_custom(isolated_root / "sessions" / her_id, "conversation_name")
     assert journal is not None and journal.get("text") == "Sovereign"
+
+
+def test_is_her_session_reads_the_duty_flag_defensively() -> None:
+    """The rename receipts' gate: True only when the session wears the duty.
+
+    A reduced facade without the attribute answers False — wording must not
+    change for a session whose identity cannot be established.
+    """
+    from types import SimpleNamespace
+
+    assert naming.is_her_session(SimpleNamespace(_aida_duty=True)) is True
+    assert naming.is_her_session(SimpleNamespace(_aida_duty=False)) is False
+    assert naming.is_her_session(SimpleNamespace()) is False
+    assert naming.is_her_session(object()) is False

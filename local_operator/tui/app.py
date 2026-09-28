@@ -15678,7 +15678,14 @@ class OperatorApp(App[None]):
         # provider configured" sitting over a working session with real spend
         # (design round 2, D2).
         for toast in self.query(Toast):
-            toast.withdraw(SPLASH_NOTICE)
+            # ONLY OUR SLOT. Textual resolves a class selector by TYPE NAME, so
+            # this query also returns the framework's notification toast — a
+            # different class that shares the name ``Toast`` and has no
+            # ``withdraw``, so touching it kills the app (QA round 1, Q1: the
+            # command palette's Screenshot notice plus `/aida` did exactly
+            # that). `isinstance` is the discriminator the selector cannot be.
+            if isinstance(toast, Toast):
+                toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -30380,7 +30387,18 @@ class OperatorApp(App[None]):
         # model's over-long answer — an over-long answer is evidence the model
         # ignored the format, while this is just a long name the user chose, and
         # refusing it outright would lose a title they typed.
-        notice(f"renamed: {stored} — auto-naming will not override it")
+        from local_operator.aida import naming as aida_naming
+
+        if aida_naming.is_her_session(session):
+            # HER conversation is her NAME (the aida.name coupling): the config
+            # row (`applied: aida.name`) is the audit trail, and this clause is
+            # what stops "renamed the thread" from reading as "renamed only
+            # this thread" (UX round 1, U3). The auto-naming clause is dropped
+            # here because it is vacuous for her pinned conversation — born
+            # `user_set`, no auto-namer may touch it.
+            notice(f"renamed: {stored} — she is now called {stored} everywhere")
+        else:
+            notice(f"renamed: {stored} — auto-naming will not override it")
 
     def _cmd_title_refresh(self, session: SessionProtocol, notice: NoticeFn) -> None:
         """``/title refresh`` — re-read the conversation and name it now.
@@ -32839,6 +32857,15 @@ class OperatorApp(App[None]):
         changed = sorted(getattr(change, "changed_keys", ()))
         if not changed:
             return
+        if "aida.name" in changed:
+            # THE SETTING-PATH LAG (review round 1, R1-M3): a rename written
+            # outside `/aida rename` — the /settings page, `lop config edit`,
+            # the desktop PATCH — with her session CLOSED left the stored title
+            # (what the sidebar row and the picker render) at the old name
+            # until the next `ensure_session`. One stat + sidecar compare, off
+            # the loop; a no-op when the title already matches. Covers the
+            # `local` source too — the page write is the common case.
+            self.run_worker(self._reconcile_aida_title(), thread=False, group="aida")
         local = getattr(change, "source", "disk") == "local"
         if local:
             # Apply, do not announce. The only groups whose apply this process
@@ -33046,6 +33073,26 @@ class OperatorApp(App[None]):
                     self._apply_theme(wanted)
                 except KeyError:
                     self._system_notice(f"theme: unknown theme {wanted!r} in config.yml", "warning")
+
+    async def _reconcile_aida_title(self) -> None:
+        """Point her STORED title at ``aida.name`` (the R1-M3 seam).
+
+        The same reconcile ``/aida rename`` and every ``ensure_session`` run;
+        kept off the loop because it can append to her transcript when the
+        stored title is stale. Best-effort — a config change must never fail
+        over a decoration.
+        """
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.aida import state as aida_state
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+            session_id = aida_state.session_id_of(root)
+            if session_id:
+                await aida_naming.reconcile_session_title(root, session_id)
+        except Exception:  # noqa: BLE001 — a decoration never fails a config change
+            logger.debug("aida: could not reconcile her stored title", exc_info=True)
 
     def _follow_configured_approvals(self, change: Any, *, announce: bool) -> _ApprovalsFollow:
         """Move this app's gate to ``tool_approval_mode``. THE one apply path.
@@ -41940,6 +41987,29 @@ class OperatorApp(App[None]):
             label = getattr(self._session, "model_label", "") or "this model"
             picker.set_notice("" if levels else _effort_unavailable(label))
             return
+        if message.command == "aida":
+            # THE RESERVED WORDS, not the provider fall-through (UX round 1,
+            # U1). The fall-through is the provider vocabulary and is wrong for
+            # every `/aida` argument: the free-form half is prose for her, and
+            # the word half is this set. Showing it is also the rename verb's
+            # discoverability — a verb a user never sees is one they cannot
+            # use — and the rows are sourced from ``AIDA_SUBCOMMANDS`` plus
+            # `rename`, the words the handler itself parses, so the picker
+            # cannot drift from the grammar.
+            picker.set_choices(
+                [
+                    ArgumentChoice(name="pause", description="stop her proactive check-ins"),
+                    ArgumentChoice(name="resume", description="start them again"),
+                    ArgumentChoice(name="status", description="how she is doing right now"),
+                    ArgumentChoice(
+                        name="rename",
+                        description="give her a new name everywhere",
+                        detail="<name>",
+                    ),
+                ]
+            )
+            picker.set_notice("")
+            return
         if self._providers is None:
             # Same degradation as the handlers themselves: no controller means no
             # credential store to read, so the list is empty and the user is
@@ -42506,8 +42576,11 @@ class OperatorApp(App[None]):
                 )
                 return
         if self._resume_factory is None:
+            from local_operator.aida import naming as aida_naming
+
             self._system_notice(
-                "opening Aida requires a session-capable launcher — see the CLI",
+                f"opening {aida_naming.display_name()} requires a session-capable "
+                "launcher — see the CLI",
                 "warning",
             )
             return
@@ -42614,11 +42687,12 @@ class OperatorApp(App[None]):
         reads it live (the /aida receipts, the desktop payload's ``name``) —
         and her conversation's title is what the picker, the sidebar and the
         band render. The config write goes through ``settings_io`` so a live
-        session in ANY process hears it on its watcher; the title half is
-        applied here for the not-open case (``reconcile_session_title``) and
-        by that same watcher for an open one, so every surface converges
-        without a restart either way. Runs in a worker: the write is file IO,
-        and retitling an open session journals to its transcript.
+        session in ANY process hears it on its watcher; the session half here
+        is the DISK reconcile (``reconcile_session_title``) plus the local band
+        push, and the live re-title rides that same watcher in every case (see
+        the tail for why the session setter is not called). Runs in a worker:
+        the write is file IO, and retitling a closed session journals to its
+        transcript.
         """
         from local_operator.aida import naming as aida_naming
         from local_operator.aida import state as aida_state
@@ -42641,28 +42715,27 @@ class OperatorApp(App[None]):
             logger.warning("aida: rename failed", exc_info=True)
             self._system_notice(f"could not rename her: {error}", "warning")
             return
-        # The session half, when her session exists. On HER conversation in
-        # THIS terminal, rename in place through the ordinary writer (the
-        # same path /title takes, so the band, the tab and the mobile
-        # notification follow); otherwise point the stored title at the new
-        # name so the picker and the sidebar — which read disk — follow now
-        # rather than at a later boot.
+        # The session half is the DISK reconcile, and only that. The in-place
+        # setter must NOT be called on the ATTACHED lane — her conversation is
+        # normally an attached viewer, and the setter's rename RPC answers
+        # "/rename is terminal-only here", leaving one unretrieved task
+        # exception per rename in the log (UX round 1, U2). The live re-title
+        # rides the config watcher either way (the owner runtime's when she is
+        # attached, this app's own when it hosts her — ``write_setting`` rings
+        # the local watcher in-process); the reconcile keeps the disk readers
+        # (picker, sidebar) correct now rather than at a later boot, and the
+        # band segment is painted here so the receipt and the frame agree.
         session_id = aida_state.session_id_of(root)
+        if session_id:
+            await aida_naming.reconcile_session_title(root, session_id)
         if session_id and self._conversation_id() == session_id and self._session is not None:
             session = self._session
-            try:
-                stored_name = session.set_conversation_name(stored, user_set=True)
-            except Exception:  # noqa: BLE001 — the config half already landed
-                logger.warning("aida: could not retitle the open session", exc_info=True)
-                stored_name = stored
             if self._status is not None:
                 self._status.update(
-                    conversation_name=stored_name,
+                    conversation_name=stored,
                     forked=bool(getattr(session, "wears_inherited_title", False)),
                 )
-            self._notify_mobile_title(stored_name)
-        elif session_id:
-            await aida_naming.reconcile_session_title(root, session_id)
+            self._notify_mobile_title(stored)
         notice(f"{AIDA_MARKER} renamed: {stored} — every surface reads it now.")
 
     @staticmethod
