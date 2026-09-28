@@ -1788,6 +1788,17 @@ class ProjectionFold:
                     promoted = self._find(entry_id)
                     if promoted is not None:
                         promoted.tool_call_id = event.tool_call_id
+            # A row's DEFAULT state is `interrupted` — the class for "no
+            # outcome yet" (``mobile.types`` documents the choice) — so the
+            # terminal-state guard cannot read the state alone: the row this
+            # very frame is about to mint carries the same value a settled row
+            # does, and treating it as settled would leave every fresh
+            # announcement stuck at the default instead of going
+            # `composing`/`queued`. `pre_existing` is what separates them: the
+            # row existed BEFORE this frame, or this frame creates it. Computed
+            # AFTER the rekey above, so a promotion frame (the real id arriving
+            # for a placeholder row) is correctly seen as an existing row.
+            pre_existing = event.tool_call_id in self._tool_rows
             row = self._tool_row(event.tool_call_id, event.tool_name)
             # Three endings to one dictation, in the frames the producer sends:
             #
@@ -1818,7 +1829,23 @@ class ProjectionFold:
             # terminal frame also carries `dictation_complete`, walk it BACK to
             # `queued`. Note the arms are exclusive on purpose: falling through
             # to them is the bug, not the fallback.
-            started = row.tool_state in ("running", "done", "failed")
+            #
+            # `interrupted` is in the tuple for the same reason `done`/`failed`
+            # are: it is a TERMINAL state a settled-by-end row can hold (a
+            # marked abort end, or this very verdict applied once), and a late
+            # frame for that call must not touch it — review round 1 measured
+            # all three ways this leaked: a late duplicate-id twin verdict
+            # re-reddened a user-stopped row, a late skipped verdict overwrote
+            # the abort receipt, and an older dictation frame walked the row
+            # back to `composing` (the state this guard exists to prevent).
+            # Gated on `pre_existing` because the tuple's new member is ALSO
+            # the freshly-created default — see above.
+            started = pre_existing and row.tool_state in (
+                "running",
+                "done",
+                "failed",
+                "interrupted",
+            )
             if event.not_run_reason:
                 if not started:
                     # The verdict's FAULT class decides the tier, mirroring the

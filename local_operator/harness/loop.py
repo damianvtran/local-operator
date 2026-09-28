@@ -3076,6 +3076,20 @@ class AgentLoop:
                 and self._peek_steering(config)
             ):
                 for remaining in plan[index:]:
+                    # A call whose planning failure was already parked (unknown
+                    # tool, duplicate id) pairs with THAT result, never a skip:
+                    # the model must not be told "skipped" right after being
+                    # told "Tool not found", and a durable consumer keyed by
+                    # call id takes the last result for the id, so a second one
+                    # relabels the row as an interruption on every replay
+                    # (desktop QA round 1, Q-1, against the sibling UI PR). The
+                    # frames below have excluded these calls since they were
+                    # written, for exactly this reason; this loop kept pairing
+                    # them with the wrong result because a batch the steering
+                    # never reached appended nothing of its own.
+                    if remaining.failure is not None:
+                        results.append(remaining.failure)
+                        continue
                     # Marked at the source like every other fault, though this
                     # site bypasses ``park`` and so is not recorded: a call
                     # steering skipped before it was ever scheduled is excluded
