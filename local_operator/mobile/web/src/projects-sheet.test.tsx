@@ -146,6 +146,31 @@ describe("browse", () => {
 		expect(screen.queryByRole("heading", { name: "archived" })).toBeNull();
 	});
 
+	it("groups the lifecycle statuses under their own headings, in the daemon's rank order", async () => {
+		getProjects.mockResolvedValue({
+			projects: [
+				summary({ id: "p1", name: "review-thing", status: "qa" }),
+				summary({ id: "p2", name: "plan-thing", status: "planning" }),
+				summary({ id: "p3", name: "ship-thing", status: "validation" }),
+			],
+		});
+		renderSheet();
+		await screen.findByText("review-thing");
+		fireEvent.click(screen.getByRole("button", { name: "board" }));
+		// The headings follow STATUS_ORDER (the daemon's rank): planning, qa and
+		// validation each get their own section — none is dropped into the
+		// trailing unknown bucket.
+		const headings = screen
+			.getAllByRole("heading")
+			.map((heading) => heading.textContent)
+			.filter((text) =>
+				["planning", "active", "qa", "validation", "paused", "done", "archived"].includes(
+					text ?? "",
+				),
+			);
+		expect(headings).toEqual(["planning", "qa", "validation"]);
+	});
+
 	it("keeps the surface mounted on a fetch failure and retries in place", async () => {
 		getProjects.mockRejectedValueOnce(new HttpError(503, "Timed out waiting for the projects registry lock", "project_store_busy"));
 		renderSheet();

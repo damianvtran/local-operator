@@ -12336,8 +12336,9 @@ class Session:
         Fires only while the turn is MOVING and the record is quiet: at least
         one tool-execution event landed this turn (``_turn_tool_calls`` — a
         turn that ran no tools cannot have moved a project's state), and the
-        stale set (``stale_projects_for_session``: linked AND active AND
-        stale) has moved since the last nudge THIS turn. The latch is the
+        stale set (``stale_projects_for_session``: linked, in-flight
+        (``PROJECT_LIVE_STATUSES``) AND stale) has moved since the last nudge
+        THIS turn. The latch is the
         stale-set fingerprint ``(id, status, int(progress_updated_at or 0))``:
         a byte-identical set is never nudged twice (a model yielding twice on
         it is stuck, and the reminder's own exits — update / refresh /

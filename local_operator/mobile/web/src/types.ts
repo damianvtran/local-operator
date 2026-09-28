@@ -437,14 +437,23 @@ export type CommandOp =
      else ``upcoming``); the client never computes it, so a chip here and a line
      in a tool result cannot disagree about which milestone is late.
    * ``progress_stale`` is the server's one four-hour verdict, read only for
-     `active` records (settled rows never read stale) — the same derivation the
+     in-flight records (`planning`/`active`/`qa`/`validation`; settled rows
+     never read stale) — the same derivation the
      completion-time check reads, so the phone's badge and the agent's nudge can
      never disagree about one record. */
 
 /** The project's status word; an unknown status from a newer build passes
     through as its own string (the union is the shipped vocabulary, not a
-    parse bar). */
-export type ProjectStatus = "active" | "paused" | "done" | "archived";
+    parse bar). The seven words mirror `PROJECT_STATUSES` in
+    `local_operator/projects.py` — keep in step with the daemon. */
+export type ProjectStatus =
+	| "planning"
+	| "active"
+	| "qa"
+	| "validation"
+	| "paused"
+	| "done"
+	| "archived";
 
 /** One milestone, with its DERIVED status — see the note above. */
 export interface ProjectMilestone {

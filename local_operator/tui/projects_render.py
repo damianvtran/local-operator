@@ -44,7 +44,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 
-from local_operator.projects import PROJECT_ROW_CAP
+from local_operator.projects import PROJECT_ROW_CAP, PROJECT_STATUSES
 from local_operator.projects import age_text as derived_age_text
 from local_operator.projects import display_name
 from local_operator.projects import milestone_state as derived_milestone_state
@@ -65,6 +65,55 @@ LIST_ROW_CAP = PROJECT_ROW_CAP
 #: (the desktop board's rule, kept identical so the two boards agree).
 BOARD_COLUMNS: tuple[str, ...] = ("active", "paused", "done")
 BOARD_EXTRA_COLUMN = "archived"
+
+#: The lifecycle statuses the three columns do not name, mapped to the column
+#: they ride in. Kept as data (not inline in the renderer) because the desktop
+#: board reads the same mapping off the payload's status; a card's own chip
+#: stays the exact word either way.
+BOARD_STATUS_BUCKET: dict[str, str] = {
+    "planning": "active",
+    "qa": "active",
+    "validation": "active",
+}
+
+#: Column header LABELS: the bucket column says what it HOLDS (design review
+#: round 1, D4) — planning/qa/validation cards ride the leading column, so
+#: "active · 4" over one true active was two things called active on one
+#: screen. "in flight · 4" is true of every card under it.
+BOARD_COLUMN_LABELS: dict[str, str] = {"active": "in flight"}
+
+#: One glyph per status — the SHAPE channel, chosen because the ink channel
+#: cannot separate seven statuses out of the five semantic tokens that fit
+#: statuses at all (planning/active/qa/validation/paused/done/archived vs
+#: accent/success/warning/muted/dim). The repo already ships a shape-only
+#: contract for exactly this reason: the tool-status family separates
+#: `✓`/`◐`/`✗`/`⊘` in a colourless frame. `✓` is that family's completion
+#: glyph and `◐` its in-progress shape; `○`(not started)/`●`(running)/
+#: `◉`(under watch)/`‖`(held)/`▤`(filed) extend the same geometric family.
+#: An unknown status (a row from a newer build) takes `?` — visibly unknown,
+#: still a chip.
+STATUS_GLYPHS: dict[str, str] = {
+    "planning": "○",
+    "active": "●",
+    "qa": "◐",
+    "validation": "◉",
+    "paused": "‖",
+    "done": "✓",
+    "archived": "▤",
+}
+
+
+def status_chip_text(status: str) -> str:
+    """The ONE chip rendering every surface composes: ``[◐ qa]``.
+
+    Glyph, word and ink together: the glyph separates by shape (colourless
+    frames included), the word names the status exactly, and the ink is
+    :func:`_status_style`'s one mapping. Used by the list rows, the board
+    cards, the detail footer and the chip-preserving truncation — a chip can
+    never render two ways on one page.
+    """
+    return f"[{STATUS_GLYPHS.get(status, '?')} {status}]"
+
 
 #: Card column width in cells, header included. "Fixed ~32 cells" per the
 #: design: columns must be comparable side by side, so the width cannot be
@@ -197,7 +246,11 @@ def _status_style(style_for: StyleFor, status: str) -> Style:
     ``active`` keeps the accent every other "running" chip on the page uses,
     ``paused`` takes the warning tone, and ``done``/``archived`` recede — so
     the colour channel carries the scan the page exists for instead of three
-    identical green badges.
+    identical green badges. Where the ink channel runs out the SHAPE channel
+    carries the separation instead: chips render through
+    :func:`status_chip_text`, whose per-status glyphs keep every pair apart in
+    a colourless frame (the measured ink table and its acceptances live in
+    ``projects_view._style_resolver``).
     """
     return style_for(f"status_{status or 'active'}")
 
@@ -338,7 +391,7 @@ def _list_row(
         # it visible beside the label the reader knows.
         row.append(f" ({project.get('name') or ''})", style=style_for("dim"))
     status = str(project.get("status") or "active")
-    row.append(f" [{status}]", style=_status_style(style_for, status))
+    row.append(" " + status_chip_text(status), style=_status_style(style_for, status))
     extras: list[tuple[str, str]] = []
     estimate = estimate_text(project)
     if estimate:
@@ -442,18 +495,31 @@ def _card_lines(
     for glyph, key in _marker_cells(selected=selected, associated=associated):
         name.append(glyph, style=style_for(key) if key != "dim" else style_for("dim"))
     label = display_name(project) or "(unnamed)"
-    name.append(label)
+    status = str(project.get("status") or "active")
+    chip = status_chip_text(status)
+    chip_w = cell_len(chip)
     key = str(project.get("name") or "")
-    if project.get("title") and key and 2 + cell_len(f"{label} ({key})") <= BOARD_COLUMN_WIDTH - 1:
-        # The key joins the title only when the fixed 32-cell column can hold
-        # BOTH — and the two-cell marker column is painted FIRST, so the budget
-        # for ``label (key)`` is BOARD_COLUMN_WIDTH - 3 (31 cells minus the two
-        # markers), the same shape as the timeline's ``- 2``. Without the
-        # marker term a 30-31-cell ``label (key)`` passed this check and then
-        # clipped the key mid-token at the cell edge, which the rule's own
-        # comment names as corruption (design review round 2, D5). Title wins
-        # otherwise; the key stays recoverable in the footer/detail.
-        name.append(f" ({key})", style=style_for("dim"))
+    key_part = ""
+    # After the two-cell marker column, a card line has BOARD_COLUMN_WIDTH - 3
+    # cells for `label` + `key` + the separator space + the chip.
+    content_room = BOARD_COLUMN_WIDTH - 3
+    if project.get("title") and key:
+        candidate = f" ({key})"
+        # The key joins the title only when the whole line fits: the chip is
+        # the exact status the card exists to state (design review round 1,
+        # D1) and is never shed; the key is recoverable in the footer/detail,
+        # so it sheds first; a label that still cannot fit truncates with an
+        # ellipsis — never a mid-token clip at the cell edge (design review
+        # round 2, D5).
+        if cell_len(label) + cell_len(candidate) + 1 + chip_w <= content_room:
+            key_part = candidate
+    room = content_room - chip_w - 1 - cell_len(key_part)
+    if cell_len(label) > room:
+        label = truncate_row(label, cap=room)
+    name.append(label)
+    if key_part:
+        name.append(key_part, style=style_for("dim"))
+    name.append(" " + chip, style=_status_style(style_for, status))
     facts = Text(no_wrap=True)
     bits: list[str] = []
     estimate = estimate_text(project)
@@ -486,7 +552,18 @@ def _columns_of(views: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, A
     by_status: dict[str, list[dict[str, Any]]] = {name: [] for name in BOARD_COLUMNS}
     for view in views:
         status = str(_row(view).get("status") or "active")
-        by_status.setdefault(status, []).append(view)
+        # Lifecycle statuses beyond the board's three columns are BUCKETED into
+        # the column they belong to, not given columns of their own: planning,
+        # qa and validation are all "in the machine", and every card carries
+        # its own exact ``[◐ qa]``-style chip (glyph + word + ink), so the
+        # column ("in flight") tells the coarse story while the chip stays
+        # exact. An entirely unknown status (a row from a newer build) rides
+        # the leading column rather than vanishing — the board's one job is
+        # that every project is visible somewhere.
+        bucket = BOARD_STATUS_BUCKET.get(status, status)
+        if bucket not in (*BOARD_COLUMNS, BOARD_EXTRA_COLUMN):
+            bucket = BOARD_COLUMNS[0]
+        by_status.setdefault(bucket, []).append(view)
     columns = [(name, by_status.get(name, [])) for name in BOARD_COLUMNS]
     archived = by_status.get(BOARD_EXTRA_COLUMN) or []
     if archived:
@@ -540,8 +617,9 @@ def render_project_board(
     blocks: list[list[Text]] = []
     for status, rows in columns:
         block: list[Text] = []
+        label = BOARD_COLUMN_LABELS.get(status, status)
         header = Text(no_wrap=True)
-        header.append(status, style=resolver("status"))
+        header.append(label, style=resolver("status"))
         header.append(f" · {len(rows)}", style=resolver("dim"))
         block.append(header)
         visible, hidden, extra = _painted_cards(rows, selected_id)
@@ -1030,12 +1108,12 @@ def detail_footer(
     identity.append(name_text, style=resolver("name"))
     if keyed_identity:
         identity.append(f" ({key})", style=resolver("dim"))
-    identity.append(f" [{status}]", style=chip(status))
+    identity.append(" " + status_chip_text(status), style=chip(status))
     clauses["identity"] = identity
     if keyed_identity:
         keyless_identity = Text(no_wrap=True)
         keyless_identity.append(name_text, style=resolver("name"))
-        keyless_identity.append(f" [{status}]", style=chip(status))
+        keyless_identity.append(" " + status_chip_text(status), style=chip(status))
     else:
         keyless_identity = identity
 
@@ -1166,7 +1244,7 @@ def detail_footer(
         # 2, U5). The chip is a whole token, so when it fits alone the NAME
         # gives way first and the chip survives intact; only when even the
         # chip cannot fit does the line ellipsize mid-token.
-        chip_text = f"[{status}]"
+        chip_text = status_chip_text(status)
         if cell_len(chip_text) + 2 <= width:
             name_cap = max(width - cell_len(chip_text) - 1, 1)
             fitted = Text(truncate_row(name_text, cap=name_cap) + " " + chip_text)
@@ -1180,8 +1258,21 @@ def aggregate_footer(
     *,
     tier: str | None = None,
     style_for: StyleFor | None = None,
+    width: int | None = None,
 ) -> Text:
-    """Counts for the board/timeline footer: what the page is summarising."""
+    """Counts for the board/timeline footer: what the page is summarising.
+
+    ``width`` is the measured box the line renders into. Without it a line
+    wider than its box was cut by the container, mid-clause and without a
+    marker (design review round 1, D5: at 100×30 an "· 0" tail read as a
+    count, and at 60 the live-session clause silently vanished). The ladder
+    SHEDS whole segments, most-expendable first — zoom (the header and the
+    hints carry it), then the live-session count (each card still says "N
+    live"), then the counts themselves, ellipsized at a SEGMENT boundary
+    with an explicit ``…`` so a cut line always says more exists and never
+    cuts inside a clause. ``None`` keeps the full line for callers with no
+    box to fit.
+    """
     resolver = _styles(style_for)
     live = sum(live_count(view) for view in views)
     counts: dict[str, int] = {}
@@ -1189,12 +1280,48 @@ def aggregate_footer(
         status = str(_row(view).get("status") or "active")
         counts[status] = counts.get(status, 0) + 1
     text = Text(no_wrap=True, overflow="ellipsis")
-    order = [*BOARD_COLUMNS, BOARD_EXTRA_COLUMN]
+    head = f"{len(views)} project{'' if len(views) == 1 else 's'}"
+    # The counts are per TRUE status, in lifecycle order: the board buckets
+    # planning/qa/validation into one column, but the summary must not merge
+    # them — "1 active" over a store that also holds two qa rows would be a lie
+    # of omission (the same reason archived has always had its own count).
+    order = [*PROJECT_STATUSES]
     parts = [f"{counts[status]} {status}" for status in order if counts.get(status)]
-    text.append(f"{len(views)} project{'' if len(views) == 1 else 's'}", style=resolver("dim"))
-    if parts:
-        text.append(" · " + " · ".join(parts), style=resolver("dim"))
-    text.append(f" · {live} live session{'' if live == 1 else 's'}", style=resolver("dim"))
-    if tier:
-        text.append(f" · zoom: {tier}", style=resolver("dim"))
+    joined = " · ".join(parts)
+    zoom = f"zoom: {tier}" if tier else None
+    rungs = [
+        " · ".join(
+            filter(None, [head, joined, f"{live} live session{'' if live == 1 else 's'}", zoom])
+        ),
+        " · ".join(filter(None, [head, joined, f"{live} live", zoom])),
+        " · ".join(filter(None, [head, joined, f"{live} live"])),
+        " · ".join(filter(None, [head, joined])),
+    ]
+    chosen: str | None = None
+    for rung in rungs:
+        if width is None or cell_len(rung) <= width:
+            chosen = rung
+            break
+    if chosen is None:
+        # Nothing above fits: keep the head plus as many count segments as
+        # the width allows, then an explicit ``…``. A rung that fits is never
+        # ellipsized; an ellipsized rung never pretends to be complete. (The
+        # loop above binds the first rung whenever ``width`` is None, so
+        # reaching here means a width exists — pinned for the type checker.)
+        assert width is not None
+        kept: list[str] = []
+        for part in parts:
+            candidate = " · ".join([head, *kept, part])
+            if cell_len(candidate + " · …") <= width:
+                kept.append(part)
+            else:
+                # STRICT prefix: the first segment that cannot fit ends the
+                # list. Skipping it and picking a shorter later one ("1 qa ·
+                # 1 paused · …", with validation silently missing) claims a
+                # completeness the line does not have.
+                break
+        chosen = (
+            " · ".join([head, *kept]) + " · …" if kept else truncate_row(head + " …", cap=width)
+        )
+    text.append(chosen, style=resolver("dim"))
     return text

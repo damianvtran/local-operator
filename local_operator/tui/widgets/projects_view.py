@@ -98,13 +98,36 @@ def _style_resolver() -> Callable[[str], Style]:
     styles = {
         "name": Style(color=color("fg"), bold=True),
         "status": Style(color=color("accent")),
-        # D4: per-status chips — `active` keeps the accent, `paused` warns,
-        # `done`/`archived` recede. One mapping, read by the list rows, the
-        # footer chip and the board.
+        # D4: per-status chips — one mapping, read by the list rows, the board
+        # cards and the footer chip. `active` keeps the accent every other
+        # "running" chip uses; `paused` warns; `done`/`archived` recede. The
+        # lifecycle additions and the measured constraints behind them
+        # (design review round 1, D2/D3; ΔE00 across all 54 registered
+        # themes):
+        #   * `planning` recedes with `done` — the ends of the arc are quiet —
+        #     and the two share `muted` (ΔE00 0.00 in every theme). That reuse
+        #     is deliberate and is carried by SHAPE: the chips render through
+        #     `projects_render.status_chip_text`, whose per-status glyphs
+        #     (`○` vs `✓`) keep every pair apart in a colourless frame — the
+        #     same shape-only contract the tool-status family (`✓`/`◐`/`✗`/`⊘`)
+        #     already ships.
+        #   * `qa` keeps the running accent (ΔE00 0.00 against `active`),
+        #     the same statement one phase further along; `◐` vs `●`
+        #     separates them.
+        #   * `validation` deliberately does NOT take `success`: the theme's
+        #     two greens measured ΔE00 2.23 in `light` (dark 5.07) — the
+        #     accidental-duplicate class the sibling fix rejected at 2.22 —
+        #     and the available re-inks that keep meaning are scarcer than the
+        #     bar; the deployed-and-proving state takes the `fg` focus ink
+        #     instead (worst pair 4.44, against the quiet `muted` pair; every
+        #     other pair ≥9.06), with `◉` — the chip you watch.
         "status_active": Style(color=color("accent")),
         "status_paused": Style(color=color("warning")),
         "status_done": Style(color=color("muted")),
         "status_archived": Style(color=color("dim")),
+        "status_planning": Style(color=color("muted")),
+        "status_qa": Style(color=color("accent")),
+        "status_validation": Style(color=color("fg")),
         "cursor": Style(color=color("accent"), bold=True),
         # The session's own projects carry `◆` in the row's leading column
         # (S3b): the accent without the cursor's bold, so `▸` still owns the
@@ -477,21 +500,29 @@ class ProjectsView(Vertical):
         width = max(self.size.width - 2, 1)
         self._rule.update(Text("─" * width, style=dim))
 
+        # The footer fits the DETAIL box's own measured width, not the page's
+        # minus its padding: the two differ by the box's position in the
+        # layout, and fitting to the smaller number skipped a rung the space
+        # could hold (measured: at 100x30 the box is 96 cells, the page
+        # arithmetic says 94, and a 97-cell rung was shed that fits). The
+        # board/timeline counts line takes the same measured width so its own
+        # ladder sheds whole segments instead of the container cutting a
+        # clause mid-token (design review round 1, D5).
+        footer_width = self._detail.size.width or width
         if self._view == "list" and self._views:
             index = max(0, min(self._cursor, max(self._painted_count() - 1, 0)))
-            # The footer fits the DETAIL box's own measured width, not the
-            # page's minus its padding: the two differ by the box's position in
-            # the layout, and fitting to the smaller number skipped a rung the
-            # space could hold (measured: at 100x30 the box is 96 cells, the
-            # page arithmetic says 94, and a 97-cell rung was shed that fits).
-            footer_width = self._detail.size.width or width
             self._detail.update(
                 detail_footer(self._views[index], style_for=_style_resolver(), width=footer_width)
             )
         else:
             tier = self._tier if self._view == "timeline" else None
             self._detail.update(
-                aggregate_footer(self._views, tier=tier, style_for=_style_resolver())
+                aggregate_footer(
+                    self._views,
+                    tier=tier,
+                    style_for=_style_resolver(),
+                    width=footer_width,
+                )
             )
         self._paint_hints()
 
