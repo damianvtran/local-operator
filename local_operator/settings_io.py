@@ -252,6 +252,12 @@ class Setting:
     #: read as a cap in force (design round 1, D1). Presentational only: the
     #: consumer of the gated key is responsible for honouring the master.
     gated_by: str | None = None
+    #: The SCOPE of a HOTKEY row's value, DERIVED from ``keymap.KEY_ACTIONS``
+    #: (``"app"`` / ``"desktop"``): it selects the value grammar every write
+    #: path applies and is projected on the wire so the desktop app can render
+    #: a desktop row with the rules that own it. Never authored twice — an
+    #: empty string means "not a hotkey row".
+    hotkey_scope: str = ""
 
     @property
     def resolved_choices(self) -> tuple[Choice, ...]:
@@ -2011,6 +2017,7 @@ SETTINGS: tuple[Setting, ...] = (
             kind=Kind.HOTKEY,
             default=action.default,
             help=action.help,
+            hotkey_scope=action.scope,
         )
         for action in _keymap.KEY_ACTIONS
     ),
@@ -3808,7 +3815,10 @@ def coerce(setting: Setting, text: str) -> Any:
         # store `ctrl+N`: the page then DISPLAYS `ctrl+N` while the runtime
         # binds a key nobody can press (measured — Textual accepts it
         # verbatim). Rejection happens in `validate`, so the message is the
-        # same whichever writer arrives.
+        # same whichever writer arrives. The grammar follows the ROW's scope:
+        # a desktop value is an accelerator, not a Textual key string.
+        if setting.hotkey_scope == "desktop":
+            return _keymap.normalize_desktop_key(text, action_id=setting.key)
         return _keymap.normalize_key(text)
     if setting.kind is Kind.CASCADE:
         # JSON, because the value is a two-level structure and the page's own
@@ -3935,8 +3945,15 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
         # garbage key string silently moves the binding somewhere unreachable
         # AND takes the shipped default with it (measured; the Claude Code
         # pre-2.1.246 silent-disable bug, live in Textual today). The capture
-        # widget calls the same predicate, so the two cannot disagree.
-        return _keymap.validate_key(value)
+        # widget calls the same predicate, so the two cannot disagree. The
+        # scope (and, for desktop rows, the action id) selects the grammar:
+        # `keymap.quick_send` must be judged by the rules of a global
+        # shortcut, not the rules of a terminal key.
+        return _keymap.validate_key(
+            value,
+            scope=setting.hotkey_scope or "app",
+            action_id=setting.key,
+        )
     if setting.kind is Kind.CASCADE:
         # Same rule the HOTKEY arm above states, for the same reason: `lop
         # config edit` and a hand-edited config.yml both reach this value
@@ -4032,8 +4049,13 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
         # normalizes internally before checking, so an un-normalized `ctrl+N`
         # would PASS validation and then be stored verbatim — the page would
         # display `ctrl+N` while the runtime bound a key nobody can press.
-        # One normalization at the single point every write funnels through.
-        value = _keymap.normalize_key(value)
+        # One normalization at the single point every write funnels through,
+        # in the GRAMMAR of the row's own scope (a desktop value is not a
+        # Textual key string).
+        if setting.hotkey_scope == "desktop":
+            value = _keymap.normalize_desktop_key(value, action_id=setting.key)
+        else:
+            value = _keymap.normalize_key(value)
     # The group check needs the CURRENT config, so it is supplied here rather
     # than left to each caller: this is the one function every writer funnels
     # through, including `lop config edit` and `PATCH /v1/settings`, neither of
