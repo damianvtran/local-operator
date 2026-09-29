@@ -1157,6 +1157,17 @@ REFUSAL_MATRIX: tuple[_DoorRoute, ...] = (
         {"subscription_id": "0" * 32, "visible": False, "can_notify": False},
     ),
     _DoorRoute("warm", "POST", "/v1/desktop/sessions/{session_id}/warm", {}),
+    # The checkpoint rail's naming warm (transcript UX BE-2). It takes a bridge
+    # like every other row — the errand is routed to the owner — so it must
+    # refuse on a latched daemon like every other row. (The manifest's own row
+    # arrived with BE-1's merge; the duplicate this branch briefly carried was
+    # dropped at the main rebase, so only the warm row is here.)
+    _DoorRoute(
+        "checkpoints_warm",
+        "POST",
+        "/v1/desktop/sessions/{session_id}/checkpoints/warm",
+        {"ids": ["a1"]},
+    ),
     # Added with the route, for the reason this test exists: ``/interrupt`` takes
     # a bridge like every other row, so on a latched daemon it must answer the
     # typed refusal and claim no receipt — the row is what proves the new route
