@@ -59,16 +59,18 @@ def grant_ttl_s(root: Path | None = None) -> float:
     return float(store.read_config(("network", "credentials", "grant_ttl_s"), GRANT_TTL_S, root))
 
 
-def build_auth_store(config_dir: Path | None = None) -> Any:
+def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:
     """The session's credential store: plain, or mesh-aware when this device borrows.
 
     Imported lazily through this module so ``network.credentials.store`` — and with
     it ``providers.auth_store`` — is reached only from the session construction
-    path, never from the relay's.
+    path, never from the relay's. ``db_path`` forwards verbatim (``None`` keeps
+    ``AuthStore``'s ambient default); the caller that needs it is the Radient
+    resolvers, which preserve their explicit ``<config_dir>/auth.db`` spelling.
     """
     from local_operator.network.credentials.store import build_auth_store as _build
 
-    return _build(config_dir)
+    return _build(config_dir, db_path=db_path)
 
 
 class _LocalOps:

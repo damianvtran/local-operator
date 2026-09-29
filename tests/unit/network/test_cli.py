@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -1475,6 +1476,26 @@ def _mcp_login_row(url: str) -> Any:
     return SimpleNamespace(id=1, identity_key=url, updated_at=0)
 
 
+def _radient_login_row(email: str = "owner@example.test") -> Any:
+    """A provider-login row as ``list_credentials(None)`` hands it over.
+
+    The shape is the store's ``StoredCredential`` reduced to what the ledger reads
+    (``provider``/``credential_type``/``data``). ``identity_key`` is deliberately
+    empty: ``McpTokenStorage.has_stored_row`` matches on it, and a provider row must
+    never read as an MCP server's own login.
+    """
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=2,
+        provider="radient",
+        credential_type="oauth",
+        data={"email": email},
+        identity_key="",
+        updated_at=0,
+    )
+
+
 def _share_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
     """One network, this device holding the slack login and sharing it with a peer.
 
@@ -1520,17 +1541,30 @@ def test_credentials_lists_the_shareable_ledger_per_server(
 ) -> None:
     """The 2026-09-28 offload gap: a login held here but shared nowhere had no row
     on any surface until `credential share` refused it at share time. The ledger
-    answers up front, and its ``--json`` is the contract the tool digest reads."""
+    answers up front, and its ``--json`` is the contract the tool digest reads.
+
+    PROVIDER LOGINS ARE ROWS HERE TOO (Radient org projection): the store holds a
+    Radient OAuth login, so the same listing carries a ``provider`` row beside the
+    ``server`` rows — the row the operator needed to see before the share existed."""
     self_device, peer_device = _share_fixture(root, monkeypatch)
     monkeypatch.setattr(
-        readiness, "_open_store", lambda _root: _FakeCredentialStore([_mcp_login_row(SLACK_URL)])
+        readiness,
+        "_open_store",
+        lambda _root: _FakeCredentialStore(
+            [_mcp_login_row(SLACK_URL), _radient_login_row("owner@example.test")]
+        ),
     )
     assert net_cli._cmd_credentials(Namespace(json=True, network="")) == 0  # noqa: SLF001
     payload = json.loads(capsys.readouterr().out)
     shareable = payload["shareable"]
-    # The fact sorts servers by name, and the ledger follows that order.
-    assert [row["server"] for row in shareable] == ["notion", "slack"]
-    notion, slack = shareable
+    # Servers sort by name; the provider rows follow, sorted by provider, and the
+    # ledger follows that order.
+    assert [row.get("server") or row.get("provider") for row in shareable] == [
+        "notion",
+        "slack",
+        "radient",
+    ]
+    notion, slack, radient = shareable
     assert slack == {
         "server": "slack",
         "url": SLACK_URL,
@@ -1547,8 +1581,17 @@ def test_credentials_lists_the_shareable_ledger_per_server(
         "shared_with": [],
         "remedy": f"run '/mcp login {NOTION_URL}' here first",
     }
+    # The provider row: kind and label from the same classifier the share records
+    # with, the held sentence's remedy, no share yet (nothing declares it).
+    assert radient == {
+        "provider": "radient",
+        "kind": "oauth-rotating",
+        "identity_label": "owner@example.test",
+        "shared_with": [],
+        "remedy": "lop network credential share radient --with <device>",
+    }
     # stdio servers have no login to share and are excluded entirely.
-    assert all(row["server"] != "fs" for row in shareable)
+    assert all(row.get("server") != "fs" for row in shareable)
     # And no field name carries a scrubber marker, so the tool digest cannot eat
     # the row's facts on its way to a model.
     for row in shareable:
@@ -1566,7 +1609,9 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
     and the existing nest for a share that already exists."""
     _share_fixture(root, monkeypatch)
     monkeypatch.setattr(
-        readiness, "_open_store", lambda _root: _FakeCredentialStore([_mcp_login_row(SLACK_URL)])
+        readiness,
+        "_open_store",
+        lambda _root: _FakeCredentialStore([_mcp_login_row(SLACK_URL), _radient_login_row()]),
     )
     assert net_cli._cmd_credentials(Namespace(json=False, network="")) == 0  # noqa: SLF001
     out = capsys.readouterr().out
@@ -1577,6 +1622,11 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
         " --with <device>" in out
     ), out
     assert "      shared with cloud-node-1 (session)" in out, out
+    assert (
+        "  radient  oauth-rotating  login held — share: lop network credential share radient"
+        " --with <device>" in out
+    ), out
+    assert "      signed in as owner@example.test" in out, out
     assert (
         f"  notion  http  no login here yet — run '/mcp login {NOTION_URL}' here first" in out
     ), out
@@ -1628,6 +1678,103 @@ def test_credentials_shareable_read_creates_nothing(
     capsys.readouterr()
     after = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
     assert after == before, f"the listing created files: {sorted(set(after) - set(before))}"
+
+
+def test_the_provider_ledger_read_creates_nothing(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The PROVIDER half of the ledger is an observation too (Radient org projection).
+
+    The cell above pins the no-store case; this pins the store-PRESENT case the new
+    provider arm added: with an ``auth.db`` on disk, a listing must not add a file
+    (no placement, no observation state, no new sidecar) and must not write a row.
+    The first read is a WARM-UP — SQLite may leave sidecars behind on first open —
+    and the comparison starts from there, so what is pinned is that reads add
+    nothing of their OWN.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    auth.upsert_credential(
+        "radient",
+        {
+            "type": "oauth",
+            "access": "access-fixture",
+            "refresh": "refresh-fixture",
+            "expires": int(time.time() * 1000) + 3600_000,
+            "email": "owner@example.test",
+        },
+    )
+    auth.close()
+    assert net_cli._cmd_credentials(Namespace(json=True, network="")) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert [row.get("provider") for row in payload["shareable"]] == ["radient"]
+    before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+    assert net_cli._cmd_credentials(Namespace(json=True, network="")) == 0  # noqa: SLF001
+    capsys.readouterr()
+    after = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+    assert after == before, f"the listing created files: {sorted(set(after) - set(before))}"
+
+
+def test_sharing_radient_records_the_oauth_login_over_an_older_key(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R1: the placement a share writes names the OAuth row, not an older pasted key.
+
+    ``radient-key`` aliases into ``"radient"``, so a store can hold BOTH logins under
+    one provider, and ``list_credentials`` is ``ORDER BY id``. Reading the oldest row
+    recorded ``api-key-static``/``""`` for a store whose org calls are served from the
+    OAuth row — a document the broker narrows on, wrong about the login it describes.
+    Driven through the REAL parser, as the operator types it.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    self_device, peer_device = _share_fixture(root, monkeypatch)
+    # The fixture's record is hand-built (never admitted), so its self MEMBER row
+    # carries no capabilities; the share's own capability write needs the admin one
+    # a real admission would have written.
+    record = store.load(NETWORK, root)
+    member = record.member(self_device)
+    assert member is not None
+    member.capabilities = sorted(types.capabilities_for_role("admin"))
+    store.save(record, root)
+
+    from local_operator.providers.auth_store import AuthStore
+
+    auth = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        auth.upsert_credential(
+            "radient", {"type": "api_key", "source": "login", "key": "pasted-fixture"}
+        )
+        auth.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": "access-fixture",
+                "refresh": "refresh-fixture",
+                "expires": int(time.time() * 1000) + 3600_000,
+                "email": "owner@example.test",
+            },
+        )
+    finally:
+        auth.close()
+
+    rc = net_cli.main(
+        _parser().parse_args(
+            ["network", "credential", "share", "radient", "--with", "cloud-node-1"]
+        )
+    )
+    assert rc == 0
+    capsys.readouterr()
+
+    from local_operator.network.credentials import placement as placement_mod
+
+    document = placement_mod.PlacementDocument.load(NETWORK, root, self_device=self_device)
+    entry = document.entry("radient")
+    assert entry is not None, "the share wrote no placement entry"
+    assert entry.provider == "radient"
+    assert entry.kind == "oauth-rotating"
+    assert entry.identity_label == "owner@example.test"
 
 
 def test_a_refused_share_does_not_create_a_store(

@@ -98,7 +98,7 @@ class CredentialSource(Protocol):
     def close(self) -> None: ...
 
 
-def build_auth_store(config_dir: Path | None = None) -> Any:
+def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:
     """The store a session should use: plain, or mesh-aware when this device borrows.
 
     THE ONE CONSTRUCTION SITE (``session_factory``), and the only place the 0-peer
@@ -108,17 +108,30 @@ def build_auth_store(config_dir: Path | None = None) -> Any:
     owns everything it knows about, or holds nothing, therefore takes the old path
     with the old object, and ``type(build_auth_store(cfg)) is AuthStore`` is the
     test that pins it.
+
+    ``db_path`` PASSES THROUGH to the local ``AuthStore`` and its default keeps
+    every pre-existing caller byte-identical (``None`` = the store's own
+    ``default_db_path()``). It exists because ``config_dir`` does NOT set the
+    DATABASE path — that kwarg feeds the env-override tier only — so a caller whose
+    ``config_dir`` is not the ambient one (the Radient resolvers, whose
+    ``config_dir`` can be an explicit root, and the tests driving them) must keep
+    spelling its own ``<config_dir>/auth.db``; swapping such a caller to this
+    function without the passthrough silently changes which database is read. The
+    explicit-root cell in ``tests/unit/network/test_credentials_placement.py``
+    pins it.
     """
     from local_operator.providers.auth_store import AuthStore
 
     found = placement_for_store(config_dir)
     if found is None:
-        return AuthStore(config_dir=config_dir)
+        return AuthStore(db_path=db_path, config_dir=config_dir)
     _network_id, document = found
     client = MeshCredentialClient.for_this_device(config_dir)
     if client is None:  # pragma: no cover - placement_for_store is the same predicate
-        return AuthStore(config_dir=config_dir)
-    return MeshAwareAuthStore(AuthStore(config_dir=config_dir), mesh=client, config_dir=config_dir)
+        return AuthStore(db_path=db_path, config_dir=config_dir)
+    return MeshAwareAuthStore(
+        AuthStore(db_path=db_path, config_dir=config_dir), mesh=client, config_dir=config_dir
+    )
 
 
 class MeshAwareAuthStore:
