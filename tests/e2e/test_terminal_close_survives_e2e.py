@@ -59,7 +59,7 @@ from __future__ import annotations
 import contextlib
 import os
 import pty
-import select
+import selectors
 import signal
 import subprocess
 import sys
@@ -208,12 +208,24 @@ class _Pty:
             if self._fd is None:
                 return
             try:
-                ready, _, _ = select.select([self._fd], [], [], 0.1)
+                # A selector rather than ``select.select``: ``select`` refuses
+                # any descriptor at or above ``FD_SETSIZE`` (1024), and a
+                # loaded runner hands this drain the next free fd, which can
+                # sit above that ceiling — where the wait raised
+                # ``ValueError: filedescriptor out of range in select()``
+                # instead of reading the wire (the five red death-witness
+                # cells: job 109273492099, run 36523315488; reproduced by
+                # holding 1078 fds before calling this helper).
+                # ``selectors.DefaultSelector`` is epoll on Linux and kqueue on
+                # macOS, neither of which has the limit, and it watches the
+                # same bytes on the same pty.
+                with selectors.DefaultSelector() as selector:
+                    selector.register(self._fd, selectors.EVENT_READ)
+                    if not selector.select(0.1):
+                        continue
             except OSError:
                 self._fd = None
                 return
-            if not ready:
-                continue
             try:
                 chunk = os.read(self._fd, 65536)
             except OSError:
