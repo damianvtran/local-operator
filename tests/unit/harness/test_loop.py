@@ -5811,6 +5811,8 @@ async def test_final_response_gate_ignores_non_clean_exits() -> None:
     end = events[-1]
     assert isinstance(end, AgentEndEvent)
     assert end.aborted is True
+
+
 # ---------------------------------------------------------------------------
 # Nameless tool calls (incident 2026-09-29): dropped at assembly, model re-asked
 # ---------------------------------------------------------------------------
