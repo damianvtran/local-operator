@@ -655,6 +655,47 @@ def test_org_commands_need_a_signed_in_account(
     from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
 
     assert ORG_LOGIN_REMEDY in out
+    # A device in no network keeps the single sentence: the ask-the-holder clause
+    # needs a mesh to ask (design review round 1, D3).
+    assert "lop network credential share radient --with <this device>" not in out
+
+
+def test_the_org_remedy_names_the_holder_share_on_a_mesh_member(
+    tmp_home: Path, quiet_env: None, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A member device's missing-login remedy gains the ask-the-holder clause (D3).
+
+    The GUIDE says never to run a login on a peer, so where a paired device could
+    hold the org login the remedy must name the share path a peer can act on; the
+    cell above pins the no-network shape unchanged.
+    """
+    from local_operator.network import identity as identity_mod
+    from local_operator.network import store as network_store
+    from local_operator.network.types import MemberRecord, NetworkRecord
+    from local_operator.providers import radient_credentials
+    from local_operator.providers.radient_credentials import ORG_LOGIN_REMEDY
+
+    identity = identity_mod.load_or_mint()
+    record = NetworkRecord(
+        network_id="net_org_remedy", name="home", self_device_id=identity.device_id
+    )
+    record.members.append(MemberRecord(device_id=identity.device_id, name="this-device"))
+    record.members.append(MemberRecord(device_id="d_" + "b" * 32, name="cloud-node-1"))
+    network_store.save(record)
+
+    monkeypatch.setattr(
+        radient_credentials, "resolve_radient_oauth_access_sync", lambda *a, **k: None
+    )
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "crew"])
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert ORG_LOGIN_REMEDY in out
+    assert (
+        "Or ask the device that holds it to run "
+        "`lop network credential share radient --with <this device>`." in out
+    ), out
 
 
 def test_the_local_server_does_not_restate_the_remedy_sentences() -> None:

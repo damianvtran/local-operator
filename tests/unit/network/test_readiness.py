@@ -572,7 +572,9 @@ def test_shareable_lines_render_every_login_state_once() -> None:
 
     Both row kinds render (Radient org projection): MCP-server rows keep their
     three-valued login state, and a PROVIDER-LOGIN row — which only exists when the
-    login is held — renders the held sentence plus the identity it was read from."""
+    login is held — renders the held sentence plus the identity it was read from —
+    and, for Radient only, its person-scope caution line (design review round 1,
+    D1)."""
     rows = [
         {
             "server": "slack",
@@ -606,6 +608,7 @@ def test_shareable_lines_render_every_login_state_once() -> None:
         "  odd  http  login state not known — this device's credential store could not be read",
         "  radient  oauth-rotating  login held — share: lop network credential share radient"
         " --with <device>",
+        "      organization account — share only to your own devices",
         "      signed in as owner@example.test",
         "      shared with cloud-node-1 (session)",
     ]
@@ -625,6 +628,24 @@ def test_shareable_lines_render_every_login_state_once() -> None:
         "shareable here:",
         "  openai  api-key-static  login held — share: lop network credential share openai"
         " --with <device>",
+    ]
+    # The Radient caution is not an identity line: it renders with the label
+    # absent too. The openai cell above pins that no other provider carries it.
+    assert readiness.shareable_lines(
+        [
+            {
+                "provider": "radient",
+                "kind": "oauth-rotating",
+                "identity_label": "",
+                "remedy": "lop network credential share radient --with <device>",
+                "shared_with": [],
+            }
+        ]
+    ) == [
+        "shareable here:",
+        "  radient  oauth-rotating  login held — share: lop network credential share radient"
+        " --with <device>",
+        "      organization account — share only to your own devices",
     ]
     assert readiness.shareable_lines([]) == []
 

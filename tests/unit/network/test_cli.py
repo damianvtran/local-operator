@@ -1626,6 +1626,7 @@ def test_credentials_shareable_block_renders_login_states_and_shares(
         "  radient  oauth-rotating  login held — share: lop network credential share radient"
         " --with <device>" in out
     ), out
+    assert "      organization account — share only to your own devices" in out, out
     assert "      signed in as owner@example.test" in out, out
     assert (
         f"  notion  http  no login here yet — run '/mcp login {NOTION_URL}' here first" in out

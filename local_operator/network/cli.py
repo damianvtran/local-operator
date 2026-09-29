@@ -1713,8 +1713,9 @@ def _credential_shape(key: str) -> tuple[str, str, str]:
     (``radient-key`` aliases into ``"radient"``), and org calls are served from the
     OAuth row. Reading the oldest row — ``list_credentials`` is ``ORDER BY id`` —
     recorded ``api-key-static``/``""`` for a store whose org calls are OAuth, so a
-    share looked narrower than the login actually is. Radient is the only aliased
-    MIXED bucket; every other aliased login stores an OAuth row only.
+    share looked narrower than the login actually is. The aliased MIXED buckets
+    today are ``radient``, ``xai`` and ``zai``; the OAuth row wins in all of
+    them.
     """
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
 
