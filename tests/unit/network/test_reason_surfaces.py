@@ -92,6 +92,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the peer's own reason word, rendered for a person",
     ),
+    # The MCP definition bundle's own describe: same shape, same sentence rules —
+    # a peer's or a rig's row rendered as ``kind 'name' (reason)`` for a person.
+    ("local_operator/network/mcpdefs.py", "_describe_rows", "reason"): (
+        1,
+        "the sender's or rig's reason word for a withheld/refused row, rendered for a person",
+    ),
+    # The MCP push's per-peer report: the peer's own conflict and refusal
+    # sentences, printed verbatim — the same two classes `_cmd_definitions` prints.
+    ("local_operator/network/cli.py", "_cmd_mcp", "reason"): (
+        2,
+        "the peer's own conflict and refusal sentences, printed verbatim",
+    ),
     ("local_operator/network/cli.py", "_cmd_definitions", "reason"): (
         1,
         "the peer's own conflict sentence, printed verbatim",

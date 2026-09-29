@@ -20,6 +20,7 @@ import pytest
 from local_operator.network import (
     credentials,
     definitions,
+    mcpdefs,
     mobility,
     relay,
     sync,
@@ -327,9 +328,17 @@ def test_the_shipped_slices_route_their_ops_through_the_hook(root: Path) -> None
             # bounded per bundle, and it writes durable rows, so it must not run on a
             # link's reader (see ``definitions.DEFINITIONS_OP_DEADLINE_S``).
             "net_definitions",
+            # The MCP definition sync's op (mcpdefs.py): the same shape again — a
+            # whole-bundle apply into the user's mcp.json — and bounded per bundle
+            # for the same reason (see ``mcpdefs.MCP_DEFS_OP_DEADLINE_S``).
+            "net_mcp_defs",
         }
         assert server.slow_op_deadline("net_sync") == sync.SYNC_OP_DEADLINE_S
         assert server.slow_op_deadline("net_definitions") == definitions.DEFINITIONS_OP_DEADLINE_S
+        # NIT (agent review round 1): the MCP slice joined the slow set but was
+        # the one deadline nothing asserted — the 60 s constant could decay
+        # unnoticed.
+        assert server.slow_op_deadline("net_mcp_defs") == mcpdefs.MCP_DEFS_OP_DEADLINE_S
         assert server.slow_op_deadline("net_broker") == credentials.BROKER_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_move") == mobility.MOVE_OP_DEADLINE_S
         assert server.slow_op_deadline("net_session_lifecycle") == mobility.LIFECYCLE_OP_DEADLINE_S

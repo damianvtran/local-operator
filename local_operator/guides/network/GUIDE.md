@@ -167,6 +167,19 @@ and what it mirrored from elsewhere (agents and teams are configuration and are 
 secret; a row whose text looks like a credential is withheld and named rather than
 sent, and a definition is refused on arrival for the same reason).
 
+The same deliberate half exists for MCP servers, and an offload usually needs it: a
+workload that assumed a GitLab or Linear server finds none on a freshly paired peer.
+`lop network mcp push [--peer <id>|--all-peers]` reconciles this device's user-scope
+MCP servers onto a peer (the mesh-definitions cadence also carries them after pairing,
+so a device converges on its own), and `lop network mcp state` shows what THIS device
+holds and which keys a mirror still needs. **Values never travel**: `env` and
+`headers` move as `${NAME}` references and per-key state (a literal value stays on
+the device that wrote it), an OAuth server re-registers on the peer instead of
+copying its client secret, and a mirrored server whose key the peer's store lacks is
+NOT hidden — it refuses at connect, by name, and the fix is `lop secret set <KEY>`
+on the device that runs it. A row whose text looks like a credential is withheld and
+named rather than sent, on both ends.
+
 WHAT A PEER MAY AND MAY NOT BE ASKED FOR, and each is refused in words rather than
 quietly dropped:
 
@@ -593,6 +606,8 @@ lop network show <network> --json
 lop network peers --json
 lop network doctor --json
 lop network ready --json            # --peer <device>: what a peer still needs for offload
+lop network definitions state --json
+lop network mcp state --json        # user-scope MCP servers, provenance, keys still needed
 lop network log --json              # --follow, --limit 50, --since 15m, --export <file>
 
 # lifecycle

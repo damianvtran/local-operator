@@ -306,7 +306,14 @@ def test_mcp_servers_row_names_the_missing_file(tmp_path: Path) -> None:
     assert row["ok"] is False
     assert row["code"] == readiness.CODE_NO_MCP_SERVERS
     assert "no user-scope MCP servers" in row["detail"]
-    assert any("/mcp add" in remedy for remedy in row["remedies"])
+    remedy = " ".join(row["remedies"])
+    assert "/mcp add" in remedy
+    # D1 (design round 1): the remedy must name the verb that makes these rows
+    # travel, and must not keep the clause this slice falsified ("server config
+    # is per device and is not copied over the mesh") — a shipped surface may
+    # not lie about its own sibling verb.
+    assert "lop network mcp push --peer cloud-node-1" in remedy
+    assert "per device" not in remedy and "not copied" not in remedy
 
 
 @pytest.mark.parametrize(("count", "phrase"), [(1, "1 row withheld"), (2, "2 rows withheld")])
