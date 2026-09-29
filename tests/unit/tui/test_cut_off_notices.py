@@ -346,6 +346,58 @@ async def test_a_cut_off_turns_live_cards_are_retired_as_cut_off(tmp_path, monke
         assert "interrupted" not in row, row
 
 
+@pytest.mark.asyncio
+async def test_a_settled_run_paints_no_error_card_and_the_poller_stays_quiet(
+    tmp_path, monkeypatch
+) -> None:
+    """The settle arm's surfaces: no verdict means no card — live or on return.
+
+    Session 664a234ec561's disposal settled a zero-work delivery run with an
+    ``eligible:False`` marker and NO store row (``Session.dispose``), leaving
+    the completed turn's own ``complete`` as the latest record. The surfaces
+    must read that as nothing to say: the live empty aborted end — the turn
+    row the abort persisted ([775]: an assistant message with
+    ``stop_reason="aborted"`` and no content) — keeps its standing
+    ``interrupted`` row (``test_attention.py`` pins that for any aborted
+    turn) and must paint NO error card, and the poller, reading the store the
+    settled session left behind, must not synthesise one from the absence.
+
+    The LAST phase is the canary: it publishes the row the fix removes
+    (``error | cause=disposed``) and requires the same instrument to report
+    it, so the quiet readings above cannot come from a dead probe.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _start_and_end_turn(app, pilot, aborted=True, error=None)
+        notices = _notice_texts(app)
+        assert not any("Stopped with an error" in text for text in notices), notices
+        assert all(
+            block._token != "danger" for block in _notice_blocks(app)
+        ), "the settled run's end must not wear the danger tier"
+
+        # The store a settled session leaves: the work turn's own `complete`
+        # is still the latest row — the disposal published nothing on top.
+        session.publish("complete")
+        before = _notice_texts(app)
+        await app._poll_completion_attention()
+        await pilot.pause()
+        assert _notice_texts(app) == before, "the poller must stay quiet on the settle"
+
+        # CANARY for the instrument above.
+        session.publish(
+            "error",
+            cause="disposed",
+            reason="the session was disposed while this turn was running",
+        )
+        await app._poll_completion_attention()
+        await pilot.pause()
+        assert any(
+            "Stopped with an error" in text for text in _notice_texts(app)
+        ), "the canary must be reported, or the quiet readings above are dead"
+
+
 def test_the_returned_to_turn_notice_carries_an_escalated_stops_attribution() -> None:
     """Design round 1, D1 on the row the TUI poller and the phone SHARE.
 
