@@ -90,6 +90,7 @@ from local_operator.session.spec import (
 
 if TYPE_CHECKING:  # the names `__getattr__` serves, for type checkers only
     from local_operator.harness.types import AgentEvent, EventHandler
+    from local_operator.output_contract import MarkdownSchema, decode_output
     from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
     from local_operator.session.runtime.launch import (
         EngageOutcome,
@@ -107,6 +108,7 @@ __all__ = [
     "EngageOutcome",
     "Errand",
     "EventHandler",
+    "MarkdownSchema",
     "PeerMessageErrand",
     "PromptErrand",
     "SessionEventStream",
@@ -119,6 +121,7 @@ __all__ = [
     "ViewerSessionProtocol",
     "WakeErrand",
     "WarmErrand",
+    "decode_output",
     "deliver",
     "events",
     "open_session",
@@ -143,6 +146,8 @@ _LAZY_REEXPORTS: dict[str, str] = {
     "EngageOutcome": "local_operator.session.runtime.launch",
     "AgentEvent": "local_operator.harness.types",
     "EventHandler": "local_operator.harness.types",
+    "MarkdownSchema": "local_operator.output_contract",
+    "decode_output": "local_operator.output_contract",
     "SessionProtocol": "local_operator.session.protocol",
     "ViewerSessionProtocol": "local_operator.session.protocol",
 }
@@ -633,6 +638,24 @@ async def _build_session(spec: SessionSpec, roots: SessionRoots, *, mode: str) -
         session.set_goal(spec.goal)
     if spec.name is not None:
         session.set_conversation_name(spec.name)
+    if spec.output_format is not None:
+        # The output contract, applied through the same post-open session
+        # method exec installs it with — see the docstring above for why this
+        # path calls the method rather than ``apply_startup``. Validation is
+        # ``OutputContract``'s (the one validator both paths share); a refused
+        # contract surfaces as ``SessionSpecError``, the spec surface's own
+        # error type, so callers catch one class.
+        from local_operator.output_contract import OutputContract, OutputContractError
+
+        try:
+            contract = OutputContract(
+                format=spec.output_format,
+                schema=spec.output_schema,
+                retries=2 if spec.output_retries is None else spec.output_retries,
+            )
+        except OutputContractError as error:
+            raise SessionSpecError(str(error)) from error
+        session.set_output_contract(contract)
     _install_approval_policy(session, spec.approvals)
     return session
 
@@ -739,6 +762,24 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         )
         if value is not None
     ]
+    occupancy = [
+        name
+        for name, value in (
+            ("output_format", spec.output_format),
+            ("output_schema", spec.output_schema),
+            ("output_retries", spec.output_retries),
+        )
+        if value is not None
+    ]
+    if occupancy:
+        # Enforced by the OWNER runtime, never the viewer: an attach spec that
+        # carried enforcement would be inert by construction (the viewer
+        # cannot install it), and an inert setting a caller believes in is the
+        # failure shape this surface refuses to have.
+        raise SessionSpecError(
+            "output enforcement cannot be set on an attached session; the owning "
+            "runtime decides"
+        )
     # Value equality, deliberately: ``refuse()`` is the default, so a caller
     # who spells it out is indistinguishable from one who does not — and every
     # other preset (auto/declared/callback) is refused, each enum value covered
@@ -782,6 +823,26 @@ def _refuse_spawn_extras(spec: SessionSpec) -> None:
         )
         if value not in (None, False)
     ]
+    output_fields = [
+        name
+        for name, value in (
+            ("output_format", spec.output_format),
+            ("output_schema", spec.output_schema),
+            ("output_retries", spec.output_retries),
+        )
+        if value is not None
+    ]
+    if output_fields:
+        # A spawned runtime child is composed from its environment plus the
+        # sidecars its session directory already carries; the contract is
+        # post-open session state and has no sanctioned channel to a NEW child
+        # (same rule as team/profile/tools/goal). The composition that works
+        # is named in the remedy below and in the module docstring.
+        raise SessionSpecError(
+            "spawn_session() cannot carry output enforcement "
+            f"({', '.join(output_fields)}); open the session with "
+            "open_session(..., mode='own') and engage it afterwards"
+        )
     if spec.yolo:
         blockers.append("yolo")
     if (

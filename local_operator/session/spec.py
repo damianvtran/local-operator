@@ -85,6 +85,17 @@ class SessionIsolationError(SessionSpecError):
     """The environment resolved a root the caller did not declare."""
 
 
+#: The formats a spec may enforce, duplicated from
+#: ``output_contract.OUTPUT_FORMATS`` rather than imported: this module is the
+#: import-cheap half of the SDK (stdlib + ``paths``, pinned by
+#: ``test_importing_spec_leaves_the_engine_off_the_graph``), and constructing a
+#: spec must not drag the contract's pydantic/yaml machinery in — the same
+#: stdlib-only discipline the ``tools``/``yolo`` checks follow.
+#: ``tests/unit/session/test_spec.py`` pins the two tuples together, so the
+#: duplication cannot drift.
+_OUTPUT_FORMATS: tuple[str, ...] = ("markdown", "json", "yaml", "toml")
+
+
 # ---------------------------------------------------------------------------
 # Roots — explicit, durable, and checked against the resolved environment
 # ---------------------------------------------------------------------------
@@ -414,6 +425,19 @@ class SessionSpec:
     #: False (default) silences a *spawned* runtime; True lets it inherit the
     #: launcher's notification posture. In-process sessions ignore this field.
     notifications: bool = False
+    #: Enforce the format of the assistant's final response for every turn of
+    #: this session: "markdown" | "json" | "yaml" | "toml". None (default)
+    #: leaves every turn byte-identical to today's behaviour.
+    output_format: str | None = None
+    #: Schema the decoded payload must validate against (json/yaml/toml), or a
+    #: MarkdownSchema / {"required_sections": [...]} for markdown. Accepts a
+    #: pydantic model class, dataclass, TypedDict — anything
+    #: ``pydantic.TypeAdapter`` accepts — or a raw JSON Schema mapping.
+    #: Validation is ``OutputContract``'s, so ``output_schema`` without
+    #: ``output_format`` is refused below rather than silently inert.
+    output_schema: object | None = None
+    #: Max retries after a rejected final response (0-5; default 2).
+    output_retries: int | None = None
 
     def __post_init__(self) -> None:
         if self.agent_name and self.agent_id:
@@ -439,6 +463,26 @@ class SessionSpec:
                 f"yolo=True makes an ApprovalPolicy.{self.approvals.mode}() gate "
                 "unreachable; use ApprovalPolicy.auto() (or drop yolo) instead"
             )
+        # The output-contract fields are validated cheaply HERE (stdlib only —
+        # see ``_OUTPUT_FORMATS``) and fully by ``OutputContract.__post_init__``
+        # when the session is built, which both the SDK and exec run; these
+        # refusals exist so a spec that cannot possibly work fails where it is
+        # written, before anything is constructed.
+        if self.output_format is not None:
+            if self.output_format not in _OUTPUT_FORMATS:
+                raise SessionSpecError(
+                    "output_format must be one of " + ", ".join(_OUTPUT_FORMATS)
+                )
+        if self.output_schema is not None and self.output_format is None:
+            raise SessionSpecError("output_schema requires output_format")
+        if self.output_retries is not None and self.output_format is None:
+            raise SessionSpecError("output_retries requires output_format")
+        if self.output_retries is not None and (
+            isinstance(self.output_retries, bool)
+            or not isinstance(self.output_retries, int)
+            or not 0 <= self.output_retries <= 5
+        ):
+            raise SessionSpecError("output_retries must be between 0 and 5")
 
     def to_namespace(self) -> argparse.Namespace:
         """The narrow session-factory namespace, field-for-field as exec builds it.
@@ -446,7 +490,11 @@ class SessionSpec:
         Do not add fields here. ``session_factory._prepare`` receives only this
         namespace, and the parity test pins it to the literal in
         ``exec_mode._make_default_session_factory``; anything runner-level
-        belongs in :meth:`to_runner_args`.
+        belongs in :meth:`to_runner_args`. The output-contract fields are
+        deliberately absent for that same reason (the eight-field pin is the
+        published adapter's shape), and they need no home here anyway: they are
+        applied post-open through ``Session.set_output_contract``, exactly like
+        ``tools``/``goal``/``name``.
         """
         return argparse.Namespace(
             hosting=self.hosting,
@@ -471,6 +519,14 @@ class SessionSpec:
         form — with the runner-level keys exec's runner owns (``loop``,
         ``clear_goal``, ``control``) present and off, so the helpers' ``getattr``
         reads are answered rather than defaulted.
+
+        The output-contract keys are deliberately NOT included: the SDK's schema
+        spelling is a type or mapping, not a file path, so the shared
+        ``resolve_startup`` validation (which reads a path) does not cover it.
+        ``resolve_output_contract`` reads the three keys with ``getattr(...,
+        None)`` defaults and an absent key means "not declared"; the common
+        validation is ``OutputContract.__post_init__``, which
+        ``sdk._build_session`` runs directly.
         """
         return argparse.Namespace(
             **vars(self.to_namespace()),

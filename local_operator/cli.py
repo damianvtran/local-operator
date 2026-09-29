@@ -10295,6 +10295,18 @@ def main() -> int:
                 # hidden exactly as before. In `STARTUP_FIELDS`, so the detached
                 # worker is told the same thing.
                 workstream=bool(getattr(args, "workstream", False)),
+                # The output-contract flags, getattr'd like the additive flags
+                # above; ``output_schema`` is absolutised HERE, before the
+                # optional ``--background`` process boundary, because the
+                # detached worker resolves it from its own cwd and a relative
+                # path would silently name a different file there.
+                output_format=getattr(args, "output_format", None),
+                output_schema=(
+                    os.path.abspath(args.output_schema)
+                    if getattr(args, "output_schema", None)
+                    else None
+                ),
+                output_retries=getattr(args, "output_retries", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast

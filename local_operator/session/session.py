@@ -252,6 +252,11 @@ if TYPE_CHECKING:
     # It only holds the manager the composition root hands it.
     from local_operator.mcp.manager import McpManager
 
+    # Type-only: the contract itself is built by the host that installs it
+    # (``exec_startup`` / ``sdk._build_session``), and the session holds the
+    # object without ever constructing one.
+    from local_operator.output_contract import OutputContract
+
     # Type-only for the same reason ``resume`` is imported lazily at its two
     # call sites below: ``cli.py``'s startup path is guarded by a test that
     # fails if resolving ``--resume`` drags the engine in, and that guard runs
@@ -2594,6 +2599,12 @@ class Session:
         #: tell apart from "declare nothing" (an empty inventory strands a
         #: session with nothing to reach).
         self._attached_profile_tools: tuple[str, ...] = ()
+        #: This session's final-response OUTPUT CONTRACT, or ``None`` for the
+        #: default: every turn ends exactly as it did before contracts existed.
+        #: Set through :meth:`set_output_contract` by a host that needs the
+        #: final answer in a known format (``lop exec --output-format``, an SDK
+        #: spec) — session state, like the tool declaration, never persisted.
+        self._output_contract: OutputContract | None = None
         self._has_ui = has_ui
         self._cwd = cwd or "."
         self._skill_resolver = skill_resolver
@@ -4466,6 +4477,14 @@ class Session:
         desired = self._system_blocks(model)
         if inspect.isawaitable(desired):
             desired = await desired
+        if self._output_contract is not None:
+            # The contract is announced to the model, because otherwise every
+            # first attempt is a coin flip — and announced WHOLE (a partial
+            # schema is worse than none; the caller opted in). Appended before
+            # the epoch/delta machinery, so a contract installed before the
+            # first turn rides the frozen prefix and a mid-session set becomes
+            # an ordinary state delta like the tool inventory's.
+            desired = list(desired) + [self._output_contract.system_block()]
         # Before the epoch/delta machinery sees them, so a tool installed after
         # construction is compared, persisted and journalled as the inventory
         # that will actually be advertised. Reconciling afterwards would make
@@ -7832,6 +7851,30 @@ class Session:
         self.refresh_tools(self._tools)
         self.materialize_declared_tools()
 
+    def set_output_contract(self, contract: "OutputContract | None") -> None:
+        """Enforce ``contract`` on this session's final responses, or clear it.
+
+        Post-open session state, installed the same way ``set_tool_inventory``
+        is and by the same two hosts (``exec_startup.apply_startup`` and
+        ``sdk._build_session``): the session owns the state, the harness loop
+        reads it through ``LoopConfig.final_response_gate``, and ``None`` — the
+        default — leaves every turn byte-identical to today.
+
+        REFUSED while a turn is streaming rather than queued: the gate is read
+        once per run, at the moment the run's final response is finalized, so a
+        contract installed mid-stream would either apply to a response already
+        in flight (an inert setting the caller believes in) or be silently
+        dropped. Either way the caller gets the refusal now, when the exchange
+        is still theirs to sequence.
+
+        Not persisted, deliberately: like ``--tools``, the enforcement is a
+        property of THIS run's invocation. A later ``--resume`` without the
+        flag is unrestricted.
+        """
+        if self._is_streaming:
+            raise RuntimeError("cannot change the output contract while a turn is running")
+        self._output_contract = contract
+
     def materialize_declared_tools(self) -> tuple[str, ...]:
         """Grant the SCHEMAS of this session's declared tools that are lazy.
 
@@ -10335,6 +10378,12 @@ class Session:
                 record_tool_call=self._record_tool_call,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
+                # This session's output contract (or None). Read here, at the one
+                # place a turn's config is built, so every consumer of this
+                # session — exec foreground, the detached worker, an SDK
+                # session — enforces the same thing the host installed via
+                # ``set_output_contract``.
+                final_response_gate=self._output_contract,
             )
 
             new_messages: list[AgentMessage] = []

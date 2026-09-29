@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,14 @@ STARTUP_FIELDS = (
     # front end and silently lost, and the workstream the operator asked for
     # would come back hidden.
     "workstream",
+    # The final-response output contract, appended here rather than in a
+    # bespoke branch of ``build_worker_argv``: membership is what makes a
+    # ``--background`` run the same request run elsewhere, AND what makes the
+    # ``--status`` no-run-options guard cover them without a second list to
+    # drift from (its guard reads this tuple).
+    "output_format",
+    "output_schema",
+    "output_retries",
 )
 
 #: Separator between tool names in ``--tools``. A COMMA, not a space: the flag's
@@ -185,6 +194,125 @@ def add_startup_arguments(parser: argparse.ArgumentParser) -> None:
             "--control for that). Stamps nothing outside an agent's shell"
         ),
     )
+    parser.add_argument(
+        "--output-format",
+        choices=("markdown", "json", "yaml", "toml"),
+        default=None,
+        help=(
+            "Enforce the format of the assistant's FINAL response. The run fails "
+            "(exit 1) if no valid payload is produced within --output-retries. "
+            "Default: no enforcement — behaviour is unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--output-schema",
+        metavar="PATH",
+        help=(
+            "JSON Schema file the decoded JSON/YAML/TOML payload must satisfy. For "
+            "--output-format markdown: a JSON object {'required_sections': [...]}. "
+            "Requires --output-format."
+        ),
+    )
+    parser.add_argument(
+        "--output-retries",
+        type=int,
+        metavar="N",
+        help=(
+            "Max retries after a failed final response (0-5; default 2). "
+            "Requires --output-format."
+        ),
+    )
+
+
+def resolve_output_contract(args: Any) -> Any:
+    """The output contract this invocation declares, or ``None`` when unenforced.
+
+    Validation lives HERE, next to the other preflight refusals and before any
+    session exists: the schema FILE is read, parsed and meta-schema-checked now,
+    so a bad schema fails as ``exec failed: …`` with no session directory left
+    behind — and the detached worker re-resolves identically on its own side of
+    the process boundary.
+
+    All three reads use ``getattr(..., None)`` defaults, because the SDK's wider
+    namespace deliberately does not carry these keys: an SDK schema is a type or
+    mapping rather than a file path, so ``sdk._build_session`` constructs the
+    contract itself (through the ``OutputContract`` validation both paths
+    share) and an absent key here must read as "not declared", never raise.
+    """
+    output_format = getattr(args, "output_format", None)
+    output_schema = getattr(args, "output_schema", None)
+    retries = getattr(args, "output_retries", None)
+    if output_format is None:
+        if output_schema is not None:
+            raise ValueError("--output-schema requires --output-format")
+        if retries is not None:
+            raise ValueError("--output-retries requires --output-format")
+        return None
+    if retries is not None and not (isinstance(retries, int) and 0 <= retries <= 5):
+        raise ValueError("--output-retries must be between 0 and 5")
+    from local_operator.output_contract import OutputContract, OutputContractError
+
+    schema = _load_output_schema(output_format, output_schema) if output_schema else None
+    try:
+        return OutputContract(
+            format=output_format,
+            schema=schema,
+            retries=2 if retries is None else retries,
+        )
+    except OutputContractError as error:
+        # Re-raised as a plain ValueError so the caller's existing
+        # ``except (ValueError, OSError)`` arm prints it behind ``exec failed:``
+        # with the flag vocabulary the operator actually typed.
+        raise ValueError(str(error)) from error
+
+
+def _load_output_schema(output_format: str, path: str) -> Any:
+    """Read one ``--output-schema`` FILE into the contract's schema vocabulary.
+
+    The file speaks JSON in every mode — a JSON Schema for json/yaml/toml, or
+    the markdown sections object — and every failure names the flag and the
+    path, because this message is the operator's only channel for a file they
+    wrote and cannot see re-parsed.
+    """
+    import json
+
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as error:
+        raise ValueError(f"cannot read --output-schema file '{path}': {error}") from error
+    try:
+        loaded = json.loads(text)
+    except ValueError as error:
+        raise ValueError(f"--output-schema file is not valid JSON: {error}") from error
+    if output_format == "markdown":
+        # The one schema vocabulary markdown has, checked to the exact shape
+        # the flag documents: a file that "almost" matches refuses now rather
+        # than validating nothing later.
+        if (
+            not isinstance(loaded, dict)
+            or set(loaded) != {"required_sections"}
+            or not isinstance(loaded["required_sections"], list)
+            or not all(isinstance(item, str) for item in loaded["required_sections"])
+        ):
+            raise ValueError(
+                '--output-schema for markdown must be {"required_sections": ["<section>", ...]}'
+            )
+        return loaded
+    from jsonschema import Draft202012Validator
+
+    try:
+        Draft202012Validator.check_schema(loaded)
+    except Exception as error:  # noqa: BLE001 — jsonschema's own failure classes
+        raise ValueError(
+            f"--output-schema is not a valid JSON Schema: {_schema_failure(error)}"
+        ) from error
+    return loaded
+
+
+def _schema_failure(error: Exception) -> str:
+    """jsonschema's ``SchemaError`` carries a one-line ``message``."""
+    message = getattr(error, "message", None)
+    return " ".join(str(message if message else error).split())
 
 
 def resolve_startup(args: Any) -> Any:
@@ -263,6 +391,14 @@ def resolve_startup(args: Any) -> Any:
                 f"No role or specialist named {args.profile!r}. "
                 f"Available roles: {available}. Add your own with 'lop agents create'"
             )
+    # The output contract's flags are validated HERE, before anything is
+    # constructed, exactly like ``--tools`` above: the schema file is read and
+    # meta-schema-checked now, so a bad schema is ``exec failed: …`` with no
+    # session directory behind it — and the detached worker refuses the same
+    # way when it re-resolves on its own side of the process boundary. The
+    # result is discarded on purpose: the contract is built again from the same
+    # flags in ``apply_startup``, the one place a contract can be installed.
+    resolve_output_contract(args)
     return team
 
 
@@ -336,6 +472,13 @@ def apply_startup(session: Any, args: Any, team: Any) -> None:
             inventory,
             unattended=not getattr(args, "control", False) and not stdin_is_tty,
         )
+    # The output contract is built and installed HERE — re-resolved from the
+    # same flags, not carried over from resolve_startup's validation pass — so
+    # the object the loop reads belongs to this session's invocation. ``None``
+    # (no --output-format) installs nothing: the byte-identical default.
+    contract = resolve_output_contract(args)
+    if contract is not None:
+        session.set_output_contract(contract)
     if getattr(args, "clear_goal", False):
         session.set_goal("")
     elif getattr(args, "goal", None) is not None:
