@@ -34,6 +34,12 @@ FORMATTER_PARITY = (
     Path(__file__).resolve().parents[3] / "local_operator/mobile/web/src/lib/format.parity.json"
 )
 
+#: The generated spend/context fixture, pinned by the same two-suite contract.
+SPEND_CONTEXT_PARITY = (
+    Path(__file__).resolve().parents[3]
+    / "local_operator/mobile/web/src/lib/spend-context.parity.json"
+)
+
 
 @pytest.mark.asyncio
 async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
@@ -604,6 +610,201 @@ def test_the_formatter_fixture_is_what_its_generator_produces() -> None:
 
     assert FORMATTER_PARITY == FIXTURE, "the generator writes the file this suite reads"
     assert FORMATTER_PARITY.read_text() == render()
+
+
+def test_the_phone_spend_context_fixture_still_matches_the_python_sources() -> None:
+    """The spend/context bridge's Python half (mobile parity phase 1).
+
+    `web/src/lib/spend-context.ts` ports the money ladder
+    (`tui/costs.py::format_usd` / `micro_from_usd`), the spend composite
+    (`FrontendSessionState.cumulative_cost` / `cumulative_cost_knowledge` plus
+    the band's `_spend_text` rules) and the context reading
+    (`status_line.py::context_spelling` / `context_semantic_color`,
+    `frontend_state.py::format_context_tokens` / `format_window`). ONE
+    generated artifact — `spend-context.parity.json`, written by
+    `scripts/generate_spend_context_parity.py` — is asserted here and by the
+    vitest suite, so neither side can drift in silence while both stay green.
+
+    The spend cases are recomputed from a REAL `FrontendSessionState(**inputs)`
+    rather than compared against literals, so the property answers themselves
+    are the contract: a change to `cumulative_cost` fails this suite, and the
+    TS port then has to be regenerated to match.
+    """
+    from local_operator.session.frontend_state import (
+        CostKnowledge,
+        FrontendSessionState,
+    )
+    from local_operator.tui.costs import (
+        LOWER_BOUND_MARK,
+        UNKNOWN_COST_CELL,
+        format_usd,
+        micro_from_usd,
+    )
+    from local_operator.tui.widgets.status_line import (
+        context_semantic_color,
+        context_spelling,
+        format_cost,
+    )
+
+    fixture = json.loads(SPEND_CONTEXT_PARITY.read_text())
+
+    fixed = fixture["pyFixed"]
+    assert len(fixed) > 70, "the fixture must keep covering real ties and near-ties"
+    for value, digits, expected in fixed:
+        assert format(value, f".{digits}f") == expected, (value, digits)
+
+    money = fixture["money"]
+    assert len(money) > 15, "every ladder crossing stays covered"
+    for micro, expected in money:
+        assert format_usd(micro) == expected, micro
+
+    micros = fixture["micro"]
+    assert len(micros) >= 10, "the float→micro step keeps its exact-tie cases"
+    for cost, expected in micros:
+        assert micro_from_usd(cost) == expected, cost
+
+    spend = fixture["spend"]
+    assert len(spend) >= 35, "every ledger combination and spelling stays covered"
+    spend_keys = (
+        "cumulative_parent_cost",
+        "child_costs",
+        "subagent_cost",
+        "subagent_cost_knowledge",
+        "cost_knowledge",
+    )
+    for values, usage, expected in spend:
+        inputs: dict[str, Any] = {}
+        for key, value in zip(spend_keys, values, strict=True):
+            # The fixture records an ABSENT non-Optional field as None (it was
+            # recorded from the case's inputs, not from the constructed model);
+            # the constructor default is what the generator actually fed the
+            # model, so omit rather than pass None, which the model refuses.
+            if value is None and key in {"child_costs", "cost_knowledge"}:
+                continue
+            inputs[key] = value
+        state = FrontendSessionState(session_id="parity", epoch="parity", **inputs)
+        total = state.cumulative_cost
+        knowledge = state.cumulative_cost_knowledge
+        is_floor = knowledge in {CostKnowledge.PARTIAL, CostKnowledge.FLOOR}
+        if total is None:
+            billed = bool(usage and (usage[0] or usage[1]))
+            text = UNKNOWN_COST_CELL if billed else ""
+        elif not total:
+            text = ""
+        else:
+            text = f"{LOWER_BOUND_MARK if is_floor else ''}{format_cost(total)}"
+        assert [total, knowledge.value, is_floor, text] == expected, inputs
+
+    context = fixture["context"]
+    assert len(context) > 40, "every band crossing and spelling form stays covered"
+    for tokens, window, spelling, rung in context:
+        assert context_spelling(tokens, window) == spelling, (tokens, window)
+        assert context_semantic_color(tokens, window) == rung, (tokens, window)
+
+
+def test_the_spend_context_fixture_is_what_its_generator_produces() -> None:
+    """The provenance half of the spend/context pin.
+
+    Both suites assert the fixture's content against their own formatter,
+    which catches a formatter drifting but says nothing about the FILE: a hand
+    edit that shrank a section while keeping it over the suites' bounds would
+    shrink coverage with every test green. ``render()`` is the generator's own
+    bytes, so comparing against it pins the file; CI runs this suite, so it is
+    not only behind the script's ``--check`` flag.
+    """
+    from scripts.generate_spend_context_parity import FIXTURE, render
+
+    assert SPEND_CONTEXT_PARITY == FIXTURE, "the generator writes the file this suite reads"
+    assert SPEND_CONTEXT_PARITY.read_text() == render()
+
+
+def test_the_tui_hosts_refresh_publishes_the_stores_spend_and_context_block() -> None:
+    """The TUI host's half of the spend/context read (the serving handle's twin).
+
+    Both hosts must publish the same block off the same canonical store, or the
+    phone sees one figure while a session is runtime-hosted and another while
+    it is TUI-hosted. Each host's suite pins its OWN path against the store's
+    values — this is the TUI half; see
+    `tests/unit/session/runtime/test_serving.py` for the other — which is what
+    keeps the two call sites from drifting without a literal cross-host test.
+
+    The shape chosen exercises the exact-assignment rule the fold documents:
+    the parent figure is legitimately `None` while children ARE known, so a
+    `set_state`-style `None`-skip would keep a stale parent alive here.
+    """
+    from local_operator.harness.types import Usage
+    from local_operator.session.frontend_state import (
+        CostKnowledge,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    class Session(FakeSession):
+        pass
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+    session = Session()
+    store = FrontendStateStore(FrontendSessionState(session_id="sess-1", epoch="t"))
+    session._frontend_state_store = store  # type: ignore[attr-defined]
+    store.mutate(
+        cumulative_parent_cost=None,
+        child_costs={"job-a": 0.5},
+        subagent_cost=2.0,
+        subagent_cost_knowledge=CostKnowledge.PARTIAL,
+        cost_knowledge=CostKnowledge.EXACT,
+        context_tokens=12_400,
+        context_window=200_000,
+        context_is_estimate=False,
+        last_usage=Usage(input_tokens=9_000, output_tokens=100),
+    )
+
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    handle._refresh_state()
+
+    projection = handle._fold.projection
+    assert projection.cumulative_parent_cost is None
+    assert projection.child_costs == {"job-a": 0.5}
+    assert projection.subagent_cost == 2.0
+    assert projection.subagent_cost_knowledge == CostKnowledge.PARTIAL
+    assert projection.cost_knowledge == CostKnowledge.EXACT
+    assert projection.context_tokens == 12_400
+    assert projection.context_window == 200_000
+    assert projection.context_is_estimate is False
+    assert projection.usage == {"input_tokens": 9_000, "output_tokens": 100}
+
+
+def test_a_store_less_tui_host_keeps_the_spend_and_context_defaults() -> None:
+    """The serving handle's defaults test, mirrored for the TUI host.
+
+    Both hosts publish the block only from a canonical store — a reduced host
+    (no store) or a durable-only rebuild must land on ``None``/``{}``/
+    ``"unknown"`` rather than a synthesised zero. See
+    `test_serving.py::test_a_store_less_session_keeps_the_spend_and_context_defaults`
+    for the other half.
+    """
+
+    class Session(FakeSession):
+        pass
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+    handle = TuiSessionHandle(App(Session()))  # type: ignore[arg-type]
+    handle._refresh_state()
+    p = handle._fold.projection
+    assert p.cumulative_parent_cost is None
+    assert p.child_costs == {}
+    assert p.subagent_cost is None
+    assert p.subagent_cost_knowledge is None
+    assert p.cost_knowledge == "unknown"
+    assert p.context_tokens is None
+    assert p.context_window is None
+    assert p.context_is_estimate is None
+    assert p.usage == {}
 
 
 @pytest.mark.asyncio

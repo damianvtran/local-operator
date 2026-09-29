@@ -2939,6 +2939,48 @@ class ProjectionFold:
             p.streaming = streaming
         self._bump()
 
+    def set_spend_context(
+        self,
+        *,
+        cumulative_parent_cost: float | None,
+        child_costs: dict[str, float],
+        subagent_cost: float | None,
+        subagent_cost_knowledge: str | None,
+        cost_knowledge: str,
+        context_tokens: int | None,
+        context_window: int | None,
+        context_is_estimate: bool | None,
+        usage: dict[str, int],
+    ) -> None:
+        """Adopt the store's spend/context block EXACTLY, then bump.
+
+        Why not ``set_state``: its ``None``-skipping is right for scalars whose
+        only absence is "not provided this call", and wrong here, where
+        ``None`` is a legitimate READING — "money we cannot state", "no window
+        known yet". A skip-on-``None`` method would keep a stale older value
+        alive exactly when the truth is unknown, which is the confident lie
+        the whole unknown/floor/partial discipline exists to refuse
+        (``cost_knowledge`` falling back to ``"unknown"`` is likewise a value,
+        not an absence). Every parameter is therefore required and assigned
+        unconditionally: the callers read the whole block from one store in
+        one pass, so a partial update is not a state this fold expresses.
+
+        ``child_costs``/``usage`` must be caller-owned copies (the store's
+        ``spend_context_copy`` builds them fresh); the fold keeps the objects
+        it is handed so a repaint never re-copies them.
+        """
+        p = self.projection
+        p.cumulative_parent_cost = cumulative_parent_cost
+        p.child_costs = child_costs
+        p.subagent_cost = subagent_cost
+        p.subagent_cost_knowledge = subagent_cost_knowledge
+        p.cost_knowledge = cost_knowledge
+        p.context_tokens = context_tokens
+        p.context_window = context_window
+        p.context_is_estimate = context_is_estimate
+        p.usage = usage
+        self._bump()
+
     # -- internals ----------------------------------------------------------
 
     def _reasoning_row(self, message_id: str, delta: str) -> None:

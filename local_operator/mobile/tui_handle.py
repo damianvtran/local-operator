@@ -1751,6 +1751,26 @@ class TuiSessionHandle(SessionHandle):
             # lifecycle events are authoritative for ``streaming``;
             # ``_reconcile_streaming`` covers attach and command boundaries.
         )
+        # The spend + context glance: the same read the serving handle's
+        # ``_refresh_state`` makes, off the same canonical store, so the two
+        # hosts' projections cannot disagree about a figure. See that site for
+        # why the reads go through ``read_field`` + ``spend_context_copy``
+        # rather than ``session.frontend_state`` (the whole-state deep copy)
+        # and why ``observe_event`` ordering upstream makes this fresh.
+        store = getattr(session, "_frontend_state_store", None)
+        if store is not None:
+            child_costs, usage = store.spend_context_copy()
+            self._fold.set_spend_context(
+                cumulative_parent_cost=store.read_field("cumulative_parent_cost"),
+                child_costs=child_costs,
+                subagent_cost=store.read_field("subagent_cost"),
+                subagent_cost_knowledge=store.read_field("subagent_cost_knowledge"),
+                cost_knowledge=store.read_field("cost_knowledge"),
+                context_tokens=store.read_field("context_tokens"),
+                context_window=store.read_field("context_window"),
+                context_is_estimate=store.read_field("context_is_estimate"),
+                usage=usage,
+            )
         comms = getattr(session, "_subagent_comms", None)
         if comms is not None:
             self._fold.set_subagent_details(comms)

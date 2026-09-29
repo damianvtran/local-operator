@@ -867,6 +867,32 @@ class SessionProjection:
     #: shows "1 of N" so the user knows more cards follow this one.
     pending_count: int = 0
     usage: dict[str, int] = field(default_factory=dict)  # input/output tokens
+    # -- the spend + context glance (phase 1 of the mobile parity program) --
+    # The session's spend, as the canonical store holds it: the SAME inputs the
+    # desktop strip reads, never a formatted total. The phone spells them with
+    # its own port of the TUI ladder, so the wire stays raw numbers and rungs.
+    #
+    # ``None`` on ``cumulative_parent_cost`` is "money we cannot state" —
+    # distinct from ``0.0``, which is a real zero — and ``child_costs`` empty
+    # means "no children", never "children cost nothing". ``subagent_cost`` /
+    # ``subagent_cost_knowledge`` carry the owner ledger that SUPERSEDES the
+    # compatibility map (a reader must use one or the other, never add both —
+    # the double-count rule); ``cost_knowledge`` is the rung for the parent
+    # figure alone (CostKnowledge's values: unknown|exact|partial|floor).
+    cumulative_parent_cost: float | None = None
+    child_costs: dict[str, float] = field(default_factory=dict)
+    subagent_cost: float | None = None
+    subagent_cost_knowledge: str | None = None
+    cost_knowledge: str = "unknown"
+    # The context reading: tokens in use, the window they are measured against
+    # (``None``/0 = the window is unknown, and a percentage is impossible —
+    # the phone spells ``12.4k/—`` instead), and whether the token figure is
+    # the harness's estimate rather than a provider receipt. All three are
+    # defaulted: a pre-upgrade runtime, a durable rebuild or a session that
+    # has never reported must invent nothing.
+    context_tokens: int | None = None
+    context_window: int | None = None
+    context_is_estimate: bool | None = None
     version: int = 0  # projection epoch; the phone drops stale repaints
     attention: dict[str, Any] = field(default_factory=dict)
 

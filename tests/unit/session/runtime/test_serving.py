@@ -2835,3 +2835,79 @@ async def test_a_subagent_start_still_republishes_the_roster_inline() -> None:
     session.emit(SubagentStartEvent(job_id="child", label="child"))
 
     assert comms.passes == 1
+
+
+# =============================================================================
+# The spend + context glance (mobile parity phase 1)
+# =============================================================================
+
+
+def test_the_refresh_path_publishes_the_stores_spend_and_context_block() -> None:
+    """The phone's per-event refresh reads the canonical store, field for field.
+
+    This doubles as the allow-list guard: ``read_field`` raises ``KeyError``
+    for any name the shareable set does not carry, and this path runs after
+    every folded event, so a missing name would be a per-event crash on a live
+    session rather than a lag. Every value is compared so a refresh that stops
+    reading one fails here.
+
+    ``None`` is asserted through as a VALUE (the store holds nulls; the
+    projection must too) — see ``set_spend_context`` for why a
+    skip-on-``None`` assignment would be the wrong shape.
+    """
+    from local_operator.harness.types import Usage
+    from local_operator.session.frontend_state import (
+        CostKnowledge,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+
+    handle, session = make_handle()
+    store = FrontendStateStore(FrontendSessionState(session_id="sess-1", epoch="t"))
+    session._frontend_state_store = store  # type: ignore[attr-defined]
+    store.mutate(
+        cumulative_parent_cost=1.25,
+        child_costs={"job-a": 0.5},
+        subagent_cost=None,
+        subagent_cost_knowledge=None,
+        cost_knowledge=CostKnowledge.PARTIAL,
+        context_tokens=12_400,
+        context_window=200_000,
+        context_is_estimate=True,
+        last_usage=Usage(input_tokens=9_000, output_tokens=100),
+    )
+
+    handle._refresh_state()
+
+    p = handle._fold.projection
+    assert p.cumulative_parent_cost == 1.25
+    assert p.child_costs == {"job-a": 0.5}
+    assert p.subagent_cost is None, "the store's null must publish as a null"
+    assert p.subagent_cost_knowledge is None
+    assert p.cost_knowledge == CostKnowledge.PARTIAL
+    assert p.context_tokens == 12_400
+    assert p.context_window == 200_000
+    assert p.context_is_estimate is True
+    assert p.usage == {"input_tokens": 9_000, "output_tokens": 100}
+
+
+def test_a_store_less_session_keeps_the_spend_and_context_defaults() -> None:
+    """A reduced host (no store) must not invent numbers, and must not crash.
+
+    ``FakeSession`` carries no store, like an embedder facade: the defaults
+    stand — ``None``/``{}``/``"unknown"`` — which is what a durable-only
+    rebuild lands on too. This is the other half of the refresh contract: the
+    block is populated only from the store, never from a synthesised zero.
+    """
+    handle, _ = make_handle()
+    handle._refresh_state()
+    p = handle._fold.projection
+    assert p.cumulative_parent_cost is None
+    assert p.child_costs == {}
+    assert p.subagent_cost is None
+    assert p.subagent_cost_knowledge is None
+    assert p.cost_knowledge == "unknown"
+    assert p.context_tokens is None
+    assert p.context_window is None
+    assert p.context_is_estimate is None
+    assert p.usage == {}
