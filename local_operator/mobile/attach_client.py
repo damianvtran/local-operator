@@ -1441,6 +1441,14 @@ class AttachClient:
             reply.get("error_count"),
             reply.get("error_trigger"),
             getattr(self, "_drain_phrase", ""),
+            # The audio refusal's facts (agent review round 1, m2): the model
+            # label, the reason clause and the format flag ride as their own
+            # bounded fields so the rebuilt refusal NAMES the model and the
+            # report on this side too; a frame without them (an older runtime)
+            # rebuilds the bare sentence exactly as before.
+            model=reply.get("error_model"),
+            report=reply.get("error_report"),
+            format_unsupported=reply.get("error_format"),
         )
         if known is not None:
             raise known

@@ -5972,6 +5972,26 @@ class RuntimeServer:
                 # path, host or identity, so it does not widen what
                 # ``session/errors.py`` admits across this boundary.
                 frame["error_count"] = exc.count
+            if isinstance(exc, AudioInputUnsupported):
+                # THE REFUSAL'S FACTS, AS THEIR OWN FIELDS rather than prose
+                # (agent review round 1, m2): the far side rebuilds the SAME
+                # refusal sentence around them (``admission_error``
+                # sanitises and caps each), so a desktop 409 names the model
+                # and the reason instead of the bare form, and a NEWER frame
+                # still degrades sanely on an older client — the unknown
+                # fields are dropped and the bare sentence rebuilt, which is
+                # what that client always produced. Bounded here as well as
+                # there, defensively: the sender owns its own caps.
+                # Present only when the refusal actually carries them: absent
+                # fields are the SAME shape an older runtime's frame sends, so
+                # the decoder has one absence to understand, and the bare form
+                # stays byte-for-byte what it always was.
+                if exc.model:
+                    frame["error_model"] = str(exc.model)[:200]
+                if exc.report:
+                    frame["error_report"] = str(exc.report)[:300]
+                if exc.format_unsupported:
+                    frame["error_format"] = True
             await self._send_to(conn, frame)
             await self._push()
 
