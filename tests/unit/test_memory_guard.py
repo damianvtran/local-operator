@@ -716,6 +716,25 @@ def test_fragments_survive_a_pid_recycle_cycle() -> None:
     assert all(fragment.mb >= 0 for fragment in ranked)
 
 
+def test_fragments_are_root_aware_and_never_walk_past_a_runtime() -> None:
+    """A nested runtime is neither summed, nor listed, nor walked past.
+
+    This is the property that makes the NUMBER and the STOP agree: what the
+    ranking credits is exactly what the reaper may end.
+    """
+    rows = _rows(
+        (1, 0, 10),  # the runtime root
+        (2, 1, 500),  # a command under it
+        (3, 2, 400),  # a NESTED live runtime (a root)
+        (4, 3, 300),  # reachable only THROUGH the nested runtime
+    )
+    ranked = mg.fragments_ranked(rows, roots=[1, 3])
+    assert [(fragment.pid, fragment.mb, fragment.pids) for fragment in ranked] == [
+        (2, 500, (2,)),
+        (4, 300, (4,)),
+    ]
+
+
 def test_fragments_tie_break_deterministically_by_pid() -> None:
     rows = _rows((50, 1, 400), (40, 1, 400))
     ranked = mg.fragments_ranked(rows, roots=[1])

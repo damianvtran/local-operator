@@ -17,7 +17,8 @@ forks a process:
    reads (``session.runtime.registry``). The pass exists for THIS install's
    fleet; another store's processes are that store's business, the same scope
    limit the residency sweep documents.
-2. The process table once (``ps -axo pid=,ppid=``) for topology only.
+2. The process table once (``ps -axo pid=,ppid=,pgid=``) for topology, with
+   ``pgid`` carried solely for the pre-signal re-check.
 3. One batched memory read of the fleet's closure
    (``mobile.resources.session_resource_usage``) — ``ri_phys_footprint`` on
    macOS, which INCLUDES compressed pages, with RSS as the fallback.
@@ -25,15 +26,20 @@ forks a process:
 **WHAT IT DECIDES.** ``memory_guard.machine_verdict`` grades the sum: ``ok``;
 ``warn`` (a loud line naming the largest fragments — the operator's chance to
 act); ``act`` (the sum is closing on the device, and the single largest
-non-runtime fragment is ended when it is at or above
-``MACHINE_FRAGMENT_MIN_MB`` — through ``procstate.terminate_process_tree``, the
-same group-stop primitive the per-command guard uses, and never a session
-runtime: a conversation is not a runaway, the command under it is).
+non-runtime fragment at or above ``MACHINE_FRAGMENT_MIN_MB`` is ended). The
+stop walks the fragment's SUBTREE — every pid the sum counted, descendants
+first and the fragment root last — through ``procstate.terminate_process_tree``,
+the same stop primitive the per-command guard uses; a leader's group kill
+covers anything the walk missed. Immediately before the first signal the
+candidate's row is re-read, and any change withholds the stop (see
+:func:`_candidate_still_stands`). Never a session runtime: a conversation is
+not a runaway, the command under it is.
 
 **WHAT IT REFUSES.** Everything fails closed. An unreadable table, a host whose
 memory cannot be measured, a fragment below the floor, a withheld kill (the
-seat's cooldown), or no live runtimes at all: each produces a report with no
-kill. Unknown never kills — the per-command sampler's rule, kept here.
+seat's cooldown), a candidate whose row changed between the snapshot and the
+signal, or no live runtimes at all: each produces a report with no kill.
+Unknown never kills — the per-command sampler's rule, kept here.
 """
 
 from __future__ import annotations
@@ -70,15 +76,17 @@ def _default_runner(argv: list[str]) -> tuple[int, str]:
         return 1, ""
 
 
-def parse_process_table(output: str) -> list[tuple[int, int]]:
-    """Parse ``ps -axo pid=,ppid=`` into ``[(pid, ppid)]``.
+def parse_process_table(output: str) -> list[tuple[int, int, int]]:
+    """Parse ``ps -axo pid=,ppid=,pgid=`` into ``[(pid, ppid, pgid)]``.
 
     Unparseable lines are skipped, not fatal: a header or a blank line must not
     sink the reading (the per-command parser's rule, kept). Rows with a
     non-positive pid are dropped at the source; a reading that cannot name a
-    process cannot judge one either.
+    process cannot judge one either. ``pgid`` rides along for ONE consumer —
+    the pre-signal re-check that compares the candidate's row against the
+    snapshot before a stop goes out.
     """
-    rows: list[tuple[int, int]] = []
+    rows: list[tuple[int, int, int]] = []
     for line in output.splitlines():
         parts = line.split()
         if len(parts) < 2:
@@ -86,10 +94,11 @@ def parse_process_table(output: str) -> list[tuple[int, int]]:
         try:
             pid = int(parts[0])
             ppid = int(parts[1])
+            pgid = int(parts[2]) if len(parts) >= 3 else 0
         except ValueError:
             continue
         if pid > 0:
-            rows.append((pid, ppid))
+            rows.append((pid, ppid, pgid))
     return rows
 
 
@@ -135,9 +144,11 @@ class MemoryPassReport:
         """One line, no newline, safe for a log record."""
         parts = [self.reason or self.state]
         if self.killed is not None:
+            count = len(self.killed.pids)
             parts.append(
                 f"ended the largest fragment: pid {self.killed.pid} "
-                f"({self.killed.mb} MB with its descendants)"
+                f"({self.killed.mb} MB across {count} "
+                f"process{'es' if count != 1 else ''})"
             )
         elif self.kill_withheld:
             parts.append("kill withheld: a fragment was ended recently")
@@ -160,7 +171,7 @@ def machine_memory_pass(
     runner: Runner | None = None,
     footprint_probe: FootprintProbe | None = None,
     pids_probe: Callable[[Path], list[int]] | None = None,
-    kill: Callable[[int], bool] | None = None,
+    kill: Callable[[memory_guard.Fragment], bool] | None = None,
     total_mb: int | None = None,
 ) -> MemoryPassReport:
     """Run one aggregate pass; blocking, and the caller hands it to a thread.
@@ -170,17 +181,25 @@ def machine_memory_pass(
     and still names a fragment it WOULD have ended. ``total_mb`` is the host
     probe's test seam; production leaves it ``None`` and the verdict measures.
 
-    The kill is ``terminate_process_tree(pid, force=True)`` — SIGKILL to the
-    process group when the pid leads one, which is what a spawned command tree
-    is (``start_new_session``), and exactly the stop the bash tool's own guard
-    delivers on a breach. A guard acting to keep the device alive cannot wait on
-    a graceful exit it has no ladder to escalate; if the fragment's work cannot
-    take SIGKILL, nothing here could have stopped it anyway.
+    The kill walks the fragment's SUBTREE (``Fragment.pids``) through
+    ``terminate_process_tree(pid, force=True)`` — descendants first, the
+    fragment root last. One call on the root alone would signal the GROUP only
+    when the root leads one; measured on this host, roughly half of the direct
+    children of runtimes are not leaders, and their descendants would survive
+    the stop while the log credited the whole fragment. A leader's group kill
+    still covers anything the walk missed. Immediately before the first signal
+    the candidate's row is re-read and any change withholds
+    (:func:`_candidate_still_stands`) — the snapshot-to-signal window the
+    residency pass closes the same way. A guard acting to keep the device alive
+    cannot wait on a graceful exit it has no ladder to escalate; if the
+    fragment's work cannot take SIGKILL, nothing here could have stopped it
+    anyway. The ``kill`` seam receives the chosen :class:`Fragment`, not a bare
+    pid: the subtree the sum was over is the unit to end.
     """
     base = runner or _default_runner
     probe = pids_probe or _live_runtime_pids
 
-    code, table = base(["ps", "-axo", "pid=,ppid="])
+    code, table = base(["ps", "-axo", "pid=,ppid=,pgid="])
     if code != 0:
         return MemoryPassReport(
             state="unknown",
@@ -191,7 +210,7 @@ def machine_memory_pass(
             reason="the process table could not be read; the fleet's sum is not judged",
         )
     rows_all = parse_process_table(table)
-    parents = {pid: ppid for pid, ppid in rows_all}
+    rows_by_pid = {pid: (ppid, pgid) for pid, ppid, pgid in rows_all}
 
     roots = [pid for pid in probe(config_dir) if pid > 0]
     if not roots:
@@ -207,7 +226,7 @@ def machine_memory_pass(
     links = memory_guard.child_links(
         [
             memory_guard.ProcessNode(pid=pid, ppid=ppid, mb=0)
-            for pid, ppid in rows_all
+            for pid, ppid, _pgid in rows_all
         ]
     )
     closure = memory_guard.descendant_closure(roots, links)
@@ -237,7 +256,10 @@ def machine_memory_pass(
 
     nodes = [
         memory_guard.ProcessNode(
-            pid=pid, ppid=parents.get(pid, 0), mb=mb_of.get(pid, 0)
+            pid=pid,
+            ppid=rows_by_pid.get(pid, (0, 0))[0],
+            pgid=rows_by_pid.get(pid, (0, 0))[1],
+            mb=mb_of.get(pid, 0),
         )
         for pid in sorted(closure)
     ]
@@ -263,6 +285,23 @@ def machine_memory_pass(
         )
         return MemoryPassReport(
             state="warn",
+            fleet_mb=fleet_mb,
+            runtimes=len(roots),
+            measured=len(closure) - unmeasured,
+            unmeasured=unmeasured,
+            top=top,
+            reason=verdict.reason,
+        )
+
+    if verdict.state != "act":
+        # ``unknown`` (the host could not be measured) lands here by
+        # construction, and making that true is the state's whole contract: a
+        # host that could not be measured is not judged, so nothing may be
+        # ended on its reading (``memory_guard.machine_verdict`` says "no
+        # reading of it can ever kill"). The report still carries what the
+        # pass DID read, so the operator can see why nothing moved.
+        return MemoryPassReport(
+            state=verdict.state,
             fleet_mb=fleet_mb,
             runtimes=len(roots),
             measured=len(closure) - unmeasured,
@@ -323,18 +362,34 @@ def machine_memory_pass(
             + f"; would end the largest fragment (pid {candidate.pid}), kill withheld",
         )
 
+    if not _candidate_still_stands(candidate, runner=base):
+        return MemoryPassReport(
+            state="act",
+            fleet_mb=fleet_mb,
+            runtimes=len(roots),
+            measured=len(closure) - unmeasured,
+            unmeasured=unmeasured,
+            top=top,
+            kill_withheld=True,
+            reason=verdict.reason
+            + f"; the candidate pid {candidate.pid} changed before the signal; withheld",
+        )
+
     stopper = kill or _default_kill
     delivered = False
     try:
-        delivered = bool(stopper(candidate.pid))
+        delivered = bool(stopper(candidate))
     except Exception:  # noqa: BLE001 — a stop path never raises out of a pass
         logger.warning("machine memory: the stop for pid %s raised", candidate.pid, exc_info=True)
+    count = len(candidate.pids)
     logger.warning(
-        "machine memory: %s; ended the largest fragment pid %s (%s MB with its "
-        "descendants) — delivered=%s",
+        "machine memory: %s; ended the largest fragment pid %s (%s MB across %s "
+        "process%s) — delivered=%s",
         verdict.reason,
         candidate.pid,
         candidate.mb,
+        count,
+        "es" if count != 1 else "",
         delivered,
     )
     return MemoryPassReport(
@@ -349,11 +404,63 @@ def machine_memory_pass(
     )
 
 
-def _default_kill(pid: int) -> bool:
-    """Stop one fragment: its process group when it leads one, else the pid."""
+def _candidate_still_stands(
+    candidate: memory_guard.Fragment, *, runner: Runner
+) -> bool:
+    """``True`` when the candidate's row still matches the pass's snapshot.
+
+    **THE DECISION IS A SNAPSHOT AND THE SIGNAL IS NOT** — the same hazard the
+    residency pass closes with ``reclaim.target_changed``, and this pass must
+    not ship without it: the table read and the fleet's memory read stand
+    ~0.1-5 s in front of the signal, and a pid recycled inside that window
+    would take the stop. Here that is worse than a stray SIGTERM: a recycled
+    pid that happens to LEAD a group takes ``killpg`` — its whole group.
+
+    The check is deliberately the cheap one: one ``ps`` row for one pid,
+    compared against the snapshot's ``(ppid, pgid)``; a row that no longer
+    answers, or any change, withholds. Refusal, never a correction: it can
+    withhold a signal the snapshot authorised and can never authorise one the
+    snapshot did not.
+    """
+    code, out = runner(["ps", "-o", "pid=,ppid=,pgid=", "-p", str(candidate.pid)])
+    if code != 0:
+        return False
+    parts = out.split()
+    if len(parts) < 3:
+        return False
+    try:
+        pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return False
+    return pid == candidate.pid and ppid == candidate.ppid and pgid == candidate.pgid
+
+
+def _default_kill(fragment: memory_guard.Fragment) -> bool:
+    """End the fragment's whole subtree, one process at a time.
+
+    **WHY NOT ONE CALL ON THE ROOT.** ``terminate_process_tree`` signals the
+    GROUP only when the pid leads one; a candidate that is not a group leader
+    (measured on this host: roughly half of the direct children of runtimes)
+    would be signalled alone, leaving its descendants behind — reparented and
+    still burning — while the log credited the whole fragment. So every pid the
+    ranking actually summed is signalled, descendants first and the fragment
+    root LAST (a parent dying first would reparent the children; they keep
+    their pids, but ending the root last keeps the stop on the tree the
+    snapshot described). Each signal still goes through the same primitive the
+    per-command guard uses, so a leader's descendants die with its group even
+    if the walk missed them.
+
+    ``True`` when any stop was delivered; a pid that is already gone is not a
+    failure (``terminate_process_tree``'s own contract).
+    """
     from local_operator.procstate import terminate_process_tree
 
-    return terminate_process_tree(pid, force=True)
+    order = [pid for pid in fragment.pids if pid != fragment.pid]
+    order.append(fragment.pid)
+    delivered = False
+    for pid in order:
+        delivered = terminate_process_tree(pid, force=True) or delivered
+    return delivered
 
 
 def _fragment_line(fragments: Sequence[memory_guard.Fragment]) -> str:
