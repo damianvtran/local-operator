@@ -4881,6 +4881,10 @@ async def test_a_swept_child_with_a_deleted_transcript_reads_honestly(tmp_path) 
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
 
         # The directory outlived the file, which is the sweep this covers.
