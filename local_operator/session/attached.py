@@ -100,6 +100,7 @@ from local_operator.session.frontend_state import (
     FrontendUpdate,
     FrontendUsage,
     JobState,
+    MonitorState,
     SnapshotJobs,
     SnapshotMcpManager,
     SnapshotSubagentComms,
@@ -2466,6 +2467,32 @@ class AttachedSession:
             logger.debug("cold state could not read the wake index", exc_info=True)
         return wakes
 
+    def _cold_monitors(self) -> list[MonitorState]:
+        """The session's armed monitors, from the live monitor index.
+
+        The ``_cold_wakes`` twin: an INPUT to state synthesis rather than
+        something it reads, because the index is a derived file the session
+        rewrites and a cold viewer's canonical state must ship monitors the
+        same way it ships wakes (design §12's parity argument — the desktop
+        band reads both families off ``FrontendSessionState``). A session
+        created cold has no index and no rows; an unreadable one is the same
+        absence.
+        """
+        from local_operator.monitors.store import read_entry
+
+        monitors: list[MonitorState] = []
+        try:
+            entry = read_entry(self._config_dir, self._session_id)
+            for row in (entry or {}).get("monitors", []) or []:
+                if isinstance(row, dict):
+                    try:
+                        monitors.append(MonitorState.model_validate(row))
+                    except Exception:  # noqa: BLE001 — skip an unreadable row
+                        continue
+        except Exception:  # noqa: BLE001 — no index is the common case
+            logger.debug("cold state could not read the monitor index", exc_info=True)
+        return monitors
+
     async def _synthesise_cold_state(self, cwd: str) -> FrontendSessionState:
         """Canonical state for a session with no runtime to ask.
 
@@ -2486,6 +2513,7 @@ class AttachedSession:
             birth_model=self._birth_model,
             model_selection_override=self._model_selection_override,
             wakes=self._cold_wakes(),
+            monitors=self._cold_monitors(),
             selection_sink=self._note_cold_selection,
         )
         if state.selected_model is not None and state.selected_model.provider == "openai":

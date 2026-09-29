@@ -105,6 +105,10 @@ NERD_TOOL_ICONS: dict[str, str] = {
     # no legend — the desktop mirrors it as its lucide `Trash2`.
     "project_delete": "\uf014",
     "wake": "\uf017",  # nf-fa-clock_o
+    # nf-fa-eye. A monitor WATCHES a read-only call; the wake clock beside it
+    # says "something will happen later", this says "something is being
+    # watched now" — two different behaviours, two different nouns.
+    "monitor": "\uf06e",
     "list_variables": "\uf0ca",  # nf-fa-list_ul
     "read_variable": "\uf02b",  # nf-fa-tag
     "browser": "\uf0ac",  # nf-fa-globe
@@ -157,6 +161,10 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     # icon must not echo the `✗` failure verdict the status column prints.
     "project_delete": "\u2212",
     "wake": "○",  # a clock face
+    # U+25CF (WGL4): the filled dot to the wake clock's hollow ring — a
+    # standing watch is a live point, and the fill is deliberately not a
+    # verdict mark (the status column owns ✗/✓).
+    "monitor": "●",
     # `=` (algebraic assignment), NOT `x`: the earlier `x` shared its SHAPE
     # with the `✗` failure verdict the status column prints, the one plain
     # glyph echoing an outcome mark. `=` says "a value bound to a name" with

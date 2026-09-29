@@ -21,6 +21,7 @@ from local_operator.harness.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    MonitorDeltaEvent,
     NoticeEvent,
     ReasoningDeltaEvent,
     ToolCall,
@@ -43,6 +44,7 @@ from local_operator.tui.events import (
     AssistantMessageEnd,
     AssistantMessageStart,
     EventController,
+    MonitorDelta,
     NoticePosted,
     ReasoningDelta,
     StartFlushTimer,
@@ -678,6 +680,27 @@ def test_notice_forwarded() -> None:
     notices = [m for m in app.posted if isinstance(m, NoticePosted)]
     assert notices[0].text == "heads up"
     assert notices[0].kind == "warning"
+
+
+def test_monitor_delta_forwarded() -> None:
+    """A material monitor delta paints a receipt the way a wake delivery
+    does (design §12): the full text rides the message so the front end can
+    expand it, and the identity fields ride along for the collapsed line."""
+    controller, session, app = _controller()
+    session.emit(
+        MonitorDeltaEvent(
+            text="(monitor) 'watch' m1: 2 changes at 09:00 — check 12.",
+            monitor_id="m1",
+            name="watch",
+            changes=2,
+            skipped=1,
+        )
+    )
+    posted = [message for message in app.posted if isinstance(message, MonitorDelta)]
+    assert len(posted) == 1
+    assert posted[0].monitor_id == "m1"
+    assert posted[0].changes == 2 and posted[0].skipped == 1
+    assert "(monitor)" in posted[0].text
 
 
 def test_dispose_unsubscribes() -> None:

@@ -615,6 +615,30 @@ def wake_receipt_headline(text: str) -> str:
     return head.strip()
 
 
+def monitor_receipt_headline(text: str) -> str:
+    """The human-readable headline of a monitor delivery.
+
+    The monitor twin of :func:`wake_receipt_headline`. A delta's persisted
+    text starts ``(monitor) '<name>' m1: <n> change(s) at <clock> — check
+    <k> …``, and the ``(monitor)`` prefix is model-facing markup the row's own
+    affordance already says — so what the reader wants from the collapsed line
+    is WHICH monitor fired and how much moved.
+
+    The cancel instruction is a whole LINE in a monitor envelope rather than
+    the wake's inline clause, so it cannot reach a first-line split today; the
+    clause strip below is shape-closing of the same kind the wake stripper
+    records — a producer that ever moves it inline must not leak it onto this
+    surface.
+    """
+    head, _, _ = text.partition("\n\n")
+    head = " ".join(head.split())  # collapse any envelope whitespace
+    head = head.split(" — cancel with monitor(", 1)[0]
+    prefix = "(monitor) "
+    while head.startswith(prefix):
+        head = head[len(prefix) :]
+    return head.strip()
+
+
 #: Painted under a child's report that was HELD when it arrived — the delivery
 #: turn it would have opened either fell on the leaving latch or was dropped
 #: before it could run — so the row is durable and no turn ran for it at the

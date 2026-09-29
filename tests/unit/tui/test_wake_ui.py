@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from rich.text import Text
@@ -33,6 +34,7 @@ from local_operator.tui.widgets.tool_card import (
 from local_operator.tui.widgets.transcript import (
     GAP_CLASS,
     ExpandableActionBlock,
+    MonitorDeltaBlock,
     NoticeBlock,
     TranscriptView,
     WakeBlock,
@@ -333,9 +335,64 @@ class _FakeScheduler:
         self.schedules = tuple(schedules)
 
 
+class _FakeMonitorRuntime:
+    def __init__(self, spec: SimpleNamespace, counters: dict[str, Any]) -> None:
+        self.spec = spec
+        self.counters = counters
+
+
+class _FakeMonitorScheduler:
+    """The slice ``WakePanel.sync`` reads: ``monitors`` + ``runtime(id)``."""
+
+    def __init__(self, rows: list[tuple[SimpleNamespace, dict[str, Any]]]) -> None:
+        self._rows = rows
+
+    @property
+    def monitors(self) -> tuple[SimpleNamespace, ...]:
+        return tuple(spec for spec, _ in self._rows)
+
+    def runtime(self, monitor_id: str) -> _FakeMonitorRuntime | None:
+        for spec, counters in self._rows:
+            if spec.id == monitor_id:
+                return _FakeMonitorRuntime(spec, dict(counters))
+        return None
+
+
+def _monitor(
+    monitor_id: str,
+    name: str,
+    *,
+    every_ms: int = 60_000,
+    due_in_ms: int | None = 30_000,
+    disabled: bool = False,
+    reason: str = "",
+    failures: int = 0,
+) -> tuple[SimpleNamespace, dict[str, Any]]:
+    """(spec-ish, counters) — what the scheduler's two read surfaces return."""
+    now = int(time.time() * 1000)
+    spec = SimpleNamespace(id=monitor_id, name=name, tool="bash", every_ms=every_ms)
+    counters: dict[str, Any] = {
+        "next_due_at": None if due_in_ms is None else now + due_in_ms,
+        "last_check_at": now - 1_000,
+        "checks": 3,
+        "consecutive_failures": failures,
+        "disabled": disabled,
+        "disabled_reason": reason,
+    }
+    return spec, counters
+
+
 class _FakeSession:
-    def __init__(self, schedules: list[WakeSchedule]) -> None:
+    def __init__(
+        self,
+        schedules: list[WakeSchedule],
+        monitors: list[tuple[SimpleNamespace, dict[str, Any]]] | None = None,
+    ) -> None:
         self.wake_scheduler = _FakeScheduler(schedules)
+        # ``None`` (not an empty scheduler) for the pre-monitor shape: a
+        # session whose host has no monitor scheduler is a real production
+        # state, and the panel must read it as "no rows".
+        self.monitor_scheduler = _FakeMonitorScheduler(monitors) if monitors is not None else None
 
 
 class _PanelHost(App[None]):
@@ -348,7 +405,10 @@ class _PanelHost(App[None]):
         yield WakePanel()
 
 
-async def _paint(schedules: list[WakeSchedule]) -> tuple[bool, str]:
+async def _paint(
+    schedules: list[WakeSchedule],
+    monitors: list[tuple[SimpleNamespace, dict[str, Any]]] | None = None,
+) -> tuple[bool, str]:
     """Sync a mounted panel; return (was_displayed, painted_text).
 
     ``display`` is read INSIDE the running app and returned as a plain bool:
@@ -358,7 +418,7 @@ async def _paint(schedules: list[WakeSchedule]) -> tuple[bool, str]:
     app = _PanelHost()
     async with app.run_test(size=(100, 30)) as pilot:
         panel = app.query_one(WakePanel)
-        panel.sync(_FakeSession(schedules))
+        panel.sync(_FakeSession(schedules, monitors))
         await pilot.pause()
         return bool(panel.display), str(panel._body.content)
 
@@ -427,6 +487,120 @@ class TestWakePanel:
             # Five schedules can never fit a floored budget; the marker must
             # report the hidden ones rather than vanish.
             assert "more wakes" in out
+
+
+#: One material monitor delta as the session hands it over: the model-facing
+#: envelope, the description line, the cancel hint, and the bounded diff.
+MONITOR_TEXT = (
+    "(monitor) 'watch the deploy queue' m1: 2 changes at 09:31 — check 12.\n"
+    "Watching for: the deploy queue to drain\n"
+    'Cancel with monitor({op:"cancel",id:"m1"}) once its goal is met.\n'
+    "\n"
+    "Diff vs the previous check:\n"
+    "+ running 3 -> 5"
+)
+
+
+class TestMonitorBand:
+    """The monitor section of the same band (design §12)."""
+
+    @pytest.mark.asyncio
+    async def test_monitor_rows_join_the_same_band(self) -> None:
+        displayed, out = await _paint([], [_monitor("m1", "watch the deploy queue")])
+        assert displayed is True
+        assert "Monitors · 1 watching" in out
+        assert "m1" in out and "watch the deploy queue" in out and "every 1m" in out
+
+    @pytest.mark.asyncio
+    async def test_wake_rows_come_first_then_the_monitor_section(self) -> None:
+        _, out = await _paint(
+            [_schedule("w1", "check the backup")], [_monitor("m1", "watch the queue")]
+        )
+        assert out.index("Wakes · 1 scheduled") < out.index("Monitors · 1 watching")
+        assert out.index("w1") < out.index("m1")
+
+    @pytest.mark.asyncio
+    async def test_hidden_when_both_are_empty(self) -> None:
+        displayed, out = await _paint([], [])
+        assert displayed is False
+        assert out == ""
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_monitor_shows_state_and_reason(self) -> None:
+        _, out = await _paint(
+            [],
+            [
+                _monitor(
+                    "m2",
+                    "watch the issue tracker",
+                    due_in_ms=None,
+                    disabled=True,
+                    reason="the tool stopped being read-only after 5 failed checks",
+                    failures=5,
+                )
+            ],
+        )
+        assert "disabled" in out
+        assert "stopped being read-only" in out
+
+    @pytest.mark.asyncio
+    async def test_monitor_overflow_marker_counts_the_hidden(self) -> None:
+        _, out = await _paint([], [_monitor(f"m{i}", f"watch {i}") for i in range(1, 5)])
+        assert "more monitors" in out
+
+    @pytest.mark.asyncio
+    async def test_a_short_screen_keeps_the_wake_rows_whole(self) -> None:
+        """At the floor budget the wake section wins whole: the monitor
+        section is dropped rather than two half-sections each claiming rows
+        they cannot show (the design's ordering, made explicit)."""
+        app = _PanelHost()
+        async with app.run_test(size=(100, 12)):
+            panel = app.query_one(WakePanel)
+            panel.sync(_FakeSession([_schedule("w1", "x")], [_monitor("m1", "y")]))
+            out = str(panel._body.content)
+            assert "Wakes · 1 scheduled" in out and "w1" in out
+            assert "Monitors" not in out
+
+    @pytest.mark.asyncio
+    async def test_equality_guard_covers_monitors_too(self) -> None:
+        app = _PanelHost()
+        async with app.run_test(size=(100, 30)):
+            panel = app.query_one(WakePanel)
+            session = _FakeSession([], [_monitor("m1", "x")])
+            panel.sync(session)
+            first = panel._shown
+            panel.sync(session)
+            assert panel._shown is first  # same object — no repaint happened
+
+
+class TestMonitorDeltaBlock:
+    """The monitor receipt: the WakeBlock's twin (design §12)."""
+
+    def test_collapsed_line_strips_the_model_facing_prefix(self) -> None:
+        block = MonitorDeltaBlock(MONITOR_TEXT)
+        rendered = block._build_row(80).plain
+        assert "m1" in rendered
+        assert "monitor" in rendered  # the name column
+        assert "(monitor)" not in rendered
+        assert "Diff vs" not in rendered  # the delta stays collapsed
+        assert "cancel" not in rendered
+
+    def test_expand_shows_the_envelope_and_the_bounded_delta(self) -> None:
+        block = MonitorDeltaBlock(MONITOR_TEXT)
+        assert block.expanded is False
+        assert block.toggle_expanded() is True
+        expanded = block._build_content(80).plain
+        assert "Diff vs the previous check:" in expanded
+        assert "+ running 3 -> 5" in expanded
+        assert "m1" in expanded  # the summary row stays
+
+    def test_the_row_wears_the_monitors_own_name_and_glyph(self) -> None:
+        """The name column says ``monitor`` and the glyph table knows it — not
+        the generic fallback, which would read as an unknown tool."""
+        from local_operator.tui.glyphs import NERD_TOOL_ICONS, PLAIN_TOOL_ICONS
+
+        assert MonitorDeltaBlock.tool_name == "monitor"
+        assert "monitor" in NERD_TOOL_ICONS and "monitor" in PLAIN_TOOL_ICONS
 
 
 class TestWakeDeliveredEvent:

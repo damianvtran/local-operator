@@ -1029,6 +1029,38 @@ def test_a_live_exec_record_labels_its_row_as_an_exec_run(tmp_path) -> None:
     assert by_id["cccccccccccc"].kind == ""
 
 
+def test_decorate_rows_counts_monitors_and_their_dormancy(tmp_path) -> None:
+    """The monitors index is read once for the whole list, like the wake one
+    (design §12): the count rides the row, and ``stopped_at`` — the store's own
+    ``is_held`` marker — is what makes it DORMANT rather than simply absent."""
+    from local_operator.monitors.store import write_entry as write_monitors
+    from local_operator.resume import SessionRow
+    from local_operator.session.catalog import decorate_rows
+
+    monitor = {"id": "m1", "name": "watch", "tool": "bash", "every_ms": 60_000}
+    write_monitors(tmp_path, "aaaaaaaaaaaa", cwd="/w", monitors=[monitor])
+    write_monitors(
+        tmp_path,
+        "bbbbbbbbbbbb",
+        cwd="/w",
+        monitors=[monitor],
+        preserve={"stopped_at": 1234},
+    )
+
+    rows = [
+        SessionRow(id="aaaaaaaaaaaa", mtime=0.0, name="armed"),
+        SessionRow(id="bbbbbbbbbbbb", mtime=0.0, name="dormant"),
+        SessionRow(id="cccccccccccc", mtime=0.0, name="no monitors"),
+    ]
+    by_id = {row.id: row for row in decorate_rows(tmp_path, rows)}
+
+    assert by_id["aaaaaaaaaaaa"].monitors == 1
+    assert by_id["aaaaaaaaaaaa"].monitors_dormant is False
+    assert by_id["bbbbbbbbbbbb"].monitors == 1
+    assert by_id["bbbbbbbbbbbb"].monitors_dormant is True
+    assert by_id["cccccccccccc"].monitors == 0
+
+
 def test_an_idle_exec_row_says_what_it_is_instead_of_ready(tmp_path) -> None:
     """The words and the glyph may not disagree.
 

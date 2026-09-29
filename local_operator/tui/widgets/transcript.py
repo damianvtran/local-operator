@@ -2510,6 +2510,39 @@ class WakeBlock(ExpandableActionBlock):
         return self._row_count > 1
 
 
+class MonitorDeltaBlock(WakeBlock):
+    """A monitor-delta delivery receipt, drawn as a tool-ledger card.
+
+    The ``WakeBlock``'s twin (design §12): a monitor delivers with no user
+    keystroke exactly like a wake — the delta appears because a watched call
+    changed — so the same one-line card names which monitor fired and how much
+    moved, and the expansion shows the model-facing envelope plus the bounded
+    delta. It subclasses ``WakeBlock`` because the layout contract is
+    identical (the ledger's shared spine, the hover/focus expand affordance,
+    the paragraph wrapping in the expansion); only the name column, the glyph
+    and the summary are the monitor's own.
+    """
+
+    EXPANDED_CLASS = "monitor-expanded"
+
+    #: The name column says ``monitor``, the way the wake row's says ``wake``.
+    tool_name = "monitor"
+
+    def _summary(self) -> tuple[str, str]:
+        """(identity, message body) — the monitor twin of ``WakeBlock._summary``.
+
+        The collapsed line strips the model-facing ``(monitor)`` prefix (see
+        ``harness.rows.monitor_receipt_headline``). The expansion is the FULL
+        delivered text — envelope, description, cancel hint and the bounded
+        delta — because that is what the model was handed: a monitor has no
+        user-authored prompt behind it to show instead, which is why the split
+        differs from ``WakeBlock``'s.
+        """
+        from local_operator.harness.rows import monitor_receipt_headline
+
+        return monitor_receipt_headline(self._text), self._text
+
+
 #: Cell cap on one advisory sender field. The header is an identity label, and
 #: no honest conversation name, model label or directory basename approaches
 #: this — but the field crosses the wire, so its length is the peer's choice

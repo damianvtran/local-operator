@@ -3018,6 +3018,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "leaving",
         "wakes",
         "wakes_dormant",
+        # The monitors pair rides the wakes argument (design §12): a watch can
+        # be armed or cancelled while the list is open — the session rewrites
+        # the index and the catalogue re-reads it — and the rank key bands on
+        # it, so two ticks of one open picker can differ in ORDER here.
+        "monitors",
+        "monitors_dormant",
         "kind",
         # The two subagent counts. In the signature because they ARRIVE WHILE THE
         # LIST IS OPEN — a child starting or a parked child picking up a slot is
