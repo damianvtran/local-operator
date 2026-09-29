@@ -514,25 +514,49 @@ export function Transcript({
 		}
 	};
 
-	/* The reserve above every row must not move what the reader is looking at
-	   (round 2, U23 = D7). The spacer adds `topInset` of content ABOVE all the
-	   rows, so with the browser keeping `scrollTop` the whole transcript slides
-	   up by that much; at the tail that reads as the newest message sinking
-	   below the fold. Follow the delta when the reader is not at the very top —
-	   there the slide is the POINT: the first row comes out from under the strip
-	   with no gesture, and `scrollTop` cannot go below zero anyway. `min`/`max`
-	   keep it inside the scroller's own range as the reserve clears again. */
-	const prevInset = useRef(topInset);
+	/* What the reserve itself inserted, so a reader mid-history keeps the rows
+	   they are looking at (round 2, U23 = D7; corrected in round 3 — the follow
+	   below double-counted against the browser's scroll anchoring). The spacer
+	   is not the whole insertion: it is a flex child, so it also opens the
+	   scroller's row gap before the next child. Both are read off the DOM
+	   rather than derived from `topInset`, because the gap is the stylesheet's
+	   token — and a `scrollHeight` delta would also count rows appended at the
+	   tail in the same commit, growth BELOW the reader that must not move it. */
+	const reserveGrowth = (): number => {
+		const el = scrollRef.current;
+		const spacer = el?.querySelector<HTMLElement>("[data-scroll-top-inset]");
+		if (!el || !spacer) return 0;
+		const box = spacer.getBoundingClientRect();
+		const next = spacer.nextElementSibling;
+		const gap = next
+			? Math.max(0, next.getBoundingClientRect().top - box.bottom)
+			: 0;
+		return box.height + gap;
+	};
+	const prevGrowth = useRef(0);
 	useLayoutEffect(() => {
 		const el = scrollRef.current;
-		const delta = topInset - prevInset.current;
-		prevInset.current = topInset;
-		if (el && delta !== 0 && el.scrollTop > 0) {
-			el.scrollTop = Math.max(
-				0,
-				Math.min(el.scrollTop + delta, el.scrollHeight - el.clientHeight),
-			);
-		}
+		if (!el) return;
+		const growth = reserveGrowth();
+		const delta = growth - prevGrowth.current;
+		prevGrowth.current = growth;
+		/* THE BROWSER MUST NOT DO THIS TOO. This scroller opts out of native
+		   scroll anchoring (`[overflow-anchor:none]` below), because otherwise
+		   Chrome compensates the spacer's insertion for the same mid-history
+		   reader whose position this write is holding and the two add up: round 3
+		   measured a 53px slide on the ended rung and 25.6px on the reopening
+		   line, against 0.4px with the opt-out and this write alone. The opt-out
+		   also leaves the older-rows prepend path above as the only adjustment
+		   there, which is the contract its own comment states. At the very top
+		   there is nothing to hold: the slide is the POINT (the first row comes
+		   out from under the strip with no gesture), and `scrollTop` cannot go
+		   below zero anyway. `min`/`max` keep the write inside the scroller's own
+		   range as the reserve clears again. */
+		if (delta === 0 || el.scrollTop === 0) return;
+		el.scrollTop = Math.max(
+			0,
+			Math.min(el.scrollTop + delta, el.scrollHeight - el.clientHeight),
+		);
 	}, [topInset]);
 
 	return (
@@ -544,6 +568,15 @@ export function Transcript({
 				   wrap everything, but a table or pre that still overflows scrolls
 				   INSIDE itself, never the whole chat sideways. */
 				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
+				/* ONE HAND ON `scrollTop` (round 3). The reserve is the one place this
+				   app inserts height above a reader, and both the platform and the
+				   follow effect above want to compensate for it — together they moved a
+				   mid-history reader by 53px per rung. The opt-out leaves that effect as
+				   the only adjustment. The session LIST keeps anchoring ON
+				   (`screens/session-list.tsx`, QA round 4): it has no manual path of its
+				   own and needs the platform for insertions from other clients — the two
+				   answers differ on purpose. */
+				"[overflow-anchor:none]",
 			)}
 		>
 			{/* THE OVERLAY'S HEIGHT, RESERVED (round 2, U23 = D7). First child on

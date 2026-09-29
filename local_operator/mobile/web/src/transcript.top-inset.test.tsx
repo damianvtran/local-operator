@@ -9,8 +9,12 @@
 // transcript's half of that contract: the reserve is the scroller's FIRST
 // child (above the load indicator, the "show N more" control and every row),
 // it carries the height it was given, and NOTHING is rendered when nothing
-// overlays the scroller. The rendered geometry itself is the headless
-// captures' lane.
+// overlays the scroller. Round 3 added the other half of the same contract:
+// the scroller keeps native scroll anchoring OFF, so the follow effect is the
+// only hand on `scrollTop` and the platform cannot double-compensate the
+// reserve's insertion (measured then: a 53px slide per rung with anchoring on,
+// 0.4px with the opt-out). The rendered geometry itself is the headless
+// captures' lane, and the round-3 mid-history scene measures exactly that.
 import { cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Transcript } from "./components/transcript";
@@ -65,6 +69,23 @@ describe("the rung's height reserved inside the scroller", () => {
 		expect(children.indexOf(spacer as Element)).toBeLessThan(
 			children.indexOf(row as Element),
 		);
+	});
+
+	it("keeps native scroll anchoring off, so the follow is the only hand on scrollTop", () => {
+		/* Round 3: with anchoring left on, the browser compensates the reserve's
+		   insertion for the same mid-history reader the follow effect holds —
+		   measured as a 53px slide per rung, 0.4px with this opt-out. The class
+		   IS the mechanism (no JS), so pinning it here pins the single-hand
+		   contract; the rendered before/after is the round's headless scene. */
+		const { container } = render(
+			<Transcript
+				pid="1"
+				entries={[entry({ id: "a", kind: "user", text: "prompt", final: false })]}
+				topInset={52}
+			/>,
+		);
+		const scroller = container.querySelector("div.lo-scroll");
+		expect(scroller?.className).toContain("[overflow-anchor:none]");
 	});
 
 	it("renders no reserve when nothing overlays the scroller", () => {
