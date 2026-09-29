@@ -206,8 +206,11 @@ from local_operator.projects import (
     stale_projects_for_session,
 )
 from local_operator.prompts_api import (
+    STATE_SECTION_HEADINGS,
     TOOL_INVENTORY_HEADING,
+    assemble_system_block_sections,
     render_tool_inventory_block,
+    split_system_block_sections,
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
@@ -855,6 +858,22 @@ def _callable_accepts_one_positional(func: Callable[..., Any]) -> tuple[bool, bo
         ):
             return True, True
     return False, True
+
+
+def _state_section_text(body: Any, heading: str) -> str:
+    """One state section exactly as the model reads it: labelled, never blank.
+
+    An empty section still renders (``"(empty)"``) because silence about a
+    section the reader was told about before reads as "unchanged", not as
+    "gone" — the one misreading the in-band replacement contract cannot afford
+    (a completed goal must not keep sitting in front of the model). The heading
+    check is on the whole first LINE, not ``startswith``: a section that opens
+    with ``## Available tools and rules`` keeps its label.
+    """
+    text = str(body) if body else "(empty)"
+    if text.split("\n", 1)[0] == heading:
+        return text
+    return f"{heading}\n{text}"
 
 
 def _todo_reminder_text(pending: list[dict[str, str]]) -> str:
@@ -2566,7 +2585,35 @@ class Session:
                         continue
                     for key, value in payload.get("details", {}).get("blocks", {}).items():
                         index = int(key)
-                        if 0 <= index < len(self._last_system_blocks):
+                        if not (0 <= index < len(self._last_system_blocks)):
+                            continue
+                        if isinstance(value, Mapping):
+                            # Section-granular record: replace exactly the named
+                            # sections of the block reconstructed so far; an
+                            # empty value says that section is gone. The split
+                            # of what we hold is deterministic (see
+                            # ``split_system_block_sections``), so folding a
+                            # sequence of records ends on the bytes the last
+                            # record's render produced.
+                            current = split_system_block_sections(
+                                index, self._last_system_blocks[index]
+                            )
+                            updated: dict[str, str] = {}
+                            for name, text in current.items():
+                                if name in value:
+                                    text = str(value[name]) if value[name] else ""
+                                if text:
+                                    updated[name] = text
+                            for name, text in value.items():
+                                if name not in current and text:
+                                    updated[str(name)] = str(text)
+                            self._last_system_blocks[index] = assemble_system_block_sections(
+                                index, updated
+                            )
+                        else:
+                            # Whole-block record (the shape every record had
+                            # before sections, and the one a block with no
+                            # known split still gets): the text IS the block.
                             self._last_system_blocks[index] = str(value)
                     self._system_state_message_id = entry.id
         # Whether the block provider accepts the live ``model_label`` argument.
@@ -4552,8 +4599,19 @@ class Session:
         self._system_state_compaction_id = compaction_id
         return list(self._frozen_system_blocks)
 
-    def _system_state_delta(self, desired: list[str]) -> tuple[dict[str, str], str | None]:
-        """The same live-state/reanchor decision for main turns and helpers."""
+    def _system_state_delta(
+        self, desired: list[str]
+    ) -> tuple[dict[str, dict[str, str]], str | None]:
+        """The same live-state/reanchor decision for main turns and helpers.
+
+        Each changed block is reduced to the sections that ACTUALLY changed
+        (``split_system_block_sections``), so a change inside one section of
+        the tail does not re-ship the whole tail — a replay of 300 recent
+        transcripts (934 records) measures 86% of the re-sent chars avoidable.
+        A section's value is the exact piece text; ``""`` says the
+        section is gone (the goal gated off, the team brief cleared) and must
+        still be shipped, or the model keeps reading the old snapshot.
+        """
         previous = self._last_system_blocks or self._frozen_system_blocks or desired
         # Compaction may replace the record that carried the latest state.
         # Re-anchor a complete live snapshot then; otherwise only changed
@@ -4564,25 +4622,41 @@ class Session:
             self._system_state_message_id is not None
             and compaction_id != self._system_state_compaction_id
         )
-        changes = {
-            str(index): block
-            for index, block in enumerate(desired)
-            if index > 0 and (lost_state or index >= len(previous) or block != previous[index])
-        }
+        changes: dict[str, dict[str, str]] = {}
+        for index, block in enumerate(desired):
+            if index == 0:
+                continue
+            sections = split_system_block_sections(index, block)
+            if lost_state:
+                changes[str(index)] = sections
+                continue
+            prior = (
+                split_system_block_sections(index, previous[index]) if index < len(previous) else {}
+            )
+            section_changes = {
+                name: text for name, text in sections.items() if prior.get(name) != text
+            }
+            section_changes.update(
+                {name: "" for name, text in prior.items() if name not in sections and text}
+            )
+            if section_changes:
+                changes[str(index)] = section_changes
         return changes, compaction_id
 
     @staticmethod
-    def _system_state_message(changes: dict[str, str]) -> CustomMessage:
+    def _system_state_message(changes: dict[str, Any]) -> CustomMessage:
         """One ``[session-state]`` record naming each changed section.
 
         The label is what makes an anonymous block index legible to the model,
-        so it is prepended — EXCEPT where the block already opens with that
-        exact heading, which is an asymmetry rather than an oversight. Block 1
-        is rendered by :func:`render_tool_inventory_block`, whose output starts
-        with ``TOOL_INVENTORY_HEADING`` because the same string has to head the
-        section in the system prefix, where nothing prepends a label. Blocks 2
-        and 3 carry no heading of their own and would be unlabelled prose
-        without this, so stripping the label unconditionally is not the fix.
+        so it is prepended — EXCEPT where the section already opens with that
+        exact heading, which is an asymmetry rather than an oversight. The
+        inventory section (block 1's ``tools``, and a whole-block fallback for
+        that index) is rendered by :func:`render_tool_inventory_block`, whose
+        output starts with ``TOOL_INVENTORY_HEADING`` because the same string
+        has to head the section in the system prefix, where nothing prepends a
+        label. Other sections carry no heading of their own and would be
+        unlabelled prose without this, so stripping the label unconditionally
+        is not the fix.
 
         Prepending regardless produced ``## Available tools`` twice, back to
         back, on the wire. That is latent on ``main`` — a session's inventory
@@ -4592,13 +4666,24 @@ class Session:
         fix. Matched on the whole first LINE, not ``startswith`` on the
         heading, so a future section named ``## Available tools and rules``
         still gets its label rather than silently losing it.
+
+        Values arrive in two shapes: a section map (the current protocol;
+        only changed sections, ``""`` meaning the section is gone) or a
+        whole-block string (the shape every record had before sections, still
+        produced for an index with no known split, and still parsed for old
+        transcripts). Both are labelled here, so a record renders the same way
+        whichever shape it carries.
         """
-        labels = {1: "Available tools", 2: "Environment", 3: "Knowledge and session state"}
+        legacy_labels = {1: "Available tools", 2: "Environment", 3: "Knowledge and session state"}
         sections: list[str] = []
-        for index, block in changes.items():
-            body = block or "(empty)"
-            heading = f"## {labels.get(int(index), 'Session state')}"
-            sections.append(body if body.split("\n", 1)[0] == heading else f"{heading}\n{body}")
+        for index, value in changes.items():
+            if isinstance(value, Mapping):
+                for name, body in value.items():
+                    heading = f"## {STATE_SECTION_HEADINGS.get(str(name), 'Session state')}"
+                    sections.append(_state_section_text(body, heading))
+            else:
+                heading = f"## {legacy_labels.get(int(index), 'Session state')}"
+                sections.append(_state_section_text(value, heading))
         text = "[session-state]\n" + "\n\n".join(sections)
         return CustomMessage(
             custom_type="session_state",
