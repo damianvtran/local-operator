@@ -432,6 +432,15 @@ class ProjectsView(Vertical):
             if isinstance(project, dict) and str(project.get("id")) == str(project_id):
                 self._view = "list"
                 self._cursor = max(0, min(index, max(self._painted_count() - 1, 0)))
+                if self._mode == "detail":
+                    # A named show is a CANVAS retarget, obeying the same rule
+                    # `load` states for an explicit canvas request: the reader
+                    # asked to be shown a project, not the page they were on.
+                    # Leaving the page open split it — chrome on the named
+                    # project, body on the old one — and `↵` then wrote through
+                    # the cursor into a project its row never came from
+                    # (QA round 1, Q1).
+                    self._exit_detail()
                 self._repaint()
                 self._scroll_cursor_into_view()
                 self.call_after_refresh(self._scroll_cursor_into_view)
@@ -1598,11 +1607,15 @@ class ProjectsView(Vertical):
         Sessions reuse the shipped conversation ladder by posting the SAME
         message the canvas does, scoped to the one row; milestones post the
         toggle the app answers with the same store core the tool uses.
+
+        The target is the PAGE's own provenance — the id and name its rows
+        were built from in ``DetailPage.show`` — never the canvas cursor's
+        current row: a retarget mid-read once split the page, and `↵` then
+        wrote through the cursor into a project the row never came from
+        (QA round 1, Q1). Bound to the build snapshot, that write is
+        impossible by construction.
         """
-        view_row = self._detail_view_row() or {}
-        project_value = view_row.get("project")
-        project = project_value if isinstance(project_value, dict) else {}
-        project_id = str(project.get("id") or "")
+        project_id = self._detail_page.project_id or ""
         if kind == "session":
             session_id = str(row.get("session_id") or "")
             if not session_id:
@@ -1610,7 +1623,7 @@ class ProjectsView(Vertical):
             self.post_message(
                 ProjectsViewJumpRequested(
                     project_id=project_id,
-                    project_name=str(project.get("name") or "(unnamed)"),
+                    project_name=self._detail_page.project_name or "(unnamed)",
                     sessions=((session_id, detail_session_state(row)),),
                 )
             )

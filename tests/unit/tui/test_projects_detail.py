@@ -495,6 +495,61 @@ async def test_detail_heading_gap_rides_the_sanctioned_class(
         assert all(row.styles.margin.top == 1 for row in headings[1:])
 
 
+async def test_a_named_show_leaves_the_detail_and_the_page_keeps_its_own_project(
+    tmp_path: Path,
+) -> None:
+    """QA round 1, Q1 — the split page and the crosswrite it enabled.
+
+    Reading one project's detail, `/project show <other>` must land on the
+    CANVAS of the named project (no chrome/body split), and the row verb's
+    write target is the PAGE's provenance: moving the canvas cursor under an
+    open page must not move where `↵` writes.
+    """
+    session = _ProjectSession()
+    registry = _rich_registry(tmp_path)
+    session.project_registry = registry
+    parity_id = str(registry.get_project_by_name("parity-spec").id)
+    board_id = str(registry.get_project_by_name("board-entry").id)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "detail"
+        page = view._detail_page
+        assert page.project_id == parity_id
+        # The retarget, through the real command: the page closes and the
+        # canvas lands on the named project — no split page.
+        app._run_slash_command("/project show board-entry")
+        await pilot.pause()
+        await pilot.pause()
+        assert view._mode == "canvas"
+        assert not page.display
+        assert view.current_project_id() == board_id
+        # The belt: with the page OPEN again, the row verb targets the PAGE's
+        # project even when the canvas cursor points at another project's row
+        # (the exact state the bug exploited; caught crosswrite pre-fix).
+        await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        board_index = next(
+            index
+            for index, row in enumerate(view._views)
+            if str((row.get("project") or {}).get("id")) == board_id
+        )
+        view._cursor = board_index
+        view._detail_row_action("milestone", {"name": "step 01", "completed_at": None})
+        await pilot.pause()
+        await pilot.pause()
+        parity = registry.get_project_by_name("parity-spec")
+        board = registry.get_project_by_name("board-entry")
+        assert any(m.name == "step 01" for m in parity.milestones)
+        assert not any(m.name == "step 01" for m in board.milestones)
+
+
 async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(
     tmp_path: Path,
 ) -> None:

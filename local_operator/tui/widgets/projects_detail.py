@@ -255,8 +255,25 @@ class ProjectDetailPage(VerticalScroll):
         self._on_nav = on_nav
         self._view: dict[str, Any] | None = None
         self._own_session: str | None = None
+        self._project_id: str | None = None
+        self._project_name = ""
         self._selectables: list[DetailRow] = []
         self._selected = 0
+
+    @property
+    def project_id(self) -> str | None:
+        """The project every row on this page was built from (write provenance).
+
+        The row verbs relay THIS id, not the canvas cursor's current row:
+        bound to the same snapshot that built the rows, a write can never
+        land on a project the row did not come from (QA round 1, Q1).
+        """
+        return self._project_id
+
+    @property
+    def project_name(self) -> str:
+        """The built project's name — the jump sentence's subject."""
+        return self._project_name
 
     def action_cursor_up(self) -> None:
         if self._on_nav is not None:
@@ -281,6 +298,14 @@ class ProjectDetailPage(VerticalScroll):
         """
         self._view = view
         self._own_session = own_session
+        # The rows' provenance, captured in the SAME snapshot the rows are
+        # built from: the id and name every row verb must target (QA round 1,
+        # Q1 — a retarget once let `↵` write into the project under the
+        # cursor while the body showed another).
+        project_value = view.get("project")
+        project = project_value if isinstance(project_value, dict) else {}
+        self._project_id = str(project.get("id") or "") or None
+        self._project_name = str(project.get("name") or "")
         children = self._build(view, own_session)
         self.remove_children()
         self.mount_all(children)
