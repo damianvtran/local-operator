@@ -440,7 +440,10 @@ async def test_a_changed_inventory_rides_a_state_delta_and_keeps_block_zero(tmp_
     assert len(updates) == 1
     # Names only: the inventory deliberately carries no descriptions (schemas
     # ride the tools array), so match the whole line rather than a prefix.
-    assert "\n- ask\n" in str(updates[-1].details["text"])
+    # The record now carries only the changed ``tools`` section, so the
+    # capability notes no longer follow the list: the matched line can be
+    # the record's last one, with no trailing newline to anchor on.
+    assert any(line == "- ask" for line in str(updates[-1].details["text"]).splitlines())
     await session.dispose()
 
 
@@ -540,6 +543,9 @@ async def test_the_advisor_sends_the_turns_prefix_not_a_reconciled_one(tmp_path)
         for message in advisor.messages
         if (message.text or "").startswith("[session-state]")
     ]
-    assert tail and "\n- ask\n" in (tail[-1].text or "")
+    # Whole-line match — ``- task`` contains the substring ``ask``, and the
+    # section delta ships only the changed ``tools`` piece, so the matched line
+    # can be the record's last (no trailing newline to anchor on).
+    assert tail and any(line == "- ask" for line in (tail[-1].text or "").splitlines())
     assert "ask" in {tool.name for tool in advisor.tools}
     await session.dispose()

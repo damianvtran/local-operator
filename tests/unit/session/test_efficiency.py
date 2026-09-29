@@ -220,7 +220,10 @@ async def test_helpers_reanchor_compacted_state_without_journaling(tmp_path, res
     assert len(session._transcript.entries()) == len(before) + 1
     current_state = session._context.messages[-1]
     assert isinstance(current_state, CustomMessage)
-    assert current_state.details["blocks"]["3"] == goal
+    # Block 3 ships as its changed sections; this provider's tail is one opaque
+    # string, so it files under the ``knowledge`` fallback section. An emptied
+    # goal is an explicit empty section, not an omission.
+    assert current_state.details["blocks"]["3"]["knowledge"] == goal
     await session.dispose()
 
 
