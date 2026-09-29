@@ -139,9 +139,18 @@ def _session(root: Path, session_id: str) -> Path:
     return directory
 
 
-def _publish(root: Path, session_id: str, kind: str = "complete", anchor: str = "a1") -> str:
+def _publish(
+    root: Path,
+    session_id: str,
+    kind: str = "complete",
+    anchor: str = "a1",
+    *,
+    notify: bool = True,
+) -> str:
     token = str(uuid.uuid4())
-    AttentionStore(root / "attention.db").publish(f"session/{session_id}", token, anchor, kind)
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", token, anchor, kind, notify=notify
+    )
     return token
 
 
@@ -384,6 +393,84 @@ def test_the_doorbell_delivers_a_completion_with_no_bridge_anywhere(tmp_path):
     # No desktop is connected and nothing else holds the session, so rung 1 did
     # not apply and the feed composes the banner itself.
     assert announced[0]["payload"]["focus_policy"] == "always"
+
+
+def test_a_quiet_completion_is_never_announced(tmp_path):
+    """§14: the feed reads the row's own notify value; nothing re-derives it.
+
+    Both arms in one cell and one tick: the quiet session's completion emits no
+    banner although its `attention` frame still ships, and the loud control's
+    does — so the assertion cannot pass on a feed that announces nothing at
+    all.
+    """
+    root = tmp_path
+    quiet, loud = "q" * 12, "l" * 12
+    _session(root, quiet)
+    _session(root, loud)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, quiet, notify=False)
+    loud_token = _publish(root, loud)
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    announced = _notified(frames)
+    assert len(announced) == 1, frames
+    assert announced[0]["session_id"] == loud
+    assert announced[0]["payload"]["completion_token"] == loud_token
+
+
+def test_two_rows_one_tick_gate_per_row_quiet_then_loud(tmp_path):
+    """§14: each row's OWN notify value gates it (review round 1, F1).
+
+    A tick can carry two completions of one session. The latest state's value
+    must not decide the older row's fate: on the pre-fix head this cell
+    announced the QUIET completion too (two banners, one carrying the quiet
+    token), because the loud row had made the state notify=True.
+    """
+    root = tmp_path
+    sid = "r" * 12
+    _session(root, sid)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, sid, anchor="quiet-first", notify=False)
+    loud_token = _publish(root, sid, anchor="loud-second")
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    announced = _notified(frames)
+    assert len(announced) == 1, frames
+    assert announced[0]["payload"]["completion_token"] == loud_token
+
+
+def test_two_rows_one_tick_gate_per_row_loud_then_quiet(tmp_path):
+    """The other order: the quiet row must not swallow the loud one.
+
+    On the pre-fix head this cell produced NO banner at all — the quiet row was
+    latest, so the state gate skipped both.
+    """
+    root = tmp_path
+    sid = "s" * 12
+    _session(root, sid)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    loud_token = _publish(root, sid, anchor="loud-first")
+    _publish(root, sid, anchor="quiet-second", notify=False)
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    announced = _notified(frames)
+    assert len(announced) == 1, frames
+    assert announced[0]["payload"]["completion_token"] == loud_token
 
 
 def test_the_feed_ships_the_bridge_payload_byte_for_byte(tmp_path):

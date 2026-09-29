@@ -51,3 +51,18 @@ class ReenrolmentRequired(ValueError):
     ``service.enforce_harness_ports``) and the same command that renews the
     local record — ``lop tunnel connect`` — is what clears the park.
     """
+
+
+class RecordNotFound(ValueError):
+    """The control plane answered 404 for this tunnel under the SELECTED login.
+
+    A type rather than only a status code inside a sentence, because the tunnel
+    commands TRANSLATE this one: under an owner-pinned request a 404 usually
+    means the enrolled owner account is not the selected login, and the sentence
+    that says so is composed where the two can be compared — the stored record's
+    ``owner_account_id`` against the selected login's own account
+    (``cli._missing_record_message``), because the status code alone cannot tell
+    "belongs to another account" from "revoked". Every other status keeps the
+    generic fixed literal, and this stays a ``ValueError`` subclass so every
+    existing handler on this path keeps working unchanged.
+    """

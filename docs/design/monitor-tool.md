@@ -1339,8 +1339,10 @@ turn), and the counterweights are:
   `notify: true` when the user asked to be told (`wake create … notify:true`),
   so reminders keep their point;
 - errors always notify (§14.2);
-- the wake tool's schema grows one field: measured +172 chars / +48 cl100k /
-  ~+62 billed over the shipped tool (§17).
+- the wake tool's schema grows one field and its description one sentence:
+  re-measured on the implemented tool at +249 chars / +60 cl100k / ~+90 billed
+  over the shipped shape — the field alone +200 chars / +50 cl100k / ~+72
+  billed (§17, slice-3 re-measurement).
 
 CLI note: `lop wake create` gains `--notify` (opt-in; default stays quiet, so
 scripted arms match the contract).
@@ -1454,6 +1456,8 @@ one.
 | system.md sentence change (net) | +159 | +36 | ~+57 |
 | no-action sentence (new) | 161 | 34 | ~58 |
 | guide description line | 150 | 37 | ~54 |
+| notify guidance sentence (system.md, new) | +83 | +21 | ~+30 |
+| notify guidance bullet (guide; lazy, no prefix cost) | 225 | 50 | ~81 |
 
 **Slice-2 re-measurement — the implemented classifier call (2026-09-28).** The
 classifier rows were re-run on the SHIPPED shape: the request is built by
@@ -1472,6 +1476,28 @@ its `noul` sibling, never implemented) sampled a differently composed 358-char
 state; §8.3 keeps that comparison as the decision record. The per-monitor
 attribution row above stays §8.3's measurement: the shapes cost the same
 within ~1%, and the decision was attribution, not bytes.
+
+**Slice-3 re-measurement — the implemented wake tool (2026-09-28).** The table
+above is the design record; the implemented shape was re-measured with
+`probe_wake_tool.py` (this slicing session's scratchpad, the worktree venv
+interpreter — Python 3.12.13, has `tiktoken`), reporting the same three rulers
+from the OpenAI chat-completions wire object `providers/clients.py::
+_tools_to_openai` builds (default `json.dumps` separators), with the shipped
+arm reconstructed from the same source (the description without the notify
+sentence, the `WakeParams` schema without the `notify` property):
+
+| arm | chars | cl100k | billed |
+|---|---|---|---|
+| shipped (no notify) | 1,583 | 496 | ~569 |
+| + `notify` field only | 1,783 | 546 | ~641 |
+| implemented (field + description sentence) | 1,832 | 556 | ~659 |
+
+The field alone is **+200 chars / +50 cl100k / ~+72 billed**; the implemented
+tool is **+249 / +60 / ~+90**. The design-time wire-object row (1,551/487)
+reproduces within ~2% under this method, not byte-for-byte — its exact
+serialization lived in a scratchpad probe that is gone — so the deltas above
+are the numbers to quote, and they cannot be compared against the table's
+absolute values.
 
 **Per-event accounting.**
 

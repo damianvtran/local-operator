@@ -670,6 +670,269 @@ async def test_configuration_edit_preserves_private_origin_and_explicit_stop(
     assert all(call.args[0] == "GET" for call in api.request.call_args_list)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["configure", "connect"])
+async def test_a_dead_pinned_login_falls_back_to_the_current_one(
+    tmp_path, monkeypatch, connection, action
+):
+    """A pin whose row is gone must not be re-proposed (issue #1711, item 3b).
+
+    Before: `credential_id(19)` filtered the store by an id no row has, and the
+    bare command answered "log in first" while a current login sat right there —
+    the re-point was impossible from the surface that exists to do it. Now the
+    bare command drops the dead pin and re-points at the current login, and the
+    new id is SAVED, so it sticks. The same command with an explicit
+    `--credential-id` that names nothing still fails loudly: that is a stale
+    note or a typo, not a default.
+    """
+    from local_operator.tunnels import cli, install
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        fresh = store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    config.save(_stored(connection, credential_id=19))  # no row 19 exists
+    api = AsyncMock()
+    api.request.side_effect = (
+        [{"eligible": True, "balance_usd": 10}, copy.deepcopy(connection["tunnel"])]
+        if action == "connect"
+        else [copy.deepcopy(connection["tunnel"])] * 2  # configure reads, then patches
+    )
+    factory = Mock(return_value=api)
+    monkeypatch.setattr(cli, "RadientTunnels", factory)
+    monkeypatch.setattr(cli, "_prepare_mobile", Mock())
+    monkeypatch.setattr(cli, "cloudflared_binary", lambda _: "/trusted/cloudflared")
+    monkeypatch.setattr(install, "install", Mock())
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    args = ["tunnel", action] + (["--no-start"] if action == "connect" else [])
+    receipt = await dispatch(parser.parse_args(args))
+
+    assert HOST in receipt
+    assert factory.call_args.args[0] == fresh.id, "the dead pin fell back to the current login"
+    assert config.load()["credential_id"] == fresh.id, "the re-point is saved, so it sticks"
+
+    with pytest.raises(ValueError, match="Log in with lop login radient first"):
+        await dispatch(parser.parse_args(["tunnel", action, "--credential-id", "19"]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["configure", "connect"])
+async def test_a_404_under_another_account_names_the_owner_mismatch(
+    tmp_path, monkeypatch, connection, action
+):
+    """Issue #1711, item 3a: the bare HTTP status becomes a sentence.
+
+    The comparison the sentence can make is the selected login's account (read
+    live from `GET /v1/me`) against the owner the stored record names
+    (`record.owner_account_id`). Here they differ, so the refusal names the
+    mismatch — and never the provider's body or the bare status code.
+    """
+    from local_operator.tunnels import cli
+    from local_operator.tunnels.errors import RecordNotFound
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    stored = _stored(connection, credential_id=7)
+    stored["record"]["owner_account_id"] = "owner-1"
+    config.save(stored)
+    api = AsyncMock()
+    api.request.side_effect = (
+        [
+            {"eligible": True, "balance_usd": 10},
+            RecordNotFound("Radient has no record of this tunnel for the selected login."),
+        ]
+        if action == "connect"
+        else [RecordNotFound("Radient has no record of this tunnel for the selected login.")]
+    )
+    api.account_id.return_value = "owner-2"
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    args = ["tunnel", action] + (["--no-start"] if action == "connect" else [])
+    with pytest.raises(ValueError) as raised:
+        await dispatch(parser.parse_args(args))
+
+    message = str(raised.value)
+    assert "belongs to a different Radient account than the selected login" in message
+    assert "HTTP 404" not in message
+    api.account_id.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_404_without_a_comparable_owner_names_both_possibilities(
+    tmp_path, monkeypatch, connection
+):
+    """No stored owner (an older or hand-edited config): the sentence must not
+    claim "different account" — it names both causes and where to check, and
+    the account read is never spent, because there is nothing to compare."""
+    from local_operator.tunnels import cli
+    from local_operator.tunnels.errors import RecordNotFound
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    config.save(_stored(connection, credential_id=7))
+    api = AsyncMock()
+    api.request.side_effect = [
+        RecordNotFound("Radient has no record of this tunnel for the selected login.")
+    ]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    with pytest.raises(ValueError) as raised:
+        await dispatch(parser.parse_args(["tunnel", "configure"]))
+
+    message = str(raised.value)
+    assert "different Radient account" in message and "revoked" in message
+    assert "This tunnel belongs to a different Radient account" not in message
+    api.account_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_404_with_a_matching_owner_says_revoked_not_another_account(
+    tmp_path, monkeypatch, connection
+):
+    """The compare MATCHED: the one possibility it excluded must not be named.
+
+    The stored record's owner and the selected login's live account are the same
+    (issue #1711, review round 1 F2/D2), so "it may belong to a different
+    Radient account" would name a possibility this very comparison just
+    excluded — the matched case gets its own revoked-only sentence instead.
+    """
+    from local_operator.tunnels import cli
+    from local_operator.tunnels.errors import RecordNotFound
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    stored = _stored(connection, credential_id=7)
+    stored["record"]["owner_account_id"] = "owner-1"
+    config.save(stored)
+    api = AsyncMock()
+    api.request.side_effect = [
+        RecordNotFound("Radient has no record of this tunnel for the selected login.")
+    ]
+    api.account_id.return_value = "owner-1"  # the comparison MATCHES
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    with pytest.raises(ValueError) as raised:
+        await dispatch(parser.parse_args(["tunnel", "configure"]))
+
+    message = str(raised.value)
+    assert message == (
+        "Radient has no record of this tunnel for the selected login; it may "
+        "have been revoked. Check it in the Radient console "
+        "(https://console.radienthq.com/dashboard/tunnels)."
+    )
+    assert "different Radient account" not in message
+    api.account_id.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_connect_for_a_different_tunnel_id_does_not_blame_the_stored_record(
+    tmp_path, monkeypatch, connection
+):
+    """`connect --tunnel-id B` while the config holds A: A's record is not
+    evidence about B (issue #1711, review round 1 F1).
+
+    The previous spelling composed the sentence from A's record, so a 404 for B
+    could claim B "belongs to a different Radient account" — a fact this device
+    never established — and send the operator to sign in to an account that may
+    not own B. With the id mismatch the sentence is the both-possibilities one,
+    and the account read is not spent at all.
+    """
+    from local_operator.tunnels import cli
+    from local_operator.tunnels.errors import RecordNotFound
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    stored = _stored(connection, credential_id=7)  # record of connection's tunnel
+    stored["record"]["owner_account_id"] = "owner-1"
+    config.save(stored)
+    api = AsyncMock()
+    api.request.side_effect = [
+        {"eligible": True, "balance_usd": 10},
+        RecordNotFound("Radient has no record of this tunnel for the selected login."),
+    ]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    with pytest.raises(ValueError) as raised:
+        await dispatch(parser.parse_args(["tunnel", "connect", "tunnel-2", "--no-start"]))
+
+    message = str(raised.value)
+    assert "it may belong to a different Radient account, or it may have been revoked" in message
+    assert "belongs to a different Radient account than the selected login" not in message
+    api.account_id.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_id_reads_the_login_account_and_degrades_silently(tmp_path, monkeypatch):
+    """`api.account_id`: `result.account.id`, live; None on every failure.
+
+    The 404 message's comparison depends on this answering only when it can be
+    sure — a None degrades to the both-possibilities sentence, never a claim —
+    so the shape (`account.id`, else `identity.account_id`) and two silent
+    failure modes are pinned here.
+    """
+    from local_operator.tunnels import api as tunnels_api
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {"type": "oauth", "access": "live", "refresh": "live"},
+        )
+
+    def account(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/me"
+        return httpx.Response(200, json={"result": {"account": {"id": "account-b"}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(account)) as client:
+        assert await tunnels_api.RadientTunnels(row.id, client).account_id() == "account-b"
+
+    def identity_only(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"result": {"identity": {"account_id": "account-c"}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(identity_only)) as client:
+        assert await tunnels_api.RadientTunnels(row.id, client).account_id() == "account-c"
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "refused"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(refused)) as client:
+        assert await tunnels_api.RadientTunnels(row.id, client).account_id() is None
+
+    def explode(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request may be made for a row this device does not have")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(explode)) as client:
+        assert await tunnels_api.RadientTunnels(9999, client).account_id() is None
+
+
 @pytest.mark.parametrize("billing_succeeds", [False, True])
 def test_mobile_enable_reactivates_existing_tunnel_before_starting(
     tmp_path, monkeypatch, billing_succeeds
@@ -2873,7 +3136,7 @@ async def test_status_json_reports_the_park_the_login_and_the_remedy(
     tmp_path, monkeypatch, connection
 ) -> None:
     """The machine-readable shape the desktop route also serves."""
-    from local_operator.tunnels import cli
+    from local_operator.tunnels import cli, gateway
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     config.save(_stored(connection))
@@ -2899,10 +3162,150 @@ async def test_status_json_reports_the_park_the_login_and_the_remedy(
     assert payload["connector"]["state"] == "parked"
     assert payload["connector"]["reason"] == LOGIN_REQUIRED
     assert payload["connector"]["since"] == 1_800_000_000
-    # No credential row exists for this config's id, which is itself a reason to
-    # sign in — and a local answer, which is the only answer available here.
-    assert payload["login"]["state"] == "login_required"
-    assert payload["remedy"]["command"] == "lop login radient"
+    # No credential row exists for this config's id. That is `owner_missing`,
+    # NOT the `login_required` this fixture used to report: a fresh sign-in is
+    # a NEW row and nothing re-points the configuration, so the park's own
+    # sign-in remedy could never clear it (issue #1711) — the remedy below is
+    # the command that re-points the device instead.
+    assert payload["login"]["state"] == "owner_missing"
+    assert payload["remedy"] == {
+        "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
+        "url": gateway.CONSOLE_URL,
+    }
+
+
+def test_the_remedy_for_a_gone_login_is_the_repoint_not_a_sign_in() -> None:
+    """`report.remedy()`'s own table, driven directly: the desktop callout's source.
+
+    Four combinations matter, one branch each: `owner_missing` with no park; a
+    `login_required` PARK whose login is `owner_missing` (the parked reboot case
+    — the park's sign-in command is provably unable to clear it, so the
+    verdict's re-point command stands in); a genuine refused grant, where the
+    park's sign-in command is right and must survive; and any other park, which
+    keeps its own remedy untouched.
+    """
+    from local_operator.tunnels import gateway, report
+
+    missing = {"credential_id": 19, "state": gateway.OWNER_MISSING}
+    refused = {"credential_id": 19, "state": "login_required"}
+    repoint = {
+        "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
+        "url": gateway.CONSOLE_URL,
+    }
+    parked_sign_in = {
+        "reason": LOGIN_REQUIRED,
+        "remedy": {"command": gateway.TERMINAL_REMEDY[LOGIN_REQUIRED], "url": CONSOLE_URL},
+    }
+
+    assert report.remedy({"stopped": False}, {"remedy": None}, missing) == repoint
+    assert report.remedy({"stopped": False}, parked_sign_in, missing) == repoint
+    assert report.remedy({"stopped": False}, parked_sign_in, refused) == {
+        "command": gateway.TERMINAL_REMEDY[LOGIN_REQUIRED],
+        "url": CONSOLE_URL,
+    }
+    parked_reconnect = {
+        "reason": "reenrolment_required",
+        "remedy": {"command": "lop tunnel connect", "url": CONSOLE_URL},
+    }
+    assert report.remedy({"stopped": False}, parked_reconnect, missing) == {
+        "command": "lop tunnel connect",
+        "url": CONSOLE_URL,
+    }
+    # A stopped tunnel offers nothing, whatever the login's state (D5).
+    assert report.remedy({"stopped": True}, {"remedy": None}, missing) is None
+
+
+@pytest.mark.asyncio
+async def test_a_login_that_is_gone_is_never_reported_as_sign_in_expired(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """Issue #1711, end to end through the CLI: verdict + remedy + human line.
+
+    The configuration pins a row this device no longer has (the operator logged
+    out, or the account was removed) while a fresh, valid Radient login exists
+    beside it. The old answer was `login_required` with the sign-in remedy —
+    advice that could never clear it, because a fresh sign-in is a NEW row and
+    nothing re-points `tunnel/config.json` at it. Both surfaces must now say
+    `owner_missing` and offer the re-point; the sign-in spelling appears in
+    neither.
+    """
+    from local_operator.tunnels import cli, gateway
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        fresh = store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "qa", "access": "live", "refresh": "live"},
+        )
+    assert fresh.id != 19, "the valid login is a different row; nothing re-points the config at it"
+    config.save(_stored(connection, credential_id=19))
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+
+    login_lines = [line for line in receipt.splitlines() if line.startswith("Login:")]
+    assert len(login_lines) == 1, receipt
+    # The amended D1 copy, pinned exactly: 156 cells → two 80-column rows, and
+    # the sign-in made conditional (only the re-point clears the state; a
+    # sign-in is a precondition when the owning account is not on this device).
+    assert login_lines[0] == (
+        "Login: this tunnel's saved login is gone from this device — "
+        "run lop tunnel configure to re-point it (sign in to the account that "
+        "owns the tunnel if needed)."
+    )
+    assert f"run {gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING]}" in login_lines[0]
+    assert "sign-in expired" not in login_lines[0]
+    assert gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED] not in receipt
+
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+    assert payload["login"] == {"credential_id": 19, "state": "owner_missing"}
+    assert payload["remedy"] == {
+        "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
+        "url": gateway.CONSOLE_URL,
+    }
+
+
+@pytest.mark.asyncio
+async def test_login_verdict_calls_a_login_it_cannot_see_owner_missing(tmp_path, monkeypatch):
+    """Both `owner_missing` arms, and the arm that must NOT become it.
+
+    A configuration naming a row this device does not have, or naming nothing
+    usable at all (not even an int), is `owner_missing`; a row that IS there but
+    whose grant the IdP refused stays `login_required` (the sign-in remedy
+    clears that one — the status-level test below drives it). Also pinned: the
+    state is read ahead of the memo, so a row appearing beside it is `ok` on
+    the very next check rather than after a block window.
+    """
+    from local_operator.tunnels import gateway, report
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert await report.login_verdict({"credential_id": 19}) == {
+        "credential_id": 19,
+        "state": gateway.OWNER_MISSING,
+    }
+    assert await report.login_verdict({"credential_id": "nineteen"}) == {
+        "credential_id": "nineteen",
+        "state": gateway.OWNER_MISSING,
+    }
+    with closing(AuthStore()) as store:
+        wrong_kind = store.upsert_credential("radient", {"type": "api_key", "key": "x"})
+        row = store.upsert_credential(
+            "radient",
+            {"type": "oauth", "access": "live-access", "refresh": "live-refresh"},
+        )
+    assert await report.login_verdict({"credential_id": wrong_kind.id}) == {
+        "credential_id": wrong_kind.id,
+        "state": gateway.OWNER_MISSING,
+    }
+    assert await report.login_verdict({"credential_id": row.id}) == {
+        "credential_id": row.id,
+        "state": "ok",
+    }
 
 
 @pytest.mark.asyncio
@@ -3056,10 +3459,17 @@ async def test_the_status_first_line_is_a_state_line_not_a_paragraph(
     assert lines[0].startswith("Connector: parked — login required")
     assert len(lines[0]) <= 80, lines[0]
     assert lines[1].startswith("  "), "the park's own sentence is a continuation row"
-    assert lines[2].startswith("Login: sign-in expired — run lop login radient")
-    # The command appears ONCE, and the billing URL is not welded to the login
-    # copy: the terminal has a billing block for the line that is about billing.
-    assert receipt.count(gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]) == 1
+    assert lines[2].startswith(
+        "Login: this tunnel's saved login is gone from this device — "
+        f"run {gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING]}"
+    )
+    # The command appears ONCE, and it is the RE-POINT, not the park's sign-in
+    # loop: a sign-in cannot clear a configuration that names a missing row
+    # (issue #1711), so the sign-in spelling must appear nowhere in the receipt.
+    assert receipt.count(gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING]) == 1
+    assert gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED] not in receipt
+    # The billing URL is not welded to the login copy: the terminal has a
+    # billing block for the line that is about billing.
     assert receipt.count(gateway.CONSOLE_URL) <= 1
 
 
@@ -3086,8 +3496,13 @@ async def test_a_stopped_tunnel_is_never_told_to_sign_in(tmp_path, monkeypatch, 
     receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
 
     # The fact stays, with its reason attached…
-    assert "Login: sign-in expired (not in use — tunnel stopped)" in receipt
-    # …and nothing in the output asks for an action.
+    assert (
+        "Login: this tunnel's saved login is gone from this device "
+        "(not in use — tunnel stopped)" in receipt
+    )
+    # …and nothing in the output asks for an action: neither the re-point nor
+    # the sign-in spelling appears.
+    assert gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING] not in receipt
     assert gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED] not in receipt
     assert "Cloud status:" not in receipt
 

@@ -685,6 +685,57 @@ class CheckpointWarmReceipt(BaseModel):
     pending: list[str]
 
 
+#: What one find hit matched (D3/D9): a casefolded literal substring of what
+#: was said (``exact``), or the bounded soft tier (``soft`` — prefix,
+#: token-AND, or edit distance <= 2 on 4+ character tokens).
+FindTier = Literal["exact", "soft"]
+
+#: The find answer's lifecycle state (D9). ``building`` means the index scan is
+#: in flight and ``hits`` is whatever the previous scan held (``partial``);
+#: ``error`` is a failed refresh inside its cooldown; ``unsupported`` is the
+#: peer/remote degradation (D4) — a peer's journal is not on this device, so v1
+#: cannot derive a searchable index for it, and the renderer hides find there.
+FindState = Literal["ready", "building", "error", "unsupported"]
+
+
+class FindHit(BaseModel):
+    """One message the query matched, with the snippet the results list renders.
+
+    ``ranges`` are match offsets RELATIVE TO ``snippet`` (non-overlapping,
+    oldest first, at most five), so a client marks ``snippet[start:end]``
+    without knowing the window offset. They are always present — empty for a
+    soft hit, which has no literal occurrence of the query by construction.
+    ``role`` is the wire vocabulary (``user``/``agent``); the stored docs say
+    ``assistant``, and the translation happens server-side so both clients
+    read the same word.
+    """
+
+    id: str
+    role: Literal["user", "agent"]
+    ts: float
+    snippet: str
+    ranges: list[tuple[int, int]]
+    tier: FindTier
+
+
+class SessionFind(BaseModel):
+    """``GET /v1/desktop/sessions/{session_id}/find`` (D9).
+
+    ``query`` is echoed rather than assumed: the renderer debounces its input,
+    so responses can arrive out of order and it must be able to tell which of
+    its queries this answers. ``partial`` is True exactly when ``hits`` were
+    ranked from an index that does not reflect the journal's current tail
+    (``building``), never as a substitute for the ``truncated`` flag, which
+    reports the hit list itself being cut at ``limit``.
+    """
+
+    query: str
+    state: FindState
+    partial: bool
+    hits: list[FindHit]
+    truncated: bool
+
+
 #: Why a child job's live window could not be handed over, when its absence
 #: needs naming. A TOKEN, not a sentence: the copy belongs to the surface.
 #:
