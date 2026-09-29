@@ -50,6 +50,7 @@ from local_operator.resume import SessionRow
 from local_operator.session.catalog import CatalogEntry
 from local_operator.tui.app import COMPOSER_FOCUSED_CLASS, OperatorApp
 from local_operator.tui.widgets.editor import Editor
+from local_operator.tui.widgets.session_sidebar import PIN_CELL_WIDTH
 from local_operator.tui.widgets.tool_card import ToolCard
 from local_operator.tui.widgets.welcome import WelcomeView
 
@@ -1447,10 +1448,11 @@ async def test_a_click_on_the_list_does_not_move_the_keyboard() -> None:
             await pilot.pause()
         assert app.focused is editor, f"the panel's dead space took the keyboard: {app.focused!r}"
 
-        # A row: the click still acts on it …
+        # A row: the click still acts on it … and one cell past the pin cell,
+        # which toggles a pin instead (issue #1357 slice 2a).
         rows = {entry.id: y for y, entry in _visible_rows(app, sidebar)}
         assert "sess-b" in rows, "premise: the second session has a painted row"
-        await pilot.click(offset=(sidebar.region.x + 2, rows["sess-b"]))
+        await pilot.click(offset=(sidebar.region.x + PIN_CELL_WIDTH + 1, rows["sess-b"]))
         for _ in range(4):
             await pilot.pause()
         assert sidebar.cursor_id == "sess-b", "the row click no longer acts on the list"
@@ -1493,10 +1495,11 @@ async def test_a_click_on_the_switched_session_ends_with_the_keyboard_in_the_com
 
         app._sidebar_navigation.select = _record  # type: ignore[method-assign]
         try:
-            # The row of the OTHER conversation: the switch branch.
+            # The row of the OTHER conversation: the switch branch. One cell
+            # past the pin cell, which toggles a pin instead (#1357 slice 2a).
             rows = {entry.id: y for y, entry in _visible_rows(app, sidebar)}
             assert "sess-b" in rows, "premise: the other session has a painted row"
-            await pilot.click(offset=(sidebar.region.x + 2, rows["sess-b"]))
+            await pilot.click(offset=(sidebar.region.x + PIN_CELL_WIDTH + 1, rows["sess-b"]))
             for _ in range(6):
                 await pilot.pause()
         finally:

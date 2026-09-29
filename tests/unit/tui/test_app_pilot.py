@@ -13526,6 +13526,90 @@ async def test_f10_unpins_a_pinned_row(tmp_path, monkeypatch) -> None:
         assert sidebar._pins == ()
 
 
+@pytest.mark.asyncio
+async def test_clicking_the_pin_cell_toggles_the_pin_and_never_opens_the_row(
+    tmp_path, monkeypatch
+) -> None:
+    """Issue #1357 slice 2a: pinning gets a DIRECT pointer action.
+
+    Both cells of the pin cell toggle the pin, the cursor does not move, and —
+    the half the issue calls out — a press meant for the star never opens or
+    selects the row under it. The app's ONE switch entry point
+    (`_select_sidebar_session`) is watched rather than inferred from a frame,
+    so "it did not open" is asserted where opening would actually start (the
+    body-click test below proves the same watcher fires when it should).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session_dirs(tmp_path)
+    from local_operator.tui.sidebar_pins import read_pins
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        sidebar.cursor_id = "alpha"
+
+        def row_y() -> int:
+            return next(
+                i
+                for i, line in enumerate(sidebar.render().plain.splitlines())
+                if "Session beta" in line
+            )
+
+        opened: list[str] = []
+        with patch.object(app, "_select_sidebar_session", side_effect=opened.append):
+            # Content column 0 = widget offset x=1 (one cell of LEFT padding),
+            # column 1 = x=2: BOTH cells of the pin cell toggle...
+            await pilot.click("#session-sidebar", offset=(1, row_y()))
+            for _ in range(40):
+                await pilot.pause()
+                if read_pins(tmp_path):
+                    break
+            assert read_pins(tmp_path) == ["beta"]
+            # ...and it is a toggle in both directions.
+            await pilot.click("#session-sidebar", offset=(2, row_y()))
+            for _ in range(40):
+                await pilot.pause()
+                if not read_pins(tmp_path):
+                    break
+            assert read_pins(tmp_path) == []
+        assert opened == [], "a pin-cell press started a session switch"
+        assert sidebar.cursor_id == "alpha", "the pin cell moved the cursor"
+
+
+@pytest.mark.asyncio
+async def test_a_click_on_the_row_body_still_opens_the_session(tmp_path, monkeypatch) -> None:
+    """The other half of the hit zone: outside the pin cell nothing changed.
+
+    The click moves the cursor to the row and asks the app's switch entry
+    point for it — the same pair of effects the row had before the pin cell
+    existed (issue #1357 slice 2a keeps today's behaviour off the star).
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session_dirs(tmp_path)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        sidebar.cursor_id = "alpha"
+        y = next(
+            i
+            for i, line in enumerate(sidebar.render().plain.splitlines())
+            if "Session beta" in line
+        )
+        opened: list[str] = []
+        with patch.object(app, "_select_sidebar_session", side_effect=opened.append):
+            # Content column 2 is the caret cell — outside the pin cell's two.
+            await pilot.click("#session-sidebar", offset=(3, y))
+            for _ in range(40):
+                await pilot.pause()
+                if opened:
+                    break
+        assert opened == ["beta"], "a body click no longer opens the row"
+        assert sidebar.cursor_id == "beta"
+
+
 # -- the cross-surface round trip: one config root, two front ends ----------------
 #
 # THE PROOF THE FEATURE EXISTS FOR, in both directions and against ONE config root.

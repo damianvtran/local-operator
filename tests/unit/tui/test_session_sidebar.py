@@ -25,7 +25,12 @@ from local_operator.tui.session_catalog import (
 )
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.session_sidebar import (
+    _ROW_MARK_COLUMN,
+    _ROW_PREFIX_CELLS,
     APP_SCREEN_INSET,
+    PIN_CELL_WIDTH,
+    PIN_HOVER,
+    PIN_MARK,
     SIDEBAR_GUTTER,
     SIDEBAR_MAIN_COMFORT_WIDTH,
     SIDEBAR_MAIN_MIN_WIDTH,
@@ -611,18 +616,16 @@ async def test_list_window_current_cursor_and_footer_are_independent():
         lines = sidebar.render().plain.splitlines()
         assert len(lines) <= sidebar.size.height
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
-        # Focused AND paginated: the footer keeps the exit hint (design round
-        # D4). This assertion used to read `1–{page}/101 · ctrl+b hide` and
-        # passed only because the pagination branch REPLACED the hint — the
-        # counter displaced `esc return` exactly when the list is long enough to
-        # need it, which is the state a user is most likely to be lost in. The
-        # page counter may never be the reason the exit hint disappears, so the
-        # rule is asserted as "both, or the exit alone": which of the two forms
-        # is painted depends on the panel's width.
-        assert lines[-1].startswith(f"1–{sidebar.page_size}/101"), lines[-1]
-        assert (
-            "esc return" in lines[-1]
-        ), "the page counter displaced the only named exit (design round D4)"
+        # Focused AND paginated, at the 29-cell floor: the footer keeps the exit
+        # hint, and it now keeps the pin teach beside it (issue #1357 slice 2a
+        # re-ranked the focused ladder). This assertion used to read
+        # `1–{page}/101 · esc return`; with `f10 pin` a candidate at this width
+        # the POSITION is the fact that yields — it is recoverable by scrolling,
+        # while `f10 pin` is taught nowhere else on the frame — and the exit
+        # must never be the fact that yields, whatever else is on the rung
+        # (design round D4: the counter may never be the reason the exit hint
+        # disappears; here the counter is the one that gave way).
+        assert lines[-1].strip() == "esc return · f10 pin", lines[-1]
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
         # Unfocused and paginated: the position plus the way INTO the keyboard
         # mode (U1). The counter used to leave a full list naming the entry
@@ -821,18 +824,20 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
     def caret(line: str) -> str:
         """The CURSOR-PREFIX slot — the source's own name for this cell.
 
-        Not the mark column: `row_state_mark` owns the cell at `line[3]` in this
+        Not the mark column: `row_state_mark` owns the cell at `line[5]` in this
         arrangement (see `SessionSidebar.render`), which is precisely the column
         this test stopped reading.
 
-        `line[1]` is that slot here because the docked list's LEFT padding is one
-        cell (`padding: 0 3 0 1` in `local_operator.tcss`), and
-        `_sync_sidebar_layout` swaps in the gutter when the list is docked right
-        (`padding: (0, 1, 0, gutter)`, gutter 3), where the caret would sit at
-        `line[3]`: a right-docked run then fails loudly above rather than quietly
-        reading a padding cell here.
+        `line[1 + PIN_CELL_WIDTH]` is that slot here because the docked list's
+        LEFT padding is one cell (`padding: 0 3 0 1` in `local_operator.tcss`)
+        and the row opens with the two-cell pin cell (issue #1357 slice 2a), so
+        content column 0 lands on `line[1]` and the caret sits at content column
+        `PIN_CELL_WIDTH`. `_sync_sidebar_layout` swaps in the gutter when the
+        list is docked right (`padding: (0, 1, 0, gutter)`, gutter 3), where the
+        caret would sit two cells further right: a right-docked run then fails
+        loudly above rather than quietly reading a padding cell here.
         """
-        return line[1]
+        return line[1 + PIN_CELL_WIDTH]
 
     # The CARET SLOT, not a fixed prefix. The cell beside the caret is the row's
     # own MARK COLUMN, and it carries state that legitimately moves with time:
@@ -862,7 +867,8 @@ async def test_requested_row_is_distinguishable_from_the_keyboard_cursor():
     columns = {
         row_line(frame, title).index(title) for frame in (straight, mirrored) for title in markers
     }
-    assert columns == {len(" »   ")}, columns
+    # One padding cell plus the row prefix (pin cell, caret, locality, mark).
+    assert columns == {1 + _ROW_PREFIX_CELLS}, columns
 
 
 @pytest.mark.asyncio
@@ -3197,9 +3203,10 @@ async def test_a_subagent_row_draws_its_label_and_role():
         row = next(line for line in lines if "fix the poll" in line)
         assert "coder" in row
         assert "untitled-7" not in row
-        # The 4-cell prefix is "» "/"› "/"  " then the mark then a space, so
-        # the mark is column 2 — the same cell `_advance_spinner` patches.
-        assert row[2] == "⌥"
+        # The prefix is the two-cell pin cell, then the caret and locality
+        # cells; the mark keeps its own column — the same cell `_advance_spinner`
+        # patches.
+        assert row[_ROW_MARK_COLUMN] == "⌥"
 
 
 @pytest.mark.asyncio
@@ -3683,8 +3690,8 @@ async def test_a_pinned_row_keeps_its_urgency_glyph():
 
     `★` is the DURABLE fact (it does not change while the user looks at it) and
     the state glyph is the volatile, time-critical one, so `★` is the one that
-    moves: it takes the cursor-prefix slot at columns 0-1 and leaves column 2
-    to the urgency ladder.
+    moves: issue #1357 slice 2a gave it its own leading cell pair and left the
+    urgency ladder's column (`_ROW_MARK_COLUMN`) entirely alone.
     """
     from local_operator.tui.widgets.session_picker import row_state_mark
 
@@ -3697,7 +3704,7 @@ async def test_a_pinned_row_keeps_its_urgency_glyph():
         row = next(line for line in sidebar.render().plain.splitlines() if "Needs you" in line)
         expected, _ink = row_state_mark(entry.row, sidebar._frame)
         assert expected == "!", "fixture must be a needs-you row"
-        assert row[2] == "!", f"column 2 lost the urgency glyph: {row!r}"
+        assert row[_ROW_MARK_COLUMN] == "!", f"the urgency glyph left its column: {row!r}"
         assert row[0] == "★", f"column 0 is not the pin slot: {row!r}"
 
 
@@ -3706,9 +3713,10 @@ async def test_a_pinned_busy_row_still_spins():
     """D1's other half: the flicker fix must not cost the spinner.
 
     The first cut skipped pinned rows in `_advance_spinner` because `★` lived
-    in the cell the tick patches. With `★` at columns 0-1 that conflict is
-    gone, so a pinned busy row animates like any other — and the pin mark is
-    left alone by a tick that only ever touches column 2.
+    in the cell the tick patches. With the pin in its own cell (columns 0-1)
+    that conflict is gone, so a pinned busy row animates like any other — and
+    the pin mark is left alone by a tick that only ever touches the mark
+    column.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -3721,9 +3729,62 @@ async def test_a_pinned_busy_row_still_spins():
             sidebar._advance_spinner()
             await pilot.pause()
             row = next(line for line in sidebar.render().plain.splitlines() if "Working" in line)
-            seen.add(row[2])
+            seen.add(row[_ROW_MARK_COLUMN])
             assert row[0] == "★", f"the tick disturbed the pin slot: {row!r}"
-        assert len(seen) == 2, f"column 2 did not animate across two ticks: {seen}"
+        assert len(seen) == 2, f"the mark column did not animate across two ticks: {seen}"
+
+
+@pytest.mark.asyncio
+async def test_the_pin_cell_is_blank_at_rest_and_outlines_under_the_pointer():
+    """The unpinned affordance is pointer-revealed, not painted on every row.
+
+    Issue #1357 slice 2a: an unpinned row has no durable fact to paint, so the
+    resting frame stays blank and the outline appears on the same hover event
+    that paints the row's `overlay` ground — the pointer that can act on the
+    cell is the pointer that sees it, and a list nobody is pointing at carries
+    no column of empty stars.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30), tooltips=True) as pilot:
+        await pilot.pause()
+        entries = [_plain("mine", name="Session mine"), _plain("other", name="Session other")]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        resting = sidebar.render().plain
+        assert all(
+            line[:PIN_CELL_WIDTH] == "  " for line in resting.splitlines() if "Session " in line
+        ), resting
+        y = next(i for i, line in enumerate(resting.splitlines()) if "Session mine" in line)
+        await pilot.hover("#session-sidebar", offset=(8, y))
+        await pilot.pause()
+        hovered = sidebar.render().plain.splitlines()
+        mine = next(line for line in hovered if "Session mine" in line)
+        other = next(line for line in hovered if "Session other" in line)
+        assert mine[:PIN_CELL_WIDTH] == f"{PIN_HOVER} ", repr(mine)
+        assert other[:PIN_CELL_WIDTH] == "  ", repr(other)
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_row_shows_the_solid_mark_with_the_caret_beside_it():
+    """`★` rides its own cell on every frame; the caret no longer displaces it.
+
+    The shared cursor-prefix cell could show either `›` or `★` — never both —
+    so the one row the user was deciding about could lose its pin. The
+    dedicated cell makes both facts paintable at once, which this asserts with
+    the cursor sitting on the pinned row (the state the old slot could not
+    draw).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("mine", name="Session mine"), _plain("other", name="Session other")]
+        sidebar = await _sidebar_with(pilot, app, entries, pins=("mine",))
+        sidebar.focus()
+        sidebar.cursor_id = "mine"
+        await pilot.pause()
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
+        row = next(line for line in sidebar.render().plain.splitlines() if "Session mine" in line)
+        assert row[:PIN_CELL_WIDTH] == f"{PIN_MARK} ", repr(row)
+        assert row[PIN_CELL_WIDTH] == "›", f"the caret left its cell: {row!r}"
 
 
 @pytest.mark.asyncio
@@ -4259,12 +4320,15 @@ async def test_the_footer_ladder_keeps_an_exact_fit_at_the_29_cell_floor():
 
 @pytest.mark.asyncio
 async def test_a_deep_page_yields_the_position_and_never_the_lead_or_chip():
-    """Candidate ③: the position yields second, the lead and chip never yield.
+    """The position yields; the lead, the pin and the chip never yield.
 
-    On the last page of 152 entries the position is 11 cells, so candidate ②
-    (`128–152/152 · esc return · ⌥1k+`, 31 cells) does not fit 29 and the
-    ladder must fall to `{lead} · {chip}`. What it must NOT do is crop: a fact
-    drops whole or not at all (design round 4, §R4.3).
+    On the last page of 152 entries the position is 11 cells, so every
+    position-carrying candidate is over 29 and the ladder must fall to
+    `{lead} · f10 pin · {chip}` (27 cells). What it must NOT do is crop: a fact
+    drops whole or not at all (design round 4, §R4.3; the pin rung was added by
+    issue #1357 slice 2a, which re-ranked the focused ladder so the position
+    yields BEFORE the pin — recoverable by scrolling, while `f10 pin` is taught
+    nowhere else on the frame).
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -4281,8 +4345,60 @@ async def test_a_deep_page_yields_the_position_and_never_the_lead_or_chip():
         position = f"{sidebar._offset + 1}–{last}/{len(sidebar.entries)}"
         context = f"page_size={sidebar.page_size} position={position!r}"
         footer = sidebar.render().plain.splitlines()[-1]
-        assert footer.strip() == "esc return · ⌥1k+", f"{footer!r} ({context})"
+        assert footer.strip() == "esc return · f10 pin · ⌥1k+", f"{footer!r} ({context})"
         assert "…" not in footer, f"a fact was cropped instead of yielding: {footer!r}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        ((100, 30), "esc return · f10 pin · ⌥1k+"),
+        ((150, 40), "esc return · f10 pin · ctrl+a ⌥ · ⌥1k+"),
+    ],
+)
+async def test_the_focused_ladder_teaches_pin_at_the_floor_and_the_layer_when_it_fits(
+    size, expected
+):
+    """Issue #1357 slice 2a's two rungs, at the widths that decide them.
+
+    At the 29-cell floor the pin rung fits where the position does not, and it
+    is the keyboard's only in-product teacher for pinning. At 150 columns the
+    layer toggle rides the same string intact — `ctrl+a ⌥` is a candidate that
+    drops WHOLE below this width, never an append whose tail gets cropped
+    (design round 4, §R4.3).
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1520)
+        assert len(sidebar.entries) <= sidebar.page_size, "premise: the list must not page"
+        sidebar.focus()
+        await pilot.pause()
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert footer.strip() == expected, f"{footer!r} (width={sidebar.size.width})"
+        assert "…" not in footer, f"a fact was cropped instead of yielding: {footer!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_focused_footer_teaches_the_pin_with_no_subagent_runs():
+    """No hidden population, no layer hint: `ctrl+a ⌥` is gated on the chip.
+
+    The chord that flips the ⌥ layer is taught only when there is a layer to
+    flip — the same "nothing hidden, nothing said" rule the chip itself keeps
+    — so a store with no subagent runs keeps the focused footer to the two
+    facts that always apply: the way out and the pin.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=0)
+        sidebar.focus()
+        await pilot.pause()
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
+        footer = sidebar.render().plain.splitlines()[-1]
+        assert footer.strip() == "esc return · f10 pin", footer
 
 
 @pytest.mark.asyncio
@@ -4521,7 +4637,7 @@ async def test_creating_a_remote_session_reveals_the_row_it_opens(
             sidebar.cursor_id == MINTED_PEER_SESSION
         ), f"the caret is not on the session the app attached to ({context})"
         line = _caret_line(sidebar, f"Session {MINTED_PEER_SESSION}")
-        assert line.startswith("›"), f"the caret is not painted on that row: {line!r}"
+        assert line[PIN_CELL_WIDTH] == "›", f"the caret is not painted on that row: {line!r}"
 
 
 @pytest.mark.asyncio

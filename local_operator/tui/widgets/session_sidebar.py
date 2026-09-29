@@ -44,6 +44,35 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 
 SIDEBAR_WIDTH = 30
 
+#: The pin cell's two glyphs: the durable mark (accent ink, on a pinned row in
+#: every state) and the outline a mouse user sees while the pointer rests on an
+#: unpinned row. The cell exists to be FOUND — the issue this slice serves is
+#: that pinning was discoverable only through documentation (issue #1357).
+PIN_MARK = "★"
+PIN_HOVER = "☆"
+
+#: Cells the pin cell owns at the head of every entry row. Two, so the glyph
+#: carries its own separator and the cell is a mouse target the width of every
+#: other slot. A NEW column rather than a reuse of the cursor-prefix slot:
+#: that slot's cell 0 is shared between the caret and the star — only one of
+#: them can show — so a press there has always meant "open the row" and must
+#: keep meaning it. See `on_mouse_down`.
+PIN_CELL_WIDTH = 2
+
+#: Cells every entry row spends before its title: the pin cell, the caret
+#: cell, the locality mark's cell, and the state mark plus its trailing space.
+#: `render`'s title arithmetic and the tests that pin the row geometry both
+#: read this, so the two cannot drift apart.
+_ROW_PREFIX_CELLS = 4 + PIN_CELL_WIDTH
+
+#: The state mark's column — the cell `row_state_mark`'s urgency ladder owns,
+#: and the one cell `_advance_spinner` patches in place on its fast path.
+_ROW_MARK_COLUMN = 2 + PIN_CELL_WIDTH
+
+#: The locality mark's column. A peer section's heading is indented to it so
+#: the heading's `⇄` stacks with the rows it governs (see `_peer_heading_text`).
+_LOCALITY_COLUMN = PIN_CELL_WIDTH + 1
+
 #: The widest the list may grow on a roomy terminal, in the same units as
 #: :data:`SIDEBAR_WIDTH` (content, before the gutter is added).
 #:
@@ -266,8 +295,14 @@ def _peer_heading_text(label: str, reachable: bool) -> str:
     carries the relay's own report). A second ``f" ⇄ …"`` beside this one is how
     the two would drift into two vocabularies for one state — and the reader has
     to be able to tell a live section from a silent one by that suffix alone.
+
+    The indent aligns the heading's `⇄` with the rows' locality cell
+    (`_LOCALITY_COLUMN`), the same property the round-1 fix installed when the
+    mark was one cell in: the heading has no caret and no pin, and a heading
+    whose glyph starts at a different x from the cells it governs reads as a
+    separate column rather than a label for the block under it.
     """
-    return f" ⇄ {label}" + ("" if reachable else " (unreachable)")
+    return f"{' ' * _LOCALITY_COLUMN}⇄ {label}" + ("" if reachable else " (unreachable)")
 
 
 #: Prefix a peer section's heading carries in its row kind, so `render` can tell
@@ -365,6 +400,19 @@ class SessionSidebar(Widget, can_focus=True):
             super().__init__()
             self.show_subagents = show_subagents
 
+    class PinToggled(Message):
+        """A pointer press on a row's pin cell asked to toggle that row's pin.
+
+        Carries the row id because the app cannot re-derive WHICH row was
+        pressed after the fact — the cell belongs to a row a poll may have
+        reordered. The widget writes nothing itself: `toggle_pin` is file I/O
+        and belongs on the app's worker, the same split `Selected` keeps.
+        """
+
+        def __init__(self, session_id: str) -> None:
+            super().__init__()
+            self.session_id = session_id
+
     def __init__(self) -> None:
         super().__init__(id="session-sidebar")
         self.entries: tuple[CatalogEntry, ...] = ()
@@ -386,6 +434,11 @@ class SessionSidebar(Widget, can_focus=True):
         self._timer: Timer | None = None
         self._spinner_rate = SIDEBAR_SPINNER_INTERVAL_S
         self._pressed_id: str | None = None
+        #: Whether the press in flight started on the pin cell. Read together
+        #: with `_pressed_id` (which still names the row, so `set_entries`'s
+        #: gesture freeze covers both) — `on_click` branches on it to toggle
+        #: the pin instead of opening the row.
+        self._pressed_pin = False
         self._deferred: tuple[CatalogEntry, ...] | None = None
         #: Row under the pointer, by identity rather than by row index: a
         #: catalog refresh reorders rows beneath a stationary pointer, and a
@@ -628,12 +681,12 @@ class SessionSidebar(Widget, can_focus=True):
         those sessions the only ones that could not report being blocked,
         broken or finished. ``★`` is the DURABLE fact — it does not change
         while the user looks at it — and the state glyph is the volatile one,
-        so the pin is what moves. It is painted in the cursor-prefix slot
-        (columns 0-1) by ``render`` instead.
+        so the pin is what moves. It is painted in the pin cell by ``render``
+        instead — its own leading column pair since issue #1357 slice 2a.
 
         One helper, consulted by BOTH ``render`` and ``_advance_spinner``, so
         the full frame and the 150 ms mark-cell patch cannot disagree about who
-        owns column 2. They did disagree in the first cut: a pinned BUSY row
+        owns the mark column. They did disagree in the first cut: a pinned BUSY row
         painted ``★`` on a full frame and then had a spinner frame patched over
         it on the very next tick, so the mark flickered between the two at
         7 Hz. With ``★`` out of that column the pinned row simply spins.
@@ -692,14 +745,15 @@ class SessionSidebar(Widget, can_focus=True):
         the ROWS here; that is ``placement_stale``'s business and the tooltip's,
         because a heading that stacked both would be a sentence, not a label.
 
-        THE LEADING SPACE IS THE MARK COLUMN (design round 2, D18). Rows paint
-        the locality glyph in cell 1 (cell 0 is the caret or the pin, §1.3
-        decision 2), and this heading used to paint it in cell 0 — so the one
-        glyph that says "everything under this line is another device" started at
-        a different x from every mark it governed and the column did not stack.
-        A heading has no caret and no pin, so its cell 0 is empty by definition,
-        and indenting it costs no row its width: the tier headings above
-        (``★ Pinned``, ``Active Sessions``) keep cell 0 and stay put.
+        THE LEADING INDENT IS THE LOCALITY COLUMN (design round 2, D18, moved
+        by issue #1357 slice 2a). Rows paint the locality glyph in
+        `_LOCALITY_COLUMN` (after the pin cell and the caret), and this heading
+        used to paint it at the start of the line — so the one glyph that says
+        "everything under this line is another device" started at a different x
+        from every mark it governed and the column did not stack. A heading has
+        no pin and no caret, so those columns are empty on it by definition, and
+        indenting it costs no row its width: the tier headings above
+        (``★ Pinned``, ``Active Sessions``) keep the star column and stay put.
         """
         return _peer_heading_text(row.owner_label or UNNAMED_DEVICE, bool(row.reachable))
 
@@ -1058,6 +1112,7 @@ class SessionSidebar(Widget, can_focus=True):
         if not opened and self._pressed_id is not None:
             self.release_mouse()
             self._pressed_id = None
+            self._pressed_pin = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
@@ -1191,9 +1246,9 @@ class SessionSidebar(Widget, can_focus=True):
             requested = entry.id == self._requested_id and entry.id != self.current_id
             if entry.subagent:
                 # A sub row's mark column is `⌥`, not a spinner's to patch
-                # (`_special_mark`). A PINNED row is no longer skipped: its
-                # `★` lives in the cursor-prefix slot, so column 2 is free to
-                # animate and a pinned busy row spins like any other.
+                # (`_special_mark`). A PINNED row is not skipped: its `★` has
+                # its own cell now, so the mark column is free to animate and
+                # a pinned busy row spins like any other.
                 continue
             if (requested and self._requested_spinning()) or (
                 entry.row.live_state == "busy"
@@ -1206,11 +1261,13 @@ class SessionSidebar(Widget, can_focus=True):
                     return
                 # The old cell carries its exact resolved foreground/background
                 # (including cursor/hover selection). Only its glyph changes.
-                cell = line.crop(2, 3)
+                cell = line.crop(_ROW_MARK_COLUMN, _ROW_MARK_COLUMN + 1)
                 glyph = SPINNER_FRAMES[self._frame % len(SPINNER_FRAMES)]
                 mark = Strip([Segment(glyph, next(iter(cell)).style)], 1)
-                replacements[y] = Strip.join([line.crop(0, 2), mark, line.crop(3)])
-                regions.append(Region(2, y, 1, 1))
+                replacements[y] = Strip.join(
+                    [line.crop(0, _ROW_MARK_COLUMN), mark, line.crop(_ROW_MARK_COLUMN + 1)]
+                )
+                regions.append(Region(_ROW_MARK_COLUMN, y, 1, 1))
         # refresh() with no regions means the ENTIRE widget, not no work.
         # Only glyphs move at this cadence; titles, chrome and empty space do
         # not need recompositing. The existing timer rate is unchanged.
@@ -1540,10 +1597,25 @@ class SessionSidebar(Widget, can_focus=True):
         kind, entry = rows[index]
         return entry if kind == "entry" else None
 
+    def _pin_cell_pressed(self, event: events.MouseEvent) -> bool:
+        """Whether a pointer event landed on a row's pin cell.
+
+        The column is resolved against the widget's LEFT PADDING because an
+        event's x arrives relative to the widget's outer box (Textual forwards
+        ``screen_x - region.x``), while the row's columns belong to the content
+        box. Reading `styles.padding.left` rather than a constant keeps this
+        true in all three placements: the gutter swaps sides with the dock and
+        the overlay keeps the base left pad, so the resolved pad is the only
+        thing the column arithmetic may depend on (see `_sync_sidebar_layout`).
+        """
+        column = event.x - self.styles.padding.left
+        return 0 <= column < PIN_CELL_WIDTH
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
         entry = self._entry_at(event.y)
         if entry is not None and event.button == 1:
             self._pressed_id = entry.id
+            self._pressed_pin = self._pin_cell_pressed(event)
             self.capture_mouse()
         event.stop()
 
@@ -1551,6 +1623,7 @@ class SessionSidebar(Widget, can_focus=True):
         self.release_mouse()
         if not self.region.contains(event.screen_x, event.screen_y):
             self._pressed_id = None
+            self._pressed_pin = False
             if self._deferred is not None:
                 deferred, self._deferred = self._deferred, None
                 self.set_entries(deferred)
@@ -1563,8 +1636,17 @@ class SessionSidebar(Widget, can_focus=True):
             else None
         )
         target = (self._pressed_id or (entry.id if entry else "")) if entry is not None else ""
+        pin_press = self._pressed_pin
         self._pressed_id = None
-        if target:
+        self._pressed_pin = False
+        if target and pin_press:
+            # A press on the pin cell toggles the pin and NOTHING else: the
+            # cursor does not move and no `Selected` is posted, so a click
+            # meant for the star can never open or switch the row under it
+            # (issue #1357 slice 2a). The row is the one the press STARTED on
+            # — the same freeze `set_entries` keeps for an ordinary press.
+            self.post_message(self.PinToggled(target))
+        elif target:
             self.cursor_id = target
             self.post_message(self.Selected(target))
         if self._deferred is not None:
@@ -1869,7 +1951,7 @@ class SessionSidebar(Widget, can_focus=True):
             # other two: it is transient pointer feedback, and must not
             # overpaint the identity of where you ARE or where the keyboard is.
             background = (
-                "tint-select"
+                ("tint-select-hi" if self.has_focus else "tint-select")
                 if cursor or requested
                 else "surface" if current else "overlay" if hovered else None
             )
@@ -1879,6 +1961,30 @@ class SessionSidebar(Widget, can_focus=True):
                 bold=current,
             )
             line = Text(style=style, no_wrap=True)
+            # THE PIN CELL (issue #1357 slice 2a). The durable star leaves the
+            # cursor-prefix slot for its own leading cell pair. Cell 0 of that
+            # slot is shared between the caret and the star — only one of them
+            # can show — so a pinned row that was also the cursor lost its star,
+            # and for a pointer user the star's position was not a click target
+            # at all: `★` and `›` lived in the same cell, and a press there has
+            # always meant "open the row". With its own column the row carries
+            # both facts at once (`★ ›`), the star never moves, and the cell is
+            # a stable target whose press can only mean "toggle the pin" (see
+            # `on_mouse_down` / `_pin_cell_pressed`).
+            #
+            # `☆` under the pointer is the unpinned row's affordance: an
+            # unpinned row has no durable fact to paint, and the discovery
+            # problem this slice closes is precisely that nothing on a resting
+            # frame named the feature. It appears on the same hover event that
+            # paints the row's `overlay` ground, so it is seen before it is
+            # clicked; resting unpinned rows stay blank rather than carrying a
+            # column of empty stars.
+            if entry.id in self._pins:
+                line.append(f"{PIN_MARK} ", style=theme_mod.semantic_color("accent"))
+            elif hovered:
+                line.append(f"{PIN_HOVER} ", style=theme_mod.semantic_color("muted"))
+            else:
+                line.append(" " * PIN_CELL_WIDTH)
             # The requested row gets a caret the cursor does not have. Sharing
             # BOTH `tint-select` and `›` made the two indistinguishable, and
             # they are reachable on opposite rows from real bindings (focus the
@@ -1888,38 +1994,30 @@ class SessionSidebar(Widget, can_focus=True):
             # column, so nothing reflows and the ramp is untouched. Requested
             # wins when a row is both, because "this is opening" is the fact
             # the user is waiting on.
-            # The pin rides in the CURSOR-PREFIX slot, never the mark column:
-            # `row_state_mark` owns column 2 and its urgency ladder must not be
-            # displaced by a durable property (see `_special_mark`). The caret
-            # still wins the SLOT's first cell when a pinned row is also the
-            # cursor or the requested row — the `★ Pinned` header already carries
-            # the pinned fact, while the caret is the only thing that says "here"
-            # or "opening".
             #
             # THE SLOT HOLDS TWO FACTS, NOT ONE (design round 1, D4). Taking both
             # cells for the caret was the defect: the one row the user is
             # deciding about was the one row that stopped saying it was remote,
             # and the peer heading that carries the fact independently is only
-            # two lines above it, on a screen the user is scrolling. Cell 0 is the
-            # caret or the pin, cell 1 is the locality mark; a local row still
-            # paints two blanks, so no title moves and no row grows
+            # two lines above it, on a screen the user is scrolling. The slot's
+            # first cell is the caret, its second is the locality mark; a local
+            # row still paints two blanks, so the mark grows no row
             # (mesh-ui.md §1.3 decision 2, which this keeps).
             if requested or cursor:
                 line.append("»" if requested else "›")
-            elif entry.id in self._pins:
-                line.append("★", style=theme_mod.semantic_color("accent"))
             else:
                 line.append(" ")
             if entry.row.is_remote:
-                # The LOCALITY mark: `⇄` costs no new cells — cell 1 is reserved
-                # and was blank on this row anyway — and it never displaces the
-                # caret. Muted, like the other prefixes: it is a durable property,
-                # never a state — it does not spin and never turns `danger`.
+                # The LOCALITY mark: `⇄` occupies one cell of the slot the
+                # caret run reserved, and it never displaces the caret. Muted,
+                # like the other prefixes: it is a durable property, never a
+                # state — it does not spin and never turns `danger`.
                 line.append("⇄", style=theme_mod.semantic_color("muted"))
             else:
                 # Nothing to say: this row is a session on THIS machine, which is
-                # what the list has always shown. The blank keeps every title at
-                # column 4 (mesh-ui.md §1.3 "local: no mark").
+                # what the list has always shown. The blank keeps the title at
+                # the same column a remote row puts it (mesh-ui.md §1.3
+                # "local: no mark").
                 line.append(" ")
             mark, ink = row_state_mark(entry.row, self._frame)
             special = self._special_mark(entry)
@@ -1954,7 +2052,7 @@ class SessionSidebar(Widget, can_focus=True):
                 )
             line.append(f"{mark or ' '} ", style=theme_mod.semantic_color(ink))
             age = self._age(entry)
-            title_width = max(1, width - 4 - (len(age) + 1 if age else 0))
+            title_width = max(1, width - _ROW_PREFIX_CELLS - (len(age) + 1 if age else 0))
             # A subagent row is identified by what it was delegated to do
             # ("label · role"), not by the session name the runtime generated
             # for it. `sub_title` already degrades to either half alone, and
@@ -2027,17 +2125,53 @@ class SessionSidebar(Widget, can_focus=True):
         if self._subagent_total > 0:
             chip = f"⌥{'1k+' if self._subagent_total > 999 else self._subagent_total}"
         tail = f" · {chip}" if chip else ""
-        if len(self.entries) > self.page_size:
-            last = min(len(self.entries), self._offset + self.page_size)
-            position = f"{self._offset + 1}–{last}/{len(self.entries)}"
-            candidates = [
-                f"{position} · {lead} · ctrl+b hide{tail}",
-                f"{position} · {lead}{tail}",
-            ]
+        # THE FOCUSED LADDER (issue #1357 slice 2a). When the list holds the
+        # keyboard its footer teaches the action set the keyboard now owns:
+        # `f10 pin` rides every rung — pinning was documentation-only before
+        # this slice, and this is its one in-product teacher (the pin cell's
+        # `☆` only appears under the pointer) — and `ctrl+a ⌥` rides the rungs
+        # wide enough for it. That chord is the layer toggle and has NO other
+        # in-product teacher: `/help` deliberately excludes the two
+        # sidebar-scoped chords (they would be lies outside f9 mode). It is a
+        # candidate, never an append, and drops whole: it needs the chip's
+        # rung, since the count it flips is what it acts on (`⌥N`; nothing
+        # hidden, nothing said — same rule the chip itself follows).
+        #
+        # The drop order within the focused ladder is: ctrl+a ⌥, then the
+        # position, then the chip and the lead (never). ctrl+a yields before
+        # the position because the position is recoverable by scrolling while
+        # ctrl+a is not recoverable anywhere else on the frame; the position
+        # yields before the lead/chip exactly as it does unfocused (D4/U1).
+        # `ctrl+o` is deliberately absent: no spelling of it fits a real
+        # content width beside the chip and the pin (`ctrl+a ⌥ … ⌥N` is 36 of
+        # the 43-cell ceiling with a 1k+ count), and a bare chord would break
+        # this footer's key-and-what-it-does contract — recorded on the PR
+        # rather than smuggled in as an append.
+        if self.has_focus:
+            pin = f"{lead} · f10 pin"
+            layer = " · ctrl+a ⌥" if chip else ""
+            candidates: list[str] = []
+            if len(self.entries) > self.page_size:
+                last = min(len(self.entries), self._offset + self.page_size)
+                position = f"{self._offset + 1}–{last}/{len(self.entries)}"
+                if chip:
+                    candidates.append(f"{position} · {pin}{layer}{tail}")
+                candidates.append(f"{position} · {pin}{tail}")
+            if chip:
+                candidates.append(f"{pin}{layer}{tail}")
+            candidates += [f"{pin}{tail}", f"{lead}{tail}", lead]
         else:
-            candidates = [f"{base}{tail}"]
-        if chip:
-            candidates.append(f"{lead} · {chip}")
+            if len(self.entries) > self.page_size:
+                last = min(len(self.entries), self._offset + self.page_size)
+                position = f"{self._offset + 1}–{last}/{len(self.entries)}"
+                candidates = [
+                    f"{position} · {lead} · ctrl+b hide{tail}",
+                    f"{position} · {lead}{tail}",
+                ]
+            else:
+                candidates = [f"{base}{tail}"]
+            if chip:
+                candidates.append(f"{lead} · {chip}")
         hint = next(
             (
                 candidate
