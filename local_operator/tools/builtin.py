@@ -21103,8 +21103,9 @@ def _lead_hub_schema() -> dict[str, Any]:
 
     Rendered as the NULLABLE anyOf rather than a bare ``required`` removal so it
     matches the shape ``message``/``to``/``steps`` already render in this
-    schema — the one the provider matrix accepts (see the ``to`` field's note on
-    non-nullable unions).
+    schema — no top-level ``type``, because ``validate_tool_arguments`` checks
+    that first and would never consult the null arm (see the ``to`` field's
+    note on non-nullable unions).
 
     The top session keeps ``HubParams.model_json_schema()`` byte for byte: this
     is built only for a child that holds ``task``, the same 2.1% of children
@@ -21114,10 +21115,21 @@ def _lead_hub_schema() -> dict[str, Any]:
     schema = HubParams.model_json_schema()
     properties = dict(schema.get("properties") or {})
     op = dict(properties.get("op") or {})
-    variant = {key: value for key, value in op.items() if key != "enum"}
-    variant["anyOf"] = [{"enum": list(op.get("enum") or [])}, {"type": "null"}]
-    variant["default"] = None
-    variant["description"] = f"{op.get('description', '')} {_LEAD_REPLY_SENTENCE}"
+    # Rebuilt, not patched: the inherited property carries a top-level
+    # ``"type": "string"`` (and the old top-level ``enum``), and a top-level
+    # ``type`` makes ``validate_tool_arguments`` decide before it ever looks at
+    # ``anyOf`` — so the null arm was dead and ``{"op": null, ...}``, the call
+    # this variant exists to admit, was rejected. The variant must render like
+    # ``message``/``to``: a nullable anyOf with NO top-level ``type``/``enum``.
+    variant = {
+        "anyOf": [
+            {"enum": list(op.get("enum") or []), "type": "string"},
+            {"type": "null"},
+        ],
+        "default": None,
+        "description": f"{op.get('description', '')} {_LEAD_REPLY_SENTENCE}",
+        "title": op.get("title") or "Op",
+    }
     properties["op"] = variant
     addressed = dict(properties.get("to") or {})
     addressed["description"] = (

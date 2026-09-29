@@ -786,8 +786,9 @@ def resolve_launch_target(
     """Resolve one ``task`` launch to the team and depth its child runs under.
 
     Raises :class:`TeamLaunchError` for an unknown team, a counted launch, a
-    manager that cannot delegate, a cycle, or a launch past the depth cap —
-    never a silent generic child (BEN-1 N3).
+    manager that cannot delegate, a cycle, or a fresh launch past the depth
+    cap (a resume keeps its recorded depth) — never a silent generic child
+    (BEN-1 N3).
     """
     agent = agent or "task"
     parent_team = getattr(parent_session, "active_team", None)
@@ -814,8 +815,14 @@ def resolve_launch_target(
         sub_name = agent
 
     if carried is not None:
-        # A resume re-enters the team the child was BORN under. Checks that
-        # guarded its original launch are not re-run: it already exists.
+        # A resume re-enters the team the child was BORN under, at the depth
+        # its record carries. Checks that guarded its original launch are not
+        # re-run: it already exists. That includes the depth cap — a child
+        # recorded at depth N resumes at N even after the operator lowers
+        # ``subagents.max_team_depth`` below it, and only its FURTHER launches
+        # are capped (the ``if lineage:`` check below). Refusing the resume
+        # instead would strand work that already exists; a resume is recovery,
+        # not a new launch.
         team = None
         if carried.team_name:
             if parent_team is not None and getattr(parent_team, "name", "") == carried.team_name:
@@ -888,7 +895,7 @@ def _lineage_names(session: "Session", lineage: tuple[str, ...]) -> list[str]:
             if registry is not None:
                 name = str(registry.get_team(team_id).name)
         except Exception:  # noqa: BLE001 — the id is still a usable name
-            pass
+            logger.debug("could not name lineage team %r", team_id, exc_info=True)
         names.append(name)
     return names
 

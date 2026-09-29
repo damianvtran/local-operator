@@ -17,6 +17,7 @@ import pytest
 
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.loop import validate_tool_arguments
+from local_operator.harness.subagent import LaunchTarget
 from local_operator.harness.types import ModelSpec, TextContent, ToolContext, ToolResult
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
@@ -124,14 +125,28 @@ def test_resume_launches_under_the_live_lead(tmp_path, monkeypatch):
         "local_operator.harness.subagent.run_subagent",
         lambda **kwargs: (seen.update(kwargs), "w-2")[1],
     )
-    monkeypatch.setattr(
-        "local_operator.harness.subagent.resolve_launch_target",
-        lambda agent, parent, carried=None: seen.setdefault("target_parent", parent),
+    # A real LaunchTarget, never the session the old stub leaked through the
+    # return slot: the type here is the contract ``run_subagent`` consumes, and
+    # a stub that lied about it would keep lying the day the consumer checks.
+    stub_target = LaunchTarget(
+        role="coder",
+        team=None,
+        team_lineage=(),
+        depth=2,
+        reports_to="the operator's top session",
+        is_team_launch=False,
     )
+
+    def resolve(agent: str, parent: Any, *, carried: Any = None) -> LaunchTarget:
+        seen["target_parent"] = parent
+        return stub_target
+
+    monkeypatch.setattr("local_operator.harness.subagent.resolve_launch_target", resolve)
     new_id, error = comms.resume("w", "carry on")
     assert error is None and new_id == "w-2"
     assert seen["parent_session"] is lead and seen["jobs_manager"] is lead.jobs
     assert seen["target_parent"] is lead
+    assert seen["target"] is stub_target
 
 
 def test_resume_of_an_orphan_falls_back_to_the_root(tmp_path, monkeypatch):
@@ -157,6 +172,27 @@ def test_resume_of_an_orphan_falls_back_to_the_root(tmp_path, monkeypatch):
     new_id, error = comms.resume("w", "carry on")
     assert error is None and new_id == "w-2"
     assert seen["parent_session"] is root and seen["jobs_manager"] is root.jobs
+
+
+def test_a_superseded_worker_id_resolves_to_its_continuation(tmp_path):
+    """``resolve`` canonicalizes attempt aliases before matching, exactly as
+    ``_job_from`` does. Without that, a lead addressing its worker by the
+    pre-resume id fell through to the label path: the continuation sat in the
+    lead's own subtree, yet the id read as ``unknown subagent`` — and from
+    outside the subtree the same address missed the advertised ``not your
+    subagent`` refusal in the same way."""
+    comms, _root, lead, _worker = tree(tmp_path)
+    _settle_with_transcript(comms, lead.jobs, "w")
+    # The continuation folds the settled attempt at attach: aliases map the
+    # pre-resume id to the new record and the old one is gone.
+    lead.jobs.add("w-2")
+    comms.record_launch("w-2", "worker", parent_job_id="lead", agent_role="coder")
+    comms.attach("w-2", FakeChild(), tmp_path / "w")
+    assert comms._aliases.get("w") == "w-2"
+
+    assert comms.resolve("w", scope="lead") == (["w-2"], None)
+    ids, error = comms.resolve("w", scope="other")
+    assert ids == [] and error is not None and "not your subagent" in error
 
 
 # -- the tool: shape and scope -------------------------------------------------
@@ -195,7 +231,22 @@ def test_a_delegating_child_gets_the_parent_shape_and_others_keep_messages(tmp_p
         HubParams.model_json_schema()["properties"]
     )
     assert lead_tool.parameters["required"] == []
-    assert {"type": "null"} in lead_tool.parameters["properties"]["op"]["anyOf"]
+    op_schema = lead_tool.parameters["properties"]["op"]
+    # Byte-shaped like ``message``/``to``: a nullable anyOf with NO top-level
+    # ``type`` (``loop.validate_tool_arguments`` checks a top-level type BEFORE
+    # it ever consults ``anyOf``, so the old inherited ``type: "string"``
+    # rejected the very ``op: null`` the schema advertises) and no stale
+    # top-level ``enum``. The enum arm keeps its own ``type: string``.
+    assert "type" not in op_schema and "enum" not in op_schema
+    assert op_schema["anyOf"] == [
+        {
+            "enum": ["list", "peek", "send", "ask", "steer", "pause", "cancel", "resume"],
+            "type": "string",
+        },
+        {"type": "null"},
+    ]
+    assert op_schema["default"] is None
+    assert "Omit 'op'" in op_schema["description"]
     assert "parent" in lead_tool.parameters["properties"]["to"]["description"]
     assert "delegated to you" in lead_tool.description
 
@@ -225,6 +276,17 @@ async def test_a_leads_bare_reply_validates_and_reaches_its_parent(tmp_path):
     # The lead's parent IS the root here; the nested hop (worker -> lead) is
     # ``test_a_workers_reply_reaches_its_lead_not_the_root``.
     assert len(root.asides) == 1 and lead.asides == []
+
+    # And the literal shape the schema ADVERTISES — a serialized ``op: null``
+    # (what "omit op" round-trips to in some clients) — must survive the same
+    # gate and route as the reply. This is the case the stale top-level
+    # ``type: "string"`` rejected.
+    null_args = {"op": None, "message": "not stuck; fixtures are slow"}
+    assert validate_tool_arguments(tool, null_args, json.dumps(null_args)) == []
+    null_result = await execute_hub("c2", null_args, None, None, ctx)
+    assert not null_result.is_error
+    assert "delivered to the parent" in body(null_result)
+    assert len(root.asides) == 2
 
     # The top session's tool still requires ``op``: the variant is the lead's.
     top = build_hub_tool(context_for(comms, None, may_delegate=True))

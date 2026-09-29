@@ -2329,7 +2329,9 @@ SETTINGS: tuple[Setting, ...] = (
         # Literal, like max_running's: the consumer default is
         # ``harness.subagent.DEFAULT_MAX_TEAM_DEPTH``, and the consumer test
         # keeps the two equal. The maximum is ``teams.MAX_ORG_DEPTH``; the
-        # reader clamps to it even when the file says more (BEN-7-D3).
+        # reader clamps to it even when the file says more (BEN-7-D3), and
+        # ``test_settings_io.test_the_team_depth_maximum_matches_max_org_depth``
+        # keeps this literal equal to the constant.
         default=3,
         help="Deepest launch allowed in a tree that runs a team. 1 is the top's children.",
         minimum=1,

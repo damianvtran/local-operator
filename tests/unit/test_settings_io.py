@@ -497,6 +497,18 @@ def test_every_default_matches_its_consumer(setting) -> None:
     )
 
 
+def test_the_team_depth_maximum_matches_max_org_depth() -> None:
+    """The registry's ``maximum`` for ``subagents.max_team_depth`` is a literal
+    beside a comment naming ``teams.MAX_ORG_DEPTH``, and the reader clamps to
+    the real constant — so a moved constant with a stale literal here would let
+    the settings page accept a value every launch silently clamps. This is that
+    pair's guard, the shape ``_consumer_defaults`` gives the defaults."""
+    from local_operator.teams import MAX_ORG_DEPTH
+
+    setting = settings_io.BY_KEY["subagents.max_team_depth"]
+    assert setting.maximum == MAX_ORG_DEPTH
+
+
 def test_display_keys_are_flat_dotted() -> None:
     """THE trap. Every display flag's path is ONE element containing a dot."""
     for key in settings_io.flat_dotted_keys():
