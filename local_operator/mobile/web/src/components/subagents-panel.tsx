@@ -187,16 +187,29 @@ export function AgentRoster({
 					    implies the roster is held; a failed fan-out may not, and it
 					    matters most while a decision is waiting.
 
-					    `min-w-0 truncate` makes the label the span that YIELDS: it is
+					    `min-w-0 truncate` makes the LABEL the span that YIELDS: it is
 					    the only one here that degrades gracefully, because a clipped
 					    label still reads and the tail it loses is recoverable by
 					    opening the panel. This is the mechanism the hint's `shrink-0`
-					    in `disclosure.tsx` already assumes exists. */}
+					    in `disclosure.tsx` already assumes exists.
+
+					    D6 (mobile UX batch): the label yields ON ITS OWN. It used to
+					    share one truncating span with the count, which cut the count
+					    group mid-phrase at 390 — "subagents 1/5 r…", an unreadable
+					    fragment. The count is now a `shrink-0` sibling, so it survives
+					    WHOLE (worst case "sub… 1/5 running"); a clipped LABEL is the
+					    loss this row can afford, and it stays recoverable by opening
+					    the panel. */}
 					<span className={cn("min-w-0 truncate", forceCollapsed && HELD_DIM)}>
-						{label}{" "}
-						<span className="font-mono text-mono-sm text-ink-dim">
-							{running}/{direct.length} running
-						</span>
+						{label}
+					</span>
+					<span
+						className={cn(
+							"shrink-0 whitespace-nowrap font-mono text-mono-sm text-ink-dim",
+							forceCollapsed && HELD_DIM,
+						)}
+					>
+						{running}/{direct.length} running
 					</span>
 					{queued > 0 ? (
 						/* The same `shrink-0 whitespace-nowrap` rule as the failure count, and

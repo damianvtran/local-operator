@@ -1,7 +1,7 @@
 /**
  * Session list (`#/`) — the phone's home. One card per live session, kept
- * current by the list SSE; footer row with new session, past sessions, and
- * the theme picker.
+ * current by the list SSE; footer row with new session, past sessions,
+ * projects and the theme picker.
  *
  * Visual contract: a streaming session shimmers its name (the row itself is
  * the indicator — no spinner); a session waiting on the user carries the
@@ -267,7 +267,7 @@ function SessionCard({
 				}
 				navigate(`/s/${encodeURIComponent(s.session_id)}`);
 			}}
-			className="flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
+			className="flex min-h-11 w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left select-none active:bg-elevated"
 		>
 			<div className="flex items-center gap-2">
 				{/* ONE reserved indicator slot serving every state, so every title
@@ -419,7 +419,13 @@ function SessionCard({
 				<span className="min-w-0 truncate font-mono text-mono-sm text-ink-dim">
 					{home ? shortenHome(s.cwd, home) : s.cwd}
 				</span>
-				<span className="ml-auto shrink-0 font-mono text-mono-sm text-ink-dim">
+				{/* D1 (mobile UX batch): the model label YIELDS like the cwd does.
+				    `shrink-0` made it unable to shrink and unable to ellipsize, so a
+				    long label ran to the viewport edge — no ellipsis, unreachable by
+				    touch (a row drag is a tap), and `main` itself became horizontally
+				    scrollable. `min-w-0 truncate` lets both spans share the row; the
+				    row can never exceed it. */}
+				<span className="ml-auto min-w-0 truncate font-mono text-mono-sm text-ink-dim">
 					{s.model_label}
 				</span>
 			</div>
@@ -446,7 +452,7 @@ function ThemePicker({
 							applyTheme(t.id);
 							setCurrent(t.id);
 						}}
-						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -811,7 +817,7 @@ export function SessionListScreen() {
 						value={query}
 						onChange={(event) => setQuery(event.target.value)}
 						placeholder="Search conversations…"
-						className="mx-2 mb-2 min-h-10 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+						className="mx-2 mb-2 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 					/>
 					{/* THE GESTURE'S DISCOVERER, on the surface that owns the gesture (design
 					    round 1, D2). The session view's ☆ is one tap away and does the same
@@ -914,6 +920,18 @@ export function SessionListScreen() {
 					className="flex min-h-11 flex-1 items-center justify-center rounded-md border border-control bg-surface text-body-sm font-medium text-ink select-none active:bg-elevated"
 				>
 					new session
+				</button>
+				{/* U10 (mobile UX batch): the entry point the file's own contract
+				    describes. `#/past` — searchable, resumable history — was reachable
+				    only by knowing its hash; nothing in the app linked to it, so on a
+				    phone the feature was dead. The footer is where the other
+				    top-level entries live. */}
+				<button
+					type="button"
+					onClick={() => navigate("/past")}
+					className="flex min-h-11 items-center justify-center rounded-md border border-control bg-surface px-3 text-body-sm text-ink-muted select-none active:bg-elevated"
+				>
+					past
 				</button>
 				<button
 					type="button"

@@ -138,7 +138,7 @@ export function PairScreen() {
 					type="button"
 					onClick={() => navigate("/")}
 					aria-label="back to sessions"
-					className="flex min-h-8 min-w-8 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
+					className="flex min-h-11 min-w-11 items-center justify-center rounded-sm text-ink-muted active:bg-elevated"
 				>
 					‹
 				</button>

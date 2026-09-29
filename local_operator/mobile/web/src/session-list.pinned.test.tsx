@@ -206,6 +206,55 @@ describe("the pin gesture", () => {
 		fireEvent.click(card);
 		expect(window.location.hash).not.toBe("#/s/a1");
 	});
+
+	it("keeps the sheet open when the opening press releases over the sheet (U1)", async () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const card = cardByName("Alpha");
+		longPress(card);
+		await screen.findByRole("button", { name: "Pin to the top" });
+
+		/* The platform sequence measured in Chromium (and reported on iOS): the
+		   finger's release dispatches pointerup — implicit touch capture targets
+		   it at the ROW — and the browser then synthesises a click at the lift
+		   point, which hit-tests to the sheet's scrim. That click has no
+		   pointerdown of its own since mount, so it must be swallowed. */
+		fireEvent.pointerUp(card);
+		fireEvent.click(screen.getByRole("button", { name: "close" }));
+		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+
+		/* A genuinely new press still dismisses: its own pointerdown legitimises
+		   the click that follows it. */
+		const scrim = screen.getByRole("button", { name: "close" });
+		fireEvent.pointerDown(scrim);
+		fireEvent.pointerUp(scrim);
+		fireEvent.click(scrim);
+		expect(screen.queryByRole("button", { name: "Pin to the top" })).toBeNull();
+	});
+
+	it("does not let the release click run the sheet's action either (U1)", async () => {
+		sessionList = [summary({ session_id: "a1", conversation_name: "Alpha" })];
+		render(<SessionListScreen />);
+		const card = cardByName("Alpha");
+		longPress(card);
+		const action = await screen.findByRole("button", { name: "Pin to the top" });
+
+		/* Same tail click, landing on the action row this time — the release can
+		   hit anything the sheet paints at the lift coordinates, so the guard is
+		   the dialog's, not the scrim's. */
+		fireEvent.pointerUp(card);
+		fireEvent.click(action);
+		expect(applySessionPin).not.toHaveBeenCalled();
+		expect(setSessionPin).not.toHaveBeenCalled();
+		expect(screen.getByRole("button", { name: "Pin to the top" })).toBeTruthy();
+
+		/* An intended press still pins. */
+		fireEvent.pointerDown(action);
+		fireEvent.pointerUp(action);
+		fireEvent.click(action);
+		expect(applySessionPin).toHaveBeenCalledWith("a1", true);
+		await waitFor(() => expect(setSessionPin).toHaveBeenCalledWith("a1", true));
+	});
 });
 
 describe("empty sections cost no heading (design round 1, D1)", () => {

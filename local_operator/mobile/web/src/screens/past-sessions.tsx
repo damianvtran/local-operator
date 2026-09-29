@@ -150,7 +150,7 @@ export function PastSessionsScreen() {
 								type="button"
 								onClick={() => void resume(s.id)}
 								disabled={resumingId !== ""}
-								className="min-h-9 shrink-0 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
+								className="min-h-11 shrink-0 rounded-sm border border-control bg-surface px-3 text-body-sm text-ink active:bg-accent-wash disabled:opacity-50"
 							>
 								{resumingId === s.id ? "opening…" : "resume"}
 							</button>

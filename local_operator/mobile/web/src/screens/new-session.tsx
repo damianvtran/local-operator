@@ -191,7 +191,7 @@ export function NewSessionScreen() {
 						spellCheck={false}
 						autoCapitalize="off"
 						autoCorrect="off"
-						className="min-h-9 rounded-sm border border-hairline bg-transparent px-3 font-mono text-mono-sm text-ink-muted outline-none placeholder:text-ink-dim focus:border-control focus:text-ink"
+						className="min-h-11 rounded-sm border border-hairline bg-transparent px-3 font-mono text-mono-sm text-ink-muted outline-none placeholder:text-ink-dim focus:border-control focus:text-ink"
 					/>
 				</section>
 
@@ -246,7 +246,7 @@ export function NewSessionScreen() {
 							setModel(null);
 							setModelSheetOpen(false);
 						}}
-						className="flex min-h-8 items-center rounded-sm px-2 text-left text-ink-muted active:bg-surface"
+						className="flex min-h-11 items-center rounded-sm px-2 text-left text-ink-muted active:bg-surface"
 					>
 						default
 					</button>
@@ -268,7 +268,7 @@ export function NewSessionScreen() {
 								setModel(m);
 								setModelSheetOpen(false);
 							}}
-							className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+							className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 						>
 							<span className="min-w-0 flex-1 truncate text-body">
 								{m.name}

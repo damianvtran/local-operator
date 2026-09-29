@@ -50,32 +50,28 @@ import {
 } from "../store";
 import type { SessionProjection } from "../types";
 
-/** The header strip's control box, and the HIT SLOP that widens its target.
+/** The header strip's control box: a real 44x44 target.
 
-    The strip is one compact line, so each control is a 32px box (`min-h-8`
-    `min-w-8`) — the size the back button has always been. 32px is below the
-    44px touch floor the rest of the phone UI honours (the composer's controls
-    are `min-h-11`), and a small target is a real cost on a phone even when the
-    glyph is legible.
+    This was a 32px box (`min-h-8 min-w-8`) plus a 6px hit-slop pseudo-element,
+    chosen so the painted strip kept its height. The mobile-UX audit's sweep
+    (D2) reads element boxes, and its measured arithmetic showed the slop never
+    reached the floor anyway: the controls sit `gap-2` (8px) apart, so two 6px
+    slops overlap by 4px between neighbours and the effective horizontal target
+    was ~40px, not 44 — while every header control still measured as a sub-44
+    box, back/★ included.
 
-    The fix is SLOP, not a taller box: an absolutely-positioned pseudo-element
-    extends the touchable area 6px each side while the painted strip keeps its
-    height, so the header does not grow and the layout the composer sits under
-    does not move.
-
-    THE TARGET IS NOT A CLEAN 44px, and the measured truth is stated rather than
-    the arithmetic (design round 2, D7): the controls sit `gap-2` (8px) apart, so
-    two 6px slops OVERLAP by 4px between neighbours and the effective horizontal
-    target is ~40px, not 44 (the vertical IS 44). The overlap is not a tap-steal
-    — the later sibling wins its 4px — and 40px is still a large improvement on
-    32. Recorded because the earlier version of this comment claimed "32 + 12 =
-    44", which the rendered pixels do not support.
+    The floor is now the PAINTED box: `min-h-11 min-w-11`, the same idiom the
+    new-session, past-sessions and agent headers already use. The strip grows
+    32 -> 44 (this header lands at ~52px, the height the agent screen's header
+    states outright); that is the accepted cost of a target that measures what
+    it is, and it unifies the back-button treatments D7 recorded (44 /
+    32+slop / 32-no-slop). The slop pseudo-element is gone with it — it existed
+    to widen a box that is now wide enough on its own.
 
     One constant rather than the classes repeated inline, for the reason every
     shared class here is shared: three copies drift. */
 const HEADER_CONTROL =
-	"relative flex min-h-8 min-w-8 items-center justify-center rounded-sm " +
-	"before:absolute before:-inset-1.5 before:content-[''] active:bg-elevated";
+	"flex min-h-11 min-w-11 items-center justify-center rounded-sm active:bg-elevated";
 
 function Header({
 	projection,
