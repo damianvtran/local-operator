@@ -2628,6 +2628,11 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
         # directory is discovered on that worker — so the note is not painted
         # until it settles. Asserting straight after _open read whatever state
         # happened to be current one frame in.
+        # Pin the request so "until it settles" is deterministically this
+        # wait's job (``_wait_history``'s docstring): the mount schedules it
+        # through ``call_after_refresh``, and a loaded scheduler can otherwise
+        # leave it scheduled-but-not-started past this point.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
         assert "Reading the ingest path." in " ".join(view.rendered_rows())
@@ -4739,6 +4744,10 @@ async def test_the_unavailable_note_clears_when_the_transcript_appears(tmp_path)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         # Correct at this instant: there genuinely is no transcript yet.
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
@@ -4816,6 +4825,10 @@ async def test_a_missing_transcript_costs_one_stat_per_refresh_and_no_read(
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
 
@@ -4908,6 +4921,10 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
 
