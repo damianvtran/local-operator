@@ -1497,6 +1497,81 @@ async def test_sync_by_name_answers_every_requested_name(context, registry) -> N
     assert "op='install'" in body
 
 
+# ---------------------------------------------------------------------------
+# action_class — the proactive-class switch (R29/R36/R37)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_defaults_to_reactive_and_says_so_when_proactive(context, registry) -> None:
+    from local_operator.action_class import PROACTIVE, class_from_tags
+
+    # The default: no class word in the receipt, and the stored row reads
+    # reactive (absence, the sparsest encoding) — R37.
+    receipt = await call(
+        context, op="create", kind="role", name="plain", description="d", instructions="i"
+    )
+    assert "proactive" not in receipt
+    row = registry.get_agent_by_name("plain")
+    assert row is not None and class_from_tags(row.tags) != PROACTIVE
+
+    # The explicit flip is loud, because it changes who may message the user.
+    receipt = await call(
+        context,
+        op="create",
+        kind="role",
+        name="buddy",
+        description="d",
+        instructions="i",
+        action_class="proactive",
+    )
+    assert "Class: proactive" in receipt
+    row = registry.get_agent_by_name("buddy")
+    assert row is not None and class_from_tags(row.tags) == PROACTIVE
+
+
+@pytest.mark.asyncio
+async def test_show_prints_the_class_and_update_flips_it(context, registry) -> None:
+    await call(
+        context,
+        op="create",
+        kind="role",
+        name="buddy",
+        description="d",
+        instructions="i",
+        action_class="proactive",
+    )
+    body = await call(context, op="show", name="buddy")
+    assert "class: proactive" in body
+
+    receipt = await call(context, op="update", name="buddy", action_class="reactive")
+    assert "now reactive" not in receipt  # that sentence is the TUI's
+    assert "stopped" in receipt
+    body = await call(context, op="show", name="buddy")
+    assert "class: reactive" in body
+    # An OMITTED class on a later edit never clears what is there: flip back,
+    # then fix the description, and the class survives.
+    await call(context, op="update", name="buddy", action_class="proactive")
+    await call(context, op="update", name="buddy", description="d2")
+    body = await call(context, op="show", name="buddy")
+    assert "class: proactive" in body
+
+
+@pytest.mark.asyncio
+async def test_a_bad_class_spelling_is_refused_by_the_schema(context) -> None:
+    from pydantic import ValidationError
+
+    # Unpacked through a dict so the bad spelling reaches the VALIDATOR rather
+    # than tripping the type checker on a literal it exists to reject.
+    with pytest.raises(ValidationError):
+        AgentParams(
+            op="create",
+            name="x",
+            instructions="i",
+            action_class="sideways",  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.asyncio
 async def test_sync_degrades_the_hub_arm_without_a_credential(
     context, registry, monkeypatch

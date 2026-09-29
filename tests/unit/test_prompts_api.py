@@ -661,6 +661,10 @@ def test_inventory_block_matches_default_tool_order() -> None:
             # ORDER of a fully-capable inventory.
             agent_registry=object(),
             team_registry=object(),
+            # ``patience`` is createIf-gated on the proactive CLASS (design
+            # §8.2.5) beside the scheduler, and only its PRESENCE is read here
+            # — this test is about the ORDER of a fully-capable inventory.
+            action_class="proactive",
             # Presence-only, same rule as the two above: `project`/
             # `project_delete` are createIf-gated on a store being attached.
             project_registry=object(),

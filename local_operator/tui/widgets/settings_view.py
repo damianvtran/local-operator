@@ -256,6 +256,32 @@ class _Suggestion(NamedTuple):
 #: fitting pass (`_fit_pane`) has to count lines before they are painted.
 _PaneLine = list[tuple[str, "Style"]]
 
+
+def _paint_facts(facts: str, room: int, *, muted: "Style", faint: "Style") -> _PaneLine:
+    """A profile row's facts, with the class marker painted one rung brighter.
+
+    The class is the one fact on this line that tells a user whether the agent
+    may message them unprompted, so it survives truncation (the app orders it
+    before model/effort) and it is painted `muted` — measured at 8.6:1 against
+    the pane, where `faint` measures 1.97:1 and effectively erased it (design
+    round 1, D1: "the important words must survive a narrow container", and
+    the ink has to carry them once they do). Whole-token matching only: a
+    ``proactive`` inside another word would be a coincidence, not a class.
+    """
+    text = truncate_cells(facts, room)
+    parts = text.split(" · ")
+    if "proactive" not in parts:
+        return [(f"    {text}", faint)]
+    line: _PaneLine = []
+    pending_indent = "    "
+    for index, part in enumerate(parts):
+        if index:
+            line.append((" · ", faint))
+        line.append((f"{pending_indent}{part}", muted if part == "proactive" else faint))
+        pending_indent = ""
+    return line
+
+
 #: One footer hint: the button, its trailing label, and whether a separator
 #: precedes it. A module-scope alias because a function-local assignment is not
 #: a valid type expression, and the literal labels otherwise infer as distinct
@@ -4935,7 +4961,7 @@ class SettingsView(Vertical):
             shown, hidden = self._budget_pane_rows(rows, used=used + 1)
             for name, facts, summary in shown:
                 entry: list[_PaneLine] = [[(f"  {truncate_cells(name, room - 2)}", muted)]]
-                entry.append([(f"    {truncate_cells(facts, room - 4)}", faint)])
+                entry.append(_paint_facts(facts, room - 4, muted=muted, faint=faint))
                 if summary:
                     entry.append([(f"    {truncate_cells(summary, room - 4)}", faint)])
                 entries.append(entry)

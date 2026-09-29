@@ -257,6 +257,66 @@ def test_list_marks_overdue_and_stale_schedules(
     assert "stale" in stale_line and "overdue" not in stale_line, stale_line
 
 
+def test_list_hides_patience_rows_and_a_patience_only_session(
+    tmp_path: Path, running_supervisor, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``wake list`` is a human listing: internal timers are not wakes here.
+
+    A session with a scheduled wake plus a hidden patience wait shows only the
+    scheduled row; a session with ONLY a patience wait contributes no row at
+    all (it is not a wake-carrying session on any human surface).
+    """
+    from local_operator.cli import wake_command
+
+    _arm(
+        tmp_path,
+        "statussess07",
+        cwd=str(tmp_path),
+        schedules=[
+            {"id": "w1", "message": "visible watch", "next_due_at": NOW_MS + 600_000},
+            {
+                "id": "patience-1",
+                "message": "",
+                "next_due_at": NOW_MS + 300_000,
+                "kind": "patience",
+                "hidden": True,
+                "episode_id": "patience-1",
+                "attempt": 1,
+                "armed_at": 1,
+            },
+        ],
+    )
+    _arm(
+        tmp_path,
+        "statussess08",
+        cwd=str(tmp_path),
+        schedules=[
+            {
+                "id": "patience-2",
+                "message": "",
+                "next_due_at": NOW_MS + 300_000,
+                "kind": "patience",
+                "hidden": True,
+                "episode_id": "patience-2",
+                "attempt": 1,
+                "armed_at": 1,
+            }
+        ],
+    )
+
+    assert wake_command(_args(wake_command="list", json=True)) == 0
+    rows = json.loads(capsys.readouterr().out)
+    mine = [row for row in rows if row["session_id"] == "statussess07"]
+    assert [row["wake_id"] for row in mine] == ["w1"]
+    assert "statussess08" not in {row["session_id"] for row in rows}
+
+    # The rendered form too: the hidden id never reaches a painted line.
+    assert wake_command(_args(wake_command="list", json=False)) == 0
+    out = capsys.readouterr().out
+    assert "statussess07" in out and "visible watch" in out
+    assert "patience" not in out and "statussess08" not in out
+
+
 def test_the_install_subcommand_reaches_the_repair_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

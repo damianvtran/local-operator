@@ -1036,6 +1036,48 @@ def test_queued_custom_steers_project_their_human_text() -> None:
     assert all(entry["image_count"] == 0 for entry in state.queued_steering)
 
 
+def test_a_patience_wait_never_reaches_frontend_wakes() -> None:
+    """The desktop wake chip and Wakes section read THIS list, not a facade.
+
+    ``canonical.frontend.wakes`` is exactly this field, and it drives the
+    composer's wake chip count AND the run pane's Wakes rows, so the hidden
+    filter has to live at this builder (agent review round 1, R1: a session
+    with one pending patience wait showed "1 wake" and a row on the desktop).
+    The VISIBLE control stays, so an over-broad filter fails in the other
+    direction rather than passing as a silent blanket.
+    """
+    from local_operator.harness.wake_types import WakeSchedule
+
+    visible = WakeSchedule(id="w1", message="morning check", next_due_at=2, created_at=1)
+    hidden = WakeSchedule(
+        id="patience-1",
+        message="still waiting",
+        next_due_at=2,
+        created_at=1,
+        kind="patience",
+        hidden=True,
+    )
+    session = SimpleNamespace(
+        jobs=SimpleNamespace(list=lambda: []),
+        _subagent_comms=None,
+        model=_spec(),
+        effective_model=_spec(),
+        session_id="s1",
+        cwd="/repo",
+        queued_steering=lambda: [],
+        conversation_name="Canonical state",
+        goal="",
+        active_agent="",
+        active_team_name="",
+        wake_scheduler=SimpleNamespace(schedules=[visible, hidden]),
+        mcp_manager=None,
+        mcp_startup=None,
+    )
+    store = FrontendStateStore(_state(jobs=[]))
+    state = store.refresh_from_session(session)
+    assert [row.id for row in state.wakes] == ["w1"]
+
+
 class _CheckpointTranscript:
     """The one method ``FrontendStateStore._restored_state`` reads."""
 

@@ -668,7 +668,44 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise lands at head + 55 — the band this file keeps, and together with
 #: the known CI-vs-local offset (~25 billed) it clears CI rather than this
 #: machine alone — and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 34_961
+#: FOLDED with the PROACTIVE CLASS + PATIENCE slice (design §8; R29–R38) — the
+#: ``patience`` tool a proactive session can see and the ``patience`` field on
+#: ``send`` — and, on the latest fold, with main's own ``backend`` raise above.
+#: Re-measured ON THE FOLDED TREE with every raise present — 99,471 chars =
+#: ~35,781 billed, 32/32 tools; the enforced ceiling is that measurement + 55
+#: (the band this file keeps, which also clears the CI-vs-local offset
+#: recorded above).
+#:
+#: RAISED 33,760 -> 34,634 for the PROACTIVE CLASS + PATIENCE slice (design
+#: §8; R29–R38): the ``patience`` tool a proactive session can see, and the
+#: ``patience`` field on ``send``. Measured by running THIS script from two
+#: trees, one after the other (the base tree checked out at ``origin/main``
+#: 11fc505e4, which is this branch's merge base — the two numbers are the same
+#: tree pair the gates ran on):
+#:
+#:   baseline (origin/main 11fc505e4)      93,699 chars = ~33,705 billed
+#:   head (this branch)                    96,131 chars = ~34,579 billed
+#:     = +2,432 chars = +874 billed, and the delta is two pieces exactly:
+#:       the ``patience`` tool's schema and its one inventory line
+#:       (+2,421 chars of tool_schemas, +11 of tool_inventory), and the
+#:       ``patience`` field on ``send`` (+308 chars, measured on
+#:       ``SendParams.model_json_schema()`` in each tree). The first writing
+#:       cost +948 billed; moving the "defaults to the configured 5m" clause
+#:       out of ``send``'s field description — the tool that owns the default
+#:       says it — cut it to +874, the same trim discipline this block's
+#:       ``secret`` entry demands.
+#:
+#: What makes the raise the right trade is that the GATED part is paid by no
+#: session that exists: ``patience`` is createIf-gated on the proactive class
+#: AND a scheduler (design §8.2.5, rung 3 on the tool-footprint ladder), and
+#: R37 makes the class opt-in — the packaged Aida seed is the only profile
+#: that ships proactive — so the maximum-surface measurement this guard bounds
+#: carries a schema no reactive session ever receives. The one unconditional
+#: cost is the ``patience`` field on ``send``, and that is the price of the
+#: attach-on-send API §8.2.5 requires: arming from the tool alone cannot
+#: cover "the message this turn is about to send", which is the case the
+#: mechanism exists for.
+BUDGET_BILLED_TOKENS = 35_836
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

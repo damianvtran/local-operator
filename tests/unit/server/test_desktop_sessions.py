@@ -8210,3 +8210,115 @@ async def test_checkpoints_adapter_answers_unsupported_for_a_peer(tmp_path) -> N
         "index": {"state": "unsupported"},
         "checkpoints": [],
     }
+
+
+def test_visible_transcript_rows_drops_only_the_hidden_shapes() -> None:
+    """The serializer-level filter that keeps OLD desktop builds safe (Q1/U2).
+
+    Hidden wake deliveries and hidden tool rows are dropped together, in one
+    place, and each visible control (a scheduled wake, an ordinary tool row,
+    an assistant row with prose beside a hidden call) SURVIVES — so an
+    over-broad filter fails here rather than silently blanking a transcript.
+    """
+    from local_operator.server.utils.desktop_sessions import visible_transcript_rows
+
+    rows = [
+        {
+            "type": "message",
+            "payload": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        },
+        {
+            "type": "message",
+            "payload": {"custom_type": "wake_prompt", "details": {"hidden": True, "text": "x"}},
+        },
+        {
+            "type": "message",
+            "payload": {"custom_type": "wake_prompt", "details": {"text": "visible"}},
+        },
+        {"type": "message", "payload": {"role": "tool", "tool_name": "patience", "content": []}},
+        {"type": "message", "payload": {"role": "tool", "tool_name": "read", "content": []}},
+        {
+            "type": "message",
+            "payload": {
+                "role": "assistant",
+                "content": [],
+                "tool_calls": [{"id": "c1", "name": "patience"}],
+            },
+        },
+        {
+            "type": "message",
+            "payload": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "prose beside a hidden call"}],
+                "tool_calls": [{"id": "c1", "name": "patience"}],
+            },
+        },
+    ]
+
+    kept = visible_transcript_rows(rows)
+    assert [id(row) for row in kept] == [id(rows[0]), id(rows[2]), id(rows[4]), id(rows[6])]
+
+
+@pytest.mark.asyncio
+async def test_desktop_history_hides_patience_rows_through_the_real_bridge(tmp_path) -> None:
+    """End of the wire: the page this bridge serves carries no patience row.
+
+    ``/history`` and the snapshot's inline page both come out of ``history()``
+    through ``DesktopSessionBridge.history`` -> ``load_transcript_page``, which
+    serves RAW journal rows; the hidden filter lived in the attach window
+    while these served the leak (agent review round 1, R1; QA round 1, Q1/U2).
+    Planted through the product's own writer shapes: a hidden fire, a visible
+    one, a patience call+result pair and an ordinary call+result pair.
+    """
+    from local_operator.harness.types import Message, TextContent, ToolCall, ToolResult
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    directory = tmp_path / "sessions" / "s1"
+    transcript = Transcript(directory)
+    await transcript.append_message(Message.user("morning"))
+    await transcript.append_custom(
+        WAKE_PROMPT_MESSAGE_TYPE,
+        {
+            "text": "(patience) Still no reply",
+            "wake_id": "patience-1",
+            "occurrence": 1,
+            "kind": "patience",
+            "hidden": True,
+            "episode_id": "patience-1",
+            "attempt": 1,
+        },
+    )
+    await transcript.append_custom(
+        WAKE_PROMPT_MESSAGE_TYPE,
+        {"text": "(alarm) Scheduled wake w1 — morning check", "wake_id": "w1", "occurrence": 2},
+    )
+    await transcript.append_message(
+        Message.assistant("", tool_calls=[ToolCall(id="p1", name="patience", arguments={})])
+    )
+    await transcript.append_message(
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="p1",
+                tool_name="patience",
+                content=[TextContent(text="armed 5m")],
+            )
+        )
+    )
+    await transcript.append_message(
+        Message.assistant("", tool_calls=[ToolCall(id="r1", name="read", arguments={})])
+    )
+    await transcript.append_message(
+        Message.tool_result(
+            ToolResult(tool_call_id="r1", tool_name="read", content=[TextContent(text="file body")])
+        )
+    )
+
+    bridge = module.DesktopSessionBridge(tmp_path, "s1", str(tmp_path))
+    page = await bridge.history()
+    body = json.dumps(page["entries"])
+
+    assert "Still no reply" not in body and "armed 5m" not in body
+    assert '"patience"' not in body
+    # Visible controls: both the scheduled receipt and the ordinary tool row.
+    assert "morning check" in body
+    assert "file body" in body

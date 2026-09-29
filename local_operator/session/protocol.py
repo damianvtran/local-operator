@@ -635,7 +635,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 133 public members and a POSITIVE
+    than stylistic. This protocol carries 134 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -678,7 +678,9 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     and ``verify_live`` (the ``ping`` round trip that refreshes it), which is one
     rung adding two members because a stamp with no way to refresh it cannot
     distinguish "the owner is there" from "the owner was there"), 133 once the
-    projects primitive needed the ``project_registry`` ``/project`` reads), so
+    projects primitive needed the ``project_registry`` ``/project`` reads, 134
+    once the proactive class needed ``cleanup_after_class_switch`` so a viewer's
+    class switch answers honestly instead of dying on a duck-probe), so
     recompute it rather
     than adjusting it by the size of your own change.
 
@@ -1777,6 +1779,31 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     @property
     def active_team_name(self) -> str:
         """Name of the team this session manages (``""`` when none)."""
+        ...
+
+    # --- proactive class ----------------------------------------------------
+    # NOTE the class this sits in: it is the VIEWER protocol, deliberately. The
+    # member is read by one duck-probe (``tui/app.py``'s class command) whose
+    # host may hold either kind, both kinds implement it, and the 18
+    # both-classes members above are declared here for the same reason. It must
+    # NOT be added to ``GoalRecordProtocol`` — that protocol's whole contract is
+    # the goal RECORD's five members, its ``isinstance`` at
+    # ``_goal_record_for`` is what gates the judge, and one extra member there
+    # silently disables the judge for every double that lacks it (found by the
+    # goal suites, 2026-09-28).
+    async def cleanup_after_class_switch(self, profile_name: str) -> dict[str, Any]:
+        """Best-effort cleanup after ``/agent class`` flipped ``profile_name``.
+
+        Declared because the one call site (``tui/app.py``'s class command)
+        holds a session of EITHER kind, and reaches it through a duck-probe.
+        The registry write IS the switch; this immediate cleanup is the
+        optimisation on top of it — the owner cancels this session's pending
+        patience waits and reconciles the packaged agent's cadence, while
+        anything it does not reach self-corrects at the next delivery-time
+        class read and the episode TTL bounds the difference (design §8.2.6).
+        The owner's answer carries what it cancelled; a viewer answers with the
+        empty outcome, because only the owner holds the wake writer.
+        """
         ...
 
 

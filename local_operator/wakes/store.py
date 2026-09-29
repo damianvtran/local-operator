@@ -158,6 +158,26 @@ def read_index(config_dir: Path) -> dict[str, dict[str, Any]]:
     return read_index_report(config_dir)[0]
 
 
+def is_patience_row(row: Any) -> bool:
+    """Whether ``row`` is a HIDDEN patience wait (model or dumped dict alike).
+
+    Defined HERE, beside the index readers, so every consumer that must
+    subtract these rows to answer a human question — the picker's armed-wake
+    count, the CLI listing, the desktop listing and feed, the dormant-count
+    receipt — makes the same call rather than each filtering a shape the next
+    reader cannot see. Two readers must stay UNFILTERED on purpose: the wake
+    supervisor (a hidden timer still engages a runtime) and the session (it
+    owns the rows and delivers them hidden).
+    """
+    kind = row.get("kind") if isinstance(row, Mapping) else getattr(row, "kind", None)
+    return str(kind or "") == "patience"
+
+
+def scheduled_rows(rows: Sequence[Any]) -> list[Any]:
+    """The rows a human surface may show: everything except patience waits."""
+    return [row for row in rows or () if not is_patience_row(row)]
+
+
 def read_index_report(config_dir: Path) -> tuple[dict[str, dict[str, Any]], bool]:
     """``(entries, read_error)`` — :func:`read_index` plus whether the
     DIRECTORY could not be listed.
