@@ -30,6 +30,7 @@ import { GateSheet } from "../components/gate-sheet";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
+import { SessionStatus } from "../components/session-status";
 import { Transcript } from "../components/transcript";
 import { WorkingLine } from "../components/working-line";
 import { cn } from "../lib/cn";
@@ -331,6 +332,9 @@ export function SessionScreen({
 				/>
 			) : <>
 			<Header projection={projection} sessionId={sessionId} />
+			{/* The spend + context glance (phase 1), read-only and self-hiding:
+			    it renders nothing until either reading has something to state. */}
+			<SessionStatus projection={projection} />
 
 			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll

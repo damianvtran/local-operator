@@ -264,6 +264,25 @@ export interface SessionProjection {
 	pending_count: number;
 	/** input/output tokens. */
 	usage: Record<string, number>;
+	/**
+	 * The session's spend ledger, raw — the same inputs the desktop strip reads,
+	 * spelled by `lib/spend-context.ts` (never a total on the wire). Optional
+	 * because an older daemon omits the whole block, and absent means the
+	 * defaults that module documents: no money stated, no children.
+	 */
+	cumulative_parent_cost?: number | null;
+	child_costs?: Record<string, number> | null;
+	subagent_cost?: number | null;
+	subagent_cost_knowledge?: string | null;
+	cost_knowledge?: string | null;
+	/**
+	 * The context reading: tokens in use, the window they are measured against
+	 * (absent/0 = unknown, so no percentage is possible), and whether the token
+	 * figure is the app's own estimate rather than a provider receipt.
+	 */
+	context_tokens?: number | null;
+	context_window?: number | null;
+	context_is_estimate?: boolean | null;
 	/** Projection epoch; drop stale repaints. */
 	version: number;
 }

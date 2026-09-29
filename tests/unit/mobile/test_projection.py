@@ -3759,3 +3759,57 @@ def test_a_held_child_report_and_a_delivered_one_do_not_read_alike_on_the_phone(
             held.text != delivered.text
         ), f"a held row must never fold identical to a delivered one (len={length})"
         assert marker not in delivered.text
+
+
+def test_set_spend_context_assigns_every_field_and_never_skips_a_none() -> None:
+    """The spend/context block is adopted EXACTLY — ``None`` included.
+
+    ``None`` here is a READING ("money we cannot state", "no window known
+    yet"), so this fold must not behave like ``set_state`` and skip it: a
+    skipped ``None`` keeps a stale older value alive exactly when the truth is
+    unknown — the confident lie the unknown/floor/partial discipline exists to
+    refuse. The second half pins that overwrite.
+    """
+    fold = make_fold()
+    fold.set_spend_context(
+        cumulative_parent_cost=1.25,
+        child_costs={"job-a": 0.5},
+        subagent_cost=2.0,
+        subagent_cost_knowledge="partial",
+        cost_knowledge="exact",
+        context_tokens=12_400,
+        context_window=200_000,
+        context_is_estimate=True,
+        usage={"input_tokens": 9_000, "output_tokens": 100},
+    )
+    p = fold.projection
+    assert p.cumulative_parent_cost == 1.25
+    assert p.child_costs == {"job-a": 0.5}
+    assert p.subagent_cost == 2.0
+    assert p.subagent_cost_knowledge == "partial"
+    assert p.cost_knowledge == "exact"
+    assert p.context_tokens == 12_400
+    assert p.context_window == 200_000
+    assert p.context_is_estimate is True
+    assert p.usage == {"input_tokens": 9_000, "output_tokens": 100}
+
+    version = p.version
+    fold.set_spend_context(
+        cumulative_parent_cost=None,
+        child_costs={},
+        subagent_cost=None,
+        subagent_cost_knowledge=None,
+        cost_knowledge="unknown",
+        context_tokens=None,
+        context_window=None,
+        context_is_estimate=None,
+        usage={},
+    )
+    assert p.cumulative_parent_cost is None, "a None reading must overwrite, not skip"
+    assert p.child_costs == {}
+    assert p.subagent_cost is None and p.subagent_cost_knowledge is None
+    assert p.cost_knowledge == "unknown"
+    assert p.context_tokens is None and p.context_window is None
+    assert p.context_is_estimate is None
+    assert p.usage == {}
+    assert p.version > version

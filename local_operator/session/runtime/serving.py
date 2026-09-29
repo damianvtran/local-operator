@@ -620,6 +620,31 @@ class ServingSessionHandle(SessionHandle):
             # Checkpoint state is not an instruction to spend more tokens. A
             # replaced owner reports interrupted work rather than resuming it.
             store.mutate(loop={**store.state.loop, "status": "interrupted"})
+        # THE DURABLE RECEIPT PAIR IS RE-MATERIALIZED HERE, at the edge where
+        # this host takes the session up — the twin of the TUI host's call on
+        # its own adopt edge (``OperatorApp._adopt_session`` ->
+        # ``refresh_frontend_usage()``, ``tui/app.py``), and the reason this
+        # host needed one of its own (QA round 1, Q1):
+        #
+        # A session restored from the durable checkpoint carries the money and
+        # the context reading but NOT the receipt pair. The turn-end
+        # checkpoint is written while the turn's final ``AgentEndEvent`` is
+        # still held (``Session._held_end``; it folds at the held-end flush in
+        # the pipeline's ``finally``, AFTER ``_run_turn``'s durable write), and
+        # that fold is what lands the aggregate receipt in ``last_usage``. A
+        # restored runtime therefore published ``last_usage: null`` — and the
+        # phone reads the pair as its ``$—`` billed signal and its refresh
+        # cadence, so a resumed session silently dropped the spend segment
+        # where the live one read "we spent something we cannot price".
+        #
+        # The pair is re-derivable rather than lost: the transcript replay
+        # already seeds ``Session.restored_usage()``. The same mechanism the
+        # TUI uses (and the same guard shape, for reduced hosts) re-reads it
+        # into the store before this handle serves any frame; nothing later
+        # needs the null.
+        refresh_frontend_usage = getattr(session, "refresh_frontend_usage", None)
+        if callable(refresh_frontend_usage):
+            refresh_frontend_usage()
         self._loop = loop
         # When the owner's saved default is full-auto (``tool_approval_mode:
         # auto``), the phone must not park a card the TUI would never show —
@@ -7834,6 +7859,28 @@ class ServingSessionHandle(SessionHandle):
             # lifecycle events are authoritative; ``_reconcile_streaming``
             # covers attach and command boundaries.
         )
+        # The spend + context glance (phase 1 of the mobile parity program):
+        # the canonical store's raw numbers and rungs, spelled by the phone's
+        # own port of the TUI ladder. Read through ``read_field`` +
+        # ``spend_context_copy`` rather than ``session.frontend_state`` — that
+        # property deep-copies the whole state (~30 ms of a 135 ms frame, see
+        # ``read_field``) and this runs after every folded event. Freshness
+        # holds because ``Session._emit`` runs the store's ``observe_event``
+        # BEFORE this handler fan-out.
+        store = getattr(self._session, "_frontend_state_store", None)
+        if store is not None:
+            child_costs, usage = store.spend_context_copy()
+            self._fold.set_spend_context(
+                cumulative_parent_cost=store.read_field("cumulative_parent_cost"),
+                child_costs=child_costs,
+                subagent_cost=store.read_field("subagent_cost"),
+                subagent_cost_knowledge=store.read_field("subagent_cost_knowledge"),
+                cost_knowledge=store.read_field("cost_knowledge"),
+                context_tokens=store.read_field("context_tokens"),
+                context_window=store.read_field("context_window"),
+                context_is_estimate=store.read_field("context_is_estimate"),
+                usage=usage,
+            )
         # Publish the child roster beside the session state, the way the TUI
         # host does (``mobile/tui_handle.py::_refresh_state``). The folded
         # projection's per-child ``session_id`` is the ONLY route to

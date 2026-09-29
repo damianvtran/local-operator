@@ -516,3 +516,62 @@ def test_a_malformed_annotation_refuses_the_command_payload() -> None:
         ContinuationCommand.from_json({**base, "input_mode": "bogus"})
     with pytest.raises(ValueError, match="input_path"):
         ContinuationCommand.from_json({**base, "input_path": "z" * 200})
+
+
+#: The spend/context block's wire names, shared by both halves of the round-trip.
+_SPEND_CONTEXT_FIELDS = (
+    "cumulative_parent_cost",
+    "child_costs",
+    "subagent_cost",
+    "subagent_cost_knowledge",
+    "cost_knowledge",
+    "context_tokens",
+    "context_window",
+    "context_is_estimate",
+)
+
+
+def test_the_spend_and_context_block_rides_the_wire_and_defaults_when_absent() -> None:
+    """The spend/context fields round-trip, and an ABSENT block invents nothing.
+
+    Additive by construction: a pre-upgrade runtime omits every field and a
+    durable rebuild (``_projection_from_json`` filters to the dataclass's known
+    fields) must land on the defaults — including ``cost_knowledge``'s
+    ``"unknown"`` and an empty ``child_costs`` ("no children", never "children
+    cost nothing"). ``None`` survives as ``None``: it is "money we cannot
+    state", distinct from the ``0.0`` a synthesised zero would be.
+    """
+    projection = SessionProjection(session_id="s1", pid=1)
+    projection.cumulative_parent_cost = 1.25
+    projection.child_costs = {"job-a": 0.5}
+    projection.subagent_cost = 2.0
+    projection.subagent_cost_knowledge = "partial"
+    projection.cost_knowledge = "exact"
+    projection.context_tokens = 12_400
+    projection.context_window = 200_000
+    projection.context_is_estimate = True
+
+    wire = projection.to_json()
+    for name in _SPEND_CONTEXT_FIELDS:
+        assert name in wire, name
+
+    rebuilt = _projection_from_json(wire, _record())
+    assert rebuilt.cumulative_parent_cost == 1.25
+    assert rebuilt.child_costs == {"job-a": 0.5}
+    assert rebuilt.subagent_cost == 2.0
+    assert rebuilt.subagent_cost_knowledge == "partial"
+    assert rebuilt.cost_knowledge == "exact"
+    assert rebuilt.context_tokens == 12_400
+    assert rebuilt.context_window == 200_000
+    assert rebuilt.context_is_estimate is True
+
+    absent = {key: value for key, value in wire.items() if key not in _SPEND_CONTEXT_FIELDS}
+    default = _projection_from_json(absent, _record())
+    assert default.cumulative_parent_cost is None
+    assert default.child_costs == {}
+    assert default.subagent_cost is None
+    assert default.subagent_cost_knowledge is None
+    assert default.cost_knowledge == "unknown"
+    assert default.context_tokens is None
+    assert default.context_window is None
+    assert default.context_is_estimate is None
