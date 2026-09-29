@@ -278,7 +278,16 @@ export function NewSessionScreen() {
 							</span>
 						</button>
 					))}
-					{!modelsError && models !== null && filtered.length === 0 ? (
+					{!modelsError && models !== null && models.length === 0 ? (
+						/* EMPTY CATALOGUE first — see the sheet's rung of the same name
+						   (U9, batch 2): with no rows at all, filter advice cannot
+						   succeed. Same copy as the in-session sheet so the two pickers
+						   account for themselves alike. */
+						<p className="px-3 py-2 text-body-sm text-ink-dim">
+							no models available from this machine — check the runtime's
+							providers
+						</p>
+					) : !modelsError && models !== null && filtered.length === 0 ? (
 						/* Without this the picker answered a non-matching query with
 						   the bare `default` row and empty space, which does not tell
 						   "nothing matched" from "the list failed to load". Same copy

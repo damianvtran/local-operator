@@ -23,9 +23,16 @@ export const dracula: ThemeDefinition = {
 		surface: "#2F3146",
 		// The old theme used selection 44475A as its tooltip ground. Nothing that
 		// light can carry a third ink weight — inkDim would have to land within a
-		// hair of inkMuted to clear 4.5:1 on it — so elevated steps one stop back
-		// down the same blue-grey ramp and selection stays available for hovers.
-		elevated: "#3D4055",
+		// hair of inkMuted to clear 4.5:1 on it — so elevated steps back down the
+		// same blue-grey ramp and selection stays available for hovers. One step
+		// further than the first landing (D4, mobile UX batch 2): at 3D4055 the
+		// ACCENT measured 4.22:1 on it, under the text floor, and mobile sheets
+		// paint accent there for real — the pin sheet's ★, the roster's status
+		// dots, the theme picker's ✓ — so the DERIVED ground moves rather than
+		// the canonical purple, or an exception. Surface separation narrows to
+		// ΔE76 4.5 (other dark themes sit near 5.3); the value stays distinct
+		// from both surface and selection.
+		elevated: "#383B50",
 		sunken: "#21222C",
 
 		ink: "#F8F8F2",

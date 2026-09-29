@@ -378,6 +378,54 @@ export function AgentUnavailable({
 	);
 }
 
+/** The TRANSIENT sibling of ``AgentUnavailable`` (mobile UX batch 2, U6).
+ *
+ * The detail load used to collapse every failure into "no longer available —
+ * it may have expired or been removed": a permanent verdict on a temporary
+ * fact (a 5xx, a dropped fetch, an unparseable body). A 404 IS the permanent
+ * verdict — the daemon resolved no child — and keeps that card; everything
+ * else says what it can vouch for and offers the retry the loader already
+ * supports (reconnection retries it too — the ``connected`` effect above).
+ * The transcript loader beside it (``TranscriptFetchError``) draws the same
+ * line, which is where the rule came from. */
+export function AgentLoadFailed({
+	sessionId,
+	parentPath,
+	connected,
+	onRetry,
+}: {
+	sessionId: string;
+	parentPath?: string;
+	connected: boolean;
+	onRetry: () => void;
+}) {
+	const rootPath = `/s/${encodeURIComponent(sessionId)}`;
+	const fallbackPath = parentPath || rootPath;
+	return (
+		<>
+			<AgentHeader detail={null} parentPath={fallbackPath} fallbackSubtitle="Not loaded" />
+			<InlineState>
+				{/* The live region is the TEXT, not the card — the same shape
+				    ``TranscriptFetchError`` documents: wrapping the card put the
+				    button inside an alert with an empty accessible name. */}
+				<div role="alert" className="flex flex-col gap-2">
+					<p className="text-body-sm font-medium text-ink">Couldn't load this agent.</p>
+					<p className="text-body-sm text-ink-dim">
+						{connected
+							? "The request didn't go through. Retry to try again."
+							: "You're offline. Reconnecting will retry automatically."}
+					</p>
+				</div>
+				<div className="mt-2 flex flex-wrap gap-2">
+					<button type="button" onClick={onRetry} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Retry</button>
+					<button type="button" onClick={() => navigateUp(fallbackPath)} className="min-h-11 rounded-sm border border-control px-3 text-body-sm">Back to parent</button>
+					<button type="button" onClick={() => navigate(rootPath)} className="min-h-11 rounded-sm px-3 text-body-sm text-ink-muted active:bg-elevated">View root</button>
+				</div>
+			</InlineState>
+		</>
+	);
+}
+
 export function AgentLoading({
 	sessionId,
 	connected,
@@ -834,19 +882,34 @@ export function AgentScreen({
 }) {
 	const key = `${sessionId}:${jobId}`;
 	const [detail, setDetail] = useState<SubagentDetail | null>(() => detailCache.get(key) ?? null);
-	const [error, setError] = useState("");
+	const [failure, setFailure] = useState<{
+		message: string;
+		/* A 404 is a verdict about the child; anything else is a fact about the
+		   link. See the branch below and `AgentLoadFailed`. */
+		terminal: boolean;
+	} | null>(null);
 	const loaderRef = useRef<DetailRequestCoordinator | null>(null);
 	useEffect(() => {
 		setDetail(detailCache.get(key) ?? null);
-		setError("");
+		setFailure(null);
 		const loader = new DetailRequestCoordinator(
 			() => getSubagentDetail(sessionId, jobId),
 			(next) => {
 				cacheDetail(key, next);
 				setDetail((current) => !current || next.version >= current.version ? next : current);
-				setError("");
+				setFailure(null);
 			},
-			(reason) => setError(reason instanceof Error ? reason.message : "failed to load agent"),
+			(reason) =>
+				setFailure({
+					message: reason instanceof Error ? reason.message : "failed to load agent",
+					/* THE ONE DISCRIMINATOR (U6, batch 2): the daemon answers 404 when
+					   this child cannot be resolved at all — that is the permanent
+					   verdict — while a 5xx / dropped fetch / unparseable body is a
+					   transient fact about the request, and the screen must not claim
+					   the permanent one for it. Mirrors `useLazySubagentTranscript`'s
+					   own split one component below. */
+					terminal: reason instanceof HttpError && reason.status === 404,
+				}),
 		);
 		loaderRef.current = loader;
 		loader.request(projection.version);
@@ -862,19 +925,27 @@ export function AgentScreen({
 		if (connected) loaderRef.current?.request(projection.version);
 	}, [connected, projection.version]);
 
-	if (error && !detail) {
+	if (failure && !detail) {
 		const summary = projection.subagents.find((row) => row.job_id === jobId);
 		const parentPath = summary?.parent_job_id
 			? agentPath(sessionId, summary.parent_job_id)
 			: `/s/${encodeURIComponent(sessionId)}`;
-		return (
-			<AgentUnavailable
+		const retry = () => {
+			setFailure(null);
+			loaderRef.current?.request(projection.version);
+		};
+		/* A 404 keeps the terminal card (`AgentUnavailable`); every other failure
+		   gets the transient card, which keeps the retry the loader already
+		   supports (U6 — the copy used to claim "expired or been removed" for a
+		   request that merely did not go through). */
+		return failure.terminal ? (
+			<AgentUnavailable sessionId={sessionId} parentPath={parentPath} onRetry={retry} />
+		) : (
+			<AgentLoadFailed
 				sessionId={sessionId}
 				parentPath={parentPath}
-				onRetry={() => {
-					setError("");
-					loaderRef.current?.request(projection.version);
-				}}
+				connected={connected}
+				onRetry={retry}
 			/>
 		);
 	}

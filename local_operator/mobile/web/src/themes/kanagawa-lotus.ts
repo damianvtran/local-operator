@@ -31,8 +31,10 @@ export const kanagawaLotus: ThemeDefinition = {
 		// Upstream lotusInk2 #43436C is 5.67:1 on `sunken`, under the 7:1
 		// floor; darkened on-hue.
 		ink: "#363658",
-		// Upstream lotusInk1, canonical.
-		inkMuted: "#545464",
+		// Upstream lotusInk1, darkened one step: canonical it clears every page
+		// ground but only 4.49:1 on the danger wash (the failed row's name;
+		// D3).
+		inkMuted: "#535363",
 		// Upstream lotusGray2 #716E61 is 3.12:1 on `sunken`, under the 4.5
 		// floor; darkened on-hue.
 		inkDim: "#57544F",
