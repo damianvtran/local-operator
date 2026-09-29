@@ -45,6 +45,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -102,12 +104,19 @@ class _HeldWriteLock:
 class _HeldExclusiveLock:
     """A sibling holding SQLite's EXCLUSIVE lock -- the one that blocks a READER.
 
-    The write-path fixture above uses ``BEGIN IMMEDIATE``, which conflicts with a
-    sibling WRITER but leaves readers free on a rollback-journal store: a reader
-    that is not itself blocked is exactly how the read class went untested while
-    the write class was covered. ``BEGIN EXCLUSIVE`` is the shape QA's daemon rig
-    held for its read cells, and it is what the operator's log shows the daemon's
-    own scan losing to.
+    ONLY on a ROLLBACK-journal store. The write-path fixture above uses ``BEGIN
+    IMMEDIATE``, which conflicts with a sibling WRITER but leaves readers free: a
+    reader that is not itself blocked is exactly how the read class went untested
+    while the write class was covered. ``BEGIN EXCLUSIVE`` is the shape QA's
+    daemon rig held for its read cells, and it is what the operator's log shows
+    the daemon's own scan losing to. Once the store's WAL adoption has run (a
+    write-path step -- see ``AttentionStore._connect``), an EXCLUSIVE holder
+    does not block readers AT ALL -- readers take a snapshot, measured -- so
+    every read cell that needs this fixture pins its store to the un-converted
+    shape with ``_seed_rollback``: a real production state (older builds still
+    running, or a filesystem that refused WAL), not a contrivance. The positive
+    half -- readers proceed under a held lock on a converted store -- is pinned
+    by ``test_readers_are_never_blocked_on_a_wal_store``.
     """
 
     def __init__(self, path: Path) -> None:
@@ -129,6 +138,22 @@ def _seed(path: Path) -> AttentionStore:
     """A store with its schema materialised, as any live machine's would be."""
     store = AttentionStore(path)
     store.publish("session/a", str(uuid.uuid4()), "anchor-first", "complete")
+    return store
+
+
+def _seed_rollback(path: Path) -> AttentionStore:
+    """A store still in the ROLLBACK JOURNAL: the not-yet-converted shape.
+
+    The WAL adoption is a WRITE-path step, so a machine whose writers are all
+    older builds -- or whose filesystem refused the conversion -- still presents
+    exactly this state, and in it a sibling's EXCLUSIVE lock DOES block a
+    reader, which is the race the read cells below exercise. ``_seed``'s publish
+    adopts WAL, so the file is switched back for the cell; readers never convert
+    it (the adoption is write-path only, by design).
+    """
+    store = _seed(path)
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("PRAGMA journal_mode=DELETE")
     return store
 
 
@@ -323,6 +348,115 @@ def test_a_lock_that_never_clears_is_a_classified_deferral_not_a_bare_error(
     # Nothing half-written: a failed attempt leaves no row, and the previous
     # completion still stands.
     assert store.state("session/a")["completion_token"] == seeded
+
+
+#: The four writes that carry a user gesture: the desktop's per-session clear
+#: (``acknowledge``), its sidebar clear-all (``acknowledge_many``), and the
+#: notification path's claim/release pair.
+WRITE_OPERATIONS = ["acknowledge", "acknowledge_many", "claim_delivery", "release_delivery"]
+
+
+def _run_write(operation: str, store: AttentionStore, token: str) -> Any:
+    if operation == "acknowledge":
+        return store.acknowledge("session/a", token)
+    if operation == "acknowledge_many":
+        return store.acknowledge_many([("session/a", token)])
+    if operation == "claim_delivery":
+        return store.claim_delivery("session/a", token, "test")
+    return store.release_delivery("session/a", token)
+
+
+@pytest.mark.parametrize("operation", WRITE_OPERATIONS)
+def test_every_user_facing_write_rides_out_a_held_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """The four writes that had NO retry ride the window out exactly like publish.
+
+    The operator's 2026-09-29 toast was ``acknowledge`` (the desktop's ``/seen``
+    clear); ``acknowledge_many`` is the sidebar's clear-all; ``claim_delivery``
+    and ``release_delivery`` carry the notification path. Each is run against a
+    lock that outlasts its first attempt and is released the moment the store is
+    RE-ENTERED -- the release is an event of the retry itself, not a sleep --
+    and each must have left its intended effect behind, or the pass would be a
+    lucky window rather than a ride-out.
+    """
+    _shrink_the_budget(monkeypatch)
+    path = tmp_path / "attention.db"
+    store = _seed(path)
+    token = store.state("session/a")["completion_token"]
+    if operation == "release_delivery":
+        # A release only ever releases a claim that exists.
+        assert store.claim_delivery("session/a", token, "test") is True
+    holder = _HeldWriteLock(path)
+    attempts: list[int] = []
+    original = AttentionStore._connect
+
+    def release_for_the_second_attempt(inner_self: AttentionStore) -> sqlite3.Connection:
+        attempts.append(1)
+        if len(attempts) == 2:
+            holder.release()
+        return original(inner_self)
+
+    monkeypatch.setattr(AttentionStore, "_connect", release_for_the_second_attempt)
+    try:
+        result = _run_write(operation, store, token)
+    finally:
+        holder.release()
+        holder.close()
+
+    assert len(attempts) == 2, "the first attempt met the lock; the retry is the pass"
+    if operation == "acknowledge":
+        assert result["unseen"] is False
+        assert store.state("session/a")["unseen"] is False
+    elif operation == "acknowledge_many":
+        assert [verdict["status"] for verdict in result] == ["read"]
+        assert store.state("session/a")["unseen"] is False
+    elif operation == "claim_delivery":
+        assert result is True
+        assert store.claim_delivery("session/a", token, "test") is False
+    else:
+        assert result is True
+        assert (
+            store.claim_delivery("session/a", token, "test") is True
+        ), "a released claim re-opens exactly that event"
+
+
+@pytest.mark.parametrize("operation", WRITE_OPERATIONS)
+def test_every_user_facing_write_defers_when_the_lock_never_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """Exhaustion must surface as the SAME classified deferral publish raises.
+
+    The desktop ladder keys the retryable 503 -- and therefore the toast copy --
+    off ``AttentionWriteDeferred`` and its certified ``SQLITE_BUSY``; a bare
+    ``database is locked`` would classify the same way by TEXT today, which is a
+    coincidence, not a contract.
+    """
+    _shrink_the_budget(monkeypatch)
+    path = tmp_path / "attention.db"
+    store = _seed(path)
+    token = store.state("session/a")["completion_token"]
+    if operation == "release_delivery":
+        assert store.claim_delivery("session/a", token, "test") is True
+    holder = _HeldWriteLock(path)
+    try:
+        with pytest.raises(AttentionWriteDeferred) as raised:
+            _run_write(operation, store, token)
+    finally:
+        holder.release()
+        holder.close()
+
+    assert raised.value.sqlite_errorname == "SQLITE_BUSY"
+    classified = store_failure(raised.value, tmp_path)
+    assert classified is not None and classified.code == STORE_BUSY
+    # Nothing half-written: the receipt did not move, and no claim appeared.
+    assert store.state("session/a")["unseen"] is True
+    if operation == "claim_delivery":
+        assert _delivery_row(path, "session/a") is None
+    if operation == "release_delivery":
+        assert (
+            store.claim_delivery("session/a", token, "test") is False
+        ), "an exhausted release must not have re-opened the event"
 
 
 def test_a_non_contention_failure_is_never_retried(
@@ -534,7 +668,7 @@ def test_a_read_rides_out_a_lock_that_outlasts_the_window(
     monkeypatch.setattr(attention, "_BUSY_TIMEOUT_MS", 60)
     monkeypatch.setattr(attention, "_CONTENTION_BACKOFF_S", 0)
     path = tmp_path / "attention.db"
-    store = _seed(path)
+    store = _seed_rollback(path)
     holder = _HeldExclusiveLock(path)
     original = AttentionStore._connect_read_only
     connects: list[int] = []
@@ -567,7 +701,7 @@ def test_a_read_that_never_gets_the_lock_is_a_classified_deferral(
     """What escapes a blocked read is named and still classifies as contention."""
     _shrink_the_budget(monkeypatch)
     path = tmp_path / "attention.db"
-    store = _seed(path)
+    store = _seed_rollback(path)
     original = AttentionStore._connect_read_only
     attempts: list[int] = []
 
@@ -638,6 +772,10 @@ async def test_the_refresh_read_degrades_instead_of_killing_the_caller(
         store = AttentionStore(path)
         identity = "session/sess"
         store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        # Rollback-journal store (see _seed_rollback): only there does a
+        # sibling's EXCLUSIVE lock still block this read.
+        with closing(sqlite3.connect(path)) as pin:
+            pin.execute("PRAGMA journal_mode=DELETE")
         session._attention = store.state(identity)
         previous = dict(session._attention)
         holder = _HeldExclusiveLock(path)
@@ -651,6 +789,251 @@ async def test_the_refresh_read_degrades_instead_of_killing_the_caller(
         assert "keeping the previous state" in caplog.text, caplog.text
     finally:
         await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The WAL ADOPTION: what it changes for locks, and what it must never cost.
+#
+# The adoption is opportunistic by contract (see ``AttentionStore._adopt_wal``):
+# a store that cannot convert keeps working exactly as it did, so every property
+# below has TWO sides -- the converted store's new behavior, and the
+# not-yet-converted store's old one, which the read cells above pin with
+# ``_seed_rollback``.
+# ---------------------------------------------------------------------------
+
+
+def _wal_store(path: Path) -> tuple[AttentionStore, str]:
+    """A store whose write path has adopted WAL -- the normal post-upgrade state.
+
+    TWO publishes, deliberately: the first creates the schema and the second is
+    what runs the ADDITIVE migrations (a fresh store lacks ``supersede_log``
+    until a later write op migrates it), so only after the second is the store
+    "established and current" -- the shape every machine reaches after one write
+    and the only one the fast-path cells may measure. The conversion is
+    asserted concretely (``PRAGMA journal_mode``, via SQLite itself) rather than
+    trusted, so a cell that depends on WAL fails loudly if the adoption
+    regresses.
+    """
+    store = AttentionStore(path)
+    token = str(uuid.uuid4())
+    store.publish("session/a", token, "anchor-first", "complete")
+    store.publish("session/b", str(uuid.uuid4()), "anchor-second", "complete")
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    return store, token
+
+
+@pytest.mark.parametrize("lock_kind", ["IMMEDIATE", "EXCLUSIVE"])
+def test_readers_are_never_blocked_on_a_wal_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock_kind: str
+) -> None:
+    """A converted store's readers are answered from a snapshot, lock or not.
+
+    THE POSITIVE HALF OF THE ADOPTION, and the cell that would notice if it
+    stopped happening: with the budget shrunk to milliseconds, a reader that WAS
+    blocked raises ``AttentionReadDeferred`` here -- that is the bounded answer
+    it gives instead of hanging -- and the canary proves the lock really is held
+    before the read is trusted. ``EXCLUSIVE`` is the stronger shape: on a
+    rollback-journal store it blocks readers outright (the cells above), and
+    here it must block a competing writer while the reads sail past it.
+    """
+    _shrink_the_budget(monkeypatch)
+    path = tmp_path / "attention.db"
+    store, token = _wal_store(path)
+    holder = sqlite3.connect(path, timeout=0.0, check_same_thread=False)
+    holder.execute(f"BEGIN {lock_kind}")
+    holder.execute(
+        "INSERT INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
+        ("session/held", str(uuid.uuid4()), "held", "complete"),
+    )
+    canary = sqlite3.connect(path, timeout=0.2)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            canary.execute("BEGIN IMMEDIATE")
+        assert store.state("session/a")["completion_token"] == token
+        assert store.revision()[0] >= 1
+        assert store.state_many(["session/a"])["session/a"]["completion_token"] == token
+    finally:
+        canary.close()
+        holder.rollback()
+        holder.close()
+
+
+def test_a_separate_process_reads_a_wal_store_under_a_held_write_lock(tmp_path: Path) -> None:
+    """The deployment shape is MANY PROCESSES, same user -- so one is driven.
+
+    Same-user processes on one file is the whole reason this store is a SQLite
+    file at all; a read that only works in-process would not be evidence for
+    the shape the fleet runs.
+    """
+    path = tmp_path / "attention.db"
+    store, token = _wal_store(path)
+    holder = sqlite3.connect(path, timeout=0.0, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute(
+        "INSERT INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
+        ("session/held", str(uuid.uuid4()), "held", "complete"),
+    )
+    try:
+        probe = (
+            "import sys; from pathlib import Path;"
+            " from local_operator.session.attention import AttentionStore;"
+            " state = AttentionStore(Path(sys.argv[1])).state('session/a');"
+            " assert state['completion_token'] == sys.argv[2], state"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(path), token],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+    finally:
+        holder.rollback()
+        holder.close()
+
+
+def test_read_only_reads_work_in_every_wal_sidecar_state(tmp_path: Path) -> None:
+    """``mode=ro`` reads across the sidecar lifecycle -- the states the fleet sees.
+
+    The adoption makes sidecars a fact of this store's life, and the read path
+    opens ``mode=ro``: readers must keep working (a) while a writer holds the
+    file with both sidecars present, (b) after a TRUNCATE checkpoint and a clean
+    close, when ``-wal`` is GONE at rest, and (c) afterwards. A read that lands
+    on the at-rest store re-creates an empty ``-wal`` (plus ``-shm``) exactly
+    once -- SQLite's own reader machinery, not a write of ours -- which is why
+    the absence is asserted BEFORE the read, not after it.
+    """
+    path = tmp_path / "attention.db"
+    store, token = _wal_store(path)
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute(
+            "INSERT INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
+            ("session/b", str(uuid.uuid4()), "two", "complete"),
+        )
+        writer.commit()
+        assert Path(f"{path}-wal").exists(), "a live writer keeps the WAL sidecar"
+        assert store.state("session/a")["completion_token"] == token
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        writer.close()
+    assert not Path(f"{path}-wal").exists(), "a clean close leaves the store checkpointed"
+    assert store.state("session/a")["completion_token"] == token
+    assert store.revision()[0] >= 2
+
+
+def test_an_established_store_connects_without_the_write_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validation of a live store must not buy the lock the OP is about to need.
+
+    The shipped ``_connect`` opened ``BEGIN IMMEDIATE``, probed and committed on
+    every write op, and behind a sibling's held lock that was a second
+    acquisition of the lock the op itself needs -- measured at 771.5 ms blocked
+    while doing nothing -- and one more thing that could lose the 5 s window.
+    An ESTABLISHED store now validates with reads, so it connects while the lock
+    is held; creation and migration still take the transaction, re-checked
+    inside it.
+    """
+    _shrink_the_budget(monkeypatch)
+    path = tmp_path / "attention.db"
+    store, _token = _wal_store(path)
+    holder = _HeldWriteLock(path)
+    conn = None
+    try:
+        conn = store._connect()
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        if conn is not None:
+            conn.close()
+        holder.release()
+        holder.close()
+
+
+def test_a_write_connect_does_not_touch_an_existing_store(tmp_path: Path) -> None:
+    """The private placeholder is a CREATION step, not a per-connect habit.
+
+    A ``touch(exist_ok=True)`` on every write connect moved the main file's
+    mtime each time, and the desktop feed's doorbell fingerprints exactly that
+    (pure noise: a connect that changes nothing ringing a 10 Hz consumer),
+    while it cannot fix an existing file's mode anyway. On the converted store
+    the bare connect writes nothing at all, so mtime must not move.
+    """
+    path = tmp_path / "attention.db"
+    store, _token = _wal_store(path)
+    before = path.stat().st_mtime_ns
+    conn = store._connect()
+    conn.close()
+    assert path.stat().st_mtime_ns == before
+
+
+def test_a_missing_store_is_created_private_and_converted(tmp_path: Path) -> None:
+    """The other half of the touch rule: creation still lands 0600, and WAL."""
+    path = tmp_path / "attention.db"
+    conn = AttentionStore(path)._connect()
+    conn.close()
+    assert path.exists()
+    assert (path.stat().st_mode & 0o777) == 0o600
+    with closing(sqlite3.connect(path)) as raw:
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_the_wal_adoption_declines_quietly_and_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both refusal shapes leave a working store; the contention retry is bounded.
+
+    (a) INSIDE A TRANSACTION SQLite silently answers with the current mode --
+    no change, no error -- so the adoption returns without raising. (b) A FILE
+    SQLITE CANNOT READ raises ``DatabaseError`` rather than
+    ``OperationalError``; a raise must never escape, because the store the
+    caller was about to use keeps working in rollback mode and its own probe is
+    what names corruption properly. (c) Contention retries are BOUNDED, and a
+    store that never converts is simply used in the mode it has.
+    """
+    monkeypatch.setattr(attention, "_WAL_ATTEMPTS", 3)
+    monkeypatch.setattr(attention, "_WAL_BUSY_TIMEOUT_MS", 10)
+    sleeps: list[float] = []
+    monkeypatch.setattr(attention.time, "sleep", sleeps.append)
+
+    # (a) inside a transaction: silent, no change.
+    path = tmp_path / "attention.db"
+    store = AttentionStore(path)
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("CREATE TABLE t(x)")
+        raw.execute("BEGIN")
+        store._adopt_wal(raw)
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        raw.rollback()
+    finally:
+        raw.close()
+
+    # (b) an unreadable file: the refusal is swallowed, never raised.
+    junk = tmp_path / "junk.db"
+    junk.write_bytes(b"this is not a SQLite database" * 64)
+    broken = sqlite3.connect(junk)
+    try:
+        store._adopt_wal(broken)
+    finally:
+        broken.close()
+
+    # (c) contention: bounded attempts on the short window, and no raise.
+    contended = tmp_path / "contended.db"
+    _seed_rollback(contended)
+    holder = _HeldExclusiveLock(contended)
+    conn = sqlite3.connect(contended, timeout=0.05)
+    try:
+        store._adopt_wal(conn)
+        assert len(sleeps) == 2, "retries stop at _WAL_ATTEMPTS - 1"
+    finally:
+        conn.close()
+        holder.release()
+        holder.close()
+    with closing(sqlite3.connect(contended)) as check:
+        assert check.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
 # ---------------------------------------------------------------------------
@@ -760,7 +1143,7 @@ async def test_the_store_wait_still_surfaces_a_store_that_never_answers(
     """
     _shrink_the_budget(monkeypatch)
     path = tmp_path / "attention.db"
-    _seed(path)
+    _seed_rollback(path)
     holder = _HeldExclusiveLock(path)
     try:
         with pytest.raises(AssertionError) as raised:
