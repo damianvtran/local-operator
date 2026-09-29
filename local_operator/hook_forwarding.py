@@ -1,17 +1,20 @@
-"""Forward Claude Code / Codex ``PostToolUse`` hooks into lop sessions.
+"""Run ``PostToolUse`` hooks: lop's own (``hooks.json``) and forwarded
+Claude Code / Codex hooks.
 
-lop has no hook format of its own. It runs the hooks the operator already
-configured for Claude Code (``~/.claude/settings.json``, the project's
-``.claude/settings{,.local}.json``, and the ``hooks/hooks.json`` of every
-enabled Claude plugin) and for Codex (``~/.codex/hooks.json``), with the same
-stdin payload and the same output contract, so a script written for either
-tool behaves the same when lop runs it.
+lop's own hook file is ``config_dir()/hooks.json`` — "native" hooks, enabled by
+``hooks.native`` — and it uses Claude's schema. lop also runs the hooks the
+operator already configured for Claude Code (``~/.claude/settings.json``, the
+project's ``.claude/settings{,.local}.json``, and the ``hooks/hooks.json`` of
+every enabled Claude plugin) and for Codex (``~/.codex/hooks.json``). All
+sources share ONE contract — the same stdin payload and the same output
+handling — so a script written for either tool behaves the same when lop runs
+it.
 
 Scope, deliberately: ``PostToolUse`` and ``PostToolUseFailure`` only. The other
 events (``SessionStart``, ``UserPromptSubmit``, ``PreToolUse``, ``Stop``, the
-subagent events) are not forwarded yet; ``docs/HOOKS.md`` lists them.
+subagent events) are not run yet; ``docs/HOOKS.md`` lists them.
 
-Both sources are OFF by default (``hooks.forward_claude`` /
+All sources are OFF by default (``hooks.native`` / ``hooks.forward_claude`` /
 ``hooks.forward_codex``) and read at CALL time, the way ``bash.shell`` is, so
 toggling them in ``/settings`` reaches the very next tool call.
 
@@ -49,6 +52,8 @@ FORWARD_CLAUDE_PATH: tuple[str, ...] = ("hooks", "forward_claude")
 FORWARD_CLAUDE_DEFAULT = False
 FORWARD_CODEX_PATH: tuple[str, ...] = ("hooks", "forward_codex")
 FORWARD_CODEX_DEFAULT = False
+NATIVE_PATH: tuple[str, ...] = ("hooks", "native")
+NATIVE_DEFAULT = False
 
 #: Claude Code's default for a command hook on the tool events, in seconds.
 DEFAULT_TIMEOUT_S = 600.0
@@ -131,15 +136,40 @@ def forwarding_enabled() -> tuple[bool, bool]:
     return (claude is True, codex is True)
 
 
-def _read_json(path: Path) -> dict[str, Any] | None:
+def native_hooks_enabled() -> bool:
+    """Whether ``config_dir()/hooks.json`` is on; read at call time, any failure off."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+
+        manager = ConfigManager(config_dir())
+        native = manager.get_nested_value(NATIVE_PATH, NATIVE_DEFAULT)
+    except Exception:  # noqa: BLE001 - config trouble must never block a tool
+        return False
+    return native is True
+
+
+def _read_json_value(path: Path) -> tuple[bool, Any]:
+    """``(readable, value)``: the file's JSON value as written.
+
+    ``_read_json`` projects this onto ``dict | None``; callers that must
+    distinguish "no usable shape" from "no file" (the native loader) need the
+    present-but-unusable shapes that projection erases — an array, ``{}``, a
+    scalar. An unreadable file is logged once, here.
+    """
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return None
+        return (False, None)
     except (OSError, ValueError):
-        logger.warning("hook forwarding: could not read %s", path, exc_info=True)
-        return None
-    return data if isinstance(data, dict) else None
+        logger.warning("hooks: could not read %s", path, exc_info=True)
+        return (False, None)
+    return (True, value)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    readable, value = _read_json_value(path)
+    return value if readable and isinstance(value, dict) else None
 
 
 def _project_root(cwd: str) -> Path:
@@ -272,6 +302,33 @@ def load_hook_commands(
     return commands
 
 
+def load_native_commands() -> list[HookCommand]:
+    """Every ``type: command`` hook in ``config_dir()/hooks.json`` (Claude schema).
+
+    Read at CALL time like the forwarded sources, so an edit lands on the next
+    tool call. An absent file is a no-op; unreadable JSON keeps its ``could not
+    read`` warning; every other present-but-unusable shape (no usable ``hooks``
+    mapping, an empty or non-object document) warns rather than loading nothing
+    in silence. ``disableAllHooks: true`` disables its hooks.
+    """
+    from local_operator.paths import config_dir
+
+    path = config_dir() / "hooks.json"
+    readable, value = _read_json_value(path)
+    if not readable:
+        return []  # absent, or unreadable (already logged)
+    if isinstance(value, dict) and value.get("disableAllHooks") is True:
+        return []
+    if isinstance(value, dict) and isinstance(value.get("hooks"), Mapping):
+        return _commands_from(value, "native")
+    # Present and valid JSON, but no usable ``hooks`` mapping: the natural
+    # hand-written mistake (``{"PostToolUse": [...]}`` at the top level), an
+    # empty document, or a non-object — say so rather than loading nothing in
+    # silence.
+    logger.warning("hooks: %s has no top-level 'hooks' mapping; nothing will run", path)
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Matching and payload
 # ---------------------------------------------------------------------------
@@ -287,7 +344,7 @@ def matcher_matches(matcher: str | None, value: str) -> bool:
     try:
         return re.search(matcher, value) is not None
     except re.error:
-        logger.warning("hook forwarding: invalid matcher %r", matcher)
+        logger.warning("hooks: invalid matcher %r", matcher)
         return False
 
 
@@ -479,7 +536,7 @@ def interpret(run: HookRun, event: str) -> list[str]:
         try:
             candidate = json.loads(stdout)
         except ValueError:
-            logger.warning("hook forwarding: %s hook printed unparseable JSON", event)
+            logger.warning("hooks: %s hook printed unparseable JSON", event)
         else:
             parsed = candidate if isinstance(candidate, dict) else None
     if parsed is not None:
@@ -497,7 +554,7 @@ def interpret(run: HookRun, event: str) -> list[str]:
     return notes
 
 
-async def forward_post_tool(
+async def run_post_tool_hooks(
     identity: HookIdentity,
     *,
     tool_name: str,
@@ -510,19 +567,23 @@ async def forward_post_tool(
 ) -> list[str]:
     """Run every matching Post hook for one finished call; return context notes.
 
-    Never raises for a hook's own failure; cancellation still propagates (and
-    reaps the hook's process tree) so an aborted turn stops promptly.
+    Native (``hooks.json``) entries run before forwarded ones; within a source
+    the file order holds. Never raises for a hook's own failure; cancellation
+    still propagates (and reaps the hook's process tree) so an aborted turn
+    stops promptly.
     """
     claude, codex = forwarding_enabled()
-    if not (claude or codex):
+    native = native_hooks_enabled()
+    if not (claude or codex or native):
         return []
     event = POST_TOOL_USE_FAILURE if is_error else POST_TOOL_USE
     try:
-        hooks = [
-            h
-            for h in load_hook_commands(identity.cwd, claude=claude, codex=codex, home=home)
-            if h.event == event
-        ]
+        loaded: list[HookCommand] = []
+        if native:
+            loaded.extend(load_native_commands())
+        if claude or codex:
+            loaded.extend(load_hook_commands(identity.cwd, claude=claude, codex=codex, home=home))
+        hooks = [h for h in loaded if h.event == event]
         if not hooks:
             return []
         mapped, tool_input = claude_tool(tool_name, args, identity.cwd)
@@ -540,7 +601,7 @@ async def forward_post_tool(
             duration_s=duration_s,
         )
     except Exception:
-        logger.warning("hook forwarding: could not prepare %s hooks", event, exc_info=True)
+        logger.warning("hooks: could not prepare %s hooks", event, exc_info=True)
         return []
 
     async def one(hook: HookCommand) -> list[str]:
@@ -550,17 +611,17 @@ async def forward_post_tool(
             raise
         except Exception:
             logger.warning(
-                "hook forwarding: %s hook failed: %s",
+                "hooks: %s hook failed: %s",
                 event,
                 hook.command,
                 exc_info=True,
             )
             return []
         if run.timed_out:
-            logger.warning("hook forwarding: %s hook timed out: %s", event, hook.command)
+            logger.warning("hooks: %s hook timed out: %s", event, hook.command)
         elif run.exit_code not in (0, 2):
             logger.warning(
-                "hook forwarding: %s hook exited %s: %s",
+                "hooks: %s hook exited %s: %s",
                 event,
                 run.exit_code,
                 run.stderr.strip(),

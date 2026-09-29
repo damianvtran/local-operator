@@ -2292,7 +2292,7 @@ async def _construct_child_session(
         # Display-only on both counts: a child is authorized by its own
         # ``session_id``, never by a name it borrowed from its parent.
         job_label=label,
-        # Forwarded hooks report it as ``agent_type``, as Claude Code does.
+        # Hooks report it as ``agent_type``, as Claude Code does.
         agent_type=agent,
         parent_display_name=_parent_display_name_resolver(parent_session),
         # The PARENT's comms instance, so the child's every-turn tool context

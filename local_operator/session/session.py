@@ -10773,10 +10773,11 @@ class Session:
                 # is put_nowait-only and swallows its own errors, so this stays
                 # off the turn's critical path.
                 record_tool_call=self._record_tool_call,
-                # The operator's Claude Code / Codex PostToolUse hooks, forwarded
-                # (``hook_forwarding``). Always wired: the forwarder reads its
-                # on/off keys per call, so ``/settings`` reaches the next tool.
-                post_tool_hooks=self._forward_post_tool_hooks,
+                # The operator's hooks — native (``hooks.json``) and forwarded
+                # Claude Code / Codex (``hook_forwarding``). Always wired: the
+                # runner reads its on/off keys per call, so ``/settings``
+                # reaches the next tool.
+                post_tool_hooks=self._run_post_tool_hooks,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
             )
@@ -11271,15 +11272,15 @@ class Session:
         scratchpad = self._scratchpad_dir()
         return None if scratchpad is None else str(Path(scratchpad).parent)
 
-    async def _forward_post_tool_hooks(
+    async def _run_post_tool_hooks(
         self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
     ) -> list[str]:
-        """Run forwarded ``PostToolUse`` hooks for one finished tool call.
+        """Run the operator's native and forwarded ``PostToolUse`` hooks for one call.
 
         A child reports ``agent_id``/``agent_type`` exactly as a Claude Code
         subagent does, so a hook that skips subagents keeps doing so here.
         """
-        from local_operator.hook_forwarding import HookIdentity, forward_post_tool
+        from local_operator.hook_forwarding import HookIdentity, run_post_tool_hooks
 
         is_child = self._job_id is not None
         transcript_path: str | None = None
@@ -11295,7 +11296,7 @@ class Session:
             agent_id=self._job_id if is_child else None,
             agent_type=(self._agent_type or "task") if is_child else None,
         )
-        return await forward_post_tool(
+        return await run_post_tool_hooks(
             identity,
             tool_name=tool_name,
             args=args,

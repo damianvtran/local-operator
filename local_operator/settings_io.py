@@ -565,13 +565,14 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "How the built-in tools execute.",
     ),
-    # LIVE: ``hook_forwarding.forwarding_enabled`` reads both keys through a
-    # fresh ``ConfigManager(config_dir())`` on every finished tool call.
+    # LIVE: ``hook_forwarding.native_hooks_enabled`` / ``forwarding_enabled``
+    # read these through a fresh ``ConfigManager(config_dir())`` on every
+    # finished tool call.
     Section(
         "hooks",
-        "Forwarded hooks",
+        "Hooks",
         Scope.LIVE,
-        "Run Claude Code / Codex PostToolUse hooks in lop sessions.",
+        "Run native and forwarded Claude Code / Codex PostToolUse hooks.",
     ),
     # LIVE, and its own section, for the reason ``tools`` is LIVE: ``execute_bash``
     # reads these through a fresh ``ConfigManager(config_dir())`` per call, so an
@@ -3073,7 +3074,16 @@ SETTINGS: tuple[Setting, ...] = (
     # imported, because this module must stay cheap for the CLI and
     # ``tools.builtin`` is not (see the module docstring on Textual).
     # -- hooks ------------------------------------------------------------
-    # ``path`` mirrors ``hook_forwarding.FORWARD_*_PATH``.
+    # ``path`` mirrors ``hook_forwarding.NATIVE_PATH`` / ``FORWARD_*_PATH``.
+    Setting(
+        key="hooks.native",
+        path=("hooks", "native"),
+        section="hooks",
+        label="Native hooks",
+        kind=Kind.BOOL,
+        default=False,
+        help="Run hooks from hooks.json in the lop config dir after each tool call.",
+    ),
     Setting(
         key="hooks.forward_claude",
         path=("hooks", "forward_claude"),
@@ -3081,7 +3091,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Forward Claude Code hooks",
         kind=Kind.BOOL,
         default=False,
-        help="Run ~/.claude + plugin PostToolUse hooks after each tool call.",
+        help="Run PostToolUse hooks from ~/.claude and plugins after each tool call.",
     ),
     Setting(
         key="hooks.forward_codex",
@@ -3090,7 +3100,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Forward Codex hooks",
         kind=Kind.BOOL,
         default=False,
-        help="Run ~/.codex/hooks.json PostToolUse hooks after each tool call.",
+        help="Run PostToolUse hooks from ~/.codex/hooks.json after each tool call.",
     ),
     Setting(
         key="bash.shell",
