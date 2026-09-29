@@ -5754,19 +5754,31 @@ async def test_nameless_call_recovery_is_bounded():
         ]
     )
     context = LoopContext(tools=[])
-    messages = await AgentLoop().run_to_end(
-        [Message.user("go")], context, make_config(stream), None
-    )
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
 
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
     recoveries = [
         message
-        for message in messages
+        for message in end.messages
         if isinstance(message, Message)
         and message.role == "user"
         and "arrived without a tool name" in message.text
     ]
     assert len(recoveries) == 2
-    # Two re-asks, then the third drop ends the turn without a fourth call.
+    # Two re-asks, then the third drop ends the turn without a fourth call --
+    # and the closing notice NAMES that ending, so it cannot read as a
+    # completed answer (review N1).
+    drops = [
+        event.text
+        for event in events
+        if isinstance(event, NoticeEvent) and "without a tool name" in event.text
+    ]
+    assert len(drops) == 3, drops
+    assert all("re-asking" in text for text in drops[:2]), drops
+    assert drops[-1].endswith("no further re-asks; ending the turn"), drops[-1]
     assert len(stream.requests) == 3
 
 

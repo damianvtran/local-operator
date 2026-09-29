@@ -1882,10 +1882,14 @@ class AgentLoop:
                         # every other recovery in this loop. With a surviving
                         # call the turn continues on its own; the drop is still
                         # told to the user, because it is real either way.
+                        reasks_left = nameless_call_recoveries < MAX_NAMELESS_CALL_RECOVERIES
                         recovering = (
+                            not assistant.tool_calls and stop_reason == "toolUse" and reasks_left
+                        )
+                        ending = (
                             not assistant.tool_calls
                             and stop_reason == "toolUse"
-                            and nameless_call_recoveries < MAX_NAMELESS_CALL_RECOVERIES
+                            and not reasks_left
                         )
                         if recovering:
                             nameless_call_recoveries += 1
@@ -1899,16 +1903,26 @@ class AgentLoop:
                             recovery = Message.user(NAMELESS_CALL_RECOVERY_PROMPT)
                             context.messages.append(recovery)
                             new_messages.append(recovery)
-                        yield NoticeEvent(
-                            text=(
+                        if recovering:
+                            notice = (
                                 "a tool call arrived without a tool name and was "
                                 "not executed — re-asking the model to re-issue it"
-                                if recovering
-                                else "a tool call arrived without a tool name "
-                                "and was not executed"
-                            ),
-                            kind="warning",
-                        )
+                            )
+                        elif ending:
+                            # The budget is spent, so this drop is what ends the
+                            # turn -- and an ending left unnamed reads as a
+                            # completed answer on every surface (the
+                            # continuation-limit doctrine; review N1). "turn",
+                            # not "run": a queued steering/aside/follow-up
+                            # message can still re-open the loop after this, and
+                            # copy claiming the run's end would then be false.
+                            notice = (
+                                "a tool call arrived without a tool name and was "
+                                "not executed — no further re-asks; ending the turn"
+                            )
+                        else:
+                            notice = "a tool call arrived without a tool name and was not executed"
+                        yield NoticeEvent(text=notice, kind="warning")
                         if recovering:
                             # No TurnEndEvent on this path, deliberately: the
                             # call was never announced (announcements are minted
