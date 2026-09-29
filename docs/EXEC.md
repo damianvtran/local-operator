@@ -101,7 +101,9 @@ given order.
 (`! output check failed (<format>, attempt <n>/<m>): <reason>`) and, when the
 budget is spent, the run ends with exit 1 and the two stderr lines
 `Error: final response did not satisfy the output contract (<format>) after N attempts: <reason>`
-and `exec failed: The admitted loop turn did not complete`. **stdout carries
+and `exec failed: the turn did not complete` (the existing headless failure
+line, whose text comes from `exec_session`'s fallback unless a prior prompt
+failure recorded a more specific reason). **stdout carries
 nothing** for an exhausted turn — a wrong payload on stdout is worse than an
 empty one for `… | jq` consumers. On success, stdout is the VALIDATED payload
 span (the winning candidate, stripped): `lop exec --output-format json | jq .`
