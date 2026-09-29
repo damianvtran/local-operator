@@ -923,11 +923,14 @@ approval puts its own synthetic text on the operator's screen — measured
 operator asked why. The product now refuses every surface that leaves this
 process:
 
-- `tui.notify.desktop_belongs_to_this_process()` asks the uid's **passwd home**
-  (the answer `browser_bridge/install.py::_default_config_root()` derives for the
-  same purpose, and for the same reason — `Path.home()` would compare a
-  redirected home against itself and conclude it is the real one), and refuses
-  when `$HOME` is not it. **On Windows the gate is inert by construction**: there
+- `tui.notify.desktop_belongs_to_this_process()` calls
+  `supervisors.real_home()` — this uid's passwd home — and compares
+  `Path.home()` against it, refusing when they differ. `real_home()` is the same
+  helper `supervisors.unit_is_addressable` uses to decide whether a launchd unit
+  addresses the real user, and `browser_bridge/install.py::_default_config_root()`
+  asks the same question for the same reason: `Path.home()` alone would compare a
+  redirected home against itself and conclude it is the real one. **On Windows
+  the gate is inert by construction**: there
   is no passwd database, so both readings come from `USERPROFILE` and always
   agree — the same weakness
   `supervisors.unit_is_addressable`'s docstring records for its Windows arm, and

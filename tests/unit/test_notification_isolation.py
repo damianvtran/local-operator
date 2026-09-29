@@ -1080,43 +1080,63 @@ def test_the_refusal_is_reported_once_per_process(
     assert any(row.levelno == logging.DEBUG for row in caplog.records), "the repeat is silent"
 
 
-def _files_that_spawn_a_cmux_toast() -> list[Path]:
-    """Modules outside ``tui/notify.py`` that build a ``cmux notify`` argv.
+def _cmux_toast_sites() -> list[tuple[Path, int]]:
+    """Every ``cmux_command(...)`` CALL site outside the argv builder's module.
 
-    The argv builder is pure and stays that way; what this finds is every site
-    that would SPAWN it, which is where the identity gate has to be asked.
+    The argv builder itself is pure and stays that way; what this finds is every
+    line that would SPAWN it, which is where the identity gate has to be asked.
     """
     root = Path(__file__).resolve().parents[2] / "local_operator"
-    return [
-        path
-        for path in root.rglob("*.py")
-        if path.name != "notify.py" and "cmux_command(" in path.read_text(encoding="utf-8")
-    ]
+    sites: list[tuple[Path, int]] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "notify.py":
+            continue
+        for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+            if "cmux_command(" in line:
+                sites.append((path, index + 1))
+    return sites
 
 
 def test_every_cmux_toast_site_asks_the_gate() -> None:
     """A cmux spawn whose gate was forgotten is a rig on the operator's screen.
 
-    THIS SWEEP IS PER FILE, NOT PER SITE, and the distinction is load-bearing:
-    a file that names the predicate anywhere passes it, so it cannot see the
-    second spawn site inside a file that already answers the question (`app.py`
-    has two). It is a drift tripwire against a NEW module reaching for
-    `cmux_command` without asking whose desktop it is — which is the shape the
-    first cut of this change had. What pins each SITE is behaviour:
-    ``test_a_redirected_home_refuses_the_cmux_toast`` for `Notifier.send`, and
-    the two cells in ``tests/unit/tui/test_background_completion_notify.py`` for
-    `app.py`'s two, each with a control arm and each proven to fail when its
-    clause is deleted.
+    PER SITE, NOT PER FILE, and that is the whole reason this function looks at
+    the enclosing function. The first version asked only that the module
+    mentioned the predicate, which the module's own IMPORT line satisfies — so
+    deleting the actual clause inside `tui/app.py` left this sweep green
+    (rebase-review round, RB-1). It now requires a
+    ``desktop_belongs_to_this_process()`` CALL between the spawn and the `def`
+    that encloses it: the same FUNCTION, which is the narrowest anchor that does
+    not depend on how much code sits between the two lines (the two `app.py`
+    sites are 2 and 31 lines apart, so any fixed window is either loose or a
+    false alarm waiting to happen).
+
+    Still textual, and the PR must not read it as proof of behaviour: what pins
+    the behaviour is ``test_a_redirected_home_refuses_the_cmux_toast`` for
+    `Notifier.send` and the two cells in
+    ``tests/unit/tui/test_background_completion_notify.py`` for `app.py`'s two,
+    each with a control arm and each proven to fail when its clause is deleted.
     """
-    population = _files_that_spawn_a_cmux_toast()
-    assert population, "the sweep found no cmux sites; the predicate has rotted"
-    offenders = [
-        path for path in population if "desktop_belongs_to_this_process" not in path.read_text()
-    ]
-    assert (
-        not offenders
-    ), "these modules spawn a cmux toast and never ask whose desktop it is:\n" + "\n".join(
-        f"  {path}" for path in offenders
+    sites = _cmux_toast_sites()
+    assert sites, "the sweep found no cmux spawn sites; the predicate has rotted"
+    offenders: list[str] = []
+    for path, line_number in sites:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        spawn = line_number - 1
+        enclosing = next(
+            (
+                index
+                for index in range(spawn - 1, -1, -1)
+                if lines[index].lstrip().startswith(("def ", "async def "))
+            ),
+            0,
+        )
+        if not any("desktop_belongs_to_this_process()" in line for line in lines[enclosing:spawn]):
+            offenders.append(f"  {path}:{line_number}")
+    assert not offenders, (
+        "these call sites spawn a cmux toast with no identity gate in the same "
+        "function, so they would post into whatever cmux the environment names:\n"
+        + "\n".join(offenders)
     )
 
 
