@@ -3031,3 +3031,34 @@ async def test_a_restored_receipt_pair_is_re_materialized_when_the_host_takes_th
         # and it must not outlive the loop.
         if session._spend_tasks:
             await asyncio.gather(*list(session._spend_tasks), return_exceptions=True)
+@pytest.mark.asyncio
+async def test_audio_is_probed_away_for_a_session_that_predates_the_keyword() -> None:
+    """A reduced session must never receive a keyword its signature lacks.
+
+    Same contract as the silent input metadata above: the handle decodes and
+    holds the blocks, and the drain adds ``audio`` only when the SESSION's own
+    signature takes the keyword. ``FakeSession`` here carries the pre-carriage
+    production shape (``prompt(text, images)``), so a leaked keyword would be a
+    ``TypeError`` inside the drain — the assertion is that the call lands and
+    the recorded shape is unchanged. The accepting half of the probe is pinned
+    against a real ``Session`` in ``test_audio_carriage.py``.
+    """
+    import base64
+
+    wav = base64.b64encode(b"RIFF" + b"\x00" * 4 + b"WAVE").decode("ascii")
+    handle, session = make_handle()
+    session.prompt_release.set()
+
+    await handle.prompt(
+        "with a recording",
+        audio=[{"data_b64": wav, "mime_type": "audio/wav"}],
+        command_id="audio-probe",
+    )
+
+    # The drain runs as a background task; poll like ``test_concurrent_ordinary
+    # _prompts_are_admitted_fifo`` does rather than sleeping a fixed turn count.
+    deadline = asyncio.get_running_loop().time() + 5
+    while not session.prompt_calls:
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.01)
+    assert session.prompt_calls == ["with a recording"]

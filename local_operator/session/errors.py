@@ -48,6 +48,48 @@ class TurnInFlight(RuntimeError):
     """
 
 
+class AudioInputUnsupported(ValueError):
+    """The message carried a recording and the selected model cannot take one.
+
+    Raised by ``Session.prompt``'s admission gate BEFORE any paid work: the
+    audio door exists only for models whose capability chain says they accept
+    audio input, and a send that bypasses that check would spend a turn on a
+    request the model refuses mid-stream. The refusal is the honest error the
+    cascade resolves to when no rung can carry the recording.
+
+    THE DETAILED FORM names the model and carries the resolver's report
+    (``resolve_audio_path``'s ``reason``), because the caller can act on both:
+    the model is a choice the user can change, and the report names whether a
+    transcription path IS available instead. THE BARE FORM (no arguments) is
+    what ``admission_error`` rebuilds from the code on the far side of an
+    attach socket, where no prose may cross: it says the same thing without
+    the model or the report, and adds the remedy.
+
+    A ``ValueError`` so it lands in the desktop control plane's
+    named-condition arm (``(ReceiptConflict, ValueError)``) rather than the
+    generic 503 that tells a client the runtime is unreachable — the wrong
+    remedy for a request that was refused on purpose.
+    """
+
+    code = "audio_input_unsupported"
+
+    def __init__(self, *, model: str = "", report: str = "") -> None:
+        if model:
+            sentence = (
+                f"The selected model ({model}) does not accept audio input, so "
+                f"the recording cannot be sent to it."
+            )
+            if report:
+                sentence += f" Resolver report: {report}"
+        else:
+            sentence = (
+                "The selected model does not accept audio input, so the recording "
+                "cannot be sent to it. Transcribe the recording first, or switch "
+                "to a model that accepts audio input."
+            )
+        super().__init__(sentence)
+
+
 class RuntimeRetiring(ValueError, RuntimeError):
     """This runtime has committed to leaving; the message was not admitted.
 
@@ -648,6 +690,12 @@ def admission_error(
     and a table key is all this boundary admits of those (MINOR-1/U14/D11,
     round 5). It never reaches an error object; the trigger it resolves to does.
     """
+    if code == AudioInputUnsupported.code:
+        # No payload: the detailed sentence names a model and a resolver
+        # report, and neither may cross this boundary as text. The rebuilt
+        # sentence says the same category with its remedy (see the class),
+        # which is what a far-side renderer needs to get the user unstuck.
+        return AudioInputUnsupported()
     if code == AttachmentUnavailable.code:
         return AttachmentUnavailable()
     if code == RuntimeRetiring.code:
