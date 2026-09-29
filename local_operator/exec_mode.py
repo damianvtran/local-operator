@@ -153,6 +153,23 @@ class ExecArgs:
     loop_goal: str | None = None
     name: str | None = None
     effort: str | None = None
+    #: Enforce the format of the assistant's FINAL response
+    #: (``markdown`` | ``json`` | ``yaml`` | ``toml``), or ``None`` for no
+    #: enforcement — the default, and byte-identical to every run before this
+    #: flag existed. Validation and application both live in
+    #: ``exec_startup`` (``resolve_startup`` / ``apply_startup``), so the
+    #: foreground and detached-worker paths cannot disagree about what the
+    #: flags mean.
+    output_format: str | None = None
+    #: Schema the decoded payload must satisfy. A FILE PATH, unlike the SDK's
+    #: type-or-mapping spelling, and made ABSOLUTE by ``cli.py`` before this
+    #: object crosses the ``--background`` process boundary: the worker
+    #: resolves it from its own cwd, so a relative path would silently name a
+    #: different file there (or none). ``STARTUP_FIELDS`` carries it as
+    #: ``--output-schema=<abspath>`` with no special case.
+    output_schema: str | None = None
+    #: Max retries after a rejected final response (0-5; default 2 when set).
+    output_retries: int | None = None
 
 
 def slugify(command: str, max_length: int = 40) -> str:

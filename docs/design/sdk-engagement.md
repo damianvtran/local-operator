@@ -383,6 +383,22 @@ async with open_session(spec, roots=roots) as session:
   guard), `tests/unit/test_sdk.py` (same-machinery surface, isolation
   tripwires, shell guard + stamp, spawn/deliver routing, single-root, attach,
   events, pinned surface).
+- **Final-response output contract (landed 2026-09-28).** Three additive
+  `SessionSpec` fields — `output_format`, `output_schema`, `output_retries` —
+  applied by `sdk._build_session` through the same post-open session method
+  `lop exec --output-format` installs (`Session.set_output_contract`), so the
+  two surfaces cannot diverge on meaning; the shared validator is
+  `output_contract.OutputContract`. `attach` refuses them (the viewer cannot
+  install owner state) and `spawn_session` refuses them loudly (post-open state
+  has no channel to a new runtime child), like every other field in that list.
+  The contract is per-invocation session state — never persisted, never a
+  config key. SDK-visible surface grows exactly two lazy re-exports,
+  `decode_output` and `MarkdownSchema`; failure is the ordinary turn-error
+  shape (`agent_end.error`, `last_turn_outcome == "error"`), success is an
+  `output_validation` event with the validated `payload_text` span. Docs:
+  `docs/SDK.md` §Enforcing the final response contract; the flag spellings and
+  the per-format strictness table are `docs/EXEC.md` §Final-response
+  enforcement.
 - Corrections carried from authoring: the target ref is `origin/main @
   9f4e9d8b2` (the authoring note abbreviated it as `9f4e9d8b8`, which is not
   an object), and exec's namespace literal now sits in

@@ -38,6 +38,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     NoticeEvent,
+    OutputValidationEvent,
     ReasoningDeltaEvent,
     RetryStartEvent,
     ToolExecutionEndEvent,
@@ -141,7 +142,11 @@ class PrintRenderer:
 
     ``failed`` flips True on an errored or aborted ``agent_end``; callers
     turn that into exit code 1. ``last_assistant_text`` tracks the final
-    assistant message for text-mode output.
+    assistant message for text-mode output, and ``last_output_payload``
+    tracks the VALIDATED payload span when an output contract ran —
+    ``output_contract_failed`` says a contract ran and exhausted its retries,
+    in which case stdout carries nothing (a wrong payload is worse than an
+    empty one for ``… | jq``).
     """
 
     def __init__(
@@ -157,6 +162,14 @@ class PrintRenderer:
         self.json_mode = json_mode
         self.failed: bool = False
         self.last_assistant_text: str = ""
+        #: The payload span the output contract validated, or "" when no
+        #: contract ran (the field stays empty and ``run_print_mode`` falls
+        #: back to ``last_assistant_text``, which is what keeps an unenforced
+        #: run byte-identical to today).
+        self.last_output_payload: str = ""
+        #: True once a contract-checked turn exhausted its retries: the run
+        #: failed AND its stdout must stay empty.
+        self.output_contract_failed: bool = False
         self._streaming_assistant: bool = False
         #: Whether this model call's reasoning phase has already announced
         #: itself on stderr. One line per phase, not per fragment -- see
@@ -215,6 +228,15 @@ class PrintRenderer:
         if isinstance(event, AgentEndEvent):
             if event.error or event.aborted:
                 self.failed = True
+        elif isinstance(event, OutputValidationEvent):
+            if event.ok:
+                self.last_output_payload = event.payload_text
+            elif event.exhausted:
+                # Only an EXHAUSTED rejection silences stdout. A rejected
+                # attempt with retries left is followed by another final
+                # answer, and the last one wins: a recovery must not be
+                # overwritten by the failure before it.
+                self.output_contract_failed = True
         elif isinstance(event, MessageEndEvent):
             message = event.message
             if isinstance(message, Message) and message.role == "assistant":
@@ -343,6 +365,28 @@ class PrintRenderer:
             # report an operator gets.
             text = sanitize_prompt_line(event.text)
             self.console.print(f"{glyph}{text}", style=style, highlight=False, markup=False)
+        elif isinstance(event, OutputValidationEvent):
+            # One dim stderr line per REJECTED attempt, and nothing on success
+            # (success speaks through stdout, the payload). The text is
+            # model-influenced (a schema violation message can quote the
+            # payload at fault), so it takes the same rendering discipline as
+            # every other line here: sanitized, whitespace-collapsed by
+            # ``sanitize_prompt_line``, and ``markup=False`` so a ``[`` in it
+            # is data rather than Rich markup that would vanish the line.
+            if not event.ok:
+                reason = sanitize_prompt_line(event.error)
+                self.console.print(
+                    f"! output check failed ({event.format}, attempt "
+                    f"{event.attempt}/{event.max_attempts}): {reason}",
+                    style="dim",
+                    highlight=False,
+                    markup=False,
+                    # One stderr line per rejected attempt, literally: rich
+                    # would otherwise reflow a long schema reason at the
+                    # console width, splitting the pinned prefix from its
+                    # reason for anything grepping stderr.
+                    soft_wrap=True,
+                )
         elif isinstance(event, RetryStartEvent):
             self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
         elif isinstance(event, ModelChangeEvent) and event.context_metadata:
@@ -410,11 +454,23 @@ class PrintRenderer:
                 # on this path may raise.
                 sentence = append_auth_recovery(event.error, provider or None)
                 sentence = append_usage_limit_recovery(sentence, provider or None)
+                # ``soft_wrap`` ONLY for the contract-exhaustion end, and the
+                # flag says which end this is without a string test: an
+                # exhausted ``OutputValidationEvent`` sets it (see
+                # ``_track_outcome``) and the loop emits that event and this
+                # error together, by construction. It is needed there because
+                # rich otherwise reflows the pinned "… after N attempts: …"
+                # sentence at the console width (80 when stderr is not a
+                # terminal), splitting it mid-phrase — measured. Every OTHER
+                # error keeps its historical wrapping: review R-1 measured
+                # that scoping this to all errors changed unenforced-run stderr,
+                # and an unenforced run must stay byte-identical.
                 self.console.print(
                     f"Error: {sentence}",
                     style="red",
                     highlight=False,
                     markup=False,
+                    soft_wrap=self.output_contract_failed,
                 )
             elif event.aborted:
                 self.console.print("[red]aborted[/red]", highlight=False)
@@ -499,9 +555,17 @@ async def run_print_mode(
         if not renderer.failed and continuation is not None:
             if not await continuation():
                 renderer.failed = True
-        if not json_mode and renderer.last_assistant_text:
-            sys.stdout.write(renderer.last_assistant_text + "\n")
-            sys.stdout.flush()
+        if not json_mode and not renderer.output_contract_failed:
+            # The validated payload span when a contract ran (byte-faithful to
+            # what validated, so ``--output-format json | jq .`` works even
+            # when the payload arrived inside a fence or prose), the last
+            # assistant text otherwise. An exhausted turn prints NOTHING here:
+            # a wrong payload on stdout is worse than an empty one for every
+            # consumer of this stream.
+            final_text = renderer.last_output_payload or renderer.last_assistant_text
+            if final_text:
+                sys.stdout.write(final_text + "\n")
+                sys.stdout.flush()
         return 1 if renderer.failed else 0
     finally:
         if callable(unsubscribe):

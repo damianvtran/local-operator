@@ -16,8 +16,10 @@ from local_operator.exec_mode import (
 from local_operator.exec_startup import (
     apply_startup,
     report_unresolved_declared_tools,
+    resolve_output_contract,
     resolve_startup,
 )
+from local_operator.output_contract import OutputContract
 from local_operator.session.goal_loop import GoalLoop
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
@@ -277,6 +279,15 @@ class RecordingSession:
         self._declared: set[str] = set()
         self.declared: list[tuple[tuple[str, ...], bool]] = []
         self.attached_profiles: list[str] = []
+        #: Contracts installed through ``set_output_contract`` (the output
+        #: contract is post-open session state, applied the same way the
+        #: inventory is). Typed to the contract, not ``object``: the tests that
+        #: read it back off the double want the real class's attributes (the
+        #: pyright gate has no union attributes either).
+        self.contracts: list[OutputContract] = []
+
+    def set_output_contract(self, contract: OutputContract) -> None:
+        self.contracts.append(contract)
 
     def attach_team(self, team):
         pass
@@ -481,3 +492,91 @@ def test_the_worker_parser_accepts_the_tool_declaration():
 
     parsed = build_parser().parse_args(["--prompt=p", "--tools=read,mcp__vendor_screen"])
     assert parsed.tools == "read,mcp__vendor_screen"
+
+
+# --- the final-response output contract (flags, preflight, application) ------
+
+
+def test_output_contract_flags_resolve_apply_and_reach_the_worker(tmp_path):
+    import json
+
+    schema_path = tmp_path / "schema.json"
+    schema_path.write_text(json.dumps({"type": "object", "required": ["name"]}))
+    args = ExecArgs(output_format="json", output_schema=str(schema_path), output_retries=1)
+    resolve_startup(args)  # preflight parses the file and passes
+    session = RecordingSession()
+    apply_startup(session, args, None)
+    assert len(session.contracts) == 1
+    contract = session.contracts[0]
+    assert contract.format == "json"
+    assert contract.retries == 1
+    assert contract.max_attempts == 2
+    assert "required" in contract.system_block()
+    # And the same three flags ride the --background boundary.
+    argv = build_worker_argv("t", args)
+    assert "--output-format=json" in argv
+    assert f"--output-schema={schema_path}" in argv
+    assert "--output-retries=1" in argv
+
+
+def test_apply_startup_installs_no_contract_without_the_flag():
+    """The byte-identical default: no flag, no contract, no block."""
+    session = RecordingSession()
+    apply_startup(session, ExecArgs(), None)
+    assert session.contracts == []
+
+
+@pytest.mark.parametrize(
+    "args,message",
+    [
+        (ExecArgs(output_schema="x.json"), "--output-schema requires --output-format"),
+        (ExecArgs(output_retries=1), "--output-retries requires --output-format"),
+        (ExecArgs(output_format="json", output_retries=9), "between 0 and 5"),
+        # An empty schema is refused, never read as "no schema": silently
+        # dropping it would run the format ENFORCED with the schema missing,
+        # which is the opposite of what the operator asked for (review R-4).
+        (
+            ExecArgs(output_format="json", output_schema=""),
+            "--output-schema must name a schema file",
+        ),
+        (
+            ExecArgs(output_format="json", output_schema="   "),
+            "--output-schema must name a schema file",
+        ),
+    ],
+)
+def test_output_contract_preflight_refusals(args, message):
+    with pytest.raises(ValueError, match=message):
+        resolve_startup(args)
+
+
+def test_output_schema_file_failures(tmp_path):
+    import json
+
+    missing = tmp_path / "missing.json"
+    with pytest.raises(ValueError, match="cannot read --output-schema file"):
+        resolve_startup(ExecArgs(output_format="json", output_schema=str(missing)))
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json")
+    with pytest.raises(ValueError, match="is not valid JSON"):
+        resolve_startup(ExecArgs(output_format="json", output_schema=str(broken)))
+
+    not_a_schema = tmp_path / "not_a_schema.json"
+    not_a_schema.write_text(json.dumps({"type": "nonsense"}))
+    with pytest.raises(ValueError, match="is not a valid JSON Schema"):
+        resolve_startup(ExecArgs(output_format="json", output_schema=str(not_a_schema)))
+
+    wrong_markdown = tmp_path / "sections.json"
+    wrong_markdown.write_text(json.dumps({"sections": ["Summary"]}))
+    with pytest.raises(ValueError, match="required_sections"):
+        resolve_startup(ExecArgs(output_format="markdown", output_schema=str(wrong_markdown)))
+
+    # The markdown spelling that IS accepted resolves to a contract whose
+    # section check is live.
+    sections = tmp_path / "ok_sections.json"
+    sections.write_text(json.dumps({"required_sections": ["Summary", "Risks"]}))
+    contract = resolve_output_contract(
+        ExecArgs(output_format="markdown", output_schema=str(sections))
+    )
+    assert not contract.check("# Summary\ntext").ok
