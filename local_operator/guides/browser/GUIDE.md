@@ -17,14 +17,19 @@ resort when none of them is available:
 
 1. **The Local Operator desktop app's browser tab** (preferred) — the app runs
    the browser host itself, on a persistent shared profile, so "log in once,
-   stay logged in" holds. A fresh `open` uses it whenever it is reachable.
+   stay logged in" holds. A fresh `open` uses it whenever it is reachable,
+   unless the call names another host with `backend` (item 2).
 2. **The Local Operator browser extension** — a real Chromium profile (Chrome,
    Edge, Arc, Brave, any Chromium) paired to lop over a loopback bridge daemon.
    It carries the user's real cookies and logins, so it reaches authenticated
    pages, and the user can sign in by hand and you carry on. It is the host for
    a session that exists only in a real profile — device trust, hardware keys,
    enterprise conditional access — and a surface's `handle`, or an explicit
-   `backend` hint, reaches it when that is what the user wants.
+   `backend` hint, reaches it when that is what the user wants. That hint
+   (`"ui"`, `"extension"`, `"cmux"` — `""`, the default, keeps the order
+   above) is `open`-only and decides a FRESH surface only: a held surface's
+   handle and an adoption outrank it, and a named host that cannot serve
+   returns a typed error instead of silently falling back to a different host.
 3. **A cmux browser panel** (fallback) — used automatically when lop runs
    inside cmux and no other host is connected.
 4. **`bash` + curl for static pages** (last resort) — only when the user
