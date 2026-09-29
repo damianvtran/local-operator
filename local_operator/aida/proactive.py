@@ -2,7 +2,7 @@
 
 WHAT THE ENGINE OWNS. Exactly one internal cadence row, id ``aida-cadence``,
 armed as a one-shot due at the next local wall-clock occurrence of
-``aida.cadence.at`` (default 09:00); plus the bounded ``aida-extra-N`` one-shots
+``aida.cadence.at`` (default 08:30); plus the bounded ``aida-extra-N`` one-shots
 she requests through her escalation tray. Every row the engine owns has an id
 under the ``aida-`` prefix, and that prefix is the ownership boundary: pause,
 disable and re-arm all work by dropping or rewriting those ids and never touch
@@ -96,7 +96,7 @@ ROW_PREFIX = "aida-"
 #: like the refusal it records.
 CUSTOM_ENTRY_TYPE = "aida_proactive"
 
-DEFAULT_CADENCE_AT = "09:00"
+DEFAULT_CADENCE_AT = "08:30"
 DEFAULT_MAX_EXTRA_PER_DAY = 2
 DEFAULT_MIN_GAP_MINUTES = 90
 #: The two boolean defaults this engine reads. ``DEFAULT_ENABLED`` is also the
@@ -494,7 +494,7 @@ def reconcile(
                     if too_close:
                         notes.append(
                             "escalation request refused: within the "
-                            f"{pol.min_gap_minutes}-minute spacing floor of another Aida wake."
+                            f"{pol.min_gap_minutes}-minute spacing floor of her other wakes."
                         )
                         continue
                     kept.append(
@@ -514,7 +514,7 @@ def reconcile(
         # TRUE NOW, and it was not before (M1b): the tray is consumed inside
         # the lock, so a contended acquisition leaves the file exactly where
         # it was. The sentence is what makes the failure observable.
-        notes.append("escalation tray left unread (another Aida operation is in flight).")
+        notes.append("escalation tray left unread (another operation is in flight).")
 
     # -- cadence ------------------------------------------------------------
     if not any(row.id == CADENCE_ID for row in kept):
@@ -545,7 +545,7 @@ def reconcile(
             kept.append(
                 WakeSchedule(
                     id=GREETING_WAKE_ID,
-                    message=_onboarding.GREETING_MESSAGE,
+                    message=_onboarding.greeting_message(config_dir),
                     next_due_at=now,
                     every_ms=None,
                     created_at=now,
@@ -795,7 +795,7 @@ async def _drain_tray_external(
             if too_close:
                 notes.append(
                     "escalation request refused: within the "
-                    f"{pol.min_gap_minutes}-minute spacing floor of another Aida wake."
+                    f"{pol.min_gap_minutes}-minute spacing floor of her other wakes."
                 )
                 continue
             extra_id = _next_extra_id(ids)

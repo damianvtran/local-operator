@@ -57,7 +57,7 @@ from tests.unit.network.test_mobility_busy_wait import (  # noqa: F401 — the o
     _Record as _BusyRecord,
 )
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — the fixture `pair` reaches for
-    _pair,
+    _pair_settled,
     devices,
 )
 from tests.unit.session.runtime.test_server import FakeHandle
@@ -216,10 +216,19 @@ def _arrivals(
 
 
 def _pair_and_own(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Devices:
-    """Two paired relays, A holding one session. The destination is B on every route."""
+    """Two paired relays, A holding one session. The destination is B on every route.
+
+    THE PAIRING IS SETTLED BEFORE THE CELL'S FIRST MOVE, exactly as the mobility
+    cells are: the join link outlives the ceremony by the length of
+    ``PeerLink.close``'s flush window, and a move driven inside it resolves the dying
+    link instead of dialling the reachable peer -- CI run 36518398815 failed
+    ``test_the_offload_carries_the_flag_to_the_destination`` with that refusal
+    (``unreachable (no answer on its link)``). ``_pair_settled`` docs carry the
+    measurement; every cell here goes through this one helper.
+    """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     return both
 

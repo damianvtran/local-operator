@@ -212,3 +212,98 @@ async def test_a_config_write_reaches_her_live_session(isolated_root: Path) -> N
     finally:
         unsubscribe()
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_renaming_her_session_syncs_the_config_name(isolated_root: Path) -> None:
+    """Direction one (the operator's report): a rename of HER conversation
+    stores ``aida.name``.
+
+    The hook lives in ``Session.set_conversation_name`` — the ONE writer the
+    TUI's ``/title``, the runtime's ``/rename``, the desktop and the phone all
+    funnel through — so every rename gesture syncs config, not just one.
+    """
+    from local_operator.config import ConfigManager
+
+    session_id = "ab12ab12ab12"
+    state.update_state(isolated_root, session_id=session_id)
+    session = make_session(isolated_root, session_id)
+    try:
+        assert session.set_conversation_name("Boss", user_set=True) == "Boss"
+        assert ConfigManager(config_dir=isolated_root).get_nested_value(("aida", "name")) == "Boss"
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_other_sessions_do_not_touch_the_name(isolated_root: Path) -> None:
+    """A rename of ANY other conversation must not rename her."""
+    from local_operator.config import ConfigManager
+
+    state.update_state(isolated_root, session_id="ab12ab12ab12")
+    session = make_session(isolated_root, "cd34cd34cd34")
+    try:
+        assert session._aida_duty is False
+        assert session.set_conversation_name("Not her", user_set=True) == "Not her"
+        assert (
+            ConfigManager(config_dir=isolated_root).get_nested_value(("aida", "name"), None) is None
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_generated_titles_never_rewrite_the_name(isolated_root: Path) -> None:
+    """The auto-namer (``user_set=False``) is not the operator naming her.
+
+    Adopting a generated title would let a fresh install's first turn
+    silently rewrite a configured name.
+    """
+    from local_operator.config import ConfigManager
+
+    session_id = "ef56ef56ef56"
+    state.update_state(isolated_root, session_id=session_id)
+    session = make_session(isolated_root, session_id)
+    try:
+        stored = session.set_conversation_name("Auto generated title", user_set=False)
+        assert stored == "Auto generated title"
+        assert (
+            ConfigManager(config_dir=isolated_root).get_nested_value(("aida", "name"), None) is None
+        )
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_name_write_reaches_her_live_session(isolated_root: Path) -> None:
+    """Direction two, live: ``aida.name`` → the open session re-titles itself.
+
+    The same registry-key-diff seam as the pause test above, and the subject
+    is the fact every surface reads: ``session.conversation_name``. The
+    rename must go through the ordinary writer, so the user-set claim moves
+    with it (a generated title can never displace it afterwards).
+    """
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.config_watch import ConfigWatcher
+
+    session_id = "1212ababcdcd"
+    state.update_state(isolated_root, session_id=session_id)
+    session = make_session(isolated_root, session_id)
+    watcher = ConfigWatcher(isolated_root)
+    unsubscribe = watcher.subscribe(session._apply_config_change)
+    try:
+        setting = settings_io.BY_KEY["aida.name"]
+        settings_io.write_setting(ConfigManager(config_dir=isolated_root), setting, "Sovereign")
+        change = watcher.poll_now()
+        assert change is not None and "aida.name" in change.changed_keys
+
+        for _ in range(400):
+            if session.conversation_name == "Sovereign":
+                break
+            await asyncio.sleep(0.01)
+        assert session.conversation_name == "Sovereign"
+        assert session.conversation_name_state.user_set is True
+    finally:
+        unsubscribe()
+        await session.dispose()

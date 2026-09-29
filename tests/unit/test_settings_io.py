@@ -289,11 +289,13 @@ def _consumer_defaults() -> dict[str, object]:
     # package's import path — it is loaded on every CLI start), and this block
     # is the half that turns a drifted literal into a red test rather than a
     # page that lies about what the engine will do.
+    from local_operator.aida import naming as aida_naming
     from local_operator.aida import onboarding as aida_onboarding
     from local_operator.aida import proactive as aida_proactive
     from local_operator.aida.bootstrap import DEFAULT_ENABLED
 
     consumers["aida.enabled"] = DEFAULT_ENABLED
+    consumers["aida.name"] = aida_naming.DEFAULT_NAME
     consumers["aida.cadence.at"] = aida_proactive.DEFAULT_CADENCE_AT
     consumers["aida.cadence.paused"] = aida_proactive.DEFAULT_PAUSED
     consumers["aida.cadence.max_extra_per_day"] = aida_proactive.DEFAULT_MAX_EXTRA_PER_DAY
@@ -614,6 +616,11 @@ _VALID_TEXT_SAMPLES: dict[object, str] = {
     # `sys.executable` is one on every machine the suite runs on; an invented
     # name would be refused by the very check this sample exists to satisfy.
     settings_io._validate_desktop_launch_command: f"{sys.executable} --open-session {{session}}",
+    # A display name that is valid, non-default, and reads as a name (the
+    # validator refuses empties, control characters and over-longs, so the
+    # arbitrary "round-trip-probe" spelling would do fine — but a real name
+    # keeps the sample honest about what the field carries).
+    settings_io._validate_aida_name: "Sovereign",
 }
 
 
@@ -2520,3 +2527,63 @@ def test_declared_endpoints_must_be_host_port_pairs() -> None:
     ):
         problem = settings_io.validate(setting, bad, None)
         assert problem and "host:port" in problem, (bad, problem)
+
+
+# ---------------------------------------------------------------------------
+# Desktop-scope hotkeys: the facade applies the ROW's own grammar
+# ---------------------------------------------------------------------------
+
+
+def test_a_desktop_hotkey_row_validates_with_the_desktop_rules() -> None:
+    """The facade dispatches by the row's scope.
+
+    Judged by the app rules, the shipped default itself would be refused (it is
+    not a terminal key) and an OS-reserved chord would PASS. One shared answer
+    is what keeps the page, ``lop config edit`` and ``PATCH /v1/settings`` from
+    disagreeing — the writers all reach ``validate`` rather than a private
+    predicate.
+    """
+    setting = settings_io.BY_KEY["keymap.quick_send"]
+
+    assert settings_io.validate(setting, setting.default) is None
+    for bad in ("meta+space", "n", "ctrl+n,f5"):
+        problem = settings_io.validate(setting, bad)
+        assert problem, f"the desktop row accepted {bad!r}"
+    # The app-scope rows keep the terminal rules, unchanged.
+    assert settings_io.validate(settings_io.BY_KEY["keymap.new_session"], "primary+alt+space")
+
+
+def test_a_desktop_hotkey_write_canonicalizes_through_the_facade(
+    manager: ConfigManager,
+) -> None:
+    """``write_setting`` normalizes in the row's grammar (a value typed as
+    ``CMD+SHIFT+N`` stores as the canonical ``meta+shift+n``), and ``coerce``
+    agrees with it so the CLI and the page spell the same stored value."""
+    setting = settings_io.BY_KEY["keymap.quick_send"]
+
+    assert settings_io.coerce(setting, "CMD+SHIFT+N") == "meta+shift+n"
+    settings_io.write_setting(manager, setting, "CMD+SHIFT+N")
+    assert settings_io.read_setting(manager, setting) == "meta+shift+n"
+    # The app-scope normalization is untouched beside it.
+    assert settings_io.coerce(settings_io.BY_KEY["keymap.new_session"], "CTRL+G") == "ctrl+g"
+
+
+def test_a_hotkey_row_without_a_derived_scope_falls_back_to_the_app_rules() -> None:
+    """An empty/unknown ``hotkey_scope`` means the APP grammar — the behaviour
+    every row had before the scope axis existed — never a crash and never a
+    silent desktop acceptance. A hand-built ``Setting`` or a future row shape
+    meets this fallback first, so it is pinned rather than incidental."""
+    setting = settings_io.Setting(
+        key="keymap.unknown_row",
+        path=("keymap.unknown_row",),
+        section="keymap",
+        label="Unknown",
+        kind=Kind.HOTKEY,
+        default="ctrl+g",
+        help="",
+        hotkey_scope="",
+    )
+
+    assert settings_io.validate(setting, "ctrl+g") is None
+    assert settings_io.validate(setting, "banana") is not None
+    assert settings_io.validate(setting, "primary+alt+space") is not None

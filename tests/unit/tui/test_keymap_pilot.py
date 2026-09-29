@@ -335,6 +335,51 @@ async def test_a_reserved_key_is_refused_with_its_reason_and_capture_stays_open(
 
 
 @pytest.mark.asyncio
+async def test_a_desktop_row_captures_and_validates_by_its_own_rules(tmp_path: Path) -> None:
+    """The capture widget dispatches on the ROW's scope, not one global rule.
+
+    The refusal SENTENCE is what proves which grammar ran: the app scope's
+    bare-key refusal names the composer, the desktop one names the missing
+    modifier. A desktop row judged by the app rules would also refuse its own
+    shipped default (`primary+alt+space` is not a key a terminal can send), so
+    a regression here would read as "this row can never be edited from the
+    terminal". The committed value is read back through a FRESH manager, the
+    same reason the other capture test does.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.quick_send")
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._keymap_capture, "capture did not arm on the desktop row"
+
+        # A bare printable is refused with the DESKTOP sentence, and the
+        # capture stays open — a refusal that ended the mode would read as the
+        # key having worked.
+        await pilot.press("n")
+        await pilot.pause()
+        detail = view._detail_text.plain
+        assert "modifier" in detail and "composer" not in detail, detail
+        assert app._keymap_capture, "a refusal must not end the capture"
+
+        # A chord a terminal CAN send is accepted and normalized in the
+        # desktop grammar, and the confirming enter writes it.
+        await pilot.press("ctrl+alt+space")
+        await pilot.pause()
+        assert view._capture is not None and view._capture.key == "ctrl+alt+space"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        setting = settings_io.BY_KEY["keymap.quick_send"]
+        assert settings_io.read_setting(ConfigManager(tmp_path), setting) == "ctrl+alt+space"
+
+
+@pytest.mark.asyncio
 async def test_a_conflicting_key_names_its_victim_and_is_still_allowed() -> None:
     """Warn-and-allow, with the cost stated at the moment of the decision.
 
