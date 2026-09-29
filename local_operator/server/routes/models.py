@@ -236,14 +236,22 @@ async def list_models(
         # Add models from each provider
         for provider_detail in providers_to_check:
             if provider_detail.id == "anthropic":
-                for model_name, model_info in anthropic_models.items():
+                # The registry's rows, layered under Anthropic's own listing:
+                # a model released today appears without a catalogue edit, and
+                # the shared discovery cache keeps repeated reads at disk speed
+                # (stale-while-revalidate; one fetch per document per TTL at
+                # most). The registry stays the offline fallback and the price
+                # source -- this listing quotes no prices -- and every field
+                # the listing omits falls through to it.
+                api_key = await provider_auth_store.get_api_key("anthropic")
+                rows, _ = await asyncio.to_thread(available_models, "anthropic", api_key=api_key)
+                for row in rows:
+                    fallback = anthropic_models.get(row.id) or ModelInfo(
+                        id=row.id, name=row.name or row.id, description="Unknown model"
+                    )
+                    info = info_from_discovered_model("anthropic", row.id, row, fallback)
                     models.append(
-                        ModelEntry(
-                            id=model_name,
-                            name=model_info.name,
-                            provider=provider_detail.id,
-                            info=model_info,
-                        )
+                        ModelEntry(id=row.id, name=info.name, provider="anthropic", info=info)
                     )
             elif provider_detail.id == "deepseek":
                 # Share native discovery's authenticated inventory/cache with
