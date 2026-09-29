@@ -6,6 +6,12 @@
  * The panel takes the elevated ground and the overlay shadow — the one
  * shadow in the system, reserved for objects that leave the flow. The scrim
  * click dismisses; there is no drag gesture in v1.
+ *
+ * A sheet can be summoned by a gesture that is STILL HELD when it mounts (the
+ * list's long-press pin). The platform then synthesises the release click at
+ * lift-off, hit-tests whatever the sheet now paints at those coordinates, and
+ * a scrim or ✕ receives it — dismissing the sheet the user never touched. The
+ * guard below swallows exactly that one click; every other path is unchanged.
  */
 import { useEffect, useId, useRef, type ReactNode, type RefObject } from "react";
 import { cn } from "../../lib/cn";
@@ -16,12 +22,17 @@ export function Sheet({
 	title,
 	children,
 	returnFocusRef,
+	initialFocusRef,
 }: {
 	open: boolean;
 	onClose: () => void;
 	title?: string;
 	children: ReactNode;
 	returnFocusRef?: RefObject<HTMLElement | null>;
+	/** Where focus lands when the sheet opens. Defaults to the ✕; the slash
+	    sheet passes its filter so a sheet opened by typing `/…` keeps
+	    receiving type-ahead instead of stranding it on a button (U8). */
+	initialFocusRef?: RefObject<HTMLElement | null>;
 }) {
 	const dialogRef = useRef<HTMLDivElement>(null);
 	const closeRef = useRef<HTMLButtonElement>(null);
@@ -51,7 +62,10 @@ export function Sheet({
 			node.setAttribute("inert", "");
 			node.setAttribute("aria-hidden", "true");
 		}
-		closeRef.current?.focus();
+		/* The initial focus target: the ✕ by default, or a caller's control —
+		   the slash sheet's filter, so a sheet opened by typing keeps receiving
+		   its type-ahead (U8, mobile UX batch 1). */
+		(initialFocusRef?.current ?? closeRef.current)?.focus();
 		const onKey = (event: KeyboardEvent) => {
 			if (event.key === "Escape") {
 				event.preventDefault();
@@ -96,7 +110,65 @@ export function Sheet({
 			   still-connected control is a valid restoration target. */
 			if (openerRef.current?.isConnected) openerRef.current.focus();
 		};
-	}, [open, returnFocusRef]);
+	}, [open, returnFocusRef, initialFocusRef]);
+
+	/* THE RELEASE CLICK OF THE PRESS THAT OPENED THE SHEET (mobile UX batch 1,
+	   U1) is swallowed; every other click passes. Measured in Chromium against
+	   the long-press pin: `pointerdown` lands on the row, the sheet mounts
+	   ~450ms later, and the finger's release dispatches `pointerup` (implicit
+	   touch capture targets it at the ROW outside this dialog, which is why the
+	   listeners below are on the window in the capture phase) followed ~1ms
+	   later by a `click` whose target is the sheet's own scrim — which ran
+	   `onClose` and dismissed the sheet. iOS Safari fires the same release
+	   click; Android may suppress it.
+
+	   THE DISCRIMINATOR IS THE GESTURE, NOT A CLOCK. The click belongs to the
+	   opening press iff NO pointerdown has been seen since mount — the opening
+	   gesture's own pointerdown predates the sheet, because it is what started
+	   the hold. So: arm on a pointerup with no since-mount pointerdown, and
+	   swallow the single click that follows it. A fresh press answers scrim/✕
+	   as always (its pointerdown disarms), a keyboard activation passes (a
+	   keydown precedes Enter/Space activation and disarms), and a platform that
+	   synthesises no click leaves nothing armed past the next press. This also
+	   covers the ✕ and any action row a release click could land on, not just
+	   the scrim the defect was measured on. */
+	useEffect(() => {
+		if (!open) return;
+		let downSinceMount = false;
+		let armed = false;
+		const onPointerDown = () => {
+			downSinceMount = true;
+			armed = false;
+		};
+		const onPointerUp = () => {
+			if (!downSinceMount) armed = true;
+			downSinceMount = false;
+		};
+		const onPointerCancel = () => {
+			downSinceMount = false;
+		};
+		const onKeyDown = () => {
+			armed = false;
+		};
+		const onClick = (event: MouseEvent) => {
+			if (!armed) return;
+			armed = false;
+			event.stopPropagation();
+			event.preventDefault();
+		};
+		window.addEventListener("pointerdown", onPointerDown, true);
+		window.addEventListener("pointerup", onPointerUp, true);
+		window.addEventListener("pointercancel", onPointerCancel, true);
+		window.addEventListener("keydown", onKeyDown, true);
+		window.addEventListener("click", onClick, true);
+		return () => {
+			window.removeEventListener("pointerdown", onPointerDown, true);
+			window.removeEventListener("pointerup", onPointerUp, true);
+			window.removeEventListener("pointercancel", onPointerCancel, true);
+			window.removeEventListener("keydown", onKeyDown, true);
+			window.removeEventListener("click", onClick, true);
+		};
+	}, [open]);
 
 	const focusEdge = (last: boolean) => {
 		const focusable = Array.from(
