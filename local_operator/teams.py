@@ -267,7 +267,9 @@ class Team(BaseModel):
     #: changed would silently rewrite the team's own recommendation (the echo
     #: rule). ``None`` means "derive from the manager row at push time" when a
     #: registry is available; see :func:`hub_team_document`. Optional field
-    #: with a default, so every old ``team.yml`` loads unchanged.
+    #: with a default, so every old ``team.yml`` loads unchanged -- and a
+    #: hand-edited payload the pair cannot construct degrades to ``None`` in
+    #: the before-validator below rather than failing the whole row.
     model_suggestion: ModelSuggestion | None = None
 
     @field_validator("id")
@@ -293,6 +295,30 @@ class Team(BaseModel):
         if not name:
             raise ValueError("manager is required")
         return name
+
+    @field_validator("model_suggestion", mode="before")
+    @classmethod
+    def _whole_pair_or_none(cls, value: Any) -> Any:
+        """A suggestion the pair cannot construct degrades to ``None``.
+
+        ``_load`` skips any row whose ``Team.model_validate`` raises, so a
+        hand-edited ``team.yml`` whose suggestion is a half pair or carries a
+        non-string member would drop the WHOLE team from every listing -- the
+        wrong cost for an advisory field, and exactly what the field's own
+        "a hand-edited team.yml must still load" bar forbids. Degrading is
+        also what :func:`hub_team_document` already does with ``None``
+        (derive-or-omit). Blank and over-cap members still load unchanged:
+        those rules belong to the push preflight, in the hub's vocabulary.
+        """
+
+        if value is None or isinstance(value, ModelSuggestion):
+            return value
+        if isinstance(value, Mapping):
+            hosting = value.get("hosting")
+            model = value.get("model")
+            if isinstance(hosting, str) and isinstance(model, str):
+                return value
+        return None
 
     def roster_lines(self) -> list[str]:
         """One scannable line per slot, manager first.
@@ -417,7 +443,11 @@ _TEAM_NAME_MAX_CHARS = 64
 #: sentence, so a document refused here reads as one refused by the hub --
 #: plus the submitted magnitude, which a local refusal knows and the hub's
 #: never carries (by the time the hub sees the document there is nothing
-#: left but the cap it states).
+#: left but the cap it states). ``model_suggestion`` is the ONE field with no
+#: magnitude: its halves carry the hub's single count-free sentence per half
+#: ("must carry a hosting of 1 to 64 characters"), because on the empty arm a
+#: count would measure nothing the rule is about and a per-arm split would
+#: give one field two vocabularies (copy round 1, C1).
 HUB_TEAM_DESCRIPTION_MAX_CHARS = 2000
 HUB_TEAM_MANAGER_MAX_CHARS = 128
 HUB_TEAM_MEMBERS_MAX_ITEMS = 64
@@ -436,7 +466,9 @@ class TeamDocumentError(ValueError):
     :class:`~local_operator.clients.radient.InstructionSetError` pattern).
     ``rule`` carries the magnitude this machine submitted wherever the hub's
     sentence is a limit: a local refusal can see the document, and its author
-    needs the number to trim.
+    needs the number to trim. The ``model_suggestion`` halves are the one
+    exception: they carry the hub's count-free sentence verbatim, so a
+    locally refused document and a hub-refused one read identically.
     """
 
     def __init__(self, field: str, rule: str) -> None:
@@ -466,7 +498,8 @@ def _preflight_hub_team_document(document: Mapping[str, Any]) -> None:
     refused locally, before any upload is spent. The checks mirror
     agent-server's ``TeamDocument.Validate`` in order, and each refusal
     carries the hub's own rule text (plus the submitted magnitude; see
-    :func:`_submitted_rule`).
+    :func:`_submitted_rule`) -- EXCEPT the ``model_suggestion`` halves, whose
+    shared count-free sentence travels verbatim.
 
     Raises:
         TeamDocumentError: For the first field the hub would refuse.
@@ -586,32 +619,33 @@ def _preflight_hub_team_document(document: Mapping[str, Any]) -> None:
             raise TeamDocumentError("model_suggestion", "must be an object")
         raw_hosting = suggestion.get("hosting")
         raw_model = suggestion.get("model")
-        # A member of any other shape is refused by the same sentence as a
-        # blank one: neither is "a non-empty hosting/model", and a coercion
-        # here (str(5)) would publish a value no reader can look up.
-        # The blank arm carries no magnitude, like the roster's blank-role arm:
-        # a count would contradict the sentence it is meant to explain.
-        if not isinstance(raw_hosting, str) or not raw_hosting.strip():
-            raise TeamDocumentError("model_suggestion", "must hold a non-empty hosting")
-        if len(raw_hosting) > INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS:
+        # Both arms of a member -- missing, blank, mis-typed or over-cap --
+        # raise the hub's ONE count-free sentence for the half ("must carry a
+        # hosting of 1 to 64 characters"): a locally refused document and a
+        # hub-refused one must render identically, and the hub's shared
+        # sentence deliberately carries no magnitude (on the empty arm a
+        # count would measure nothing the rule is about). A member of any
+        # other shape takes the same sentence rather than a coercion, since
+        # str(5) would publish a value no reader can look up.
+        if (
+            not isinstance(raw_hosting, str)
+            or not raw_hosting.strip()
+            or len(raw_hosting) > INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS
+        ):
             raise TeamDocumentError(
                 "model_suggestion",
-                _submitted_rule(
-                    "must hold a hosting of at most "
-                    f"{INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS} characters",
-                    len(raw_hosting),
-                ),
+                f"must carry a hosting of 1 to {INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS}"
+                " characters",
             )
-        if not isinstance(raw_model, str) or not raw_model.strip():
-            raise TeamDocumentError("model_suggestion", "must hold a non-empty model")
-        if len(raw_model) > INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS:
+        if (
+            not isinstance(raw_model, str)
+            or not raw_model.strip()
+            or len(raw_model) > INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS
+        ):
             raise TeamDocumentError(
                 "model_suggestion",
-                _submitted_rule(
-                    "must hold a model of at most "
-                    f"{INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS} characters",
-                    len(raw_model),
-                ),
+                f"must carry a model of 1 to {INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS}"
+                " characters",
             )
 
 

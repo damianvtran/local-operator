@@ -1902,6 +1902,57 @@ def test_preflight_resolves_agents_and_config_from_the_override(
     ), "preflight read the agent registry at the home root instead of the override"
 
 
+def test_preflight_resolves_the_team_suggestion_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """QA round 1, Q1: `exec --team`'s dry preflight resolves the team rung.
+
+    The worker's ladder is agent > flag > team > config, and the dry preflight
+    feeds the KEY CHECK that runs before launch -- so a dry path that skipped
+    the team rung validated the config default's provider while the run would
+    launch on the team's stored suggestion: it refused a runnable suggestion
+    when the config default was unkeyed, and let an unkeyed suggestion die
+    mid-boot on the mirror. Both directions reduce to one assertion at this
+    seam: the dry pair is the pair the run resolves, never the config default.
+    """
+
+    from local_operator.config import ConfigManager
+    from local_operator.teams import ModelSuggestion, TeamEditFields, TeamRegistry
+
+    override = tmp_path / "override-config"
+    ConfigManager(override).update_config({"hosting": "anthropic", "model_name": "config-model"})
+    TeamRegistry(override).create_team(
+        TeamEditFields(
+            name="qa-team",
+            manager="manager",
+            instructions="say hi",
+            model_suggestion=ModelSuggestion(hosting="openrouter", model="team-model"),
+        )
+    )
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(override))
+
+    # The team suggestion outranks the config default, exactly as it does in
+    # the session ladder -- so the key check names openrouter, not anthropic.
+    assert exec_mode.resolve_hosting_model_dry(ExecArgs(team="qa-team")) == (
+        "openrouter",
+        "team-model",
+    )
+
+    # And a deliberate flag still outranks the suggestion, same as the ladder.
+    assert exec_mode.resolve_hosting_model_dry(
+        ExecArgs(team="qa-team", hosting="openai", model="flag-model")
+    ) == ("openai", "flag-model")
+
+    # A team with no suggestion leaves the answer to the config default.
+    TeamRegistry(override).create_team(
+        TeamEditFields(name="plain-team", manager="manager", instructions="i")
+    )
+    assert exec_mode.resolve_hosting_model_dry(ExecArgs(team="plain-team")) == (
+        "anthropic",
+        "config-model",
+    )
+
+
 def test_background_logs_and_ledger_follow_the_config_dir_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

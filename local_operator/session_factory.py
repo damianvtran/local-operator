@@ -503,7 +503,7 @@ _HOSTING_NOT_CHAT_REMEDY = {
     ),
     "team": (
         "It came from the team's stored model suggestion, so update the team (or "
-        "pass a chat --hosting/--model for this run)."
+        "pass --hosting/--model naming a chat provider for this run)."
     ),
 }
 

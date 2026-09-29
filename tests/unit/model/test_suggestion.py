@@ -331,10 +331,37 @@ def test_the_notice_payload_and_line_carry_reason_and_request() -> None:
         "reason": REASON_UNKNOWN_PROVIDER,
         "requested": {"hosting": "definitely-not-a-provider", "model": "m"},
     }
-    line = notice.describe()
-    assert "definitely-not-a-provider" in line
-    assert "not applied" in line
-    # Wording shape only; the copy round owns the sentence.
-    assert (
-        ModelNotice(REASON_INVALID, "", "").describe().endswith("Using your default model instead.")
+    # The landed notice opening, "Model suggestion" -- the field's own name on
+    # every other surface (copy round 1, C7).
+    assert notice.describe() == (
+        "Model suggestion 'm' (hosting 'definitely-not-a-provider') was not "
+        "applied: this machine does not know the provider "
+        "'definitely-not-a-provider'. Using your default model instead."
+    )
+
+
+def test_the_notice_never_renders_an_empty_quote_pair() -> None:
+    """A malformed suggestion names back only the readable half (C2)."""
+
+    assert ModelNotice(REASON_INVALID, "", "").describe() == (
+        "The model suggestion was malformed and was not applied. "
+        "Using your default model instead."
+    )
+    assert ModelNotice(REASON_INVALID, "openrouter", "").describe() == (
+        "The model suggestion (hosting 'openrouter') was malformed and was not "
+        "applied. Using your default model instead."
+    )
+    assert ModelNotice(REASON_INVALID, "", "ghost").describe() == (
+        "The model suggestion (model 'ghost') was malformed and was not "
+        "applied. Using your default model instead."
+    )
+
+
+def test_the_unknown_model_line_names_this_machine() -> None:
+    """C3: the check is this machine's catalogue, not a fact about the provider."""
+
+    assert ModelNotice(REASON_UNKNOWN_MODEL, "openrouter", "m").describe() == (
+        "Model suggestion 'm' (hosting 'openrouter') was not applied: the model "
+        "is not offered by 'openrouter' on this machine. Using your default "
+        "model instead."
     )

@@ -1341,38 +1341,45 @@ def test_the_suggestion_caps_are_the_servers_numbers() -> None:
         ({"categories": ["not_a_category"]}, "categories", "must name categories"),
         ({"tags": ["t" * 65]}, "tags", "must hold items of 1 to 64 characters"),
         ({"version": " "}, "version", "must not be empty"),
+        # The suggestion halves raise the hub's ONE count-free sentence for
+        # both the empty and the over-cap arm -- no "(submitted N)" anywhere
+        # (agent review + copy round 1, M1/C1).
         (
             {"model_suggestion": {"hosting": "", "model": "m"}},
             "model_suggestion",
-            "must hold a non-empty hosting",
+            f"must carry a hosting of 1 to {INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS}"
+            " characters",
         ),
         (
             {"model_suggestion": {"model": "m"}},
             "model_suggestion",
-            "must hold a non-empty hosting",
+            f"must carry a hosting of 1 to {INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS}"
+            " characters",
         ),
         (
             {"model_suggestion": {"hosting": "h", "model": "  "}},
             "model_suggestion",
-            "must hold a non-empty model",
+            f"must carry a model of 1 to {INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS}"
+            " characters",
         ),
         (
             {"model_suggestion": {"hosting": "h" * 65, "model": "m"}},
             "model_suggestion",
-            "must hold a hosting of at most "
-            f"{INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS} characters",
+            f"must carry a hosting of 1 to {INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS}"
+            " characters",
         ),
         (
             {"model_suggestion": {"hosting": "h", "model": "m" * 129}},
             "model_suggestion",
-            "must hold a model of at most "
-            f"{INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS} characters",
+            f"must carry a model of 1 to {INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS}"
+            " characters",
         ),
         ({"model_suggestion": "not-an-object"}, "model_suggestion", "must be an object"),
         (
             {"model_suggestion": {"hosting": 5, "model": "m"}},
             "model_suggestion",
-            "must hold a non-empty hosting",
+            f"must carry a hosting of 1 to {INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS}"
+            " characters",
         ),
     ],
 )
