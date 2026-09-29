@@ -21,7 +21,10 @@ agreeing on the same active/previous partition. The sections are also the
 scroll order: each peer's rows form one contiguous block after **Previous
 Sessions** and before **⌥ Subagent Runs**, so the window the list scrolls by
 and the frame it paints are one order, and rows enter and leave at the frame's
-edges.
+edges. Page keys move that window a page at a time: the next page starts where
+the previous ended (overlap is allowed, a gap never), and a press whose
+landing reaches the tail settles bottom-aligned, on the same window the wheel
+clamp and `End` land on, rather than on a remainder stub.
 
 The phone draws the same partition and the same ★ Pinned section, and it does
 so off the SAME key: the mobile daemon ranks through `session.catalog.entry_for`

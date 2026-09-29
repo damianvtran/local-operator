@@ -474,12 +474,22 @@ class SessionSidebar(Widget, can_focus=True):
         this a pure IMPROVEMENT on the old number: a list whose headings all fit
         on one page resolves to the same value it always did.
         """
-        chrome = self._header_lines()
+        return self._page_size_at(self._offset)
+
+    def _page_size_at(self, offset: int) -> int:
+        """`page_size` asked of a candidate offset, without moving there.
+
+        A page move has to price the window it is about to land on — and the
+        bottom-aligned window the wheel clamp settles on — BEFORE committing
+        to either. The bisection is the same question at any offset; this is
+        the one place it is asked, so the two callers cannot drift.
+        """
+        chrome = self._header_lines(offset)
         low = max(1, self.size.height - 1 - (0 if chrome else 1) - chrome)
         # No window can be taller than the sidebar, nor longer than the order
         # left to show: past either, the candidate is describing rows that do
         # not exist.
-        high = min(len(self.entries) - self._offset, max(1, self.size.height - 1))
+        high = min(len(self.entries) - offset, max(1, self.size.height - 1))
         # The seed can exceed the rows left to show — its chrome count is the
         # WHOLE list's — and near the tail that leaves `low > high`, so the loop
         # never runs. Returning the bare seed there would describe rows that do
@@ -489,7 +499,7 @@ class SessionSidebar(Widget, can_focus=True):
         best = min(low, high)
         while low <= high:
             middle = (low + high) // 2
-            window = self.entries[self._offset : self._offset + middle]
+            window = self.entries[offset : offset + middle]
             inner = self._chrome_for(window)
             if middle + inner + 1 + (1 if inner == 0 else 0) <= self.size.height:
                 best = middle
@@ -528,7 +538,7 @@ class SessionSidebar(Widget, can_focus=True):
             chrome += 1
         return chrome
 
-    def _header_lines(self) -> int:
+    def _header_lines(self, offset: int | None = None) -> int:
         """Lines the section headers will consume, over the WHOLE list.
 
         Computed from the whole ranked list rather than the visible slice
@@ -540,6 +550,10 @@ class SessionSidebar(Widget, can_focus=True):
         :meth:`_chrome_for`, which asks the same question of a candidate window
         so the page can grow back into rows this count over-reserved (design
         round 1, D5b).
+
+        ``offset`` prices the note for a candidate landing rather than the
+        live window (``_page_size_at``); the note's charge is the only part of
+        this count that depends on where the window sits.
         """
         if not self.entries:
             return 0
@@ -567,14 +581,18 @@ class SessionSidebar(Widget, can_focus=True):
         chrome = len(tiers) * 2 + (len(tiers) - 1)
         # The `+N more pinned` note (`_display_rows`) is chrome too, and the
         # charge follows the same predicate the paint uses (`_chrome_for`): a
-        # pinned row missing from the window. The old rank-0 guard charged only
-        # windows that carried a pinned row, so a page past the pinned block
-        # under-reserved by one line and the frame overran its height. Sized
-        # against a window computed WITHOUT the note: adding the note can only
-        # shrink that window, which can only push more pinned rows out, so this
-        # never claims a note that `_display_rows` then declines to emit.
+        # pinned row missing from the window. This count's own old rank-0
+        # guard already reduced to that predicate — an overflow is only
+        # possible when a pin exists, so the guard was implied by it — which
+        # leaves the under-charge the note fix repaired in `_chrome_for`
+        # alone, whose per-window guard could miss a page that no longer
+        # carried any pinned row. Sized against a window computed WITHOUT the
+        # note: adding the note can only shrink that window, which can only
+        # push more pinned rows out, so this never claims a note that
+        # `_display_rows` then declines to emit.
         base = max(1, self.size.height - 1 - chrome)
-        window = self.entries[self._offset : self._offset + base]
+        where = self._offset if offset is None else offset
+        window = self.entries[where : where + base]
         if self._pinned_overflow(window):
             chrome += 1
         return chrome
@@ -1351,7 +1369,21 @@ class SessionSidebar(Widget, can_focus=True):
                 # The whole tail is already on the page: the bottom is a
                 # destination, and a further press must not re-show it smaller.
                 return False
-            new_start = min(start + page, len(self.entries) - 1)
+            # No clamp is needed here: the guard above proves `start + page`
+            # is at most the last row's index.
+            new_start = start + page
+            # And the bottom is ALSO a destination for the press that crosses
+            # into the tail (UX round 1, U1): when that landing is itself the
+            # FINAL window — it reaches the last row — and the bottom-aligned
+            # window (where the wheel's `len - page_size` clamp settles) would
+            # show at least as many rows, settle there rather than on the
+            # remainder below it. `bottom <= new_start` is that no-gap check:
+            # the bottom window lies at or beyond the row where this page
+            # ended, so the union stays contiguous and the press still moves.
+            if new_start + self._page_size_at(new_start) >= len(self.entries):
+                bottom = self._bottom_start()
+                if start < bottom <= new_start:
+                    new_start = bottom
         else:
             new_start = max(0, start - page)
         if new_start == start:
@@ -1370,6 +1402,27 @@ class SessionSidebar(Widget, can_focus=True):
         index = max(new_start, min(new_start + new_page - 1, cursor + (new_start - start)))
         self.cursor_id = self.entries[index].id
         return True
+
+    def _bottom_start(self) -> int:
+        """The offset of the window that carries the tail — the bottom-aligned
+        landing the wheel's ``len - page_size`` clamp comes to rest on.
+
+        The candidates are the offsets whose window shows every row left below
+        it (``offset + page_size(offset) >= len``), and at a short height there
+        can be several, because a window can grow again where a section's
+        heading leaves it. The wheel stops on the first candidate it reaches
+        from above, which is the EARLIEST one — the window showing the most
+        rows while still carrying the tail. So that is what is walked for
+        here: start at the deepest window (one row, always a candidate) and
+        step up while the offset above still carries the tail. The walk is
+        bounded by the panel height, not the list — only the last
+        ``height`` offsets can reach "carry" at all.
+        """
+        entries = len(self.entries)
+        offset = max(0, entries - 1)
+        while offset > 0 and (offset - 1) + self._page_size_at(offset - 1) >= entries:
+            offset -= 1
+        return offset
 
     def action_edge(self, end: bool) -> None:
         if self.entries:

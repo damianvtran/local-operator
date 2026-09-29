@@ -3733,7 +3733,7 @@ def _aged(sid: str, *, active: bool = False, age: float = 0.0) -> CatalogEntry:
     )
 
 
-def _remote_entry(sid: str, *, age: float = 0.0) -> CatalogEntry:
+def _remote_entry(sid: str, *, age: float = 0.0, device: str = "pixel-8") -> CatalogEntry:
     """A peer's session as the catalogue lists it: remote and reachable."""
     born = time.time() - age
     return CatalogEntry(
@@ -3743,8 +3743,8 @@ def _remote_entry(sid: str, *, age: float = 0.0) -> CatalogEntry:
             f"Session {sid}",
             created_at=born,
             locality="remote",
-            owner_device="d_peer",
-            owner_device_name="pixel-8",
+            owner_device=f"d_{device}",
+            owner_device_name=device,
             reachable=True,
         )
     )
@@ -3858,6 +3858,146 @@ async def test_a_page_move_advances_the_viewport_the_wheel_left():
             here - page <= sidebar._offset < here
         ), f"pageup jumped: {here} -> {sidebar._offset} (page {page})"
         assert sidebar.cursor_id in {entry.id for entry in sidebar.visible_entries}
+
+
+def _landing_catalog() -> list[CatalogEntry]:
+    """The UX round-1 (U1) fixture shape: 58 rows whose sweep ends on a REMAINDER.
+
+    4 active, 40 remote rows interleaved among `previous` by birth across two
+    devices (`peer26` among them, pinned), a 12-row cold tail, 2 subagent runs.
+    The pagedown sweep's last window used to be the 2-row stub (56..57) at
+    100x30 — a full-height list painting two rows and ~22 blanks beneath, at
+    the exact moment the user pages to the end.
+    """
+    rows: list[CatalogEntry] = [_aged(f"act{i}", active=True, age=60.0 * (i + 1)) for i in range(4)]
+    age = 1000.0
+    for i in range(40):
+        if i == 26:
+            rows.append(_remote_entry("peer26", age=age, device="macbook"))
+        elif i % 5 == 2:
+            rows.append(_remote_entry(f"peer{i}", age=age))
+        elif i % 10 == 6:
+            rows.append(_remote_entry(f"peer{i}", age=age, device="macbook"))
+        else:
+            rows.append(_aged(f"old{i:02d}", age=age))
+        age += 45.0
+    rows += [_aged(f"cold{i:02d}", age=3000.0 + i * 60) for i in range(12)]
+    rows += [
+        _sub("run1", label="section the sidebar", agent="coder"),
+        _sub("run2", label="audit the poll cost", agent="reviewer"),
+    ]
+    return rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (100, 20)])
+async def test_a_page_walk_to_the_end_settles_on_the_bottom_window(size):
+    """UX round 1 (U1): the sweep's last landing is the BOTTOM window, not a stub.
+
+    A landing that reaches the tail settled on the remainder below it — 2 of
+    58 rows at 100x30, painted into a full-height list with everything below
+    blank. It settles bottom-aligned now, on the window the wheel clamp comes
+    to rest on, and a further press is a no-op. The equality with the wheel is
+    the discriminator: the old stub was also "bottom-aligned" against its own
+    two-row page, so only another path's landing tells the windows apart.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        entries = _landing_catalog()
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("act1", "peer26"), show_subagents=True, total=2
+        )
+        await _focus_settled(pilot, sidebar)
+        all_ids = {entry.id for entry in entries}
+        covered: set[str] = set()
+        windows: list[tuple[int, int]] = []
+        for _ in range(len(entries) + 2):
+            covered.update(entry.id for entry in sidebar.visible_entries)
+            windows.append((sidebar._offset, sidebar._offset + len(sidebar.visible_entries) - 1))
+            before = (sidebar._offset, sidebar.cursor_id)
+            await pilot.press("pagedown")
+            await pilot.pause()
+            if (sidebar._offset, sidebar.cursor_id) == before:
+                break
+        settled = sidebar._offset
+        assert covered == all_ids, f"rows never painted: {sorted(all_ids - covered)}"
+        for (lo, hi), (lo_next, _hi_next) in zip(windows, windows[1:]):
+            assert lo_next <= hi + 1, f"a page gap: {lo}..{hi} then {lo_next}.."
+        assert settled + sidebar.page_size == len(entries), (
+            f"the sweep settled at {settled} with page {sidebar.page_size}, not"
+            f" bottom-aligned on {len(entries)} rows"
+        )
+        # ... and it is the window the wheel clamp settles on — the reference
+        # the UX round named. `End` is its own mechanism (the smallest offset
+        # at or after its guess that shows the last row, which can be a
+        # narrower window than the earliest carrying one): it must land
+        # carrying the tail too, but not necessarily on the same row.
+        sidebar._offset = 0
+        sidebar.refresh()
+        await pilot.pause()
+        await pilot.press("end")
+        await pilot.pause()
+        assert sidebar._offset + sidebar.page_size >= len(
+            entries
+        ), f"End left the tail off the page: {sidebar._offset} + {sidebar.page_size}"
+        sidebar._offset = 0
+        sidebar.refresh()
+        await pilot.pause()
+        for _ in range(len(entries) + 4):
+            sidebar.post_message(_wheel(sidebar))
+            await pilot.pause()
+        assert (
+            sidebar._offset == settled
+        ), f"the wheel clamp lands at {sidebar._offset}; the page sweep at {settled}"
+        assert sidebar.cursor_id in {entry.id for entry in sidebar.visible_entries}
+
+
+@pytest.mark.asyncio
+async def test_the_pageup_walk_from_the_bottom_window_stays_gapless():
+    """The mirror of U1 (UX round 1): stepping up off the bottom window.
+
+    The up-walk holds the same doctrine as down — overlap allowed, a gap never:
+    every window reaches at least the row above the previous window's start,
+    every row is painted somewhere on the way, and the walk tops out on row 0
+    with the cursor riding the page after every press.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = _landing_catalog()
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("act1", "peer26"), show_subagents=True, total=2
+        )
+        await _focus_settled(pilot, sidebar)
+        # Land the bottom the way the sweep does.
+        for _ in range(len(entries) + 2):
+            before = (sidebar._offset, sidebar.cursor_id)
+            await pilot.press("pagedown")
+            await pilot.pause()
+            if (sidebar._offset, sidebar.cursor_id) == before:
+                break
+        all_ids = {entry.id for entry in entries}
+        covered: set[str] = set()
+        windows: list[tuple[int, int]] = []
+        for _ in range(len(entries) + 2):
+            covered.update(entry.id for entry in sidebar.visible_entries)
+            windows.append((sidebar._offset, sidebar._offset + len(sidebar.visible_entries) - 1))
+            before = (sidebar._offset, sidebar.cursor_id)
+            await pilot.press("pageup")
+            await pilot.pause()
+            if (sidebar._offset, sidebar.cursor_id) == before:
+                break
+            assert sidebar.cursor_id in {
+                entry.id for entry in sidebar.visible_entries
+            }, f"the cursor left the page on the way up at {sidebar._offset}"
+        assert sidebar._offset == 0, f"the walk topped out at {sidebar._offset}, not row 0"
+        assert covered == all_ids, f"rows never painted on the way up: {sorted(all_ids - covered)}"
+        for (lo, hi), (lo_next, hi_next) in zip(windows, windows[1:]):
+            assert lo_next <= hi + 1, f"a page gap on the way up: {lo}..{hi} then {lo_next}.."
+            assert (
+                hi_next >= lo - 1
+            ), f"a window that stepped over the row above it: {lo}..{hi} then {lo_next}..{hi_next}"
 
 
 @pytest.mark.asyncio
