@@ -421,3 +421,67 @@ def test_an_empty_or_missing_bash_command_is_refused() -> None:
     reason = verdict(fake_tool("bash", tier="exec"), {})
     assert reason is not None
     assert 'needs a "command"' in reason
+
+
+# ---------------------------------------------------------------------------
+# The external resolver: the same verdicts, reached WITHOUT a live session
+# ---------------------------------------------------------------------------
+#
+# The arm routes resolve a tool from ``TOOL_BUILDERS`` cold, so its sentences
+# must be ``readonly_verdict``'s own for every call the evaluator can judge —
+# and the hard rejects especially, because three of them (task/ask/wait) are
+# session-only builders: resolving them through the builder branch answered
+# "not available without a running session", which sends the caller to a
+# session that STILL cannot watch the call. The fragments below are the
+# reasons, not the transport (round-1 review F1).
+
+
+def test_hard_rejects_keep_their_own_sentence_outside_a_session() -> None:
+    """task/ask/wait refuse with the REASON, never the session transport.
+
+    The module docstring promises ``readonly_verdict``'s sentence for
+    hard-rejected tools; this is that promise as assertions — the
+    discriminating phrase of each entry, and the absence of the cold-path
+    wording that would bury it.
+    """
+    cases = [
+        ("task", "delegates autonomous work"),
+        ("ask", "sends a message to the parent"),
+        ("wait", "parks the turn"),
+    ]
+    for name, phrase in cases:
+        reason = readonly.external_monitor_verdict(name, {})
+        assert reason is not None, name
+        assert phrase in reason, f"{name}: {reason!r}"
+        assert "not available without a running session" not in reason, name
+
+
+def test_the_external_resolver_refuses_by_class() -> None:
+    """One request per refusal class, so a branch reordered in the resolver
+    fails here rather than shifting which sentence a class receives."""
+    # eval: the evaluator's own sentence (its builder resolves cold).
+    reason = readonly.external_monitor_verdict("eval", {"code": "1"})
+    assert reason is not None, "eval"
+    assert "arbitrary Python" in reason, reason
+
+    # bash: the §6.4 verdict, not a tier complaint.
+    reason = readonly.external_monitor_verdict("bash", {"command": "rm -rf /"})
+    assert reason is not None, "bash"
+    assert "is not on the read-only allow-list" in reason, reason
+
+    # A read-tier tool that resolves cold: accepted.
+    assert readonly.external_monitor_verdict("network", {"action": "status"}) is None
+
+    # A session-only builder with no evaluator sentence (hub): the transport
+    # sentence is the true one, and it is kept distinct from the hard rejects.
+    reason = readonly.external_monitor_verdict("hub", {"op": "list"})
+    assert reason is not None, "hub"
+    assert "not available without a running session" in reason, reason
+
+    # Unknown name / MCP: the two builder-table refusals.
+    reason = readonly.external_monitor_verdict("totally_unknown_tool", {})
+    assert reason is not None, "unknown"
+    assert "not a tool every session builds" in reason, reason
+    reason = readonly.external_monitor_verdict("mcp__srv__thing", {})
+    assert reason is not None, "mcp"
+    assert "read-only hint can only be checked inside a running session" in reason, reason
