@@ -25,6 +25,7 @@ import logging
 import os
 import random
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -82,15 +83,24 @@ def _empty() -> dict[str, Any]:
 
 
 def scrub(text: str, limit: int = 300) -> str:
-    """The user-facing error sentence: one line, bounded, credential-scrubbed."""
+    """The user-facing error sentence: one line, bounded, credential-scrubbed.
+
+    Scrubs by credential SHAPE (bearer headers, ``sk-`` keys, JWTs...): this text
+    is built from hub and PROVIDER exceptions, none of which pass through the
+    Radient client's own body scrubbing, and it is persisted to ``status.json``
+    and served by the updates route and ``lop hub status``. There is no known
+    secret VALUE to pass here, so a value-only redactor would replace nothing.
+    The shapes run BEFORE the whitespace collapse and the length cut, so a token
+    is never left half-masked by the truncation.
+    """
 
     try:
-        from local_operator.clients._http import redact_secrets
+        from local_operator.redaction_shapes import scrub_secrets
 
-        text = redact_secrets(text, [])
+        text = scrub_secrets(str(text))
     except Exception:  # noqa: BLE001 - scrubbing is best-effort; length bound still applies
-        pass
-    return " ".join(str(text).split())[:limit]
+        text = str(text)
+    return " ".join(text.split())[:limit]
 
 
 class StatusStore:
@@ -288,8 +298,13 @@ def apply_check(
                 item, reason or "hub-error", detail, now=now, keep_state=reason == "hub-error"
             )
     elif verdict == "up-to-date":
+        # ``applied`` is kept for exactly ONE check cycle ("Updated just now"), so
+        # the check that first observes it only stamps ``applied_seen`` and the
+        # next one settles to ``up-to-date``. Without the stamp it was sticky.
+        keep_applied = item.get("state") == "applied" and not item.get("applied_seen")
+        item["applied_seen"] = keep_applied
         item.update(
-            state="up-to-date" if item.get("state") != "applied" else "applied",
+            state="applied" if keep_applied else "up-to-date",
             classification=None,
             error_class=None,
             last_error=None,
@@ -316,6 +331,7 @@ def settle_applied(
     now: datetime | None = None,
 ) -> None:
     now = now or datetime.now(timezone.utc)
+    item["applied_seen"] = False
     item.update(
         state="applied",
         classification=None,
@@ -446,15 +462,49 @@ class RunnerLease:
     degrades to "no lease" for a READ-ONLY caller. Here a failure to take the
     lease means SKIP (a merge that ignored a lost race would be the double-apply
     the lease exists to prevent).
+
+    EVERY WRITER TAKES IT: the runner tick, the desktop routes (through
+    ``HubSyncRunner.exclusive``), ``lop agents|teams sync`` and the ``agent``
+    tool's sync. A holder is kept alive by a heartbeat thread started in
+    :meth:`acquire`, because a tick of fifty items with model calls of up to two
+    minutes each outlives any fixed TTL; the TTL is only the bound on how long a
+    CRASHED holder blocks everyone else.
     """
+
+    #: Poll period while waiting for a held lease.
+    _POLL_S = 0.25
 
     def __init__(self, config_dir: Path, ttl_s: float = LEASE_TTL_S) -> None:
         self._path = hub_root(Path(config_dir)) / ".runner.lease"
         self._ttl = ttl_s
         self._token = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._held = False
+        self._beat_stop: threading.Event | None = None
 
-    def acquire(self) -> bool:
+    def acquire(self, wait_s: float = 0.0) -> bool:
+        """Take the lease, waiting up to ``wait_s`` for a live holder; start the heartbeat."""
+
+        deadline = time.monotonic() + max(0.0, wait_s)
+        while True:
+            if self._try_acquire():
+                self._start_heartbeat()
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self._POLL_S)
+
+    def _start_heartbeat(self) -> None:
+        stop = threading.Event()
+        self._beat_stop = stop
+
+        def beat() -> None:
+            while not stop.wait(self._ttl / 3):
+                if not self.renew():
+                    return
+
+        threading.Thread(target=beat, name="hub-lease-heartbeat", daemon=True).start()
+
+    def _try_acquire(self) -> bool:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -469,7 +519,7 @@ class RunnerLease:
                 self._path.unlink()
             except OSError:
                 return False
-            return self.acquire()
+            return self._try_acquire()
         except OSError:
             return False
         try:
@@ -482,7 +532,37 @@ class RunnerLease:
         self._held = True
         return True
 
+    def renew(self) -> bool:
+        """Push the expiry out again; False when the lease is no longer ours.
+
+        The TTL is a crash-recovery bound, not a budget: a tick of up to fifty
+        items with model calls of up to two minutes each can outlive any fixed
+        TTL, and a second process acquiring the lease mid-tick is the double
+        apply the lease exists to prevent. So the heartbeat renews it.
+
+        The rewrite is atomic (temp + replace): a reader that saw a half-written
+        file would parse it as "expired" and steal a live lease.
+        """
+
+        if not self._held:
+            return False
+        try:
+            data = json.loads(self._path.read_text("utf-8"))
+            if data.get("holder") != self._token:
+                self._held = False
+                return False
+            data["expires_at"] = time.time() + self._ttl
+            tmp = self._path.with_name(f"{self._path.name}.{self._token.replace(':', '-')}.tmp")
+            tmp.write_text(json.dumps(data), "utf-8")
+            os.replace(tmp, self._path)
+        except (OSError, ValueError):
+            return False
+        return True
+
     def release(self) -> None:
+        if self._beat_stop is not None:
+            self._beat_stop.set()
+            self._beat_stop = None
         if not self._held:
             return
         self._held = False

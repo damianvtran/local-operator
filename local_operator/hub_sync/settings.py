@@ -69,5 +69,23 @@ class HubSyncSettings:
             merge_model=merge_model.strip() if isinstance(merge_model, str) else "",
         )
 
+    @staticmethod
+    def read_fresh(cm: "ConfigManager") -> "HubSyncSettings":
+        """The settings as they are on disk NOW, not as this process last loaded them.
+
+        The section is LIVE (``settings_io``): an edit from the TUI, the CLI or
+        another daemon must land within one tick. A long-lived ``ConfigManager``
+        (the server's) holds the config it read at boot, so a write made by a
+        different process would never reach it. Falls back to the given manager
+        when the directory cannot be re-read.
+        """
+
+        try:
+            from local_operator.config import ConfigManager as _CM
+
+            return HubSyncSettings.from_config(_CM(cm.config_dir))
+        except Exception:  # noqa: BLE001 - never lose the tick over a settings read
+            return HubSyncSettings.from_config(cm)
+
     def auto_for(self, kind: str) -> bool:
         return self.auto_teams if kind == "team" else self.auto_agents

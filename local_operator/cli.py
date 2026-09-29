@@ -8030,15 +8030,19 @@ def _hub_sync_run(
     if getattr(args, "check", False):
         checks = svc.check_items(ctx, kinds=(kind,), names=names)
         return ctx, svc.ApplyReport(tuple(svc.check_report(c) for c in checks))
-    report = svc.apply_items(
-        ctx,
-        kind=kind,
-        names=names,
-        prefer=args.prefer or "none",
-        acknowledge_unknown_baseline=bool(args.accept_unknown_baseline),
-        replace=replace,  # type: ignore[arg-type]
-        dry_run=bool(args.dry_run),
-    )
+    try:
+        report = svc.apply_items(
+            ctx,
+            kind=kind,
+            names=names,
+            prefer=args.prefer or "none",
+            acknowledge_unknown_baseline=bool(args.accept_unknown_baseline),
+            replace=replace,  # type: ignore[arg-type]
+            dry_run=bool(args.dry_run),
+        )
+    except svc.HubBusy as busy:
+        print(f"\n\033[1;31mError: {busy}\033[0m")
+        return None
     return ctx, report
 
 
@@ -8681,7 +8685,7 @@ def agents_pull_org_command(args: argparse.Namespace, agent_registry: Any, base_
         return 1
     try:
         outcome = agent_registry.download_agent_from_radient(
-            client, args.id, [redacted]=True, tenant_id=tenant
+            client, args.id, with_credential=True, tenant_id=tenant
         )
         imported_agent = outcome.agent
         print(

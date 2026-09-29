@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -12,7 +12,7 @@ from local_operator.hub_sync.merge import ConflictRequest, ResolverError
 
 
 def _req(**kw) -> ConflictRequest:
-    base = dict(
+    base: dict[str, Any] = dict(
         field="instructions",
         heading="A",
         base="Be brief.",
@@ -29,10 +29,13 @@ def _ok(text="Be brief, cite, and plain.") -> str:
 
 
 def _provider_error(kind: str, *, status: int | None = None, retry_after_ms: int | None = None):
-    from local_operator.providers.failover import ProviderError
+    from local_operator.providers.failover import ProviderError, ProviderErrorKind
 
-    return ProviderError(  # type: ignore[arg-type]
-        status, f"{kind} problem", kind=kind, retry_after_ms=retry_after_ms
+    return ProviderError(
+        status,
+        f"{kind} problem",
+        kind=cast(ProviderErrorKind, kind),
+        retry_after_ms=retry_after_ms,
     )
 
 
@@ -206,7 +209,7 @@ def test_a_malformed_override_is_a_named_refusal_not_a_silent_fallthrough(bad: s
 def test_the_default_model_is_the_users_own_via_bootstrap(monkeypatch) -> None:
     from local_operator import bootstrap
 
-    seen: list[tuple] = []
+    seen: list[tuple[str, str]] = []
 
     def fake_build(hosting: str, model: str, info=None):
         seen.append((hosting, model))
@@ -214,7 +217,7 @@ def test_the_default_model_is_the_users_own_via_bootstrap(monkeypatch) -> None:
 
     monkeypatch.setattr("local_operator.model.configure.build_model_spec", fake_build)
     cm = _CM({"hosting": "openai", "model_name": "gpt-x"})
-    assert bootstrap.resolve_hosting_model(cm, None, None, None) == ("openai", "gpt-x")
+    assert bootstrap.resolve_hosting_model(cast(Any, cm), None, None, None) == ("openai", "gpt-x")
     assert rs.resolve_merge_model(cm).label == "openai/gpt-x" and seen == [("openai", "gpt-x")]
     override = rs.resolve_merge_model(_CM({"hub": {"merge_model": "anthropic/claude-x"}}))
     assert override.label == "anthropic/claude-x" and seen[-1] == ("anthropic", "claude-x")

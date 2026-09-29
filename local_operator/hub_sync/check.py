@@ -30,6 +30,12 @@ Verdict = Literal["up-to-date", "available", "unavailable"]
 
 ClientFor = Callable[[str | None], Any]
 
+#: Bound on ONE hub request (design B3.3, "per-request timeout 20 s"). Every check
+#: runs in a worker thread that cannot be cancelled; without a socket timeout a
+#: stalled connection would hold the runner tick, its lock and the update lease,
+#: and daemon shutdown could hang at interpreter exit.
+REQUEST_TIMEOUT_S = 20.0
+
 
 @dataclass(frozen=True)
 class Classification:
@@ -182,9 +188,11 @@ def check_hub_agents(
             continue
         try:
             if tenant:
-                text, desc = fetcher(client, hub_id, with_credential=True)
+                text, desc = fetcher(
+                    client, hub_id, with_credential=True, timeout=REQUEST_TIMEOUT_S
+                )
             else:
-                text, desc = fetcher(client, hub_id)
+                text, desc = fetcher(client, hub_id, timeout=REQUEST_TIMEOUT_S)
         except Exception as error:  # noqa: BLE001 - classified below
             reason, detail = _failure_reason(error)
             checks.append(
@@ -265,6 +273,25 @@ def team_fields_of(team: Any) -> dict[str, Any]:
     )
 
 
+def _team_confirmed_gone(registry: Any, team_id: str) -> bool:
+    """True only when ``teams/<id>`` is absent AND no swap-in-progress sibling exists.
+
+    Any doubt (an unreadable directory, a hidden ``.<id>.*`` staging/backup entry
+    from a save in flight, an id that cannot be a path segment) answers False, i.e.
+    "keep the baseline".
+    """
+
+    teams_dir = getattr(registry, "teams_dir", None)
+    if teams_dir is None or not team_id or "/" in team_id or team_id.startswith("."):
+        return False
+    try:
+        if not teams_dir.is_dir() or (teams_dir / team_id).exists():
+            return False
+        return not any(child.name.startswith(f".{team_id}.") for child in teams_dir.iterdir())
+    except OSError:
+        return False
+
+
 def check_hub_teams(
     registry: Any,
     *,
@@ -283,7 +310,18 @@ def check_hub_teams(
     config_dir = Path(registry.config_dir)
     wanted = {str(n).strip().lower() for n in names} if names else None
     teams = sorted(registry.list_teams(), key=lambda t: t.name.lower())
-    prov.prune(config_dir, "team", {t.id for t in teams})
+    # A baseline is what keeps a deleted brief section from being re-added, so it is
+    # pruned only when the team is CONFIRMED gone on disk right now. The listing alone
+    # is not authoritative: ``TeamRegistry._load`` skips a row whose directory is
+    # mid-swap (the documented publish gap) and reads as EMPTY on an ``iterdir``
+    # error, so a check racing a user's save would otherwise unlink the baseline and
+    # silently unlink the team.
+    prov.prune(
+        config_dir,
+        "team",
+        {t.id for t in teams},
+        confirmed_absent=lambda team_id: _team_confirmed_gone(registry, team_id),
+    )
     checks: list[ItemCheck] = []
     for meta in teams:
         if wanted is not None and meta.name.strip().lower() not in wanted:
@@ -330,7 +368,7 @@ def check_hub_teams(
             )
             continue
         try:
-            document = client.get_team(record.hub_id)
+            document = client.get_team(record.hub_id, timeout=REQUEST_TIMEOUT_S)
         except Exception as error:  # noqa: BLE001
             reason, detail = _failure_reason(error)
             checks.append(

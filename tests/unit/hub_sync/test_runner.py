@@ -148,3 +148,74 @@ async def test_a_tick_is_bounded_to_fifty_items_oldest_checked_first(rig) -> Non
     }
     picked = runner._pick(links, doc)
     assert len(picked) == 50 and "id0" in picked and "id59" not in picked
+
+
+async def test_a_setting_written_by_another_process_is_read_on_the_next_tick(rig) -> None:
+    """The ``hub`` section is LIVE: the runner's own manager is stale, the disk is not."""
+
+    runner, hub, agents, root, cm, _ = rig
+    row = _drift(agents, hub, root)
+    await runner.tick(reason="startup")  # first-run grace: checks, applies nothing
+    # A second manager stands in for the TUI / CLI / another daemon writing config.yml.
+    ConfigManager(root).set_config_value("hub", {"auto_update": {"agents": False}})
+    report = await runner.tick(reason="timer")
+    assert report.available == 1 and report.applied == 0
+    assert "Added upstream" not in agents.get_agent_system_prompt(row.id)
+
+
+async def test_route_work_and_the_timer_share_one_lock(rig) -> None:
+    """``run_exclusive`` queues behind a running tick instead of racing it."""
+
+    runner, hub, agents, root, *_ = rig
+    _drift(agents, hub, root)
+    order: list[str] = []
+
+    real_tick = runner._tick_locked
+
+    async def slow_tick(reason: str):
+        order.append("tick-start")
+        await asyncio.sleep(0.05)
+        out = await real_tick(reason)
+        order.append("tick-end")
+        return out
+
+    runner._tick_locked = slow_tick  # type: ignore[method-assign]
+    tick = asyncio.create_task(runner.tick(reason="timer"))
+    await asyncio.sleep(0.01)
+    await runner.run_exclusive(lambda _ctx: order.append("route"))
+    await tick
+    assert order == ["tick-start", "tick-end", "route"]
+
+
+async def test_an_apply_holds_the_cross_process_lease_and_refuses_when_it_is_taken(
+    rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI, the routes and the tool all reach ``apply_items``: it takes the lease."""
+
+    runner, hub, agents, root, cm, _ = rig
+    row = _drift(agents, hub, root)
+    ctx = await runner.context()
+    monkeypatch.setattr(svc, "LEASE_WAIT_S", 0.0)
+    other = st.RunnerLease(root)
+    assert other.acquire()
+    try:
+        with pytest.raises(svc.HubBusy):
+            await asyncio.to_thread(svc.apply_items, ctx, kind="agent")
+        assert "Added upstream" not in agents.get_agent_system_prompt(row.id)
+    finally:
+        other.release()
+    report = await asyncio.to_thread(svc.apply_items, ctx, kind="agent")
+    assert report.reports[0].applied
+
+
+async def test_the_lease_heartbeat_outlives_its_ttl(tmp_path: Path) -> None:
+    lease = st.RunnerLease(tmp_path, ttl_s=0.3)
+    assert lease.acquire()
+    try:
+        await asyncio.sleep(0.8)  # > 2 TTLs
+        assert not st.RunnerLease(tmp_path, ttl_s=0.3).acquire()
+    finally:
+        lease.release()
+    contender = st.RunnerLease(tmp_path, ttl_s=0.3)
+    assert contender.acquire()
+    contender.release()

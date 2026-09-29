@@ -38,6 +38,7 @@ from local_operator.hub_sync.merge import (
     ConflictRequest,
     Resolver,
     ResolverError,
+    ResolverErrorClass,
 )
 
 logger = logging.getLogger(__name__)
@@ -253,7 +254,9 @@ def backoff_delay(attempt: int, *, rng: Callable[[float, float], float] = random
     return min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2**attempt)) * rng(1 - JITTER, 1 + JITTER)
 
 
-def classify_failure(error: BaseException) -> tuple[str, str | None, float | None]:
+def classify_failure(
+    error: BaseException,
+) -> tuple[ResolverErrorClass, str | None, float | None]:
     """``(class, subclass, retry_after_s)`` for a provider failure.
 
     ``class`` is a :data:`~local_operator.hub_sync.merge.ResolverErrorClass`;

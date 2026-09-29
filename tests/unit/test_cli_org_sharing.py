@@ -74,7 +74,7 @@ class _FakeOrgHub:
             "team": {"id": "hub-team-1", "name": document["name"], "version": document["version"]}
         }
 
-    def get_team(self, team_id: str) -> dict[str, Any]:
+    def get_team(self, team_id: str, **_kw: Any) -> dict[str, Any]:
         self.pulled_teams.append(team_id)
         return self.team_documents[team_id]
 
@@ -419,7 +419,9 @@ def test_agents_pull_org_downloads_through_the_person_client(
 
     seen: dict[str, Any] = {}
 
-    def fake_download(self, radient_client, agent_id, *, with_credential=False):
+    def fake_download(
+        self, radient_client, agent_id, *, with_credential=False, tenant_id=None, **_kw
+    ):
         seen["client"] = radient_client
         seen["agent_id"] = agent_id
         seen["with_credential"] = with_credential
@@ -866,7 +868,9 @@ def test_agents_pull_org_prints_the_model_suggestion_notice(
 
     notice = ModelNotice(reason="unknown_provider", requested_hosting="nope", requested_model="m")
 
-    def fake_download(self, radient_client, agent_id, *, with_credential=False, auth_store=None):
+    def fake_download(
+        self, radient_client, agent_id, *, with_credential=False, auth_store=None, tenant_id=None
+    ):
         pulled = types.SimpleNamespace(name="Carrier", id="local-9")
         return types.SimpleNamespace(agent=pulled, renamed_from=None, model_notice=notice)
 

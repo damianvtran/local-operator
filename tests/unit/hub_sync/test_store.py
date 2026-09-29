@@ -5,8 +5,13 @@ import multiprocessing as mp
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from local_operator.hub_sync import store as st
+
+
+def _ignore(_result: object) -> None:
+    """``mutate`` wants a ``-> None`` callback; ``_apply`` returns the item for readers."""
 
 
 def _apply(doc, verdict="available", remote="fp1", reason="", **kw):
@@ -29,7 +34,7 @@ def _apply(doc, verdict="available", remote="fp1", reason="", **kw):
 
 def test_round_trip_and_atomic_write_leaves_no_temp(tmp_path: Path) -> None:
     store = st.StatusStore(tmp_path)
-    assert store.mutate(lambda d: _apply(d))
+    assert store.mutate(lambda d: _ignore(_apply(d)))
     assert store.load()["items"]["agent:a1"]["state"] == "available"
     assert (
         sorted(
@@ -47,7 +52,7 @@ def test_a_corrupt_file_is_quarantined_and_rebuilt_not_fatal(tmp_path: Path) -> 
     store.path.write_text("{oops")
     assert store.load()["items"] == {}
     assert list(store.path.parent.glob("status.json.corrupt-*"))
-    assert store.mutate(lambda d: _apply(d))
+    assert store.mutate(lambda d: _ignore(_apply(d)))
 
 
 def test_a_crashed_updating_writer_reads_as_failed_after_five_minutes() -> None:
@@ -66,7 +71,7 @@ def test_backoff_numbers_and_the_six_attempt_stop() -> None:
         21600,
         21600,
     ]
-    doc: dict = {}
+    doc: dict[str, Any] = {}
     item = _apply(doc)
     for _ in range(6):
         st.record_failure(item, "provider-error/quota", "slow down", rng=mid)
@@ -75,7 +80,7 @@ def test_backoff_numbers_and_the_six_attempt_stop() -> None:
 
 
 def test_failure_classes_follow_the_table() -> None:
-    doc: dict = {}
+    doc: dict[str, Any] = {}
     item = _apply(doc)
     st.record_failure(item, "merge-refused", "both changed")
     assert item["state"] == "available" and item["auto_retry"] is False  # a human decides
@@ -92,7 +97,7 @@ def test_failure_classes_follow_the_table() -> None:
 
 
 def test_a_new_remote_fingerprint_rearms_everything_a_human_had_stopped() -> None:
-    doc: dict = {}
+    doc: dict[str, Any] = {}
     item = _apply(doc)
     st.record_failure(item, "merge-refused", "x")
     assert item["auto_retry"] is False
@@ -101,14 +106,14 @@ def test_a_new_remote_fingerprint_rearms_everything_a_human_had_stopped() -> Non
 
 
 def test_no_credential_is_informational_not_a_failure() -> None:
-    doc: dict = {}
+    doc: dict[str, Any] = {}
     item = _apply(doc)
     item = _apply(doc, verdict="unavailable", reason="no-credential")
     assert item["state"] == "available" and item["error_class"] is None and item["attempts"] == 0
 
 
 def test_a_404_stays_visible_as_failed_and_is_throttled_for_a_day() -> None:
-    doc: dict = {}
+    doc: dict[str, Any] = {}
     item = _apply(doc, verdict="unavailable", reason="hub-item-missing", detail="gone")
     assert item["state"] == "failed" and not st.check_due(item)
     assert st.check_due(item, datetime.now(timezone.utc) + timedelta(hours=25))
@@ -122,7 +127,7 @@ def test_manual_retry_ignores_the_schedule_and_clears_the_counters() -> None:
 
 
 def test_items_whose_row_is_gone_are_pruned() -> None:
-    doc: dict = {}
+    doc: dict[str, Any] = {}
     _apply(doc)
     st.prune_items(doc, set())
     assert doc["items"] == {}
@@ -157,5 +162,16 @@ def test_nothing_is_written_under_the_real_home(tmp_path: Path, monkeypatch) -> 
 
     real_home = tmp_path / "realhome"
     monkeypatch.setenv("HOME", str(real_home))
-    st.StatusStore(tmp_path / "cfg").mutate(lambda d: _apply(d))
+    st.StatusStore(tmp_path / "cfg").mutate(lambda d: _ignore(_apply(d)))
     assert not real_home.exists()
+
+
+def test_scrub_redacts_real_token_shapes_not_just_the_length() -> None:
+    """R5: the persisted ``last_error`` is built from provider/hub exception text."""
+
+    # Assembled at runtime so no secret-shaped literal sits in the source.
+    jwt = ".".join(["eyJ" + "a" * 20, "eyJ" + "b" * 20, "c" * 20])
+    api_key = "sk-" + "proj-" + "Z9" * 20
+    text = st.scrub(f"401 Authorization: Bearer {jwt} for key {api_key}\nretry")
+    assert jwt not in text and api_key not in text
+    assert "\n" not in text and "retry" in text

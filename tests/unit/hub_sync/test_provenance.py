@@ -138,3 +138,20 @@ def test_the_baseline_is_absent_from_an_agent_export_archive(tmp_path: Path) -> 
         names = z.namelist()
     assert names, "the archive must not be empty for this to prove anything"
     assert not any("baseline" in n or n.endswith(f"agent-{row.id}.json") for n in names)
+
+
+def test_prune_keeps_a_record_the_caller_cannot_confirm_gone(tmp_path: Path) -> None:
+    prov.write_baseline(
+        tmp_path,
+        prov.make_record(
+            "team",
+            "racing",
+            "h",
+            None,
+            prov.team_fields(description="", manager="m", members=[], instructions="i", project=""),
+            "pull",
+        ),
+    )
+    assert prov.prune(tmp_path, "team", set(), confirmed_absent=lambda _id: False) == []
+    assert prov.read_baseline(tmp_path, "team", "racing") is not None
+    assert prov.prune(tmp_path, "team", set(), confirmed_absent=lambda _id: True) == ["racing"]

@@ -223,16 +223,18 @@ class AgentParams(BaseModel):
             "being a role. Ignored on update: a profile cannot change kind."
         ),
     )
-    # A plain enum with an empty-string "unset", not ``Literal[...] | None``: the
-    # optional form costs an ``anyOf`` null branch on EVERY session's tools array
-    # (the same ~55 characters the old ``force`` bool avoided), and ``scripts/
-    # bench_context_budget.py`` gates the schema's size. ``""`` is "no decision":
-    # the merge runs and a genuine conflict is left for the user. There is no
-    # ``replace`` here on purpose — a model must never be able to discard the
-    # user's copy of a role.
-    resolve: Literal["", "local", "remote"] = Field(
+    # A plain string with an empty-string "unset", NOT ``Literal["", ...]`` and not
+    # ``Literal[...] | None``: an empty-string enum member is rejected by the
+    # Gemini-family providers (``tests/unit/tools/test_registry.py`` pins that no
+    # built-in schema emits one), and the optional form costs an ``anyOf`` null
+    # branch on EVERY session's tools array while ``scripts/bench_context_budget.py``
+    # gates the schema's size. The accepted values are validated in ``_op_sync``.
+    # ``""`` is "no decision": the merge runs and a genuine conflict is left for the
+    # user. There is no ``replace`` here on purpose — a model must never be able to
+    # discard the user's copy of a role.
+    resolve: str = Field(
         default="",
-        description="sync: pick a side for a hub conflict.",
+        description="sync: local|remote picks a side for a hub conflict.",
     )
 
 
@@ -1036,6 +1038,14 @@ async def _op_sync(
     word a caller typed.
     """
 
+    side = (resolve or "").strip().lower()
+    if side not in ("", "local", "remote"):
+        return _error(
+            tool_call_id,
+            "agent",
+            f"resolve must be 'local' or 'remote' (got {resolve!r}); "
+            "leave it out to let conflicts wait for the user.",
+        )
     registry = _registry(context)
     if registry is None:
         return _error(
@@ -1066,12 +1076,17 @@ async def _op_sync(
             logger.warning("hub credential resolution failed; syncing local starters only")
             return seed.render()
         ctx.agent_registry = registry
-        hub = svc.apply_items(
-            ctx,
-            kind="agent",
-            names=names,
-            prefer=resolve or "none",  # type: ignore[arg-type]
-        )
+        try:
+            hub = svc.apply_items(
+                ctx,
+                kind="agent",
+                names=names,
+                prefer="local" if side == "local" else "remote" if side == "remote" else "none",
+            )
+        except svc.HubBusy as busy:
+            # Another process is mid-update: report it beside the local starters
+            # rather than failing the whole sync.
+            return seed.render() + f"\n\nHub updates not run: {busy}"
         hub_names = {r.name.lower() for r in hub.reports}
         seed_only = SyncReport(
             entries=tuple(

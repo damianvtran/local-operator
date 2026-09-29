@@ -6,11 +6,14 @@ manual mode too (the runner keeps checking whichever way ``hub.auto_update.*``
 is set). Every mutation runs through ``receipts(request).run(..., retry_safe=True)``
 like ``profiles/sync``, so a lost response is replayed rather than re-run.
 
-Check and apply go through ``app.state.hub_sync`` (the runner) when the daemon
-has one, so the timer and the buttons share ONE lock and cannot double-apply;
-without one (a bare router in a test) they build a one-shot service context from
-the same pieces. There is no third path: classification, merging and wording all
-live in ``local_operator.hub_sync.service``.
+Check and apply run through ``app.state.hub_sync.run_exclusive`` (the runner)
+when the daemon has one, so a button press queues behind a running tick on the
+runner's ONE in-process lock; ``service.apply_items`` additionally takes the
+cross-process lease (a CLI run or a second daemon), and a lease that stays held
+past its wait answers 409. Without a runner (a bare router in a test) the work
+runs on a one-shot service context built from the same pieces — still under the
+lease. There is no third path: classification, merging and wording all live in
+``local_operator.hub_sync.service``.
 
 Imported lazily inside handlers: this module is mounted on every ``lop serve``
 boot and the hub stack (registries, ``requests`` clients, the merge core) is dead
@@ -20,7 +23,7 @@ weight until someone asks (the server-shape guard in ``tests/unit/test_import_gr
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Literal
+from typing import Any, Callable, Literal, TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field
@@ -44,6 +47,7 @@ from local_operator.server.routes.desktop_sessions import (
 router = APIRouter(tags=["Desktop hub"], dependencies=[Depends(require_desktop)])
 
 Kind = Literal["agent", "team"]
+T = TypeVar("T")
 
 
 class HubCheck(Input):
@@ -76,21 +80,34 @@ class HubRetry(Input):
     name: str = Field(min_length=1, max_length=128)
 
 
-async def _context(
-    request: Request, config_manager: ConfigManager, provider_auth_store: AuthStore
-) -> Any:
+async def _run(
+    request: Request,
+    config_manager: ConfigManager,
+    provider_auth_store: AuthStore,
+    work: Callable[[Any], T],
+) -> T:
+    """Run ``work(ctx)`` (synchronous, blocking) under the runner's lock when there is one.
+
+    ``HubBusy`` (another process holds the update lease) is the caller's 409: the
+    request did nothing and is safe to repeat.
+    """
+
     from local_operator.hub_sync import service as svc
 
     runner = getattr(request.app.state, "hub_sync", None)
-    if runner is not None:
-        return await runner.context()
-    for_tenant, credential = await svc.build_clients(config_manager, provider_auth_store)
-    return svc.HubSyncContext(
-        config_dir=config_manager.config_dir,
-        config_manager=config_manager,
-        client_for_tenant=for_tenant,
-        credential=credential,  # type: ignore[arg-type]
-    )
+    try:
+        if runner is not None:
+            return await runner.run_exclusive(work)
+        for_tenant, credential = await svc.build_clients(config_manager, provider_auth_store)
+        ctx = svc.HubSyncContext(
+            config_dir=config_manager.config_dir,
+            config_manager=config_manager,
+            client_for_tenant=for_tenant,
+            credential=credential,  # type: ignore[arg-type]
+        )
+        return await asyncio.to_thread(work, ctx)
+    except svc.HubBusy as busy:
+        raise _refusal(409, str(busy)) from None
 
 
 def _refusal(status: int, message: str) -> HTTPException:
@@ -148,17 +165,19 @@ async def check(
 
     from local_operator.hub_sync import service as svc
 
-    async def mutate() -> dict[str, Any]:
-        ctx = await _context(request, config_manager, provider_auth_store)
+    def work(ctx: Any) -> dict[str, Any]:
         kinds = (body.kind,) if body.kind else ("agent", "team")
         names = [body.name] if body.name else None
-        checks = await asyncio.to_thread(svc.check_items, ctx, kinds=kinds, names=names)
+        checks = svc.check_items(ctx, kinds=kinds, names=names)
         if body.name and not checks:
             raise _refusal(404, f"no linked {body.kind or 'item'} named {body.name!r}")
         return {
             "reports": [svc.check_report(c).to_json() for c in checks],
-            "status": await asyncio.to_thread(svc.status_snapshot, ctx),
+            "status": svc.status_snapshot(ctx),
         }
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
 
     async with errors(request):
         return reply(
@@ -187,15 +206,11 @@ async def apply(
     if body.replace and body.prefer:
         raise _refusal(422, "pass either prefer or replace, not both")
 
-    async def mutate() -> dict[str, Any]:
-        ctx = await _context(request, config_manager, provider_auth_store)
-        checks = await asyncio.to_thread(
-            svc.check_items, ctx, kinds=(body.kind,), names=[body.name]
-        )
+    def work(ctx: Any) -> dict[str, Any]:
+        checks = svc.check_items(ctx, kinds=(body.kind,), names=[body.name])
         if not checks:
             raise _refusal(404, f"no linked {body.kind} named {body.name!r}")
-        report = await asyncio.to_thread(
-            svc.apply_items,
+        report = svc.apply_items(
             ctx,
             kind=body.kind,
             checks=checks,
@@ -207,8 +222,11 @@ async def apply(
         _raise_for(report.reports)
         return {
             "reports": [r.to_json() for r in report.reports],
-            "status": await asyncio.to_thread(svc.status_snapshot, ctx),
+            "status": svc.status_snapshot(ctx),
         }
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
 
     async with errors(request):
         return reply(
@@ -233,14 +251,16 @@ async def apply_all(
 
     from local_operator.hub_sync import service as svc
 
-    async def mutate() -> dict[str, Any]:
-        ctx = await _context(request, config_manager, provider_auth_store)
-        report = await asyncio.to_thread(svc.apply_items, ctx, kind=body.kind, all_available=True)
+    def work(ctx: Any) -> dict[str, Any]:
+        report = svc.apply_items(ctx, kind=body.kind, all_available=True)
         return {
             "reports": [r.to_json() for r in report.reports],
             "counts": report.counts(),
-            "status": await asyncio.to_thread(svc.status_snapshot, ctx),
+            "status": svc.status_snapshot(ctx),
         }
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
 
     async with errors(request):
         return reply(
@@ -261,23 +281,21 @@ async def retry(
 
     from local_operator.hub_sync import service as svc
 
-    async def mutate() -> dict[str, Any]:
-        ctx = await _context(request, config_manager, provider_auth_store)
-        await asyncio.to_thread(svc.clear_retry, ctx, body.kind, body.name)
-        checks = await asyncio.to_thread(
-            svc.check_items, ctx, kinds=(body.kind,), names=[body.name]
-        )
+    def work(ctx: Any) -> dict[str, Any]:
+        svc.clear_retry(ctx, body.kind, body.name)
+        checks = svc.check_items(ctx, kinds=(body.kind,), names=[body.name])
         if not checks:
             raise _refusal(404, f"no linked {body.kind} named {body.name!r}")
         auto = ctx.settings().auto_for(body.kind)
-        report = await asyncio.to_thread(
-            svc.apply_items, ctx, kind=body.kind, checks=checks, auto=True, dry_run=not auto
-        )
+        report = svc.apply_items(ctx, kind=body.kind, checks=checks, auto=True, dry_run=not auto)
         _raise_for(report.reports)
         return {
             "reports": [r.to_json() for r in report.reports],
-            "status": await asyncio.to_thread(svc.status_snapshot, ctx),
+            "status": svc.status_snapshot(ctx),
         }
+
+    async def mutate() -> dict[str, Any]:
+        return await _run(request, config_manager, provider_auth_store, work)
 
     async with errors(request):
         return reply(

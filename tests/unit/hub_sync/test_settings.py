@@ -49,3 +49,15 @@ def test_bad_types_fall_back_to_the_default_and_the_interval_is_clamped() -> Non
     assert (
         HubSyncSettings.from_config(_cm({"hub": {"check_interval_min": True}})).interval_min == 60
     )
+
+
+def test_read_fresh_sees_a_write_from_another_manager(tmp_path) -> None:
+    """A long-lived manager holds what it loaded at boot; the LIVE section must not."""
+
+    from local_operator.config import ConfigManager
+
+    held = ConfigManager(tmp_path)
+    assert HubSyncSettings.from_config(held).auto_agents is True
+    ConfigManager(tmp_path).set_config_value("hub", {"auto_update": {"agents": False}})
+    assert HubSyncSettings.from_config(held).auto_agents is True  # stale by construction
+    assert HubSyncSettings.read_fresh(held).auto_agents is False

@@ -22,11 +22,13 @@ not the merged result: local edits that survived the merge are then still
 "local edits since base", and a section the user deleted stays a local removal
 against the very remote text they declined to keep. That differs from the
 design's literal "B := text now identical on both sides" only when local edits
-survive a merge (then no such text exists) and is recorded in the design doc.
+survive a merge (then no such text exists). Recorded in the design doc as the
+amendment under A2.2 and Implementation note 9.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import difflib
 import json
 import re
@@ -204,8 +206,11 @@ class MergeResult:
     merged: "str | list[Any]"
     regions: tuple[RegionReport, ...] = ()
     warnings: tuple[str, ...] = ()
-    counts: Mapping[str, int] = field(default_factory=dict)
-    engine: EngineInfo = field(default_factory=EngineInfo)
+    # ``dataclasses.field``, not the bare name: this class declares a FIELD called
+    # ``field`` (the merged field's name), which shadows the imported function inside
+    # the class body and made the defaults unbound.
+    counts: Mapping[str, int] = dataclasses.field(default_factory=dict)
+    engine: EngineInfo = dataclasses.field(default_factory=EngineInfo)
     #: The hub's rule text when ``outcome == "refused"``.
     refusal: str = ""
     kind: str = "markdown"
@@ -1206,7 +1211,7 @@ def replace_field(inp: FieldInput, *, take: Literal["local", "remote"]) -> Merge
 
     keep, drop = (inp.remote, inp.local) if take == "remote" else (inp.local, inp.remote)
     if isinstance(keep, str):
-        keep_n, drop_n, local_n = seg.norm(keep), seg.norm(drop), seg.norm(str(inp.local))
+        keep_n, drop_n, local_n = seg.norm(keep), seg.norm(str(drop)), seg.norm(str(inp.local))
     else:
         keep_n, drop_n, local_n = keep, drop, inp.local
     changed = keep_n != local_n

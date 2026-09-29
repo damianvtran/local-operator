@@ -1,9 +1,10 @@
 """The periodic hub check/apply runner (design B3.2, B3.3).
 
 One :class:`HubSyncRunner` per ``lop serve`` daemon, started from the server
-lifespan as a single asyncio task. The routes call the SAME object
-(``check_now``/``apply``), so the timer, the buttons and (through the shared
-service) the CLI cannot diverge about what a check or an update is.
+lifespan as a single asyncio task. The desktop routes run their work through the
+SAME object (:meth:`run_exclusive`), so the timer and the buttons queue on one
+lock, and (through the shared service) the CLI cannot diverge about what a check
+or an update is.
 
 "AUTO ON" vs "MANUAL" BOTH KEEP CHECKING (requirement). ``hub.auto_update.*``
 false means the runner still checks and records ``available`` — that is what
@@ -16,9 +17,13 @@ QUIET BY CONSTRUCTION. ``run_forever`` never raises; every tick catches per item
 nothing here logs above WARNING except a once-per-item-per-class summary. A
 missing login is not a failure.
 
-NO DOUBLE APPLY, three layers: one runner per daemon plus an ``asyncio.Lock``;
-a cross-process lease so a second daemon or a CLI run skips an item another
-process is merging; and the apply's own under-lock fingerprint re-verify.
+NO DOUBLE APPLY, three layers: one runner per daemon plus an ``asyncio.Lock``
+(the timer and every route go through it); a cross-process, heartbeat-renewed
+lease that EVERY writer takes — the tick here, and ``service.apply_items`` for the
+routes, the CLI and the ``agent`` tool — so a second daemon or a CLI run waits
+(or, for the timer, skips) instead of merging the same item; and the apply's own
+under-lock fingerprint re-verify, which is what stays airtight for teams and a
+narrow window for agents (design Q4).
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ import asyncio
 import logging
 import random
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence, TypeVar
 
 from local_operator.hub_sync import service as svc
 from local_operator.hub_sync import store as st
@@ -37,12 +42,19 @@ from local_operator.hub_sync.settings import HubSyncSettings
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
 #: Startup delay so a daemon boot is never blocked or slowed by a network pass.
 STARTUP_DELAY_S = 45.0
 STARTUP_JITTER_S = 15.0
 #: At most this many items per tick, oldest ``last_checked`` first (B3.3).
 MAX_ITEMS_PER_TICK = 50
 CHECK_CONCURRENCY = 2
+#: Ceiling on a whole tick's CHECK phase. Each request already has its own socket
+#: timeout (``check.REQUEST_TIMEOUT_S``); this is the belt for a hang those cannot
+#: see. A check is read-only, so abandoning its worker threads is safe — unlike an
+#: apply, which is never abandoned mid-write.
+CHECK_PHASE_TIMEOUT_S = 300.0
 #: Interval jitter, +-10 %.
 INTERVAL_JITTER = 0.10
 #: First tick after an upgrade marks items available but applies nothing
@@ -118,7 +130,7 @@ class HubSyncRunner:
                 logger.warning("hub update tick failed", exc_info=True)
             reason = "timer"
             try:
-                minutes = HubSyncSettings.from_config(self._cm).interval_min
+                minutes = HubSyncSettings.read_fresh(self._cm).interval_min
             except Exception:  # noqa: BLE001
                 minutes = 60
             delay = minutes * 60 * random.uniform(1 - INTERVAL_JITTER, 1 + INTERVAL_JITTER)
@@ -161,7 +173,7 @@ class HubSyncRunner:
             logger.debug("hub update credential: %s", ctx.credential)
             self._last_credential = ctx.credential
 
-        settings = HubSyncSettings.from_config(self._cm)
+        settings = HubSyncSettings.read_fresh(self._cm)
         links = await asyncio.to_thread(list_links, ctx.agents(), ctx.teams())
         if not links:
             report.skipped = "no-linked-items"
@@ -177,7 +189,15 @@ class HubSyncRunner:
             self.last_tick = report
             return report
         try:
-            checks = await self._check_bounded(ctx, picked)
+            try:
+                checks = await asyncio.wait_for(
+                    self._check_bounded(ctx, picked), timeout=CHECK_PHASE_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                report.skipped = "check-timeout"
+                logger.warning("hub update check did not finish in %.0fs", CHECK_PHASE_TIMEOUT_S)
+                self.last_tick = report
+                return report
             report.checked = len(checks)
             report.available = sum(1 for c in checks if c.verdict == "available")
             grace = await asyncio.to_thread(self._first_run_grace, ctx)
@@ -275,42 +295,29 @@ class HubSyncRunner:
 
         ctx.store().mutate(fold)
 
-    # -- route/CLI entries ---------------------------------------------------------------
+    # -- route entries -------------------------------------------------------------------
+
+    async def run_exclusive(self, fn: Callable[[svc.HubSyncContext], T]) -> T:
+        """Run ``fn(ctx)`` in a worker thread while holding the runner's lock.
+
+        The desktop routes use this for every check and apply, so a button press
+        queues behind a running tick (and vice versa) instead of both computing
+        the same merge. ``fn`` is synchronous and may raise; ``service.apply_items``
+        additionally takes the cross-process lease, so this lock only orders the
+        in-process callers. Nothing here swallows an exception: the caller maps it.
+        """
+
+        async with self._lock:
+            ctx = await self._context()
+            return await asyncio.to_thread(fn, ctx)
 
     async def check_now(
         self, *, kind: Literal["agent", "team", "all"] = "all", names: Sequence[str] | None = None
     ) -> list[Any]:
         """A user-requested check: applies nothing, ignores the schedule (B5.1)."""
 
-        async with self._lock:
-            ctx = await self._context()
-            kinds = ("agent", "team") if kind == "all" else (kind,)
-            return await asyncio.to_thread(svc.check_items, ctx, kinds=kinds, names=names)
-
-    async def apply(
-        self,
-        kind: str | None,
-        names: Sequence[str] | None = None,
-        *,
-        all_available: bool = False,
-        prefer: str = "none",
-        replace: str | None = None,
-        acknowledge_unknown_baseline: bool = False,
-        dry_run: bool = False,
-    ) -> Any:
-        async with self._lock:
-            ctx = await self._context()
-            return await asyncio.to_thread(
-                svc.apply_items,
-                ctx,
-                kind=kind,
-                names=names,
-                all_available=all_available,
-                prefer=prefer,  # type: ignore[arg-type]
-                replace=replace,  # type: ignore[arg-type]
-                acknowledge_unknown_baseline=acknowledge_unknown_baseline,
-                dry_run=dry_run,
-            )
+        kinds = ("agent", "team") if kind == "all" else (kind,)
+        return await self.run_exclusive(lambda ctx: svc.check_items(ctx, kinds=kinds, names=names))
 
     async def context(self) -> svc.HubSyncContext:
         return await self._context()

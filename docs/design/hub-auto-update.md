@@ -121,7 +121,18 @@ write (temp + `os.replace`, the `monitors/state.py:155-175` shape). Schema:
 
 Writers (the ONLY writers): pull/import, publish, and a successful merge apply
 (either direction). After any of these, **B := the text now identical on both
-sides**. Agents keep their existing `hub:`/`hub_sha256:` tags too (they remain
+sides**.
+
+> **Amended after the pull-side implementation (Implementation note 9): the
+> "identical" clause holds only when no local edit survives the merge.** After a
+> merge that KEEPS local edits (or local deletions) no text is identical on both
+> sides. The rule that is actually normative, and that the shared vectors encode, is
+> **B := the REMOTE text that was integrated** (for a pull-merge) and **B := the
+> LOCAL text that was published** (for a push-merge). Recording the merged result
+> instead would make every surviving local edit read as "unchanged since base" and
+> let the next hub edit to that region overwrite it. When L == R (the common
+> no-conflict case) the two formulas coincide, which is why the letter of the
+> sentence above was never contradicted by a vector. Agents keep their existing `hub:`/`hub_sha256:` tags too (they remain
 the cheap "is this row linked/clean?" probe and are read by the CLI/tool today);
 the baseline record adds the text. The tag and the record must agree; on
 disagreement the record's fingerprint wins and the tag is repaired at the next
@@ -215,6 +226,15 @@ atoms absent from B):
    whitespace tokens, accepting pairs with ratio ≥ **0.60**, greedy by
    descending ratio, ties broken by lowest index. Pairs matched in step 2 are
    "*modified*", in step 1 "*unchanged*".
+
+   > **Amended (Implementation note 10): the similarity function is
+   > `max(token ratio, character ratio, containment)`, not the bare whitespace-token
+   > ratio.** Threshold `0.60` and the sentence splitter are unchanged and remain part
+   > of the contract. With whitespace tokens alone `x.` vs `x2.` scores 0 and `Be
+   > brief.` vs `Be brief and cite sources.` scores 0.29, so vectors V01, V06, V07 and
+   > V08 could never align and every edit would read as delete+add. The reference
+   > implementation is `hub_sync/segment.py::similarity`; the push side imports it,
+   > it does not re-implement it.
 3. A region present in only some of B/L/R aligns as a region of all-∅ on the
    missing sides (so a deleted region is a set of removed atoms + a removed
    heading).
@@ -1480,13 +1500,18 @@ Each is the smallest change code reality forced; none alters Part A.
 3. **`AgentRegistry` still has no lock (Q4).** The agent fingerprint re-check is a narrow-window
    guard. Teams re-verify under `TeamRegistry`'s writer lock via
    `update_team(..., precondition=...)`, which is airtight.
-4. **Model-facing `agent` tool: `resolve` is `Literal["", "local", "remote"]` with `""` unset**,
-   not `... | None` (an `anyOf` null branch costs bytes on every session's tools array). It maps
-   to `prefer` only; the tool has no `replace`. The seed arm's `--force` is unchanged and is
-   still not reachable by the model: a refused edited starter points at `op='reset'`.
+4. **Model-facing `agent` tool: `resolve` is a plain `str` (default `""` = unset), validated to
+   `"" | "local" | "remote"` in `_op_sync`**, not `... | None` (an `anyOf` null branch costs bytes
+   on every session's tools array) and not `Literal["", ...]` (an empty-string enum member is
+   rejected by the Gemini-family providers; `tests/unit/tools/test_registry.py` pins that no
+   built-in schema emits one). It maps to `prefer` only; the tool has no `replace`. The seed arm's
+   `--force` is unchanged and is still not reachable by the model: a refused edited starter
+   points at `op='reset'`.
 5. **`profiles/sync` payload:** the seed arm keeps `entries`/`summary`; the hub arm reports under
-   `hub` (the merge service's `ApplyReport`). `force` is honoured only with `confirm_replace`
-   (422 otherwise) because it now means `replace`.
+   `hub` (the merge service's `ApplyReport`). `force` on the hub arm means `replace`, so it is
+   honoured only with `confirm_replace`; the 422 is raised only when the hub arm would actually
+   reach a hub-pulled agent, so an old client that sends `force` for the seed arm alone keeps
+   working (it gets the hub arm as a plain merge).
 6. **V2 has a content check** beyond key tokens: a covered side's newly added words must mostly
    appear in the merged text, otherwise a proposal that returns just the base sentence "covers"
    both sides and passes.
@@ -1494,3 +1519,33 @@ Each is the smallest change code reality forced; none alters Part A.
 8. **Runner auth store:** the lifespan passes a provider for the desktop login's `AuthStore`
    (created lazily by the first authenticated request); before that the resolver opens a
    short-lived store itself.
+9. **Baseline after a pull-merge is the REMOTE text integrated, not the merged result** (amends
+   A2.2, see the note there). `merge.py` and `service._advance_baseline` implement it; the push
+   side must record the LOCAL text it published in the mirror-image case.
+10. **Atom similarity is `max(token ratio, character ratio, containment)`** (amends A4.1, see the
+    note there). Forced by vectors V01/V06/V07/V08; `segment.py::similarity` is the single
+    implementation and the push side imports it.
+11. **Prompt chunking (B2.6.3) is not implemented; B2.6.1/2/4 are.** A conflict group is one atom
+    triple (a single base/local/remote sentence or bullet), so there is no group to halve: on
+    `prompt-too-long` the resolver sheds the OPTIONAL context (neighbouring regions) once and
+    retries, and a second failure degrades per B2.6.4 (`failed`, no auto-retry until the remote
+    text changes). Revisit only if a single atom can exceed a model's window.
+12. **Cross-process single-flight is enforced in `service.apply_items`, not only in the runner.**
+    Every writer (runner tick, desktop routes, `lop agents|teams sync`, the `agent` tool) holds the
+    `RunnerLease`; a heartbeat thread renews it every TTL/3 (the TTL bounds only a CRASHED holder).
+    A caller that cannot get it within `LEASE_WAIT_S` (30 s) gets `HubBusy` (HTTP 409 / a CLI error
+    line); the timer skips the tick instead. The routes additionally serialise on the runner's
+    `asyncio.Lock` via `HubSyncRunner.run_exclusive`. Checks write only `status.json`, which has
+    its own file lock, and do not take the lease. The agent fingerprint re-check still has the
+    narrow window of Q4 (it reads through the registry's 5 s cache when a live registry is
+    injected), so the lease, not the re-check, is what stops two merges of one agent.
+13. **Per-request hub timeout (B3.3, 20 s)** is a socket timeout the check path passes to
+    `download_agent_from_marketplace(timeout=)` / `get_team(timeout=)`, plus a 300 s ceiling on the
+    whole check phase of a tick. It is opt-in on the client, so interactive pulls behave as before.
+14. **Team baselines are pruned only when the team is confirmed absent on disk** (no `teams/<id>`
+    and no `.<id>.*` staging/backup sibling), never from the listing alone: `TeamRegistry._load`
+    skips a row mid-swap and reads as empty on an `iterdir` error.
+15. **Status semantics:** `applied` is kept for exactly one check cycle (`applied_seen`), then
+    reverts to `up-to-date`; `last_error` is scrubbed by credential SHAPE (`redaction_shapes`),
+    since it is built from provider exception text that no client scrubs; an explicit `--replace`
+    / `force` acts on a copy that differs from the hub even when the hub has not moved.

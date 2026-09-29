@@ -661,7 +661,16 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: and ``tests/unit/aida/test_aida_supervisor_hold.py`` pins the supervisor skip.
 #: The per-key scope caveat — pause acts at once, the rest are read when she next
 #: acts — is stated in the section description the page renders.
+#: ``hub`` is host-owned in the same shape: nothing is read off a session
+#: attribute. The hub update runner (a daemon task, not a ``Session``) re-reads the
+#: four keys from disk at the top of every tick and before every interval sleep
+#: (``HubSyncSettings.read_fresh``), so a write from ANOTHER process lands within one
+#: tick. That live half is proven where it lives:
+#: ``tests/unit/hub_sync/test_runner.py`` (a runner holding a stale ``ConfigManager``
+#: follows a write made through a second one) and
+#: ``tests/unit/hub_sync/test_settings.py`` (``read_fresh`` sees another manager's write).
 HOST_OWNED_LIVE_SECTIONS = {
+    "hub",
     "appearance",
     "runtime",
     "approvals",

@@ -6,7 +6,8 @@ the same three texts merge differently depending on direction, which is exactly
 what the shared vectors (``tests/fixtures/hub_merge/vectors.json``) exist to catch.
 
 Two deliberate deviations from the design's letter, both forced by the
-vectors it ships (and recorded in the design doc):
+vectors it ships (recorded in the design doc: the amendment under A4.1 and
+Implementation note 10):
 
 * The similarity of two atoms is the MAX of a token ratio (words AND
   punctuation are tokens, so ``brief.`` and ``brief`` share ``brief``), a

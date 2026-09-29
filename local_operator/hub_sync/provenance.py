@@ -31,7 +31,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from local_operator.hub_sync.segment import norm
 
@@ -286,8 +286,22 @@ def delete_baseline(config_dir: Path, kind: Kind, local_id: str) -> None:
         logger.debug("could not remove baseline for %s %s", kind, local_id, exc_info=True)
 
 
-def prune(config_dir: Path, kind: Kind, live_ids: set[str]) -> list[str]:
-    """Drop records whose local item is gone (deletes are not hooked; this is the sweep)."""
+def prune(
+    config_dir: Path,
+    kind: Kind,
+    live_ids: set[str],
+    *,
+    confirmed_absent: Callable[[str], bool] | None = None,
+) -> list[str]:
+    """Drop records whose local item is gone (deletes are not hooked; this is the sweep).
+
+    A baseline is the guard against silently re-adding what the user deleted, so
+    it must never be destroyed on a listing that can be transiently short (a
+    registry read that raced a save, or failed and read as empty). When
+    ``confirmed_absent`` is given, a record is dropped only if it ALSO answers
+    True for that id — i.e. the item is confirmed gone on disk at prune time,
+    not merely missing from ``live_ids``.
+    """
 
     removed: list[str] = []
     directory = baselines_dir(config_dir)
@@ -297,7 +311,7 @@ def prune(config_dir: Path, kind: Kind, live_ids: set[str]) -> list[str]:
         return removed
     for path in entries:
         local_id = path.name[len(kind) + 1 : -len(".json")]
-        if local_id not in live_ids:
+        if local_id not in live_ids and (confirmed_absent is None or confirmed_absent(local_id)):
             try:
                 path.unlink()
                 removed.append(local_id)

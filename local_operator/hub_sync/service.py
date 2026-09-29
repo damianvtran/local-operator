@@ -16,6 +16,16 @@ there is no agent registry lock, design Q4), that the row still equals the
 snapshot the merge was computed from; (4) a backup of the local fields is written
 BEFORE any change; (5) a large shrink forces ``needs-review`` under auto-update.
 
+ONE WRITER AT A TIME, ACROSS PROCESSES. :func:`apply_items` takes the
+:class:`~local_operator.hub_sync.store.RunnerLease` (heartbeat-renewed) for the
+whole run unless it is a dry run, so the runner tick, the desktop routes, ``lop
+agents|teams sync`` and the ``agent`` tool cannot compute and write the same item
+concurrently (double model spend, double write). The daemon's routes additionally
+serialise on the runner's ``asyncio.Lock`` (``HubSyncRunner.run_exclusive``) so a
+button press queues behind a running tick instead of waiting out the lease. A
+CHECK writes only ``status.json``, which has its own file lock; it does not take
+the lease.
+
 PARTIAL APPLY. Deliberately not done: an item is applied whole or not at all. The
 design lets an agent's ``description`` apply while an ``instructions`` region is
 unresolved; that needs per-field baselines and is listed as a follow-up rather
@@ -25,11 +35,12 @@ human resolves the item).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
 from local_operator.hub_sync import check as chk
 from local_operator.hub_sync import provenance as prov
@@ -56,8 +67,38 @@ TEAM_ROSTER_MAX = 64
 Prefer = Literal["none", "local", "remote"]
 
 
+#: How long an interactive caller waits for another process's update run before
+#: refusing. Long enough to ride out a short tick, short enough that a click never
+#: appears hung (the lease TTL is the bound for a CRASHED holder, not for this).
+LEASE_WAIT_S = 30.0
+
+
 class ConcurrentEdit(Exception):
     """The row changed between the snapshot and the write; nothing was written."""
+
+
+class HubBusy(Exception):
+    """Another process holds the update lease; nothing was checked or written."""
+
+
+@contextlib.contextmanager
+def exclusive(ctx: "HubSyncContext", wait_s: float | None = None) -> Iterator[None]:
+    """Hold the cross-process update lease, or raise :class:`HubBusy` after ``wait_s``.
+
+    Blocking (it polls); async callers reach it through ``asyncio.to_thread``.
+    """
+
+    lease = st.RunnerLease(ctx.config_dir)
+    # Resolved at call time so a test (or an operator override) can shorten it.
+    if not lease.acquire(LEASE_WAIT_S if wait_s is None else wait_s):
+        raise HubBusy(
+            "another hub update is running (the update runner or a second `lop` process); "
+            "try again in a moment"
+        )
+    try:
+        yield
+    finally:
+        lease.release()
 
 
 @dataclass
@@ -93,7 +134,7 @@ class HubSyncContext:
         return TeamRegistry(self.config_dir)
 
     def settings(self) -> HubSyncSettings:
-        return HubSyncSettings.from_config(self.config_manager)
+        return HubSyncSettings.read_fresh(self.config_manager)
 
     def store(self) -> st.StatusStore:
         return st.StatusStore(self.config_dir)
@@ -392,8 +433,9 @@ def _missing_roles(ctx: HubSyncContext, results: Sequence[MergeResult]) -> tuple
     """A roster naming a role nobody has installed is a warning, never a refusal (A7)."""
 
     roster = next((r for r in results if r.field == "members" and r.outcome == "merged"), None)
-    if roster is None:
-        return ()
+    if roster is None or isinstance(roster.merged, str):
+        return ()  # a roster is always a list; the str arm only narrows the type
+    slots = roster.merged
     try:
         from local_operator.agent_profiles import list_seeds
 
@@ -404,7 +446,7 @@ def _missing_roles(ctx: HubSyncContext, results: Sequence[MergeResult]) -> tuple
         return ()
     return tuple(
         f"missing-role:{slot['role']}"
-        for slot in roster.merged  # type: ignore[union-attr]
+        for slot in slots
         if slot["kind"] == "agent" and slot["role"].casefold() not in known
     )
 
@@ -498,7 +540,18 @@ def apply_one(
             error_class=c.reason,
             message=c.detail,
         )
-    if c.verdict == "up-to-date":
+    # An EXPLICIT replace acts on a copy that differs from the hub even when the hub
+    # has not moved (classification ``local-only``, which a plain pull reads as
+    # up-to-date): "discard my edits, take the hub's" is the main reason anyone
+    # asks for it, and the old ``--force`` did exactly that. Truly equal texts
+    # (L == R) still have nothing to replace.
+    replace_differs = (
+        replace is not None
+        and c.remote is not None
+        and c.local is not None
+        and c.local_fp != c.remote_fp
+    )
+    if c.verdict == "up-to-date" and not replace_differs:
         return ItemMergeReport(c.kind, c.local_id, c.name, c.hub_id, "up-to-date")
 
     report = merge_item(
@@ -605,6 +658,38 @@ def apply_items(
     are ignored there so a batch can never discard anyone's work.
     """
 
+    kwargs: dict[str, Any] = dict(
+        kind=kind,
+        names=names,
+        all_available=all_available,
+        prefer=prefer,
+        acknowledge_unknown_baseline=acknowledge_unknown_baseline,
+        replace=replace,
+        dry_run=dry_run,
+        auto=auto,
+        checks=checks,
+        allow_llm=allow_llm,
+    )
+    if dry_run:
+        return _apply_items_locked(ctx, **kwargs)  # writes nothing, so no lease
+    with exclusive(ctx):
+        return _apply_items_locked(ctx, **kwargs)
+
+
+def _apply_items_locked(
+    ctx: HubSyncContext,
+    *,
+    kind: str | None,
+    names: Sequence[str] | None,
+    all_available: bool,
+    prefer: Prefer,
+    acknowledge_unknown_baseline: bool,
+    replace: Literal[None, "remote", "local"],
+    dry_run: bool,
+    auto: bool,
+    checks: Sequence[chk.ItemCheck] | None,
+    allow_llm: bool,
+) -> ApplyReport:
     if all_available:
         prefer, replace = "none", None
     kinds = (kind,) if kind else ("agent", "team")
@@ -637,19 +722,13 @@ def apply_items(
         reports.append(report)
         cls = report.error_class
         if cls and cls != "merge-refused":
-            sub = _subclass_of(report)
-            label = f"{cls}/{sub}" if sub else cls
-            if cls in ("no-credential", "model-unavailable") or label in st.SYSTEMIC:
-                stopped = label
+            # ``error_class`` already carries the subclass ("provider-error/quota",
+            # from ``failure_class``): appending it again produced
+            # "provider-error/quota/quota", which is in no set, so a quota error
+            # never stopped the run.
+            if cls in st.SYSTEMIC:
+                stopped = cls
     return ApplyReport(tuple(reports))
-
-
-def _subclass_of(report: ItemMergeReport) -> str | None:
-    for r in report.fields:
-        fc = r.engine.failure_class
-        if fc and "/" in fc:
-            return fc.split("/", 1)[1]
-    return None
 
 
 # -- status snapshot (store read, no network) --------------------------------------------
