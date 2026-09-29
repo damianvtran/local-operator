@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from textual import events
+from textual.css.query import NoMatches
 
 from local_operator.session.attached import AttachedSession
 from local_operator.session.frontend_state import FrontendModelSpec
@@ -484,6 +485,75 @@ async def test_session_navigation_retires_queued_startup_choice(
         await pilot.pause()
         assert handle.calls == [], "a cancelled choice cannot reach the outgoing owner"
         assert "owner ran /model" not in _transcript_text(app)
+
+
+@pytest.mark.asyncio
+async def test_a_paint_that_outlives_the_ui_is_dropped(tmp_path, monkeypatch):
+    """A frontend paint landing after shutdown began must not query the tree.
+
+    ``App._shutdown`` clears ``_running`` BEFORE ``_close_all`` prunes the
+    widget tree, and Textual flushes pending callbacks after every dispatch —
+    so a paint scheduled by the attach client (which outlives the UI) can be
+    invoked with the composer already gone. That is a real crash, not a
+    shutdown-ordering detail: CI run 36449068218's ``[model-spawn]`` cell above
+    died exactly here, ``NoMatches: No nodes match 'Editor'`` re-raised out of
+    ``run_test``.
+
+    Both halves are deliberate. The late-delivery task exercises the real
+    flush (it releases the paint from outside the pump, the way a socket delta
+    does); the direct call at the end pins the guard deterministically — it
+    presents the same state a final flush would, so an unguarded paint fails it
+    every run rather than most runs.
+    """
+    async with _held_startup(tmp_path, monkeypatch, "spawn") as (
+        app,
+        _pilot,
+        _viewer,
+        _handle,
+        _release,
+    ):
+        delivered: list[bool] = []
+
+        async def deliver_while_quitting() -> None:
+            while app.is_running:
+                await asyncio.sleep(0.001)
+            # Shutdown has begun. Wait for the composer itself to go: that is
+            # the instant an unguarded paint would die, so delivering after it
+            # targets the crash window instead of racing it.
+            while True:
+                try:
+                    app._editor()
+                except NoMatches:
+                    break
+                await asyncio.sleep(0.001)
+            # Deliver the way the attach client does: schedule the paint on the
+            # app, to be flushed with whatever dispatch comes next — the last
+            # of which is inside `_shutdown`, after the prune.
+            app._pending_frontend_session = app._session
+            # A model identity change is the CI branch (it queries the editor);
+            # force it whatever the session's labels are.
+            app._last_frontend_model_identity = ("late-delta-sentinel", "")
+            app.call_next(
+                app._apply_pending_frontend_state,
+                getattr(app, "_frontend_session_generation", 0),
+            )
+            delivered.append(True)
+
+        task = asyncio.get_running_loop().create_task(deliver_while_quitting())
+
+    await asyncio.wait_for(task, timeout=10)
+    assert delivered == [True], "the late delivery never reached the shutdown window"
+
+    # The deterministic half: the same paint, invoked with the app shut down
+    # (is_running False) and the tree pruned, as a very late flush would. The
+    # pending session is the app's own (the attach client outlives the UI, so
+    # its session object does too); the sentinel identity forces the
+    # model-identity branch that queries the editor.
+    late = app._session
+    assert late is not None, "the app dropped its session before the late delivery"
+    app._pending_frontend_session = late
+    app._last_frontend_model_identity = ("late-delta-sentinel", "")
+    app._apply_pending_frontend_state(getattr(app, "_frontend_session_generation", 0))
 
 
 @pytest.mark.asyncio
