@@ -1386,6 +1386,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.replace",
         "temp FILE -> search index FILE",
     ),
+    # -- transcript index cache (derived, regenerable; never a session entry) --
+    # Both paths are built from `config_dir()/cache/transcript_index/<sid>.json`
+    # — the CACHE root beside `sessions/`, never inside a session directory —
+    # and `_sweep_missing` refuses anything but a `*.json` FILE whose session
+    # directory is already gone: it unlinks the FILE, never a directory.
+    (
+        "local_operator/session/transcript_index.py::write_index",
+        "<path>.replace",
+        "temp FILE -> transcript index FILE under the cache root",
+    ),
+    (
+        "local_operator/session/transcript_index.py::_sweep_missing",
+        "<path>.unlink",
+        "a *.json cache FILE whose session directory is gone; suffix-guarded",
+    ),
     (
         "local_operator/session/transcript.py::Transcript._write_entries",
         "<path>.unlink",
@@ -2324,6 +2339,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
+        "local_operator/session/transcript_index.py::write_index",  # tmp -> index FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int
