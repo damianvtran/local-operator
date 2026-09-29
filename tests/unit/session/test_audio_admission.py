@@ -44,6 +44,7 @@ from local_operator.harness.types import (
     StreamEndEvent,
 )
 from local_operator.session.errors import AudioInputUnsupported
+from local_operator.session.session import AUDIO_OMITTED_NOTICE
 
 from .test_session import MODEL, ScriptedStream, make_session
 
@@ -368,3 +369,119 @@ async def test_dispose_cancels_a_forked_sidecar(tmp_path, monkeypatch):
     assert all(
         task.cancelled() or task.done() for task in pending
     ), "dispose must cancel and settle every task the fork registered"
+
+
+@pytest.mark.asyncio
+async def test_a_switch_to_an_incapable_model_omits_the_recording_at_render(tmp_path):
+    """The history strip, capability half (agent review round 1, M2b).
+
+    A session switched onto a model that takes no audio must not send the
+    recording (a paid provider refusal) and must not leave a silent hole; the
+    ROW keeps its block, and switching back restores it on the next render —
+    acceptance reads the CURRENT spec, so nothing is sticky.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, model=AUDIO_MODEL)
+
+    await session.prompt("listen", audio=_audio())
+    await _wait_for(lambda: not session.is_streaming)
+    session.set_model(MODEL)  # the tape spec: supports_audio_input False
+    await session.prompt("and now?")
+
+    sent = [block for message in stream.requests[-1].messages for block in message.content]
+    assert not any(
+        isinstance(block, AudioContent) for block in sent
+    ), "an incapable model was sent the recording"
+    assert any(
+        getattr(block, "text", None) == AUDIO_OMITTED_NOTICE for block in sent
+    ), "the model was left with a silent hole"
+
+    # The transcript was never stripped: the ROW (and its data) still carries
+    # the recording.
+    rows = [r["payload"] for r in _message_rows(tmp_path)]
+    assert any(
+        block.get("type") == "audio" for payload in rows for block in (payload.get("content") or [])
+    ), "the transcript lost its recording"
+
+    session.set_model(AUDIO_MODEL)
+    await session.prompt("again")
+    restored = [block for message in stream.requests[-1].messages for block in message.content]
+    assert any(
+        isinstance(block, AudioContent) for block in restored
+    ), "switching back to a capable model must restore the recording"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_switch_to_a_wire_that_cannot_carry_the_format_omits_it(tmp_path):
+    """The history strip, format half: the M2 wedge, reached by a switch.
+
+    Webm is carryable on Gemini's wire and NOT on the chat wire, so a model
+    switch between them used to leave the block in every request render — the
+    renderer would raise ``WireCannotCarryAudio`` on the first send and every
+    one after (zero HTTP calls). The strip now replaces it with the notice,
+    and switching back restores it.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamEndEvent(stop_reason="stop")],
+            [StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, model=GOOGLE_AUDIO_MODEL)
+    webm = [AudioContent(data=WAV, mime_type="audio/webm")]
+
+    await session.prompt("listen", audio=webm)
+    await _wait_for(lambda: not session.is_streaming)
+    session.set_model(OPENAI_AUDIO_MODEL)  # chat wire: wav|mp3 only
+    await session.prompt("and now?")
+
+    sent = [block for message in stream.requests[-1].messages for block in message.content]
+    assert not any(
+        isinstance(block, AudioContent) for block in sent
+    ), "the chat wire would have raised on every request from here on"
+    assert any(getattr(block, "text", None) == AUDIO_OMITTED_NOTICE for block in sent)
+
+    session.set_model(GOOGLE_AUDIO_MODEL)
+    await session.prompt("again")
+    restored = [block for message in stream.requests[-1].messages for block in message.content]
+    assert any(
+        isinstance(block, AudioContent) for block in restored
+    ), "Gemini's wire carries webm; the restore must return it"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_live_context_rebuild_keeps_the_recording(tmp_path):
+    """``keep_images=True`` suspends the strip, like the image capability one.
+
+    The compaction rebuild must not bake THIS model's omission into
+    ``_context.messages`` — the next request re-renders (``keep_images=False``)
+    and strips then.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, model=AUDIO_MODEL)
+
+    await session.prompt("listen", audio=_audio())
+    await _wait_for(lambda: not session.is_streaming)
+    session.set_model(MODEL)
+
+    kept = session._render_history(list(session._context.messages), keep_images=True)
+    assert any(
+        isinstance(block, AudioContent) for message in kept for block in message.content
+    ), "the live-context rebuild lost the recording"
+    sent = session._render_history(list(session._context.messages))
+    assert not any(isinstance(block, AudioContent) for message in sent for block in message.content)
+    assert any(
+        getattr(block, "text", None) == AUDIO_OMITTED_NOTICE
+        for message in sent
+        for block in message.content
+    )
+    await session.dispose()
