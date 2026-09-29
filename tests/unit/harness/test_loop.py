@@ -5661,3 +5661,167 @@ async def test_a_runaway_follow_up_still_ends_the_run_as_a_named_cut_off():
     assert end.aborted is True
     # Bounded: the guard fired rather than the pipeline spinning to the cap.
     assert len(stream.requests) <= 6
+
+
+# ---------------------------------------------------------------------------
+# Nameless tool calls (incident 2026-09-29): dropped at assembly, model re-asked
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_nameless_tool_call_cannot_kill_the_run():
+    """Live defect: a tool call whose name fragment never arrived was assembled
+    with name "" and kept. It executed as an unknown tool, and the NEXT request
+    replayed the row, which a strict provider refused as a whole body (HTTP 400
+    ``tool_calls[0].function.name must be a non-empty string``). That refusal is
+    non-retryable and ended a 44-step run as ``stop_reason: error`` with no
+    finish. The call must now be dropped where it enters the transcript, the
+    model re-asked once, and the run must complete."""
+    executed: list[str] = []
+
+    class ValidatingStream(ScriptedStream):
+        """A provider that validates the body the way the live one did: one
+        nameless call in the history refuses the WHOLE request."""
+
+        def __call__(self, request, signal):
+            for message in request.messages:
+                for call in message.tool_calls:
+                    if not call.name.strip():
+                        raise ProviderError(
+                            400,
+                            "tool_calls[0].function.name must be a non-empty "
+                            "string (got empty string)",
+                        )
+            return super().__call__(request, signal)
+
+    stream = ValidatingStream(
+        [
+            [
+                # The name fragment never arrives; only argument deltas do.
+                tool_call_delta(0, id="call_n1", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [
+                tool_call_delta(0, id="call_n2", name="echo", args='{"text":"ok"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[echo_tool(executed)])
+    loop = AgentLoop()
+
+    events = []
+    async for event in loop.run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    # The run survived: it ended on its own terms, not on a provider refusal.
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is None and end.aborted is False
+    assert executed == ["echo"]
+    # The model was told why it was re-asked, in the harness's own words.
+    notices = [event.text for event in events if isinstance(event, NoticeEvent)]
+    assert any("without a tool name" in text for text in notices), notices
+    reasked = any(
+        isinstance(message, Message)
+        and message.role == "user"
+        and "arrived without a tool name" in message.text
+        for message in stream.requests[1].messages
+    )
+    assert reasked, "the recovery message must reach the next model call"
+    # No request ever carried a nameless call -- the raising validator is armed.
+    for request in stream.requests:
+        for message in request.messages:
+            assert all(call.name.strip() for call in message.tool_calls)
+
+
+@pytest.mark.asyncio
+async def test_nameless_call_recovery_is_bounded():
+    """A model that keeps emitting nameless calls gets two re-asks, not an
+    unbounded relay: each nudge is a model call, and a third silent drop ends
+    the turn instead."""
+
+    def nameless_turn(call_id: str) -> list[StreamEvent]:
+        return [tool_call_delta(0, id=call_id, args="{}"), StreamEndEvent(stop_reason="toolUse")]
+
+    stream = ScriptedStream(
+        [
+            nameless_turn("n1"),
+            nameless_turn("n2"),
+            nameless_turn("n3"),
+            [StreamTextDelta(delta="never reached"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[])
+    messages = await AgentLoop().run_to_end(
+        [Message.user("go")], context, make_config(stream), None
+    )
+
+    recoveries = [
+        message
+        for message in messages
+        if isinstance(message, Message)
+        and message.role == "user"
+        and "arrived without a tool name" in message.text
+    ]
+    assert len(recoveries) == 2
+    # Two re-asks, then the third drop ends the turn without a fourth call.
+    assert len(stream.requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_missing_required_argument_is_refused_but_never_fatal():
+    """The incident's companion family: ``apply_actions`` arrived as ``{}``
+    twice ("Invalid arguments: missing required argument 'actions'"), was
+    refused per call, and the run CONTINUED — that part is correct and this
+    pins it: the refusal is a normal tool result, nothing ends the run."""
+    executed: list[str] = []
+
+    def required_text_tool() -> AgentTool:
+        async def execute(tool_call_id, args, signal, on_update, context):
+            executed.append("ran")
+            return ToolResult(
+                tool_call_id=tool_call_id,
+                tool_name="echo",
+                content=[TextContent(text=args.get("text", ""))],
+            )
+
+        return AgentTool(
+            name="echo",
+            parameters={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+            concurrency="shared",
+            execute=execute,
+        )
+
+    stream = ScriptedStream(
+        [
+            [
+                tool_call_delta(0, id="c1", name="echo", args="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [
+                tool_call_delta(0, id="c2", name="echo", args='{"text":"ok"}'),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    context = LoopContext(tools=[required_text_tool()])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is None and end.aborted is False
+    assert executed == ["ran"]
+    first_result = next(
+        message for message in stream.requests[1].messages if message.role == "tool"
+    )
+    assert first_result.is_error
+    assert "missing required argument 'text'" in first_result.text

@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import email.utils
+import functools
 import json
 import logging
 import math
@@ -1730,11 +1731,21 @@ def _replayable_tool_arguments(call: ToolCall) -> dict[str, Any]:
     try:
         parsed = json.loads(call.raw_arguments)
     except json.JSONDecodeError:
-        logger.warning(
-            "tool call %s (%s) carries unparseable raw arguments; "
-            "replaying parsed arguments instead",
+        # ONCE per corrupt call, not once per request: this parse runs at the
+        # replay boundary for every call in the whole history on every request,
+        # and an audit of one run counted 221 such lines for 8 distinct calls —
+        # which reads as 221 incidents and buries the shape. Deduplicated
+        # lines make N mean N, and the fragment's first bytes name the
+        # corruption a later reader would otherwise have to reproduce.
+        _log_once(
+            "tool call %s (%s) carries unparseable raw arguments "
+            "(%d bytes, starts %r); replaying parsed arguments instead — the "
+            "fragment is permanent in the transcript and is salvaged on "
+            "every later request",
             call.id,
             call.name,
+            len(call.raw_arguments),
+            call.raw_arguments[:80],
         )
         return call.arguments
     # A non-object parse (a bare string or list from a confused model) is just
@@ -1812,6 +1823,95 @@ def _is_empty_assistant(message: Message) -> bool:
     if any(isinstance(block, ImageContent) for block in message.content):
         return False
     return not message.text.strip()
+
+
+@functools.lru_cache(maxsize=1024)
+def _log_once(message: str, *args: object) -> None:
+    """Emit ``logger.warning(message, *args)`` once per distinct warning.
+
+    The replay boundary runs for every call in the whole history on every
+    request, so a warning about one PERSISTENT condition fires dozens of
+    times: one run's log carried 221 ``unparseable raw arguments`` lines for
+    8 distinct calls, and a reader counting lines counts incidents that are
+    not distinct (that is how a third of one run's calls were repaired in
+    flight without anyone noticing). Deduplicating here makes N lines mean N
+    problems, which is what a later investigation must be able to do before
+    it can say anything about frequency.
+
+    Keyed on the formatted text, so callers pass the call's identity in
+    ``args`` (hashable values only — strings, ints) and get exactly one line
+    per distinct repair. The cache is bounded so a long-lived server cannot
+    grow it without bound; eviction can only ever cost one extra line for an
+    ancient call.
+    """
+    logger.warning(message, *args)
+
+
+def _without_unrenderable_tool_calls(messages: Sequence[Message]) -> Sequence[Message]:
+    """The history as far as any wire may render it: no nameless tool calls.
+
+    A tool call whose name never arrived is a call no provider accepts. The
+    OpenAI family answers the WHOLE REQUEST with an HTTP 400,
+    ``tool_calls[0].function.name must be a non-empty string (got empty
+    string)`` (measured live 2026-09-29 on the benchmark fleet — the run had
+    spent 44 steps and $5.10 when the identical rebuilt body ended it with
+    ``stop_reason: error`` and no finish), and the Anthropic and Google wires
+    reject an empty ``tool_use`` / ``functionCall`` name the same way.
+    Unlike a truncated ARGUMENT — which ``_replayable_tool_arguments`` can
+    salvage to ``{}`` — an empty NAME is unsalvageable: it is the call's
+    identity, and inventing one would put a call in the model's history that
+    the model never made.
+
+    So the call is dropped — together with every tool result answering it,
+    because a result whose call is gone is an orphan, and strict providers
+    reject an orphan exactly as they reject the empty name. Dropped at the
+    RENDER boundary rather than repaired in the transcript, for the same
+    reason ``_is_empty_assistant`` drops dead turns here: rows written before
+    this guard existed are already in sessions on disk, and a render-side
+    repair fixes those too (the transcript keeps its record; every build of
+    any request is cleaned).
+
+    Every distinct dropped call logs ONE warning naming it, so a later reader
+    can count repairs instead of rediscovering them — the failure mode this
+    family shipped with, where a per-request log made 8 corrupt calls read as
+    221.
+
+    Messages that need no repair pass through BY IDENTITY; this runs on every
+    request, and consumers downstream (native replay, the Google pairing
+    pass) compare messages and key calls by id.
+    """
+    dropped_ids: set[str] = set()
+    for message in messages:
+        if message.role != "assistant" or not message.tool_calls:
+            continue
+        for call in message.tool_calls:
+            # ``strip()`` as well as truthiness: a whitespace-only name is as
+            # unusable on a wire as an empty one, and no registered tool name
+            # carries surrounding whitespace. Names with INTERIOR characters
+            # no provider pattern allows are a different class — the registry
+            # validates names and the model can only pick from the wire list —
+            # deliberately not folded in here.
+            if call.name.strip():
+                continue
+            dropped_ids.add(call.id)
+            _log_once(
+                "tool call %s has no name and cannot be rendered on any wire; "
+                "dropping it and its result from this request (the transcript "
+                "keeps the row; every request is repaired)",
+                call.id or "<no id>",
+            )
+    if not dropped_ids:
+        return messages
+    out: list[Message] = []
+    for message in messages:
+        if message.role == "assistant" and message.tool_calls:
+            kept = [call for call in message.tool_calls if call.name.strip()]
+            if len(kept) != len(message.tool_calls):
+                message = message.model_copy(update={"tool_calls": kept})
+        elif message.role == "tool" and (message.tool_call_id or "") in dropped_ids:
+            continue
+        out.append(message)
+    return out
 
 
 def _deepseek_tool_images(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1974,7 +2074,7 @@ def _messages_to_openai_responses(
 ) -> list[dict[str, Any]]:
     """Render harness history as Responses input items, including tool turns."""
     items: list[dict[str, Any]] = []
-    for message in messages:
+    for message in _without_unrenderable_tool_calls(messages):
         if model is not None:
             native = replay_items(message, model, endpoint, "openai-responses", scope)
             if native is not None:
@@ -2374,7 +2474,7 @@ class OpenAICompatClient:
         # one boundary where the wire history is rendered, and real recorded
         # reasoning always wins over the placeholder.
         echo_turns = 0
-        for message in request.messages:
+        for message in _without_unrenderable_tool_calls(request.messages):
             entry = self._replay_chat_message(message, request.model, endpoint, scope)
             # DeepSeek tool requests replay ALL prior native reasoning, even a
             # reasoning-only turn. Validate provenance before retaining it: a
@@ -3662,7 +3762,7 @@ class AnthropicClient:
 
     def _build_body(self, request: ChatRequest, *, oauth: bool = False) -> dict[str, Any]:
         messages: list[dict[str, Any]] = []
-        for message in request.messages:
+        for message in _without_unrenderable_tool_calls(request.messages):
             # Anthropic 400s on an assistant message whose content array is
             # empty, which is exactly what an errored/aborted model turn
             # replays as. Same drop as the OpenAI paths; see
@@ -4001,7 +4101,7 @@ class GoogleClient:
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
-        for message in request.messages:
+        for message in _without_unrenderable_tool_calls(request.messages):
             if message.role != "tool":
                 last_tool_result = False
             native = replay_items(message, request.model, self._base_url, "google-content", scope)
