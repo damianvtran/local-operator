@@ -250,9 +250,9 @@ two briefs the individual agents never hard-code: a *collaboration* brief (how
 this group works together, who blocks a release) and a *project* brief (what
 product this instance owns). Swap the project brief and the same roster staffs
 a different product. A roster slot can name another team (`team:<name>`), so a
-team becomes an org of teams; `/team chart <name>` draws it as an org chart
-(nested teams show as `(declared)` until a manager can actually delegate into
-them). `lop teams list` is empty until you create one.
+team becomes an org of teams; `/team chart <name>` draws it as an org chart.
+Nesting is live: `task(agent="team:<name>")` starts that sub-team's manager,
+with its own roster and briefs. `lop teams list` is empty until you create one.
 
 <p align="center">
   <img src="./static/ui-teams.png" alt="The desktop app's Agents and teams page with the release-crew team open: its name and description, manager agent (architect), members (coder ×2, reviewer ×1), collaboration instructions, and project brief; the page's own list shows the release-crew and docs-pod teams." width="720">

@@ -409,6 +409,28 @@ class Team(BaseModel):
         return "\n\n".join(parts) + "\n\n"
 
 
+def escalation_preamble(reports_to: str) -> str:
+    """The chain-of-command line for a team launch or a launch below depth 1.
+
+    Stamped on every ``team:`` launch at ANY depth — a depth-1 lead reports to
+    the top session and needs the rule as much as a depth-3 worker — and on
+    every plain launch at depth >= 2 inside a team lineage (BEN-7-D4).
+
+    One source of truth for the no-push / no-secret / escalate rule. It is a
+    prompt-level rule, not enforcement: session-wide auto-approve reaches
+    delegated work, so a grandchild under ``--yolo`` has no human gate, and the
+    base Safety rules never say "escalate to your parent". Kept OUT of
+    ``member_preamble`` because depth-1 launch bytes are frozen (BEN-1 N0); the
+    wording is pinned by the N2 test, so edit both together.
+    """
+    return (
+        f"[chain of command] You report to {reports_to}, through hub. Do not push, "
+        "merge, deploy, release, delete data, or print secrets. When the work needs "
+        f"one of those, stop that step and escalate it to {reports_to} through hub "
+        "with what you would run and why.\n\n"
+    )
+
+
 def validate_team_id(team_id: str) -> str:
     """Return an ID that is exactly one safe filesystem path segment."""
     candidate = team_id or ""

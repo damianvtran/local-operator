@@ -28,6 +28,7 @@ from local_operator.compaction.thresholds import CompactionSettings
 from local_operator.config import ConfigManager
 from local_operator.config_watch import ConfigWatcher, _reset_for_tests, process_watcher
 from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
+from local_operator.harness.subagent import read_max_team_depth
 from local_operator.harness.types import (
     AbortSignal,
     ChatRequest,
@@ -514,6 +515,9 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     ),
     # -- subagents ---------------------------------------------------------------
     "subagents.max_running": (3, lambda s, w: s.jobs.max_running),
+    # Read at every launch by the resolver (BEN-7-D3), so the consumer IS the
+    # reader: there is no session state to push the value into.
+    "subagents.max_team_depth": (5, lambda s, w: read_max_team_depth()),
     # The policy key beside them, and the ONLY probe in this table that reads a
     # TOOL-BUILD product: ``subagents.models.*`` are launched-through (read per
     # spawn), while this one is baked into the ``task``/``agent`` schemas at
