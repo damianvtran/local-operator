@@ -1158,7 +1158,7 @@ class AttentionState(BaseModel):
     conversation_id: str
     completion_token: str | None
     anchor_id: str | None
-    kind: Literal["complete", "error", "interrupted", "closed"] | None
+    kind: Literal["complete", "error", "interrupted", "closed", "retired"] | None
     unseen: bool
     #: ``[published, acknowledged]`` -- monotonic per conversation, and
     #: independent of the runtime epoch, so it orders a conversation's own states

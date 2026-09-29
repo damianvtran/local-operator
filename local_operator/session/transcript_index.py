@@ -972,6 +972,15 @@ class _Derivation:
                 # earlier ``complete`` marker for the same turn must stand,
                 # which is exactly the masking this fix exists to stop.
                 continue
+            if marker_kind == "retired":
+                # RETIRE-FOR-BUILD (2026-09-29): the rail's vocabulary is
+                # frozen (``CheckpointOutcome``), so the kind is normalized to
+                # an EXISTING cut value — and ``interrupted`` (CircleSlash,
+                # warning) is the honest one: ``error`` is the failure framing
+                # this arm exists to remove, while the warning slash is the
+                # rail's "cut short" mark and matches the row's own warning
+                # tier. Eligibility keeps its usual no-claim rule below.
+                marker_kind = OUTCOME_INTERRUPTED
             outcomes[index] = marker_kind if eligible else None
 
         # Only markers bound to a run by token count as evidence: an orphan

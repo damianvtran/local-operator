@@ -833,6 +833,14 @@ def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSever
 #: drift from the row.
 CLOSED_NOTICE_TEXT = "Completed — runtime retired/disposed"
 
+#: The row a turn cut by a build drain paints — TRUTHFUL but DISTINGUISHED
+#: FROM A FAILURE (retire-for-build arm, 2026-09-29; seed 7e797aaaf6e7): the
+#: turn really was cut, but the update was routine and the operator asked for
+#: these transitions to stop reading as errors. One sentence shared by the TUI
+#: poller, the phone projection and the desktop notice, so no two surfaces can
+#: disagree about the same record.
+RETIRED_NOTICE_TEXT = "Retired for an update — a turn was in flight and was cut"
+
 
 def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]:
     """A RETURNED-TO turn's outcome row: its sentence and the ink it deserves.
@@ -866,6 +874,14 @@ def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]
         # whose output had already been delivered (v2 directive). The reason
         # is ignored on purpose — the closure has no sentence to explain.
         return CLOSED_NOTICE_TEXT, "info"
+    if kind == "retired":
+        # WARNING, NEVER DANGER (architect addendum, 2026-09-29): a latched
+        # build drain bounded by a signal sweep cut a live turn, and the row
+        # must say so in warning ink — the update was routine; the lost work
+        # is real but it is not a failure. The reason is ignored on purpose:
+        # the cause token survives in the store for readers that want it, and
+        # this row's one-line budget goes to the fact.
+        return RETIRED_NOTICE_TEXT, "warning"
     if kind == "error":
         text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
         return text, "error"

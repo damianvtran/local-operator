@@ -129,7 +129,7 @@ from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
-from local_operator.harness.rows import CLOSED_NOTICE_TEXT
+from local_operator.harness.rows import CLOSED_NOTICE_TEXT, RETIRED_NOTICE_TEXT
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
 
@@ -169,11 +169,27 @@ CONTEXT_COMPLETE = "Complete"
 CONTEXT_INPUT_REQUIRED = "Input required"
 CONTEXT_ATTENTION = "Needs attention"
 CONTEXT_INTERRUPTED = "Interrupted"
+#: The retire-for-build arm's own category (2026-09-29; seed 7e797aaaf6e7).
+#: REQUIRED to be a distinct entry rather than a synonym for error's "Needs
+#: attention", for the two reasons CONTEXT_INTERRUPTED documents next door:
+#: folding it into error would make every update-cut banner assert a failure
+#: (design round 1, D3), and the digest resolves a uniform set through this
+#: map — a shared value would make two DIFFERENT kinds resolve to one
+#: category, which its vocabulary test refuses. Unlike ``closed`` this kind
+#: MUST be registered: retired announces (a turn was cut and the user should
+#: know), and an unregistered kind resolves to "Complete"/"Task complete" —
+#: a lie, which is the defect class this whole vocabulary exists to avoid.
+CONTEXT_RETIRED = "Retired"
 BODY_COMPLETE = "Task complete"
 BODY_APPROVAL = "Waiting for approval"
 BODY_ASK = "Waiting for your answer"
 BODY_ERROR = "Stopped with an error"
 BODY_INTERRUPTED = "Stopped before finishing"
+#: The retire-for-build row's sentence, shared verbatim with ``rows.py`` (the
+#: module that owns this row on both surfaces) so the banner cannot drift
+#: from the row it stands for. Warning-tier in the row; the banner's own
+#: urgency comes from the kind, not from this string.
+BODY_RETIRED = RETIRED_NOTICE_TEXT
 #: The neutral post-completion closure's sentence (v2 directive, 2026-09-29).
 #: The words live in ``harness/rows.py`` — the module that owns this row on
 #: both surfaces — and are imported rather than retyped so the banner cannot
@@ -204,6 +220,7 @@ CONTEXTS: dict[str, str] = {
     "ask": CONTEXT_INPUT_REQUIRED,
     "error": CONTEXT_ATTENTION,
     "interrupted": CONTEXT_INTERRUPTED,
+    "retired": CONTEXT_RETIRED,
 }
 
 #: The digest's subtitle when the sessions it stands for did NOT all end the
@@ -255,7 +272,7 @@ def digest_subtitle(kinds: Sequence[str]) -> str:
 #: Notification kinds. ``complete`` is an edge the user may ignore; the two
 #: waiting kinds are edges the turn is BLOCKED on, which is why they are
 #: separated — see :func:`urgency_for`.
-NotifyKind = Literal["complete", "approval", "ask", "error", "interrupted"]
+NotifyKind = Literal["complete", "approval", "ask", "error", "interrupted", "retired"]
 
 #: Bodies keyed by kind, so a call site names the event rather than the prose.
 BODIES: dict[str, str] = {
@@ -265,6 +282,7 @@ BODIES: dict[str, str] = {
     "error": BODY_ERROR,
     "interrupted": BODY_INTERRUPTED,
     "closed": BODY_CLOSED,
+    "retired": BODY_RETIRED,
 }
 
 #: Title for a background completion whose session has no STORED name, and the
