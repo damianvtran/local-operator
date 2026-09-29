@@ -991,6 +991,58 @@ async def test_board_card_clicks_select_the_card(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_sentinel_bucket_answers_its_own_header_click(tmp_path: Path) -> None:
+    """R1-2/U1: two `no team` sections, and each header reaches its own."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="alpha", team="core"))
+    registry.create_project(ProjectEdit(name="binary", team="no team"))
+    registry.create_project(ProjectEdit(name="charlie", team="no team"))
+    registry.create_project(ProjectEdit(name="delta"))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "alpha")
+        assert [row["project"]["name"] for row in view._views] == [
+            "alpha",
+            "binary",
+            "charlie",
+            "delta",
+        ]
+        # rows: 0 core header, 1 alpha, 2 `no team` header, 3-4 its rows,
+        # 5 `no team (unset)` header, 6 delta
+        await pilot.click(view._canvas, offset=(5, 5))
+        await pilot.pause()
+        assert view.cursor == 3  # the teamless row, not the upper team
+        await pilot.click(view._canvas, offset=(5, 2))
+        await pilot.pause()
+        assert view.cursor == 1  # the real team's first row
+
+
+@pytest.mark.asyncio
+async def test_timeline_chart_header_click_lands_on_the_chart(tmp_path: Path) -> None:
+    """U3: the chart header targets its first DATED row, not the tail line."""
+    session = _ProjectSession()
+    registry = ProjectRegistry(tmp_path)
+    registry.create_project(ProjectEdit(name="aaa-notes", team="core"))
+    registry.create_project(ProjectEdit(name="zzz-ship", team="core", target_date="2026-10-04"))
+    session.project_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(140, 40)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "aaa-notes")
+        await pilot.press("3")
+        await pilot.pause()
+        assert view.view_type == "timeline"
+        # rows: 0 axis, 1 the section header, 2 zzz-ship's chart row, 3 blank,
+        # 4 the `no dates` tail line
+        await pilot.click(view._canvas, offset=(5, 1))
+        await pilot.pause()
+        assert view.cursor == 1  # zzz-ship's dated row, not the tail line
+
+
+@pytest.mark.asyncio
 async def test_a_grouped_reveal_accounts_for_the_header_rows(tmp_path: Path) -> None:
     session = _ProjectSession()
     session.project_registry = _grouped_registry(tmp_path)

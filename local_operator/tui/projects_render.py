@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Any, Callable, cast
+from typing import Any, Callable, NamedTuple, cast
 
 from rich.cells import cell_len
 from rich.style import Style
@@ -86,6 +86,13 @@ BOARD_COLUMN_LABELS: dict[str, str] = {"active": "in flight"}
 #: (the page's honest-tail convention: `no dates`, `no progress`), and the name
 #: the ruler and the section jumps address that bucket by.
 NO_TEAM_LABEL = "no team"
+
+#: The sentinel's label when a real team is literally named like it: two
+#: sections sharing one label would paint identically, and every reader (the
+#: ruler's count, the `· sel` clause, a header click) would be left guessing
+#: which `no team` is which. Only the collision pays for the qualifier, and it
+#: still says exactly what the bucket is — the team field, unset (R1-2/U1).
+NO_TEAM_UNSET_LABEL = "no team (unset)"
 
 #: One glyph per status — the SHAPE channel, chosen because the ink channel
 #: cannot separate seven statuses out of the five semantic tokens that fit
@@ -389,9 +396,14 @@ def sections_of(views: list[dict[str, Any]]) -> list[tuple[str, list[int]]] | No
     teams = sorted((team for team in buckets if team is not None), key=str.casefold)
     if not teams:
         return None
+    sentinel = NO_TEAM_LABEL
+    if any(team.casefold() == NO_TEAM_LABEL.casefold() for team in teams):
+        # Display disambiguation only; every behavioural reader keys on a
+        # band's position and its group, never on label equality (R1-2/U1).
+        sentinel = NO_TEAM_UNSET_LABEL
     order: list[str | None] = [*teams, None]
     return [
-        (team if team is not None else NO_TEAM_LABEL, buckets[team])
+        (team if team is not None else sentinel, buckets[team])
         for team in order
         if buckets.get(team)
     ]
@@ -1170,7 +1182,10 @@ def render_project_timeline(
             rows = [paint_dated(view) for view in section_dated]
             fill_width = max(cell_len(row.plain) for row in rows)
             start = len(lines)
-            lines.append(_section_header_text(label, len(section_dated), fill_width, resolver))
+            # The count is the SECTION's painted projects (dated + its tail) —
+            # the one number every surface shows for a team; the tail line's
+            # own parenthetical counts the names it lists (UX round 1, U2).
+            lines.append(_section_header_text(label, len(indexes), fill_width, resolver))
             lines.extend(rows)
             bands.append((start, len(lines), label))
 
@@ -1387,18 +1402,40 @@ def timeline_position(views: list[dict[str, Any]], cursor: int) -> tuple[int, in
 # every position against the painted lines.
 
 
+class _Band(NamedTuple):
+    """One painted section band, as the painters lay it out.
+
+    ``end`` is EXCLUSIVE. ``target`` is the project index a click on this
+    band's header selects — the first row of the block the header actually
+    heads (a mixed team's timeline chart header lands on its first DATED row,
+    not on an undated member's tail line; UX round 1, U3). ``group`` is the
+    index into :func:`sections_of`'s groups, so the ruler compares the
+    cursor's section with the band's by IDENTITY — a real team named
+    `no team` must never alias the sentinel bucket (R1-2/U1).
+    """
+
+    start: int
+    end: int
+    label: str
+    target: int
+    group: int
+
+
 def _bands_for(
     views: list[dict[str, Any]],
     view_type: str,
     *,
     cursor: int | None = None,
-) -> tuple[tuple[int, int, str], ...]:
+) -> tuple[_Band, ...]:
     """The section bands ``render_*`` paints, recomputed for hit tests.
 
-    ``(start_row, end_row, label)`` with ``end`` EXCLUSIVE, in paint order.
-    ``cursor`` matters on the board (a past-cap SELECTED card is painted past
-    the cap, which shifts later sections) — the same term the painters read.
-    Empty on an ungrouped canvas.
+    Built from the FULL ``views``, not a pre-capped list: the board's overflow
+    row exists when ``len(views) > PROJECTS_MAX`` and it shifts every row
+    after section 0 down by two, so a capped list here made the ruler drift on
+    >200-project boards (review round 1, R1-1). ``cursor`` matters on the
+    board (a past-cap SELECTED card is painted past the cap, which shifts
+    later sections) — the same term the painters read. Empty on an ungrouped
+    canvas.
     """
     rendered = views[:PROJECTS_MAX]
     groups = sections_of(rendered)
@@ -1408,26 +1445,26 @@ def _bands_for(
     if cursor is not None and 0 <= cursor < len(rendered):
         selected_id = str(_row(rendered[cursor]).get("id") or "")
     if view_type == "list":
-        bands: list[tuple[int, int, str]] = []
+        bands: list[_Band] = []
         y = 0
-        for label, indexes in groups:
+        for group_index, (label, indexes) in enumerate(groups):
             start = y
             y += 1 + len(indexes)
-            bands.append((start, y, label))
+            bands.append(_Band(start, y, label, indexes[0], group_index))
         return tuple(bands)
     if view_type == "board":
         bands = []
         y = 0
-        for index, (label, indexes) in enumerate(groups):
+        for group_index, (label, indexes) in enumerate(groups):
             section_views = [rendered[position] for position in indexes]
             columns = _columns_of(section_views, skip_empty=True)
             start = y
             y += 1 + _board_block_height(
                 columns,
                 selected_id=selected_id,
-                extra_note=index == 0 and len(views) > PROJECTS_MAX,
+                extra_note=group_index == 0 and len(views) > PROJECTS_MAX,
             )
-            bands.append((start, y, label))
+            bands.append(_Band(start, y, label, indexes[0], group_index))
         return tuple(bands)
     if view_type == "timeline":
         dated, undated = _split_dated(rendered)
@@ -1436,7 +1473,7 @@ def _bands_for(
         span = timeline_span(rendered)
         bands = []
         y = 1 if (span is not None and dated) else 0
-        for label, indexes in groups:
+        for group_index, (label, indexes) in enumerate(groups):
             section_dated = [
                 index
                 for index in indexes
@@ -1446,11 +1483,11 @@ def _bands_for(
                 continue
             start = y
             y += 1 + len(section_dated)
-            bands.append((start, y, label))
+            bands.append(_Band(start, y, label, section_dated[0], group_index))
         if undated:
             if y:
                 y += 1  # the blank line between the chart and the tail
-            for label, indexes in groups:
+            for group_index, (label, indexes) in enumerate(groups):
                 section_undated = [
                     index
                     for index in indexes
@@ -1458,7 +1495,7 @@ def _bands_for(
                 ]
                 if not section_undated:
                     continue
-                bands.append((y, y + 1, label))
+                bands.append(_Band(y, y + 1, label, section_undated[0], group_index))
                 y += 1
         return tuple(bands)
     return ()
@@ -1646,9 +1683,9 @@ def section_at(
     run from the section's header row through its last painted row (or tail
     line), the span the ruler tracks and the jumps address.
     """
-    for start, end, label in _bands_for(views, view_type, cursor=cursor):
-        if start <= y < end:
-            return label
+    for band in _bands_for(views, view_type, cursor=cursor):
+        if band.start <= y < band.end:
+            return band.label
     return None
 
 
@@ -1659,15 +1696,20 @@ def section_header_at(
     y: int,
     *,
     cursor: int | None = None,
-) -> str | None:
-    """The label when ``(x, y)`` is exactly a section HEADER row, else ``None``.
+) -> tuple[str, int] | None:
+    """``(label, target)`` when ``(x, y)`` is a section's header row.
 
-    Headers are the click targets that jump to a section (`section_at` would
-    also match a project row, which clicks handle as a selection).
+    ``target`` is the project index a click selects: the first row of the
+    block the header actually HEADS (a mixed team's timeline chart header
+    lands on its first DATED row, not on an undated member's tail line — UX
+    round 1, U3). A timeline tail line answers with its own first name, so
+    both bands of a split section are reachable by their own row. Headers are
+    the click targets that jump to a section (`section_at` would also match a
+    project row, which clicks handle as a selection).
     """
-    for start, _end, label in _bands_for(views, view_type, cursor=cursor):
-        if start == y:
-            return label
+    for band in _bands_for(views, view_type, cursor=cursor):
+        if band.start == y:
+            return (band.label, band.target)
     return None
 
 
@@ -1685,9 +1727,13 @@ def section_ruler(
     ``None`` means "no section at the viewport top" — an ungrouped canvas, the
     axis row, a blank separator, the truncation row — and the caller paints
     the shipped plain rule (design D2: the sticky counterpart is this ZERO-row
-    ruler, never faked motion). When the cursor sits in a DIFFERENT section
-    than the one at the viewport top, a dim ``· sel {team}`` clause says so.
-    Shed order (design §6): the sel clause first, then the count, then — only
+    ruler, never faked motion). The count is the SECTION's painted projects —
+    the one number every surface shows for a team (UX round 1, U2; the
+    timeline tail's own parenthetical counts the names it lists). When the
+    cursor sits in a DIFFERENT section than the one at the viewport top, a dim
+    ``· sel {team}`` clause says so; the comparison is by group IDENTITY, so a
+    real team named like the sentinel can never alias it (R1-2/U1). Shed
+    order (design §6): the sel clause first, then the count, then — only
     below the label's own fit — the label truncated with an ellipsis; the team
     name never simply vanishes.
     """
@@ -1696,19 +1742,23 @@ def section_ruler(
     groups = sections_of(rendered)
     if groups is None:
         return None
-    label_at: str | None = None
-    for start, end, label in _bands_for(rendered, view_type, cursor=cursor):
-        if start <= top_row < end:
-            label_at = label
+    hit: _Band | None = None
+    for band in _bands_for(views, view_type, cursor=cursor):
+        if band.start <= top_row < band.end:
+            hit = band
             break
-    if label_at is None:
+    if hit is None:
         return None
-    counts = {label: len(indexes) for label, indexes in groups}
+    label_at = hit.label
+    count_at = len(groups[hit.group][1])
     cursor_label: str | None = None
     if cursor is not None and 0 <= cursor < len(rendered):
-        for label, indexes in groups:
+        for group_index, (label, indexes) in enumerate(groups):
+            # IDENTITY, not the label: the cursor's OWN group is the one whose
+            # membership names it, whatever two sections happen to be called.
             if cursor in indexes:
-                cursor_label = label
+                if group_index != hit.group:
+                    cursor_label = label
                 break
 
     def fill(line: Text) -> Text:
@@ -1723,8 +1773,8 @@ def section_ruler(
         line.append(label_text, style=resolver("name"))
         tail = ""
         if with_count:
-            tail += f" · {counts.get(label_at, 0)} "
-        if with_sel and cursor_label is not None and cursor_label != label_at:
+            tail += f" · {count_at} "
+        if with_sel and cursor_label is not None:
             tail += f"· sel {cursor_label} "
         if not tail:
             # With the count (and sel) shed, keep a space so the label does
