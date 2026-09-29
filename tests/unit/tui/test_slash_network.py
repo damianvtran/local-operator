@@ -2294,7 +2294,9 @@ async def test_a_repair_notice_renders_in_this_device_block_or_not_at_all(
     # (its continuation repeats the row's own lead, so stitch it back and compare
     # the lot, rather than pinning where this build happens to break the line).
     assert "repair: laptop needs" in seen[True], seen[True]
-    flat = seen[True].replace("\n  repair: ", " ")
+    # The wrap is indent-only under the label (design round 1, D1), so the
+    # continuation is the lead's own cell count of spaces — stitch that back.
+    flat = seen[True].replace("\n" + " " * cell_len("  repair: "), " ")
     assert (
         "laptop needs '/mcp login https://mcp.example.com' here — its borrowed "
         "credential cannot be refreshed"

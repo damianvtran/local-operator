@@ -405,6 +405,11 @@ LocalCredentialOp = Literal[
     "net_credential_repair",    # ask the owner's human to re-run an interactive login
 ]
 
+#: TARGET-STATE SKETCH. One row is deliberately NOT built, and this is its pointer:
+#: the ``net_credential_repair`` op is retracted (§4.7) — the repair notice is
+#: DERIVED from the report row (`network/credentials/repair.py`); the other three
+#: ship, spelled ``credential_{grant,report,placement}`` (local ops, no prefix).
+
 #: PEER vocabulary. `net_broker` is RESERVED by `mesh-transport-identity.md`
 #: §6.4 with capability `broker_credential` (§7.1); this document fills in its
 #: body. One peer op with a `kind` discriminator, not four peer ops: the
