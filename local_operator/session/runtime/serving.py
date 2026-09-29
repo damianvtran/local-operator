@@ -364,6 +364,12 @@ class _PromptCommand:
     #: delivery, a compaction) before handing this command to ``Session.prompt``.
     #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
     wait_for_turn: bool = True
+    #: Silent input metadata (see ``Message.input_mode``) carried from the wire
+    #: to the durable row: set by the desktop composer for a dictation send and
+    #: for the reserved ``input_path`` route slot; ``None`` for every legacy
+    #: producer, which is what keeps the row byte-identical for them.
+    input_mode: str | None = None
+    input_path: str | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -2750,12 +2756,21 @@ class ServingSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
+        input_mode: str | None = None,
+        input_path: str | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
         wait_for_turn: bool = True,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``input_mode``/``input_path`` are the silent input metadata the
+        desktop composer sends for a dictation (see ``Message.input_mode``).
+        They ride the queue like the text does and are handed to
+        ``Session.prompt`` only when its signature takes them — the dispatch
+        above already made the same probe on this method, so an owner from
+        before the carriage never receives a keyword it would drop.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -2962,7 +2977,15 @@ class ServingSessionHandle(SessionHandle):
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
         command = _PromptCommand(
-            command_id, text, blocks, admitted, completed, harness_injected, wait_for_turn
+            command_id,
+            text,
+            blocks,
+            admitted,
+            completed,
+            harness_injected,
+            wait_for_turn,
+            input_mode=input_mode,
+            input_path=input_path,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -3644,6 +3667,10 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "input_mode" in parameters:
+                        fields["input_mode"] = command.input_mode
+                    if "input_path" in parameters:
+                        fields["input_path"] = command.input_path
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
@@ -3713,6 +3740,8 @@ class ServingSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
+        input_mode: str | None = None,
+        input_path: str | None = None,
     ) -> str:
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
@@ -3771,6 +3800,13 @@ class ServingSessionHandle(SessionHandle):
             fields["message_id"] = command_id
         if "producer_command_id" in parameters:
             fields["producer_command_id"] = command_id
+        # The silent input metadata rides the steer exactly as it rides a
+        # prompt: a mid-turn dictation keeps its provenance on the queued row,
+        # and a reduced session that predates the keywords gets neither.
+        if "input_mode" in parameters:
+            fields["input_mode"] = input_mode
+        if "input_path" in parameters:
+            fields["input_path"] = input_path
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
