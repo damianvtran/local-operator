@@ -1011,11 +1011,13 @@ beside the arm that produced it**, and the two are not comparable until their
 record formats converge.
 
 - **`reply` (default)** — the reply-channel loop whose mechanics this section
-describes below: the runner calls the model through its own client with
-`tool_choice="none"`, and the model answers with one strict JSON action
-batch. It reuses the central model/provider request path and the compaction
-engine, but it *deliberately* has no host shell/file tools and shares neither
-the TUI prompts, the skills, the guides, nor the tool registry —
+describes below: the runner calls the model through its own client, offering
+the reply envelope as the model's own tool channel (the only tool on the
+call) — `tool_choice="auto"` when the model's spec supports tool calls,
+`tool_choice="none"` otherwise — and a reply is one strict JSON action batch
+either way. It reuses the central model/provider request path and the
+compaction engine, but it *deliberately* has no host shell/file tools and
+shares neither the TUI prompts, the skills, the guides, nor the tool registry —
 MODEL_PILOT.md states the distinction as a standing rule ("The evaluated
 control loop is not the full interactive session"). Its record is the sealed
 evidence bundle (§6).
@@ -1024,18 +1026,28 @@ evidence bundle (§6).
 turn through `local_operator.sdk` — the same session object the TUI,
 `lop exec`, the desktop server and the mobile relay drive — so the session
 scaffolding (compaction, guides, skills discovery, the full tool registry
-including delegation) arrives by construction rather than by coincidence, and
-the episode's computer-use actions arrive as calls to a per-session MCP
-server (`local_operator/evaluation/action_server.py`). The launchd scratch
+including delegation — no team is provisioned into a fresh episode root; that
+provisioning is a deferred arm-design decision) arrives by construction
+rather than by coincidence, and the episode's computer-use actions arrive as
+calls to a per-session MCP server
+(`local_operator/evaluation/action_server.py`). The launchd scratch
 environment is required and REFUSED when missing, never defaulted (`HOME`,
 `LOCAL_OPERATOR_CONFIG_DIR`, `LOP_RUN_SCRATCH_ROOT`), and the episode session
 is confined to the run's scratch before any tool call can run
-(`Session.set_tool_confinement`; the residual list lives in
+(`Session.set_tool_confinement`; several registry tools refuse under
+confinement — the residual list lives in
 `local_operator/tools/confinement.py`). Its record is the pilot format —
 `local_operator/evaluation/session_arm.py`'s `events.jsonl`, `outcome.json`
 and `score.json` under an `ep-<id>-session` directory — NOT the sealed
 bundle, and it is not comparable to reply-arm results. Design and current
 status of record: `docs/design/sdk-engagement.md` §6 and §9.
+
+Deferred (pending the skills/confinement owners): skills discovery is not
+scratch-scoped the way tool execution is. `default_skill_roots` walks up from
+the session cwd regardless of `$HOME`, so a scratch home under the operator's
+own home lists their real `~/.local-operator/skills` among an episode's
+discovery roots — two operators with different skill sets produce different
+episode surfaces.
 
 Session-arm flags: `--session-route <provider>/<model>` (default: the episode
 route) and `--session-wall-s` (bounds the session's turn; past it the driver
