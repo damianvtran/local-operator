@@ -158,6 +158,53 @@ async def test_a_harness_injected_row_mounts_no_user_bubble() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_goal_continuation_row_never_mounts_a_user_bubble() -> None:
+    """The continuation FAMILY at the fold: stamped and legacy rows alike.
+
+    The live judge's row is stamped (``test_goal_judge_lifecycle`` pins that),
+    but a replayed transcript can also carry UNSTAMPED continuations — the spool
+    boundary dropped the marker for a whole fleet window, and the operator's
+    session holds ten such rows — so the recogniser is the legacy half of the
+    shared decision and it has to hold at the fold. Both rows must mount
+    nothing while staying whole in the history, and the answers they bought
+    must still render.
+    """
+    from local_operator.session.goal_judge import goal_continuation_prompt
+    from local_operator.tui.widgets.transcript import TranscriptView, UserBlock
+
+    continuation = goal_continuation_prompt("Ship it")
+    stamped = _injected(continuation)
+    legacy = Message.user(continuation)
+    session = FakeSession()
+    session._history = [
+        Message.user("keep going please"),
+        legacy,
+        Message(role="assistant", content=[TextContent(text="the deploy is green")]),
+        stamped,
+        Message(role="assistant", content=[TextContent(text="and the tests pass")]),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        # No manual fold: the app's own boot replays ``session.history()``
+        # through ``_project_settled_rows`` (the settled-rows path) — calling
+        # it again here would fold the same rows twice, which is a fixture
+        # artifact the substring assertions elsewhere cannot see.
+        await pilot.pause()
+        shown = _transcript_text(app)
+        user_blocks = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, UserBlock)
+        ]
+
+    assert "the deploy is green" in shown
+    assert "and the tests pass" in shown
+    assert [block.text() for block in user_blocks] == ["keep going please"]
+    # Not lost anywhere else: both rows are still whole in the history.
+    assert legacy.text == continuation and stamped.text == continuation
+
+
+@pytest.mark.asyncio
 async def test_the_mcp_unavailable_row_replays_on_the_warning_tier() -> None:
     """The replay row's tier, asserted as PIXELS, and what it does NOT say.
 

@@ -37,6 +37,7 @@ from typing import Any
 import pytest
 
 from local_operator.session.errors import RuntimeRetiring, admission_error
+from local_operator.session.goal_judge import goal_continuation_prompt
 from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.tui.app import (
@@ -719,7 +720,9 @@ def _user_rows(app: OperatorApp) -> list[str]:
     return [" ".join(block._rows(40)) for block in _blocks(app) if isinstance(block, UserBlock)]
 
 
-def _spool_row(app: OperatorApp, command_id: str, text: str) -> None:
+def _spool_row(
+    app: OperatorApp, command_id: str, text: str, *, harness_injected: bool = False
+) -> None:
     """Write the row the draining runtime would have spooled for this message."""
     from local_operator.paths import config_dir
     from local_operator.session.runtime.inbox import (
@@ -733,7 +736,14 @@ def _spool_row(app: OperatorApp, command_id: str, text: str) -> None:
     directory = config_dir() / "sessions" / str(session.session_id)
     assert append_inbox(
         directory,
-        InboxLine(text=text, sender={}, source=SOURCE_USER, command_id=command_id, wake=True),
+        InboxLine(
+            text=text,
+            sender={},
+            source=SOURCE_USER,
+            command_id=command_id,
+            wake=True,
+            harness_injected=harness_injected,
+        ),
     ), "the spool row could not be written"
 
 
@@ -1152,6 +1162,41 @@ async def test_the_joiner_row_is_taken_down_when_the_spool_empties() -> None:
         await pilot.pause()
 
         assert QUEUED_ELSEWHERE_NOTICE not in [n._text for n in _notices(app)], [
+            n._text for n in _notices(app)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_harness_continuation_is_not_a_queued_operator_message() -> None:
+    """The joiner row describes the OPERATOR's messages, not harness chrome.
+
+    A continuation spooled while the window drained is not a message anyone is
+    waiting on, so it must not raise — or hold up — the queued-elsewhere notice.
+    With no operator row in the spool there is nothing to announce; a genuine
+    queued message beside it still paints (the control below).
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        assert app._interaction is not None
+        _spool_row(
+            app,
+            "c" * 32,
+            goal_continuation_prompt("Ship it"),
+            harness_injected=True,
+        )
+        app._on_runtime_draining(LEAVING_FOR_BUILD)
+        await pilot.pause()
+        assert QUEUED_ELSEWHERE_NOTICE not in [n._text for n in _notices(app)], [
+            n._text for n in _notices(app)
+        ]
+
+        # Control: a genuine queued operator message beside it still announces.
+        _spool_row(app, "f" * 32, "a message from the other front end")
+        app._on_runtime_draining(LEAVING_FOR_BUILD)
+        await pilot.pause()
+        assert QUEUED_ELSEWHERE_NOTICE in [n._text for n in _notices(app)], [
             n._text for n in _notices(app)
         ]
 

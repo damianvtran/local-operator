@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.harness.types import StreamEndEvent
+from local_operator.harness.types import Message, StreamEndEvent
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime.inbox import (
     MAX_INBOX_ROWS,
@@ -39,6 +39,7 @@ def _line(
     source: str = "",
     command_id: str = "",
     wake: bool = False,
+    harness_injected: bool = False,
 ) -> InboxLine:
     return InboxLine(
         text=text,
@@ -46,6 +47,7 @@ def _line(
         source=source,
         command_id=command_id,
         wake=wake,
+        harness_injected=harness_injected,
     )
 
 
@@ -58,6 +60,41 @@ def test_append_then_drain_preserves_write_order(tmp_path: Path) -> None:
     assert drained[0].sender["conversation_name"] == "peer"
     # Consumed: a second open must not re-deliver them.
     assert drain_inbox(tmp_path) == []
+
+
+def test_the_harness_stamp_round_trips_and_legacy_rows_read_unstamped(tmp_path: Path) -> None:
+    """The stamp must survive the spool's JSON round trip — and only when set.
+
+    ``harness_injected`` rides the row so the successor knows a replayed owner
+    prompt is harness chrome (the goal judge's continuation is the producer;
+    see ``serving._spool_for_successor``). The field is an ADDITION to the
+    format, so an absent key must keep meaning what it meant before it existed:
+    False, not chrome.
+    """
+    stamped = InboxLine(
+        text="Continue working toward this goal:\n\nShip it",
+        sender={},
+        source=SOURCE_USER,
+        command_id="c" * 8,
+        harness_injected=True,
+    )
+    assert append_inbox(tmp_path, stamped) is True
+    [back] = drain_inbox(tmp_path)
+    assert back == stamped
+    assert back.harness_injected is True
+    assert back.to_json()["harness_injected"] is True
+
+    # A row written before the field existed: the key is absent on disk and the
+    # row reads as the old behaviour — a plain message, not harness chrome.
+    payload = stamped.to_json()
+    del payload["harness_injected"]
+    assert InboxLine.from_json(payload).harness_injected is False
+
+    # Negative control: an ordinary row round-trips False either way, so the
+    # carriage can never manufacture a stamp for a person's message.
+    plain = InboxLine(text="deploy the fix", sender={})
+    assert plain.harness_injected is False
+    assert InboxLine.from_json(plain.to_json()).harness_injected is False
 
 
 def test_peek_does_not_consume(tmp_path: Path) -> None:
@@ -488,6 +525,72 @@ async def test_a_twice_spooled_owner_row_steers_once_inside_the_first_turn(tmp_p
 
     queued = session.queued_steering()
     assert len(queued) == 1, [getattr(item, "id", "") for item in queued]
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_harness_continuation_steers_with_its_stamp(tmp_path: Path) -> None:
+    """The first-turn drain's steer arm must carry the row's stamp too.
+
+    ``Session._run_spooled_owner_prompt`` joins a spooled OWNER row to the turn
+    already running — as a steer, the only verb available while the turn lock
+    is held — and without the carriage the steered row reaches the transcript
+    unstamped: the same drop as the boot arm one layer up. The row stays in the
+    model-bound history either way; the stamp is what keeps every surface from
+    painting it as the operator's own words.
+    """
+    from local_operator.session.goal_judge import goal_continuation_prompt
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    continuation = goal_continuation_prompt("Ship it")
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert append_inbox(
+        session_dir,
+        _line(
+            continuation,
+            source=SOURCE_USER,
+            command_id="g" * 8,
+            wake=True,
+            harness_injected=True,
+        ),
+    )
+    # Negative control beside it: an ordinary owner row steers unstamped, so the
+    # carriage cannot manufacture chrome out of a person's message.
+    assert append_inbox(
+        session_dir,
+        _line("also, keep the summary short", source=SOURCE_USER, command_id="q" * 8, wake=True),
+    )
+
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    await session._drain_spooled_peer_inbox()
+
+    queued = session.queued_steering()
+    assert [getattr(item, "text", "") for item in queued] == [
+        continuation,
+        "also, keep the summary short",
+    ]
+    # ``queued_steering()`` is the ``AgentMessage`` union, so reading
+    # ``provider_payload`` needs the row narrowed first — the same narrowing
+    # the goal-judge cells make.
+    stamp_row = queued[0]
+    assert isinstance(stamp_row, Message)
+    stamp = stamp_row.provider_payload
+    assert stamp == {"harness_injected": True}, "the stamp was dropped at the steer hop"
+    plain_row = queued[1]
+    assert isinstance(plain_row, Message)
+    assert not (plain_row.provider_payload or {}), "an operator row must not be stamped"
 
 
 def test_a_recall_marker_withholds_its_row_from_both_readers(tmp_path: Path) -> None:
