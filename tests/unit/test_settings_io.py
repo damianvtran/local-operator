@@ -2565,7 +2565,7 @@ def test_a_desktop_hotkey_row_validates_with_the_desktop_rules() -> None:
         problem = settings_io.validate(setting, bad)
         assert problem, f"the desktop row accepted {bad!r}"
     # The app-scope rows keep the terminal rules, unchanged.
-    assert settings_io.validate(settings_io.BY_KEY["keymap.new_session"], "primary+alt+space")
+    assert settings_io.validate(settings_io.BY_KEY["keymap.new_session"], "primary+alt+shift+space")
 
 
 def test_a_desktop_hotkey_write_canonicalizes_through_the_facade(
@@ -2592,7 +2592,7 @@ def test_a_hold_hotkey_row_validates_with_its_own_grammar() -> None:
 
     assert settings_io.validate(setting, setting.default) is None
     assert settings_io.validate(setting, "ctrl-left-hold") is None
-    for bad in ("primary+alt+space", "ctrl+n", "alt-right", "space"):
+    for bad in ("primary+alt+shift+space", "ctrl+n", "alt-right", "space"):
         problem = settings_io.validate(setting, bad)
         assert problem, f"the hold row accepted {bad!r}"
     # The accelerator row beside it refuses the hold family right back.
@@ -2612,7 +2612,7 @@ def test_a_hold_hotkey_write_canonicalizes_through_the_facade(
 
 
 def test_the_grammar_speaks_before_the_sibling_check() -> None:
-    """`primary+alt+space` is both an accelerator and quick_send's default.
+    """`primary+alt+shift+space` is both an accelerator and quick_send's default.
 
     Before this ordering the sibling check answered first and the hold row was
     told "pick another" — advice that is wrong there, because no accelerator
@@ -2622,7 +2622,7 @@ def test_the_grammar_speaks_before_the_sibling_check() -> None:
     """
     setting = settings_io.BY_KEY["keymap.push_to_talk"]
     problem = settings_io.validate(
-        setting, "primary+alt+space", {"keymap.quick_send": "primary+alt+space"}
+        setting, "primary+alt+shift+space", {"keymap.quick_send": "primary+alt+shift+space"}
     )
     assert problem is not None and "hold" in problem, problem
 
@@ -2649,4 +2649,4 @@ def test_a_hotkey_row_without_a_derived_scope_falls_back_to_the_app_rules() -> N
 
     assert settings_io.validate(setting, "ctrl+g") is None
     assert settings_io.validate(setting, "banana") is not None
-    assert settings_io.validate(setting, "primary+alt+space") is not None
+    assert settings_io.validate(setting, "primary+alt+shift+space") is not None
