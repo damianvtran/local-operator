@@ -33,6 +33,32 @@ def _clean_module_state():
     tf._reset_for_tests()
 
 
+@pytest.fixture()
+def hide_cross_session(tmp_path, monkeypatch):
+    """The display flag, flipped through the real config file and reader.
+
+    The mobile fold suite's fixture (``tests/unit/mobile/test_projection.py``)
+    in this file's terms: the write goes through ``settings_io``, so the
+    flat-dotted key the reader actually looks up is the one exercised, and a
+    test that never calls ``set_hidden`` leaves the default (off) alone.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.tui.settings import settings_reload
+
+    settings_reload()
+
+    def set_hidden(on: bool) -> None:
+        from local_operator import settings_io
+        from local_operator.config import ConfigManager
+
+        settings_io.write_setting(
+            ConfigManager(tmp_path), settings_io.BY_KEY["display.hide_cross_session"], on
+        )
+
+    yield set_hidden
+    settings_reload()
+
+
 def doc(
     id_: str,
     seq: int,
@@ -91,6 +117,21 @@ def peer_message(id_: str, ts: float, body: str) -> dict[str, Any]:
             "custom_type": "peer_message",
             "details": {"body": body, "sender": "w1"},
         },
+    }
+
+
+def inject(id_: str, ts: float, custom_type: str, text: str) -> dict[str, Any]:
+    """Any other custom row, the index suite's ``inject`` shape.
+
+    ``custom_type`` is the discriminator the hidden-cross-session filter must
+    match EXACTLY: only ``peer_message`` is in the hidden set, so a row built
+    through this helper (hub, wake, compaction, ...) has to stay findable.
+    """
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {"kind": "custom", "custom_type": custom_type, "details": {"text": text}},
     }
 
 
@@ -383,3 +424,101 @@ async def test_a_peer_message_row_is_findable_end_to_end(tmp_path):
     assert peer["snippet"] == "peer says the deploy is green"
     start, end = peer["ranges"][0]
     assert peer["snippet"][start:end] == "deploy"
+
+
+# ---------------------------------------------------------------------------
+# Hidden cross-session docs (display.hide_cross_session)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_hidden_cross_session_drops_peer_docs_and_keeps_the_rest(
+    tmp_path, hide_cross_session
+):
+    """The flag gates peer docs at the docs-selection seam, both polarities.
+
+    OFF is the byte-identical default: every injected doc is a hit, exactly as
+    ``test_a_peer_message_row_is_findable_end_to_end`` pins. ON drops the peer
+    doc — including on text only the peer body carries — because a result the
+    overlay would reveal cannot point at a row no surface paints (design
+    §5.3). A ``hub_message`` is NOT in the frozen hidden set and stays
+    findable, which guards the filter against being written as "injected".
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "deploy the staging target"),
+            peer_message("p1", 1.1, "peer says the deploy is green"),
+            inject("i1", 1.2, "hub_message", "deploy hub note"),
+        ],
+    )
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    assert view["state"] == "ready"
+    assert [h["id"] for h in view["hits"]] == ["u1", "p1", "i1"]  # genuine, then injected
+
+    hide_cross_session(True)
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    assert [h["id"] for h in view["hits"]] == ["u1", "i1"]
+    # Peer-only text returns nothing under any tier: the doc leaves before the
+    # exact and the soft pass both.
+    view = await tf.find_view(tmp_path, SID, query="green", limit=10)
+    assert view["hits"] == []
+
+    hide_cross_session(False)
+    view = await tf.find_view(tmp_path, SID, query="green", limit=10)
+    assert [h["id"] for h in view["hits"]] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_hidden_peer_docs_are_dropped_from_the_building_partial_too(
+    tmp_path, hide_cross_session, monkeypatch
+):
+    """``building`` serves the PREVIOUS scan's docs — the second selection site.
+
+    A gate that only covered the ready path would leak the peer doc for the
+    whole scan window, and the overlay reveals hits the moment they arrive, so
+    the partial answer must be filtered too. Same machinery as
+    ``test_find_view_building_serves_the_previous_scan_as_partial``.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "deploy the staging target"),
+            peer_message("p1", 1.1, "peer says the deploy is green"),
+        ],
+    )
+    first = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    assert first["state"] == "ready"
+
+    hide_cross_session(True)
+
+    # Grow the journal so the cache is stale, and hold the rescan so the ask
+    # lands inside the build.
+    write_rows(tmp_path, [assistant("a2", 2.0, "the zebra escaped")])
+    entered, release = threading.Event(), threading.Event()
+    real = ti.refresh_index
+
+    def slow(config_dir, session_id):
+        entered.set()
+        assert release.wait(30), "test never released the build"
+        return real(config_dir, session_id)
+
+    monkeypatch.setattr(ti, "refresh_index", slow)
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=0.05)
+    assert view["state"] == "building"
+    assert view["partial"] is True
+    # The previous scan holds the peer doc; nothing it returns may carry it.
+    assert [h["id"] for h in view["hits"]] == ["u1"]
+
+    assert await asyncio.to_thread(entered.wait, 30)
+    release.set()
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while True:
+        view = await tf.find_view(tmp_path, SID, query="deploy", limit=10, wait_s=0.05)
+        if view["state"] == "ready":
+            break
+        assert asyncio.get_running_loop().time() < deadline, view
+        await asyncio.sleep(0.02)
+    # And the refilled scan stays filtered: the re-derived doc carries
+    # custom_type, so the gate covers it by the same field.
+    assert [h["id"] for h in view["hits"]] == ["u1"]
