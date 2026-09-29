@@ -49,7 +49,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import threading
 import time
 from pathlib import Path
@@ -1684,14 +1683,33 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
         # the verified copy — which is then the ONLY complete copy anywhere — is
         # exactly the moment it must not be refused. Anything else in the way
         # refuses exactly as before; nothing is ever cleared without the strict
-        # predicate in ``_bare_remnant`` agreeing, and the removal is logged
-        # below because it deletes bytes on this device's disk.
+        # predicate in ``_bare_remnant`` agreeing, and the removal goes through
+        # ``cleanup.remove_session_dir`` — the ONE rmtree of a session directory
+        # in this codebase (``tests/unit/session/test_no_session_deletion.py``
+        # fails the build on any other), whose guards refuse an unmarked store.
+        # The store is marked first, the same authority ``_remove_handed_away``
+        # exercises for the hand-back this device decided: a promote's target
+        # store is one this device is adopting INTO, which is the same claim
+        # ``session_factory`` makes when it marks a store it created.
         if not _bare_remnant(target):
             return False
-        try:
-            shutil.rmtree(target)
-        except OSError as exc:
-            logger.warning("mobility: a bare remnant at %s could not be cleared: %s", target, exc)
+        from local_operator.session.cleanup import (
+            MESH_REMNANT_POLICY,
+            mark_store,
+            remove_session_dir,
+        )
+
+        mark_store(target.parent)
+        if not remove_session_dir(
+            target,
+            config_dir=server.root,
+            policy=MESH_REMNANT_POLICY,
+            reason="mesh-recall: cleared a bare remnant so the verified copy could land",
+            actor="mesh:promote",
+        ):
+            # The guard refused (or the target moved under us): the remnant is
+            # still in the way, and a promote must never write over what it
+            # could not clear — refuse exactly as before.
             return False
         logger.info(
             "mobility: cleared a bare remnant (no session content) at %s so the "
