@@ -447,7 +447,8 @@ SECTIONS: tuple[Section, ...] = (
         "subagents",
         "Subagents",
         Scope.LIVE,
-        "Concurrency cap, who picks a child's model, and the model each tier runs on.",
+        "Concurrency cap, child knowledge slimming, who picks a child's model, "
+        "and the model each tier runs on.",
     ),
     # NEW_SESSIONS, and the scope is a statement about the CONSUMER: the
     # classification service is built per session (``ClassificationService`` is
@@ -2267,6 +2268,26 @@ SETTINGS: tuple[Setting, ...] = (
         help="Ceiling on concurrent subagents and backgrounded bash, which share one pool.",
         minimum=1,
         maximum=64,
+    ),
+    Setting(
+        key="subagents.slim_child_knowledge",
+        path=("subagents", "slim_child_knowledge"),
+        section="subagents",
+        label="Slim child knowledge",
+        kind=Kind.BOOL,
+        # The consumer constant is ``DEFAULT_SLIM_CHILD_KNOWLEDGE`` in
+        # ``harness/subagent.py``; ``test_settings_io``'s ``_consumer_defaults``
+        # guards the pair, which is what stops this literal and the reader's
+        # fallback drifting apart.
+        default=True,
+        # 60 cells — with the 3-space gutter and the 30-cell key path that is
+        # 93 of the 94-cell slot at 100 columns, so the key keeps its place
+        # beside the help (the shedding discipline this section sizes to).
+        # The sentence carries both halves the row must state: what is
+        # trimmed, and the invariant — every guide/skill NAME survives, so
+        # nothing a child could have read becomes unfindable, only terser.
+        help="Keep skill/guide names; trim descriptions and parent extras.",
+        choices=_bool_choices("keep names, trim the rest", "inherit the parent block as-is"),
     ),
     Setting(
         key="subagents.model_choice",
