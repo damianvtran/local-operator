@@ -1700,13 +1700,27 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
         )
 
         mark_store(target.parent)
-        if not remove_session_dir(
-            target,
-            config_dir=server.root,
-            policy=MESH_REMNANT_POLICY,
-            reason="mesh-recall: cleared a bare remnant so the verified copy could land",
-            actor="mesh:promote",
-        ):
+        try:
+            cleared = remove_session_dir(
+                target,
+                config_dir=server.root,
+                policy=MESH_REMNANT_POLICY,
+                reason="mesh-recall: cleared a bare remnant so the verified copy could land",
+                actor="mesh:promote",
+            )
+        except OSError as exc:
+            # AN I/O FAILURE REFUSES, IT DOES NOT RAISE — the contract this call
+            # site kept when it wrapped its own ``rmtree``, and ``apply_cleanup``
+            # wraps the same call in the same shape for the same reason.
+            # ``remove_session_dir`` does not catch its own rmtree, and an
+            # exception escaping a relay's frame handler drops the control
+            # connection, which the caller reads as ``relay_unavailable`` — "a
+            # wedged relay" — about a relay that is serving (PR #1756 round 3,
+            # MINOR). A promote must never write over what it could not clear,
+            # so warn and leave the remnant where it is.
+            logger.warning("mobility: a bare remnant at %s could not be cleared: %s", target, exc)
+            return False
+        if not cleared:
             # The guard refused (or the target moved under us): the remnant is
             # still in the way, and a promote must never write over what it
             # could not clear — refuse exactly as before.

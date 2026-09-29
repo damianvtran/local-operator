@@ -118,6 +118,53 @@ def test_a_recall_lands_over_a_bare_remnant_already_at_its_target(
     ).exists(), "the remnant outlived the promote that landed on it"
 
 
+def test_a_failed_corpse_clear_refuses_the_recall_and_keeps_the_remnant(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed clear is a REFUSED promote, never a raise.
+
+    Pre-delta ``_promote`` wrapped its own ``rmtree``, warned and returned
+    ``False``. Routing the clear through ``remove_session_dir`` (whose
+    ``rmtree`` is deliberately unguarded — ``apply_cleanup`` wraps the same call
+    in the same shape) briefly let a real I/O failure — the target racing away,
+    a permission error — escape the promote before its ``os.replace``, where the
+    relay's control loop reads it as a dead connection and answers
+    ``relay_unavailable`` about a relay that is actually serving (PR #1756
+    round 3, MINOR). The remnant must survive and the recall must come back as
+    the refusal it always was.
+    """
+    server_a, server_b = _offload_to_peer(request.getfixturevalue("pair"), monkeypatch)
+    remnant = _plant_remnant(server_a.root, SESSION)
+    before = (remnant / "created_at.json").read_bytes()
+
+    real_rmtree = shutil.rmtree
+
+    def fail_for_the_remnant_only(path: Any, *args: Any, **kwargs: Any) -> None:
+        # Scoped to THIS target on purpose: any other rmtree a relay thread
+        # happens to run during the window keeps its real behaviour, so the
+        # fault injected is exactly the corpse-clear's.
+        if Path(path) == remnant:
+            raise OSError("simulated I/O failure while clearing the remnant")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_for_the_remnant_only)
+
+    recalled = _move(server_a, SESSION, monkeypatch=monkeypatch)
+
+    assert recalled["ok"] is False, recalled
+    # THE PRE-DELTA CONTRACT, exactly: a failed clear reaches the caller as the
+    # ordinary "could not be adopted" refusal — not as ``relay_unavailable``
+    # ("a wedged relay"), which is what an escape past the promote produced.
+    assert (
+        recalled["code"] == "in_progress"
+    ), f"an I/O failure in the corpse-clear must refuse, not read as a dead relay: {recalled}"
+    assert (remnant / "created_at.json").read_bytes() == before, (
+        "the remnant must survive a failed clear — a promote never writes over "
+        "what it could not clear"
+    )
+    assert not (remnant / "transcript.jsonl").exists()
+
+
 # ---------------------------------------------------------------------------
 # The refusal the operator hit FIRST: the remnant lands while the copy is in flight
 # ---------------------------------------------------------------------------
