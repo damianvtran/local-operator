@@ -949,6 +949,8 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
                 )
         return lines or ["no agent or team definitions on this device"]
     if action == "mcp_state":
+        from local_operator.network import mcpdefs  # the ONE "looks like …" spelling
+
         lines = []
         for row in payload.get("servers") or []:
             origin = str(row.get("origin") or "")
@@ -964,6 +966,11 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
             ]
             if needs:
                 line += " — needs: " + ", ".join(needs)
+            # Same marker as the CLI's `state` (mcpdefs.state_rows carries the
+            # label): a row the shape scan will never send says so before a push.
+            withheld = str(row.get("withheld") or "")
+            if withheld:
+                line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
             lines.append(line)
         return lines or ["no user-scope MCP servers on this device"]
     if action == "member_rm":

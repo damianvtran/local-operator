@@ -1515,7 +1515,9 @@ def push_to_peer(
         "ok": ok,
         "code": "applied" if ok else "conflict",
         "message": (
-            f"sent {len(missing_agents)} agent and {len(missing_teams)} team definition(s)"
+            f"sent {len(missing_agents)} {'agent' if len(missing_agents) == 1 else 'agents'}"
+            f" and {len(missing_teams)} team "
+            f"{'definition' if len(missing_teams) == 1 else 'definitions'}"
             if ok
             else "that device would not take every definition: "
             + _describe_rows(conflicts + refused)
@@ -1941,7 +1943,8 @@ def local_sync_handler(server: "RelayServer") -> Any:
                 if not results
                 else (
                     f"{sum(1 for item in results if item.get('ok'))} of {len(results)} "
-                    "device(s) hold this device's definitions"
+                    f"{'device holds' if len(results) == 1 else 'devices hold'} "
+                    "this device's definitions"
                 )
             ),
         }

@@ -487,11 +487,19 @@ def test_the_new_actions_render_what_the_cli_actually_emits() -> None:
                     "refs": [{"id": "GITLAB_TOKEN", "set": False}],
                 },
                 {"name": "crm", "transport": "http", "origin": "d_1", "refs": []},
+                {
+                    "name": "leaky",
+                    "transport": "http",
+                    "origin": "",
+                    "refs": [],
+                    "withheld": "github-token",
+                },
             ],
         },
     ) == [
         "server: gl  stdio (yours) — needs: GITLAB_TOKEN",
         "server: crm  http (mirrored from d_1)",
+        "server: leaky  http (yours) — will not travel: looks like a github-token",
     ]
     assert net_tool._render("mcp_state", {"ok": True, "servers": []}) == [  # noqa: SLF001
         "no user-scope MCP servers on this device"

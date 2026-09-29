@@ -5528,12 +5528,15 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
             # THE SENDER'S OWN HONESTY: a row the shape table kept OFF the wire is
             # named here, so "my GitLab server is not on the pod" has an answer on
             # the side that can act on it (`shape` is the shape table's label, not
-            # a value — the whole point is that the value never left).
+            # a value — the whole point is that the value never left). The row
+            # also says it was NOT sent and names the move (design round 1, D3).
             for withheld in item.get("withheld") or []:
                 if isinstance(withheld, dict):
                     lines.append(
                         f"  withheld server {withheld.get('name')!r}: "
-                        f"looks like a {withheld.get('shape') or 'credential'}"
+                        f"{mcpdefs.shape_likeness(str(withheld.get('shape') or ''))}"
+                        " — not sent; make the value a ${NAME} reference "
+                        "(env/headers) or drop the literal, then push again"
                     )
         return _emit(
             args,
@@ -5557,6 +5560,12 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         ]
         if needs:
             line += " — needs: " + ", ".join(needs)
+        # A ROW THAT WILL NEVER TRAVEL (design round 1, D4): the shape scan
+        # withholds these at push time, so the local ledger must say so before a
+        # push discovers it — the same words as the receipt.
+        withheld = str(row.get("withheld") or "")
+        if withheld:
+            line += f" — will not travel: {mcpdefs.shape_likeness(withheld)}"
         lines.append(line)
     if not lines:
         lines = ["no user-scope MCP servers on this device"]
