@@ -1316,6 +1316,85 @@ async def test_dispose_does_not_wait_for_a_parked_ladder(
     assert parked.done() and parked.cancelled(), "dispose must cancel the parked rung"
 
 
+@pytest.mark.asyncio
+async def test_dispose_flushes_an_owed_republish_before_cancelling_the_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one-shot exit case: an owed completion must still land at teardown.
+
+    Session `17ea09afe588` (2026-09-29) is the shape this reproduces: a turn's
+    `finally` deferred against a busy store, the republish ladder was armed with
+    the process seconds from exit, and `dispose` cancelled the ladder before its
+    first rung -- the completion then waited for a boot import that itself met
+    the lock, and the mark never appeared (five hours later, still absent). The
+    ladder is parked 30 s out here and the lock is released before dispose, so a
+    passing assertion can only come from the flush: teardown itself must publish
+    what is owed.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 30.0, 30.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    path = config_dir() / "attention.db"
+    store = AttentionStore(path)
+    store.publish("session/sess", str(uuid.uuid4()), "anchor-earlier", "complete")
+    holder = _HeldWriteLock(path)
+    try:
+        session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+        await session._publish_attention_outcome()
+        assert session._attention_republish_due
+        marker = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
+        assert marker is not None
+    finally:
+        holder.release()
+        holder.close()
+
+    await asyncio.wait_for(session.dispose(), timeout=5.0)
+    assert not session._attention_republish_due
+    assert (
+        store.state("session/sess")["completion_token"] == marker["token"]
+    ), "dispose must flush the marker the ladder never got to send"
+
+
+@pytest.mark.asyncio
+async def test_dispose_reports_an_owed_republish_it_cannot_land(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A teardown that gives up on the flush says so -- the cancel is silent today.
+
+    The lock is held THROUGH dispose, so the flush gets its one bounded attempt
+    and fails it; what must remain loud is the abandonment: the marker is
+    durable and the next boot owns it, and this log line is the only place that
+    fact is recorded for THIS process.
+    """
+    from local_operator.harness.types import AgentEndEvent
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    _shrink_the_ladder(monkeypatch, 30.0, 30.0)
+    session = make_session(tmp_path, ScriptedStream([]))
+    path = config_dir() / "attention.db"
+    AttentionStore(path).publish("session/sess", str(uuid.uuid4()), "anchor-earlier", "complete")
+    holder = _HeldWriteLock(path)
+    try:
+        session._attention_outcome = AgentEndEvent(messages=[], error="Fixture failure")
+        await session._publish_attention_outcome()
+        assert session._attention_republish_due
+        with caplog.at_level(logging.WARNING):
+            await asyncio.wait_for(session.dispose(), timeout=5.0)
+        assert session._attention_republish_due, "nothing landed; the latch is still owed"
+        assert any(
+            "never took the republish owed" in record.getMessage() for record in caplog.records
+        ), "the abandonment must be logged once, not performed silently"
+    finally:
+        holder.release()
+        holder.close()
+
+
 # ---------------------------------------------------------------------------
 # The republish ladder's own failure modes, from review round 1.
 #
