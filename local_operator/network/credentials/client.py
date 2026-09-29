@@ -47,6 +47,7 @@ from local_operator.network.credentials.placement import (
     merge_from_peer,
     placement_for_store,
     placement_path,
+    placement_state_path,
 )
 from local_operator.network.credentials.state import PlacementState
 from local_operator.network.credentials.types import (
@@ -110,6 +111,19 @@ class GrantCache:
             return None
         return grant
 
+    def peek(self, key: str, session_id: str) -> Grant | None:
+        """The cached grant for ``(key, session_id)``, WITHOUT the re-ask margin.
+
+        AN ATTRIBUTION READ, NOT A USABILITY READ. When a provider has just refused
+        a bearer, the grant that carried it may be inside ``REASK_MARGIN_MS`` — the
+        window where :meth:`get` reads as absent — and that grant is exactly the one
+        a report must name. Nothing serves a bearer from here, so a grant inside
+        the margin is still never handed out: the resolve path keeps using
+        :meth:`get`.
+        """
+        with self._lock:
+            return self._grants.get((key, session_id))
+
     def put(self, key: str, session_id: str, grant: Grant) -> None:
         with self._lock:
             self._grants[(key, session_id)] = grant
@@ -169,6 +183,11 @@ class MeshCredentialClient:
         self._placement_stamp: tuple[int, int] | None = self._stat_placement()
         self._placement_lock = threading.Lock()
         self._state: PlacementState | None = state
+        #: ``(mtime_ns, size)`` of the observation file ``_state`` reflects, so a
+        #: clearing written by ANOTHER process is noticed with one ``stat``: the
+        #: pull runs on the relay, and the session serving a stale refusal from its
+        #: own memory is a different process. See :attr:`state`.
+        self._state_stamp: tuple[int, int] | None = self._stat_state()
         self._relay = relay
         self.deadline_s = deadline_s
         self.grants = GrantCache()
@@ -269,6 +288,20 @@ class MeshCredentialClient:
             return None
         return (found.st_mtime_ns, found.st_size)
 
+    def _stat_state(self) -> tuple[int, int] | None:
+        """``(mtime_ns, size)`` of this device's observation file, or ``None``.
+
+        The twin of :meth:`_stat_placement`, for :attr:`state` — same reason, same
+        cost (one ``stat`` per read, no parse unless it moved).
+        """
+        if not self.network_id:
+            return None
+        try:
+            found = placement_state_path(self.network_id, self.root).stat()
+        except OSError:
+            return None
+        return (found.st_mtime_ns, found.st_size)
+
     def entry(self, key: str) -> CredentialPlacementEntry | None:
         return self.placement.entry(key) if self.placement is not None else None
 
@@ -335,9 +368,25 @@ class MeshCredentialClient:
 
     @property
     def state(self) -> PlacementState:
+        """This device's observations, RE-READ when the file changes.
+
+        The same pattern, for the same reason, as :attr:`placement` above — and the
+        reason now runs in both directions. A refusal this process cached has to
+        stop being served once ANOTHER process clears it: the pull runs on the
+        relay, and the clearing a merge writes (``placement.py``) reaches the
+        session that must not serve the stale "does not share" only through this
+        file. A copy loaded once was exactly the shadow the clearing exists to
+        remove.
+        """
         with self._state_lock:
             if self._state is None:
                 self._state = PlacementState.load(self.network_id, self.root)
+                self._state_stamp = self._stat_state()
+                return self._state
+            stamp = self._stat_state()
+            if stamp is not None and stamp != self._state_stamp:
+                self._state = PlacementState.load(self.network_id, self.root)
+                self._state_stamp = stamp
             return self._state
 
     def cached_refusal(self, key: str) -> BrokerError | None:
@@ -408,6 +457,9 @@ class MeshCredentialClient:
             # the refusal cache was not persisted would trade a real capability for a
             # memo. Read-only config dirs are legitimate (a container, a test root).
             pass
+        else:
+            with self._state_lock:
+                self._state_stamp = self._stat_state()
 
     # -- leg 1: the runtime asks its own relay ------------------------------
 
@@ -605,9 +657,18 @@ class MeshCredentialClient:
         split is that this device cannot decide it — see ``owner.py``'s report arm
         for why routing this into ``rotate_sibling`` would log the operator out of
         every device.
+
+        THE ROW THAT WAS LENT TRAVELS WITH THE REPORT (audit Q5 #4). The owner used
+        to resolve a report's target as the provider's FIRST row, so on a multi-row
+        owner a quota block or a provoked refresh could land on a row this device
+        was never lent. The cached grant's ``credential_ref.credential_id`` is read
+        BEFORE the cache is dropped and echoed as ``credential_id``; the owner
+        validates it against its own id space and falls back to the first-row pick
+        only when the field is absent (an older peer, or no grant left to attribute).
         """
         if not self.should_borrow(key):
             return
+        credential_id = self._reported_credential_id(key, session_id)
         self.grants.drop(key)
         try:
             from local_operator.network import store
@@ -626,9 +687,25 @@ class MeshCredentialClient:
                 model_id=model_id,
                 retry_after_ms=int(retry_after_ms),
                 block_scope=block_scope,
+                credential_id=credential_id,
             )
         except Exception:  # noqa: BLE001 — a failed report must not raise into a turn
             return
+
+    def _reported_credential_id(self, key: str, session_id: str) -> int:
+        """The owner's row id from the grant this device was last lent for ``key``.
+
+        A ``peek``, not a ``get``: the failing bearer's grant may be inside the
+        re-ask margin, and attributing the report to the row that was actually lent
+        matters most exactly then. ``0`` means "nothing to attribute" — no grant was
+        cached for this ``(key, session)``, or it was cached before grants carried
+        an id at all.
+        """
+        for sid in dict.fromkeys((session_id, "")):
+            grant = self.grants.peek(key, sid)
+            if isinstance(grant, Grant) and grant.credential_ref.credential_id:
+                return int(grant.credential_ref.credential_id)
+        return 0
 
     def serve_report(self, key: str, *, kind: str, **fields: Any) -> dict[str, Any]:
         """Answer a leg-1 ``credential_report`` (relay side)."""
@@ -671,11 +748,19 @@ class MeshCredentialClient:
         The merge is ``PlacementDocument.merge``, so a member can only ever tell us
         about the rows IT owns; a document that claims a third device's credential
         is dropped there rather than here.
+
+        ``newly_borrowable`` IS THE REPLY'S SECOND ANSWER (audit Q5 #5): the keys
+        this device could NOT reach before the pull and can reach after it. It is
+        the only honest signal for "a share just arrived that a running session
+        cannot see" — ``build_auth_store`` decides plain-vs-mesh at session
+        construction, so a key that was not borrowable before this pull cannot have
+        been wired into any session that was running while it landed.
         """
         if self.placement is None or not self.network_id:
-            return {"kind": "ack", "key": "", "changed": [], "owners": 0}
+            return {"kind": "ack", "key": "", "changed": [], "owners": 0, "newly_borrowable": []}
         from local_operator.network.types import MeshRefusal
 
+        before_borrowable = set(self._borrowable_now())
         changed: list[str] = []
         #: ``{device, reason}`` for every member whose document was NOT merged, so a
         #: skipped member is named in the reply rather than silently missing.
@@ -733,15 +818,37 @@ class MeshCredentialClient:
                     # under the lock and only after parsing, so nothing was written.
                     skipped.append({"device": device, "reason": "malformed_document"})
                     continue
+        after_borrowable = self._borrowable_now()
         result: dict[str, Any] = {
             "kind": "ack",
             "key": "",
             "changed": sorted(set(changed)),
             "owners": asked,
+            "newly_borrowable": sorted(
+                key
+                for key in set(changed)
+                if key in after_borrowable and key not in before_borrowable
+            ),
         }
         if skipped:
             result["skipped"] = skipped
         return result
+
+    def _borrowable_now(self) -> dict[str, Any]:
+        """``{key: entry}`` for what this device may borrow, per the file on disk.
+
+        One read of :attr:`placement` (which re-stats), so a pull's before/after
+        snapshots see the same reloaded document every other reader does. An entry
+        owned by this device is excluded: owning is not borrowing.
+        """
+        document = self.placement
+        if document is None:
+            return {}
+        return {
+            key: entry
+            for key, entry in document.entries.items()
+            if entry.owner_device != self.self_device and entry.is_holder(self.self_device)
+        }
 
     def _other_active_members(self) -> list[str]:
         try:

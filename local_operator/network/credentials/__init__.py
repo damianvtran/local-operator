@@ -125,6 +125,11 @@ class _LocalOps:
             model_id=str(frame.get("model_id") or ""),
             block_scope=str(frame.get("block_scope") or ""),
             for_session=str(frame.get("session_id") or ""),
+            # THE LENT ROW'S ID, IF THIS DEVICE STILL KNOWS IT (audit Q5 #4). Validated
+            # at the boundary like every other number a frame carries; ``0`` is
+            # dropped so the peer frame carries the field only when there is one to
+            # send, which keeps an older peer's frame shape byte-identical.
+            credential_id=peer_int(frame.get("credential_id")) or None,
             # VALIDATED AT THE BOUNDARY (QA round 2): a bare ``int(...)`` raised
             # ``ValueError`` on a non-numeric value and the control reply came back
             # ``null``. The owner no longer reads this number (review round 2, m1), so
@@ -142,7 +147,7 @@ class _LocalOps:
         """
         client = self._source()
         if client is None:
-            return {"kind": "ack", "key": "", "changed": [], "owners": 0}
+            return {"kind": "ack", "key": "", "changed": [], "owners": 0, "newly_borrowable": []}
         return client.pull_placement()
 
 
