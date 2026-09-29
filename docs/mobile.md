@@ -298,3 +298,34 @@ endpoints in `daemon.py`.
   a future service-worker push; not in this pass).
 - Multi-user/ scoped tokens (single owner password, as with omp mobile).
 - Editing files or browsing the filesystem from the phone beyond session cwds.
+
+## Parity matrix (maintained per phase)
+
+The phone's goal is parity with the TUI, using the desktop app as the
+information-design reference (issue #1598). This table is the program's working
+state: the row a phase changes is updated in the SAME PR that ships it, so the
+list cannot rot between milestones. Numbers and spellings come from the Python
+source of truth where one exists, ported to TypeScript with parity fixtures —
+never re-derived per surface.
+
+| Area | TUI | Desktop reference | Mobile status |
+| --- | --- | --- | --- |
+| Spend + context-window status | status band, `/context` | session status strip | **present** (phase 1) — the session screen's read-only status row; spellings are ports pinned by `web/src/lib/spend-context.parity.json` |
+| Provider quota (`/usage`) | `usage_panel` | usage view | missing — needs a daemon-side fetch + cache, not just a render |
+| Tool-card detail + copy actions | `tool_card`, `copy_picker` | run details / trace | partial — expand-on-tap exists, but the payload is a bounded window (8k output tail / 4k args); no copy actions (phase 2) |
+| Session info / report | `info_panel`, `report_view`, `session_panel` | info + session panels | missing (phase 3) |
+| Sidebar: pins, subagent layer | `session_sidebar` | chat sidebar | partial — subagent drill-down exists; pins and the layer view are missing (phase 3) |
+| Wakes / schedules | `wake_panel` | schedules | missing (phase 4) |
+| Settings | `settings_view` | settings | missing (phase 5) |
+| Move session | `move_picker` | move session | missing (phase 5) |
+| Org chart / team view | `org_chart_view` | agent hub | missing (phase 5) |
+| Analytics | `analytics_panel` | analytics panel | missing (phase 5) |
+| Aside panel | `aside_panel` | — | missing (phase 5) |
+
+Already on the phone: session list / view / agent view, past sessions, resume
+and new session, transcript, steering, approvals and asks, model/effort
+switching, slash commands, todos, subagent drill-down, image upload.
+
+The cross-cutting parity guard (flagging a new TUI panel or command that lands
+without a mobile counterpart, or an explicit "desktop/TUI only" exemption) is
+still open; until it exists this table is maintained by hand, per phase.

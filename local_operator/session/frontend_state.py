@@ -355,6 +355,13 @@ _SHAREABLE_STATE_FIELDS = frozenset(
         "context_window",
         "context_is_estimate",
         "cumulative_parent_cost",
+        # The spend scalars join on the set's own two tests (``str``/``float``/
+        # ``None``): the phone's per-event refresh reads them beside the
+        # context fields above, and ``child_costs`` — the one spend member that
+        # is a mutable mapping — is served by ``spend_context_copy`` instead.
+        "subagent_cost",
+        "subagent_cost_knowledge",
+        "cost_knowledge",
         # The working line's phase and its zero are read PER EVENT that moves the
         # turn (`OperatorApp._current_activity`), which is far too hot for the
         # whole-state clone. Both are admitted on the set's own two tests: a
@@ -5064,6 +5071,34 @@ class FrontendStateStore:
             self.read_field("activity_phase"),
             self.read_field("activity_phase_started_at"),
         )
+
+    def spend_context_copy(self) -> tuple[dict[str, float], dict[str, int]]:
+        """COPIES of the spend members ``read_field`` cannot serve, cheaply.
+
+        The sibling of :meth:`live_tool_start_epochs`, for the same reason: the
+        allow-list hands out the store's OWN objects, so it admits only deeply
+        immutable scalars — ``child_costs`` is a mutable mapping and
+        ``last_usage`` is a model. Both are read once per folded event by the
+        phone's refresh paths (``serving``/``tui_handle`` ``_refresh_state``),
+        which cannot afford :meth:`state`'s whole-state deep copy for two small
+        values. Each call builds fresh objects, so the caller owns what it
+        keeps.
+
+        The second half is the LAST receipt's input/output token pair, and it
+        is ``{}`` only when no receipt has arrived — the read that separates
+        "billed at a price we cannot resolve" (``None`` cost plus billed
+        tokens → the phone's ``$—``) from "nothing spent yet". A plain dict
+        because that is the shape the projection carries.
+        """
+        state = self._state
+        usage = state.last_usage
+        pair: dict[str, int] = {}
+        if usage is not None:
+            pair = {
+                "input_tokens": int(usage.input_tokens),
+                "output_tokens": int(usage.output_tokens),
+            }
+        return dict(state.child_costs), pair
 
     def read_label(self, name: str) -> str:
         """One DERIVED label of the state, WITHOUT cloning the whole state.
