@@ -71,6 +71,24 @@ def _run(provider: str, handler, **kwargs) -> tuple[key_check.KeyCheck, list[htt
         (403, '{"error": "authorization failed"}', None),
         (401, '{"error": "Unauthorized"}', False),
         (401, '{"error": "authorization failed"}', False),
+        # ElevenLabs scopes keys per permission, measured 2026-09-28: a
+        # speech-to-text-only key answers the models read with 401
+        # "missing the permission models_read..." (status missing_permissions)
+        # while transcribing fine -- unverified, never refused...
+        (
+            401,
+            '{"detail": {"type": "authentication_error", "message": "The API key you '
+            'used is missing the permission models_read to execute this operation.", '
+            '"status": "missing_permissions"}}',
+            None,
+        ),
+        # ...while the same route's invalid-key spelling still refuses.
+        (
+            401,
+            '{"detail": {"type": "authentication_error", "message": "Invalid API key", '
+            '"status": "invalid_api_key"}}',
+            False,
+        ),
     ],
 )
 def test_the_status_table(status: int, body: str, valid: bool | None) -> None:
@@ -111,6 +129,8 @@ def test_a_network_failure_is_unknown_not_invalid() -> None:
         ("openrouter", "https://openrouter.ai/api/v1/key", "authorization"),
         # A login flavour checks against the provider it stores under.
         ("xai-oauth", "https://api.x.ai/v1/models", "authorization"),
+        # ElevenLabs checks its models list with its own header, never Authorization.
+        ("elevenlabs", "https://api.elevenlabs.io/v1/models", "xi-api-key"),
     ],
 )
 def test_the_key_goes_to_the_registry_host_in_a_header(
@@ -131,6 +151,38 @@ def test_a_provider_that_needs_no_key_is_not_checked() -> None:
     result, seen = _run("ollama", lambda _r: httpx.Response(500))
     assert result == key_check.KeyCheck(None, None)
     assert seen == []
+
+
+def test_an_elevenlabs_speech_scoped_key_saves_unverified() -> None:
+    """The exact key this feature needs must not be refused by its own login.
+
+    Measured 2026-09-28: a key scoped to speech-to-text 401s on every read
+    (models/user/voices) with ``missing_permissions`` while POSTing
+    ``/v1/speech-to-text`` fine. Refusing that save would refuse every properly
+    scoped BYO key, so the check must answer None (save unverified) -- and the
+    invalid spelling from the same route must still refuse (the table above).
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={
+                "detail": {
+                    "type": "authentication_error",
+                    "message": (
+                        "The API key you used is missing the permission models_read "
+                        "to execute this operation."
+                    ),
+                    "status": "missing_permissions",
+                }
+            },
+        )
+
+    result, seen = _run("elevenlabs", handler)
+    assert result.valid is None
+    assert result.reason and "ElevenLabs" in result.reason
+    assert SECRET not in result.reason
+    assert str(seen[0].url) == "https://api.elevenlabs.io/v1/models"
 
 
 def test_the_check_is_bounded() -> None:
