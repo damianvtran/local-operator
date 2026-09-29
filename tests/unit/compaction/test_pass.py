@@ -294,6 +294,68 @@ async def test_a_second_pass_does_not_resummarize_the_marker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_marker_headed_pass_folds_the_prior_summary_through_the_fold_slot() -> None:
+    """The pass after the first hands the prior summary to ``previous_summary``.
+
+    A chained pass plans over ``[marker, *kept, *new]``. Left in the span, the
+    rendered marker serializes inside ``<conversation>`` as an ordinary user
+    turn, so the summarizer re-derives the whole summary from a transcript
+    that already CONTAINS it — the uncompact/recompact churn a wake's pass
+    repeats. The prior summary belongs in the template's fold slot instead,
+    and the marker must not also ride the conversation: lift XOR keep.
+    """
+    prior = "PRIOR-SUMMARY-SENTINEL-7f3a"
+    history = _history(8, words=200)
+    tokens = estimate_messages_tokens(history)
+    window = int(tokens / 0.9)
+    settings = CompactionSettings(keep_recent_tokens=300)
+    first = await run_compaction_pass(
+        history,
+        model=_model(window=window),
+        settings=settings,
+        summarize=_Summarizer(prior),
+        now_ms=NOW,
+        last_activity_ms=NOW,
+    )
+    assert first.ran
+    first_marker = first.messages[0]
+    assert first_marker.provider_payload is not None
+    assert first_marker.provider_payload[COMPACTION_MARKER_TYPE]["summary"] == prior
+
+    # Real work for the second pass: the marker plus a short kept tail alone
+    # refuses (see the test above). The manual ``/compact`` posture
+    # (``respect_threshold=False``) skips the size gate, so the cut point
+    # alone decides whether the summarizer runs.
+    new_span = [Message.user(f"NEW-SPAN {index} " + "state " * 200) for index in range(4)]
+    second_summarizer = _Summarizer("second")
+    second = await run_compaction_pass(
+        [*first.messages, *new_span],
+        model=_model(window=window),
+        settings=settings,
+        summarize=second_summarizer,
+        now_ms=NOW,
+        last_activity_ms=NOW,
+        respect_threshold=False,
+    )
+
+    assert second.ran is True
+    assert len(second_summarizer.prompts) == 1
+    prompt = second_summarizer.prompts[0]
+    fold = prompt.split("<previous-summary>", 1)[1].split("</previous-summary>", 1)[0]
+    conversation = prompt.split("<conversation>", 1)[1].split("</conversation>", 1)[0]
+    # The prior summary arrives ONCE, through the fold slot ...
+    assert prior in fold
+    assert prompt.count(prior) == 1
+    # ... and the rendered marker does not also ride the conversation.
+    assert "<previous-context-summary>" not in conversation
+    assert prior not in conversation
+    # The new span is what the fold joins: it is the conversation's material.
+    assert "NEW-SPAN" in conversation
+    # The rebuild is unchanged: a fresh marker heads the result.
+    assert second.messages[0].text.startswith("<previous-context-summary>")
+
+
+@pytest.mark.asyncio
 async def test_defaults_leave_an_ordinary_session_pass_byte_identical() -> None:
     """THE compatibility proof for ``keep_recent_frames=None``.
 
