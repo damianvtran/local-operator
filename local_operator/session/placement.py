@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from secrets import token_hex
 from typing import Any, Literal
 
 #: The sidecar's name inside a session directory. A WIRE-ADJACENT CONSTANT:
@@ -414,10 +416,20 @@ def clear_handoff_entry(config_dir: Path, session_id: str) -> bool:
 
 
 def _write_journal(path: Path, entries: dict[str, dict[str, Any]]) -> None:
+    # ONE STAGING FILE PER CALL, NOT PER PROCESS. The journal has more than one
+    # writer inside one process — the crash-window recovery drives ``reconcile``
+    # (the failing frame CI caught) while other threads of the same process write
+    # the same root — and with a pid-scoped name two such writers shared one
+    # file: the first ``os.replace`` took it away and the second died with
+    # ``FileNotFoundError`` (``test_mobility_crash.py``: ``reconcile`` ->
+    # ``clear_handoff_entry``). Thread ident and four random bytes are the suffix
+    # ``store._stage_private`` and ``identity.save`` already stage with; a lock
+    # would additionally serialise read-modify-write, which is not this fix and
+    # is not needed for uniqueness.
     payload = json.dumps({"version": 1, "entries": entries}, indent=2, sort_keys=True).encode(
         "utf-8"
     )
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{token_hex(4)}.tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "wb") as handle:

@@ -1937,7 +1937,7 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/placement.py::_write_journal",
         "os.unlink",
-        "Removes only its own pid-keyed temp file after a failed atomic replacement",
+        "Removes only its own pid+thread+token-keyed temp file after a failed atomic replacement",
     ),
     # -- the projects store (projects primitive, slice 1) --------------------
     # Every path here is `<config_dir>/projects/<uuid>.json` or this call's own
