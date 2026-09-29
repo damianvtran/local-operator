@@ -75,6 +75,25 @@ def assistant(id_: str, ts: float, text: str = "answer") -> dict[str, Any]:
     }
 
 
+def peer_message(id_: str, ts: float, body: str) -> dict[str, Any]:
+    """The real ``peer_message`` row shape: its text lives under ``details.body``.
+
+    Copied from the index suite's own extraction fixture
+    (``test_injected_rows_extract_text_beyond_the_text_key``) so the two files
+    cannot drift on what a peer message looks like on disk.
+    """
+    return {
+        "id": id_,
+        "ts": ts,
+        "type": "message",
+        "payload": {
+            "kind": "custom",
+            "custom_type": "peer_message",
+            "details": {"body": body, "sender": "w1"},
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tiers and ranking
 # ---------------------------------------------------------------------------
@@ -146,11 +165,9 @@ def test_injected_docs_carry_their_text_into_find_results():
 
     Injected rows are conversation INPUTS — an incoming peer message is text
     the reader may well want to find again — so the pipeline must never treat
-    "injected" as "empty". Pinned at this seam because the SCANNER's extraction
-    of the real row shape (``peer_message`` carries its body under
-    ``details.body``; BE-1's remediation) is upstream of this module; what the
-    extracted text must satisfy is pinned here: exact tier, a real snippet, and
-    the demotion below genuine docs.
+    "injected" as "empty". This is the pipeline-level contract;
+    :func:`test_a_peer_message_row_is_findable_end_to_end` drives the same
+    property off a real ``details.body`` journal row.
     """
     peer = doc("p1", 1, "peer says the deploy is green", injected=True)
     genuine = doc("g1", 2, "a genuine note about the deploy")
@@ -339,3 +356,30 @@ async def test_find_view_missing_journal_is_ready_empty(tmp_path):
         "hits": [],
         "truncated": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_a_peer_message_row_is_findable_end_to_end(tmp_path):
+    """The row-format pin: a peer's message is searchable, not empty.
+
+    ``peer_message`` carries its text under ``details.body`` (the extraction
+    the index slice's remediation added); this drives the REAL journal →
+    scanner → find chain so this slice cannot silently regress to indexing a
+    peer's message as "" — the shape that made it unfindable. Demotion and
+    snippet come from the same run, against text that actually came off disk.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "deploy the staging target"),
+            peer_message("p1", 1.1, "peer says the deploy is green"),
+        ],
+    )
+    view = await tf.find_view(tmp_path, SID, query="deploy", limit=10)
+    assert view["state"] == "ready"
+    assert [h["id"] for h in view["hits"]] == ["u1", "p1"]  # genuine first: D3
+    peer = view["hits"][1]
+    assert peer["tier"] == "exact"
+    assert peer["snippet"] == "peer says the deploy is green"
+    start, end = peer["ranges"][0]
+    assert peer["snippet"][start:end] == "deploy"
