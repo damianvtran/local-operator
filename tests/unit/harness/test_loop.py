@@ -5666,11 +5666,11 @@ async def test_a_runaway_follow_up_still_ends_the_run_as_a_named_cut_off():
 # --- final-response output contract -----------------------------------------
 
 
-def _good_reply(text: str = '{"ok": true}'):
+def _good_reply(text: str = '{"ok": true}') -> list[StreamEvent]:
     return [StreamTextDelta(delta=text), StreamEndEvent(stop_reason="stop")]
 
 
-def _bad_reply(text: str = "this is not json"):
+def _bad_reply(text: str = "this is not json") -> list[StreamEvent]:
     return [StreamTextDelta(delta=text), StreamEndEvent(stop_reason="stop")]
 
 
@@ -5732,19 +5732,26 @@ async def test_final_response_gate_retries_inside_the_same_turn() -> None:
         (2, True, False),
     ]
     assert len(stream.requests) == 2
-    assert context.messages[-1].text == '{"ok": true}'
+    last = context.messages[-1]
+    assert isinstance(last, Message)
+    assert last.text == '{"ok": true}'
     end = events[-1]
     assert isinstance(end, AgentEndEvent)
     assert end.error is None
     # Persisted shape: assistant, the retry notice, the answering assistant.
-    roles = [m.role for m in end.messages]
-    assert roles == ["assistant", "user", "assistant"]
-    retry = end.messages[1]
+    # Narrow to ``Message``: ``AgentMessage`` is the union with the
+    # host-authored ``CustomMessage``, and this path must produce plain rows.
+    rows = [row for row in end.messages if isinstance(row, Message)]
+    assert len(rows) == len(end.messages) == 3
+    assert [row.role for row in rows] == ["assistant", "user", "assistant"]
+    retry = rows[1]
     assert retry.text.startswith("Harness output check: ")
     assert "The required output format is json." in retry.text
     assert "(attempt 2 of 3)" in retry.text
     # And the retry rode the NEXT provider request.
-    wire = [m.text for m in stream.requests[1].messages if m.role == "user"]
+    wire = [
+        m.text for m in stream.requests[1].messages if isinstance(m, Message) and m.role == "user"
+    ]
     assert any(text.startswith("Harness output check: ") for text in wire)
 
 

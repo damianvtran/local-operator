@@ -19,6 +19,7 @@ from local_operator.exec_startup import (
     resolve_output_contract,
     resolve_startup,
 )
+from local_operator.output_contract import OutputContract
 from local_operator.session.goal_loop import GoalLoop
 from local_operator.teams import TeamEditFields, TeamMember, TeamRegistry
 
@@ -280,10 +281,12 @@ class RecordingSession:
         self.attached_profiles: list[str] = []
         #: Contracts installed through ``set_output_contract`` (the output
         #: contract is post-open session state, applied the same way the
-        #: inventory is).
-        self.contracts: list[object] = []
+        #: inventory is). Typed to the contract, not ``object``: the tests that
+        #: read it back off the double want the real class's attributes (the
+        #: pyright gate has no union attributes either).
+        self.contracts: list[OutputContract] = []
 
-    def set_output_contract(self, contract):
+    def set_output_contract(self, contract: OutputContract) -> None:
         self.contracts.append(contract)
 
     def attach_team(self, team):
