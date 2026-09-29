@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import functools
 import inspect
+import json
 import logging
 import secrets
 import time
@@ -364,6 +365,12 @@ class _PromptCommand:
     #: delivery, a compaction) before handing this command to ``Session.prompt``.
     #: See ``ServingSessionHandle.prompt``'s ``wait_for_turn``.
     wait_for_turn: bool = True
+    #: Silent input metadata (see ``Message.input_mode``) carried from the wire
+    #: to the durable row: set by the desktop composer for a dictation send and
+    #: for the reserved ``input_path`` route slot; ``None`` for every legacy
+    #: producer, which is what keeps the row byte-identical for them.
+    input_mode: str | None = None
+    input_path: str | None = None
 
     def __iter__(self):  # type: ignore[no-untyped-def]
         # Tuple compatibility for older diagnostics that inspect the queue.
@@ -2750,12 +2757,21 @@ class ServingSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
+        input_mode: str | None = None,
+        input_path: str | None = None,
         *,
         wait_complete: bool = False,
         harness_injected: bool = False,
         wait_for_turn: bool = True,
     ) -> str:
         """Admit one ordinary prompt; the receipt is its durable append.
+
+        ``input_mode``/``input_path`` are the silent input metadata the
+        desktop composer sends for a dictation (see ``Message.input_mode``).
+        They ride the queue like the text does and are handed to
+        ``Session.prompt`` only when its signature takes them — the dispatch
+        above already made the same probe on this method, so an owner from
+        before the carriage never receives a keyword it would drop.
 
         ``wait_for_turn`` makes an accepted prompt WAIT for a turn this queue
         did not open instead of failing after admission (see
@@ -2962,7 +2978,15 @@ class ServingSessionHandle(SessionHandle):
         admitted: asyncio.Future[None] = self._loop.create_future()
         completed = self._loop.create_future() if wait_complete else None
         command = _PromptCommand(
-            command_id, text, blocks, admitted, completed, harness_injected, wait_for_turn
+            command_id,
+            text,
+            blocks,
+            admitted,
+            completed,
+            harness_injected,
+            wait_for_turn,
+            input_mode=input_mode,
+            input_path=input_path,
         )
         position = len(self._prompt_queue) + 1
         legacy_prompt = "message_id" not in inspect.signature(self._session.prompt).parameters
@@ -3644,6 +3668,10 @@ class ServingSessionHandle(SessionHandle):
                         # keyword's whole job is to stamp a marker those hosts
                         # never read.
                         fields["harness_injected"] = command.harness_injected
+                    if "input_mode" in parameters:
+                        fields["input_mode"] = command.input_mode
+                    if "input_path" in parameters:
+                        fields["input_path"] = command.input_path
                     await self._session.prompt(command.text, command.images, **fields)
                 else:
                     # Legacy tests/third-party handles have no admission seam;
@@ -3713,6 +3741,8 @@ class ServingSessionHandle(SessionHandle):
         text: str,
         images: list[dict[str, str]] | list["ImageContent"] | None = None,
         command_id: str | None = None,
+        input_mode: str | None = None,
+        input_path: str | None = None,
     ) -> str:
         self._check_loop_thread()
         command_id = command_id or str(uuid.uuid4())
@@ -3771,6 +3801,13 @@ class ServingSessionHandle(SessionHandle):
             fields["message_id"] = command_id
         if "producer_command_id" in parameters:
             fields["producer_command_id"] = command_id
+        # The silent input metadata rides the steer exactly as it rides a
+        # prompt: a mid-turn dictation keeps its provenance on the queued row,
+        # and a reduced session that predates the keywords gets neither.
+        if "input_mode" in parameters:
+            fields["input_mode"] = input_mode
+        if "input_path" in parameters:
+            fields["input_path"] = input_path
         try:
             self._session.steer(text, blocks, **fields)
         except Exception:
@@ -5693,6 +5730,51 @@ class ServingSessionHandle(SessionHandle):
                 # refusal, which left the desktop unable to say why.
                 return SlashResult(kind="error", data={"code": refusal_code(exc)})
             return SlashResult(kind="block", data=data)
+        if command == "checkpoints_warm":
+            # An INTERNAL word on this ladder, like ``desktop_mcp``: the
+            # desktop route's ``sessions.checkpoints.warm`` (design D2/D9),
+            # carried here because generation must run where the session's
+            # provider and errand tier live — a viewer facade refuses errands
+            # outright ("provider errands run on the session owner").
+            # ``args`` is a JSON object with optional ``ids``/``limit``; the
+            # answer is the receipt the route forwards verbatim, so the
+            # payload parsing stays tolerant (a malformed extra is ignored,
+            # never an exception the caller has to read for decoration).
+            from local_operator.paths import config_dir
+            from local_operator.session import checkpoint_naming
+
+            # ``errand``, not ``complete``: this function's fork branch below
+            # defines a nested ``complete(fork_id, error)`` callback in the SAME
+            # scope, and a second binding of that name is both a type error and
+            # a shadowing hazard.
+            errand = getattr(session, "complete_once", None)
+            if not callable(errand):
+                return SlashResult(kind="error", data={"code": "naming_unavailable"})
+            complete_fn = cast("Callable[[str, str], Awaitable[str]]", errand)
+            try:
+                payload = json.loads(args or "{}")
+            except ValueError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            raw_ids = payload.get("ids")
+            ids = [str(item) for item in raw_ids] if isinstance(raw_ids, list) else None
+            raw_limit = payload.get("limit")
+            limit = (
+                raw_limit
+                if isinstance(raw_limit, int) and not isinstance(raw_limit, bool)
+                else None
+            )
+            return SlashResult(
+                kind="block",
+                data=await checkpoint_naming.warm_checkpoints(
+                    config_dir(),
+                    session.session_id,
+                    ids=ids,
+                    limit=limit,
+                    complete_fn=complete_fn,
+                ),
+            )
         if command == "fork":
             from local_operator.fork import fork_session
             from local_operator.paths import config_dir
@@ -6225,7 +6307,20 @@ class ServingSessionHandle(SessionHandle):
             return SlashResult(kind="notice", text="session is still starting…", style="warning")
         stored = setter(name)
         self._publish_name()
-        return SlashResult(kind="notice", text=f"renamed to {stored or name}", style="info")
+        shown = stored or name
+        # HER conversation is her NAME (the `aida.name` coupling, UX round 1
+        # U3): the receipt says the side effect where the expectation forms,
+        # beside the `applied: aida.name` config row. `is_her_session` keeps
+        # this and the TUI's own receipt from drifting on what "hers" means.
+        from local_operator.aida import naming as aida_naming
+
+        if aida_naming.is_her_session(session):
+            return SlashResult(
+                kind="notice",
+                text=f"renamed to {shown} — she is now called {shown} everywhere",
+                style="info",
+            )
+        return SlashResult(kind="notice", text=f"renamed to {shown}", style="info")
 
     async def _title_refresh_slash(self, session: Any, SlashResult: Any) -> Any:
         """``/title refresh`` on a detached runtime.

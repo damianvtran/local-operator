@@ -24,11 +24,41 @@ from tests.unit.tui.test_sidebar_swap_reset import SidebarRemote
 #: A BACKSTOP, not an assertion: the pump ends the moment the switch binds.
 _SWITCH_BACKSTOP_S = 5.0
 
+#: Wall-clock backstop for `_poll_now`'s wait on an in-flight attention poll,
+#: for the same reason as `_SWITCH_BACKSTOP_S`: the wait ends the moment the
+#: poll finishes; this only stops a wedged poll from hanging the file.
+_POLL_PENDING_BACKSTOP_S = 10.0
+
 
 async def mouse_down(app):
     # Pilot.click posts below App.on_event; use the actual driver's entry point
     # so this exercises the latch, not merely Textual's downstream widget route.
     await app.on_event(events.MouseDown(None, 1, 1, 0, 0, 1, False, False, False))
+
+
+async def _poll_now(app, pilot) -> None:
+    """Run one attention poll that is guaranteed to have actually run.
+
+    `_poll_completion_attention` refuses to re-enter itself
+    (`_attention_poll_pending`) because the app's 1 s tick runs the same
+    method — so an explicit call made while a tick-poll is in flight returns
+    WITHOUT reading, acknowledging, or refreshing any receipt. Every
+    assertion in this file depends on the call having run: when it silently
+    did not, the receipt for the key just pressed never landed and the cell
+    failed an assert it had no part in (reproduced at ~2 runs in 30 under
+    CI-shaped load here; CI run 36389917865 saw `[2, 1] == [2, 2]`).
+
+    Wait for the in-flight poll to finish first. Between that observation and
+    the call there is no `await`, so on the single-threaded loop nothing can
+    slip back in before this call claims the latch. The deadline is a
+    backstop for a wedged poll, never the thing being waited on.
+    """
+    deadline = asyncio.get_running_loop().time() + _POLL_PENDING_BACKSTOP_S
+    while getattr(app, "_attention_poll_pending", False):
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("an attention poll stayed in flight past the backstop")
+        await pilot.pause()
+    await app._poll_completion_attention()
 
 
 @pytest.mark.asyncio
@@ -40,26 +70,26 @@ async def test_input_cannot_acknowledge_future_token(tmp_path, monkeypatch, blur
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 30)) as pilot:
         await _settle(app, pilot, session.result.id)
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [1, 0]
         if edge == "mouse":
             await mouse_down(app)
         else:
             await pilot.press("a")
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [1, 1]
         if blur:
             app.on_app_blur(events.AppBlur())
         # Same visible row is deliberately the strongest adversarial case: the
         # token identity, not just an anchor still being on screen, must fence B.
         session.store.publish("session/sess", str(uuid.uuid4()), session.result.id, "complete")
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [2, 1]
         if edge == "mouse":
             await mouse_down(app)
         else:
             await pilot.press("b")
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [2, 2]
 
 
@@ -72,7 +102,7 @@ async def test_blur_revokes_unconsumed_edge(tmp_path, monkeypatch):
         await _settle(app, pilot, session.result.id)
         await mouse_down(app)
         app.on_app_blur(events.AppBlur())
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [1, 0]
 
 
@@ -87,11 +117,11 @@ async def test_hidden_result_is_not_witnessed_by_input(tmp_path, monkeypatch):
         await pilot.pause()
         assert not app._completion_anchor_visible(session.result.id)
         await mouse_down(app)
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [1, 0]
         app._transcript_view().scroll_end(animate=False)
         await _settle(app, pilot, session.result.id)
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [1, 0]
 
 
@@ -137,11 +167,11 @@ async def test_switch_transfers_only_the_observed_catalogue_token(tmp_path, monk
         app._bind_viewer(session)
         app._transcript_view().display = True
         await _settle(app, pilot, session.result.id)
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [1, 1]
         app._bind_viewer(session)
         session.store.publish("session/sess", str(uuid.uuid4()), session.result.id, "complete")
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert session.store.state("session/sess")["revision"] == [2, 1]
 
 
@@ -240,7 +270,7 @@ async def test_the_real_switch_lands_the_clicked_token_on_the_incoming_session(
             incoming.result.id,
         ), "the token the click carried did not survive the switch's own bind"
         await _settle(app, pilot, incoming.result.id)
-        await app._poll_completion_attention()
+        await _poll_now(app, pilot)
         assert not incoming.store.state("session/sess")[
             "unseen"
         ], "the click's token did not clear the incoming session's unseen completion"

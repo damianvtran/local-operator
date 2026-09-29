@@ -31,7 +31,8 @@ durable facts a session directory is made of, exactly as the desktop's own
 5. the conversation title, both channels: the ``conversation_name`` custom
    entry (the transcript reader's fallback) and the title sidecar (the O(1)
    picker read), ``user_set=True`` so the auto-namer may not replace it after
-   her first turn — "Aida" is what R27's row must say;
+   her first turn — the configured ``aida.name`` (default "Aida") is what
+   R27's row must say;
 6. a birth custom entry, which is ALSO the reason the directory becomes REAL:
    ``session_activity`` (the ONE ranking clock) returns ``None`` for a
    directory holding neither a transcript nor a mail spool, and such a
@@ -68,7 +69,7 @@ import time
 import uuid
 from pathlib import Path
 
-from local_operator.aida import proactive, state
+from local_operator.aida import naming, proactive, state
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,11 @@ DEFAULT_ENABLED = proactive.DEFAULT_ENABLED
 #: attachment sidecar's ``agent`` field, and the name ``/agent aida`` resolves.
 ROLE_NAME = "aida"
 
-#: The conversation title every surface reads (picker, sidebar, band).
-SESSION_TITLE = "Aida"
+#: Her conversation's packaged title — the default the configured name
+#: starts from. What creation actually writes is ``aida.name`` (see
+#: :mod:`local_operator.aida.naming`), reconciled on every ensure; this
+#: constant stays as that default and for the module's existing readers.
+SESSION_TITLE = naming.DEFAULT_NAME
 
 #: The birth custom entry's type. Never enters the model's context; it is the
 #: activity clock's reason to rank her row and a permanent marker of how the
@@ -124,14 +128,19 @@ async def _create_session_dir(config_dir: Path, session_id: str) -> None:
 
     directory = _sessions_root(config_dir) / session_id
     directory.mkdir(parents=True, mode=0o700)
+    # THE CONFIGURED NAME, not the packaged default: a session first created
+    # AFTER the operator renamed her (``aida.name``, a /settings edit) must be
+    # born wearing that name — the sidebar's pinned row and the picker read
+    # this title, and they cannot ask a session that does not exist yet.
+    title = naming.display_name(config_dir)
     ensure_session_created_at(directory, time.time())
     write_session_attachment(directory, team="", agent=ROLE_NAME, goal="")
-    write_session_title(directory, SESSION_TITLE, user_set=True, past_names=[])
+    write_session_title(directory, title, user_set=True, past_names=[])
     transcript = Transcript(directory)
     # The name entry rides BEFORE the birth entry so the transcript reader's
     # first window already holds the title if the sidecar was lost.
     entry = {
-        "text": SESSION_TITLE,
+        "text": title,
         "user_set": True,
     }
     from local_operator.session.naming import CONVERSATION_NAME_CUSTOM_TYPE
@@ -166,10 +175,12 @@ async def ensure_session(
 ) -> str | None:
     """Her session id, creating the session on first need. ``None`` when disabled.
 
-    Cheap and idempotent on every call after the first: one state read and one
-    directory stat, no session construction, no provider resolution. Safe to
-    call from boot paths (best-effort: any failure logs and answers ``None``)
-    and from every ``/aida``/desktop op.
+    Cheap and idempotent on every call after the first: one state read, one
+    directory stat, and one title check (which reconciles her stored title to
+    ``aida.name`` — see ``local_operator.aida.naming``), no session
+    construction, no provider resolution. Safe to call from boot paths
+    (best-effort: any failure logs and answers ``None``) and from every
+    ``/aida``/desktop op.
     """
     from local_operator.paths import config_dir as resolve_config_dir
 
@@ -187,6 +198,13 @@ async def ensure_session(
     try:
         existing = state.session_id_of(root)
         if existing and (_sessions_root(root) / existing).is_dir():
+            # CONFIG IS CANONICAL FOR HER NAME: a rename made while she has no
+            # open runtime (a /settings edit, /aida rename in a terminal that
+            # is not sitting on her conversation, the desktop while she is
+            # closed) must reach the picker and the sidebar, which read the
+            # stored title from disk — not only the live session's watcher.
+            # Cheap when nothing moved: one small sidecar read, compare, done.
+            await naming.reconcile_session_title(root, existing)
             return existing
         session_id = uuid.uuid4().hex[:12]
         try:

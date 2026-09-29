@@ -20,7 +20,7 @@ import sys
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -46,7 +46,7 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 # one module owns the scan, its cache and its invalidation, and this adapter is
 # only the door. Imported as a module so tests can drive its decision paths off
 # the bridge without a second seam.
-from local_operator.session import transcript_index
+from local_operator.session import transcript_find, transcript_index
 
 # The pin store is the sidebar's OWN module, reused rather than re-implemented —
 # for the reason the `move_targets` import above cites, which is also that
@@ -2840,13 +2840,23 @@ class DesktopSessionBridge:
         the conversation was ever run on the mock — the case here being a
         session a rig left in a store this backend serves.
 
+        THE IDENTITY TEST IS ASKED HERE TOO, for the reason it is asked on the
+        feed: this frame becomes a banner under the ATTACHED APP's identity, so
+        a backend running under a redirected ``HOME`` must not extend the offer
+        at all (``desktop_belongs_to_this_process``).
+
         Guarded end to end: a notification is chrome, and this runs inside the
         1 s attention poll whose loop already treats a store error as costing
         one tick rather than the feature.
         """
-        from local_operator.tui.notify import notifications_enabled
+        from local_operator.tui.notify import (
+            desktop_belongs_to_this_process,
+            notifications_enabled,
+        )
 
         if not notifications_enabled():
+            return
+        if not desktop_belongs_to_this_process():
             return
         token = state.get("completion_token")
         if (
@@ -3372,6 +3382,69 @@ class DesktopSessionBridge:
                 "checkpoints": [],
             }
         return await transcript_index.checkpoints_view(self.root, self.session_id)
+
+    async def checkpoints_warm(
+        self, *, ids: list[str] | None = None, limit: int | None = None
+    ) -> dict[str, Any]:
+        """Ask the owner to buy names for this conversation's checkpoints (D2/D9).
+
+        Generation must run where the session's provider and errand tier live
+        — ``AttachedSession.complete_once`` refuses outright ("provider
+        errands run on the session owner") — so this rides the same
+        shared-slash seam the desktop's other owner-side calls use
+        (``desktop_mcp``, ``wake``, ``fork``); the owner schedules the work as
+        background tasks and answers the receipt immediately, never waiting
+        on a provider call.
+
+        A COLD conversation answers an empty acceptance rather than an error.
+        There is no owner to run the errand, and starting one is not worth it
+        for decoration: the rail falls back to "Turn N"/message text, and the
+        next gesture after the pane's own watch-lease warm lands can try
+        again. A PEER conversation answers the same empty receipt — v1 names
+        on the device that holds the journal only (D4), the same fact the
+        manifest beside it reports as ``unsupported``.
+        """
+        if self.remote_row is not None:
+            return {"accepted": [], "pending": []}
+        remote = self.remote
+        if remote is None or not remote.owner_reachable:
+            return {"accepted": [], "pending": []}
+        payload = json.dumps({"ids": list(ids) if ids is not None else None, "limit": limit})
+        outcome = await remote.route_shared_slash("checkpoints_warm", payload)
+        data = outcome.get("data") if isinstance(outcome, Mapping) else None
+        if not isinstance(data, Mapping):
+            # Nothing usable came back (an older owner that does not know the
+            # word, or a shape that is not a SlashResult). Not an error the
+            # user should read: the rail's fallback text is the same answer.
+            return {"accepted": [], "pending": []}
+        return {
+            "accepted": [str(item) for item in (data.get("accepted") or [])],
+            "pending": [str(item) for item in (data.get("pending") or [])],
+        }
+
+    async def find(self, query: str, limit: int) -> dict[str, Any]:
+        """In-thread search over THIS conversation's message docs (D3/D9).
+
+        LOCAL sessions only, for ``checkpoints``' reason one method up: the
+        index is derived from this device's journal, and a peer's journal is
+        not here. A peer answers ``state: "unsupported"`` (D4) — a fact about
+        where the bytes are, not a failure — and the renderer hides find for
+        remote conversations.
+
+        Everything else — the tiered pipeline and the warm/cold ladder — lives
+        in :mod:`local_operator.session.transcript_find`, which reuses the
+        same index view ``checkpoints`` rides: the two surfaces cannot
+        disagree about whether the index is warm.
+        """
+        if self.remote_row is not None:
+            return {
+                "query": query,
+                "state": "unsupported",
+                "partial": False,
+                "hits": [],
+                "truncated": False,
+            }
+        return await transcript_find.find_view(self.root, self.session_id, query=query, limit=limit)
 
     async def watch(self, subscription_id: str, *, visible: bool, can_notify: bool) -> None:
         sub = self.subscribers.get(subscription_id)

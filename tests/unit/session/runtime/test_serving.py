@@ -996,6 +996,34 @@ async def test_a_renamed_session_reaches_the_projection_and_the_record() -> None
 
 
 @pytest.mark.asyncio
+async def test_the_rename_receipt_says_she_was_renamed_too_for_her_session() -> None:
+    """UX round 1, U3: renaming HER conversation renames the assistant.
+
+    The config row (``applied: aida.name``) is the audit trail; the receipt
+    is where the expectation forms, so the product-wide half is said out
+    loud. ``_aida_duty`` is the same gate the config sync itself reads, so
+    the clause cannot claim a rename that did not sync.
+    """
+    handle, session = make_handle()
+    session._aida_duty = True  # type: ignore[attr-defined]
+
+    result = await handle._rename_slash(session, "Vega", _SlashResult)
+
+    assert result.text == "renamed to Vega — she is now called Vega everywhere", result.text
+
+
+@pytest.mark.asyncio
+async def test_the_rename_receipt_stays_plain_for_every_other_session() -> None:
+    """The coupling is HERS alone — an ordinary conversation's receipt is
+    exactly the words it always was."""
+    handle, session = make_handle()
+
+    result = await handle._rename_slash(session, "Vega", _SlashResult)
+
+    assert result.text == "renamed to Vega", result.text
+
+
+@pytest.mark.asyncio
 async def test_title_refresh_that_changes_nothing_keeps_the_name_and_the_latch() -> None:
     """A refresh is not a rename: "the name still fits" must leave both the
     title and the user's claim on it exactly as they were."""

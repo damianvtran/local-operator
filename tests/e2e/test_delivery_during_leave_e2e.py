@@ -370,3 +370,510 @@ async def test_a_settled_batch_still_opens_one_turn_without_the_latch(
         "one row per result after the delivery turn: the loop must skip rows "
         f"already made durable at settle time (found {[r.get('job_id') for r in rows]})"
     )
+
+
+# --- 664a234ec561 (2026-09-28): the exit that arms NO latch --------------------
+#
+# The same handoff as a81ceec0982b, through the door neither departure rung
+# covers: an exec/print-mode run ending NORMALLY, then its process disposing.
+# Nothing arms ``begin_drain``/``begin_retire`` on that path, so the batch a
+# last turn deferred was flushed into a delivery run that the disposal aborted
+# 13 ms after the completed turn's own honest marker — a second
+# ``error | cause=disposed`` row that superseded ``complete`` for every
+# latest-wins reader and made the successor journal a ``[session incident]``
+# about work that had finished. The fleet shows the tail
+# ``complete → attention_started → error|disposed`` in >=5 exec sessions across
+# three days, every one of them with ZERO provider round-trips in the aborted
+# run.
+#
+# The cells below pin both halves of the fix, from the ordering 664a had:
+# a disposal that catches a live run publishes a cut-off ONLY when the run has
+# evidence (a provider round-trip was dispatched, or a person's/peer's prompt
+# opened it); otherwise the run settles with an ``eligible:False`` marker and
+# NO verdict. And the one-shot host arms the same departure pair before its
+# dispose, so the doomed turn is held instead of opened.
+
+
+def _park_runs_before_dispatch(
+    session: Session, *, except_token: str | None
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Park the first run whose token is not ``except_token`` BEFORE dispatch.
+
+    ``_prepare_system_blocks`` runs inside ``_run_turn`` after the run's abort
+    signal exists and before any request is built or handed to the provider,
+    so parking here is exactly the 664a state: the run is ADMITTED — its
+    token is minted, its ``attention_started`` row is written, ``_turn_task``
+    is live — and it has spent no provider round-trip. ``except_token`` lets
+    the WORK run through untouched so the cell can park the DELIVERY run
+    alone.
+    """
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    original = session._prepare_system_blocks
+    fired = False
+
+    async def gated(*args: Any, **kwargs: Any) -> Any:
+        nonlocal fired
+        if (
+            not fired
+            and session._attention_run_token is not None
+            and session._attention_run_token != except_token
+        ):
+            fired = True
+            parked.set()
+            await release.wait()
+        return await original(*args, **kwargs)
+
+    session._prepare_system_blocks = gated  # type: ignore[method-assign]
+    return parked, release
+
+
+class _ParkedDeliveryTurn(_ParkedWorkTurn):
+    """``_ParkedWorkTurn`` plus an optional park on the DELIVERY turn's call.
+
+    With ``hold_delivery`` the delivery request is parked INSIDE the provider
+    call (its round-trip was dispatched — the negative control's shape);
+    without it the delivery run is only ever exercised pre-dispatch.
+    """
+
+    #: Every batch row's text — the LAST row is what ``last_user_text`` returns,
+    #: so matching only the first one never fired (the batch carries both
+    #: children, and the review row is the tail).
+    delivery_markers = ("the QA round finished", "the review round finished")
+
+    def __init__(self, turns: Sequence[Sequence[StreamEvent]], *, hold_delivery: bool) -> None:
+        super().__init__(turns)
+        self.hold_delivery = hold_delivery
+        self.delivery_entered = asyncio.Event()
+
+    def __call__(
+        self, request: ChatRequest, signal: AbortSignal | None = None
+    ) -> AsyncIterator[StreamEvent]:
+        base = super().__call__(request, signal)
+        park_delivery = self.hold_delivery and any(
+            marker in last_user_text(request) for marker in self.delivery_markers
+        )
+
+        async def gen() -> AsyncIterator[StreamEvent]:
+            if park_delivery:
+                self.delivery_entered.set()
+                # Released only by the abort cancelling the pump, like the work
+                # turn's park: the cell never lets a parked delivery turn finish.
+                await asyncio.Event().wait()
+            async for event in base:
+                yield event
+
+        return gen()
+
+
+async def _work_turn_with_deferred_children_unlatched(
+    config: Path,
+    directory: Path,
+    stream: _ParkedDeliveryTurn,
+    *,
+    gate_flushed_run: bool,
+) -> tuple[Session, tuple[asyncio.Event, asyncio.Event] | None]:
+    """The 664a script: a live work turn, two deferred children, NO latch.
+
+    No latch is the exec condition — nothing arms the departure pair here.
+    With ``gate_flushed_run`` the helper parks whatever run the flush spawns
+    BEFORE dispatch (the record cell's admitted-but-zero-work state); without
+    it the flushed run is left to reach the provider on its own (the negative
+    control's shape). The gate has to be installed before the work turn is
+    released, because the flush — and the spawn it causes — run in that turn's
+    own tail.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    session = build_session(directory, stream)
+    task = asyncio.ensure_future(session.prompt("delegate two children"))
+    await asyncio.wait_for(stream.entered.wait(), _STEP_TIMEOUT_S)
+    assert session.is_streaming, "the work turn never reached the provider"
+    gate: tuple[asyncio.Event, asyncio.Event] | None = None
+    if gate_flushed_run:
+        work_token = session._attention_run_token
+        assert work_token, "the work run must have minted its token by admission"
+        gate = _park_runs_before_dispatch(session, except_token=work_token)
+
+    await session._on_job_completed("qa-r2", "the QA round finished", _settled("qa-r2"))
+    await session._on_job_completed("rev-r6", "the review round finished", _settled("rev-r6"))
+    assert session._deferred_job_results, "precondition: the batch is deferred"
+
+    stream.release.set()
+    await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+    return session, gate
+
+
+@pytest.mark.asyncio
+async def test_a_zero_work_disposal_settles_without_a_verdict(
+    headless_tui_env: Path,
+) -> None:
+    """THE 664a RECORD CELL: an admitted, zero-work run leaves NO verdict.
+
+    The first cell of this file required a departure latch to keep the batch
+    from opening a turn at all. This one is the door that latch cannot reach:
+    the delivery run IS admitted (its own ``attention_started`` exists) and the
+    disposal meets it pre-dispatch. Nothing was spent and no person asked, so
+    the exit settles the run — an ``eligible:False`` marker, no store row, no
+    successor narration — instead of a ``disposed`` error that supersedes the
+    work turn's honest ``complete``.
+    """
+    config = headless_tui_env
+    directory = config / "zero-work-disposal"
+
+    with bounded(120, "a zero-work delivery run caught by the disposal"):
+        stream = _ParkedDeliveryTurn(
+            [text_turn("working"), text_turn("delivery")], hold_delivery=False
+        )
+        session, gate = await _work_turn_with_deferred_children_unlatched(
+            config, directory, stream, gate_flushed_run=True
+        )
+        assert gate is not None, "the record cell must park the flushed run"
+        parked, release = gate
+        # The flush spawned the delivery task; it is ADMITTED (its own run
+        # token, its own attention_started row, a live _turn_task) and parked
+        # exactly where 664a's run was when the disposal arrived.
+        await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+        delivery_token = session._attention_run_token
+        assert delivery_token is not None
+        assert (
+            session._turn_task is not None and not session._turn_task.done()
+        ), "the gate must park a LIVE run, not a finished one"
+
+        dispose_task = asyncio.ensure_future(session.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            # The disposal decides and aborts BEFORE awaiting the run; release
+            # the park only after the abort fired so the run unwinds through
+            # the pre-aborted fast path (zero provider statements executed).
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+
+    runs = _run_rows(directory)
+    assert len(runs) == 2, f"the work run and the admitted delivery run: {runs!r}"
+    assert runs[-1].get("token") == delivery_token
+    assert [row.get("kind") for row in _completion_rows(directory)] == [
+        "complete"
+    ], f"no verdict may replace the completed turn's own: {_completion_rows(directory)!r}"
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state.get("kind") == "complete", f"the store's latest row stays complete: {state!r}"
+
+    markers = [
+        row
+        for row in _rows(directory, "completion_attention")
+        if row.get("token") == delivery_token
+    ]
+    assert len(markers) == 1, f"one settle marker for the delivery run: {markers!r}"
+    marker = markers[0]
+    assert marker.get("eligible") is False, marker
+    assert not marker.get("kind") and not marker.get(
+        "cause"
+    ), "the settlement asserts NOTHING about how the run ended"
+    assert (
+        _incident_rows(directory) == []
+    ), "the next turn must not be told a zero-work delivery run was cut off"
+
+    # THE SUCCESSOR: a real boot over the same directory. It must narrate
+    # nothing AND still carry the two durable results.
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(directory, successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        assert successor_stream.requests, "the successor never called the provider"
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "the QA round finished" in sent, sent[-2000:]
+        assert "the review round finished" in sent, sent[-2000:]
+        assert "[session incident]" not in sent, sent[-2000:]
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_noted_serving_cause_still_settles_a_zero_evidence_run(
+    headless_tui_env: Path,
+) -> None:
+    """THE SERVING DOOR: a cause noted before the handover must not dodge the settle.
+
+    ``ServingSessionHandle.dispose()`` notes the retirement cause whenever
+    ``disposal_cuts_a_turn()`` is true — the same condition the disposal's own
+    settle decision uses — so the synthesis arrives holding BOTH a noted cause
+    AND an armed settle intent. Review round 1 (MAJOR-1) measured what that
+    combination did: the synthesis took the publish branch, the armed intent
+    suppressed that publish, and the run ended settled by NOBODY — no verdict,
+    no ``eligible:False`` marker — which the successor reclassified as "the
+    cause could not be determined" about a turn that spent nothing. With the
+    intent forcing the settle branch, the serving door writes the marker and
+    the successor narrates nothing.
+    """
+    config = headless_tui_env
+    directory = config / "serving-note-settles"
+
+    with bounded(120, "a noted serving cause over a zero-evidence run"):
+        stream = _ParkedDeliveryTurn(
+            [text_turn("working"), text_turn("delivery")], hold_delivery=False
+        )
+        session, gate = await _work_turn_with_deferred_children_unlatched(
+            config, directory, stream, gate_flushed_run=True
+        )
+        assert gate is not None, "the cell must park the flushed run"
+        parked, release = gate
+        await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+        delivery_token = session._attention_run_token
+        assert delivery_token is not None
+        assert session._turn_task is not None and not session._turn_task.done()
+
+        # Exactly ``ServingSessionHandle._note_retirement_cut_off()``'s call and
+        # gate (serving.py:1735-1739): note only while a live turn is being cut.
+        assert session.disposal_cuts_a_turn(), "the serving rung notes under this gate"
+        session.note_cut_off("runtime-shutdown")
+
+        dispose_task = asyncio.ensure_future(session.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+
+    assert (
+        session._attention_run_settled is True
+    ), "the run must not be left open for the successor to reclassify"
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == [
+        "complete"
+    ], f"the noted cause must not become a verdict for a zero-evidence run: {rows!r}"
+    markers = [
+        row
+        for row in _rows(directory, "completion_attention")
+        if row.get("token") == delivery_token
+    ]
+    assert len(markers) == 1, f"one settle marker for the delivery run: {markers!r}"
+    assert markers[0].get("eligible") is False, markers[0]
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state.get("kind") == "complete", f"the store stays on the completed turn: {state!r}"
+    assert _incident_rows(directory) == []
+
+    # THE SUCCESSOR must narrate nothing: the "cause could not be determined"
+    # reclassification is exactly what the missing marker used to produce.
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(directory, successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "[session incident]" not in sent, sent[-2000:]
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_run_cut_after_its_first_request_still_errors(
+    headless_tui_env: Path,
+) -> None:
+    """NEGATIVE CONTROL: evidence = a dispatched round-trip. Still an error.
+
+    The same disposal, the same delivery origin — but this run's request
+    reached the provider (parked INSIDE the call). The disposal's verdict is
+    the honest one: ``error | cause=disposed``, and the successor narrates the
+    cut. Without this cell the settle arm could suppress a genuinely
+    involuntary death.
+    """
+    config = headless_tui_env
+    directory = config / "delivery-cut-after-dispatch"
+
+    with bounded(120, "a delivery run cut after its first provider request"):
+        stream = _ParkedDeliveryTurn(
+            [text_turn("working"), text_turn("delivery")], hold_delivery=True
+        )
+        session, gate = await _work_turn_with_deferred_children_unlatched(
+            config, directory, stream, gate_flushed_run=False
+        )
+        assert gate is None, "this cell must let the flushed run reach the provider"
+        await asyncio.wait_for(stream.delivery_entered.wait(), _STEP_TIMEOUT_S)
+        assert session.is_streaming, "the delivery turn never reached the provider"
+
+        await session.dispose()
+
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == ["complete", "error"], rows
+    assert rows[-1].get("cause") == "disposed", rows[-1]
+
+    # HONESTY: the cut IS narrated to the next turn — the settle arm was not
+    # allowed to hide a real death.
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(directory, successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "[session incident]" in sent, sent[-2000:]
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_typed_prompt_cut_with_zero_round_trips_still_errors(
+    headless_tui_env: Path,
+) -> None:
+    """NEGATIVE CONTROL: provenance = a person's words. Still an error.
+
+    Zero provider round-trips, no note of any kind: on evidence alone this run
+    would settle silently. It does not, because ``prompt()`` opened it — a
+    person (or a peer) is waiting on the answer, and their turn being cut is
+    theirs to be told about. This is the boundary of the settle arm, and it is
+    the case a too-wide suppression would swallow first.
+    """
+    config = headless_tui_env
+    directory = config / "typed-prompt-cut-pre-dispatch"
+    stream = _ParkedWorkTurn([text_turn("working")])
+
+    with bounded(120, "a typed prompt cut before dispatch"):
+        directory.mkdir(parents=True, exist_ok=True)
+        session = build_session(directory, stream)
+        parked, release = _park_runs_before_dispatch(session, except_token=None)
+        task = asyncio.ensure_future(session.prompt("do the thing"))
+        await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+        assert session._turn_task is not None and not session._turn_task.done()
+
+        dispose_task = asyncio.ensure_future(session.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == ["error"], rows
+    assert rows[-1].get("cause") == "disposed", rows[-1]
+    assert stream.exhausted_at is None, "the run must not have consumed a scripted turn"
+
+
+@pytest.mark.asyncio
+async def test_a_peer_prompt_cut_with_zero_round_trips_still_errors(
+    headless_tui_env: Path,
+) -> None:
+    """NEGATIVE CONTROL: the peer arm carries provenance, not just ``prompt()``.
+
+    Both peer arms of ``receive_peer_message`` spawn
+    ``_prompt_messages([message], carried_prompt=True)``, and a peer's ask cut
+    before its first round-trip is owed the same ``error|disposed`` a typed
+    prompt gets ("a person at the other end of ``lop send``"). Review round 1
+    (MAJOR-2) caught the keyword never being forwarded to the pipeline, which
+    sent every peer-opened run down the settle arm; this cell drives the exact
+    spawn the peer arms make and asserts the answer is the error, not silence.
+    """
+    config = headless_tui_env
+    directory = config / "peer-prompt-cut-pre-dispatch"
+    stream = _ParkedWorkTurn([text_turn("working")])
+
+    with bounded(120, "a peer-opened run cut before dispatch"):
+        directory.mkdir(parents=True, exist_ok=True)
+        session = build_session(directory, stream)
+        parked, release = _park_runs_before_dispatch(session, except_token=None)
+        message = session._peer_custom_message(
+            "peer asks a question",
+            {"pid": 999999, "conversation_name": "peer", "model_label": "m"},
+        )
+        task = asyncio.ensure_future(session._prompt_messages([message], carried_prompt=True))
+        await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+        assert session._turn_task is not None and not session._turn_task.done()
+        assert (
+            session._attention_run_carried_prompt is True
+        ), "the run must carry the peer's provenance (review round 1, MAJOR-2)"
+
+        dispose_task = asyncio.ensure_future(session.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == ["error"], rows
+    assert rows[-1].get("cause") == "disposed", rows[-1]
+    assert stream.exhausted_at is None, "the run must not have consumed a scripted turn"
+
+
+@pytest.mark.asyncio
+async def test_run_print_mode_holds_a_deferred_batch_on_its_way_out(
+    headless_tui_env: Path,
+) -> None:
+    """THE HOST CELL: the one-shot exit arms the departure pair itself.
+
+    ``run_print_mode`` is how exec ends, and it is the door 664a went through:
+    nothing on that path armed a latch, so the batch the last turn flushed was
+    spawned into a delivery task and the following dispose aborted the turn it
+    opened. With the pair armed BEFORE the dispose (and before the
+    ``before_dispose`` hook that gives exec's own close() its window), the
+    slipped spawn is held at admission: no request, no run, no verdict — and
+    the results stay durable for whoever opens next.
+    """
+    from local_operator.headless_print import run_print_mode
+
+    config = headless_tui_env
+    directory = config / "run-print-mode-holds-the-batch"
+    directory.mkdir(parents=True, exist_ok=True)
+    stream = _ParkedDeliveryTurn([text_turn("working"), text_turn("delivery")], hold_delivery=True)
+    session = build_session(directory, stream)
+
+    async def hook() -> None:
+        # The window exec's own close() gives the spawned task between the
+        # commit and the disposal: wait for it to reach its decision — either
+        # the delivery run dispatched (pre-fix shape; the park fires) or the
+        # held task finished without opening a turn (the fixed shape).
+        pending = [t for t in session._background_tasks if not t.done()]
+        waiter = asyncio.ensure_future(stream.delivery_entered.wait())
+        try:
+            await asyncio.wait([*pending, waiter], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+
+    run_task = asyncio.ensure_future(
+        run_print_mode(session, ["delegate two children"], before_dispose=hook)
+    )
+    with bounded(120, "run_print_mode holds a deferred batch on its way out"):
+        await asyncio.wait_for(stream.entered.wait(), _STEP_TIMEOUT_S)
+        await session._on_job_completed("qa-r2", "the QA round finished", _settled("qa-r2"))
+        await session._on_job_completed("rev-r6", "the review round finished", _settled("rev-r6"))
+        assert session._deferred_job_results, "precondition: the batch is deferred"
+        stream.release.set()
+        code = await asyncio.wait_for(run_task, timeout=_STEP_TIMEOUT_S)
+        assert code == 0
+
+    assert (
+        len(stream.requests) == 1
+    ), f"the held batch must not have bought a provider call: {len(stream.requests)} request(s)"
+    runs = _run_rows(directory)
+    assert len(runs) == 1, f"only the work turn may have opened a run: {runs!r}"
+    assert [row.get("kind") for row in _completion_rows(directory)] == [
+        "complete"
+    ], f"no verdict for the held delivery: {_completion_rows(directory)!r}"
+    assert (
+        _incident_rows(directory) == []
+    ), "the next turn must not be told the held batch was cut off"
+    rows = _job_result_rows(directory)
+    assert [row.get("job_id") for row in rows] == ["qa-r2", "rev-r6"], rows
+
+    # THE SUCCESSOR still receives the batch — a hold must never be a drop.
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(directory, successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "the QA round finished" in sent, sent[-2000:]
+        assert "the review round finished" in sent, sent[-2000:]
+        assert "[session incident]" not in sent, sent[-2000:]
+    finally:
+        await successor.dispose()

@@ -147,7 +147,12 @@ async def test_desktop_controls_over_real_http(tmp_path: Path, monkeypatch: pyte
             print("GET /v1/desktop/tunnel (parked)", parked.status_code, parked.json()["result"])
             assert parked.status_code == 200
             assert parked.json()["result"]["connector"]["state"] == "parked"
-            assert parked.json()["result"]["remedy"]["command"] == "lop login radient"
+            # The park's own sign-in remedy does NOT survive beside a login
+            # verdict of `owner_missing` (no row exists for credential 1): a
+            # sign-in cannot re-point the configuration (issue #1711), so the
+            # re-point command stands in — the one shape where the verdict
+            # outranks a park's own remedy.
+            assert parked.json()["result"]["remedy"]["command"] == "lop tunnel configure"
             assert parked.headers["cache-control"] == "no-store"
             assert not (tmp_path / "desktop-home" / ".local-operator" / "config.yml").exists()
     finally:
