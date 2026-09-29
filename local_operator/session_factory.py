@@ -1500,6 +1500,12 @@ class _KnowledgeHooks:
     #: message: the package's cold import is ~1.8 s of cumulative import time
     #: (``python -X importtime``), and a turn's prompt build must not pay for an
     #: import. Tests inject a double here and never touch the package.
+    #:
+    #: The MONITOR gate additionally uses ``async decide(state=..., question=...)``
+    #: when the object publishes it (monitor-tool.md §8.2): the scheduler's
+    #: callback resolves this attribute per call, and an object without
+    #: ``decide`` — a host's own classifier — simply has no gate and every
+    #: change is delivered (the fail-open posture, never a required method).
     classifier: Any | None = None
     #: The classification roster (one row per candidate resource) and the inputs
     #: it was derived from. Built ONCE per roster, never per user message: the
@@ -4023,6 +4029,20 @@ async def _prepare(
         variable_store=variable_store,
     )
 
+    # The MONITOR gate's callable (``docs/design/monitor-tool.md`` §8): the
+    # scheduler asks it for one materiality class per changed monitor, and a
+    # ``None`` ("no classifier") or a raise means DELIVER, never swallow.
+    #
+    # Resolved PER CALL, the ``attach_classification_dispose`` convention and
+    # for its reason: ``hooks.classifier`` is an injectable attribute (tests
+    # swap it after ``create_session`` returns — the documented way to inject
+    # one), so capturing the service here would pin whichever object happened
+    # to be there at construction. The import is function-local because this
+    # module is the composition root and the adapter's package must not
+    # import the classification package at module scope (see the module's own
+    # docstring for the cold-import budget).
+    from local_operator.monitors.classify import monitor_classify
+
     session_kwargs: dict[str, Any] = dict(
         model=spec,
         stream_fn=stream_fn,
@@ -4046,6 +4066,9 @@ async def _prepare(
         agent_registry=agent_registry,
         team_registry=team_registry,
         project_registry=project_registry,
+        # One shared classification seam for the message path AND the monitor
+        # gate; see the comment above for why it resolves per call.
+        monitor_classify=monitor_classify(lambda: hooks.classifier),
         # Provenance distinguishes deliberate resume flags from persisted
         # identity; no provenance subscribes a session to mutable defaults.
         model_source=model_source,

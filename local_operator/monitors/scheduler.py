@@ -3,10 +3,17 @@
 In-process only: no supervisor, no daemon, no cold engagement (§10.4 — a
 session that goes cold has dormant monitors; they resume with it). The
 scheduler owns the armed timer, the per-monitor runtime state, and the
-tick → run → normalize → compare → deliver loop. Everything with a session in
-it — resolving the tool, executing the call, delivering the delta, persisting
-the list — arrives as a callback, so this module is testable without a
-session and the session is testable without timers.
+tick → run → normalize → compare → classify → deliver loop. Everything with a
+session in it — resolving the tool, executing the call, delivering the delta,
+persisting the list — arrives as a callback, so this module is testable
+without a session and the session is testable without timers.
+
+The classify leg (§8) is one of those callbacks and the only OPTIONAL one:
+absent, every detected change is delivered; present, its verdict runs the
+§8.4 fork (deliver, or suppress + count), and a call that raises or answers
+``None`` fails OPEN to a delivery. The call is issued OUTSIDE the write lock
+and serialised across the session's monitors — see
+:meth:`MonitorScheduler._classify_change`.
 
 It preserves the ``WakeScheduler`` load-bearing properties because they were
 paid for once already:
@@ -41,6 +48,11 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from local_operator.monitors import state as monitor_state
+from local_operator.monitors.classify import (
+    MonitorClassify,
+    bounded_state,
+    suppressed_counter,
+)
 from local_operator.monitors.delivery import MonitorDelivery
 from local_operator.monitors.diff import (
     beyond_window_text,
@@ -102,6 +114,26 @@ class _Entry:
     generation: int = 0
 
 
+@dataclass(frozen=True)
+class _Change:
+    """One detected change, between the diff and the gate's verdict (§8).
+
+    :meth:`MonitorScheduler._apply_success` commits the diff state machine
+    and hands this back; the scheduler then classifies it OUTSIDE the write
+    lock (a network call may not hold a lock that the pump and the arm flow
+    need) and settles the outcome in :meth:`MonitorScheduler._settle_change`.
+    The fields are snapshots taken under the lock, and the spec rides along
+    so a settle that lands after an edit still names the row it settled.
+    """
+
+    spec: MonitorSpec
+    changes: int
+    delta_text: str
+    skipped: int
+    checks: int
+    at_ms: int
+
+
 @dataclass
 class MonitorRuntime:
     """Read-only view of one monitor for list surfaces (tests, TUI later)."""
@@ -150,6 +182,11 @@ class MonitorScheduler:
         persist: Callable[[list[MonitorSpec]], Awaitable[None] | None],
         on_change: Callable[[], None] | None = None,
         index_writable: Callable[[], bool] | None = None,
+        #: The §8 classifier gate: bounded delta → the materiality class, or
+        #: ``None`` for "no classifier". Absent (``None``) means every change
+        #: is delivered — the scheduler never requires a classifier, and the
+        #: gate failing OPEN is the contract (§8.4), not a fallback.
+        classify: MonitorClassify | None = None,
         uniform: Callable[[float, float], float] = random.uniform,
     ) -> None:
         self._now = now
@@ -162,6 +199,7 @@ class MonitorScheduler:
         self._persist = persist
         self._on_change = on_change
         self._index_writable = index_writable
+        self._classify = classify
         self._uniform = uniform
 
         self._entries: dict[str, _Entry] = {}
@@ -180,6 +218,13 @@ class MonitorScheduler:
         # mutual exclusion an arm landing inside a pump is overwritten by the
         # pump's pre-update snapshot.
         self._write_lock = asyncio.Lock()
+        #: Serialises gate calls across the session's monitors (§8.1: "calls
+        #: are issued sequentially within the pump pass" — hits are rare, and
+        #: the cascade's cheapest leg has a documented 0.5 req/s limit). Held
+        #: WITHOUT the write lock: a vendor call may take ``timeoutMs``, and a
+        #: network call inside the write lock would stall the pump and every
+        #: arm landing behind it.
+        self._classify_lock = asyncio.Lock()
         # Bounds simultaneous checks across the session's monitors (the wake
         # supervisor's concurrency ceiling). A deferred check stays due.
         self._sem = asyncio.Semaphore(2)
@@ -490,6 +535,7 @@ class MonitorScheduler:
                     return
                 outcome = await self._check_runner(entry.spec)
                 deliveries: list[MonitorDelivery] = []
+                change: _Change | None = None
                 async with self._write_lock:
                     entry = self._entries.get(monitor_id)
                     if entry is None or entry.generation != generation:
@@ -499,12 +545,25 @@ class MonitorScheduler:
                     if error:
                         self._apply_failure(entry, error, now)
                     else:
-                        delivery = self._apply_success(entry, outcome.get("text") or "", now)
+                        change = self._apply_success(entry, outcome.get("text") or "", now)
+                    self._write_counters(entry)
+                    if entry.counters.get("disabled"):
+                        self._notify_change()
+                if change is not None:
+                    # The gate runs OUTSIDE the write lock: the classifier
+                    # call is a network call bounded by ``timeoutMs``, and a
+                    # locked network call would stall the pump and every arm
+                    # queued behind it (§5.2's "a slow call cannot stall an
+                    # arm landing behind it").
+                    choice = await self._classify_change(change)
+                    suppressed = suppressed_counter(choice)
+                    async with self._write_lock:
+                        entry = self._entries.get(monitor_id)
+                        if entry is None or entry.generation != generation:
+                            return  # cancelled during the call: drop the deliver
+                        delivery = self._settle_change(entry, change, suppressed)
                         if delivery is not None:
                             deliveries.append(delivery)
-                    self._write_counters(entry)
-                    if deliveries or entry.counters.get("disabled"):
-                        self._notify_change()
                 for delivery in deliveries:
                     try:
                         await self._maybe_await(self._deliver(delivery))
@@ -524,8 +583,17 @@ class MonitorScheduler:
 
     # -- the tick's decision core ------------------------------------------
 
-    def _apply_success(self, entry: _Entry, text: str, now: int) -> MonitorDelivery | None:
-        """One successful check: the diff state machine of §7.2 in full."""
+    def _apply_success(self, entry: _Entry, text: str, now: int) -> _Change | None:
+        """One successful check: the diff state machine of §7.2 in full.
+
+        Returns the detected change awaiting the §8 gate, or ``None`` for
+        every quiet/absorbed path (unchanged tick, baseline establishment,
+        loss-recovery re-adopt, a failed snapshot write). The DELIVERY
+        decision is deliberately not made here: the gate's call is a network
+        call and may not run under the write lock, so the diff commits its
+        state (blob first, counters second — the §7.2 order) and
+        :meth:`_settle_change` applies the verdict afterwards.
+        """
         spec = entry.spec
         counters = entry.counters
         old_last_check = int(counters.get("last_check_at") or 0)
@@ -613,29 +681,94 @@ class MonitorScheduler:
         counters["content_hash"] = new_hash
         counters["last_change_at"] = now
         counters["next_due_at"] = self._advance(spec, now)
+        return _Change(
+            spec=spec,
+            changes=changes,
+            delta_text=delta_text,
+            skipped=skipped,
+            # A snapshot of the just-incremented counter, taken while the
+            # write lock is held: the delivery envelope names the check count
+            # of THIS check even if a later settle lands after edits.
+            checks=int(counters["checks"]),
+            at_ms=now,
+        )
 
-        if not self._rate_allows(counters, now):
-            entry.counters["suppressed"]["rate_cap"] = (
-                int(entry.counters["suppressed"].get("rate_cap") or 0) + 1
+    async def _classify_change(self, change: _Change) -> str | None:
+        """One gate call for one change (§8.1); the class, or ``None`` → deliver.
+
+        Serialised across the session's monitors (``_classify_lock``), bounded
+        by ``classifyMaxChars`` through
+        :func:`~local_operator.monitors.classify.bounded_state` (whose marker
+        floor is the one place the bound is not literal), and fail-OPEN on
+        every fault — including a gate callback that raises. The deadline is NOT
+        duplicated here: the call's own bound is
+        ``values.classification.timeoutMs`` inside
+        ``ClassificationService.decide`` (§8.2), and a second timer would be a
+        second policy for one call (the classification layer's own rule).
+        """
+        if self._classify is None:
+            return None
+        state = bounded_state(change.delta_text, self._settings.classify_max_chars)
+        async with self._classify_lock:
+            try:
+                return await self._classify(state)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — a monitor may not silently stop reporting
+                logger.warning(
+                    "monitor classify failed for %s; delivering (fail open)",
+                    change.spec.id,
+                    exc_info=True,
+                )
+                return None
+
+    def _settle_change(
+        self, entry: _Entry, change: _Change, suppressed: str | None
+    ) -> MonitorDelivery | None:
+        """Apply the gate's verdict to one change: count a suppression, or deliver.
+
+        The rate cap runs only on the DELIVER path, and that order is the
+        contract's (§5.2 step 5: the gate, "then either deliver (§9) or
+        suppress + count") — a suppressed change was never a delivery
+        candidate, and letting noise consume the hourly window would spend the
+        budget the operator's material messages are owed. A suppression does
+        not ``_notify_change``: the counters file is the durable record, the
+        index row (what the front ends read today) carries no suppression
+        figures, and §10.2 names delivery/arm/cancel/disable as the triggers —
+        slice 4's surfaces are where a counter repaint gets its reader.
+        """
+        counters = entry.counters
+        if suppressed is not None:
+            counted = counters["suppressed"]
+            counted[suppressed] = int(counted.get(suppressed) or 0) + 1
+            self._write_counters(entry)
+            logger.debug("monitor %s change suppressed (%s)", change.spec.id, suppressed)
+            return None
+        if not self._rate_allows(counters, change.at_ms):
+            counters["suppressed"]["rate_cap"] = (
+                int(counters["suppressed"].get("rate_cap") or 0) + 1
             )
             counters["rate_cap_held"] = int(counters.get("rate_cap_held") or 0) + 1
+            self._write_counters(entry)
             return None
         counters["rate_window_count"] = int(counters.get("rate_window_count") or 0) + 1
         counters["deliveries"] = int(counters.get("deliveries") or 0) + 1
         held = int(counters.get("rate_cap_held") or 0)
         counters["rate_cap_held"] = 0
+        self._write_counters(entry)
+        self._notify_change()
         return MonitorDelivery(
-            monitor_id=spec.id,
-            name=spec.name,
-            tool=spec.tool,
-            changes=changes,
-            checks=int(counters["checks"]),
-            skipped=skipped,
-            delta_text=delta_text,
-            at_ms=now,
+            monitor_id=change.spec.id,
+            name=change.spec.name,
+            tool=change.spec.tool,
+            changes=change.changes,
+            checks=change.checks,
+            skipped=change.skipped,
+            delta_text=change.delta_text,
+            at_ms=change.at_ms,
             held_by_cap=held,
-            final=self._is_final(spec, now),
-            description=spec.description,
+            final=self._is_final(change.spec, change.at_ms),
+            description=change.spec.description,
         )
 
     def _apply_failure(self, entry: _Entry, error: str, now: int) -> None:
