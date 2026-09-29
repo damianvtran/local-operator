@@ -519,6 +519,17 @@ class _FakeServer:
         return self._req
 
 
+def _fake_server(root: Path, link: Any = None) -> Any:
+    """A duck-typed server for the pure push/step cells (never a real relay).
+
+    ``Any`` on purpose: the seams take a ``RelayServer``, and these cells drive
+    them with the four attributes they actually read (``root``,
+    ``_ensure_link``, ``_member_name``, ``_next_relay_req``) — a real relay here
+    would make every cell a link test, which is the link file's job.
+    """
+    return _FakeServer(root, link)
+
+
 def _apply_reply(**summary: Any) -> dict[str, Any]:
     base = {"installed": [], "updated": [], "unchanged": [], "conflicts": [], "refused": []}
     base.update(summary)
@@ -532,7 +543,7 @@ def test_push_reports_in_sync_without_sending_a_bundle(root: Path) -> None:
         capabilities=wire.LINK_CAPABILITIES,
         replies=[{"op": "ack", "req": 1, "detail": {"phase": "state", "servers": {"crm": digest}}}],
     )
-    result = mcpdefs.push_to_peer(_FakeServer(root, link), PEER)
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
     assert result["code"] == "in_sync" and result["ok"] is True
     assert len(link.requests) == 1, "an in-sync peer must cost one round trip"
 
@@ -555,7 +566,7 @@ def test_push_sends_only_missing_rows(root: Path) -> None:
             _apply_reply(installed=[{"kind": "server", "name": "sent"}]),
         ],
     )
-    result = mcpdefs.push_to_peer(_FakeServer(root, link), PEER)
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
     assert result["code"] == "applied" and result["ok"] is True
     frames = [frame for frame in link.requests if frame["phase"] == "apply"]
     assert [row["name"] for row in frames[0]["bundle"]["servers"]] == ["sent"]
@@ -571,14 +582,14 @@ def test_push_to_an_old_peer_is_capability_first_and_pays_no_request(root: Path)
     _write_servers(root, {"crm": {"type": "http", "url": "https://example.test/mcp"}})
     old_capabilities = [cap for cap in wire.LINK_CAPABILITIES if cap != wire.MCP_DEFS_V1]
     link = _FakeLink(capabilities=old_capabilities, replies=[])
-    result = mcpdefs.push_to_peer(_FakeServer(root, link), PEER)
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
     assert result["code"] == "peer_too_old" and result["ok"] is False
     assert link.requests == [], "an old peer was asked anyway"
     assert "lop-update" in result["message"]
 
 
 def test_push_reports_unreachable_when_there_is_no_link(root: Path) -> None:
-    result = mcpdefs.push_to_peer(_FakeServer(root, None), PEER)
+    result = mcpdefs.push_to_peer(_fake_server(root, None), PEER)
     assert result["code"] == "unreachable"
 
 
@@ -595,7 +606,7 @@ def test_push_surfaces_a_peer_refusal_with_its_code(root: Path) -> None:
             }
         ],
     )
-    result = mcpdefs.push_to_peer(_FakeServer(root, link), PEER)
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
     assert (result["code"], result["ok"]) == ("not_authorised", False)
 
 
@@ -610,7 +621,7 @@ def test_push_reports_a_conflict_by_name(root: Path) -> None:
             ),
         ],
     )
-    result = mcpdefs.push_to_peer(_FakeServer(root, link), PEER)
+    result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
     assert result["code"] == "conflict" and result["ok"] is False
     assert "crm" in result["message"]
 
@@ -624,7 +635,7 @@ def test_the_step_skips_a_member_without_the_capability(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(definitions, "unholdable_capability", lambda *_a: "admin")
-    assert mcpdefs.mesh_tick_step(_FakeServer(root, None), PEER) == "skipped:no_admin"
+    assert mcpdefs.mesh_tick_step(_fake_server(root, None), PEER) == "skipped:no_admin"
 
 
 def test_the_step_answers_in_sync_without_dialing_when_there_is_nothing_to_send(
@@ -636,17 +647,17 @@ def test_the_step_answers_in_sync_without_dialing_when_there_is_nothing_to_send(
         raise AssertionError("the step dialed for an empty bundle")
 
     monkeypatch.setattr(mcpdefs, "push_to_peer", _must_not_run)
-    assert mcpdefs.mesh_tick_step(_FakeServer(root, None), PEER) == "in_sync"
+    assert mcpdefs.mesh_tick_step(_fake_server(root, None), PEER) == "in_sync"
 
 
 def test_the_step_returns_the_push_code(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_servers(root, {"gl": {"type": "stdio", "command": "npx"}})
     monkeypatch.setattr(definitions, "unholdable_capability", lambda *_a: "")
     monkeypatch.setattr(mcpdefs, "push_to_peer", lambda _s, _d: {"code": "applied"})
-    assert mcpdefs.mesh_tick_step(_FakeServer(root, None), PEER) == "applied"
+    assert mcpdefs.mesh_tick_step(_fake_server(root, None), PEER) == "applied"
 
 
-def _member_record(root: Path, *, self_role: str) -> None:
+def _member_record(root: Path, *, self_role: str) -> Any:
     """One network on disk with a peer member and NO endpoints.
 
     The cadence walks member RECORDS (not links), so a record is all a tick
@@ -733,7 +744,7 @@ def test_a_step_runs_after_the_push_and_a_policy_code_parks_the_member(
 
     monkeypatch.setattr(definitions, "push_to_peer", _push)
     server = SimpleNamespace(root=root, identity=own)
-    syncer = definitions.DefinitionsSyncer(server)
+    syncer = definitions.DefinitionsSyncer(server)  # type: ignore[arg-type]
     syncer.tick(now=1000.0)
     assert seen and pushes, "the step must run after the member's push attempt"
     # The policy code from the STEP parked the member on the refused floor: a

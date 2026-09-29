@@ -318,23 +318,23 @@ def _carried_bool(value: Any) -> bool | None:
 def _fields_from_file(raw: Mapping[str, Any], transport: str) -> dict[str, Any]:
     """The carried fields of one FILE entry, normalised and classified."""
     if transport == "stdio":
-        env_in = raw.get("env") if isinstance(raw.get("env"), Mapping) else {}
+        env_in = raw.get("env")
+        env_in = env_in if isinstance(env_in, Mapping) else {}
         env = {str(key): str(value) for key, value in env_in.items()}
+        args_raw = raw.get("args")
+        args_in = args_raw if isinstance(args_raw, list) else []
         refs = _refs_by_binding(env, {})
         fields: dict[str, Any] = {
             # Bounded the SAME way the wire-side rebuild bounds them: an
             # asymmetric limit would make a long row's two digests disagree and
             # turn every push into a conflict.
             "command": _bounded_text(raw.get("command"), 4096),
-            "args": (
-                [_bounded_text(item, 4096) for item in raw.get("args")]
-                if isinstance(raw.get("args"), list)
-                else []
-            ),
+            "args": [_bounded_text(item, 4096) for item in args_in],
             "env": {key: environment_state("env", key, value, refs) for key, value in env.items()},
         }
     else:
-        headers_in = raw.get("headers") if isinstance(raw.get("headers"), Mapping) else {}
+        headers_in = raw.get("headers")
+        headers_in = headers_in if isinstance(headers_in, Mapping) else {}
         headers = {
             str(key): str(value)
             for key, value in headers_in.items()
@@ -529,22 +529,26 @@ def _wire_state(field: str, key: str, value: Any) -> str | None:
 
 def _materialize_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """The canonical row as the FILE entry a mirror lands (one write shape)."""
-    raw = row.get("raw") if isinstance(row.get("raw"), Mapping) else {}
+    raw_in = row.get("raw")
+    raw = raw_in if isinstance(raw_in, Mapping) else {}
     transport = str(row.get("transport") or "stdio")
     out: dict[str, Any] = {"type": transport}
     if transport == "stdio":
         out["command"] = str(raw.get("command") or "")
-        args = [str(item) for item in raw.get("args") or []]
+        args_in = raw.get("args")
+        args = [str(item) for item in args_in] if isinstance(args_in, list) else []
         if args:
             out["args"] = args
-        env = raw.get("env") if isinstance(raw.get("env"), Mapping) else {}
+        env_in = raw.get("env")
+        env = env_in if isinstance(env_in, Mapping) else {}
         if env:
             out["env"] = {
                 str(key): _materialize_state(str(key), str(state)) for key, state in env.items()
             }
     else:
         out["url"] = str(raw.get("url") or "")
-        headers = raw.get("headers") if isinstance(raw.get("headers"), Mapping) else {}
+        headers_in = raw.get("headers")
+        headers = headers_in if isinstance(headers_in, Mapping) else {}
         if headers:
             out["headers"] = {
                 str(key): _materialize_state(str(key), str(state)) for key, state in headers.items()
@@ -610,7 +614,8 @@ def row_texts(row: Mapping[str, Any]) -> list[str]:
     literal, and the withholding rule is "the row does not travel".
     """
     out = [str(row.get("name") or ""), str(row.get("transport") or "")]
-    raw = row.get("raw") if isinstance(row.get("raw"), Mapping) else {}
+    raw_in = row.get("raw")
+    raw = raw_in if isinstance(raw_in, Mapping) else {}
     for key in ("command", "args", "url"):
         out.extend(_flatten_text(raw.get(key)))
     for field in ("env", "headers"):
@@ -778,8 +783,10 @@ def state_rows(root: Path) -> list[dict[str, Any]]:
         row = server_row(str(name), raw)
         recorded = _recorded(index, str(name))
         refs: list[dict[str, Any]] = []
-        env = raw.get("env") if isinstance(raw.get("env"), Mapping) else {}
-        headers = raw.get("headers") if isinstance(raw.get("headers"), Mapping) else {}
+        env_in = raw.get("env")
+        env = env_in if isinstance(env_in, Mapping) else {}
+        headers_in = raw.get("headers")
+        headers = headers_in if isinstance(headers_in, Mapping) else {}
         for ref in _public_refs(env, headers):
             ref_id = str(ref.get("id") or "")
             if ref_id not in presence:
