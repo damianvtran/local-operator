@@ -1374,7 +1374,7 @@ def _attestation_record(item: Verdict) -> _ReclaimAttestation | None:
     )
 
 
-def _attest_before_signal(item: Verdict, record: _ReclaimAttestation) -> bool:
+def _attest_before_signal(item: Verdict, record: _ReclaimAttestation) -> None:
     """Stage the involuntary stop marker no later than the SIGTERM.
 
     WHY EVERY SWEEP SIGNAL CARRIES ONE. The operator's rule for this class of
@@ -1398,16 +1398,32 @@ def _attest_before_signal(item: Verdict, record: _ReclaimAttestation) -> bool:
     proven unreachable must still be ended when a sidecar cannot be written.
     But the failure is SAID OUT LOUD — "could not attest" is a gap in the
     artifact, and the acting process is the only one that can name it.
+
+    NEITHER THIS NOR THE WITHDRAWAL MAY BECOME THE SWEEP'S EXCEPTION PATH: an
+    escaped error would abort a loop that has already sent signals and lose its
+    report, so both catch everything and say so (the same guard
+    ``update._attests`` keeps). This one returns nothing — the warning is the
+    say-so, and there is no consumer that could branch on it.
     """
     from local_operator.session.runtime.control import note_involuntary_stop
 
-    if note_involuntary_stop(
-        record,
-        Path(item.config_root),
-        mechanism=RECLAIM_MECHANISM,
-        actor=RECLAIM_ATTEST_ACTOR,
-    ):
-        return True
+    try:
+        attested = note_involuntary_stop(
+            record,
+            Path(item.config_root),
+            mechanism=RECLAIM_MECHANISM,
+            actor=RECLAIM_ATTEST_ACTOR,
+        )
+    except Exception:  # noqa: BLE001 — the sweep outranks the paperwork
+        logger.warning(
+            "runtime residency: attesting pid %d raised; its ending will read "
+            "unattributed",
+            item.process.pid,
+            exc_info=True,
+        )
+        return
+    if attested:
+        return
     logger.warning(
         "runtime residency: could not attest pid %d (session %s, root %s) before "
         "signalling it — its ending will read unattributed",
@@ -1415,7 +1431,6 @@ def _attest_before_signal(item: Verdict, record: _ReclaimAttestation) -> bool:
         item.session_id,
         item.config_root,
     )
-    return False
 
 
 def _withdraw_attestation(item: Verdict, record: _ReclaimAttestation) -> None:
@@ -1428,11 +1443,20 @@ def _withdraw_attestation(item: Verdict, record: _ReclaimAttestation) -> None:
     ``update.withdraw_involuntary_stops`` exists to prevent). Best-effort like
     every other evidence write: the read-back inside
     ``withdraw_involuntary_stop`` decides what is actually ours, and a failure
-    to clean up must not fail the sweep's own report.
+    to clean up must not fail the sweep's own report — nor may it become the
+    sweep's exception path: the same guard ``_attest_before_signal`` keeps, for
+    the same reason (an escaped error would abort a loop mid-signal).
     """
     from local_operator.session.runtime.control import withdraw_involuntary_stop
 
-    withdraw_involuntary_stop(record, Path(item.config_root), mechanism=RECLAIM_MECHANISM)
+    try:
+        withdraw_involuntary_stop(record, Path(item.config_root), mechanism=RECLAIM_MECHANISM)
+    except Exception:  # noqa: BLE001 — cleanup must not fail the sweep's own report
+        logger.warning(
+            "runtime residency: withdrawing the attestation for pid %d raised",
+            item.process.pid,
+            exc_info=True,
+        )
 
 
 def reclaim_runtimes(
