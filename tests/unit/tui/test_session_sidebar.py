@@ -4349,10 +4349,10 @@ async def test_the_focused_pin_rung_has_a_floor_and_the_chip_outranks_it_below(
 
     Review round 1 measured what the comment denied: at 30 columns of
     terminal (24 of list width) the focused ladder is `esc return · ⌥1k+` —
-    no pin — and the pin returns at 28 (34 columns). The order it states is:
-    `ctrl+a ⌥` first, then the position, then the pin, then the chip, never
-    the lead. The chip outranks the pin below 27 because the chip counts a
-    population nothing else on the frame can see.
+    no pin — and the pin rung first renders at 27 cells of list width (a
+    33-column terminal; review round 2 corrected this docstring's "28 / 34").
+    The chip outranks the pin below that because the chip counts a population
+    nothing else on the frame can see.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=size) as pilot:
