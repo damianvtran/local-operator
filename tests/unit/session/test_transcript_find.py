@@ -16,8 +16,11 @@ from typing import Any
 
 import pytest
 
+from local_operator.harness.types import Message, TextContent
 from local_operator.session import transcript_find as tf
 from local_operator.session import transcript_index as ti
+from local_operator.session.goal_judge import goal_continuation_prompt
+from local_operator.session.transcript import encode_message_payload
 from local_operator.session.transcript_index import MessageDoc
 
 SID = "aabbccddee02"
@@ -133,6 +136,21 @@ def inject(id_: str, ts: float, custom_type: str, text: str) -> dict[str, Any]:
         "type": "message",
         "payload": {"kind": "custom", "custom_type": custom_type, "details": {"text": text}},
     }
+
+
+#: The goal judge's continuation, through its own producer (the index suite's
+#: fixture, so the two files cannot drift on the exact text).
+GOAL_CONTINUATION = goal_continuation_prompt("make the fold hold")
+
+
+def stamped_user(id_: str, ts: float, text: str) -> dict[str, Any]:
+    """A harness row as the renderer writes it: a ``Message`` carrying the stamp."""
+    message = Message(
+        role="user",
+        content=[TextContent(text=text)],
+        provider_payload={"harness_injected": True},
+    )
+    return {"id": id_, "ts": ts, "type": "message", "payload": encode_message_payload(message)}
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +442,36 @@ async def test_a_peer_message_row_is_findable_end_to_end(tmp_path):
     assert peer["snippet"] == "peer says the deploy is green"
     start, end = peer["ranges"][0]
     assert peer["snippet"][start:end] == "deploy"
+
+
+@pytest.mark.asyncio
+async def test_a_harness_continuation_is_not_findable_as_the_operators(tmp_path):
+    """F1 of local-operator-ui#670, find half: harness chrome is not the user's.
+
+    The wire has no injected demotion to hide behind — ``FindHit`` carries
+    only id/role/snippet/ranges/tier, so a chrome doc kept as "injected" would
+    still arrive as a user-role snippet, and a hit's reveal jump must land on
+    a row a surface paints (these render nowhere). So the continuation's own
+    boilerplate — text only IT carried — must answer nothing, and the
+    operator's words must not be doubled by the harness echoing them.
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "make the fold hold"),
+            stamped_user("c1", 1.1, GOAL_CONTINUATION),
+            assistant("a1", 1.2, "working on it"),
+        ],
+    )
+    # Build the cache synchronously first: the ladder's first-paint wait is a
+    # load-sensitive race this cell does not test (the peer cell above drives
+    # the live ladder); the find decision under test must not flake on it.
+    assert ti.refresh_index(tmp_path, SID) is not None
+    view = await tf.find_view(tmp_path, SID, query="state plainly what advanced", limit=10)
+    assert view["state"] == "ready"
+    assert view["hits"] == []
+    view = await tf.find_view(tmp_path, SID, query="make the fold hold", limit=10)
+    assert [h["id"] for h in view["hits"]] == ["u1"]
 
 
 # ---------------------------------------------------------------------------

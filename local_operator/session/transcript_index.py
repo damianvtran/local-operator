@@ -11,9 +11,12 @@ beside the other derived stores under ``cache/transcript_index/``.
 WHAT IT DERIVES, and from what:
 
 - **User checkpoints** — one per ``message`` row whose ``role`` is ``user`` and
-  which is not a harness injection (``payload.kind == "custom"`` with a
-  ``custom_type`` — the ``_journal_injection_ids`` rule). Steers count; they are
-  user messages.
+  which is the operator's own words: not a harness injection
+  (``payload.kind == "custom"`` with a ``custom_type`` — the
+  ``_journal_injection_ids`` rule), and not harness chrome (the
+  ``provider_payload.harness_injected`` stamp, or a text the shared recognisers
+  claim — ``_is_harness_user_row``, the folds' own decision). Steers count;
+  they are user messages.
 - **Completion checkpoints** — one per turn whose span (its opening user row to
   just before the next user checkpoint) contains at least one message row that is
   not the opening user row. The checkpoint's ``id`` is the span's closing ANSWER
@@ -28,7 +31,10 @@ WHAT IT DERIVES, and from what:
   journal order (the find slice consumes these; injected rows stay searchable and
   are marked so ranking can demote them). Tool rows are never indexed: they are
   machine output, and indexing them makes every path-like query match everything
-  (``session_search``'s rule).
+  (``session_search``'s rule). Harness chrome rows are skipped whole, for the
+  user-checkpoint bullet's reason plus find's own: a hit's reveal jump must land
+  on a row a surface paints, and the find wire carries no injected flag to
+  demote one by.
 
 THE S3 REFINEMENTS, stated where they live (spike S3, 31 real journals at
 origin/main 2026-09-28, approved before implementation):
@@ -137,7 +143,12 @@ logger = logging.getLogger(__name__)
 #: ``custom_type=None`` — the key is simply absent — and slip them past
 #: ``transcript_find``'s hidden-cross-session gate, a silent leak rather than
 #: the stale-cache miss a version mismatch is allowed to be.
-TRANSCRIPT_INDEX_VERSION = 2
+#:
+#: 3: role-user rows that are harness chrome are skipped whole (no checkpoint,
+#: no doc — F1 of local-operator-ui#670). The bump IS the correctness again:
+#: the frozen prefix re-derives only on a full rescan, so without it every
+#: version-2 file would keep serving the rows its scan already minted.
+TRANSCRIPT_INDEX_VERSION = 3
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -630,6 +641,33 @@ def _inject_text(details: Any) -> str:
     return ""
 
 
+def _is_harness_user_row(payload: dict[str, Any], text: str) -> bool:
+    """Whether a role-user message row is harness chrome, not the operator's words.
+
+    The SAME both-legs decision every display fold makes, asked from the one
+    implementation (:mod:`local_operator.harness.rows`): the structural stamp
+    (``provider_payload.harness_injected``) on rows this build minted, and the
+    text recognisers — the chrome prompt families and the legacy notice heads —
+    for rows written before the stamp existed. Lazy import, like the folds:
+    ``harness.rows`` pulls ``compaction.cutpoint`` on first use.
+
+    WHY THE INDEX ASKS (F1 of local-operator-ui#670): every index product is a
+    human readout — the rail's hover card, find's snippets — and a harness row
+    filed as "user" paints the harness's words as the operator's. The UI review
+    reproduced it on a row carrying the stamp (this module did not read
+    ``provider_payload`` at all), and rows written before the stamp existed leak
+    by text on top; both legs close here because both reach the index. Skipped
+    WHOLE rather than marked injected: the find wire carries no injected flag (a
+    marked doc still arrives as a user-role snippet), and a find hit's reveal
+    jump must land on a row that renders — these rows render nowhere. The row
+    itself stays in the journal and in the model's context, the folds' exact
+    contract.
+    """
+    from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
+
+    return is_harness_notice_row(payload) or is_harness_chrome(text)
+
+
 def _classify(
     ordinal: int, line_start: int, line_end: int, head: bytes, line: bytes | None
 ) -> _Row:
@@ -671,6 +709,18 @@ def _classify(
             )
         role = payload.get("role")
         if role == "user" or role == "assistant":
+            text = _content_text(payload)
+            if role == "user" and _is_harness_user_row(payload, text):
+                # Harness chrome, skipped whole: no user checkpoint (the rail
+                # would caption it "Your message"), no find doc, no turn content.
+                return _Row(
+                    ordinal=ordinal,
+                    offset=line_start,
+                    end=line_end,
+                    id=id_,
+                    ts=ts,
+                    kind="other",
+                )
             return _Row(
                 ordinal=ordinal,
                 offset=line_start,
@@ -678,7 +728,7 @@ def _classify(
                 id=id_,
                 ts=ts,
                 kind=str(role),
-                text=_content_text(payload),
+                text=text,
             )
         if role == "tool":
             return _Row(
