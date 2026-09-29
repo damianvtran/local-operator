@@ -1810,6 +1810,70 @@ class WireCannotCarryAudio(ProviderError):
         super().__init__(400, sentence, retryable=False)
 
 
+def audio_format_refusal(model: ModelSpec, mime: str) -> str | None:
+    """Why ``model``'s wire cannot carry a recording in ``mime``, or ``None``.
+
+    THE ADMISSION-TIME MIRROR OF THE RENDERERS, and it must stay one: the
+    renderers are the authority on what each wire takes (this function and
+    ``_message_to_openai``'s ``input_audio`` arm / the Google body builder
+    must agree, or a capture is refused that the wire would have taken — or
+    worse, admitted and then refused mid-turn, the sticky wedge agent review
+    round 1 (M2) measured: the row was already durable, so EVERY later
+    request on that wire re-rendered the block and re-failed before a single
+    HTTP call). Returns the CLAUSE a refusal sentence embeds, never a full
+    sentence: the model label belongs to the caller, which holds it.
+
+    The answers, by wire (``get_provider_definition`` — the same lookup
+    ``client_for_spec`` performs):
+
+    * ``google`` — the inline audio part takes Gemini's documented mime list
+      (``stt.audio.GOOGLE_MODEL_AUDIO_MIME_TYPES``, kept verbatim from the
+      vendor page).
+    * ``anthropic`` — no audio at all; the renderer refuses structurally, so
+      admission refuses first.
+    * ``mock`` — nothing is rendered, so nothing can fail: the test wire is
+      never a refusal here (every fixture that stands in for a capable model
+      uses provider ``test``).
+    * everything else — the OpenAI-compatible chat ``input_audio`` part takes
+      wav or mp3 only (``stt.audio.format_for_model_wire``). A spec that ALSO
+      states ``supports_responses_api`` is still treated as the chat wire
+      here: which body an ``openai`` spec uses is a per-process SETTING
+      (``model.configure._openai_api_mode``) this layer deliberately does not
+      read, and every shipped audio row is documented as Chat Completions
+      (``model/registry.py``, the gpt-audio family). The Responses body's own
+      structural refusal remains the backstop for that configuration.
+
+    Capability is NOT this function's question: the renderers don't ask it
+    themselves, and the two callers (the admission gate and the history strip
+    in ``session/session.py``) check ``supports_audio_input`` first. Keeping
+    the two questions apart is what lets a format refusal say "the model
+    accepts audio, but not this capture" without re-deriving the capability
+    sentence.
+    """
+    from local_operator.providers.registry import get_provider_definition
+
+    definition = get_provider_definition(model.provider)
+    wire = definition.wire if definition is not None else ""
+    if wire == "google":
+        if mime in stt_audio.GOOGLE_MODEL_AUDIO_MIME_TYPES:
+            return None
+        return (
+            f"the inline audio part does not take {mime}; Gemini documents "
+            "wav, mp3, aiff, aac, ogg, flac, mpeg, m4a, l16, opus, alaw, "
+            "mulaw and webm"
+        )
+    if wire == "anthropic":
+        return "the Anthropic messages API cannot carry audio input"
+    if wire == "mock":
+        # NOT a refusal, deliberately: the mock wire renders no request at all,
+        # so no capture can fail on it — and the test fixtures that stand in
+        # for a capable model (provider ``test``) go through here.
+        return None
+    if stt_audio.format_for_model_wire(mime) is not None:
+        return None
+    return f"the chat audio part takes wav or mp3 only (this capture is {mime})"
+
+
 def _is_empty_assistant(message: Message) -> bool:
     """Is ``message`` an assistant turn with nothing on it a provider accepts?
 

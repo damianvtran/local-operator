@@ -7,6 +7,12 @@ later edit can break independently:
 * the CAPABILITY GATE refuses a recording the selected model cannot take, with
   the typed refusal (``AudioInputUnsupported``) that names the model and carries
   the resolver's report — the honest error — before any paid work;
+* the FORMAT GATE (review round 1 remediation) refuses, at the same point, a
+  capture the capable model's WIRE cannot carry (OQ-3: no transcoding) — a
+  webm capture must never become the sticky every-request wedge QA reproduced
+  — while wav/mp3 on the chat wire and Gemini's documented containers pass;
+* BOTH DOORS fork the sidecar once per recording — the prompt loop and the
+  steer drain — and only after their own append made the row durable;
 * the ANNOTATION is daemon-derived: an audio row carries
   ``input_path="model_audio_sidecar"`` whatever a surface asserted, and a
   non-audio row keeps the surface-asserted value (the carriage's own contract,
@@ -47,6 +53,25 @@ AUDIO_MODEL = ModelSpec(
     provider="test",
     model_id="m",
     context_window=100_000,
+    supports_audio_input=True,
+)
+
+#: A capable model on the OpenAI-compatible CHAT wire — the wire whose
+#: ``input_audio`` part takes wav|mp3 only (OQ-3). Used to pin the admission
+#: format gate against the real registry wire lookup.
+OPENAI_AUDIO_MODEL = ModelSpec(
+    provider="openai",
+    model_id="gpt-audio",
+    context_window=128_000,
+    supports_audio_input=True,
+)
+
+#: A capable model on the Google wire, whose inline audio part takes Gemini's
+#: documented mime list (stt/audio.py, verified against the vendor page).
+GOOGLE_AUDIO_MODEL = ModelSpec(
+    provider="google",
+    model_id="gemini-3.8-flash",
+    context_window=1_048_576,
     supports_audio_input=True,
 )
 
@@ -113,6 +138,97 @@ async def test_a_recording_for_an_incapable_model_is_refused_before_any_work(tmp
     assert "does not accept audio input" in sentence
     assert stream.requests == [], "the refused send must not spend a provider call"
     assert _message_rows(tmp_path) == [], "the refused send must not leave a row"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_container_the_wire_cannot_carry_is_refused_at_admission(tmp_path):
+    """The OQ-3 rung-unavailable error, at the door (agent review round 1, M2).
+
+    QA reproduced the wedge with a webm capture — the browser recorder's
+    default — on a capable model: admission wrote the row, the chat renderer
+    then raised ``WireCannotCarryAudio`` on the first send AND every request
+    after it (zero HTTP calls, sticky), because nothing evicts a durable
+    block. Admission now asks the renderers' own question BEFORE the write, so
+    the refusal is typed, names the model and the constraint, and costs
+    nothing — and no row can be the start of a wedge.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, model=OPENAI_AUDIO_MODEL)
+
+    webm = [AudioContent(data=WAV, mime_type="audio/webm")]
+    with pytest.raises(AudioInputUnsupported) as excinfo:
+        await session.prompt("listen", audio=webm)
+
+    sentence = str(excinfo.value)
+    assert "openai/gpt-audio" in sentence, sentence
+    assert "wav or mp3" in sentence, sentence
+    assert "audio/webm" in sentence, sentence
+    assert "No transcoding" in sentence, sentence
+    assert stream.requests == [], "the refused send must not spend a provider call"
+    assert _message_rows(tmp_path) == [], "the refused send must not leave a row"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wav_and_mp3_sail_through_the_chat_wire_gate(tmp_path):
+    """The control for the format gate: both containers the wire takes pass.
+
+    Without this, a gate that refused everything would look identical to a
+    working one from the webm test alone.
+    """
+    stream = ScriptedStream(
+        [[StreamEndEvent(stop_reason="stop")], [StreamEndEvent(stop_reason="stop")]]
+    )
+    session = make_session(tmp_path, stream, model=OPENAI_AUDIO_MODEL)
+
+    await session.prompt("wav", audio=_audio())
+    await session.prompt("mp3", audio=[AudioContent(data=WAV, mime_type="audio/mpeg")])
+    await _wait_for(lambda: not session.is_streaming and len(_message_rows(tmp_path)) >= 2)
+
+    user_rows = [
+        r["payload"] for r in _message_rows(tmp_path) if r["payload"].get("role") == "user"
+    ]
+    # ``exclude_defaults`` drops the wav block's default ``mime_type`` and the
+    # text blocks' default ``type`` from the durable row, so read both with
+    # their model defaults (the row is still byte-identical to a pre-audio one
+    # for text-only sends — that contract is pinned elsewhere).
+    mimes = [
+        block.get("mime_type", "audio/wav")
+        for block in user_rows[0]["content"]
+        if block.get("type") == "audio"
+    ]
+    assert mimes == ["audio/wav"]
+    mimes = [
+        block.get("mime_type", "audio/wav")
+        for block in user_rows[1]["content"]
+        if block.get("type") == "audio"
+    ]
+    assert mimes == ["audio/mpeg"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_google_wire_takes_its_documented_list(tmp_path):
+    """Gemini's inline part: webm is ON the documented list; audio/mp4 is not.
+
+    The vendor's page spells the M4A container ``audio/m4a`` and not
+    ``audio/mp4``, and admission mirrors the page rather than guessing family
+    aliases (v1 renames no declarations) — the m4a family still reaches Gemini
+    through the STT rungs.
+    """
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, model=GOOGLE_AUDIO_MODEL)
+
+    await session.prompt("webm", audio=[AudioContent(data=WAV, mime_type="audio/webm")])
+    await _wait_for(lambda: not session.is_streaming)
+
+    with pytest.raises(AudioInputUnsupported) as excinfo:
+        await session.prompt("m4a", audio=[AudioContent(data=WAV, mime_type="audio/mp4")])
+
+    sentence = str(excinfo.value)
+    assert "audio/mp4" in sentence, sentence
+    assert "does not take" in sentence, sentence
     await session.dispose()
 
 

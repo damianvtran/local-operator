@@ -6800,13 +6800,24 @@ class Session:
     async def _refuse_audio_admission(self, audio: Sequence[AudioContent]) -> None:
         """Refuse a recording the selected model cannot take (the rung-6 error).
 
-        Called from ``prompt``'s pre-work band. The check itself is the same
-        fact the resolver reports (``stt.cascade._model_capable``): the active
-        spec's ``supports_audio_input``, read with ``getattr`` and a ``False``
-        default so a reduced or older spec keeps the safe direction. Only when
-        the door is shut does the resolver run, and only to make the refusal
-        honest: its report names whether a transcription path IS available
-        (rungs 1-3), which is the remedy the caller can act on.
+        TWO questions, in order, both asked BEFORE the row is written:
+
+        * CAPABILITY — the active spec's ``supports_audio_input``, read with
+          ``getattr`` and a ``False`` default so a reduced or older spec keeps
+          the safe direction. Only when the door is shut does the resolver run,
+          and only to make the refusal honest: its report names whether a
+          transcription path IS available (rungs 1-3), which is the remedy the
+          caller can act on.
+        * WIRE FORMAT — capable is not enough (agent review round 1, M2): the
+          model's wire decides which CONTAINERS reach it, and v1 does not
+          transcode (OQ-3), so a capture the wire cannot carry is refused
+          here rather than becoming durable and then failing EVERY later
+          request on that wire (the sticky wedge QA reproduced with a webm
+          capture: the first send raised ``WireCannotCarryAudio`` from inside
+          the renderer with zero HTTP calls, and so did every request after).
+          The check mirrors the renderers (``audio_format_refusal`` lives
+          beside them for exactly that reason) and the refusal names the
+          model and the wire's constraint.
 
         Who reaches this, stated for reviewers: a client that gates its mic on
         the resolver's ``model_audio_capable`` never does — this is the
@@ -6814,13 +6825,31 @@ class Session:
         such a send stops being a request and becomes a typed refusal.
         """
         model = self._model
+        # ONE import for both branches: the format branch raises before the
+        # capability branch's other lazy imports would have run, and a name
+        # imported only further down is still a local for the whole function
+        # (UnboundLocalError — caught by the round's own test).
+        from local_operator.session.errors import AudioInputUnsupported
+
         if bool(getattr(model, "supports_audio_input", False)):
+            # Lazy like the neighbours' imports below: clients drags httpx and
+            # the whole provider surface, and only a capable model's audio
+            # send needs this half at all.
+            from local_operator.providers.clients import audio_format_refusal
+
+            for block in audio:
+                refusal = audio_format_refusal(model, block.mime_type)
+                if refusal is not None:
+                    raise AudioInputUnsupported(
+                        model=f"{model.provider}/{model.model_id}",
+                        report=refusal,
+                        format_unsupported=True,
+                    )
             return
         # Lazy imports like the neighbours': neither module is needed on any
         # other prompt path, and this helper runs only for a recording that is
         # about to be refused.
         from local_operator.paths import config_dir
-        from local_operator.session.errors import AudioInputUnsupported
         from local_operator.stt.cascade import resolve_audio_path
 
         resolution = await resolve_audio_path(
@@ -6836,16 +6865,20 @@ class Session:
     def _fork_audio_sidecars(self, message: AgentMessage) -> None:
         """Fork the transcription sidecar(s) for an audio-carrying durable row.
 
-        Called ONLY from the append loop in ``_run_turn``, immediately after
-        the row is durable — never before, because a record that references a
+        Called from EVERY site that makes a user row durable, immediately
+        after the append — never before, because a record that references a
         message id the transcript does not have is a dangling row no reader
         can resolve; and not later either, because the sidecar's one job is to
         extract the recording best-effort while the turn that carried it is
-        still young. The work is fire-and-forget by construction:
-        ``fork_audio_sidecar`` registers through this session's own
-        tracked-spawn seam (``_spawn_background``), so ``dispose`` cancels it
-        and every failure is a status on the record instead of a raise into
-        the turn.
+        still young. The writer sites are ``_run_turn``'s initial append loop,
+        ``_drain_steering`` (the steer door's write) and
+        ``_drop_pre_aborted_turn`` (a held delivery's write); the
+        already-durable branches at each skip the fork because the row was
+        written — and forked — by whichever site did persist it. The work is
+        fire-and-forget by construction: ``fork_audio_sidecar`` registers
+        through this session's own tracked-spawn seam (``_spawn_background``),
+        so ``dispose`` cancels it and every failure is a status on the record
+        instead of a raise into the turn.
 
         One fork per block (v1 ships at most one per message); each record is
         self-contained and keyed by the same ``message_id``, so a future
