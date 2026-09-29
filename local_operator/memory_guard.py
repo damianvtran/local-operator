@@ -906,6 +906,12 @@ class Fragment:
     pids: tuple[int, ...] = ()
     ppid: int = 0
     pgid: int = 0
+    #: The snapshot row (pid, ppid, pgid) for EVERY pid in ``pids``, in the same
+    #: order — what the pre-signal re-check compares a fresh batched read
+    #: against. The WHOLE walk is carried, not just its root: every pid in it is
+    #: a signal target, and a recycled descendant that leads a group would take
+    #: that group (round 2, R2-1).
+    rows: tuple[tuple[int, int, int], ...] = ()
 
 
 def fragment_closure(
@@ -960,16 +966,23 @@ def fragments_ranked(
     links = child_links(row_list)
     mb_of = {row.pid: max(0, row.mb) for row in row_list}
     root_set = set(roots)
-    ranked = [
-        Fragment(
-            pid=row.pid,
-            mb=sum(mb_of.get(pid, 0) for pid in fragment_closure(row.pid, links, root_set)),
-            pids=tuple(sorted(fragment_closure(row.pid, links, root_set))),
-            ppid=row.ppid,
-            pgid=row.pgid,
+    by_pid = {row.pid: row for row in row_list}
+    ranked: list[Fragment] = []
+    for row in row_list:
+        if row.pid in root_set:
+            continue
+        subtree = tuple(sorted(fragment_closure(row.pid, links, root_set)))
+        ranked.append(
+            Fragment(
+                pid=row.pid,
+                mb=sum(mb_of.get(pid, 0) for pid in subtree),
+                pids=subtree,
+                ppid=row.ppid,
+                pgid=row.pgid,
+                rows=tuple(
+                    (pid, by_pid[pid].ppid, by_pid[pid].pgid) for pid in subtree
+                ),
+            )
         )
-        for row in row_list
-        if row.pid not in root_set
-    ]
     ranked.sort(key=lambda fragment: (-fragment.mb, fragment.pid))
     return ranked

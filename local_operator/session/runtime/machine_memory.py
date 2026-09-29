@@ -138,6 +138,10 @@ class MemoryPassReport:
     top: tuple[memory_guard.Fragment, ...] = ()
     killed: memory_guard.Fragment | None = None
     kill_withheld: bool = False
+    #: WHY a stop was withheld: "cooldown" (the seat's rung) or "changed"
+    #: (the snapshot no longer matches). Text that names the wrong cause sends
+    #: an operator to the wrong place (round 2, R2-3).
+    withheld_cause: str = ""
     reason: str = ""
 
     def summary(self) -> str:
@@ -151,7 +155,12 @@ class MemoryPassReport:
                 f"process{'es' if count != 1 else ''})"
             )
         elif self.kill_withheld:
-            parts.append("kill withheld: a fragment was ended recently")
+            if self.withheld_cause == "cooldown":
+                parts.append("kill withheld: a fragment was ended within the cooldown")
+            elif self.withheld_cause == "changed":
+                parts.append("kill withheld: the fragment changed before the signal")
+            else:
+                parts.append("kill withheld")
         return "; ".join(part for part in parts if part)
 
 
@@ -358,11 +367,13 @@ def machine_memory_pass(
             unmeasured=unmeasured,
             top=top,
             kill_withheld=True,
+            withheld_cause="cooldown",
             reason=verdict.reason
             + f"; would end the largest fragment (pid {candidate.pid}), kill withheld",
         )
 
-    if not _candidate_still_stands(candidate, runner=base):
+    refusal = _fragment_refusal(candidate, runner=base)
+    if refusal:
         return MemoryPassReport(
             state="act",
             fleet_mb=fleet_mb,
@@ -371,8 +382,8 @@ def machine_memory_pass(
             unmeasured=unmeasured,
             top=top,
             kill_withheld=True,
-            reason=verdict.reason
-            + f"; the candidate pid {candidate.pid} changed before the signal; withheld",
+            withheld_cause="changed",
+            reason=verdict.reason + f"; {refusal}",
         )
 
     stopper = kill or _default_kill
@@ -404,10 +415,8 @@ def machine_memory_pass(
     )
 
 
-def _candidate_still_stands(
-    candidate: memory_guard.Fragment, *, runner: Runner
-) -> bool:
-    """``True`` when the candidate's row still matches the pass's snapshot.
+def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> str:
+    """``""`` when every process of the fragment still matches the snapshot.
 
     **THE DECISION IS A SNAPSHOT AND THE SIGNAL IS NOT** — the same hazard the
     residency pass closes with ``reclaim.target_changed``, and this pass must
@@ -416,23 +425,39 @@ def _candidate_still_stands(
     would take the stop. Here that is worse than a stray SIGTERM: a recycled
     pid that happens to LEAD a group takes ``killpg`` — its whole group.
 
-    The check is deliberately the cheap one: one ``ps`` row for one pid,
-    compared against the snapshot's ``(ppid, pgid)``; a row that no longer
-    answers, or any change, withholds. Refusal, never a correction: it can
-    withhold a signal the snapshot authorised and can never authorise one the
-    snapshot did not.
+    **THE WHOLE WALK IS RE-CHECKED, NOT JUST ITS ROOT** (round 2, R2-1): the
+    stop signals every pid the ranking summed, so every one of them is a
+    potential recycled-pid signal. ONE batched ``ps`` for the fragment's pids
+    compares each row's ``(ppid, pgid)`` against the snapshot the ranking
+    walked (``Fragment.rows``); any missing row or any change withholds the
+    WHOLE stop — refusal, never a correction, ``reclaim.target_changed``'s
+    contract. The two messages differ by cause on purpose: "changed" and
+    "could not be re-read" send an operator to different places (R2-3).
     """
-    code, out = runner(["ps", "-o", "pid=,ppid=,pgid=", "-p", str(candidate.pid)])
+    if fragment.rows:
+        snapshot = fragment.rows
+    else:  # nothing carried (a hand-built Fragment); fall back to its root row
+        snapshot = ((fragment.pid, fragment.ppid, fragment.pgid),)
+    csv = ",".join(str(pid) for pid, _ppid, _pgid in snapshot)
+    code, out = runner(["ps", "-o", "pid=,ppid=,pgid=", "-p", csv])
     if code != 0:
-        return False
-    parts = out.split()
-    if len(parts) < 3:
-        return False
-    try:
-        pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
-    except ValueError:
-        return False
-    return pid == candidate.pid and ppid == candidate.ppid and pgid == candidate.pgid
+        return (
+            f"the fragment's rows could not be re-read (pid set starting "
+            f"{fragment.pid}); withheld"
+        )
+    seen: dict[int, tuple[int, int]] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            seen[int(parts[0])] = (int(parts[1]), int(parts[2]))
+        except ValueError:
+            continue
+    for pid, ppid, pgid in snapshot:
+        if seen.get(pid) != (ppid, pgid):
+            return f"the fragment changed before the signal (pid {pid}); withheld"
+    return ""
 
 
 def _default_kill(fragment: memory_guard.Fragment) -> bool:

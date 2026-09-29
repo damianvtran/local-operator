@@ -172,7 +172,9 @@ RESIDENCY_SWEEP_INTERVAL_S = 300.0
 #: unremarkable to out-of-memory-dialog inside half an hour, with the largest
 #: single movers growing GBs per ten minutes. A minute keeps the pass cheap
 #: beside a busy fleet and short enough to see a runaway before the operator
-#: does (50-120 ms measured, quiet to busy host). WHY NOT FASTER: each pass is
+#: does (measured 95 ms - 2.3 s across ten live passes: a handful of reads,
+#: with the batched ``top`` fallback dominating the passes where the direct
+#: reader cannot answer some pid). WHY NOT FASTER: each pass is
 #: one ``ps`` plus one memory read per fleet pid, and the pass's kill path is
 #: rate-limited anyway. A single command is already bounded by the per-command
 #: guard at its own ceiling; this pass exists for the SUM, which moves in
@@ -1167,10 +1169,15 @@ class _MachineMemorySweep:
         #: When this seat last ended a fragment (monotonic seconds), gating
         #: :data:`MACHINE_MEMORY_KILL_COOLDOWN_S`.
         self.last_kill_at: float | None = None
-        #: The last pass summary logged, so the seat can tell a CHANGE (worth
-        #: INFO: a warn rung crossed, a kill, an unmeasurable host appearing)
-        #: from the same reading again (DEBUG). The residency seat's rung.
-        self.last_summary: str | None = None
+        #: The last pass's STRUCTURAL key — ``(state, killed pid or None)`` —
+        #: so the seat can tell a CHANGE (worth INFO: a warn rung crossed, a
+        #: kill, an unmeasurable host appearing) from the same reading again
+        #: (DEBUG). Structural rather than the rendered summary on purpose:
+        #: ``fleet_mb`` moves on a healthy machine (23300 → 23306 MB between two
+        #: live passes), so comparing the text logged INFO nearly every pass
+        #: (round 2, R2-2). The residency seat's predicate is structural for the
+        #: same reason.
+        self.last_key: tuple[str, int | None] | None = None
         self._task: "asyncio.Task[Any] | None" = None
 
     def seconds_until(self, now: float | None = None) -> float:
@@ -1212,10 +1219,12 @@ class _MachineMemorySweep:
         uses.
 
         THE REPORT IS LOGGED, not dropped (the residency seat's shape): the
-        summary goes out at INFO when it CHANGES — the transitions worth a
-        line: ``ok`` → ``warn``, a kill, an unmeasurable host appearing — and
-        at DEBUG otherwise, so a healthy fleet does not rewrite the log every
-        minute while a silent ``unknown`` still leaves a trace.
+        summary goes out at INFO when the STRUCTURAL key changes — the
+        transitions worth a line: ``ok`` → ``warn``, a kill, an unmeasurable
+        host appearing — and at DEBUG otherwise, so a healthy fleet does not
+        rewrite the log every minute while a silent ``unknown`` still leaves a
+        trace. The key is structural rather than the rendered text because the
+        text carries volatile numbers (round 2, R2-2).
         """
         if task.cancelled():
             return
@@ -1228,8 +1237,9 @@ class _MachineMemorySweep:
             return
         report = task.result()
         summary = report.summary()
-        changed = summary != self.last_summary
-        self.last_summary = summary
+        key = (report.state, report.killed.pid if report.killed is not None else None)
+        changed = key != self.last_key
+        self.last_key = key
         (logger.info if changed else logger.debug)("%s", summary)
 
     async def shutdown(self) -> None:

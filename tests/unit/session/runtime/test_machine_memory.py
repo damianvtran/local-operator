@@ -69,13 +69,15 @@ def _fake_runner(
     topology: str | None = None,
     rss: dict[int, int] | None = None,
     drift: bool = False,
+    drift_pids: set[int] | None = None,
 ) -> mm.Runner:
-    """A runner keyed on argv shape: topology, the re-check row, the RSS batch.
+    """A runner keyed on argv shape: topology, the re-check rows, the RSS batch.
 
     A keyed fake rather than a sequence: a fake coupled to call ORDER is the
     brittleness that hides a broken pass the day a tick grows a second read.
-    ``drift`` makes the RE-CHECK read answer a changed row (a different
-    ``pgid``) — the recycled-pid shape the pre-signal withhold exists for.
+    ``drift``/``drift_pids`` make the RE-CHECK answer a changed ``pgid`` for
+    every row / for named rows — the recycled-pid shape the pre-signal withhold
+    exists for (batched across the WHOLE fragment, round 2, R2-1).
     """
     rows: dict[int, tuple[int, int]] = {}
     if topology:
@@ -91,17 +93,22 @@ def _fake_runner(
         if argv[:3] == ["ps", "-axo", "pid=,ppid=,pgid="]:
             return (0, topology) if topology is not None else (1, "")
         if argv[:3] == ["ps", "-o", "pid=,ppid=,pgid="]:
-            try:
-                pid = int(argv[-1])
-            except (IndexError, ValueError):
-                return 1, ""
-            row = rows.get(pid)
-            if row is None:
-                return 1, ""
-            ppid, pgid = row
-            if drift:
-                pgid += 1
-            return 0, f"{pid} {ppid} {pgid}"
+            lines = []
+            for token in argv[-1].split(","):
+                try:
+                    pid = int(token)
+                except ValueError:
+                    return 1, ""
+                row = rows.get(pid)
+                if row is None:
+                    # A missing row is a change; omit it and let the caller's
+                    # comparison refuse (never invent an answer).
+                    continue
+                ppid, pgid = row
+                if drift or (drift_pids is not None and pid in drift_pids):
+                    pgid += 1
+                lines.append(f"{pid} {ppid} {pgid}")
+            return 0, "\n".join(lines)
         if argv[:3] == ["ps", "-o", "pid=,rss="]:
             if rss is None:
                 return 1, ""
@@ -278,6 +285,28 @@ def test_total_mb_zero_is_unknown_too(monkeypatch) -> None:
     )
     assert report.state == "unknown"
     assert killer.fragments == []
+
+
+def test_a_changed_descendant_row_withholds_the_whole_stop() -> None:
+    """R2-1: every pid the ranking summed is a signal target and is re-checked.
+
+    The root stands; the DESCENDANT has drifted. The stop must be withheld —
+    the walk signals descendants too, and a recycled pid that leads a group
+    would take that whole group.
+    """
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
+            drift_pids={9900003},
+        ),
+        kill=killer,
+    )
+    assert report.state == "act"
+    assert killer.fragments == []
+    assert report.kill_withheld is True
+    assert "9900003" in report.reason
 
 
 def test_a_changed_candidate_row_withholds_the_stop() -> None:
