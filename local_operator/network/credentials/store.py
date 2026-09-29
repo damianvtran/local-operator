@@ -101,13 +101,13 @@ class CredentialSource(Protocol):
 def build_auth_store(config_dir: Path | None = None, *, db_path: str | Path | None = None) -> Any:
     """The store a session should use: plain, or mesh-aware when this device borrows.
 
-    THE ONE CONSTRUCTION SITE (``session_factory``), and the only place the 0-peer
-    guarantee is enforced. It returns ``AuthStore`` — the class the call site used
-    before this slice existed — unless there is a placement entry naming a
-    credential that ANOTHER device owns and this one is a holder for. A device that
-    owns everything it knows about, or holds nothing, therefore takes the old path
-    with the old object, and ``type(build_auth_store(cfg)) is AuthStore`` is the
-    test that pins it.
+    THE SHARED CONSTRUCTION SITE — ``session_factory``, the exec preflight and the
+    Radient resolvers — and the only place the 0-peer guarantee is enforced. It
+    returns ``AuthStore`` — the class the call site used before this slice existed
+    — unless there is a placement entry naming a credential that ANOTHER device
+    owns and this one is a holder for. A device that owns everything it knows
+    about, or holds nothing, therefore takes the old path with the old object, and
+    ``type(build_auth_store(cfg)) is AuthStore`` is the test that pins it.
 
     ``db_path`` PASSES THROUGH to the local ``AuthStore`` and its default keeps
     every pre-existing caller byte-identical (``None`` = the store's own

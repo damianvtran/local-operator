@@ -550,6 +550,7 @@ def test_the_credentials_digest_carries_the_shareable_block() -> None:
         "  notion  http  no login here yet — run '/mcp login https://n.example/mcp' here first",
         "  radient  oauth-rotating  login held — share: lop network credential share radient"
         " --with <device>",
+        "      organization account — share only to your own devices",
         "      signed in as owner@example.test",
     ]
     # An absent block leaves the old rendering (and its fallback) alone.
