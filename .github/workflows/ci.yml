@@ -412,8 +412,8 @@ jobs:
 
       # Node's default V8 old-space cap is ~4 GB; pyright's whole-tree analyzer
       # OOMed at heap 3885 MB on the 16 GB ubuntu-latest runner (run
-      # 36521602567, job 109266609131 — a recurrence). Give node 6 GB of
-      # old-space headroom. Orthogonal to the version pin above (unchanged).
+      # 36521602567, job 109266609131). Give node 6 GB of
+      # old-space headroom. Orthogonal to the version-pin comment above (unchanged).
       - name: Run pyright
         env:
           NODE_OPTIONS: "--max-old-space-size=6144"
