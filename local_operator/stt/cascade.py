@@ -29,6 +29,12 @@ it raises :class:`SttUnavailable` carrying the resolution, the attempts, and
 the classified failure the route should report. When NO rung was available it
 raises the same exception with no attempts — the route maps that case to the
 structured 409 the surface reads to offer the audio door.
+
+**Token executor** (:func:`transcribe_backend`) — the same run for ONE NAMED
+rung over in-memory bytes, with no walk and no fall-forward: the mobile
+bridge's dispatch (``clients/stt.py``), where the surface already decided —
+and advertised — which token runs. Settled against that bridge at the PR
+convergence round; see the function for its failure contract.
 """
 
 from __future__ import annotations
@@ -486,3 +492,101 @@ async def transcribe_audio(
     finally:
         if owned:
             store.close()
+
+
+#: The rungs :func:`transcribe_backend` can run over IN-MEMORY bytes — the
+#: mobile bridge's dispatch targets. The Radient leg is deliberately absent:
+#: its caller (``clients/stt.py``) owns that adapter against ``RadientClient``
+#: directly (the phone's Radient path needs no cascade machinery), and the
+#: file-based :func:`transcribe_audio` remains the routes' whole-cascade entry.
+_TOKEN_RUNNERS = {
+    AudioPath.PROVIDER_STT_ELEVENLABS: _run_elevenlabs_rung,
+    AudioPath.PROVIDER_STT_OPENAI: _run_openai_rung,
+}
+
+
+async def transcribe_backend(
+    backend: str,
+    audio: bytes,
+    mime: str,
+    *,
+    config_dir: Path | None,
+    session_id: str | None = None,
+    store: AuthStore | None = None,
+    language: str | None = None,
+    prompt: str | None = None,
+) -> SttOutcome:
+    """Run ONE named rung over in-memory bytes — the mobile bridge's executor.
+
+    THE SETTLED HALF OF THE #1734 SEAM (agents review convergence, B1): the
+    phone dispatches the exact token its availability answer named
+    (``clients/stt.py::transcribe_with_backend``), so this executor runs THAT
+    rung and nothing else — a whole-cascade walk here would let a call land on
+    a rung the surface never advertised. The file-based
+    :func:`transcribe_audio` keeps owning fall-forward, budgets and the
+    409-worthy no-rung report; this function serves callers that already hold
+    the bytes and the decision.
+
+    Availability is re-checked first through the same
+    :func:`resolve_audio_path` the surface read, so a missing credential keeps
+    the phone's typed "voice input isn't available" answer (this raises
+    :class:`SttUnavailable`, which the bridge converts to its 503 class)
+    instead of a bare provider 401 — while a credential deleted AFTER this
+    check still surfaces the rung's own honest failure. An attempted rung's
+    upstream failure propagates as its typed
+    :class:`~local_operator.clients._http.APIError` (the phone's shared
+    classifier maps 402/502 from it), and a hung rung is bounded by
+    :data:`STT_ATTEMPT_TIMEOUT_S` exactly as the walk bounds it — as a
+    transport failure, never a status.
+
+    No ``model`` argument: the model-audio rung is not an STT call (see
+    :data:`STT_RUNG_PATHS`), and the phone has no session model to offer.
+    """
+    try:
+        path = AudioPath(backend)
+    except ValueError:
+        # Not a token this cascade knows. The NONE member keeps the walk's
+        # lookups total (no rung matches it) while the sentence still quotes
+        # the caller's own token.
+        path = AudioPath.NONE
+    runner = _TOKEN_RUNNERS.get(path)
+
+    store, owned = _ensure_store(config_dir, store)
+    try:
+        resolution = await resolve_audio_path(
+            config_dir=config_dir,
+            model=None,
+            session_id=session_id,
+            store=store,
+        )
+        rung = next((r for r in resolution.rungs if r.path == path), None)
+        if rung is None or runner is None or not rung.available:
+            if rung is not None and not rung.available:
+                reason = rung.reason
+            else:
+                reason = f"The speech-to-text cascade cannot run the {backend!r} path."
+            raise SttUnavailable(reason, resolution=resolution)
+        try:
+            text = await asyncio.wait_for(
+                runner(
+                    audio,
+                    mime=mime,
+                    store=store,
+                    session_id=session_id,
+                    language=language,
+                    prompt=prompt,
+                    timeout_s=STT_ATTEMPT_TIMEOUT_S,
+                ),
+                timeout=STT_ATTEMPT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            # The walk's own convention: a timeout never reached an upstream
+            # status, so it reads as a transport failure to the classifiers.
+            raise APIError(
+                f"{_rung_label(path)} did not respond within {STT_ATTEMPT_TIMEOUT_S:.0f} s.",
+                status_code=None,
+            ) from None
+    finally:
+        if owned:
+            store.close()
+    return SttOutcome(text=text, path=path, attempts=(SttAttempt(path=path, outcome="ok"),))
