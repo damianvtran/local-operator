@@ -398,6 +398,49 @@ async def test_a_settled_run_paints_no_error_card_and_the_poller_stays_quiet(
         ), "the canary must be reported, or the quiet readings above are dead"
 
 
+@pytest.mark.asyncio
+async def test_the_poller_paints_a_closed_run_neutrally_and_never_in_danger(
+    tmp_path, monkeypatch
+) -> None:
+    """THE v2 NEUTRAL ROW: a closure is a receipt, not a failure.
+
+    Session 23fc556c3799 (2026-09-29): the disposal published ``error|disposed``
+    for a zero-work run and the operator's completed turn read "Stopped with an
+    error" on both surfaces. The disposal publishes ``closed`` now; the poller
+    must paint its sentence in the info tier — never the danger tier — with the
+    words from the shared row decision (``harness/rows.py``), so the TUI, the
+    phone and the desktop cannot drift. The error and interrupted cells above
+    stay the still-paints-in-their-own-tier controls.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    from local_operator.harness.rows import CLOSED_NOTICE_TEXT
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _start_and_end_turn(app, pilot, aborted=False, error=None)
+        session.publish("closed", cause="disposed")
+        await app._poll_completion_attention()
+        await pilot.pause()
+        texts = _notice_texts(app)
+        assert any(CLOSED_NOTICE_TEXT in text for text in texts), texts
+        assert not any("Stopped with an error" in text for text in texts), texts
+        assert all(
+            block._token != "danger" for block in _notice_blocks(app)
+        ), "a closure must never paint in the danger tier"
+
+
+def test_the_closed_closure_reads_completed_and_keeps_the_info_tier() -> None:
+    """The copy and the tier, pinned at the one decision both surfaces read."""
+    from local_operator.harness.rows import CLOSED_NOTICE_TEXT, completion_notice
+
+    text, severity = completion_notice(
+        "closed", "the session was disposed while this turn was running"
+    )
+    assert text == CLOSED_NOTICE_TEXT == "Completed — runtime retired/disposed"
+    assert severity == "info", "the closure must never wear the danger tier"
+
+
 def test_the_returned_to_turn_notice_carries_an_escalated_stops_attribution() -> None:
     """Design round 1, D1 on the row the TUI poller and the phone SHARE.
 

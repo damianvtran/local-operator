@@ -278,6 +278,50 @@ def test_the_tail_keeps_its_own_outcome_when_later_runs_follow(tmp_path):
     assert [c.id for c in index.checkpoints if c.kind == "completion"] == ["a2"]
 
 
+def test_a_closed_marker_never_claims_or_clears_a_turn_outcome(tmp_path):
+    """THE v2 DIRECTIVE AT THE RAIL: a closure is inert; the completion stands.
+
+    Session 23fc556c3799: the turn completed, then the zero-work disposal
+    published on top. The attention store's newest row is the closure (rendered
+    neutrally by every row surface), but the RAIL must keep the completed
+    turn's own outcome: ``closed`` is not a rail outcome, and letting it attach
+    would either claim the tick or erase it — the same masking, one derivation
+    over. The second half is the control: a closure with no completion before
+    it asserts nothing rather than inventing an outcome.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "do the thing"),
+            assistant("a1", 1.2, "done"),
+            marker("m1", 1.3, "t1"),
+            start("s2", 2.0, "t2"),
+            inject("i1", 2.1, "hub_message"),
+            marker("m2", 2.2, "t2", kind="closed"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert outcomes(index) == [("u1", None), ("a1", "complete")]
+
+    closed_only = tmp_path / "closed-only"
+    closed_only.mkdir()
+    write_rows(
+        closed_only,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "peer's ask"),
+            inject("i1", 1.2, "hub_message"),
+            marker("m1", 1.3, "t1", kind="closed"),
+        ],
+    )
+    index = ti.refresh_index(closed_only, SID)
+    assert index is not None
+    assert [c.outcome for c in index.checkpoints if c.kind == "completion"] == [
+        None
+    ], "a closure alone must not claim the tick"
+
+
 def test_eligible_false_settles_without_an_outcome(tmp_path):
     write_rows(
         tmp_path,

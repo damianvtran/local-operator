@@ -27389,7 +27389,13 @@ class OperatorApp(App[None]):
             if (
                 anchor
                 and state.get("unseen")
-                and state.get("kind") in {"error", "interrupted"}
+                # ``closed`` joins the replay kinds (v2, 2026-09-29): a neutral
+                # closure must still paint a row when its conversation is
+                # reopened. The words AND the info tier come from
+                # ``completion_notice``'s own closed arm — nothing here may
+                # upgrade it to danger, and `_adopt_own_interrupt_notice`
+                # refuses the kind so this branch appends rather than adopts.
+                and state.get("kind") in {"error", "interrupted", "closed"}
                 and getattr(self, "_attention_retry_token", None) != (id(session), token)
             ):
                 transcript = self._transcript_view()

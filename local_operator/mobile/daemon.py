@@ -1833,7 +1833,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
             data["cut_off"] = kind == "error" and not is_deliberate_cause(
                 str(attention.get("cause") or "")
             )
-    if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
+    if not projection.streaming and attention.get("kind") in {"error", "interrupted", "closed"}:
         # The sentence AND its severity come from `harness/rows.py`, which owns
         # row decisions for both surfaces: the phone's `NoticeRow` picks its
         # glyph and ink from `details.severity`, so a frame that carried an empty
