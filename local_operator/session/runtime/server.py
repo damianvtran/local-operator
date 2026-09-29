@@ -1386,6 +1386,24 @@ class _ClientConn:
     # Exactly one writer drains the queue, so delivery stays ordered without a
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
+    #: In-flight ``aside_delta`` enqueues per request id — the flush handshake
+    #: behind ``complete_aside``'s receipt. The sink INCREMENTS on the thread
+    #: that calls ``on_delta`` before scheduling the enqueue; the enqueue
+    #: callback DECREMENTS here when the frame is actually queued, and the
+    #: receipt waits for zero. Counting rather than trusting scheduling order
+    #: is the point: on 3.13 the completion wakeup can run ahead of callbacks
+    #: appended earlier from the worker thread (measured — the receipt reached
+    #: the socket while both chunks sat unwritten), which is exactly the
+    #: overtake the receipt must not allow.
+    pending_aside_deltas: dict[Any, int] = field(default_factory=dict)
+    #: Guards ``pending_aside_deltas`` and ``aside_flushed``; the session
+    #: thread and this loop both touch them.
+    aside_flush_lock: threading.Lock = field(default_factory=threading.Lock)
+    #: One waker per request, set when its last counted delta is queued.
+    #: Bookkeeping only — the counter stays authoritative, so a waker not
+    #: registered yet cannot hide a flush: the waiter re-checks under the
+    #: lock after registering.
+    aside_flushed: dict[Any, asyncio.Event] = field(default_factory=dict)
     frontend_unsubscribe: Callable[[], None] | None = None
     #: This connection's CURRENT bind generation, and the mechanism that keeps a
     #: late on-loop bind from relaying into a connection the off-loop fallback
@@ -5788,23 +5806,22 @@ class RuntimeServer:
                     **extra,
                 }
                 if op == "complete_aside":
-                    # THE RECEIPT MUST NOT OVERTAKE ITS OWN STREAM. The chunks
-                    # travel the connection FIFO (the sink enqueues them with
-                    # ``call_soon_threadsafe``); a DIRECT write here waits on
-                    # ``send_lock`` and never on that queue, so whenever the
-                    # drain has not reached a queued chunk yet — a task created
-                    # but not started, parked behind an earlier frame, or
-                    # descheduled under load — the receipt goes out first, the
-                    # caller's sink is gone by the time the chunks arrive, and
-                    # the card paints nothing until the settled answer appears
-                    # (CI's aside-stream flake: one settled-text delta where two
-                    # streamed chunks were expected). Enqueuing makes the order
-                    # structural: the sink's callbacks ran before this op could
-                    # return, so its frames are already ahead in the same FIFO.
+                    # THE RECEIPT MUST NOT OVERTAKE ITS OWN STREAM, and the
+                    # flush below is what makes that a guarantee rather than a
+                    # schedule. The chunks reach the FIFO through a
+                    # ``call_soon_threadsafe`` hop from the session thread
+                    # (``_aside_delta_sink``); on 3.13 that hop can run AFTER
+                    # this op's completion wakeup — measured: the receipt was
+                    # queued ahead of both chunks and the caller resolved while
+                    # they sat unwritten, the exact dropped-stream CI saw. So
+                    # the receipt first waits for the counted enqueues to land
+                    # (``_await_aside_flush``) and is then queued behind them:
+                    # ordering by construction, not by scheduling luck.
                     # ``drop_on_overflow=False``: losing the receipt is the one
                     # outcome the caller contract forbids, so in the corner
                     # where even a folded queue cannot take it, the direct
                     # write is the lesser failure.
+                    await self._await_aside_flush(conn, req)
                     if not self._enqueue_client_frame(conn, ack_frame, drop_on_overflow=False):
                         await self._send_to(conn, ack_frame)
                 else:
@@ -7086,10 +7103,15 @@ class RuntimeServer:
         * the callback fires on the SESSION's loop, not this one:
           ``ServingSessionHandle.complete_aside`` is marshalled there whole, so
           the ``on_delta`` calls inside ``Session.complete_aside`` run on that
-          thread. The one write below hops back with ``call_soon_threadsafe``,
-          which from a single producer thread preserves emission order — a
-          direct ``conn.event_queue.put_nowait`` from here would be a
-          cross-thread mutation of an ``asyncio.Queue``.
+          thread. The one write below hops back with ``call_soon_threadsafe``
+          (a direct ``conn.event_queue.put_nowait`` from here would be a
+          cross-thread mutation of an ``asyncio.Queue``). The hop preserves
+          emission order AMONG chunks — single producer — but its EXECUTION can
+          lag the op's completion: on 3.13 the completion wakeup can pass
+          callbacks appended earlier from this thread, so the receipt cannot
+          infer "my chunks are queued" from having returned. That inference is
+          the counted flush instead: each send increments here, the enqueue
+          callback releases it, and ``_await_aside_flush`` waits for zero.
 
         The frame is built fresh per chunk rather than mutated in place because
         ``_enqueue_client_frame`` runs the wire size fit over it, and a shared
@@ -7106,12 +7128,78 @@ class RuntimeServer:
                 "req": req,
                 "data": {"delta": delta},
             }
+            # COUNTED BEFORE SCHEDULING: the op cannot return before its last
+            # ``on_delta`` has called this, so when the receipt's flush looks
+            # at the counter every chunk this request will send is already in
+            # it. The reverse order would leave a window where the count
+            # reached zero between a chunk's scheduling and its increment.
+            with conn.aside_flush_lock:
+                conn.pending_aside_deltas[req] = conn.pending_aside_deltas.get(req, 0) + 1
             try:
-                loop.call_soon_threadsafe(self._enqueue_client_frame, conn, frame)
+                loop.call_soon_threadsafe(self._aside_delta_enqueued, conn, req, frame)
             except RuntimeError:  # loop closing
-                pass
+                # Nothing will run the release; drop the count so a waiter
+                # cannot park on a frame that will never be queued. No waker
+                # either: a closing loop is the one place the waiter cannot
+                # safely be woken from this thread.
+                self._aside_delta_count_release(conn, req)
 
         return send
+
+    def _aside_delta_count_release(self, conn: _ClientConn, req: Any) -> asyncio.Event | None:
+        """Drop one in-flight delta count for ``req``; return the waker at zero.
+
+        Returned rather than set here because the CALLER knows its thread: the
+        enqueue callback runs on this loop and may set the event, while the
+        sink's loop-closing fallback runs on the session thread and must not
+        touch a loop primitive.
+        """
+        with conn.aside_flush_lock:
+            remaining = conn.pending_aside_deltas.get(req, 0) - 1
+            if remaining > 0:
+                conn.pending_aside_deltas[req] = remaining
+                return None
+            conn.pending_aside_deltas.pop(req, None)
+            return conn.aside_flushed.get(req)
+
+    def _aside_delta_enqueued(self, conn: _ClientConn, req: Any, frame: dict[str, Any]) -> None:
+        """The counted half of the sink hop: enqueue the chunk, then release.
+
+        ENQUEUE FIRST so a receipt unblocked by the release always finds the
+        chunk ahead of it in the FIFO; release in a ``finally`` so a refusal
+        (which can only have dropped the client) cannot park the waiter.
+        """
+        try:
+            self._enqueue_client_frame(conn, frame)
+        finally:
+            event = self._aside_delta_count_release(conn, req)
+            if event is not None:
+                event.set()
+
+    async def _await_aside_flush(self, conn: _ClientConn, req: Any) -> None:
+        """Block the receipt until every counted chunk of ``req`` is in the FIFO.
+
+        THE COUNTER IS THE TRUTH; the waker is only a waker, and it is
+        registered BEFORE the re-check, so a release landing between check and
+        wait cannot be missed. Both sides of that race run on this loop — the
+        sink's increments all happen before the op returns, while this wait
+        starts after — and the double-check holds the same lock the release
+        does, so no interleaving of the two can lose a wakeup. The wait itself
+        is bounded by work already scheduled on this loop (non-blocking
+        enqueues), never by the network.
+        """
+        with conn.aside_flush_lock:
+            if not conn.pending_aside_deltas.get(req):
+                return
+            event = conn.aside_flushed.get(req)
+            if event is None:
+                event = asyncio.Event()
+                conn.aside_flushed[req] = event
+            if not conn.pending_aside_deltas.get(req):
+                conn.aside_flushed.pop(req, None)
+                return
+        await event.wait()
+        conn.aside_flushed.pop(req, None)
 
     def _relay_on_loop(self, data: dict[str, Any]) -> None:
         """Fan one serialized AgentEvent out to event-subscribed attach clients.

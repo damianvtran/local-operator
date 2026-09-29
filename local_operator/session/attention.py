@@ -435,6 +435,24 @@ def _optional_column(row: sqlite3.Row, name: str) -> str:
     return str(value or "")
 
 
+def _optional_flag(row: sqlite3.Row, name: str, *, default: bool) -> bool:
+    """One ADDITIVE boolean column's value, ``default`` when a pre-field row lacks it.
+
+    The boolean sibling of :func:`_optional_column`, for the same two readers
+    and the same reason: ``state_many``/``published_since`` open the database
+    ``mode=ro`` precisely so a frontend list can never migrate, while the
+    schema migration lives on the WRITE path. A database no build of this
+    version has written yet genuinely has no ``notify`` column, and ``default``
+    is the answer that preserves that row's behaviour — for §14's flag that is
+    ``True`` (notify), which is what every pre-field row meant.
+    """
+    try:
+        value = row[name]
+    except IndexError:
+        return default
+    return bool(int(value))
+
+
 #: How much of a reason the STORE keeps. This string rides every attach frame
 #: (once per conversation in the canonical `attention` state, and once per child
 #: for a job row), so an unbounded provider message would spend the frame ceiling
@@ -1099,6 +1117,10 @@ def _import_transcript_outcome(
                 kind,
                 reason=reason,
                 cause=cause,
+                # §14: replayed VERBATIM, including its notify value; a marker
+                # written before the field (key absent) means notify=1 — its
+                # behaviour, exactly.
+                notify=bool(saved.get("notify", True)),
             )
             if kind == "error" and is_cut_off_cause(cause):
                 # A CUT-OFF the dying runtime could not narrate itself. Its own
@@ -1207,7 +1229,8 @@ class AttentionStore:
                         "sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
                         "conversation TEXT NOT NULL, token TEXT NOT NULL UNIQUE, "
                         "anchor TEXT NOT NULL, kind TEXT NOT NULL, "
-                        "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '')"
+                        "reason TEXT NOT NULL DEFAULT '', cause TEXT NOT NULL DEFAULT '', "
+                        "notify INTEGER NOT NULL DEFAULT 1)"
                     )
                     conn.execute(
                         "CREATE INDEX completion_conversation "
@@ -1304,6 +1327,19 @@ class AttentionStore:
                         conn.execute(
                             "ALTER TABLE completions ADD COLUMN cause TEXT NOT NULL DEFAULT ''"
                         )
+                    # ``notify`` (§14's origin-aware notification flag) is
+                    # ADDITIVE for the same reason the two columns above are,
+                    # and stays out of the probe above for the same reason:
+                    # every database written before the field legitimately
+                    # lacks it, and naming it in the probe would read all of
+                    # them as corrupt. ``DEFAULT 1`` rather than a nullable
+                    # column keeps the readers one shape — an old row notifies
+                    # exactly as it always did, and ``0`` is always a row some
+                    # build explicitly decided to keep quiet.
+                    if "notify" not in columns:
+                        conn.execute(
+                            "ALTER TABLE completions ADD COLUMN notify INTEGER NOT NULL DEFAULT 1"
+                        )
             return conn
         except BaseException:
             conn.close()
@@ -1374,6 +1410,10 @@ class AttentionStore:
             # as "nothing to say" rather than as an empty sentence.
             "reason": (row["reason"] or "") if row else "",
             "cause": (row["cause"] or "") if row else "",
+            # §14: whether this completion may notify. Absent on a pre-field
+            # row (or a database no new build has written yet) — that reads
+            # True, i.e. exactly how those rows behaved.
+            "notify": _optional_flag(row, "notify", default=True) if row else True,
             "unseen": bool(row and row["sequence"] > acknowledged),
             "revision": [row["sequence"] if row else 0, acknowledged],
         }
@@ -1400,6 +1440,7 @@ class AttentionStore:
                 "kind": None,
                 "reason": "",
                 "cause": "",
+                "notify": True,
                 "unseen": False,
                 "revision": [0, 0],
             }
@@ -1436,6 +1477,7 @@ class AttentionStore:
                         "kind": row["kind"],
                         "reason": _optional_column(row, "reason"),
                         "cause": _optional_column(row, "cause"),
+                        "notify": _optional_flag(row, "notify", default=True),
                         "unseen": row["sequence"] > row["acknowledged"],
                         "revision": [row["sequence"], row["acknowledged"]],
                     }
@@ -1453,11 +1495,12 @@ class AttentionStore:
         AUTOINCREMENT primary key, so this is an index scan over exactly what
         happened since the caller's cursor, not a per-conversation lookup.
 
-        Returns ``(conversation, sequence, token, kind)`` per row because that
-        is the whole of what "a completion was published" needs: the caller
+        Returns ``(conversation, sequence, token, kind, notify)`` per row because
+        that is the whole of what "a completion was published" needs: the caller
         keys its own per-session baseline on ``token`` (the durable identity)
-        and decides eligibility from ``kind`` (``BRIDGE_NOTIFIABLE_KINDS``).
-        The caller has to read ``state_many`` for the affected sessions
+        and decides eligibility from ``kind`` (``BRIDGE_NOTIFIABLE_KINDS``) and
+        ``notify`` (§14's origin-aware flag, carried so no consumer re-derives
+        it). The caller has to read ``state_many`` for the affected sessions
         afterwards for the wire shape — this read answers "which sessions
         moved", never "what does the card say".
 
@@ -1466,7 +1509,9 @@ class AttentionStore:
         poller that
         raised here would lose cross-process completion sync for the life of
         its loop. A pre-taxonomy database reads without ``reason``/``cause``
-        because neither is selected.
+        because neither is selected, and a pre-§14 one without ``notify``
+        because the row read tolerates the missing column (defaulting it to
+        notify, which is what those rows meant).
         """
         if not self.path.exists():
             return []
@@ -1484,10 +1529,15 @@ class AttentionStore:
                     "sequence": int(row["sequence"]),
                     "token": row["token"],
                     "kind": row["kind"],
+                    # §14: the eligibility flag rides the delta too, so the
+                    # feed's candidate filter never has to re-derive it from
+                    # the kind. Wildcard + tolerant read, the same pattern
+                    # ``_state_many_once`` uses, because an old database simply
+                    # has no column to select.
+                    "notify": _optional_flag(row, "notify", default=True),
                 }
                 for row in conn.execute(
-                    "SELECT conversation, sequence, token, kind FROM completions "
-                    "WHERE sequence > ? ORDER BY sequence",
+                    "SELECT * FROM completions WHERE sequence > ? ORDER BY sequence",
                     (sequence,),
                 )
             ]
@@ -1711,6 +1761,7 @@ class AttentionStore:
         baseline_seen: bool | None = None,
         reason: str = "",
         cause: str = "",
+        notify: bool = True,
     ) -> dict[str, Any]:
         """Import a durable outcome idempotently, including after runtime restart.
 
@@ -1767,6 +1818,15 @@ class AttentionStore:
         read. Detectable and flood-free are not in tension once they are
         separate counters.
 
+        ``notify`` is §14's origin-aware eligibility flag, COMPUTED BY THE
+        SESSION (one value per run, from the run's trigger record) and carried
+        here verbatim — the store never derives it, and a quiet row and a loud
+        one are otherwise identical. It defaults ``True`` so callers that
+        predate the field, and rows that predate it (the migration supplies
+        ``DEFAULT 1``), keep notifying exactly as today. The supersede above
+        replaces it alongside the anchor it corrects, so a healed row carries
+        the correction's own value.
+
         CONTENTION IS RIDDEN OUT HERE, NOT HANDED TO THE CALLER. The transaction
         runs under the bounded retry below (:meth:`_retry_write`), and only if
         every attempt meets SQLite's busy verdict does it raise
@@ -1793,6 +1853,7 @@ class AttentionStore:
                 baseline_seen=baseline_seen,
                 reason=reason,
                 cause=cause,
+                notify=notify,
             )
         )
 
@@ -1806,6 +1867,7 @@ class AttentionStore:
         baseline_seen: bool | None,
         reason: str,
         cause: str,
+        notify: bool,
     ) -> dict[str, Any]:
         """One attempt at :meth:`publish`'s transaction, on its own connection."""
         with closing(self._connect()) as conn, conn:
@@ -1824,8 +1886,9 @@ class AttentionStore:
                 if not _supersedes_provisional(existing, conversation, token, anchor):
                     raise ValueError("completion token belongs to another outcome")
                 conn.execute(
-                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=? WHERE token=?",
-                    (anchor, kind, reason, cause, token),
+                    "UPDATE completions SET anchor=?, kind=?, reason=?, cause=?, notify=? "
+                    "WHERE token=?",
+                    (anchor, kind, reason, cause, int(bool(notify)), token),
                 )
                 # Inside the SAME transaction as the UPDATE: a reader must
                 # never observe a healed row whose change the detector has not
@@ -1839,9 +1902,9 @@ class AttentionStore:
                 conn.execute(_APPEND_SUPERSEDE, (conversation,))
                 conn.execute(_PRUNE_SUPERSEDE_LOG, (_SUPERSEDE_LOG_RETENTION,))
             conn.execute(
-                "INSERT OR IGNORE INTO completions(conversation,token,anchor,kind,reason,cause) "
-                "VALUES(?,?,?,?,?,?)",
-                (conversation, token, anchor, kind, reason, cause),
+                "INSERT OR IGNORE INTO completions"
+                "(conversation,token,anchor,kind,reason,cause,notify) VALUES(?,?,?,?,?,?,?)",
+                (conversation, token, anchor, kind, reason, cause, int(bool(notify))),
             )
             if baseline_seen:
                 sequence = conn.execute(

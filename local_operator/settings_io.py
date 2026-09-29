@@ -565,6 +565,14 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "How the built-in tools execute.",
     ),
+    # LIVE: ``hook_forwarding.forwarding_enabled`` reads both keys through a
+    # fresh ``ConfigManager(config_dir())`` on every finished tool call.
+    Section(
+        "hooks",
+        "Forwarded hooks",
+        Scope.LIVE,
+        "Run Claude Code / Codex PostToolUse hooks in lop sessions.",
+    ),
     # LIVE, and its own section, for the reason ``tools`` is LIVE: ``execute_bash``
     # reads these through a fresh ``ConfigManager(config_dir())`` per call, so an
     # edit lands on the next command. Deliberately NOT in ``shell_environment``,
@@ -3064,6 +3072,26 @@ SETTINGS: tuple[Setting, ...] = (
     # together by ``test_bash_shell_row_shares_the_consumer_path`` rather than
     # imported, because this module must stay cheap for the CLI and
     # ``tools.builtin`` is not (see the module docstring on Textual).
+    # -- hooks ------------------------------------------------------------
+    # ``path`` mirrors ``hook_forwarding.FORWARD_*_PATH``.
+    Setting(
+        key="hooks.forward_claude",
+        path=("hooks", "forward_claude"),
+        section="hooks",
+        label="Forward Claude Code hooks",
+        kind=Kind.BOOL,
+        default=False,
+        help="Run ~/.claude + plugin PostToolUse hooks after each tool call.",
+    ),
+    Setting(
+        key="hooks.forward_codex",
+        path=("hooks", "forward_codex"),
+        section="hooks",
+        label="Forward Codex hooks",
+        kind=Kind.BOOL,
+        default=False,
+        help="Run ~/.codex/hooks.json PostToolUse hooks after each tool call.",
+    ),
     Setting(
         key="bash.shell",
         path=("bash", "shell"),
@@ -3914,15 +3942,6 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
     omitted the group check is skipped, and :func:`write_setting` always
     supplies it, so no write can reach disk unchecked.
     """
-    if (
-        setting.kind is Kind.HOTKEY
-        and values is not None
-        and isinstance(value, str)
-        and value.strip()
-    ):
-        group_problem = _keymap.group_conflict(setting.key, value, values)
-        if group_problem is not None:
-            return group_problem
     if setting.validate_value is not None:
         try:
             setting.validate_value(value)
@@ -4006,11 +4025,23 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
         # scope (and, for desktop rows, the action id) selects the grammar:
         # `keymap.quick_send` must be judged by the rules of a global
         # shortcut, not the rules of a terminal key.
-        return _keymap.validate_key(
+        problem = _keymap.validate_key(
             value,
             scope=setting.hotkey_scope or "app",
             action_id=setting.key,
         )
+        if problem is not None:
+            return problem
+        # THE SIBLING CHECK, after the grammar rather than before it: a value
+        # the row's own grammar refuses must hear THAT sentence. Adding the
+        # hold family made the old order actively misleading — an accelerator
+        # pasted into the hold row collided with quick_send's default string
+        # and was told "pick another", as if any accelerator could be accepted
+        # by a row that holds none. A value that survives its own grammar is
+        # the only kind a collision can be about.
+        if values is not None and isinstance(value, str) and value.strip():
+            return _keymap.group_conflict(setting.key, value, values)
+        return None
     if setting.kind is Kind.CASCADE:
         # Same rule the HOTKEY arm above states, for the same reason: `lop
         # config edit` and a hand-edited config.yml both reach this value

@@ -11697,6 +11697,13 @@ class WakeParams(BaseModel):
     )
     until: str | None = Field(default=None, description="Retire after this time (ISO datetime).")
     limit: int | None = Field(default=None, ge=1, description="Max number of fires.")
+    notify: bool = Field(
+        default=False,
+        description=(
+            "Notify when the wake's turn completes; pass true when the user "
+            "asked to be told (default false: wakes are quiet)."
+        ),
+    )
     id: str | None = Field(default=None, description="Schedule id (cancel; from wake list).")
 
 
@@ -11734,6 +11741,7 @@ async def _wake_create(
         "every": params.every,
         "until": params.until,
         "limit": params.limit,
+        "notify": bool(params.notify),
     }
     outcome = build_wake_schedule(request, existing, now_ms)
     if "error" in outcome:
@@ -11836,7 +11844,10 @@ def build_wake_tool(context: ToolContext) -> AgentTool | None:
         name="wake",
         label="Wake",
         describe_approval=_describe_wake_approval,
-        description="Schedule a future wake (create/list/cancel), e.g. 'in 30m' or 'in 8h30m'.",
+        description=(
+            "Schedule a future wake (create/list/cancel), e.g. 'in 30m' or 'in 8h30m'. "
+            "Pass notify:true when the user asked to be told."
+        ),
         parameters=WakeParams.model_json_schema(),
         # write tier: wake create persists schedules and arms unattended
         # future agent turns — the only tool that creates autonomous
