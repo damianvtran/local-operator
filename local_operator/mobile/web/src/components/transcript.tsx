@@ -12,6 +12,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { Markdown } from "./markdown"
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
+import { followScrollTop } from "../lib/scroll-follow";
 import { getHistory, getSubagentHistory, imageUrl } from "../api";
 import { cn } from "../lib/cn";
 import { pendingEchoCaption, type PendingEcho } from "../pending-echo";
@@ -466,21 +467,15 @@ export function Transcript({
 		return () => ro.disconnect();
 	}, []);
 
-	/* Prepending older rows must NOT move the viewport: capture the scroll
-	   offset relative to the top of the OLD content, then restore it after the
-	   prepend so the row the user was reading stays put. */
+	/* Prepending older rows must NOT move the viewport: the row the user was
+	   reading stays put. That is now simply one case of the follow effect above
+	   — rows inserted above the reader move the anchor row down and the write
+	   follows it — so the rAF restore that used to live here is gone (round 4):
+	   it was a second, blind hand on `scrollTop` (a `scrollHeight` delta that
+	   also counted any tail growth in the same commit, at a frame's delay),
+	   exactly the shape the opt-out exists to prevent. */
 	const prependPage = (page: TranscriptEntry[]) => {
-		const el = scrollRef.current;
-		const prevHeight = el?.scrollHeight ?? 0;
-		const prevTop = el?.scrollTop ?? 0;
 		setOlder((cur) => [...page, ...cur]);
-		/* Restore after React commits the taller content. */
-		requestAnimationFrame(() => {
-			const el2 = scrollRef.current;
-			if (el2) {
-				el2.scrollTop = prevTop + (el2.scrollHeight - prevHeight);
-			}
-		});
 	};
 
 	const loadOlder = async () => {
@@ -514,50 +509,94 @@ export function Transcript({
 		}
 	};
 
-	/* What the reserve itself inserted, so a reader mid-history keeps the rows
-	   they are looking at (round 2, U23 = D7; corrected in round 3 — the follow
-	   below double-counted against the browser's scroll anchoring). The spacer
-	   is not the whole insertion: it is a flex child, so it also opens the
-	   scroller's row gap before the next child. Both are read off the DOM
-	   rather than derived from `topInset`, because the gap is the stylesheet's
-	   token — and a `scrollHeight` delta would also count rows appended at the
-	   tail in the same commit, growth BELOW the reader that must not move it. */
-	const reserveGrowth = (): number => {
-		const el = scrollRef.current;
-		const spacer = el?.querySelector<HTMLElement>("[data-scroll-top-inset]");
-		if (!el || !spacer) return 0;
-		const box = spacer.getBoundingClientRect();
-		const next = spacer.nextElementSibling;
-		const gap = next
-			? Math.max(0, next.getBoundingClientRect().top - box.bottom)
-			: 0;
-		return box.height + gap;
-	};
-	const prevGrowth = useRef(0);
+	/* THE READER'S ROW, HELD ACROSS EVERY CHANGE ABOVE THEM (round 3 fixed the
+	   reserve's own edges; round 4 extends the same hand to every other row
+	   change, because the opt-out means no other hand exists). The live window
+	   drops its oldest row on each append at the cap (U28 — native anchoring
+	   used to cover that removal silently), `show N more loaded` expands the
+	   window upward, a page of older rows can prepend, and the reserve grows or
+	   clears. So rather than compensating one cause, this measures its EFFECT:
+	   EVERY rendered row is remembered with its viewport offset, and the next
+	   commit re-measures the row the reader was closest to — the first row at
+	   the viewport's top edge — and follows how far it moved.
+
+	   The row's own movement already has the reader's scrolling divided out: a
+	   pure scroll moves the row and `scrollTop` by equal and opposite amounts
+	   and the two terms cancel, so a streamed frame that lands after a drag
+	   does not undo the drag. The write itself is `lib/scroll-follow`, where
+	   the two positions that are NOT "hold this row" live: the tail (the
+	   browser's clamp already followed a shrink — round 4, reviewer MAJOR 1 =
+	   U29) and the top with the reserve's edge (the reveal — round 2, U23).
+
+	   ALL rows are tracked, not just the visible ones, because the change being
+	   measured can push the reader's row out of the viewport in the same commit
+	   (a 30-row prepend) — a topmost-visible-only anchor would lose its row and
+	   write nothing, which is the round-3 bug in a new costume (measured: a
+	   34px rung insert changed the topmost visible row's identity and the
+	   reader moved by the rung's height). When the row the reader was nearest
+	   is gone (it was the one the window dropped), the next-nearest surviving
+	   row answers instead; when nothing survives, nothing is written. */
+	const anchorRows = useRef<{ id: string; top: number }[] | null>(null);
+	const prevFollowScrollTop = useRef(0);
+	const prevReserve = useRef(0);
 	useLayoutEffect(() => {
 		const el = scrollRef.current;
 		if (!el) return;
-		const growth = reserveGrowth();
-		const delta = growth - prevGrowth.current;
-		prevGrowth.current = growth;
-		/* THE BROWSER MUST NOT DO THIS TOO. This scroller opts out of native
-		   scroll anchoring (`[overflow-anchor:none]` below), because otherwise
-		   Chrome compensates the spacer's insertion for the same mid-history
-		   reader whose position this write is holding and the two add up: round 3
-		   measured a 53px slide on the ended rung and 25.6px on the reopening
-		   line, against 0.4px with the opt-out and this write alone. The opt-out
-		   also leaves the older-rows prepend path above as the only adjustment
-		   there, which is the contract its own comment states. At the very top
-		   there is nothing to hold: the slide is the POINT (the first row comes
-		   out from under the strip with no gesture), and `scrollTop` cannot go
-		   below zero anyway. `min`/`max` keep the write inside the scroller's own
-		   range as the reserve clears again. */
-		if (delta === 0 || el.scrollTop === 0) return;
-		el.scrollTop = Math.max(
-			0,
-			Math.min(el.scrollTop + delta, el.scrollHeight - el.clientHeight),
-		);
-	}, [topInset]);
+		const box = el.getBoundingClientRect();
+		const scrollTop = el.scrollTop;
+		const max = el.scrollHeight - el.clientHeight;
+		/* The reserve's size read off the DOM, not off `topInset`: the edge
+		   belongs to the same two frames the delta is measured between, and a
+		   prop can land in a commit the spacer has not moved in yet (measured:
+		   a run flagged the edge, skipped the top guard, and a later frame then
+		   carried the move as an un-edged delta through the guard). The spacer
+		   is not the whole insertion — it is a flex child, so it also opens the
+		   scroller's row gap before the next child — and both are read here. */
+		let reserve = 0;
+		const spacer = el.querySelector<HTMLElement>("[data-scroll-top-inset]");
+		if (spacer) {
+			const spacerBox = spacer.getBoundingClientRect();
+			const next = spacer.nextElementSibling;
+			reserve =
+				spacerBox.height +
+				(next ? Math.max(0, next.getBoundingClientRect().top - spacerBox.bottom) : 0);
+		}
+		const reserveEdge = reserve !== prevReserve.current;
+		prevReserve.current = reserve;
+		const rows: { id: string; top: number }[] = [];
+		for (const candidate of el.querySelectorAll("[data-completion-anchor]")) {
+			rows.push({
+				id: candidate.getAttribute("data-completion-anchor") ?? "",
+				top: candidate.getBoundingClientRect().top - box.top,
+			});
+		}
+		const prev = anchorRows.current;
+		if (prev) {
+			const now = new Map(rows.map((r) => [r.id, r.top]));
+			const nearEdge = [...prev].sort((a, b) => Math.abs(a.top) - Math.abs(b.top));
+			for (const row of nearEdge) {
+				const top = now.get(row.id);
+				if (top === undefined) continue;
+				const next = followScrollTop({
+					domDelta: top - row.top + (scrollTop - prevFollowScrollTop.current),
+					scrollTop,
+					max,
+					reserveEdge,
+				});
+				if (next !== null) {
+					el.scrollTop = next;
+					/* The recorded offsets describe the frame the writer just
+					   left: a scroll write moves every row by the same amount. */
+					const shift = next - scrollTop;
+					for (const r of rows) r.top -= shift;
+				}
+				break;
+			}
+		}
+		anchorRows.current = rows;
+		prevFollowScrollTop.current = el.scrollTop;
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [topInset, older, windowSize, entries, pending, hasMore, loadingOlder]);
 
 	return (
 		<div
@@ -568,14 +607,18 @@ export function Transcript({
 				   wrap everything, but a table or pre that still overflows scrolls
 				   INSIDE itself, never the whole chat sideways. */
 				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
-				/* ONE HAND ON `scrollTop` (round 3). The reserve is the one place this
-				   app inserts height above a reader, and both the platform and the
-				   follow effect above want to compensate for it — together they moved a
-				   mid-history reader by 53px per rung. The opt-out leaves that effect as
-				   the only adjustment. The session LIST keeps anchoring ON
-				   (`screens/session-list.tsx`, QA round 4): it has no manual path of its
-				   own and needs the platform for insertions from other clients — the two
-				   answers differ on purpose. */
+				/* ONE HAND ON `scrollTop` (round 3; extended in round 4). The reserve,
+				   the live window's oldest-row removal at the cap, a prepended page and
+				   the window's own expansion are all "height above the reader" — and
+				   both the platform and the follow effect above want to answer for each,
+				   together moving a mid-history reader by a whole row per event. The
+				   opt-out leaves the follow effect as the only hand: it holds the
+				   reader's row structurally (see it above) instead of splitting the job
+				   with native anchoring, which is Chrome-only — Safari has none, so the
+				   manual path is the whole mechanism there. The session LIST keeps
+				   anchoring ON (`screens/session-list.tsx`, QA round 4, Q6): it has no
+				   manual path of its own and needs the platform for insertions from
+				   other clients — the two answers differ on purpose. */
 				"[overflow-anchor:none]",
 			)}
 		>
