@@ -824,6 +824,16 @@ def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSever
     return text, severity
 
 
+#: THE NEUTRAL CLOSURE'S sentence (v2, operator directive 2026-09-29, session
+#: 23fc556c3799): a disposal caught a run that had spent no provider
+#: round-trip, so it renders as a receipt on both surfaces rather than the
+#: ``Stopped with an error`` the operator re-reported. Defined HERE — the module
+#: that owns this row on both surfaces — and reused verbatim by the
+#: notification vocabulary (``tui/notify.py`` BODY_CLOSED) so the banner cannot
+#: drift from the row.
+CLOSED_NOTICE_TEXT = "Completed — runtime retired/disposed"
+
+
 def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]:
     """A RETURNED-TO turn's outcome row: its sentence and the ink it deserves.
 
@@ -850,6 +860,12 @@ def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]
     the reason away, so the one surface the phone and the TUI poller share said
     nothing about who killed what.
     """
+    if kind == "closed":
+        # A RECEIPT, not a failure: the row STATES the closure and keeps the
+        # info tier, so a disposal no longer paints danger ink over a turn
+        # whose output had already been delivered (v2 directive). The reason
+        # is ignored on purpose — the closure has no sentence to explain.
+        return CLOSED_NOTICE_TEXT, "info"
     if kind == "error":
         text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
         return text, "error"

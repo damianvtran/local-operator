@@ -276,6 +276,11 @@ def test_legacy_metadata_mtime_is_not_a_completion(tmp_path: Path) -> None:
         ),
         ("error", "", "Stopped with an error", "error"),
         ("interrupted", "the session was stopped by the user", "Interrupted", "info"),
+        # The v2 neutral closure (2026-09-29, session 23fc556c3799): a
+        # disposal that caught a zero-work run renders as a receipt on the
+        # phone too, in the info tier, and the words come from the shared row
+        # decision in ``harness/rows.py`` — never "Stopped with an error".
+        ("closed", "", "Completed — runtime retired/disposed", "info"),
     ],
 )
 def test_the_phone_notice_carries_the_tier_the_row_deserves(

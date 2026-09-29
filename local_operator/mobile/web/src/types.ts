@@ -207,7 +207,7 @@ export interface CompletionAttention {
 	conversation_id: string;
 	completion_token: string | null;
 	anchor_id: string | null;
-	kind: "complete" | "error" | "interrupted" | null;
+	kind: "complete" | "error" | "interrupted" | "closed" | null;
 	unseen: boolean;
 	revision: [number, number];
 }

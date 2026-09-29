@@ -279,6 +279,19 @@ async def test_a_retirement_cuts_nothing_and_a_live_turn_still_reports_it(
         while time.monotonic() < deadline and not live.is_streaming:
             await asyncio.sleep(0.01)
         assert live.is_streaming, "the turn never reached the provider stream"
+        # THE DISPATCH EVIDENCE, waited for explicitly (v2 split, 2026-09-29):
+        # ``is_streaming`` flips a few ms BEFORE the pump's first iteration
+        # (measured in this worktree: dispatched False at +0 s, True at
+        # +0.01 s), and under the v2 rule the two states end differently —
+        # a run that spent a provider round-trip still reports the cut-off,
+        # while one caught before its first provider statement closes
+        # neutrally (``closed``). This cell is about the FIRST state; waiting
+        # for the flag is what makes it that state deterministically rather
+        # than a race against the pump.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not live._attention_run_request_dispatched:
+            await asyncio.sleep(0.005)
+        assert live._attention_run_request_dispatched, "the stream was never consumed"
         # The latch refuses while it is live — that refusal IS half A's premise —
         # so the cut is the disposal's, and it says so.
         assert live_handle.begin_retire("runtime-retired", " (0.56.2 → 0.56.6)") is False
@@ -292,6 +305,62 @@ async def test_a_retirement_cuts_nothing_and_a_live_turn_still_reports_it(
     assert cut[0]["cause"] == "runtime-shutdown", cut[0]
     assert cut[0]["reason"] == render_cut_off_reason("runtime-shutdown"), cut[0]["reason"]
     assert "builddeclined" not in str(cut[0]["reason"])
+
+
+@pytest.mark.asyncio
+async def test_a_serving_disposal_over_a_zero_work_peer_run_closes_neutrally(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE v2 DIRECTIVE AT THE SERVING DOOR: spend nothing, close neutrally.
+
+    The decision is door-agnostic (``Session.dispose`` takes it), and this cell
+    proves the serving door inherits it with the right tokens: a peer-opened run
+    cut by the serving runtime's own ``dispose()`` before its first round-trip
+    publishes ``closed`` — not the ``error|runtime-shutdown`` a DISPATCHED cut
+    keeps earning (half B above, unchanged) — and the cause the serving rung
+    noted BEFORE the handover (``_note_retirement_cut_off``) is preserved on
+    the record, so an investigation still names the act that ended it.
+    """
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from tests.e2e.test_delivery_during_leave_e2e import _park_runs_before_dispatch
+    from tests.unit.session.test_session import make_session
+
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    monkeypatch.setenv("LOP_SESSION_GRACE_S", "0.1")
+    config = headless_tui_env
+    root = config / "serving-closed"
+    root.mkdir(parents=True, exist_ok=True)
+
+    with bounded(60, "a serving disposal over a zero-work peer run"):
+        session = make_session(root, _blocking_stream())
+        handle = ServingSessionHandle(
+            session,
+            asyncio.get_running_loop(),
+            cwd=str(config),
+            install_gates=False,
+            config_dir=config,
+        )
+        parked, release = _park_runs_before_dispatch(session, except_token=None)
+        message = session._peer_custom_message(
+            "peer closeout after the turn",
+            {"pid": 999999, "conversation_name": "peer", "model_label": "m"},
+        )
+        task = asyncio.ensure_future(session._prompt_messages([message], carried_prompt=True))
+        await asyncio.wait_for(parked.wait(), 30)
+        assert session._attention_run_carried_prompt is True
+        assert session._attention_run_request_dispatched is False
+
+        dispose_task = asyncio.ensure_future(handle.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=30)
+        await asyncio.wait_for(asyncio.shield(task), timeout=30)
+
+    rows = _completion_rows(root / "sess")
+    assert [row.get("kind") for row in rows] == ["closed"], rows
+    assert rows[-1].get("cause") == "runtime-shutdown", rows[-1]
+    assert not [row for row in rows if row.get("kind") == "error"], rows
 
 
 def _child_env(config_dir: Path, prefix: Path, session_id: str, **extra: str) -> dict[str, str]:

@@ -129,6 +129,7 @@ from pathlib import Path
 from typing import Callable, Literal, Mapping
 
 from local_operator import terminals
+from local_operator.harness.rows import CLOSED_NOTICE_TEXT
 from local_operator.proc import spawn_detached
 from local_operator.tui.settings import settings_get
 
@@ -173,6 +174,17 @@ BODY_APPROVAL = "Waiting for approval"
 BODY_ASK = "Waiting for your answer"
 BODY_ERROR = "Stopped with an error"
 BODY_INTERRUPTED = "Stopped before finishing"
+#: The neutral post-completion closure's sentence (v2 directive, 2026-09-29).
+#: The words live in ``harness/rows.py`` — the module that owns this row on
+#: both surfaces — and are imported rather than retyped so the banner cannot
+#: drift from the row it stands for. Deliberately NOT an entry in
+#: :data:`CONTEXTS` (nor in :data:`NotifyKind`): a closure is never announced
+#: — the record publishes with ``notify=False``, which every announce path
+#: already reads — so growing the notification CATEGORY vocabulary for it
+#: would widen two pinned contracts (and collide the "Complete" context with
+#: ``complete``'s) with no reachable caller. It lives in :data:`BODIES` because
+#: that is where a call site names an event and gets the house sentence.
+BODY_CLOSED = CLOSED_NOTICE_TEXT
 
 #: Short state categories for notification surfaces with a title/subtitle/body
 #: split. Approval and ask intentionally share the category: both mean the turn
@@ -252,6 +264,7 @@ BODIES: dict[str, str] = {
     "ask": BODY_ASK,
     "error": BODY_ERROR,
     "interrupted": BODY_INTERRUPTED,
+    "closed": BODY_CLOSED,
 }
 
 #: Title for a background completion whose session has no STORED name, and the
