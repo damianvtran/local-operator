@@ -252,6 +252,12 @@ class Setting:
     #: read as a cap in force (design round 1, D1). Presentational only: the
     #: consumer of the gated key is responsible for honouring the master.
     gated_by: str | None = None
+    #: The SCOPE of a HOTKEY row's value, DERIVED from ``keymap.KEY_ACTIONS``
+    #: (``"app"`` / ``"desktop"``): it selects the value grammar every write
+    #: path applies and is projected on the wire so the desktop app can render
+    #: a desktop row with the rules that own it. Never authored twice — an
+    #: empty string means "not a hotkey row".
+    hotkey_scope: str = ""
 
     @property
     def resolved_choices(self) -> tuple[Choice, ...]:
@@ -631,9 +637,10 @@ SECTIONS: tuple[Section, ...] = (
         "aida",
         "Aida",
         Scope.LIVE,
-        "Your chief of staff's proactive cadence: when she checks in, how much "
-        "she may escalate, and the pause switch. Edits are read at her next "
-        "action; /aida pause|resume act immediately.",
+        "Your chief of staff: her display name, and the proactive cadence — "
+        "when she checks in, how much she may escalate, and the pause switch. "
+        "The name applies everywhere at once; edits are read at her next "
+        "action, and /aida pause|resume act immediately.",
     ),
     Section(
         "retired",
@@ -1090,6 +1097,41 @@ def _validate_advertise_hosts(value: object) -> object:
                 "for example tunnel.example.com:4100"
             )
     return value
+
+
+#: The ``aida.name`` cap — a LITERAL here because this module deliberately
+#: stays off the aida package's import path (see the aida block below); the
+#: real constant is ``aida.naming.MAX_NAME_CHARS`` and the anti-drift test in
+#: ``tests/unit/aida/test_aida_naming.py`` pins the two together the way
+#: ``_consumer_defaults()`` pins the defaults. 80 matches the session title's
+#: own cap (``session.naming.MAX_TITLE_CHARS``) on purpose: a session rename
+#: syncs its title into this key, so a title the session layer accepted must
+#: never be refused by the config layer mid-sync.
+_AIDA_NAME_MAX_CHARS = 80
+
+
+def _validate_aida_name(value: Any) -> None:
+    """``aida.name`` is a display name: trimmed, non-empty, bounded, no controls.
+
+    Enforced at the write facade for the same reason ``_validate_advertise_hosts``
+    is — every writer (/settings, ``lop config edit``, ``PATCH /v1/settings``)
+    funnels through :func:`validate` — and the rename paths reuse THIS refusal
+    via ``aida.naming.validate_name``, so the settings page and a ``/aida
+    rename`` receipt cannot disagree about what a name is (the drift rule:
+    one rule set, one funnel). Whitespace is collapsed before the checks, so
+    ``"  Maya  "`` is the valid name ``Maya`` — readers normalize identically —
+    while control characters (a pasted escape sequence) are refused outright,
+    because they would corrupt every surface that renders the name.
+    """
+    if not isinstance(value, str):
+        raise ValueError("expected a name, e.g. Aida")
+    name = " ".join(value.split())
+    if not name:
+        raise ValueError("a name is required")
+    if len(name) > _AIDA_NAME_MAX_CHARS:
+        raise ValueError(f"at most {_AIDA_NAME_MAX_CHARS} characters — this is {len(name)}")
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
+        raise ValueError("control characters are not allowed in a name")
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -2011,6 +2053,7 @@ SETTINGS: tuple[Setting, ...] = (
             kind=Kind.HOTKEY,
             default=action.default,
             help=action.help,
+            hotkey_scope=action.scope,
         )
         for action in _keymap.KEY_ACTIONS
     ),
@@ -3571,11 +3614,32 @@ SETTINGS: tuple[Setting, ...] = (
         key="aida.enabled",
         path=("aida", "enabled"),
         section="aida",
-        label="Aida enabled",
+        # ROLE-NAMED, not persona-named (design round 1, D4): "Aida enabled"
+        # read as the old name beside a configured `Display name: Nova`, while
+        # every sibling row in the section is a role term. The section title
+        # stays "Aida" — that one is the config namespace (`aida.*`).
+        label="Chief of staff enabled",
         kind=Kind.BOOL,
         default=True,
         choices=_bool_choices("enabled", "disabled"),
         help="Read at boot and by /aida; a disabled install never creates her session.",
+    ),
+    Setting(
+        key="aida.name",
+        path=("aida", "name"),
+        section="aida",
+        label="Display name",
+        kind=Kind.TEXT,
+        default="Aida",
+        placeholder="Aida",
+        validate_value=_validate_aida_name,
+        help=(
+            # ≤94 cells, the detail line's budget at 100x30 (design round 1,
+            # D2): the previous wording truncated at "upd…", eating exactly
+            # the clause that says the rename APPLIES.
+            "What she is called everywhere. Renaming her conversation or "
+            "/aida rename <name> updates it."
+        ),
     ),
     Setting(
         key="aida.cadence.at",
@@ -3583,9 +3647,9 @@ SETTINGS: tuple[Setting, ...] = (
         section="aida",
         label="Daily check-in time",
         kind=Kind.TEXT,
-        default="09:00",
-        placeholder="09:00",
-        help="Local wall-clock HH:MM. An invalid value falls back to 09:00 at the next arm.",
+        default="08:30",
+        placeholder="08:30",
+        help="Local wall-clock HH:MM. An invalid value falls back to 08:30 at the next arm.",
     ),
     Setting(
         key="aida.cadence.paused",
@@ -3620,7 +3684,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=90,
         minimum=0,
         maximum=1440,
-        help="Minimum spacing between one Aida wake and the next; closer requests are refused.",
+        help="Minimum spacing between her wakes; closer requests are refused.",
     ),
     Setting(
         key="aida.onboarding.nudge_days",
@@ -3808,7 +3872,10 @@ def coerce(setting: Setting, text: str) -> Any:
         # store `ctrl+N`: the page then DISPLAYS `ctrl+N` while the runtime
         # binds a key nobody can press (measured — Textual accepts it
         # verbatim). Rejection happens in `validate`, so the message is the
-        # same whichever writer arrives.
+        # same whichever writer arrives. The grammar follows the ROW's scope:
+        # a desktop value is an accelerator, not a Textual key string.
+        if setting.hotkey_scope == "desktop":
+            return _keymap.normalize_desktop_key(text, action_id=setting.key)
         return _keymap.normalize_key(text)
     if setting.kind is Kind.CASCADE:
         # JSON, because the value is a two-level structure and the page's own
@@ -3935,8 +4002,15 @@ def validate(setting: Setting, value: Any, values: Mapping[str, Any] | None = No
         # garbage key string silently moves the binding somewhere unreachable
         # AND takes the shipped default with it (measured; the Claude Code
         # pre-2.1.246 silent-disable bug, live in Textual today). The capture
-        # widget calls the same predicate, so the two cannot disagree.
-        return _keymap.validate_key(value)
+        # widget calls the same predicate, so the two cannot disagree. The
+        # scope (and, for desktop rows, the action id) selects the grammar:
+        # `keymap.quick_send` must be judged by the rules of a global
+        # shortcut, not the rules of a terminal key.
+        return _keymap.validate_key(
+            value,
+            scope=setting.hotkey_scope or "app",
+            action_id=setting.key,
+        )
     if setting.kind is Kind.CASCADE:
         # Same rule the HOTKEY arm above states, for the same reason: `lop
         # config edit` and a hand-edited config.yml both reach this value
@@ -4032,8 +4106,13 @@ def write_setting(manager: "ConfigManager", setting: Setting, value: Any) -> Non
         # normalizes internally before checking, so an un-normalized `ctrl+N`
         # would PASS validation and then be stored verbatim — the page would
         # display `ctrl+N` while the runtime bound a key nobody can press.
-        # One normalization at the single point every write funnels through.
-        value = _keymap.normalize_key(value)
+        # One normalization at the single point every write funnels through,
+        # in the GRAMMAR of the row's own scope (a desktop value is not a
+        # Textual key string).
+        if setting.hotkey_scope == "desktop":
+            value = _keymap.normalize_desktop_key(value, action_id=setting.key)
+        else:
+            value = _keymap.normalize_key(value)
     # The group check needs the CURRENT config, so it is supplied here rather
     # than left to each caller: this is the one function every writer funnels
     # through, including `lop config edit` and `PATCH /v1/settings`, neither of

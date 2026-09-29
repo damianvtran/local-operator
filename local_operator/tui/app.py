@@ -4285,6 +4285,14 @@ class OperatorApp(App[None]):
         *(
             Binding(action.default, action.action, action.label, show=False, id=action.id)
             for action in _keymap.KEY_ACTIONS
+            # `scope == "app"` ONLY. A desktop-scoped action is not a Textual
+            # binding — it has no `action_*` method and its key is an Electron
+            # accelerator no terminal can send, so deriving a `Binding` for it
+            # would both ship a dead binding re-keyed by `_apply_keymap` and
+            # break the anti-drift test's "desktop ids are not bindings" half
+            # (`test_keymap.py`). The registry is generic over scope; THIS is
+            # the one place the app says which half it drives.
+            if action.scope == "app"
         ),
         # Open the aside WITHOUT spending the composer's contents, which is the
         # gesture `/btw <question>` cannot offer: submitting a slash command
@@ -11621,6 +11629,17 @@ class OperatorApp(App[None]):
     def _apply_pending_frontend_state(self, generation: int) -> None:
         if self._restart_plan is not None:
             return
+        if not self.is_running:
+            # A paint scheduled before shutdown is still flushed during it:
+            # ``App._shutdown`` clears ``_running`` BEFORE ``_close_all`` prunes
+            # the tree, and Textual flushes pending callbacks after every
+            # dispatch — so a delta that lands while the app is quitting (the
+            # attach client outlives the UI) used to query widgets that no
+            # longer exist: ``NoMatches: No nodes match 'Editor'`` out of
+            # ``run_test``/quit, seen in CI run 36449068218 as
+            # [model-spawn]. Once the app is shutting down there is nothing
+            # left to paint, so this is a drop, not a skip.
+            return
         if generation != getattr(self, "_frontend_session_generation", 0):
             return
         self._frontend_apply_scheduled = False
@@ -15678,7 +15697,14 @@ class OperatorApp(App[None]):
         # provider configured" sitting over a working session with real spend
         # (design round 2, D2).
         for toast in self.query(Toast):
-            toast.withdraw(SPLASH_NOTICE)
+            # ONLY OUR SLOT. Textual resolves a class selector by TYPE NAME, so
+            # this query also returns the framework's notification toast — a
+            # different class that shares the name ``Toast`` and has no
+            # ``withdraw``, so touching it kills the app (QA round 1, Q1: the
+            # command palette's Screenshot notice plus `/aida` did exactly
+            # that). `isinstance` is the discriminator the selector cannot be.
+            if isinstance(toast, Toast):
+                toast.withdraw(SPLASH_NOTICE)
         # The MCP segment is cleared too: the old session's manager is gone, so
         # a lingering count would describe servers nothing is connected to any
         # more. `_adopt_session` repaints it from the new session's manager.
@@ -17372,7 +17398,7 @@ class OperatorApp(App[None]):
             # HER STASHED REQUEST IS SPENT HERE TOO (UX round 1, U1). This is
             # the adoption seam for an ALREADY-BUILT viewer — the attach path
             # onto a live owner (`_attach_or_refuse`; the ordinary case once
-            # her runtime is up, from any prior open or her 09:00 cadence) and
+            # her runtime is up, from any prior open or her 08:30 cadence) and
             # the mesh remote path — and it used to spend neither prompt seam,
             # so `/aida hello` against a live her switched the conversation
             # and silently dropped the words: no transcript row, no notice,
@@ -30399,7 +30425,18 @@ class OperatorApp(App[None]):
         # model's over-long answer — an over-long answer is evidence the model
         # ignored the format, while this is just a long name the user chose, and
         # refusing it outright would lose a title they typed.
-        notice(f"renamed: {stored} — auto-naming will not override it")
+        from local_operator.aida import naming as aida_naming
+
+        if aida_naming.is_her_session(session):
+            # HER conversation is her NAME (the aida.name coupling): the config
+            # row (`applied: aida.name`) is the audit trail, and this clause is
+            # what stops "renamed the thread" from reading as "renamed only
+            # this thread" (UX round 1, U3). The auto-naming clause is dropped
+            # here because it is vacuous for her pinned conversation — born
+            # `user_set`, no auto-namer may touch it.
+            notice(f"renamed: {stored} — she is now called {stored} everywhere")
+        else:
+            notice(f"renamed: {stored} — auto-naming will not override it")
 
     def _cmd_title_refresh(self, session: SessionProtocol, notice: NoticeFn) -> None:
         """``/title refresh`` — re-read the conversation and name it now.
@@ -32858,6 +32895,15 @@ class OperatorApp(App[None]):
         changed = sorted(getattr(change, "changed_keys", ()))
         if not changed:
             return
+        if "aida.name" in changed:
+            # THE SETTING-PATH LAG (review round 1, R1-M3): a rename written
+            # outside `/aida rename` — the /settings page, `lop config edit`,
+            # the desktop PATCH — with her session CLOSED left the stored title
+            # (what the sidebar row and the picker render) at the old name
+            # until the next `ensure_session`. One stat + sidecar compare, off
+            # the loop; a no-op when the title already matches. Covers the
+            # `local` source too — the page write is the common case.
+            self.run_worker(self._reconcile_aida_title(), thread=False, group="aida")
         local = getattr(change, "source", "disk") == "local"
         if local:
             # Apply, do not announce. The only groups whose apply this process
@@ -33065,6 +33111,26 @@ class OperatorApp(App[None]):
                     self._apply_theme(wanted)
                 except KeyError:
                     self._system_notice(f"theme: unknown theme {wanted!r} in config.yml", "warning")
+
+    async def _reconcile_aida_title(self) -> None:
+        """Point her STORED title at ``aida.name`` (the R1-M3 seam).
+
+        The same reconcile ``/aida rename`` and every ``ensure_session`` run;
+        kept off the loop because it can append to her transcript when the
+        stored title is stale. Best-effort — a config change must never fail
+        over a decoration.
+        """
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.aida import state as aida_state
+            from local_operator.paths import config_dir
+
+            root = config_dir()
+            session_id = aida_state.session_id_of(root)
+            if session_id:
+                await aida_naming.reconcile_session_title(root, session_id)
+        except Exception:  # noqa: BLE001 — a decoration never fails a config change
+            logger.debug("aida: could not reconcile her stored title", exc_info=True)
 
     def _follow_configured_approvals(self, change: Any, *, announce: bool) -> _ApprovalsFollow:
         """Move this app's gate to ``tool_approval_mode``. THE one apply path.
@@ -41959,6 +42025,29 @@ class OperatorApp(App[None]):
             label = getattr(self._session, "model_label", "") or "this model"
             picker.set_notice("" if levels else _effort_unavailable(label))
             return
+        if message.command == "aida":
+            # THE RESERVED WORDS, not the provider fall-through (UX round 1,
+            # U1). The fall-through is the provider vocabulary and is wrong for
+            # every `/aida` argument: the free-form half is prose for her, and
+            # the word half is this set. Showing it is also the rename verb's
+            # discoverability — a verb a user never sees is one they cannot
+            # use — and the rows are sourced from ``AIDA_SUBCOMMANDS`` plus
+            # `rename`, the words the handler itself parses, so the picker
+            # cannot drift from the grammar.
+            picker.set_choices(
+                [
+                    ArgumentChoice(name="pause", description="stop her proactive check-ins"),
+                    ArgumentChoice(name="resume", description="start them again"),
+                    ArgumentChoice(name="status", description="how she is doing right now"),
+                    ArgumentChoice(
+                        name="rename",
+                        description="give her a new name everywhere",
+                        detail="<name>",
+                    ),
+                ]
+            )
+            picker.set_notice("")
+            return
         if self._providers is None:
             # Same degradation as the handlers themselves: no controller means no
             # credential store to read, so the list is empty and the user is
@@ -42477,14 +42566,20 @@ class OperatorApp(App[None]):
         ``pause``/``resume``/``status`` are RESERVED words parsed HERE rather
         than by the registry — the ``/team chart`` precedent, including its
         escape: ``/aida =pause …`` sends her a message that merely starts with
-        the word (the ``=`` prefix, like ``/team =chart``).
+        the word (the ``=`` prefix, like ``/team =chart``). ``rename`` is the
+        same namespace's one argument-taking verb: ``/aida rename <name>``
+        renames HER (the config key and her conversation), bare ``rename``
+        reports, and ``/aida =rename …`` still reaches her as a message.
 
         A RESERVED WORD COUNTS ONLY AS THE WHOLE ARGUMENT (cross-host grammar
         ruling, UI review round 1, MINOR-3). The first cut split on the first
         space, so ``/aida pause and think`` ran the control word and silently
         DROPPED the rest — a typed request, gone, under a receipt about
         pausing. One grammar for both hosts now: the word alone is the
-        control; anything longer is a message for her, verbatim.
+        control; anything longer is a message for her, verbatim — ``rename``
+        alone is still the report. ``/aida rename <name>`` is the one
+        argument-taking form (the ``/team chart <name>`` shape), because a
+        name with a space in it is one name, not three words of a request.
 
         Both halves run in workers: opening resolves (and on first use
         creates) her session off the loop, and the control words write config
@@ -42506,9 +42601,24 @@ class OperatorApp(App[None]):
                 self._aida_control(text.casefold(), notice), thread=False, group="session"
             )
             return
+        # `rename` WINS IN FIRST POSITION and takes the rest of the line as
+        # its argument — the `/team chart <name>` shape, so a name with a
+        # space in it is one name. Checked before the message path below, so
+        # a request that merely STARTS with the word escapes with `=` like
+        # the others (see the docstring).
+        if not escaped:
+            first, _, rest = text.partition(" ")
+            if first.casefold() == "rename":
+                self.run_worker(
+                    self._aida_rename(rest.strip(), notice), thread=False, group="session"
+                )
+                return
         if self._resume_factory is None:
+            from local_operator.aida import naming as aida_naming
+
             self._system_notice(
-                "opening Aida requires a session-capable launcher — see the CLI",
+                f"opening {aida_naming.display_name()} requires a session-capable "
+                "launcher — see the CLI",
                 "warning",
             )
             return
@@ -42526,21 +42636,26 @@ class OperatorApp(App[None]):
         conversation — the request is simply submitted.
         """
         from local_operator.aida import ensure_session
+        from local_operator.aida import naming as aida_naming
 
+        # The configured display name, read ONCE for every sentence below.
+        # Never raises: the default stands in when the key is unset or the
+        # stored value is unusable (see local_operator.aida.naming).
+        name = aida_naming.display_name()
         try:
             session_id = await ensure_session()
         except Exception as error:  # noqa: BLE001 — a boot path never raises
             logger.warning("aida: ensure failed", exc_info=True)
-            self._system_notice(f"{AIDA_MARKER} could not reach Aida: {error}", "warning")
+            self._system_notice(f"{AIDA_MARKER} could not reach {name}: {error}", "warning")
             return
         if session_id is None:
-            notice(f"{AIDA_MARKER} Aida is disabled on this install (aida.enabled is false).")
+            notice(f"{AIDA_MARKER} {name} is disabled on this install (aida.enabled is false).")
             return
         if self._conversation_id() == session_id:
             if text:
                 self._submit_command_prompt(text, attachments)
             else:
-                notice(f"{AIDA_MARKER} This conversation is Aida's — already open.")
+                notice(f"{AIDA_MARKER} This conversation is {name}'s — already open.")
             return
         if text:
             self._pending_aida_prompt = (session_id, text, attachments)
@@ -42561,25 +42676,30 @@ class OperatorApp(App[None]):
         ``status`` reads what is actually on disk — enabled, paused, next
         cadence, today's escalation budget — never a cached copy.
         """
+        from local_operator.aida import naming as aida_naming
         from local_operator.aida import proactive, state
         from local_operator.paths import config_dir
 
+        # Read OFF the try, so the failure receipt below can always name her:
+        # ``display_name`` never raises (the default stands in for an unset or
+        # unusable value), which is exactly what makes that safe.
+        name = aida_naming.display_name()
         try:
             root = config_dir()
             if word == "status":
-                notice(self._aida_status_line(proactive.status(root)))
+                notice(self._aida_status_line(proactive.status(root), name))
                 return
             session_id = state.session_id_of(root) or ""
             if word == "pause":
                 outcome = await proactive.pause(root, session_id)
                 if outcome.owner_blocked:
                     notice(
-                        f"{AIDA_MARKER} Aida: paused — her open session applies it within "
+                        f"{AIDA_MARKER} {name}: paused — her open session applies it within "
                         "a couple of seconds. /aida resume re-arms her check-ins."
                     )
                 else:
                     notice(
-                        f"{AIDA_MARKER} Aida: paused — no proactive check-ins. "
+                        f"{AIDA_MARKER} {name}: paused — no proactive check-ins. "
                         "/aida resume re-arms them."
                     )
                 return
@@ -42587,16 +42707,74 @@ class OperatorApp(App[None]):
             when = self._aida_when(proactive.status(root))
             if armed == "owner":
                 notice(
-                    f"{AIDA_MARKER} Aida: active again — her open session will arm the "
+                    f"{AIDA_MARKER} {name}: active again — her open session will arm the "
                     "next check-in within a couple of seconds."
                 )
             elif when:
-                notice(f"{AIDA_MARKER} Aida: active again — next check-in {when}.")
+                notice(f"{AIDA_MARKER} {name}: active again — next check-in {when}.")
             else:
-                notice(f"{AIDA_MARKER} Aida: active again — her next boot arms the check-in.")
+                notice(f"{AIDA_MARKER} {name}: active again — her next boot arms the check-in.")
         except Exception as error:  # noqa: BLE001 — the refusal is the receipt
             logger.warning("aida: control op failed", exc_info=True)
-            self._system_notice(f"could not {word} Aida: {error}", "warning")
+            self._system_notice(f"could not {word} {name}: {error}", "warning")
+
+    async def _aida_rename(self, name: str, notice: NoticeFn) -> None:
+        """``rename`` — set her display name (config + conversation); bare, report.
+
+        ONE gesture, two stores. ``aida.name`` is canonical — every surface
+        reads it live (the /aida receipts, the desktop payload's ``name``) —
+        and her conversation's title is what the picker, the sidebar and the
+        band render. The config write goes through ``settings_io`` so a live
+        session in ANY process hears it on its watcher; the session half here
+        is the DISK reconcile (``reconcile_session_title``) plus the local band
+        push, and the live re-title rides that same watcher in every case (see
+        the tail for why the session setter is not called). Runs in a worker:
+        the write is file IO, and retitling a closed session journals to its
+        transcript.
+        """
+        from local_operator.aida import naming as aida_naming
+        from local_operator.aida import state as aida_state
+        from local_operator.paths import config_dir
+
+        try:
+            root = config_dir()
+            if not name:
+                current = aida_naming.display_name(root)
+                notice(f"{AIDA_MARKER} {current}: /aida rename <name> renames her everywhere.")
+                return
+            stored = aida_naming.set_name(root, name)
+        except ValueError as error:
+            # The refusal, verbatim from the ONE rule set the settings page
+            # also validates through (settings_io), so the page and this
+            # receipt cannot disagree about what a name is.
+            notice(f"{AIDA_MARKER} not renamed: {error}", "warning")
+            return
+        except Exception as error:  # noqa: BLE001 — the refusal is the receipt
+            logger.warning("aida: rename failed", exc_info=True)
+            self._system_notice(f"could not rename her: {error}", "warning")
+            return
+        # The session half is the DISK reconcile, and only that. The in-place
+        # setter must NOT be called on the ATTACHED lane — her conversation is
+        # normally an attached viewer, and the setter's rename RPC answers
+        # "/rename is terminal-only here", leaving one unretrieved task
+        # exception per rename in the log (UX round 1, U2). The live re-title
+        # rides the config watcher either way (the owner runtime's when she is
+        # attached, this app's own when it hosts her — ``write_setting`` rings
+        # the local watcher in-process); the reconcile keeps the disk readers
+        # (picker, sidebar) correct now rather than at a later boot, and the
+        # band segment is painted here so the receipt and the frame agree.
+        session_id = aida_state.session_id_of(root)
+        if session_id:
+            await aida_naming.reconcile_session_title(root, session_id)
+        if session_id and self._conversation_id() == session_id and self._session is not None:
+            session = self._session
+            if self._status is not None:
+                self._status.update(
+                    conversation_name=stored,
+                    forked=bool(getattr(session, "wears_inherited_title", False)),
+                )
+            self._notify_mobile_title(stored)
+        notice(f"{AIDA_MARKER} renamed: {stored} — every surface reads it now.")
 
     @staticmethod
     def _aida_when(st: Mapping[str, Any]) -> str:
@@ -42607,15 +42785,21 @@ class OperatorApp(App[None]):
         return time.strftime("%H:%M", time.localtime(due / 1000))
 
     @staticmethod
-    def _aida_status_line(st: Mapping[str, Any]) -> str:
-        """One line: state, next check-in, today's escalation budget."""
+    def _aida_status_line(st: Mapping[str, Any], name: str) -> str:
+        """One line: state, next check-in, today's escalation budget.
+
+        ``name`` is the configured display name, PASSED IN rather than read
+        here: the caller has just read it once (``aida.naming.display_name``),
+        and one receipt must not be able to disagree with itself about what
+        she is called.
+        """
         if not st.get("enabled"):
             word = "disabled"
         elif st.get("paused"):
             word = "paused"
         else:
             word = "active"
-        parts = [f"{AIDA_MARKER} Aida: {word}"]
+        parts = [f"{AIDA_MARKER} {name}: {word}"]
         when = OperatorApp._aida_when(st)
         if when:
             parts.append(f"next check-in {when}")
@@ -42651,9 +42835,11 @@ class OperatorApp(App[None]):
         if pending is None or pending[0] != session_id:
             return False
         self._pending_aida_prompt = None
+        from local_operator.aida import naming as aida_naming
+
         self._system_notice(
-            f"{AIDA_MARKER} Request not sent — Aida's conversation did not open, "
-            "so nothing ran.",
+            f"{AIDA_MARKER} Request not sent — {aida_naming.display_name()}'s "
+            "conversation did not open, so nothing ran.",
             "warning",
         )
         return True
