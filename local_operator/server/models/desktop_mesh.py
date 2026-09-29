@@ -16,7 +16,7 @@ refused every move (Addendum 2, C).
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
@@ -59,6 +59,18 @@ class PeerRow(BaseModel):
     session_count: int
     #: ALWAYS ``None`` in this build — see ``utils.desktop_mesh.RTT_MS``.
     rtt_ms: float | None = None
+    #: The peer's build stamp as the relay read it from the handshake
+    #: (``{"version", "source_ref"}``), or ``{}`` when NOT KNOWN — an older
+    #: peer, or no link on this read. Both keys are present on every row (the
+    #: both-values rule ``reachable`` follows), and ``{}`` must never read as
+    #: parity: the renderer shows no version line rather than a default.
+    build: dict[str, Any] = Field(default_factory=dict)
+    #: The link capabilities the peer advertised on this read, or ``[]`` when
+    #: not known (the same rule as ``build``). Readable from the list: the
+    #: strings are the link's own vocabulary (``mesh-net-v1``,
+    #: ``peer-readiness-v1``), so a missing one reads as "that device cannot do
+    #: it" with no translation table to drift.
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class PeerList(BaseModel):

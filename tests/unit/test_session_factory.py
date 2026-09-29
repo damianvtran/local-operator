@@ -4545,12 +4545,16 @@ def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
     publisher = threading.Thread(target=publish_after_wait, daemon=True)
     publisher.start()
     attempts = 0
+    first_busy = threading.Event()
     real_acquire = session_factory._acquire_store_maintenance_lock
 
     def count_attempts(config_dir: Path) -> int | None:
         nonlocal attempts
         attempts += 1
-        return real_acquire(config_dir)
+        fd = real_acquire(config_dir)
+        if fd is None:
+            first_busy.set()
+        return fd
 
     monkeypatch.setattr(session_factory, "_acquire_store_maintenance_lock", count_attempts)
     done = threading.Event()
@@ -4560,10 +4564,14 @@ def test_store_maintenance_contender_stops_when_owner_publishes_stamp(
         daemon=True,
     )
     worker.start()
-    deadline = time.monotonic() + 5
-    while attempts == 0 and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert attempts > 0, "contender never attempted the root lock"
+    # Wait for the OBSERVED busy outcome rather than for the call counter to
+    # move: the counter increments BEFORE the flock is tried, so the old poll
+    # could release the owner while the first attempt was still in flight —
+    # under load that attempt then SUCCEEDED (fresh stamp, one attempt) and
+    # the retry assertion below failed for a contender that never met
+    # contention. The retry half is only exercised once an attempt has come
+    # back busy, which is what this waits for.
+    assert first_busy.wait(5), "contender never observed the busy owner lock"
     assert not done.is_set(), "contender abandoned a busy owner instead of retrying"
     release_owner.set()
     worker.join(timeout=5)
