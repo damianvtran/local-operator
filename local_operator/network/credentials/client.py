@@ -407,16 +407,21 @@ class MeshCredentialClient:
         # prose as another's, which is the failure ``render_broker_error`` exists to
         # prevent. The message is filled in by ``_render`` below.
         if ttl <= 0:
-            # A ZERO IN THE TABLE MEANS "HONOUR THE OBSERVATION'S OWN REMAINDER"
-            # (design round 1, D1): for those codes the row's ``retry_after_ms`` IS
-            # the time the owner asked for, so what is still ahead is that number
-            # MINUS the row's age — a re-served refusal counts down instead of
-            # repeating the first one's figure, and a live row can never hand back
-            # a negative one.
-            stamp = float(row.get("observed_at") or 0.0)
-            current = time.time() if now is None else now
-            elapsed_ms = int(max(0.0, current - stamp) * 1000.0)
-            ttl = max(0, int(row.get("retry_after_ms") or 0) - elapsed_ms)
+            # A ZERO IN THE TABLE MEANS "NO HARD-CODED TTL — SEE WHAT THE OWNER
+            # SAID" (design round 1, D1; corrected in review round 2, M2). Only the
+            # remainder the owner itself stated may be counted down
+            # (``owner_retry_after_ms``, recorded by ``_remember``): the row's own
+            # ``retry_after_ms`` is the CACHE's lifetime, which for a refusal with
+            # no stated remainder is this device's own default — rendering it back
+            # as "the owner's remainder" claimed a fact about another device's cap
+            # that nobody stated. No stated remainder ⇒ 0 ⇒ the sentence keeps
+            # "for now", exactly as the fresh one does.
+            owner_ms = int(row.get("owner_retry_after_ms") or 0)
+            if owner_ms:
+                stamp = float(row.get("observed_at") or 0.0)
+                current = time.time() if now is None else now
+                elapsed_ms = int(max(0.0, current - stamp) * 1000.0)
+                ttl = max(0, owner_ms - elapsed_ms)
         return BrokerError(
             code=status,
             key=key,
@@ -435,6 +440,11 @@ class MeshCredentialClient:
             reason="",
             owner_device=error.owner_device or self.owner_of(key),
             retry_after_ms=ttl,
+            # WHAT THE OWNER SAID, IF ANYTHING (review round 2, M2): ``ttl`` above
+            # is this device's cache lifetime and may be its own default; only a
+            # value that travelled on the refusal may ever be shown back as a
+            # countdown, so the two are recorded separately.
+            owner_retry_after_ms=error.retry_after_ms,
         )
         self._save_state()
 

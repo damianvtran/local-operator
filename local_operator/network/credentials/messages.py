@@ -56,10 +56,11 @@ def render_retry_after(ms: float | int | None) -> str:
     Round numbers, one unit, for the same reason as there: the operator is judging
     "retry now or move on", and a second-by-second figure would read as a
     measurement rather than as the hint the owner actually sent. The value it
-    renders was clamped at the wire boundary (``MAX_PEER_RETRY_AFTER_MS``) and is
-    counted down by ``MeshCredentialClient.cached_refusal``, so the sentence never
-    promises more than the cache will honour. ``""`` means "nothing to say" — an
-    older owner that sent no remainder, or a value the boundary dropped.
+    renders was clamped at the wire boundary when it came from an owner
+    (``MAX_PEER_RETRY_AFTER_MS``) and is counted down by
+    ``MeshCredentialClient.cached_refusal`` only when one was stated, so the
+    sentence never promises more than the cache will honour. ``""`` means "nothing
+    to say" — no owner value was sent, or the boundary dropped one.
     """
     if not ms or ms <= 0:
         return ""

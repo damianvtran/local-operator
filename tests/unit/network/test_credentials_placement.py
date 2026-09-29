@@ -1772,14 +1772,17 @@ def test_the_listing_names_the_restart_remedy_for_a_share_that_just_landed(
 
 
 def test_a_cached_quota_refusal_counts_down_and_renders_the_remainder(tmp_path: Path) -> None:
-    """D1 (design round 1): the sentence shows the LIVE remainder, and it shrinks.
+    """D1 + M2 (review round 2): the countdown is the OWNER's number — never ours.
 
-    The refusal is recorded with the owner's remainder and re-served from the state
-    file while it stands. The number the cache honours is the one recorded at refusal
-    time, so what is still ahead is that number MINUS the row's age — and the sentence
-    a person reads must count down. ``cached_refusal`` takes ``now`` for the same
-    reason ``PlacementState.status`` does: the countdown is arithmetic, and a test
-    that slept would be testing the sleep.
+    Recorded the way the wire records it (``_remember``), an owner-stated remainder
+    is re-served from the state file and counted down: what is still ahead is that
+    number MINUS the row's age. A refusal whose owner stated NONE (review round 2,
+    M2) is the other case — its row still bounds the cache for this device's default
+    lifetime, but that default must not be rendered back as "the owner's
+    remainder": the sentence keeps "for now", exactly as the fresh one does.
+    ``cached_refusal`` takes ``now`` for the same reason ``PlacementState.status``
+    does: the countdown is arithmetic, and a test that slept would be testing the
+    sleep.
     """
     from local_operator.network.credentials.client import MeshCredentialClient
     from local_operator.network.credentials.types import BrokerError
@@ -1800,7 +1803,11 @@ def test_a_cached_quota_refusal_counts_down_and_renders_the_remainder(tmp_path: 
         root=root, self_device=borrower, network_id=NETWORK, placement=document
     )
 
-    client.state.observe("openai", "quota_blocked", owner_device=OWNER, retry_after_ms=45_000)
+    # The owner stated 45 s.
+    client._remember(  # noqa: SLF001 — the recorder the wire path itself uses
+        "openai",
+        BrokerError(code="quota_blocked", key="openai", owner_device=OWNER, retry_after_ms=45_000),
+    )
 
     live = client.cached_refusal("openai")
     assert live is not None and live.code == "quota_blocked"
@@ -1825,3 +1832,15 @@ def test_a_cached_quota_refusal_counts_down_and_renders_the_remainder(tmp_path: 
     assert isinstance(served, BrokerError), served
     assert "for another " in served.message, served.message
     assert "for now" not in served.message, served.message
+
+    # No stated remainder: the cache still guards (the observation stands for this
+    # device's own default lifetime), but nothing may be presented as a countdown.
+    client.state.clear("openai")
+    client._remember(  # noqa: SLF001 — the recorder the wire path itself uses
+        "openai", BrokerError(code="quota_blocked", key="openai", owner_device=OWNER)
+    )
+    cached = client.cached_refusal("openai")
+    assert cached is not None and cached.retry_after_ms == 0, cached
+    quiet = client.request_grant_sync("openai", session_id="s-1")
+    assert isinstance(quiet, BrokerError), quiet
+    assert "rate-limited for now" in quiet.message, quiet.message
