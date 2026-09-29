@@ -313,6 +313,31 @@ class TestBridgeDiscipline:
         assert len(executed) == 2
 
     @pytest.mark.asyncio
+    async def test_a_dropped_sibling_field_is_stated_in_the_result(self, tmp_path: Path) -> None:
+        """A carried-and-dropped field is not silent on this channel either.
+
+        The result of the call is the next thing the model reads, so the note
+        rides it ahead of the observation: the definition of a silent drop is
+        that the model is never told, and a model that is never told re-sends
+        the same field on the next reply instead of correcting it.
+        """
+
+        bridge = _bridge(tmp_path, execute=None)
+
+        result = await bridge.call(
+            {"actions": [{"kind": "wait", "duration_ms": 50, "frame_id": "screen"}]}
+        )
+
+        assert result["is_error"] is False
+        assert result["content"][0].text == (
+            'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+            '(a "wait" action takes "duration_ms").'
+        )
+        # The field was still dropped, never forwarded: the call executed and
+        # the rendered observation follows the note, exactly as before.
+        assert result["content"][1].text == "seen 1"
+
+    @pytest.mark.asyncio
     async def test_a_finish_batch_is_terminal_and_never_executes(self, tmp_path: Path) -> None:
         executed: list[Any] = []
         bridge = _bridge(tmp_path, execute=None)
@@ -539,6 +564,39 @@ class TestCompletionGate:
         # a turn per render; a second render would duplicate the frame).
         assert len(reply["content"]) == 2
         assert reply["content"][1].text == "seen 0"
+
+    @pytest.mark.asyncio
+    async def test_a_challenge_does_not_re_deliver_a_dropped_fields_note(
+        self, tmp_path: Path
+    ) -> None:
+        """A drop's note is served once, on the result, never on a challenge.
+
+        The completion challenge re-attaches the state stored in
+        ``_last_shown`` -- the rendered screen -- and the note is a correction
+        about an EARLIER reply: re-attached to an unrelated challenge it reads
+        as guidance for the claim under challenge. Both challenge arms (the
+        finish call and the prose path) share ``_shown_blocks``, so this pin
+        covers both (review round 1, MINOR 1).
+        """
+
+        bridge = _bridge(tmp_path, execute=None)
+
+        result = await bridge.call(
+            {"actions": [{"kind": "wait", "duration_ms": 50, "frame_id": "screen"}]}
+        )
+        assert result["content"][0].text.startswith("Note: ")
+
+        bridge.fold(TurnEndEvent())
+        challenge = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        )
+
+        assert challenge["details"]["terminal"] == "completion-challenged"
+        # The challenge re-attaches the rendered observation alone; under the
+        # bug this list was ``[challenge, Note, "seen 1"]``.
+        assert len(challenge["content"]) == 2
+        assert challenge["content"][1].text == "seen 1"
+        assert all("was not accepted" not in block.text for block in challenge["content"])
 
 
 #: The prose-claim predicate's calibration table: every positive is a message

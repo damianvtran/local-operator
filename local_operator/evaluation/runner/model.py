@@ -105,6 +105,15 @@ class ModelDecision(ProtocolModel):
     #: structure is runner-side and is never hashed, which is what makes it the
     #: safe place to carry the count until the writer seals it.
     tolerated_action_fields: SafeCount = 0
+    #: The dropped fields themselves, as ``kind.field`` names in the reply's
+    #: action order (repeats kept). Carried BESIDE the count rather than
+    #: instead of it because the two have different readers: the count is what
+    #: the sealed ``reply_tolerance`` event records, and the names are what the
+    #: model-facing correction needs -- a count cannot be rendered into a note
+    #: the model can act on, and an episode that drops a field without saying so
+    #: teaches the model nothing (``public_reply.tolerated_fields_note``).
+    #: Runner-side like the count beside it: this structure is never hashed.
+    tolerated_field_names: tuple[str, ...] = ()
     #: How many UTF-8 bytes of framing preceded this attempt's decision, after
     #: leading whitespace. Zero for the ordinary reply, which begins with its
     #: decision; non-zero says the decoder had to LOCATE the decision behind a
@@ -162,6 +171,13 @@ class EpisodeTurn(ProtocolModel):
     # The runner attaches the evidence-redacted reply to this same observation;
     # the context builder must not reconstruct it as actions and lose its facts.
     public_reply: str | None = None
+    #: The sibling fields the reply tolerance dropped from this turn's decision
+    #: (``kind.field`` names, as the decoder reported them). The runner attaches
+    #: them when the decision is accepted, and the client renders them into the
+    #: NEXT observation's message -- the same place an ask answer reaches the
+    #: model, and for the same reason: a correction has to arrive beside the
+    #: state it applies to. Empty for an ordinary turn.
+    tolerated_field_names: tuple[str, ...] = ()
     ask_answer: str | None = None
 
 
