@@ -4,13 +4,15 @@ WHY THIS EXISTS
 ===============
 
 After pairing, a peer is reachable but NOT capable, and the first deficit the
-offload run measured was this one: MCP server definitions have no sync path at
-all. ``net_definitions`` carries agent and team bundles only, and the readiness
-report says so out loud — "server config is per device and is not copied over
-the mesh" — so a freshly paired pod has NO user-scope MCP servers, and every
-workload that assumed one (a GitLab server, a Linear server) fails there for a
-reason nobody can see from the origin device. The forward direction this slice
-must not need a refactor for is the pool's: a pod boots a bare ``lop``, pairs,
+offload run measured was this one: MCP server definitions had no sync path at
+all. ``net_definitions`` carried agent and team bundles only, and the readiness
+report said so out loud — "server config is per device and is not copied over
+the mesh" — so a freshly paired pod had NO user-scope MCP servers, and every
+workload that assumed one (a GitLab server, a Linear server) failed there for a
+reason nobody could see from the origin device. This module is that sync path;
+the readiness row's remedy now names it (``lop network mcp push``). The forward
+direction this slice must not need a refactor for is the pool's: a pod boots a
+bare ``lop``, pairs,
 runs workloads, spins down (``docs/design/mesh-compute-pool.md``, R21), and
 receives its servers from the cadence with nobody at its end.
 
@@ -89,9 +91,10 @@ SOURCE sent says ``literal-held``, so ``digest(row on disk)`` deliberately
 differs from the incoming digest for such a key. The idempotence short-circuit
 therefore compares the incoming digest with the recorded SOURCE digest AND the
 row on disk with the recorded ``landed`` digest — see ``_apply_bundle_locked``.
-A key whose name is not a valid reference name cannot be store-provisioned;
-its placeholder reads as literal text, and a local edit on the pod is the v1
-remedy (named in ``state`` as a key to set).
+A key whose name is not a valid reference name cannot be store-provisioned:
+its placeholder re-reads as literal text, and ``state`` lists no ref for it
+(only valid reference names appear there), so a local edit on the pod is the
+v1 remedy.
 
 THE CONFLICT POLICY (definitions', adopted whole)
 =================================================
@@ -639,6 +642,19 @@ def withheld_label(row: Mapping[str, Any]) -> str:
     return ""
 
 
+def shape_likeness(label: str) -> str:
+    """The article-correct "looks like …" phrase for a shape-table label.
+
+    Several of the table's labels are vowel-initial ("authorization-bearer",
+    "openssl-pass-phrase", …), and "looks like a authorization-bearer" was the
+    register defect design round 1 named (D5). ONE spelling for the two
+    surfaces that name a withheld row: the push receipt and the state marker.
+    """
+    text = label or "credential"
+    article = "an" if text[:1].lower() in "aeiou" else "a"
+    return f"looks like {article} {text}"
+
+
 def _recorded(index: Mapping[str, Any], name: str) -> Mapping[str, Any] | None:
     rows = index.get(INDEX_SECTION)
     entry = rows.get(name) if isinstance(rows, Mapping) else None
@@ -767,11 +783,15 @@ def state_rows(root: Path) -> list[dict[str, Any]]:
     """This device's servers, for ``lop network mcp state`` and the tool.
 
     One row per user-scope entry: name, transport, where it came from (the
-    provenance index's origin, ``""`` for authored), its digest, and the
+    provenance index's origin, ``""`` for authored), its digest, the
     references it declares with whether the local store can resolve each —
-    "the keys to set" (design §1.3). A reference whose presence cannot be
-    decided (no store, unreadable store) reports ``set: None``, never a false
-    "does not exist": an absent answer is not a negative one.
+    "the keys to set" (design §1.3) — and ``withheld``, the shape-table label
+    that will keep the row off the wire at push time (``""`` when it travels).
+    The withheld scan is the SAME one the bundle runs over the same canonical
+    row, so the local inventory names a row that will never reach a peer
+    BEFORE a push discovers it (design round 1, D4). A reference whose presence
+    cannot be decided (no store, unreadable store) reports ``set: None``, never
+    a false "does not exist": an absent answer is not a negative one.
     """
     document, _problem = _read_document(root)
     index = definitions.read_index(root)
@@ -799,6 +819,7 @@ def state_rows(root: Path) -> list[dict[str, Any]]:
                 "origin": str(recorded.get("origin") or "") if recorded is not None else "",
                 "digest": definitions.digest_of(row),
                 "refs": refs,
+                "withheld": withheld_label(row),
             }
         )
     return rows
@@ -1152,14 +1173,9 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
             "servers": {str(row["name"]): definitions.digest_of(row) for row in bundle["servers"]},
             "withheld": bundle.get("withheld") or [],
         }
-    size = _checked_size(missing)
-    if size > MAX_MCP_BUNDLE_BYTES:
-        return {
-            "ok": False,
-            "code": "bundle_too_large",
-            "message": _size_refusal(size),
-            "device_id": device_id,
-        }
+    # No size check on ``missing``: it is a subset of ``local_bundle()``'s rows,
+    # which already raised at the same cap — the refusal is spelled once
+    # (agent review round 1, MINOR).
     outbound = {
         "kind": BUNDLE_KIND,
         "version": BUNDLE_VERSION,
@@ -1196,7 +1212,8 @@ def push_to_peer(server: "RelayServer", device_id: str) -> dict[str, Any]:
         "ok": ok,
         "code": "applied" if ok else "conflict",
         "message": (
-            f"sent {len(missing)} MCP server definition(s)"
+            f"sent {len(missing)} MCP server "
+            f"{'definition' if len(missing) == 1 else 'definitions'}"
             if ok
             else "that device would not take every MCP server: "
             + _describe_rows([*conflicts, *refused])
@@ -1321,7 +1338,8 @@ def local_sync_handler(server: "RelayServer") -> Callable[[dict[str, Any]], dict
                 if not results
                 else (
                     f"{sum(1 for item in results if item.get('ok'))} of {len(results)} "
-                    "device(s) hold this device's MCP servers"
+                    f"{'device holds' if len(results) == 1 else 'devices hold'} "
+                    "this device's MCP servers"
                 )
             ),
         }

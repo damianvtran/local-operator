@@ -144,6 +144,8 @@ def test_push_lands_rows_on_the_peer_and_is_idempotent(
     row = payload["peers"][0]
     assert {item["name"] for item in row["installed"]} == {"crm", "gl"}, row
     assert [item["name"] for item in row["withheld"]] == ["leaky"], row
+    # D2 (design round 1): the plural register, from a REAL two-row push.
+    assert row["message"] == "sent 2 MCP server definitions", row
 
     landed = _peer_servers(server_b)
     assert set(landed) == {"crm", "gl"}

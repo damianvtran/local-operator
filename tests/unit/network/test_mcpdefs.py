@@ -112,6 +112,15 @@ def test_withheld_rows_are_named_and_never_sent(root: Path) -> None:
     assert key_shaped not in json.dumps(bundle, sort_keys=True)
 
 
+def test_shape_likeness_chooses_the_article() -> None:
+    """D5 (design round 1): "looks like a authorization-bearer" — the renderer
+    hardcoded the article, and several shape labels are vowel-initial."""
+    assert mcpdefs.shape_likeness("authorization-bearer") == "looks like an authorization-bearer"
+    assert mcpdefs.shape_likeness("github-token") == "looks like a github-token"
+    # The receipt's own fallback when a row carries no shape label at all.
+    assert mcpdefs.shape_likeness("") == "looks like a credential"
+
+
 def test_transport_owned_headers_and_cwd_never_travel(root: Path) -> None:
     _write_servers(
         root,
@@ -487,6 +496,23 @@ def test_state_rows_mark_origins_and_missing_reference_keys(root: Path) -> None:
     assert mine_refs == {"MINE": False}
 
 
+def test_state_rows_mark_a_row_that_will_never_travel(root: Path) -> None:
+    """D4 (design round 1): a shape-tripping row rendered identical to a clean
+    one, so the local ledger gave no signal for "this row will never reach any
+    peer" — the operator learned it only by pushing, or never, via the cadence.
+    """
+    _write_servers(
+        root,
+        {
+            "fine": {"type": "http", "url": "https://fine.example/mcp"},
+            "leaky": {"type": "http", "url": "https://x.example/ghp_" + "a" * 36},
+        },
+    )
+    rows = {row["name"]: row for row in mcpdefs.state_rows(root)}
+    assert rows["fine"]["withheld"] == ""
+    assert rows["leaky"]["withheld"] == "github-token"
+
+
 class _FakeLink:
     def __init__(self, *, capabilities: Any, replies: list[Any]) -> None:
         self.capabilities = frozenset(capabilities)
@@ -568,6 +594,9 @@ def test_push_sends_only_missing_rows(root: Path) -> None:
     )
     result = mcpdefs.push_to_peer(_fake_server(root, link), PEER)
     assert result["code"] == "applied" and result["ok"] is True
+    # D2 (design round 1): the receipt is a person-facing register — "sent 1
+    # MCP server definition", never "definition(s)".
+    assert result["message"] == "sent 1 MCP server definition"
     frames = [frame for frame in link.requests if frame["phase"] == "apply"]
     assert [row["name"] for row in frames[0]["bundle"]["servers"]] == ["sent"]
 
@@ -754,3 +783,30 @@ def test_a_step_runs_after_the_push_and_a_policy_code_parks_the_member(
     assert len(pushes) == 1
     syncer.tick(now=1000.0 + definitions.REFUSED_MIN_INTERVAL_S + 1)
     assert len(pushes) == 2
+
+
+# ---------------------------------------------------------------------------
+# The sync verb's own receipt (D2 — the register a person reads)
+# ---------------------------------------------------------------------------
+
+
+def test_the_sync_receipt_pluralises_by_device_count(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D2 (design round 1): "1 of 1 device(s) hold" was the register defect.
+
+    The verb agrees with the DEVICE count, and the singular is the form a
+    one-peer mesh actually reads: "1 of 1 device holds", "0 of 1 device holds".
+    """
+    own = _member_record(root, self_role="admin")
+    server = SimpleNamespace(root=root, identity=own)
+    monkeypatch.setattr(mcpdefs, "push_to_peer", lambda _s, _d: {"ok": True, "code": "applied"})
+    handler = mcpdefs.local_sync_handler(server)  # type: ignore[arg-type]
+    detail = handler({"peer": ""})
+    assert detail["message"] == "1 of 1 device holds this device's MCP servers"
+    monkeypatch.setattr(
+        mcpdefs, "push_to_peer", lambda _s, _d: {"ok": False, "code": "unreachable"}
+    )
+    detail = handler({"peer": ""})
+    assert detail["ok"] is False
+    assert detail["message"] == "0 of 1 device holds this device's MCP servers"

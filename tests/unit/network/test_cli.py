@@ -123,6 +123,66 @@ def test_mcp_push_with_no_peer_names_both_ways_it_accepts(
     assert "--all-peers" in body
 
 
+def test_the_mcp_push_receipt_names_the_next_step_for_a_withheld_row(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D3/D5 (design round 1): a withheld row must say it was NOT sent and what
+    to change — the "state the next move" bar the family's refusals meet — and
+    the shape sentence must read "an authorization-bearer", never "a
+    authorization-bearer"."""
+    detail = {
+        "ok": True,
+        "message": "1 of 1 device holds this device's MCP servers",
+        "peers": [
+            {
+                "device_id": "d_" + "b" * 32,
+                "ok": True,
+                "code": "applied",
+                "message": "sent 1 MCP server definition",
+                "installed": [{"kind": "server", "name": "gl"}],
+                "updated": [],
+                "conflicts": [],
+                "refused": [],
+                "withheld": [{"kind": "server", "name": "leaky", "shape": "authorization-bearer"}],
+            }
+        ],
+    }
+    monkeypatch.setattr(net_cli, "_relay_answer", lambda op, **fields: dict(detail))
+    rc = net_cli.main(_parser().parse_args(["network", "mcp", "push", "--peer", "cloud-node-1"]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.count("1 of 1 device holds this device's MCP servers") == 1, out
+    assert out.count("sent 1 MCP server definition") == 1, out
+    assert "withheld server 'leaky': looks like an authorization-bearer" in out, out
+    assert "— not sent;" in out and "push again" in out, out
+
+
+def test_mcp_state_render_marks_a_row_that_will_not_travel(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D4 (design round 1): the local inventory must name a row the shape scan
+    will never send BEFORE a push discovers it — the same words as the receipt."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "fine": {"type": "http", "url": "https://fine.example/mcp"},
+                    "leaky": {"type": "http", "url": "https://x.example/ghp_" + "a" * 36},
+                }
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rc = net_cli.main(_parser().parse_args(["network", "mcp", "state"]))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "server: leaky  http (yours) — will not travel: looks like a github-token" in out
+    assert out.count("will not travel") == 1, out
+
+
 def test_the_stop_verb_accepts_the_force_the_ladder_names() -> None:
     """Q-R5-2: the busy refusal names `--force`, so `--stop` must take it.
 
