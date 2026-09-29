@@ -451,8 +451,15 @@ class MeshAwareAuthStore:
             return
         from local_operator.providers.failover import retry_after_ms_from_error
 
-        self._mesh.grants.drop(key, session_id)
         kind = report_kind_for(error)
+        # THE DROP COMES AFTER THE REPORT (review round 1, Q1). ``report_sync`` reads
+        # the failing bearer's row id FROM THE GRANT CACHE and only then drops it; a
+        # drop first erased that evidence, the id left the frame as ``0``, and the
+        # owner fell back to its first-row pick — measured on a two-row owner, a
+        # report about the LENT row refreshed the never-lent one instead. The drop
+        # still runs unconditionally: ``report_sync`` drops before dialling, and this
+        # explicit one also covers its early return when this device is no longer a
+        # holder — so the failed bearer is never served again either way.
         self._mesh.report_sync(
             key,
             kind=kind,
@@ -460,6 +467,7 @@ class MeshAwareAuthStore:
             model_id=model_id,
             retry_after_ms=int(retry_after_ms_from_error(error) or 0),
         )
+        self._mesh.grants.drop(key, session_id)
 
     # -- the read-through surface keyed by credential_id --------------------
 

@@ -114,9 +114,13 @@ class BrokeredBearerAuth(httpx2.Auth):
             return
         # Report FIRST and re-borrow second: the owner's own refresh (if any) is what
         # makes the second bearer different, and asking before reporting would hand
-        # back the token that just failed.
-        self._client.grants.drop(self.key)
+        # back the token that just failed. The DROP comes after the report for the
+        # same reason it does in ``store._report_failure`` (review round 1, Q1):
+        # ``report_sync`` attributes the failure by reading the cached grant's row
+        # id, and dropping first erased that read. ``report_sync`` drops the cache
+        # itself before dialling, so nothing can re-serve the failed bearer.
         await asyncio.to_thread(self._client.report_sync, self.key, kind="unauthorized")
+        self._client.grants.drop(self.key)
         bearer = await asyncio.to_thread(self._blocking_bearer)
         if not bearer:
             return

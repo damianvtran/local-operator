@@ -87,6 +87,7 @@ from local_operator.network.credentials.types import (
     device_bound_refusal,
     is_mcp_key,
     mcp_url_from_key,
+    peer_int,
 )
 
 #: How long a second asker joins an in-flight resolve for the same key. Short on
@@ -547,7 +548,36 @@ class MeshCredentialBroker:
             )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key)
-        if access is None or not getattr(access, "access_token", None):
+        if access is None:
+            # THE EMPTY ANSWER IS SPLIT BY ITS CAUSE (audit Q5 #9). ``quota_blocked``
+            # had no producer: the owner's cascade excludes blocked rows
+            # (``is_blocked_for_model``), so a peer asking for a family whose cap is
+            # spent received ``no_local_credential`` — "nothing usable is signed in
+            # here", cached for 300 s with a re-login remedy — for a rate limit that
+            # heals on its own. When EVERY row this provider has is blocked for the
+            # requested model, that block is the reason, and the remainder travels
+            # with the code so the borrower waits the real time instead of guessing.
+            blocked_ms = self._quota_remaining_ms(provider, model_id)
+            if blocked_ms:
+                return BrokerError(
+                    code="quota_blocked",
+                    key=key,
+                    owner_device=self.self_device,
+                    owner_device_name=self.self_device_name,
+                    retry_after_ms=blocked_ms,
+                    message=(
+                        f"every login for {provider!r} is rate-limited on this device "
+                        f"for another {max(1, blocked_ms // 1000)} s"
+                    ),
+                )
+            return BrokerError(
+                code="no_local_credential",
+                key=key,
+                owner_device=self.self_device,
+                owner_device_name=self.self_device_name,
+                message=f"nothing usable is signed in for {provider!r} on this device",
+            )
+        if not getattr(access, "access_token", None):
             return BrokerError(
                 code="no_local_credential",
                 key=key,
@@ -617,7 +647,11 @@ class MeshCredentialBroker:
         del force  # a forced MCP refresh is not offered in v1; the deadline bounds it
         url = mcp_url_from_key(key)
         try:
-            from local_operator.mcp.auth import McpTokenStorage, ensure_mcp_oauth_fresh
+            from local_operator.mcp.auth import (
+                MCP_OAUTH_PROVIDER,
+                McpTokenStorage,
+                ensure_mcp_oauth_fresh,
+            )
             from local_operator.mcp.config import MCPHttpServerConfig
         except Exception as exc:  # noqa: BLE001 — reported as a refusal, not a crash
             return BrokerError(
@@ -641,10 +675,20 @@ class MeshCredentialBroker:
                 owner_device_name=self.self_device_name,
                 message=f"nothing is signed in to {url!r} on this device",
             )
+        # ``refreshed`` IS OBSERVED, NOT ASSUMED (audit Q5 #8). The provider path
+        # watches the row's ``updated_at`` move across the resolve, and MCP rows are
+        # written through the same ``upsert_credential``; this call was a hard-coded
+        # ``False``, so every borrower and every audit record was told an MCP grant
+        # never refreshed, whatever ``ensure_mcp_oauth_fresh`` had just done.
+        #
+        # The same read the provider path makes, read before the refresh runs.
+        before = self._row_stamps(MCP_OAUTH_PROVIDER)
         try:
             await ensure_mcp_oauth_fresh(url, MCPHttpServerConfig(url=url), store)
         except Exception as exc:  # noqa: BLE001 — a refresh failure is a refusal
             return self._classify_refresh_failure(exc, key)
+
+        refreshed = self._row_stamps(MCP_OAUTH_PROVIDER).get(row_id, 0) > before.get(row_id, 0)
         try:
             tokens = await storage.get_tokens()
         except Exception as exc:  # noqa: BLE001
@@ -699,7 +743,7 @@ class MeshCredentialBroker:
             credential_id=row_id,
             kind="mcp-oauth",
             token_exp_ms=int(expiry * 1000) if expiry else 0,
-            refreshed=False,
+            refreshed=refreshed,
             holder_scope=holder_scope,
             for_session=for_session,
             identity={},
@@ -762,9 +806,15 @@ class MeshCredentialBroker:
         worth repeating in the code: there is no ``rotate_sibling`` here, and adding
         one is the single change that would let a peer's bad 401 log the operator
         out of every device.
+
+        ``credential_id`` IS A CLAIM, CHECKED AGAINST THIS DEVICE'S OWN ID SPACE
+        (audit Q5 #4). The arms act on the named row only when it is one this device
+        really has for the key; an absent field keeps the pre-existing first-row
+        pick, so an older peer behaves exactly as it did.
         """
         key = str(frame.get("key") or "")
         failure = str(frame.get("failure") or "")
+        reported_id = peer_int(frame.get("credential_id"))
         by, refused = self._caller(link, frame, key, key)
         if refused is not None:
             return refused
@@ -784,9 +834,9 @@ class MeshCredentialBroker:
         if entry is None or entry.owner_device != self.self_device or not entry.is_holder(by):
             return {"kind": "error", "code": "not_a_holder", "key": key}
         if failure == "quota":
-            return self._remote_quota_block(key, entry, by, frame)
+            return self._remote_quota_block(key, entry, by, frame, reported_id=reported_id)
         if failure in ("invalid", "unauthorized"):
-            return self._one_owner_refresh(key, entry, by, reason=failure)
+            return self._one_owner_refresh(key, entry, by, reason=failure, reported_id=reported_id)
         # Anything else — ``unavailable`` (a provider 5xx/529 overload), ``failed`` —
         # is audited above and changes nothing: a provider-side fault is not evidence
         # against the credential, and the owner's own rotation only DEPRIORITISES on
@@ -794,7 +844,13 @@ class MeshCredentialBroker:
         return {"kind": "ack", "key": key, "action": "noted"}
 
     def _remote_quota_block(
-        self, key: str, entry: CredentialPlacementEntry, by: str, frame: dict[str, Any]
+        self,
+        key: str,
+        entry: CredentialPlacementEntry,
+        by: str,
+        frame: dict[str, Any],
+        *,
+        reported_id: int = 0,
     ) -> dict[str, Any]:
         """A peer's 429 as AT MOST a short, family-scoped, rate-limited block (F3).
 
@@ -826,7 +882,7 @@ class MeshCredentialBroker:
         )
         if not scope:
             return {"kind": "ack", "key": key, "action": "noted", "reason": "unscoped"}
-        credential_id = self._credential_id_for(key)
+        credential_id = self._credential_id_for(key, reported_id)
         if credential_id is None:
             return {"kind": "ack", "key": key, "action": "noted"}
         now = time.monotonic()
@@ -861,7 +917,13 @@ class MeshCredentialBroker:
         }
 
     def _one_owner_refresh(
-        self, key: str, entry: CredentialPlacementEntry, by: str, *, reason: str
+        self,
+        key: str,
+        entry: CredentialPlacementEntry,
+        by: str,
+        *,
+        reason: str,
+        reported_id: int = 0,
     ) -> dict[str, Any]:
         """AT MOST ONE owner-side refresh per credential per report window.
 
@@ -870,7 +932,7 @@ class MeshCredentialBroker:
         and the tombstone is written by the path that already writes it — not by a
         peer's observation.
         """
-        credential_id = self._credential_id_for(key)
+        credential_id = self._credential_id_for(key, reported_id)
         if credential_id is None:
             return {"kind": "ack", "key": key, "action": "noted"}
         now = time.monotonic()
@@ -1031,8 +1093,24 @@ class MeshCredentialBroker:
             self._auth_store = AuthStore(config_dir=self.root)
         return self._auth_store
 
-    def _credential_id_for(self, key: str) -> int | None:
-        """The owner's row id for ``key``, or ``None``. For the report arm only."""
+    def _credential_id_for(self, key: str, reported_id: int = 0) -> int | None:
+        """The owner's row id for ``key``, for the report arms. Prefers the lent row.
+
+        THE REPORT'S TARGET MUST BE THE ROW THAT WAS LENT (audit Q5 #4): on a
+        multi-row owner, resolving a peer's report to the provider's FIRST row made a
+        quota block — or a provoked refresh — land on a login the borrower never
+        touched. A report naming the granted ``credential_ref.credential_id`` is
+        believed only when that id exists in the id space the arms can act on — this
+        device's own rows for the entry's provider — because the id is a peer's
+        claim. A name this device cannot match is NOT actioned (the arms answer
+        ``noted``) rather than redirected to a row the peer never mentioned; an
+        ABSENT field keeps the first-row pick exactly as it was, which is what an
+        older peer's frame carries.
+
+        MCP rows are matched by the server URL, which is their identity: one row per
+        URL, and the id a peer saw is only a spelling of that same row, so the
+        reported id adds nothing there and is ignored.
+        """
         if is_mcp_key(key):
             return self._mcp_row_id(mcp_url_from_key(key))
         entry = self._entry(key)
@@ -1042,7 +1120,31 @@ class MeshCredentialBroker:
             rows = self._auth_store_instance().list_credentials(entry.provider)
         except Exception:  # noqa: BLE001
             return None
-        return int(rows[0].id) if rows else None
+        ids = [int(row.id) for row in rows]
+        if reported_id:
+            return reported_id if reported_id in ids else None
+        return ids[0] if ids else None
+
+    def _quota_remaining_ms(self, provider: str, model_id: str) -> int:
+        """How long every row for ``provider`` is quota-blocked for ``model_id``, ms.
+
+        The producer ``quota_blocked`` never had (audit Q5 #9), read only when the
+        owner's own cascade came back EMPTY and only when EVERY row the provider has
+        is blocked for the requested model — the exact reason ``_usable_key_rows``
+        could not offer one. A row that is still servable means the empty answer has
+        another cause, and the caller keeps ``no_local_credential``. The earliest
+        unblock is the wait worth reporting: it is when something can be served
+        again, whatever happened to the other rows.
+        """
+        try:
+            store = self._auth_store_instance()
+            rows = store.list_credentials(provider)
+            waits = [int(store.blocked_remaining_ms(row.id, provider, model_id)) for row in rows]
+        except Exception:  # noqa: BLE001 — an unreadable store explains nothing
+            return 0
+        if not waits:
+            return 0
+        return min(waits) if all(wait > 0 for wait in waits) else 0
 
     def _row_stamps(self, provider: str) -> dict[int, int]:
         """``{credential_id: updated_at}`` for a provider, to observe a refresh.

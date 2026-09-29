@@ -450,6 +450,17 @@ rather than the refusal that names the owner. When a peer's operator has just
 shared something and it still looks absent, run `lop network credentials` before
 asking them to share it again.
 
+A SHARE IS ALSO WIRED IN WHEN A SESSION STARTS, and that is the second reason the
+same sentence can appear while the share is right there in the listing: a session
+that was already running when the device's FIRST borrowable share arrived was
+built while this device had nothing to borrow, so it runs without the brokering
+rung for its whole life — no pull in it will ever make that key usable, and the
+remedy is to start a new session (or restart that one). A session started after
+the share brokers normally, and a session that was already brokering picks up a
+newly shared key on the next pull without a restart. `lop network credentials`
+says `note: '…' is now available to borrow on this device…` when a pull makes a
+key newly borrowable, because that is the moment the distinction matters.
+
 Brokering needs a link the BORROWER opens: the session's device dials the device
 that owns the credential and runs `net_broker` over it. An owner behind NAT with
 no reverse path to it — the laptop that owns the key, reached from a cloud peer —

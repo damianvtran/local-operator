@@ -1625,6 +1625,36 @@ class AuthStore:
         now = self._now_ms()
         return any(until > now and scope.removeprefix("model:") in lowered for scope, until in rows)
 
+    def blocked_remaining_ms(self, credential_id: int, provider: str, model_id: str) -> int:
+        """The ms until ``credential_id`` could serve ``model_id`` again, or ``0``.
+
+        THE SAME PREDICATE :meth:`is_blocked_for_model` ANSWERS AS A BOOL, read as a
+        remainder: a live account-wide block gates every model; a scoped block gates
+        exactly the models whose id contains its slug; an expired row gates nothing.
+        It exists for the broker's ``quota_blocked`` refusal — a remote borrower must
+        wait the REAL remainder of a cap it cannot see, and answering "rate-limited"
+        without saying for how long invites a retry the block will refuse.
+        """
+        credential = self.get_credential(credential_id)
+        provider = self._storage_id(provider)
+        provider_key = f"{provider}:{credential.credential_type if credential else 'api_key'}"
+        lowered = (model_id or "").lower()
+        rows = self._conn.execute(
+            "SELECT block_scope, blocked_until_ms FROM auth_credential_blocks"
+            " WHERE credential_id = ? AND provider_key = ?",
+            (credential_id, provider_key),
+        ).fetchall()
+        now = self._now_ms()
+        remaining = 0
+        for scope, until in rows:
+            if until <= now:
+                continue
+            if scope == "" or (lowered and scope.removeprefix("model:") in lowered):
+                # ``max``, not the earliest: each live block is an independent gate,
+                # and one of them stays closed for the whole of its own window.
+                remaining = max(remaining, int(until) - now)
+        return remaining
+
     def clear_blocks_for_model(self, credential_id: int, provider: str, model_id: str) -> None:
         """Drop the account-wide block and every scoped block gating ``model_id``.
 
