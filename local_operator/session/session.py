@@ -14614,7 +14614,32 @@ class Session:
                 return summary or " ", {"snapcompact": _archive_to_json(archive)}
             except Exception:
                 logger.warning("snapcompact failed; falling back to context-full", exc_info=True)
-        summary = await compaction_api.summarize_messages(to_summarize, self._one_shot_complete)
+        # A pass after the first plans over ``[marker, *kept]``: the previous
+        # summary is folded through the template's ``<previous-summary>``
+        # slot, never re-exposed inside ``<conversation>`` as an ordinary user
+        # turn — left there, a chained pass re-derives the whole summary from
+        # a conversation that already CONTAINS it (lift XOR keep; see
+        # ``compaction.marker.split_leading_marker``). The snapcompact branch
+        # above folds its own way (``_previous_archive_text``, the archive's
+        # accumulated text re-rendered into the new archive); this is the TEXT
+        # summarizer's half of the same rule.
+        #
+        # Both halves degrade with ``getattr``, the way the other optional
+        # members of ``compaction_api`` do: a partial test double that predates
+        # the fold keeps its pre-fold call shape (marker in the span, no
+        # ``previous_summary``) rather than breaking the pass.
+        splitter: Any = getattr(compaction_api, "split_leading_marker", None)
+        previous_summary: str | None = None
+        span: list[Message] = list(to_summarize)
+        if callable(splitter):
+            split_result: Any = splitter(to_summarize)
+            previous_summary, span = split_result
+        if previous_summary is None:
+            summary = await compaction_api.summarize_messages(span, self._one_shot_complete)
+        else:
+            summary = await compaction_api.summarize_messages(
+                span, self._one_shot_complete, previous_summary=previous_summary
+            )
         return summary, None
 
     def _previous_archive_text(self) -> str | None:
