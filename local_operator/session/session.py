@@ -145,6 +145,7 @@ from local_operator.harness.types import (
     ImageContent,
     LoopConfig,
     Message,
+    MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
     ModelChangeEvent,
@@ -8547,14 +8548,17 @@ class Session:
         conversation's latest reading — ONE place for both the compaction
         trigger's figure (``_last_usage``) and the prompt-cache TTL hint.
 
-        Both the post-run scan and the mid-turn boundary hook go through
-        here, so the hint can never lag the usage the way it did when only
-        the turn boundary moved it (review F9): the hint is what the next
-        request of THIS turn (an aside, the advisor) and the NEXT turn's
-        first call are stamped with. The hint only ADVANCES on a reported
-        count — a wire that omits ``context_tokens`` keeps the previous
-        figure rather than blanking it and sending a large context out at
-        the 5m TTL by the byte estimate.
+        Three callers, all through here so the two figures cannot drift: the
+        message-end note in ``_emit`` (the receipt moment — the canonical
+        store folds the same usage then, and its reconciliation refreshes
+        compare ``restored_usage()`` against that fold, so this must keep
+        pace), and the two later re-scans (the mid-turn boundary hook and the
+        post-run scan), which re-adopt the same newest usage idempotently.
+        The hint is what the next request of THIS turn (an aside, the advisor)
+        and the NEXT turn's first call are stamped with. The hint only
+        ADVANCES on a reported count — a wire that omits ``context_tokens``
+        keeps the previous figure rather than blanking it and sending a large
+        context out at the 5m TTL by the byte estimate.
         """
         for message in reversed(messages):
             if isinstance(message, Message) and message.usage is not None:
@@ -10360,6 +10364,31 @@ class Session:
                         "effort": current.reasoning_effort,
                     }
                 )
+        # Advance the conversation's latest provider reading AT THE RECEIPT,
+        # not at the next tool-batch boundary. The canonical store folds every
+        # usage-bearing event's receipt into its occupancy the moment it
+        # observes the event, and its reconciliation refreshes
+        # (``FrontendStateStore.refresh_from_session`` /
+        # ``refresh_restored_usage``) resolve "is the session holding a newer
+        # reading" by comparing ``restored_usage()`` against the receipt the
+        # store last folded. A session whose reading only advances at
+        # boundaries therefore hands those refreshes an OLDER receipt than the
+        # one the store already holds -- measured live as the post-compaction
+        # context resurrected to the pre-compaction count on the next message
+        # boundary (404.9k repainted over a settled 148.0k), then a smaller
+        # regression at every boundary after it. Noting here keeps
+        # ``restored_usage()`` honest at the only moment it is compared ("the
+        # provider's own last reading for THIS conversation" -- its own
+        # docstring), so a differing receipt genuinely means NEWER.
+        #
+        # The TTL hint rides ``_note_usage`` deliberately in lockstep with
+        # ``_last_usage`` (see ``_context_tokens_hint``), so this must move
+        # both or the pair drifts: a mid-batch aside or advisor call now
+        # stamps the count of the call that just reported instead of the one
+        # before it -- strictly fresher, and the boundary note below still
+        # runs (idempotent: it re-adopts the newest usage it scans).
+        if isinstance(event, MessageEndEvent):
+            self._note_usage([event.message])
         # Fold before fan-out: a client joining from an event handler observes a
         # snapshot that already contains this event, never an off-by-one view.
         #
