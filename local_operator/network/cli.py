@@ -1619,13 +1619,21 @@ def _credential_shape(key: str) -> tuple[str, str, str]:
     config = _config_dir()
     if is_mcp_key(key):
         url = mcp_url_from_key(key)
-        try:
-            from local_operator.mcp.auth import McpTokenStorage
+        # OPEN FIRST, CONSTRUCT ONLY WHEN A STORE CAME BACK (review round 1,
+        # MINOR; QA round 1, Q1): the ambient ``McpTokenStorage(url)`` built an
+        # ``AuthStore`` that CREATES its database, so this read made a store
+        # appear on a device that never signed in.
+        store = _open_local_store(config)
+        if store is not None:
+            try:
+                from local_operator.mcp.auth import McpTokenStorage
 
-            if McpTokenStorage(url).has_stored_row():
-                return "mcp-rotating", "mcp-oauth", ""
-        except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
-            pass
+                if McpTokenStorage(url, store=store).has_stored_row():
+                    return "mcp-rotating", "mcp-oauth", ""
+            except Exception:  # noqa: BLE001 — an unreadable store is "not signed in"
+                pass
+            finally:
+                _close_quietly(store)
         return "mcp-rotating", "mcp-oauth", ""
     rows = _provider_rows(key, config)
     if not rows:
@@ -1649,14 +1657,21 @@ def _require_local_credential(key: str, provider: str) -> None:
     from local_operator.network.types import MeshRefusal
 
     if is_mcp_key(key):
-        try:
-            from local_operator.mcp.auth import McpTokenStorage
-
-            if McpTokenStorage(mcp_url_from_key(key)).has_stored_row():
-                return
-        except Exception:  # noqa: BLE001
-            pass
         url = mcp_url_from_key(key)
+        # OPEN FIRST, CONSTRUCT ONLY WHEN A STORE CAME BACK (review round 1,
+        # MINOR; QA round 1, Q1): the refusal below must stay read-only even on
+        # a device that never signed in.
+        store = _open_local_store(_config_dir())
+        if store is not None:
+            try:
+                from local_operator.mcp.auth import McpTokenStorage
+
+                if McpTokenStorage(url, store=store).has_stored_row():
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                _close_quietly(store)
         raise MeshRefusal(
             "no_local_credential",
             f"this device has no MCP login for {url}; {readiness_mod.mcp_login_remedy(url)}",
@@ -1670,12 +1685,39 @@ def _require_local_credential(key: str, provider: str) -> None:
         )
 
 
-def _provider_rows(provider: str, config: Any) -> list[Any]:
-    """This device's rows for a provider, or ``[]``. Never raises."""
-    try:
-        from local_operator.providers.auth_store import AuthStore
+def _open_local_store(config: Any) -> Any | None:
+    """This device's credential store, or ``None`` when no database exists yet.
 
-        return list(AuthStore(config_dir=config).list_credentials(provider))
+    THE GUARD IS THE READ-ONLY PROMISE (``readiness._open_store``'s rule, reused
+    here): ``AuthStore.__init__`` CREATES its database, so the share path must
+    never construct one on a device that never signed in — a refused share would
+    then be the reason a store appeared (review round 1, MINOR; QA round 1, Q1).
+    ``None`` is the definite "nothing is stored here" answer these callers
+    already render for an absent row.
+    """
+    from local_operator.network import readiness as readiness_mod
+
+    return readiness_mod._open_store(config)  # noqa: SLF001 — the one read-only store guard
+
+
+def _close_quietly(store: Any) -> None:
+    """Close a store without letting a close failure change the answer."""
+    try:
+        store.close()
+    except Exception:  # noqa: BLE001 — closing is best-effort
+        pass
+
+
+def _provider_rows(provider: str, config: Any) -> list[Any]:
+    """This device's rows for a provider, or ``[]``. Never raises, never writes."""
+    try:
+        store = _open_local_store(config)
+        if store is None:
+            return []
+        try:
+            return list(store.list_credentials(provider))
+        finally:
+            _close_quietly(store)
     except Exception:  # noqa: BLE001 — an unreadable store is "no credential here"
         return []
 
