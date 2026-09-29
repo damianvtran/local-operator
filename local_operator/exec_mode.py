@@ -839,6 +839,24 @@ def _declared_by_profile(name: str | None) -> bool:
     return profile is not None and bool(profile.tools)
 
 
+def _saved_auto_approval() -> bool:
+    """Whether ``tool_approval_mode: auto`` is saved in this run's config root.
+
+    Best-effort and read-only: any failure — a missing config, an unreadable
+    one, an old tree — degrades to ``False``, which keeps the deny-trap
+    advisory ON. That is the safe direction for a launch-time warning: a wrong
+    ``True`` would silence advice for a run that then spent its life denied.
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.session_factory import _approval_mode_is_auto
+
+        return _approval_mode_is_auto(ConfigManager(config_dir()))
+    except Exception:  # noqa: BLE001 — keep the advisory ON when unsure
+        return False
+
+
 def _deny_trapped_advisory(args: ExecArgs) -> str | None:
     """The launch advisory for a run whose approval calls nobody can answer.
 
@@ -849,7 +867,10 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
     ``--yolo`` (approve every tier inline), or a tool declaration (``--tools``,
     or a role whose own allow-list resolves through ``--profile`` — both are
     the declaration ``exec_startup.apply_startup`` lets stand as the approval
-    exactly where nobody can be asked). Before this advisory the operator's
+    exactly where nobody can be asked), or the operator's saved default —
+    ``tool_approval_mode: auto``, which the headless gate itself reads (see
+    ``session_factory._approval_mode_is_auto``). Before this advisory the
+    operator's
     first evidence of the trap was a transcript of denials for calls no user
     had seen; this is the same news told BEFORE the run, which is the half
     that was missing.
@@ -869,12 +890,21 @@ def _deny_trapped_advisory(args: ExecArgs) -> str | None:
         return None
     if not args.background and (sys.stdin is not None and sys.stdin.isatty()):
         return None
+    # THE SAVED DEFAULT IS AN ANSWER TOO (2026-09-28 addendum). The headless
+    # gate reads ``tool_approval_mode`` now
+    # (``session_factory._approval_mode_is_auto``), so a config-``auto`` run's
+    # calls answer inline — and warning "any tool call ... will be denied" over
+    # it is the M2 hazard wearing its other face: telling a run that will work
+    # that it will be denied. Best-effort on purpose; see the helper.
+    if _saved_auto_approval():
+        return None
     return (
         "Warning: this run cannot ask for approval (no terminal attached), so "
         "any tool call that needs approval will be denied.\n"
         "  Remedies: --control parks cards for a supervisor; --yolo auto-approves "
         "every tier; --tools NAME[,NAME] pre-approves the listed tools and bounds "
-        "this run's reach to them."
+        "this run's reach to them; tool_approval_mode: auto in the config answers "
+        "every call the same way for every run."
     )
 
 

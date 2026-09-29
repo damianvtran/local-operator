@@ -246,15 +246,20 @@ async def start_exec_control(
     # degrade-to-ask) for the runs whose decisions this handle's gates make,
     # and those runs keep FOLLOWING the file afterwards.
     #
-    # An UNSUPERVISED run keeps the value the flag alone gives it. Its
-    # decisions are made by the session's ORIGINAL headless gate, which is
-    # built from ``--yolo`` and never reads the file, so seeding this handle
-    # from a mode the deciding gate ignores changed no decision while making
-    # ``/approvals`` report "(--yolo is active)" for a run with no ``--yolo``
-    # and a gate that still denies non-TTY requests — a false posture on the
-    # one surface the operator consults to check it (review round 1, M1).
+    # An UNSUPERVISED run seeds from the same read, REVERSING the earlier M1
+    # reasoning on purpose (2026-09-28 addendum). That note held while the
+    # session's ORIGINAL headless gate was built from ``--yolo`` alone and never
+    # read the file: seeding this handle then changed no decision while making
+    # ``/approvals`` report a posture the deciding gate did not have. The gate
+    # now reads the key at its own construction
+    # (``session_factory._approval_mode_is_auto``), so the identical hazard
+    # exists in the OPPOSITE direction if this handle keeps the flag's value —
+    # the report would say ask while the decisions auto-approve. One read,
+    # mirrored at both seats, keeps gate and posture equal by construction.
+    # Unsupervised still differs where it always did: no gates installed, no
+    # config watcher, so its value is a one-shot read rather than a follower.
     auto_approve = yolo
-    if supervised and not yolo:
+    if not yolo:
         try:
             approval_mode = (
                 str(
