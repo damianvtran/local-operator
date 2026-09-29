@@ -194,6 +194,21 @@ async def _run_audio_sidecar(
                 "at": time.time(),
             },
         )
+        if status in ("failed", "timeout"):
+            # The record says why for whoever reads the transcript; the LOG
+            # says it for the operator whose daemon produced it, which is the
+            # half design §4c and both round-1 briefs promise ("written to the
+            # transcript and logged at warning") — v1 renders the record
+            # nowhere, so a failed sidecar that only whispers into a JSONL
+            # file is invisible in the one place failures are watched (agent
+            # review round 1, m1 / QA Q2: an unreachable sidecar wire wrote
+            # 'failed' and left zero WARNING lines while the capture control
+            # proved the logger was live in that process). "ok" and
+            # "unavailable" stay silent on purpose: the first is the happy
+            # path, and the second is the deterministic honest answer on a
+            # machine with no route for the model call — warning on it would
+            # train the operator to ignore the line that matters.
+            logger.warning("audio sidecar %s for message %s: %s", status, message_id, error)
     finally:
         if owned_store:
             store.close()
