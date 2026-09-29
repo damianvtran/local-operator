@@ -201,6 +201,69 @@ def _interface_ipv4s() -> list[tuple[str, int, str]] | None:
         freeifaddrs(head)
 
 
+def interface_for_address(address: str) -> str | None:
+    """The interface ``address`` is held on, or ``None`` when unobservable.
+
+    :func:`_interface_ipv4s` already reads the NAME for every IPv4 the host
+    holds and :func:`local_ipv4_addresses` discards it; this is the mapping back
+    from an address to its interface, for the callers that PUBLISH the fact
+    (the readiness rows say "this device routes to it from <addr> via <if>",
+    and the interface name is the observed half of "is a tunnel or a NIC").
+    ``None`` covers both "the table could not be read" and "no interface holds
+    this address" — an unobservable fact reads as one, never as a guess.
+    """
+    entries = _interface_ipv4s()
+    if not entries:
+        return None
+    for name, _flags, held in entries:
+        if held == address:
+            return name
+    return None
+
+
+def route_observation(host: str, port: int) -> dict[str, Any]:
+    """Observed facts about the route this device would take to ``host:port``.
+
+    A UDP ``connect`` sends no packet: it resolves a route and binds the local
+    end, so ``source_address`` is the address the KERNEL itself would use —
+    the same trick :func:`_default_route_address` uses, parameterised by
+    destination — and the interface name comes back through
+    :func:`interface_for_address`. Because it sends nothing, it is safe to run
+    once per endpoint on a report path.
+
+    ``error`` names the exception class when the lookup failed (an
+    unroutable destination, a name that does not resolve); ``""`` is success.
+    Both address fields are ``None``-able on purpose: the consumer publishes
+    these as OBSERVED facts and must be able to say "not observable" rather
+    than leave a value that reads as one.
+    """
+    # The route decision is keyed on the ADDRESS; the port only has to be
+    # connectable. Port 0 is not (EADDRNOTAVAIL on macOS), and a caller that
+    # could not parse a port at all still deserves the address facts, so a
+    # non-positive port becomes discard (9).
+    if port <= 0:
+        port = 9
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError as exc:
+        return {"source_address": None, "interface": None, "error": exc.__class__.__name__}
+    try:
+        sock.connect((host, port))
+        address = str(sock.getsockname()[0])
+    except OSError as exc:
+        return {"source_address": None, "interface": None, "error": exc.__class__.__name__}
+    except (TypeError, ValueError, OverflowError):
+        # A garbage host or an out-of-range port: the same class of answer.
+        return {"source_address": None, "interface": None, "error": "bad_endpoint"}
+    finally:
+        sock.close()
+    return {
+        "source_address": address,
+        "interface": interface_for_address(address),
+        "error": "",
+    }
+
+
 def _default_route_address() -> str | None:
     """The source address the kernel picks to reach a globally routed host.
 

@@ -52,7 +52,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     from local_operator.network.relay import PeerLink, RelayServer
@@ -328,6 +328,12 @@ class SessionMoveResult(TypedDict):
     to OPEN — equal to ``session_id`` for ``mode == "move"``, freshly minted for
     ``keep``. ``phase`` is the last phase reached and is always in
     :data:`MOVE_OPENABLE_PHASES` on this shape; ``phases`` is the history.
+
+    ``engagement`` is the ONE optional member, and it is ``NotRequired`` rather than
+    ``... | None`` on purpose: it is absent — not null — for every caller that did
+    not ask for it, so the document every existing reader parses is unchanged
+    (``test_the_session_move_contract_is_frozen`` pins the set, and this is the one
+    addition made to it since the contract was frozen).
     """
 
     ok: Literal[True]
@@ -338,6 +344,31 @@ class SessionMoveResult(TypedDict):
     to_device: MoveDevice
     phase: SessionMovePhase
     phases: list[MovePhaseStamp]
+    #: Present ONLY when the move was asked to engage on arrival
+    #: (``--engage-on-arrival``); absent otherwise.
+    engagement: NotRequired[MoveEngagement]
+
+
+class MoveEngagement(TypedDict):
+    """What the destination did about arriving live (``--engage-on-arrival``).
+
+    A SEPARATE BLOCK ON A SUCCESSFUL RECEIPT, because the failure it can report is a
+    different kind of failure from every refusal in :data:`MOVE_REFUSAL_CODES`:
+    ``engaged: False`` means THE MOVE SUCCEEDED and the conversation was not started
+    on this device. Collapsing the two would make a committed transfer look like a
+    refused one, and a caller that retried on it would ask for something that has
+    already happened.
+
+    The fields are the engage op's own (``net_session_engage``), because this is
+    that act: ``detail`` is the sentence the engage path gave when ``engaged`` is
+    ``False``, and the state ("runtime joining") when it is ``True``.
+    """
+
+    engaged: bool
+    detail: str
+    #: The id engaged, which for a ``keep`` copy is the freshly minted one — the same
+    #: id the receipt tells the caller to open.
+    session_id: str
 
 
 class SessionMoveRefusal(TypedDict):
@@ -972,6 +1003,7 @@ def _destination_move(
     owner_name: str,
     asked: bool = False,
     adopt_under_id: str = "",
+    engage_on_arrival: bool = False,
 ) -> tuple[SessionMoveResult | None, SessionMoveRefusal | None, str]:
     """Pull ``session_id`` from its owner and adopt it here. THE destination path.
 
@@ -992,6 +1024,15 @@ def _destination_move(
     ``committed`` (the destination holds it, the source's cleanup confirmation is
     still in flight) is a success, which is exactly what §6.3 step 18 says about
     ``done`` being best-effort.
+
+    ``engage_on_arrival`` is the ONE opt-in step this path has beyond the protocol
+    (§6.3 step 17's ``--open``, spelled as a flag): the conversation is engaged here
+    as soon as it has arrived, so it is live on this device without a first prompt.
+    Default off, and absent from the receipt when off, so a caller that does not ask
+    for it — every caller that existed before this parameter — gets the identical
+    move it always got. It is NOT turn handoff and cannot become one: it runs AFTER
+    the move has committed, it gives the runtime no work, and a session with a turn
+    in flight is still refused by the owner before any of this can start (§6.4).
     """
     from local_operator import fork as fork_mod
     from local_operator.network import sync as sync_mod
@@ -1332,20 +1373,110 @@ def _destination_move(
         logger.debug("mobility: %s did not acknowledge the handoff", session_id)
     note("done")
     _audit(server, AUDIT_DONE, session_id, owner_device, new_session_id=target_id)
+    # §6.3 STEP 17's ``--open``, AS AN OPT-IN FLAG, AND LAST ON PURPOSE. The engage
+    # runs after the protocol's own final frame rather than between the commit and
+    # it: ``done`` is the SOURCE's completion signal, and a runtime spawn on this
+    # device (1-3 s, and up to the engage deadline when it is cold) is not something
+    # a peer's confirmation should have to wait behind. ``note("done")`` above means
+    # the phases reported are the MOVE's phases either way — arriving live is not a
+    # phase, and a failed engage must never make a finished move report a shorter
+    # one.
+    engagement = _arrival_engagement(server, target_id) if engage_on_arrival else None
+    receipt: dict[str, Any] = {
+        "ok": True,
+        "session_id": session_id,
+        "new_session_id": target_id,
+        "mode": "keep" if keep else "move",
+        "from_device": _device_block(server, owner_device, owner_name),
+        "to_device": _own_block(server),
+        "phase": "done",
+        "phases": phases,
+    }
+    if engagement is not None:
+        receipt["engagement"] = engagement
     return (
-        {
-            "ok": True,
-            "session_id": session_id,
-            "new_session_id": target_id,
-            "mode": "keep" if keep else "move",
-            "from_device": _device_block(server, owner_device, owner_name),
-            "to_device": _own_block(server),
-            "phase": "done",
-            "phases": phases,
-        },
+        cast(SessionMoveResult, receipt),
         None,
         target_id,
     )
+
+
+def _arrival_engagement(server: "RelayServer", session_id: str) -> MoveEngagement:
+    """Start (or join) a runtime for a conversation that has just arrived here.
+
+    THE WHOLE OF ``engage_on_arrival``, and the only place the feature touches the
+    runtime. The caller has already committed the move, so this is a SECOND,
+    SEPARATE act on what is now an ordinary local session — and that is what makes
+    the three properties below load-bearing rather than incidental:
+
+    * **A failure here is not a failed move, and cannot become one.** The bytes are
+      on this disk, the journal is settled, the source's copy is retired; nothing in
+      this function promotes, journals, copies or unlinks anything. The sentence
+      travels beside a successful receipt (``MoveEngagement``) so a caller can tell
+      "the conversation is here" from "it is live here" — never a refusal that would
+      send someone to retry a transfer that has already happened.
+    * **It SUPERVISES NO TURN.** Engaging starts or joins a runtime and hands it no
+      work, so this is not the turn handoff the design rejected (§6.4, and the note
+      at step 17): a session with a turn in flight was refused by its owner before
+      this path ran, and ``--wait`` is the remedy for that refusal, unchanged.
+    * **It is the same engage every other caller makes, arbitration included.** The
+      call goes to ``RelayServer.engage_session`` — the function
+      ``net_session_engage`` answers with — and so through ``launch.engage_runtime``,
+      the single point where the LEASE decides who runs. ``_promote`` leaves the
+      lease unclaimed on purpose (§6.3 step 17), which makes this a first-engager
+      racing any other first-engager, and LOSING THAT RACE IS A JOIN rather than a
+      refusal: the engage loop probes the lease BEFORE it spawns, waits for the
+      winner's record and delivers to it, so the contender that came second is joined
+      onto the runtime that won and this function reports that layer's own state —
+      never a victory, and never a defeat, of its own invention. (The refusal shape on
+      this route is the OTHER event: no runtime reachable within the deadline, or every
+      candidate the engage was allowed to start died. ``RelayServer.engage_session``
+      owns both spellings.) There is deliberately no retry and no "did anything
+      beat me" check here: both would be a second opinion about a decision the
+      lease already made, and the second defeat the first one's honesty.
+
+    The order inside ``_destination_move`` matters to this call: for a ``move`` (not
+    ``--keep``) the handoff entry is cleared before this runs, because INV-1's guard
+    refuses to engage an id the journal still names as in transit — the same
+    ``prepared`` state this device has just finished leaving.
+
+    TOTALLY DEFENSIVE ON PURPOSE, AND ONLY HERE. ``_engage_locally`` describes the
+    failures a runtime start is known to produce (its own caught tuple) and this adds
+    the ones it does not: at this point the transfer is COMMITTED and irreversible, so
+    an exception nobody anticipated in an optional step must not be allowed to destroy
+    the answer to a move that has already happened. Nothing is swallowed — the failure
+    is logged with its traceback and reported in ``detail`` — and the catch is the
+    outermost frame of the move, where there is no later reader to hand it to.
+    """
+    try:
+        engagement = cast(MoveEngagement, server.engage_session(session_id))
+    except Exception:  # noqa: BLE001 — see the docstring: reported, never swallowed
+        logger.exception("mobility: engaging %s on arrival failed", session_id)
+        return {
+            "engaged": False,
+            "detail": (
+                f"could not start a runtime for session {session_id} on arrival, for a "
+                "reason the engage path does not recognise; that device's own log has "
+                "the cause (`lop network doctor`)"
+            ),
+            "session_id": session_id,
+        }
+    if not engagement.get("engaged"):
+        # A REFUSAL IS AN ANSWER, NOT AN EXCEPTION, so the handler above never sees it —
+        # and on the OFFLOAD route nothing else does either: the inviter's receipt is the
+        # SOURCE's, because that device settles on its OWN durable progress and drops this
+        # block when it arrives (``_destination_invite._run``), so a destination that could
+        # not start the runtime left no trace anywhere without this line (review round 1,
+        # R1-2; QA round 1, Q-1 — one asymmetry seen from its two sides). INFO rather than
+        # DEBUG because this log IS the surface: the words the CLI gives an operator point
+        # at "that device's own log" by name, and a DEBUG line is not what that promise
+        # means at the default level.
+        logger.info(
+            "mobility: could not engage %s on arrival: %s",
+            session_id,
+            engagement.get("detail") or "no reason given",
+        )
+    return engagement
 
 
 def _finish_from_tombstone(
@@ -2213,6 +2344,12 @@ def _destination_invite(
     # that refuses), so it travels with the invite, bounded by the same cap the CLI
     # applies.
     wait_s = _wait_seconds(frame.get("wait_s"))
+    # THE MOVE'S ONE OPT-IN, CARRIED LIKE ``wait_s`` AND FOR THE SAME REASON: the step
+    # it configures runs HERE (this device is the destination), so a flag that stopped
+    # at the inviter would be a promise nobody keeps. Read with ``bool(...or False)``
+    # so a peer older than this field — which sends no key at all — arrives cold,
+    # exactly as it did before the flag existed.
+    engage_on_arrival = bool(frame.get("engage_on_arrival") or False)
     owner_device = link.device_id
     owner_name = server._member_name(owner_device)  # noqa: SLF001
     if not keep and _owned_here(server, session_id):
@@ -2253,6 +2390,7 @@ def _destination_invite(
                 # THE ID THE ACK ALREADY CARRIED, so the copy is adopted under the id
                 # the inviter was told about rather than a second, unreachable one.
                 adopt_under_id=new_id,
+                engage_on_arrival=engage_on_arrival,
             )
         except Exception:  # noqa: BLE001 — the inviter polls durable state, not this
             logger.debug("mobility: invited pull of %s failed", session_id, exc_info=True)
@@ -2952,22 +3090,48 @@ def local_move_handler(server: "RelayServer") -> Any:
             return _move_refusal(session_id, "not_owner", "no conversation was named")
         keep = bool(frame.get("keep"))
         wait_s = float(frame.get("wait_s") or 0.0)
+        # THE FLAG IS READ AS ``bool``, so a client older than it sends nothing and an
+        # older DESTINATION that never learned the key ignores it: absent reads as
+        # False on both hops, which is the default-off contract stated at
+        # ``SessionMoveResult``. A non-bool (a string from a hand-rolled client) is
+        # not a direction to engage either — the same reading every other optional
+        # field on this frame gets.
+        engage_on_arrival = bool(frame.get("engage_on_arrival") or False)
         to = str(frame.get("to") or "local")
         try:
             reconcile(server.root, server=server, only=session_id)
         except Exception:  # noqa: BLE001 — recovery is best effort
             logger.debug("mobility: reconcile before a move failed", exc_info=True)
         if to == "local":
-            return _recall(server, session_id, keep=keep, wait_s=wait_s)
-        return _offload(server, session_id, to=to, keep=keep, wait_s=wait_s)
+            return _recall(
+                server, session_id, keep=keep, wait_s=wait_s, engage_on_arrival=engage_on_arrival
+            )
+        return _offload(
+            server,
+            session_id,
+            to=to,
+            keep=keep,
+            wait_s=wait_s,
+            engage_on_arrival=engage_on_arrival,
+        )
 
     return _handle
 
 
 def _recall(
-    server: "RelayServer", session_id: str, *, keep: bool, wait_s: float
+    server: "RelayServer",
+    session_id: str,
+    *,
+    keep: bool,
+    wait_s: float,
+    engage_on_arrival: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
-    """``--to local``: this device is the destination and pulls."""
+    """``--to local``: this device is the destination and pulls.
+
+    ``engage_on_arrival`` travels straight through to ``_destination_move`` because
+    THIS device is both the requester and the destination on this route — the flag
+    asks for an engage here, and nothing has to cross a link to carry it.
+    """
     from local_operator.network import sync as sync_mod
 
     if _owned_here(server, session_id):
@@ -3024,6 +3188,7 @@ def _recall(
         wait_s=wait_s,
         owner_device=owner_device,
         owner_name=owner_name,
+        engage_on_arrival=engage_on_arrival,
     )
     return result or refusal or _move_refusal(session_id, "unreachable", "the move did not finish")
 
@@ -3120,7 +3285,13 @@ def _peer_may_not_take(
 
 
 def _offload(
-    server: "RelayServer", session_id: str, *, to: str, keep: bool, wait_s: float
+    server: "RelayServer",
+    session_id: str,
+    *,
+    to: str,
+    keep: bool,
+    wait_s: float,
+    engage_on_arrival: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """``--to <peer>``: this device owns the session and asks the peer to pull.
 
@@ -3186,6 +3357,13 @@ def _offload(
                 # where the busy answer is produced (the destination's loop), so
                 # a ``--wait`` that stops at this device is a promise nobody keeps.
                 "wait_s": wait_s,
+                # ... AND SO DOES THE ENGAGE, for exactly the same reason: the runtime
+                # is started by the device that adopts the conversation, which is the
+                # one this frame is addressed to. SENT ON EVERY INVITE, never only when
+                # true: the key is present whatever its value, and a MISSING key reads as
+                # off — the older-peer half of the contract, which is what
+                # ``request_move`` sends the same field for on the way in.
+                "engage_on_arrival": engage_on_arrival,
                 "to_device": target_device,
             }
         )
@@ -3491,6 +3669,7 @@ def request_move(
     wait_s: float = 0.0,
     root: Path | None = None,
     from_replica: bool = False,
+    engage_on_arrival: bool = False,
 ) -> SessionMoveResult | SessionMoveRefusal:
     """Move (or with ``keep``, copy) ``session_id`` to the device named by ``to``.
 
@@ -3498,6 +3677,11 @@ def request_move(
     device. ``wait_s`` re-polls a busy source every 5 s for up to that long
     (``--wait N``). Returns one of the two contract shapes above and never raises
     for a refusal.
+
+    ``engage_on_arrival`` asks the DESTINATION to start the conversation's runtime as
+    soon as the copy lands, so it is live there without a first prompt (the engage is
+    a separate act on a move that has already committed; see
+    ``_arrival_engagement``). Default off, and it changes nothing when off.
 
     RUN THROUGH THIS DEVICE'S RELAY, not by opening a peer link here: the relay
     owns the links and is the only process that speaks the mesh, and a second
@@ -3536,6 +3720,10 @@ def request_move(
         to=str(to),
         keep=bool(keep),
         wait_s=float(wait_s or 0.0),
+        # SENT ON EVERY REQUEST, never only when true: the destination reads a missing
+        # key and a false one the same way (off), and a frame whose shape depends on a
+        # boolean is one a future reader has to prove is not load-bearing.
+        engage_on_arrival=bool(engage_on_arrival),
     )
     if reply is None:
         return _relay_refusal(session_id, "relay_unavailable", _relay_message())

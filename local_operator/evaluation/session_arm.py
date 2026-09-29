@@ -32,13 +32,27 @@ STATUS VOCABULARY (the pilot arm's record, not the sealed-bundle format).
 ``completed`` (the model declared finish), ``agent_stop`` (the turn ended
 without a terminal batch), ``truncated`` (the step budget or the wall bound
 ended the run; the state reached is still scored), ``failed_pre_bundle`` (the
-environment never came up), ``failed`` (the run died mid-episode). The record
-is a directory with ``events.jsonl`` (the session's own event stream, via
-``headless_print.printable_event`` -- the same projection ``exec --json``
-prints), ``outcome.json``, and ``score.json``. It is deliberately NOT the
-sealed evidence-bundle format: converging the pilot's record onto the campaign
-format is the next arm's decision, and claiming comparability early would be
-the one thing a benchmark must not do.
+environment never came up, including a REFUSAL TO START: the record sink
+refuses before ``launch`` when the volume cannot hold the expected record plus
+its seal reserve), ``failed`` (the run died mid-episode).
+
+The record is a directory with ``events.jsonl`` (the session's own event
+stream, via ``headless_print.printable_event`` -- the same projection ``exec
+--json`` prints), ``outcome.json``, ``score.json``, and -- while the run is
+live -- ``seal.reserve``, the pre-allocated margin the seal spends when the
+volume is full. It is deliberately NOT the sealed evidence-bundle format:
+converging the pilot's record onto the campaign format is the next arm's
+decision, and claiming comparability early would be the one thing a benchmark
+must not do.
+
+DURABILITY IS PART OF THE RECORD, not a wrapper around it (``record_sink``
+carries the full account and the measurements): a shared volume that fills
+mid-run may cost the record's tail, but it must never again cost the run. A
+torn record still returns the run's real status, steps and score, and says so
+in ``record_incomplete``/``record_diagnostic`` -- measured 2026-09-28, two
+episodes whose interactions completed were sealed ``failed / steps: 0`` by a
+single sink write meeting ENOSPC, destroying $2.8 of committed spend and
+reading as "the arm failed to act".
 """
 
 from __future__ import annotations
@@ -90,6 +104,7 @@ from local_operator.evaluation.lifecycle import (
     aggregate_cleanup,
 )
 from local_operator.evaluation.protocol import ActionBatch, Observation
+from local_operator.evaluation.record_sink import RecordSink, RecordSinkError
 from local_operator.evaluation.runner.action_tool import (
     ACTION_TOOL_NAME,
     PendingObservationToken,
@@ -908,6 +923,36 @@ def session_tool_names(session: Any) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+def _record_diagnostic(error: BaseException) -> str:
+    """The sentence a record-level failure leaves behind, classified not repr'd.
+
+    A sink failure already carries its own legible sentence (naming the volume
+    and the bytes that did land); anything else on the record path is reported
+    by its class and message. The distinction this preserves is the one the
+    ``steps=0`` artifact destroyed: an environment that ran out of room is not
+    the run misbehaving.
+    """
+
+    if isinstance(error, RecordSinkError):
+        return error.sentence
+    return f"{type(error).__name__}: {error}"
+
+
+def _first_record_failure(
+    record: RecordSink, errors: Sequence[BaseException]
+) -> BaseException | None:
+    """The first failure that makes this record incomplete, sink-first.
+
+    The sink's own failure is preferred because it is the classified one (it
+    names the volume and the bytes that landed); ``errors`` carries the rest of
+    the record path's failures in the order they were captured.
+    """
+
+    if record.failure is not None:
+        return record.failure
+    return errors[0] if errors else None
+
+
 @dataclass(frozen=True)
 class SessionArmOutcome:
     """What happened in the pilot arm, and where its record lives."""
@@ -923,25 +968,16 @@ class SessionArmOutcome:
     rescue_complete: bool | None = None
     tool_names: tuple[str, ...] = ()
     resolved_sources: Mapping[str, str] = field(default_factory=dict)
+    #: Whether the record is a complete archive of the run. ``True`` means the
+    #: sink met a storage failure -- almost always a full volume on this shared
+    #: host -- and the record stops at its last complete line; ``record_diagnostic``
+    #: carries the classified sentence (out-of-room vs anything else) and how
+    #: many bytes did land. The status/steps/score beside these fields are the
+    #: RUN's own facts and stay true: measured 2026-09-28, a torn record must
+    #: never again read as "the arm failed to act".
+    record_incomplete: bool = False
+    record_diagnostic: str | None = None
     duration_ms: int = 0
-
-
-class _RecordWriter:
-    """Append-only JSONL record for one episode; every line is flushed."""
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self._handle = path.open("a", encoding="utf-8")
-
-    def write(self, kind: str, payload: Mapping[str, Any]) -> None:
-        self._handle.write(
-            json.dumps({"kind": kind, **payload}, ensure_ascii=False, default=str) + "\n"
-        )
-        self._handle.flush()
-
-    def close(self) -> None:
-        self._handle.close()
 
 
 async def run_session_episode(
@@ -958,6 +994,7 @@ async def run_session_episode(
     launch: Any = AdapterSupervisor.launch,
     rescue: Any = run_rescue,
     confinement_root: Path | None = None,
+    session_opener: Any = None,
 ) -> SessionArmOutcome:
     """Run ONE episode as a session: launch, reset, prompt, score, clean up.
 
@@ -972,9 +1009,29 @@ async def run_session_episode(
     """
 
     started_ms = int(time.time() * 1000)
+    # Record-level failures that are not the sink's own storage failures (an
+    # event-fold error, a write into a closed sink). Declared before the try so
+    # the failure path can report them too.
+    record_errors: list[BaseException] = []
     record_root = config.evidence_root / f"{spec.episode_id}-{SESSION_ARM_ID}"
-    record_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    record = _RecordWriter(record_root / "events.jsonl")
+    # PRE-FLIGHT, BEFORE LAUNCH. The sink refuses to open when the volume cannot
+    # hold the expected record plus its seal reserve (see ``record_sink``), so a
+    # volume that cannot finish the job is refused while the refusal is still
+    # free -- measured 2026-09-28: two episodes whose interaction completed were
+    # voided at the seal when a shared host filled mid-run, $2.8 of committed
+    # spend with nothing reportable. The refusal is a normal outcome carrying the
+    # sink's own sentence, never a traceback: nothing was allocated, so there is
+    # nothing to rescue.
+    try:
+        record = RecordSink(record_root / "events.jsonl")
+    except RecordSinkError as error:
+        return SessionArmOutcome(
+            status="failed_pre_bundle",
+            episode_id=spec.episode_id,
+            record_root=record_root,
+            diagnostic=error.sentence,
+            duration_ms=int(time.time() * 1000) - started_ms,
+        )
 
     supervisor: Any = None
     adapter_session: VerifiedAdapterSession | None = None
@@ -1126,14 +1183,15 @@ async def run_session_episode(
         episode_session = validate_episode_session_spec(spec=session_spec)
         if episode_session.name is None and display_name:
             episode_session = replace(episode_session, name=display_name)
-        record_errors: list[BaseException] = []
 
         def _sink(event: AgentEvent) -> None:
             # The sink sits on the engine's own dispatch path, where handler
-            # errors are isolated and swallowed -- so a recording failure is
-            # captured HERE, reported in the outcome, and the run continues: a
-            # torn record stays visible, and a paid episode is not lost to a
-            # logging fault.
+            # errors are isolated and swallowed. A storage failure is already
+            # classified by ``RecordSink.write`` itself and never raises; this
+            # catch is for everything ELSE the record path can raise (an
+            # event-fold error, a write after close) -- captured here, reported
+            # in the outcome, and the run continues: a torn record stays
+            # visible, and a paid episode is not lost to a logging fault.
             try:
                 _on_event(record, bridge, event)
             except BaseException as error:  # noqa: BLE001 - see above
@@ -1144,6 +1202,7 @@ async def run_session_episode(
             spec=episode_session,
             roots=roots,
             on_event=_sink,
+            session_opener=session_opener,
             confinement_root=confinement_root,
         )
         try:
@@ -1204,10 +1263,19 @@ async def run_session_episode(
                     timeout=config.score_timeout,
                 )
             ).score
-            (record_root / "score.json").write_text(
-                json.dumps(score.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            try:
+                # Through the sink's seal path, which spends the reserve when
+                # the volume is full. Its failure is a RECORD failure, not a
+                # score failure: the object above still reaches the outcome, so
+                # the paid score is never orphaned by the disk (measured: the
+                # voided runs' ``score.json`` survived while the outcome that
+                # would have linked it said ``score: null``).
+                record.seal_write(
+                    record_root / "score.json",
+                    json.dumps(score.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+                )
+            except RecordSinkError as error:
+                record_errors.append(error)
         except BaseException as error:
             # ADAPTER CONTRACT: score() returns a SCORED artifact or raises,
             # and a raise is not a reason to skip cleanup -- the worker is
@@ -1247,8 +1315,12 @@ async def run_session_episode(
             _discard_descriptor(config)
         if score_error is not None:
             raise score_error
-        if record_errors:
-            raise SessionArmError(f"the record sink failed: {record_errors[0]!r}")
+        # The record's own failure is a property of the RECORD, not of the run:
+        # the run is reported with its real status, steps and score, and the
+        # record says what it lost. The old shape raised ``SessionArmError``
+        # here, which replaced the whole outcome with ``failed / steps: 0`` and
+        # burned the product of the spend.
+        record_failure = _first_record_failure(record, record_errors)
         outcome = SessionArmOutcome(
             status=status,
             episode_id=spec.episode_id,
@@ -1256,6 +1328,10 @@ async def run_session_episode(
             score=score,
             steps=steps,
             terminal_reason=terminal_reason,
+            record_incomplete=record_failure is not None,
+            record_diagnostic=(
+                _record_diagnostic(record_failure) if record_failure is not None else None
+            ),
             rescue_required=rescue_required,
             rescue_complete=rescue_complete,
             tool_names=tool_names,
@@ -1285,6 +1361,11 @@ async def run_session_episode(
             rescue_complete = await _attempt_rescue(
                 descriptor=descriptor, config=config, secrets=secrets, rescue=rescue
             )
+        # The terminal error line comes FIRST: it is itself a sink write the
+        # full volume may refuse, and a record failure it raises belongs in the
+        # outcome below rather than after it was computed.
+        record.write("error", {"diagnostic": f"{type(error).__name__}: {error}"})
+        record_failure = _first_record_failure(record, record_errors)
         outcome = SessionArmOutcome(
             status="failed_pre_bundle" if adapter_session is None else "failed",
             episode_id=spec.episode_id,
@@ -1292,26 +1373,73 @@ async def run_session_episode(
             diagnostic=f"{type(error).__name__}: {error}",
             rescue_required=rescue_required,
             rescue_complete=rescue_complete,
+            record_incomplete=record_failure is not None,
+            record_diagnostic=(
+                _record_diagnostic(record_failure) if record_failure is not None else None
+            ),
             duration_ms=int(time.time() * 1000) - started_ms,
         )
-        record.write("error", {"diagnostic": outcome.diagnostic})
     finally:
         if bridge is not None:
             await bridge.stop()
         await _close_adapter_session(adapter_session, supervisor, spec, config, rescue_required)
-        record.close()
 
-    (record_root / "outcome.json").write_text(
-        json.dumps(_outcome_json(outcome), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    # --- the seal -----------------------------------------------------------
+    # Every other writer has stopped above, so nothing is competing with these
+    # writes and the record's own failure state is final. The terminal marker is
+    # tolerant (it names what the record lost, in the record itself); the outcome
+    # goes through the seal path (reserve-backed), and the reserve is released
+    # no matter how either went. The outcome OBJECT returns in every case -- the
+    # runner prints it to the log -- so a dead volume costs the disk copy of the
+    # summary, never the summary.
+    if record.failure is not None:
+        record.write(
+            "record_incomplete",
+            {
+                "diagnostic": record.failure.sentence,
+                "out_of_room": record.failure.out_of_room,
+                "bytes_written": record.bytes_written,
+                "lines_written": record.lines_written,
+                "failures": record.failures,
+            },
+        )
+    record.close()
+    seal_error: RecordSinkError | None = None
+    try:
+        record.seal_write(
+            record_root / "outcome.json",
+            json.dumps(_outcome_json(outcome), indent=2, sort_keys=True) + "\n",
+        )
+    except RecordSinkError as error:
+        # A failed outcome seal is not a stderr-only note: the disk copy of the
+        # summary is part of the archive ``record_incomplete`` describes, so the
+        # fact re-enters the outcome below -- the object the runner prints and
+        # returns -- rather than stopping at the console (review round 1,
+        # R1-F3). ``SessionArmOutcome`` is frozen, so this is a ``replace``.
+        seal_error = error
+        print(
+            f"the episode outcome could not be written to {record_root}: {error.sentence}",
+            file=sys.stderr,
+        )
+    finally:
+        record.release_reserve()
+    if seal_error is not None:
+        # An EARLIER record failure stays the diagnostic when there is one (it
+        # is the classified root cause; this is its consequence); the seal
+        # failure's own sentence is used only when the record path was clean up
+        # to the seal.
+        outcome = replace(
+            outcome,
+            record_incomplete=True,
+            record_diagnostic=outcome.record_diagnostic or _record_diagnostic(seal_error),
+        )
     return outcome
 
 
 async def _await_action_tool(
     handle: Any,
     declaration: ActionServerDeclaration,
-    record: "_RecordWriter",
+    record: RecordSink,
     *,
     timeout_s: float = 30.0,
 ) -> bool:
@@ -1372,7 +1500,7 @@ def _cleanup_forces_rescue(plan: CleanupPlan, receipts: Sequence[Any]) -> bool:
         return True
 
 
-def _on_event(record: _RecordWriter, bridge: ActionBridge, event: AgentEvent) -> None:
+def _on_event(record: RecordSink, bridge: ActionBridge, event: AgentEvent) -> None:
     """One sink for the whole session stream: record it, fold it, count it."""
 
     bridge.fold(event)
@@ -1380,7 +1508,7 @@ def _on_event(record: _RecordWriter, bridge: ActionBridge, event: AgentEvent) ->
 
 
 def _make_execute(
-    adapter_session: VerifiedAdapterSession, config: EpisodeConfig, record: _RecordWriter
+    adapter_session: VerifiedAdapterSession, config: EpisodeConfig, record: RecordSink
 ) -> ExecuteBatch:
     """The execution seam: one batch, with the runner's read-back recovery.
 
@@ -1577,6 +1705,8 @@ def _outcome_json(outcome: SessionArmOutcome) -> dict[str, Any]:
         "diagnostic": outcome.diagnostic,
         "rescue_required": outcome.rescue_required,
         "rescue_complete": outcome.rescue_complete,
+        "record_incomplete": outcome.record_incomplete,
+        "record_diagnostic": outcome.record_diagnostic,
         "tool_names": list(outcome.tool_names),
         "resolved_sources": {name: str(path) for name, path in outcome.resolved_sources.items()},
         "duration_ms": outcome.duration_ms,

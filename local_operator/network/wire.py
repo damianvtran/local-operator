@@ -115,8 +115,16 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "session-mobility-v1",
     "credential-broker-v1",
     "compute-pool-v1",
+    "peer-readiness-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
+#: The peer-readiness op's capability (``readiness.py``). It is advertised by
+#: every build that ships ``net_readiness``, and it is what a viewer's relay
+#: checks before asking: an OLD peer never advertised it, and asking anyway
+#: would be a request the far side answers with a not-implemented refusal it
+#: had to compose. Named here so the tuple above, the slice's ask condition
+#: and the tests read ONE spelling of the string.
+PEER_READINESS_V1 = "peer-readiness-v1"
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ import pytest
 from local_operator import resume
 from local_operator.network import audit as audit_mod
 from local_operator.network import cli as net_cli
-from local_operator.network import relay, store, types, wire
+from local_operator.network import readiness, relay, store, types, wire
 from tests.unit.network import conftest as net_fixtures
 
 NETWORK = "n_0123456789abcdef01234567"
@@ -39,6 +39,8 @@ ACTIONS = (
     "trust",
     "log",
     "doctor",
+    # Peer readiness (readiness.py): the install question `doctor` does not ask.
+    "ready",
     "identity",
     "uninstall",
     # The inviter's half of the pairing human step (mesh-transport-identity §5.3).
@@ -71,6 +73,22 @@ def _group_parser() -> argparse.ArgumentParser:
 def test_every_action_from_the_design_is_registered() -> None:
     group = _group_parser()
     assert set(net_fixtures.subcommands_of(group)) == set(ACTIONS)
+
+
+def test_the_ready_verb_takes_a_peer_by_name_and_json() -> None:
+    """``lop network ready [--peer <name|id>] [--json]`` — the design's surface.
+
+    ``--peer`` is a name a person types (``cloud-node-1``), so the parser
+    carries a string and the RELAY resolves it; ``--json`` is the agent path's
+    contract on every leaf verb.
+    """
+    parsed = _parser().parse_args(["network", "ready", "--peer", "cloud-node-1", "--json"])
+    assert parsed.network_command == "ready"
+    assert parsed.peer == "cloud-node-1"
+    assert parsed.json is True
+    # And a bare `lop network ready` is the every-member report, not a usage error.
+    bare = _parser().parse_args(["network", "ready"])
+    assert bare.peer == "" and bare.json is False
 
 
 def test_the_stop_verb_accepts_the_force_the_ladder_names() -> None:
@@ -742,6 +760,145 @@ def test_the_doctor_row_a_person_reads_carries_no_code_and_no_address(
     assert relay.handshake_not_attempted_reason("127.0.0.1:64994", budget="doctor") in (
         machine["checks"][4]["detail"]
     )
+
+
+def test_the_ready_verb_reads_refused_and_silent_apart(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refused connection is NOT "nothing answered" on this verb.
+
+    The operator's discriminator (the security-group case): a refusal means the
+    host is UP and nothing is listening, and doctor's own renderer maps every
+    ``connect_failed:`` stage — refusals included — to "nothing answered at
+    that address", which sends someone to check a machine that already
+    answered. That is why ``ready`` renders reachability rows through
+    ``readiness.reachability_reading`` while doctor's tables stay untouched.
+    """
+    checks: list[dict[str, Any]] = [
+        {"check": "identity", "ok": True, "detail": "present"},
+        {
+            "check": "reachability",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "endpoint": "54.1.2.3:7777",
+            "ok": False,
+            "detail": f"{relay.CONNECT_FAILED_PREFIX}TimeoutError",
+            "observed": {
+                "outcome": "no_answer",
+                "source_address": "203.0.113.7",
+                "interface": "utun4",
+                "elapsed_ms": 3000.2,
+                "budget_s": 3.0,
+                "attempted": True,
+                "last_seen_at": 1789.0,
+            },
+            "remedies": [
+                "on cloud-node-1 check it is up (`lop network status --json` there), then check "
+                "that any firewall or security group on the path admits this device's address "
+                "(203.0.113.7, via utun4)"
+            ],
+        },
+        {
+            "check": "reachability",
+            "device_id": "d_" + "c" * 32,
+            "device_name": "pi-box",
+            "endpoint": "10.0.0.9:7777",
+            "ok": False,
+            "detail": f"{relay.CONNECT_FAILED_PREFIX}ConnectionRefusedError",
+            "observed": {
+                "outcome": "refused",
+                "source_address": "10.0.0.2",
+                "interface": "en0",
+                "elapsed_ms": 12.0,
+                "budget_s": 3.0,
+                "attempted": True,
+                "last_seen_at": None,
+            },
+        },
+        {
+            "check": "readiness",
+            "capability": "operator_authority",
+            "device_id": "d_" + "b" * 32,
+            "device_name": "cloud-node-1",
+            "ok": False,
+            "code": "not_installed",
+            "detail": (
+                "operator authority is not installed on cloud-node-1: an approval that needs "
+                "the operator parks until someone installs it"
+            ),
+            "remedies": ["run `lop operator install` on cloud-node-1 (one privileged step)"],
+        },
+    ]
+    payload = {"ok": False, "identity_present": True, "checks": checks}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=False, peer="")) == 1  # noqa: SLF001
+    human = capsys.readouterr().out
+    for token in ("ConnectionRefusedError", "TimeoutError", "connect_failed"):
+        assert token not in human, (token, human)
+    assert "something answered this address and refused the connection" in human
+    assert "the host is up; nothing is listening on that port" in human
+    assert "nothing answered this address before the budget ran out" in human
+    assert "this device routes to it from 203.0.113.7 via utun4" in human
+    assert (
+        "FAIL readiness operator_authority cloud-node-1: operator authority is not installed"
+        in human
+    )
+    assert "    - run `lop operator install` on cloud-node-1 (one privileged step)" in human
+    # ``--json`` is the register the raw vocabulary belongs to, and it keeps it.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: payload)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    machine = json.loads(capsys.readouterr().out)
+    assert [row["detail"] for row in machine["checks"]] == [row["detail"] for row in checks]
+    assert machine["ok"] is False and machine["code"] == "unhealthy" and machine["message"]
+
+
+def test_ready_without_a_relay_never_passes_a_check_it_could_not_run(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No relay: the member rows say NOT PROBED and the capabilities say not asked.
+
+    A check that was never RUN did not pass. The rc still follows the checks
+    (``ok`` is the verdict, not "the command ran"), and ``--peer`` filters by
+    the name a person types even on this no-dial path.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    from local_operator.network import identity as identity_mod
+
+    identity_mod.mint(root, name="here")
+    record = types.NetworkRecord(
+        network_id=NETWORK,
+        name="home-net",
+        self_device_id="d_" + "a" * 32,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    record.members.append(
+        types.MemberRecord(
+            device_id="d_" + "b" * 32, name="cloud-node-1", endpoints=["127.0.0.1:9"]
+        )
+    )
+    store.save(record, root)
+
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: None)
+    assert net_cli._cmd_ready(Namespace(json=True, peer="")) == 1  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    reach = [row for row in payload["checks"] if row["check"] == "reachability"]
+    assert reach and reach[0]["probed"] is False
+    assert "not probed" in reach[0]["detail"]
+    caps = [row for row in payload["checks"] if row["check"] == "readiness"]
+    assert {row["capability"] for row in caps} == {
+        readiness.CAPABILITY_BUILD,
+        *readiness.PEER_SIDE_CHECKS,
+    }
+    assert all(row["ok"] is False and row["code"] == "not_asked" for row in caps)
+    assert payload["ok"] is False and payload["code"] == "unhealthy"
+
+    # The name filter reaches this path too: a peer that is not named is absent
+    # from the rows rather than reported on under a filter that was ignored.
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: None)
+    net_cli._cmd_ready(Namespace(json=True, peer="nobody"))  # noqa: SLF001
+    filtered = json.loads(capsys.readouterr().out)
+    assert not [row for row in filtered["checks"] if row["check"] == "reachability"]
 
 
 def test_the_federated_listing_header_lines_up_with_its_rows() -> None:

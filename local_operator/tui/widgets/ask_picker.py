@@ -59,6 +59,7 @@ from textual.widgets import Static
 from local_operator.ansi import strip_control_sequences
 from local_operator.harness.types import AskQuestion
 from local_operator.tui import theme as theme_mod
+from local_operator.tui.notify import remote_park_hints
 from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import wrap_cells
 
@@ -451,6 +452,11 @@ class _CardLayout:
     #: The question's wrapped lines that fit, the last marked ``…`` if any were
     #: cut off.
     question: tuple[str, ...]
+    #: The fitted REMOTE-gate hint line, drawn directly under the question, or
+    #: ``""`` for a local gate (and for a remote one whose hint the budget could
+    #: not afford). Composed once in ``tui/notify.py``; fitted to the card's
+    #: width by :meth:`AskPickerScreen._remote_hint_text`.
+    remote_hint: str
     #: The title and its rule, which are shown or dropped together.
     show_title: bool
     space_above: bool
@@ -553,6 +559,13 @@ class AskPickerScreen(Container):
     #: Focusable so the answer keys reach the card rather than the composer's
     #: buffer. Same rule the approval prompt follows, for the same reason.
     can_focus = True
+
+    #: Which park vocabulary this card's REMOTE hint speaks (see
+    #: :meth:`set_remote_device`). "ask" here, "approval" on
+    #: :class:`~local_operator.tui.widgets.approval.ApprovalPrompt`: the two
+    #: hints differ because the two gates differ — an ask is answerable from
+    #: the origin, an approval is not (design note §4).
+    REMOTE_HINT_KIND = "ask"
 
     class DrawableChanged(Message):
         """The card started or stopped having anything to paint.
@@ -715,6 +728,11 @@ class AskPickerScreen(Container):
         #: Cleared by every key that changes the answer, so the complaint can
         #: never outlive the state it describes.
         self._rejected = False
+        #: The peer device a REMOTE gate runs on, or "" for a local one. Set by
+        #: the app off ``_remote_owner_facts`` when the gate belongs to a
+        #: session on another machine; the card then carries one extra hint row
+        #: whose copy says where an allow happens (see :meth:`set_remote_device`).
+        self._remote_device = ""
         self._body: Static
 
     # -- state ---------------------------------------------------------------
@@ -1426,6 +1444,27 @@ class AskPickerScreen(Container):
         width, _ = self._screen_size()
         return max(1, width - ASK_PADDING_CELLS * 2)
 
+    def _remote_hint_text(self, width: int) -> str:
+        """The one-line hint for a gate on another device, fitted to ``width``.
+
+        Longest "rung" first, shedding WHOLE clauses down the ladder
+        (``notify.remote_park_hints``) — the ``_hint_row`` discipline, for the
+        same reason its comment gives: a mid-clause clamp could print ``runs on
+        demo-laptop — allow the…``, which reads as an instruction for THIS
+        machine. Only when even the floor (``runs on <device>``) cannot fit
+        does this truncate, marked by the card's own ``truncate_cells``.
+
+        Empty for a local card (the attribute is never set), which is what
+        keeps every pre-existing frame byte-identical.
+        """
+        if not self._remote_device:
+            return ""
+        rungs = remote_park_hints(self._remote_device, self.REMOTE_HINT_KIND)
+        for rung in rungs:
+            if cell_len(rung) <= width:
+                return rung
+        return truncate_cells(rungs[-1], max(1, width))
+
     def _question_lines(self, width: int, *, reveal: bool) -> list[str]:
         """The question, wrapped and bounded by what the BODY can spare.
 
@@ -2059,6 +2098,7 @@ class AskPickerScreen(Container):
                 width=width,
                 content_width=width,
                 question=tuple(first),
+                remote_hint="",
                 show_title=False,
                 space_above=False,
                 space_below=False,
@@ -2095,6 +2135,19 @@ class AskPickerScreen(Container):
             remaining -= 2
         extra = max(0, min(self.row_count - 1, remaining))
         remaining -= extra
+        # 6b. The REMOTE gate's hint line, bought AFTER every answer row and
+        # the title, before the spacers. It annotates the question (where this
+        # gate lives and where an allow happens) but it must never cost the
+        # card an answer or its own name: at the sizes where it cannot fit
+        # beside them it yields, and the refusal path (the card is re-docked
+        # with the notice, ``attached.py``'s refusal arm) is the backstop for
+        # an allow pressed blind. A local gate computes ``""`` here, so every
+        # frame it drew before this existed is byte-identical.
+        hint = self._remote_hint_text(width)
+        if hint and remaining >= 1:
+            remaining -= 1
+        else:
+            hint = ""
         # 7a is GONE. The reveal is no longer a constant-height block bought
         # here out of the option rows' remainder; it is a per-row cap LIFT on
         # the SELECTED row inside the ONE line viewport (§4, :meth:`_cap_for_row`).
@@ -2214,6 +2267,7 @@ class AskPickerScreen(Container):
             width=width,
             content_width=content_width,
             question=tuple(kept),
+            remote_hint=hint,
             show_title=show_title,
             space_above=space_above,
             space_below=space_below,
@@ -2543,6 +2597,33 @@ class AskPickerScreen(Container):
         span = digits[0] if len(digits) == 1 else f"{digits[0]}-{digits[-1]}"
         return (span, "answer")
 
+    def set_remote_device(self, device: str) -> None:
+        """Say this gate runs on ANOTHER device, so the card carries the hint.
+
+        Set by the app for a gate whose session is a peer's — the attached
+        origin viewer — and never for a local one, so a local card's frame is
+        byte-identical to before this existed. The visible consequence is one
+        extra row under the question: ``runs on <device> — …``, composed once
+        in ``tui/notify.py`` and shed whole-clause by
+        :meth:`_remote_hint_text` at narrow widths.
+
+        WHY THE CARD NEEDS IT (design note §3-§4): an ALLOW given from this
+        surface is refused by the OWNER's runtime by design — the origin holds
+        no key a peer can verify — so the one thing the reader must not do is
+        press the affirmative blind and learn from a refusal notice. A DENY is
+        ordinary and works from here; the hint says both, naming the device in
+        every instructive clause.
+
+        Idempotent on the same label, and it repaints: the hint is part of the
+        card's text, computed on the paint path, so a set after mount has to
+        repaint to become visible rather than waiting for the next natural one.
+        """
+        cleaned = strip_control_sequences(device)
+        if cleaned == self._remote_device:
+            return
+        self._remote_device = cleaned
+        self._repaint()
+
     def answer_from_key(self, character: str) -> None:
         """Take ``character`` as an answer routed from the composer."""
         if character.isdigit():
@@ -2633,6 +2714,14 @@ class AskPickerScreen(Container):
         for line in layout.question:
             newline(None)
             out.append(line, style=fg)
+        if layout.remote_hint:
+            # The remote-gate hint sits directly under the question, in `muted`
+            # rather than `dim`: it is the one line that stops an allow being
+            # pressed on a card that cannot grant it, so it must not be the
+            # faintest text on the card (the designer round owns the final
+            # ink). One row, shed whole-clause in `_remote_hint_text`.
+            newline(None)
+            out.append(layout.remote_hint, style=muted)
         if layout.space_above:
             newline(None)
 

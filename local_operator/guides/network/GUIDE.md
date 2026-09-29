@@ -485,6 +485,15 @@ Diagnose in this order, and stop at the first answer that explains it:
    `identity_present`, the per-network rows and the log path. `relay_running` is
    true whenever a relay process of ours exists, so it is never false beside a
    `record.pid`; `relay_answering` is what this probe actually got back.
+5. `lop network ready [--peer <device>]` — readiness for offload: observed
+   reachability first, then the peer's install checks (operator authority, build
+   parity, git identity, MCP servers, the model and per-server MCP credentials),
+   every failing row carrying its exact remedy and the side to run it on. It
+   reads and creates nothing on either device.
+6. A session on a peer is waiting for approval and it cannot be allowed from
+   here — `lop network ready --peer <device>`: its `operator_authority` row says
+   whether anything there can allow; the fix is `lop operator install` on that
+   device (one privileged step). Denying works from any attached viewer.
 
 Two things that look like failures and are not: a peer that is unreachable is
 **not** an error and its sessions are simply not reachable from here; a network
@@ -583,6 +592,7 @@ lop network ls --json
 lop network show <network> --json
 lop network peers --json
 lop network doctor --json
+lop network ready --json            # --peer <device>: what a peer still needs for offload
 lop network log --json              # --follow, --limit 50, --since 15m, --export <file>
 
 # lifecycle

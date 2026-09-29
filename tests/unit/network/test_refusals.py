@@ -159,6 +159,9 @@ def test_the_relay_control_path_refuses_by_name_too(root: Path) -> None:
         # check: ``ok`` now means "the mesh is healthy", not "the command ran",
         # so rc follows the checks (QA round 1).
         ("doctor", 1),
+        # ``ready`` follows the same contract one question further out: a device
+        # with no identity and no reachable peers is not ready, and its rc says so.
+        ("ready", 1),
         ("status", 0),
     ],
 )
@@ -181,6 +184,7 @@ def test_commands_that_need_no_secret_still_work_after_a_disconnect(
         ),  # noqa: SLF001
         "log": lambda: net_cli._cmd_log(args),  # noqa: SLF001
         "doctor": lambda: net_cli._cmd_doctor(args),  # noqa: SLF001
+        "ready": lambda: net_cli._cmd_ready(args),  # noqa: SLF001
         "status": lambda: net_cli._cmd_status(args),  # noqa: SLF001
     }[command]()
     assert outcome == expect

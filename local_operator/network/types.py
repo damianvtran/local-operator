@@ -286,6 +286,13 @@ NET_OPS: tuple[str, ...] = (
     # configuration with no owner device, and a create that named one had
     # nothing on the far end to resolve it against until this existed.
     "net_definitions",
+    # PEER READINESS (readiness.py). The peer reports its OWN install facts —
+    # operator authority, git identity, user-scope MCP surface, and the default
+    # model's credential path — so a viewer can answer "can this peer complete
+    # an offload" without writing anything anywhere. Read-only, and the same
+    # least authority `net_catalog` needs: it reads files this device's own
+    # user account can already read.
+    "net_readiness",
     "net_bye",
     "ping",
 )
@@ -333,6 +340,12 @@ LOCAL_OPS: tuple[str, ...] = (
     "peer_session_create",
     "peer_session_engage",
     "peer_session_stop",
+    # The readiness report (readiness.py): a VIEWER asks its own relay whether
+    # one peer (or every peer) can complete work offloaded to it — the link's
+    # own reachability, then the peer's install facts. A local op by the
+    # ``peer_*`` boundary rule above: the ask is this device's own relay being
+    # told to look and to ask outward; the peer-scope half is ``net_readiness``.
+    "peer_readiness",
     # The on-demand half of the definitions sync (definitions.py): reach every
     # linked peer, or one named peer, and bring its definitions up to date.
     # A local op because it is this device's own relay being told to talk
@@ -447,6 +460,14 @@ OP_CAPABILITY: dict[str, str | None] = {
     # definition could not be sent and why — never silently sent with the
     # create and dropped.
     "net_definitions": "admin",
+    # ``list``, the same least authority ``net_catalog`` needs. The op READS
+    # this device's own install facts — the operator anchor's level, the global
+    # git identity, the user-scope mcp.json and the credential rows behind its
+    # servers, the configured default model — and answers names only (never
+    # credential material; ``readiness.py`` carries the sanitisation). None of
+    # those files is readable only to root or to the daemon, so a member that
+    # may look at this device's catalogue may look at its readiness too.
+    "net_readiness": "list",
     "net_bye": None,
     "ping": "list",
 }

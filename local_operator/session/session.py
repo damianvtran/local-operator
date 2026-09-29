@@ -186,6 +186,7 @@ from local_operator.incidents import (
     render_cut_off_reason,
 )
 from local_operator.model.effort import cheapest_real_rung
+from local_operator.monitors.classify import MonitorClassify
 from local_operator.monitors.delivery import (
     MonitorDelivery,
     format_monitor_delivery_text,
@@ -2186,6 +2187,15 @@ class Session:
         #: supersede journalled identity. Shared defaults never change any
         #: existing session, regardless of where its birth selection came from.
         model_source: str = "config",
+        #: The §8 classifier gate's callable for THIS session's monitor
+        #: scheduler: bounded delta → materiality class, or ``None`` ("no
+        #: classifier", fail OPEN → deliver). Composed by the factory over the
+        #: session's shared ``ClassificationService`` seam so the monitor path
+        #: rides the same cascade, breaker, credential memo and HTTP client as
+        #: the message path — a second service would be a second of each. Left
+        #: ``None`` on a session built without one (tests, embedders): the gate
+        #: then never calls anything and every change is delivered.
+        monitor_classify: MonitorClassify | None = None,
         # Called each turn with the session's live ``model_label`` so the env
         # block names the running model; accepts it positionally (``...``) and
         # may return sync or async. A provider that ignores the argument is
@@ -3174,6 +3184,7 @@ class Session:
             persist=self._persist_monitor_schedules,
             on_change=self._on_monitor_change,
             index_writable=lambda: not self._monitor_index_write_failed,
+            classify=monitor_classify,
         )
         #: Whether this session is AIDA's (``local_operator.aida``), resolved
         #: once per open by :meth:`_aida_is_hers` — one stat of

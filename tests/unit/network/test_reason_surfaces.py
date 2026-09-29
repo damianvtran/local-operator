@@ -71,6 +71,18 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
         "the relay's own sentence — the 4th read is the model receipt's detail, which "
         "says why a requested model was not applied",
     ),
+    # The move's arrival engage, when the caller asked for one (``engage_on_arrival``).
+    # ``detail`` is the ENGAGE PATH'S OWN SENTENCE — ``RelayServer.engage_session``
+    # answers in ``net_session_engage``'s vocabulary and ``_engage_failure_detail``
+    # composes it as prose for a person (it curates the device name IN and the spawned
+    # child's traceback OUT) — so the CLI prints it as the reason a runtime did not
+    # start, which is what the caller needs to tell an engagement failure from a move.
+    # Same class as ``_cmd_sessions`` above, and declared for the same reason.
+    (
+        "local_operator/cli.py",
+        "_sessions_move_words",
+        "detail",
+    ): (1, "the engage path's own sentence, printed as why the runtime did not start"),
     # The push's per-peer report: ``reason`` here is the CONFLICT's own sentence (the
     # peer composed it), printed verbatim so a person learns why a row was refused.
     # The refusal/conflict SENTENCES this module composes around the peer's own
@@ -107,9 +119,38 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # ("runtime joining", "nothing to stop"), carried verbatim exactly as the CLI's
     # receipt carries it, because a flag and its English translation on two lines is
     # the duplication UX round 3 removed.
-    ("local_operator/network/tool.py", "_render", "detail"): (
+    (
+        "local_operator/network/tool.py",
+        "_render",
+        "detail",
+    ): (
         1,
-        "the peer's own sentence for a session op, rendered verbatim",
+        "the peer's own sentence for a session op, rendered verbatim (doctor's "
+        "rows gloss through doctor_detail_words; the readiness rows moved to "
+        "readiness.render_check_lines)",
+    ),
+    # The readiness report's own sentences. Capability rows are COMPOSED as prose in
+    # ``readiness.py`` (the machine token rides ``code``, which no surface here
+    # prints); the CLI renders those sentences and the summary fragments reuse them.
+    # The reading for reachability rows READS the stage code only to classify it —
+    # every sentence it returns is authored in one place — and the one verbatim arm
+    # is the no-relay fallback's own prose row.
+    ("local_operator/network/readiness.py", "reachability_reading", "detail"): (
+        1,
+        "classifier input; the returned sentences are authored here, never echoed",
+    ),
+    (
+        "local_operator/network/readiness.py",
+        "render_check_lines",
+        "detail",
+    ): (
+        1,
+        "the ONE render loop both surfaces use (round 1, NIT-2); the row's own "
+        "composed sentence, the machine token stays in `code`",
+    ),
+    ("local_operator/network/cli.py", "_ready_failure", "detail"): (
+        2,
+        "the summary reuses the same composed sentence (readiness arm + fallback arm)",
     ),
     # The credential listing's `skipped` rows (review round 5, NIT 2). THIS VOCABULARY
     # IS THIS DEVICE'S OWN, which is why the token is shown rather than glossed or

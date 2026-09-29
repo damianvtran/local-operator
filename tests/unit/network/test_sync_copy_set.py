@@ -315,6 +315,10 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     ),
     "local_operator/session/archived.py": (1, "the archived-ids list, a store-level record"),
     "local_operator/session/search_index.py": (1, "the search index, a store-level record"),
+    "local_operator/session/transcript_index.py": (
+        1,
+        "the transcript index cache directory under the cache root, a store-level record",
+    ),
     "local_operator/session/retention.py": (
         1,
         "``sessions`` itself: the directory the entries live IN",
@@ -464,6 +468,15 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/evaluation/adapters/supervisor.py": (
         1,
         "an evaluation supervisor's rescue file",
+    ),
+    # ---- the session arm's record root (caller-supplied, never a session entry) ----
+    "local_operator/evaluation/record_sink.py": (
+        1,
+        "``SEAL_RESERVE_NAME`` (``seal.reserve``): the pre-allocated seal margin "
+        "inside the record root, which ``run_session_episode`` builds as "
+        "``config.evidence_root/<episode-id>-<arm-id>`` -- an evidence directory "
+        "the caller owns (the benchmark run root), never an entry of a session "
+        "directory; a replica re-creates the reserve rather than carrying it",
     ),
 }
 

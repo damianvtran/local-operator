@@ -312,7 +312,14 @@ SLOW_REPLY_MARGIN_S = 5.0
 #: slice (§1.1: archive/delete run the owner's own implementation) even though
 #: the refusal it answers with today lives in this module.
 SLICE_PEER_OPS: frozenset[str] = frozenset(
-    {"net_session_move", "net_sync", "net_broker", "net_session_lifecycle", "net_definitions"}
+    {
+        "net_session_move",
+        "net_sync",
+        "net_broker",
+        "net_session_lifecycle",
+        "net_definitions",
+        "net_readiness",
+    }
 )
 
 #: The LOCAL control ops a slice module may register (see ``types.LOCAL_OPS``,
@@ -326,6 +333,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "credential_report",
         "credential_placement",
         "definitions_sync",
+        "peer_readiness",
     }
 )
 
@@ -338,6 +346,7 @@ SLICE_MODULES: tuple[str, ...] = (
     "local_operator.network.sync",
     "local_operator.network.credentials",
     "local_operator.network.definitions",
+    "local_operator.network.readiness",
 )
 
 #: Which link, if any, THIS thread is currently serving a request for.
@@ -2954,6 +2963,13 @@ class PeerLink:
         self.epoch = result.epoch
         self.phase: LinkPhase = result.phase
         self.capabilities = frozenset(result.peer_capabilities)
+        # The PEER'S build stamp, kept beside its capabilities because the two
+        # travel together in the handshake (hello/challenge, inside the
+        # transcript the auth MAC covers) and are read together by
+        # ``peer_status``: a stale build is how a peer comes to lack a
+        # capability this device expects. An old peer sends none and this is
+        # `{}` — "not known", never a default that would read as parity.
+        self.peer_build: dict[str, Any] = dict(result.peer_build or {})
         self.peer_addr = ""
         self.opened_at = time.time()
         self.last_frame_at = time.time()
@@ -6217,8 +6233,34 @@ class RelayServer:
         Carries NO prompt (§2.2): a prompt smuggled into an engage would be a
         second way to start a turn, and the one way is `prompt`.
         """
-        session_id = str(frame.get("session_id") or "")
-        cwd = str(frame.get("cwd") or "")
+        return self.engage_session(
+            str(frame.get("session_id") or ""), cwd=str(frame.get("cwd") or "")
+        )
+
+    def engage_session(self, session_id: str, *, cwd: str = "") -> dict[str, Any]:
+        """Engage one of THIS device's sessions, answering in the engage op's shape.
+
+        THE ACT AND ITS VOCABULARY, IN ONE PLACE. A session can be engaged from
+        inside the process as well as over the mesh: a conversation that ARRIVES on
+        this device with ``engage_on_arrival`` asks its new owner for exactly this
+        act (``mobility._destination_move``), and a second spelling of "start or
+        join a runtime" there would be a second error vocabulary for one outcome —
+        which is why the move's step calls this method rather than reaching for
+        ``_engage_locally`` beside it.
+
+        Both callers go through ``_engage_locally``, the single entry point every
+        engage path in the product uses (a viewer's first message, a wake,
+        ``lop exec``), so INV-1's guard and the lease arbitration that decides WHO
+        RUNS (``launch.engage_runtime``) apply here unchanged. A caller that arrives
+        after a runtime already holds the lease therefore loses there — by joining
+        the winner or by a sentence — rather than by a check of its own.
+
+        ``engaged`` is the outcome; ``detail`` is the sentence when it is ``False``
+        and the state when it is ``True``. Nothing here raises: an engage that could
+        not be started is an answer, because the callers that need it most (a move
+        that has already committed, a create that has already answered) must not
+        lose their own result to it.
+        """
         error = self._engage_locally(session_id, cwd=cwd)
         if error:
             return {"engaged": False, "detail": error, "session_id": session_id}
@@ -9344,6 +9386,18 @@ class RelayServer:
                         "endpoints": list(member.endpoints),
                         "last_seen_at": member.last_seen_at,
                         "suspect": member.suspect,
+                        # THE UI'S VERSION LINE (mesh-ui; slice 1 of the mesh
+                        # remote-offload workstream). Both keys are present with
+                        # both values on EVERY row — an absent key is not a claim
+                        # the row store can carry, and an absent VALUE must read
+                        # as "not known" (an older peer, or no link this pass),
+                        # never as a default: `{}` / `[]` here, a real stamp and a
+                        # real list once a probe answered. Cheap by construction:
+                        # the link is the one the probe above already made, so
+                        # these two reads add no dial — the row's liveness is
+                        # unchanged.
+                        "build": dict(link.peer_build) if link is not None else {},
+                        "capabilities": sorted(link.capabilities) if link is not None else [],
                     }
                 )
         return peers
