@@ -1935,6 +1935,46 @@ def test_build_worker_argv_threads_workstream_to_the_worker(
     assert seen["workstream"] is True
 
 
+def test_build_worker_argv_threads_the_output_contract_flags() -> None:
+    """`--background` is the same request run elsewhere, and the schema path
+    is absolutised BEFORE this boundary: the worker resolves it from its own
+    cwd, so a relative path would silently name a different file there."""
+    args = ExecArgs(
+        output_format="json", output_schema="/abs/report.schema.json", output_retries=3
+    )
+    argv = build_worker_argv("do it", args)
+    assert "--output-format=json" in argv
+    assert "--output-schema=/abs/report.schema.json" in argv
+    assert "--output-retries=3" in argv
+    parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
+    assert parsed.output_format == "json"
+    assert parsed.output_schema == "/abs/report.schema.json"
+    assert parsed.output_retries == 3
+    # Opt-in: an unenforced run carries none of the three.
+    bare = build_worker_argv("bare", ExecArgs())
+    assert "--output-format" not in bare
+    assert "--output-schema" not in bare
+    assert "--output-retries" not in bare
+
+
+def test_the_status_guard_covers_the_output_contract_flags() -> None:
+    """`--status` may not combine with run options, and its guard reads
+    ``STARTUP_FIELDS`` rather than a second hand-maintained list — so
+    membership in that tuple IS the guard (see ``cli.py``'s run_options)."""
+    from local_operator.exec_startup import STARTUP_FIELDS
+
+    assert "output_format" in STARTUP_FIELDS
+    assert "output_schema" in STARTUP_FIELDS
+    assert "output_retries" in STARTUP_FIELDS
+    # And the argv spelling STARTUP_FIELDS derives is what the worker parser
+    # accepts (the underscore-to-dash form build_worker_argv emits).
+    parsed = exec_worker.build_parser().parse_args(
+        ["--prompt=p", "--output-format=json", "--output-retries=2"]
+    )
+    assert parsed.output_format == "json"
+    assert parsed.output_retries == 2
+
+
 def test_the_foreground_factory_carries_workstream_to_the_stamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

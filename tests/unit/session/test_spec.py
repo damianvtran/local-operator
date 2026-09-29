@@ -215,6 +215,11 @@ def test_spec_field_surface_is_pinned() -> None:
         "name",
         "goal",
         "notifications",
+        # The output-contract fields (additive; applied post-open through
+        # ``Session.set_output_contract``, never through the namespace).
+        "output_format",
+        "output_schema",
+        "output_retries",
     }
 
 
@@ -320,3 +325,44 @@ def test_importing_spec_leaves_the_engine_off_the_graph() -> None:
         offenders = sorted(m for m in modules if m == banned or m.startswith(banned + "."))
         assert not offenders, f"{banned} is back on local_operator.session.spec's import path"
     assert "local_operator.paths" in modules
+
+
+# --- output contract fields --------------------------------------------------------
+
+
+def test_output_contract_field_refusals() -> None:
+    """The three fields are cheaply validated where they are written: a spec
+    that cannot possibly work never reaches construction."""
+    with pytest.raises(SessionSpecError, match="output_format must be one of"):
+        SessionSpec(output_format="xml")
+    with pytest.raises(SessionSpecError, match="output_schema requires output_format"):
+        SessionSpec(output_schema={"type": "object"})
+    with pytest.raises(SessionSpecError, match="output_retries requires output_format"):
+        SessionSpec(output_retries=1)
+    for retries in (-1, 6):
+        with pytest.raises(SessionSpecError, match="output_retries must be between 0 and 5"):
+            SessionSpec(output_format="json", output_retries=retries)
+
+
+def test_output_contract_fields_default_off_and_survive_with_resume() -> None:
+    spec = SessionSpec(
+        output_format="json", output_schema={"type": "object"}, output_retries=1
+    )
+    resumed = spec.with_resume("abc123def456")
+    assert resumed.output_format == "json"
+    assert resumed.output_schema == {"type": "object"}
+    assert resumed.output_retries == 1
+    # Default off, and the eight-field namespace pin is untouched by the three
+    # new fields (they are applied post-open, like tools/goal/name).
+    assert SessionSpec().output_format is None
+    assert "output_format" not in vars(SessionSpec().to_namespace())
+    assert "output_format" not in vars(spec.to_runner_args())
+
+
+def test_the_spec_format_vocabulary_matches_the_contracts() -> None:
+    """The tuple duplicated in ``spec.py`` (stdlib-only by design) is pinned to
+    the contract's own list, so the duplication cannot drift."""
+    from local_operator.output_contract import OUTPUT_FORMATS
+    from local_operator.session import spec as spec_module
+
+    assert spec_module._OUTPUT_FORMATS == OUTPUT_FORMATS
