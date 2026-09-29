@@ -43,6 +43,10 @@ class MonitorDelivery:
     held_by_cap: int = 0
     final: bool = False
     description: str = ""
+    #: §14.4: copied from the spec so the session can read it off the delivered
+    #: message's ``details``. Default False (a monitor is quiet unless armed
+    #: with notify), so existing construction sites keep today's behaviour.
+    notify: bool = False
 
 
 def format_monitor_delivery_text(delivery: MonitorDelivery) -> str:

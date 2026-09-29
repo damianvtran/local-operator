@@ -56,6 +56,7 @@ from .cutpoint import (
     replay_preserved_turns,
     task_boundary_floor,
 )
+from .marker import split_leading_marker
 from .pruning import (
     MIN_PRUNE_TOKENS,
     SUPERSEDED_NOTICE,
@@ -161,6 +162,7 @@ __all__ = [
     "resolve_wire_bytes_trigger",
     "serialize_conversation",
     "should_compact",
+    "split_leading_marker",
     "summarize_messages",
     "task_boundary_floor",
     "upsert_file_operations",

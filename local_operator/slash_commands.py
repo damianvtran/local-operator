@@ -219,7 +219,12 @@ PROJECT_PAGE_VERBS: tuple[str, ...] = ("show", "board", "timeline")
 #: a published `argument_shape` vocabulary, because ``/aida <anything else>``
 #: is a REQUEST (arbitrary text she is given), and a SUBCOMMAND shape would
 #: make the command route refuse one (the ``/team ops fix this`` precedent).
-#: One escape covers all three: ``/aida =pause ...`` is a message.
+#: One escape covers all of them: ``/aida =pause ...`` is a message.
+#:
+#: These count as the WHOLE argument; ``rename`` — parsed beside them in
+#: ``_cmd_aida`` — is the one that TAKES the rest of the line as its
+#: argument (``/aida rename <name>``), because a name with a space in it is
+#: one name, not three words of a request.
 AIDA_SUBCOMMANDS: tuple[str, ...] = ("pause", "resume", "status")
 
 #: The verbs whose SECOND argument slot is an existing project NAME (so the
@@ -981,7 +986,10 @@ SLASH_COMMANDS: list[SlashCommand] = [
     #
     # `pause`/`resume`/`status` are RESERVED words (AIDA_SUBCOMMANDS) parsed
     # by the handler, the `/team chart` / `/project` precedent; a message that
-    # merely starts with one is escaped with `=`. ANY, not SUBCOMMAND, for the
+    # merely starts with one is escaped with `=`. `rename` rides the same
+    # namespace as its one ARGUMENT-TAKING verb (`/aida rename <name>`; bare
+    # `rename` reports), because she is renameable and the command surface
+    # says so. ANY, not SUBCOMMAND, for the
     # reason `AIDA_SUBCOMMANDS` documents: everything else after the word is
     # the request, and the `/team` shape (`consumes_prompt` + `prefixes_text`)
     # is what makes an inline engage reassemble the draft as that request

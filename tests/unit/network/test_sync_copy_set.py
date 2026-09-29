@@ -290,6 +290,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``ROLE_NAME``: the packaged seed's NAME (an identifier resolved through the "
         "agent registry), not a file in a session directory",
     ),
+    "local_operator/aida/naming.py": (
+        1,
+        '``DEFAULT_NAME``: her display name\'s fallback ("Aida"), a human name rather '
+        "than a session entry — it matches only this guard's NAME-suffix heuristic: "
+        "``aida.name`` lives in config.yml, and the session title it syncs is written "
+        "through the session layer's own writers",
+    ),
     "local_operator/providers/oauth/zai.py": (1, "a keychain entry's name, not a path"),
     "local_operator/providers/oauth/kimi.py": (
         1,

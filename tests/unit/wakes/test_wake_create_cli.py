@@ -42,6 +42,7 @@ def _args(**kwargs: object) -> argparse.Namespace:
         "every": "",
         "until": "",
         "limit": None,
+        "notify": False,
     }
     base.update(kwargs)
     return argparse.Namespace(**base)
@@ -117,6 +118,23 @@ def test_the_advertised_time_forms_all_parse(tmp_path: Path, when: str) -> None:
 
     _session(tmp_path, "wakecreate01")
     assert _wake_create(_args(when=when)) == 0
+
+
+def test_notify_is_opt_in_and_lands_on_the_schedule(tmp_path: Path) -> None:
+    """§14.4: `--notify` is the CLI end of the wake's notify parameter, and
+    the default stays quiet — a scripted arm matches the tool's contract."""
+    from local_operator.cli import _wake_create
+    from local_operator.wakes.store import read_entry
+
+    _session(tmp_path, "wakecreate01")
+    assert _wake_create(_args(message="quiet")) == 0
+    assert _wake_create(_args(message="loud", notify=True)) == 0
+
+    entry = read_entry(tmp_path, "wakecreate01")
+    assert entry is not None
+    by_message = {s["message"]: s for s in entry["schedules"]}
+    assert by_message["quiet"].get("notify", False) is False
+    assert by_message["loud"]["notify"] is True
 
 
 def test_a_recurring_wake_stores_its_interval(tmp_path: Path) -> None:

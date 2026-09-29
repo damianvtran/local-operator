@@ -107,6 +107,44 @@ def _bind_and_start(server_b: relay.RelayServer, record: Any) -> str:
     return live
 
 
+def _settle_the_peer_link(
+    server_a: relay.RelayServer, server_b: relay.RelayServer, record: Any, live: str
+) -> None:
+    """Establish A's link to the live peer BEFORE a report composes, and settle it.
+
+    WHY THE REPORT MUST NOT DIAL LAZILY (CI run 36518398815). A report that finds no
+    link DIALS the declared endpoint, and that handshake spends the report's own
+    budget: on a loaded shard the dial can fail, and the rows then degrade to
+    ``not_asked`` ("the peer did not answer") instead of the row under test — which
+    is how ``test_an_old_peer_degrades_to_peer_too_old_and_is_never_asked`` failed
+    with ``{'not_asked'}`` against an expected ``{'peer_too_old'}``. The two cells
+    that already pinned their link (``test_a_link_that_cannot_be_pinned_…`` and
+    ``test_an_unpinnable_link_…``) dial explicitly and assert it; this is that same
+    step, shared. With the link held, the report takes the existing-link path and
+    asks the peer nothing over a fresh handshake.
+
+    ``_await_membership_pull`` follows the dial because admitting a link runs the
+    peer's own membership writers on the accept thread, and a member-row edit that
+    lands inside their window is silently dropped (review round 3, R3-1).
+
+    ORDER MATTERS AGAINST A CAPABILITY NARROWING: a link's capability set is exchanged
+    in its HANDSHAKE (``PeerLink.capabilities`` is the peer's advertised set), so a
+    cell that narrows ``wire.LINK_CAPABILITIES`` to model an old peer must warm the
+    link AFTER the narrowing — a link warmed before it still advertises the
+    capability, and the report asks a peer the cell means to leave unasked.
+    """
+    dialed, reason = server_a.dial(
+        record.network_id,
+        host=live,
+        epoch=record.epoch,
+        expected_device=server_b.identity.device_id,
+    )
+    assert dialed is not None, reason
+    link = server_a._link_for(server_b.identity.device_id)  # noqa: SLF001 — the one link seam
+    assert link is not None
+    _await_membership_pull(link)
+
+
 # ---------------------------------------------------------------------------
 # The wire: registered, asked, and the three reachability readings
 # ---------------------------------------------------------------------------
@@ -211,6 +249,7 @@ def test_a_second_endpoint_that_answers_is_reported_while_the_dead_one_is_named(
     capsys.readouterr()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, ["127.0.0.1:1", live])
 
     rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
@@ -252,6 +291,7 @@ def test_a_non_peer_listener_is_never_reported_as_the_peer(
     capsys.readouterr()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
 
     # First report: the dial identifies the peer at ``live`` and installs the link.
@@ -303,6 +343,9 @@ def test_a_verified_peer_answer_still_claims_the_peer(
     capsys.readouterr()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     live = _bind_and_start(server_b, record)
+    # NO LINK IS WARMED HERE, deliberately: this cell is the counter-cell to D1 and its
+    # subject IS the report's own dial — the row must read ``observed.outcome ==
+    # "connected"``, the socket THIS report handshook, not ``connected_link``.
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
 
     rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
@@ -488,6 +531,7 @@ def test_ready_flips_a_blocked_peer_to_ready_as_each_condition_is_fixed(
     capsys.readouterr()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
 
     # The peer's own environment: a scratch HOME with no git config, and the
@@ -599,6 +643,12 @@ def test_an_old_peer_degrades_to_peer_too_old_and_is_never_asked(
         "LINK_CAPABILITIES",
         tuple(c for c in wire.LINK_CAPABILITIES if c != wire.PEER_READINESS_V1),
     )
+    # THE LINK IS ESTABLISHED AFTER THE NARROWING, and the order is the whole point: a
+    # link's capability set is EXCHANGED IN ITS HANDSHAKE (``PeerLink.capabilities`` is
+    # the peer's advertised set), so a link warmed before this monkeypatch would still
+    # carry ``PEER_READINESS_V1`` and the report would ASK — which is exactly what this
+    # cell counts calls to forbid.
+    _settle_the_peer_link(server_a, server_b, record, live)
     rc, payload = _ready_json(capsys, "--peer", server_b.identity.name)
     assert rc == 1
     assert calls == [], "the viewer asked a peer that never advertised the capability"
@@ -635,6 +685,7 @@ def test_the_report_is_read_only_on_both_roots(
     capsys.readouterr()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
 
     _ready_json(capsys, "--peer", server_b.identity.name)
@@ -668,6 +719,7 @@ def test_peer_status_rows_carry_the_peers_build_and_capabilities(
     server_a, server_b, _host, _port = pair_devices
     record, _h, _p = _pair(pair_devices, monkeypatch)
     live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
 
     rows = [
@@ -728,6 +780,7 @@ def test_the_viewer_reports_its_own_facts_the_same_way(
     # later capture must not find two documents in it.
     capsys.readouterr()
     live = _bind_and_start(server_b, record)
+    _settle_the_peer_link(server_a, server_b, record, live)
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, [live])
     # B dials A: give B A's real address.
     with store.mutate(record.network_id, server_b.root) as copy:

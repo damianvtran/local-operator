@@ -69,7 +69,7 @@ class MonitorSpec(BaseModel):
     every_ms: int = Field(ge=MIN_MONITOR_INTERVAL_MS)
     until_at: int | None = None  # None = durable
     description: str = ""
-    notify: bool = False  # §14 — inert until the notifications slice lands
+    notify: bool = False  # §14 — rides the delivery's details; quiet stays quiet
     sort_lines: bool = False
     ignore: list[str] = Field(default_factory=list)
     cwd: str = ""  # captured at arm; the check runs with it

@@ -200,7 +200,7 @@ contains an API key, access token, refresh token, or complete stored grant.
   carries `radient_login` and `tunnel_remedy`, because a row can be `configured`
   with an unexpired access token and still be refused by the identity provider.
   **Both are objects, not strings.** `radient_login` is
-  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"|"deferred"}` —
+  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"|"deferred"|"owner_missing"}` —
   the same shape as the `login` object on `GET /v1/desktop/tunnel` — and
   `tunnel_remedy` is `{"command": str, "url": str}` or `null`, the same shape as
   `remedy` there. A renderer written from a sentence that called them a state and
@@ -213,6 +213,14 @@ contains an API key, access token, refresh token, or complete stored grant.
   resolves it. It clears by itself, so `remedy` is `null` for it and no surface
   offers a sign-in; a renderer that knows three states must treat this fourth one
   as "waiting", never as "expired".
+  `owner_missing` is the fifth state: the configuration names a login this
+  device does not have (logged out, account removed, or a config written when a
+  different row existed). It is NOT `login_required` — a fresh sign-in is a NEW
+  row and nothing re-points the tunnel configuration, so a sign-in callout for
+  it can never clear the state (issue #1711) — and `tunnel_remedy` carries the
+  command that does re-point it, `lop tunnel configure`. Renderers (including
+  local-operator-ui) should say the tunnel's saved login is gone and offer that
+  command; the sign-in sentence is wrong here.
   The verdict is decided from this machine's own credential store, but it is not
   free of the network: a stored access token outside its refresh skew makes the
   store attempt a refresh, which is a POST to a token endpoint. That one call is
@@ -268,10 +276,13 @@ alone is not an inference credential.
   `result.connector.state` is one of `parked`, `connected`, `connecting`,
   `not serving`, `stopped`, `not configured`, `unknown` (`unknown` only when a
   caller asked not to probe the loopback gateway); `result.login.state` is one
-  of `ok`, `login_required`, `unknown`, `deferred`, where `unknown` means the
-  check could not run and never means "the login is dead", and `deferred` means
-  the store is waiting out an unsettled refresh (see `GET /v1/auth/status` above:
-  self-clearing, no remedy offered). `result.remedy` is
+  of `ok`, `login_required`, `unknown`, `deferred`, `owner_missing`, where
+  `unknown` means the check could not run and never means "the login is dead",
+  `deferred` means the store is waiting out an unsettled refresh (see
+  `GET /v1/auth/status` above: self-clearing, no remedy offered), and
+  `owner_missing` means this device no longer holds the login the tunnel was
+  enrolled with — there a sign-in cannot clear the state, so `remedy` is the
+  re-point command `lop tunnel configure`. `result.remedy` is
   `{"command": str, "url": str}` or `null`: the command that clears the
   condition, with the console URL that belongs beside it. The remedy is a
   terminal command, so the UI shows it rather than running it, and this route has

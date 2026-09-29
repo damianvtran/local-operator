@@ -1630,6 +1630,13 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
     context_tokens: int | None = None
+    #: §14 (docs/design/monitor-tool.md): whether this turn's completion may
+    #: notify. The SESSION computed the value once, at turn end, and stamped it
+    #: here; every consumer gates on it and none re-derives it from the event's
+    #: other fields. Defaults True so an event constructed without the field —
+    #: a synthetic end, or one produced by a pre-field build — keeps every
+    #: existing reader's behaviour.
+    notify: bool = True
 
 
 class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
@@ -2324,6 +2331,18 @@ class LoopConfig(BaseModel):
     record_tool_call: Callable[[str, str, str, float], None] | None = Field(
         default=None, exclude=True
     )
+
+    #: Run the operator's forwarded Claude Code / Codex ``PostToolUse`` hooks
+    #: for one finished call, as ``(tool_name, args, tool_call_id, result)``,
+    #: and return the context notes the hooks produced (empty for none). The
+    #: loop appends the notes to the tool result, which is where Claude Code
+    #: puts ``additionalContext`` for this event. A callback for the reason
+    #: ``record_tool_call`` is one: the harness keeps no config dependency.
+    #: Must not raise for a hook's own failure (``hook_forwarding`` swallows
+    #: those); the loop still guards it.
+    post_tool_hooks: (
+        Callable[[str, Mapping[str, Any], str, ToolResult], Awaitable[list[str]]] | None
+    ) = Field(default=None, exclude=True)
 
     # Steering (CONSUMING) interrupts tool batches; peek (non-consuming) is
     # polled between calls. Asides never interrupt.

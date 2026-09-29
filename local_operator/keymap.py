@@ -66,7 +66,8 @@ intercept before dispatch.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+import sys
+from collections.abc import Callable, Mapping
 from typing import Any
 
 #: Prefix every remappable action's config key and binding id carries. The
@@ -106,8 +107,19 @@ class KeyAction:
     #: reads the old key after a remap (measured). Keep the sentence at or
     #: under 32 cells excluding ``{key}`` — ``welcome.TIP_MIN_WIDTH`` budgets
     #: a worst-case key against it and an over-long template would push the
-    #: threshold up and drop the tip row on narrow terminals.
+    #: threshold up and drop the tip row on narrow terminals. "" means "no
+    #: tip" and ``welcome.KEYED_TIPS`` skips the row.
     tip: str
+    #: Which surface OWNS the key: ``"app"`` for a Textual binding declared in
+    #: ``OperatorApp.BINDINGS``, ``"desktop"`` for a global shortcut owned by
+    #: the desktop app. A desktop action declares no ``action_*`` method, no
+    #: ``Binding`` and no splash tip — the key's MEANING lives entirely in the
+    #: consumer (toggle for ``quick_send``, press-and-hold for
+    #: ``push_to_talk``), and this registry is semantics-agnostic by design;
+    #: it owns only the stored value's grammar (see the desktop-grammar block
+    #: below), because ``lop config edit`` and the desktop's settings page must
+    #: refuse the same values the capture UI does.
+    scope: str = "app"
 
 
 #: Every remappable action, in the order the settings page lists them.
@@ -144,10 +156,59 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
         help="Opens the picker of recent conversations, the same as /resume.",
         tip="{key} reopens a recent conversation",
     ),
+    # The first DESKTOP-scoped action. Not a Textual binding: no `action_*`
+    # method, no `Binding`, and `tip=""` so the splash cannot advertise a key
+    # no terminal can press. The stored default is `primary+alt+space` — ONE
+    # value that registers as ⌘⌥Space on macOS and Ctrl+Alt+Space on
+    # Windows/Linux, which is why the token is `primary` and not a per-OS
+    # default; the registry must declare exactly one value because
+    # `is_default` compares against it on whichever machine reads the config.
+    KeyAction(
+        id="keymap.quick_send",
+        action="",
+        label="Quick send",
+        default="primary+alt+space",
+        help="Opens a small composer over other apps; messages the chief of staff.",
+        tip="",
+        scope="desktop",
+    ),
+    # The second DESKTOP-scoped action and the first with its OWN value
+    # grammar: a bare-modifier HOLD is not expressible as an Electron
+    # accelerator, so `alt-right-hold` is validated by the hold grammar
+    # registered in `_DESKTOP_GRAMMARS` below. Semantics stay consumer-side
+    # (the STT stream's press-and-hold dictation); the registry stores the
+    # combination and the scope only. `tip=""` like every desktop row — no
+    # terminal can press it, and the splash must not advertise it. Help is
+    # verbatim from the STT freeze; renaming it is a config migration because
+    # the id is persisted user data.
+    KeyAction(
+        id="keymap.push_to_talk",
+        action="",
+        label="Push to talk",
+        default="alt-right-hold",
+        help="Hold to dictate (desktop); release to stop.",
+        tip="",
+        scope="desktop",
+    ),
 )
 
 #: ``id -> KeyAction`` for the lookups the page, the app and the tips all do.
 BY_ID: dict[str, KeyAction] = {action.id: action for action in KEY_ACTIONS}
+
+#: ``id -> scope``, the one-question lookup every writer and display path
+#: needs: "is this value a Textual key or a desktop shortcut?". Derived so a
+#: new action cannot leave it behind.
+SCOPE_BY_ID: dict[str, str] = {action.id: action.scope for action in KEY_ACTIONS}
+
+
+def scope_of(action_id: str | None) -> str:
+    """``action_id``'s scope; ``"app"`` for ids the registry does not know.
+
+    The fallback is deliberate: an unknown id is not a desktop shortcut just
+    because someone asked, and the app rules are the pre-existing behaviour
+    every caller had before this axis existed.
+    """
+    return SCOPE_BY_ID.get(action_id or "", "app")
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +310,36 @@ COMPOSER_KEYS: frozenset[str] = frozenset(
     }
 )
 
+#: Values a DESKTOP-scoped action may never be bound to, and why.
+#:
+#: The same philosophy as :data:`RESERVED_KEYS`: a refusal always names the
+#: job the combination already does, because "that value appears to do
+#: nothing" is indistinguishable from a broken install. Two halves:
+#:
+#: * **full chords**, keyed by the CANONICAL string (the same normalization
+#:   the write boundary applies, so a hand-written alias or a different
+#:   modifier order hits the same entry — e.g. ``cmd+space`` and
+#:   ``meta+space`` are one key);
+#: * **key TOKENS** every app depends on (``escape``/``tab``/``enter``),
+#:   refused in ANY chord: a global binding on one steals it system-wide, so
+#:   v1 does not permit them as the key half at all.
+DESKTOP_RESERVED_COMBOS: dict[str, str] = {
+    "meta+space": "Spotlight uses ⌘Space — pick a chord with another modifier",
+    "primary+space": "Spotlight uses ⌘Space — pick a chord with another modifier",
+    "ctrl+space": "input-source switching uses Ctrl+Space",
+    "meta+ctrl+space": "the emoji picker uses ⌃⌘Space",
+    "alt+space": (
+        "on Windows this opens the window menu; on macOS Option+Space " "types a non-breaking space"
+    ),
+    "meta+tab": "⌘Tab switches apps",
+    "alt+f4": "closes the window on Windows",
+    "ctrl+alt+delete": "the OS owns it",
+    "meta+q": "quits apps on macOS",
+    "escape": "esc cancels in every app — a global binding would steal it system-wide",
+    "tab": "tab moves focus in every app — a global binding would steal it system-wide",
+    "enter": "enter submits in every app — a global binding would steal it system-wide",
+}
+
 
 # ---------------------------------------------------------------------------
 # Key strings: normalize, validate
@@ -329,7 +420,7 @@ def _is_valid_single_key(key: str, vocabulary: frozenset[str]) -> bool:
     return False
 
 
-def validate_key(value: Any) -> str | None:
+def validate_key(value: Any, *, scope: str = "app", action_id: str | None = None) -> str | None:
     """``None`` when ``value`` is bindable, else the user-facing reason.
 
     Written FOR the user: ``settings_io``'s page prints it inline and keeps the
@@ -338,7 +429,16 @@ def validate_key(value: Any) -> str | None:
     Order matters. The RESERVED check runs before the vocabulary check so a
     user who presses ``ctrl+c`` is told what ctrl+c is for, rather than being
     told it is not a key — which would be false and would read as a bug.
+
+    ``scope`` selects the VALUE GRAMMAR. An app-scope value is a Textual key
+    (the rules below); a desktop-scope value is a global shortcut, validated by
+    the grammar registered for ``action_id`` (default: the accelerator one —
+    see ``_DESKTOP_GRAMMARS``). An unknown scope falls back to the app rules,
+    which is the pre-existing behaviour every caller had before this axis
+    existed.
     """
+    if scope == "desktop":
+        return validate_desktop_key(value, action_id=action_id)
     if not isinstance(value, str):
         return "expected a key, like ctrl+n or f5"
     normalized = normalize_key(value)
@@ -358,6 +458,322 @@ def validate_key(value: Any) -> str | None:
         if not _is_valid_single_key(part, vocabulary):
             return "not a key this terminal can send — try ctrl+n, f5, or press a key to capture"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Desktop-scoped values: the accelerator grammar
+# ---------------------------------------------------------------------------
+#
+# A desktop value is NOT a Textual key: it is an Electron accelerator written
+# in this module's own stored vocabulary, and the grammar lives here so every
+# writer — the capture widget, ``lop config edit`` and the desktop's settings
+# page — refuses the same values. `normalize_key` is the WRONG tool for it:
+# Textual's only transformation is single-character expansion, and every
+# desktop value is multi-token, so it would pass through verbatim except for
+# case (design §A.4).
+
+#: Canonical modifier order. Load-bearing, not cosmetic: it makes
+#: ``ctrl+meta+space`` and ``meta+ctrl+space`` ONE stored string, so the
+#: reserved table below and every comparison see a single spelling. Matches the
+#: design's own examples (``primary+alt+space``, ``meta+shift+n``,
+#: ``meta+ctrl+space``).
+_DESKTOP_MODIFIER_ORDER = ("primary", "meta", "ctrl", "alt", "shift")
+
+#: Aliases canonicalized on read, so one physical modifier has one spelling in
+#: the file: ``cmd``/``command``/``super`` are the literal meta key, ``option``
+#: is alt, ``control`` is ctrl.
+_DESKTOP_MODIFIER_ALIASES = {
+    "cmd": "meta",
+    "command": "meta",
+    "super": "meta",
+    "option": "alt",
+    "control": "ctrl",
+}
+
+#: Named non-typable keys a desktop value may end in. ``space``, single
+#: letters/digits and ``f1``..``f24`` are handled by the token predicate;
+#: ``escape``/``tab``/``enter`` are deliberately ABSENT — they are refused
+#: with their reasons (the key-token half of :data:`DESKTOP_RESERVED_COMBOS`).
+_DESKTOP_NAMED_KEY_TOKENS = frozenset(
+    {
+        "backspace",
+        "delete",
+        "insert",
+        "home",
+        "end",
+        "pageup",
+        "pagedown",
+        "up",
+        "down",
+        "left",
+        "right",
+    }
+)
+
+
+def _is_desktop_modifier(token: str) -> bool:
+    return token in _DESKTOP_MODIFIER_ORDER
+
+
+def _is_desktop_function_key(token: str) -> bool:
+    """The one key class that may stand BARE in a desktop value: F1..F24
+    (design §A.5: "Bare function keys are allowed (they are not typable)")."""
+    if token.startswith("f") and token[1:].isdigit():
+        return 1 <= int(token[1:]) <= 24
+    return False
+
+
+def _is_valid_desktop_key_token(token: str) -> bool:
+    """Whether ``token`` can be the ONE key half of a desktop value."""
+    if token in _DESKTOP_NAMED_KEY_TOKENS or token == "space":
+        return True
+    if len(token) == 1 and token.isascii() and (token.isalpha() or token.isdigit()):
+        return True
+    return _is_desktop_function_key(token)
+
+
+def _canonical_desktop_tokens(text: str) -> tuple[list[str], list[str]]:
+    """``(modifiers, keys)`` for ``text``, canonicalized and de-duplicated.
+
+    Total by design: garbage produces garbage in canonical shape, and the
+    REFUSALS are :func:`_validate_accelerator`'s job. Modifiers take the fixed
+    order; keys keep their relative order (there should be exactly one).
+    """
+    tokens = [
+        _DESKTOP_MODIFIER_ALIASES.get(part.strip().lower(), part.strip().lower())
+        for part in text.split("+")
+    ]
+    tokens = [token for token in tokens if token]
+    modifiers = [m for m in _DESKTOP_MODIFIER_ORDER if m in tokens]
+    keys = list(dict.fromkeys(t for t in tokens if t not in _DESKTOP_MODIFIER_ORDER))
+    return modifiers, keys
+
+
+def _normalize_accelerator(text: str) -> str:
+    """Canonical stored form: lowercase, aliases mapped, fixed modifier order,
+    duplicates collapsed, exactly one key last."""
+    modifiers, keys = _canonical_desktop_tokens(text)
+    return "+".join(modifiers + keys)
+
+
+def _validate_accelerator(value: Any) -> str | None:
+    """The accelerator rules (design §A.5), in rule order.
+
+    Structural only: the OS is the authority on what actually registers, so a
+    value this accepts can still fail registration in the desktop app — that
+    is a registration failure to SURFACE (§G.5), never a silent dead key.
+    """
+    if not isinstance(value, str):
+        return "expected a shortcut, like primary+alt+space"
+    if "," in value:
+        # Electron has no alternates concept and the registrar can express
+        # exactly one chord per action, so a value Textual would read as "two
+        # keys" must not be storable here (design §A.3).
+        return "a global shortcut sets exactly one chord"
+    tokens = [
+        _DESKTOP_MODIFIER_ALIASES.get(part.strip().lower(), part.strip().lower())
+        for part in value.split("+")
+    ]
+    tokens = [token for token in tokens if token]
+    if not tokens:
+        return "expected a shortcut, like primary+alt+space"
+    key_token = tokens[-1]
+    for token in tokens[:-1]:
+        if not _is_desktop_modifier(token):
+            # A reserved token in modifier position gets its JOB named, not a
+            # generic "unknown modifier" — the same reason the key half does.
+            reserved_reason = DESKTOP_RESERVED_COMBOS.get(token)
+            if reserved_reason is not None:
+                return reserved_reason
+            if _is_valid_desktop_key_token(token):
+                return "a shortcut has one key and it goes last — like ctrl+f5"
+            return f"unknown modifier `{token}`"
+    if _is_desktop_modifier(key_token):
+        return "add a key to the shortcut, like primary+alt+space"
+    # The FULL chord first, so a chord the table names specifically (`meta+tab`
+    # → "⌘Tab switches apps") states its own job rather than the generic
+    # reason of its key half; then the key TOKEN, which is refused in any chord.
+    combo_reason = DESKTOP_RESERVED_COMBOS.get(_normalize_accelerator(value))
+    if combo_reason is not None:
+        return combo_reason
+    token_reason = DESKTOP_RESERVED_COMBOS.get(key_token)
+    if token_reason is not None:
+        return token_reason
+    if not _is_valid_desktop_key_token(key_token):
+        return (
+            f"not a key: `{key_token}` — use space, a letter, a digit, "
+            "F1–F24, or a named key like pageup"
+        )
+    if len(tokens) == 1 and not _is_desktop_function_key(key_token):
+        # THE bare carve-out is F1..F24 ONLY (design §A.5, "Bare function
+        # keys are allowed (they are not typable)"). Every other bare key is
+        # refused: a printable character and `space` fire while the user
+        # types, and a NAMED key (`delete`, `backspace`, an arrow, `pageup`, …)
+        # is consumed by every editing app all the same — a global binding on
+        # one steals it system-wide. Review round 1, F1: the first cut
+        # accepted the whole non-typable class, and QA reproduced a bare
+        # `delete` storing on all three write paths.
+        return "a global shortcut needs a modifier — it would otherwise fire while you type"
+    return None
+
+
+#: The accepted tokens of the bare-modifier HOLD grammar (v1, frozen with the
+#: STT stream): one bare modifier, a side, and the ``-hold`` suffix — no key
+#: token, no space or letter chords, and no modifiers stacked together. Hold
+#: semantics live entirely in the consumer (press-and-hold to dictate); the
+#: registry stores the combination and the scope only, which is why this is a
+#: second value GRAMMAR rather than a second meaning for the accelerator
+#: tokens. The two grammars refuse each other's values by construction.
+_HOLD_TOKENS: tuple[str, ...] = (
+    "alt-right-hold",
+    "alt-left-hold",
+    "meta-right-hold",
+    "meta-left-hold",
+    "ctrl-right-hold",
+    "ctrl-left-hold",
+)
+
+#: Display labels for the hold family, per platform class. macOS gets the mac
+#: key names; on the other platforms ``alt`` reads "Command" because the STT
+#: freeze pins the default's non-mac string as "Right-Command (hold)" —
+#: display-only, one line to amend if that freeze was a placeholder — and
+#: ``meta`` follows :func:`display_key`'s own meta convention (``win`` /
+#: ``super``).
+_HOLD_DISPLAY_LABELS: dict[str, dict[str, str]] = {
+    "darwin": {"alt": "Option", "meta": "Command", "ctrl": "Control"},
+    "win32": {"alt": "Command", "meta": "Win", "ctrl": "Control"},
+    "other": {"alt": "Command", "meta": "Super", "ctrl": "Control"},
+}
+
+
+def _normalize_hold(text: str) -> str:
+    """Canonical stored form of a hold value: trimmed and lowercased.
+
+    Nothing else to canonicalize — a hold is ONE token with no separators, so
+    case is the only spelling a hand-editor can vary."""
+    return text.strip().lower()
+
+
+def _validate_hold(value: Any) -> str | None:
+    """The hold-family rules. No structural parse: membership IS the rule, and
+    the refusal names the whole family so a missed spelling is one glance away.
+    """
+    if not isinstance(value, str):
+        return "expected a hold key, like alt-right-hold"
+    if _normalize_hold(value) in _HOLD_TOKENS:
+        return None
+    return (
+        "not a hold key — use a bare modifier hold: alt-right-hold, "
+        "alt-left-hold, meta-right-hold, meta-left-hold, ctrl-right-hold, "
+        "or ctrl-left-hold"
+    )
+
+
+def _display_hold(value: str, plat: str) -> str:
+    """``alt-right-hold`` -> ``Right-Option (hold)`` on macOS.
+
+    Presentation only: the stored token is the platform-independent one and
+    the consumer maps it to a physical key."""
+    modifier, side = value.removesuffix("-hold").split("-", 1)
+    klass = "darwin" if plat == "darwin" else ("win32" if plat == "win32" else "other")
+    return f"{side.title()}-{_HOLD_DISPLAY_LABELS[klass][modifier]} (hold)"
+
+
+@dataclasses.dataclass(frozen=True)
+class _DesktopGrammar:
+    """One value grammar for desktop-scoped rows: canonicalize + refuse.
+
+    The registry is GENERIC over desktop-scoped actions, but "desktop scope"
+    alone does not define a value grammar: dispatching on scope alone would
+    hardcode the accelerator one for every desktop action and block the next
+    one to arrive with a different value space.
+    """
+
+    normalize: Callable[[str], str]
+    validate: Callable[[Any], str | None]
+    #: Whether the /settings capture gesture can produce a value in this
+    #: grammar at all. App rows always can; the hold grammar cannot — terminal
+    #: input reports a KEY, never "the bare modifier is down", so its row is
+    #: app-configured only and must refuse to ARM rather than paint a
+    #: listening frame whose every completion the validator refuses.
+    capturable_in_terminal: bool = True
+
+
+_ACCELERATOR_GRAMMAR = _DesktopGrammar(
+    normalize=_normalize_accelerator, validate=_validate_accelerator
+)
+
+_HOLD_GRAMMAR = _DesktopGrammar(
+    normalize=_normalize_hold, validate=_validate_hold, capturable_in_terminal=False
+)
+
+#: action id -> the grammar its desktop value is written in. ``quick_send``
+#: uses the accelerator default (``primary+alt+space``); ``push_to_talk``
+#: registered the bare-modifier HOLD grammar when the STT stream froze its
+#: value space — a hold (``alt-right-hold``) is not expressible as an Electron
+#: accelerator, which is exactly why this seam exists. Keep this a plain dict;
+#: a plugin system is out of scope.
+_DESKTOP_GRAMMARS: dict[str, _DesktopGrammar] = {
+    "keymap.push_to_talk": _HOLD_GRAMMAR,
+}
+
+
+def _grammar_for(action_id: str | None) -> _DesktopGrammar:
+    return _DESKTOP_GRAMMARS.get(action_id or "", _ACCELERATOR_GRAMMAR)
+
+
+def capturable_in_terminal(action_id: str) -> bool:
+    """Whether the /settings capture gesture can produce a value for this row.
+
+    App rows always can. For a desktop row the answer comes from its grammar:
+    the accelerator family is captured as a chord, while a bare modifier HOLD
+    has no terminal representation at all — so the hold row is app-configured
+    only and its capture affordance must not arm (design: the refusal is the
+    row's desktop-scope detail, not a listening frame the validator would
+    reject on every completion).
+    """
+    if scope_of(action_id) != "desktop":
+        return True
+    return _grammar_for(action_id).capturable_in_terminal
+
+
+def normalize_desktop_key(text: str, *, action_id: str | None = None) -> str:
+    """Canonical stored form of a desktop value, in ``action_id``'s grammar.
+
+    One stored value maps correctly on every platform by construction:
+    ``primary`` is the platform's command modifier (⌘ / Ctrl) and ``meta`` the
+    literal Super/Command key, so the string in the file is
+    platform-independent.
+    """
+    return _grammar_for(action_id).normalize(text)
+
+
+def validate_desktop_key(value: Any, *, action_id: str | None = None) -> str | None:
+    """``None`` when ``value`` is storable for ``action_id``, else the reason.
+
+    Called from :func:`validate_key` for desktop-scope rows; ``action_id``
+    selects the grammar (default: the accelerator one) so a future desktop
+    action with a different value space cannot be validated by the wrong
+    rules.
+    """
+    return _grammar_for(action_id).validate(value)
+
+
+def _canonical_variants(action_id: str | None, text: str) -> frozenset[str]:
+    """The set of strings ``text`` collides by, canonicalized in its own scope.
+
+    App values are Textual key SETS (comma alternates); desktop values are a
+    single canonical chord. Cross-scope platform equivalence (``primary`` vs
+    ``meta`` on macOS) is deliberately NOT modelled in v1: nothing here can
+    compare two operating systems at once, so the hard case — a TUI key and a
+    global key that coincide on ONE platform — warns at most, never refuses
+    (the warn-and-allow philosophy :func:`conflict_note` states for the soft
+    class).
+    """
+    if scope_of(action_id) == "desktop":
+        normalized = normalize_desktop_key(text, action_id=action_id)
+        return frozenset({normalized}) if normalized else frozenset()
+    return alternates(text)
 
 
 def conflict_note(action_id: str, key: str) -> str:
@@ -417,15 +833,16 @@ def action_holding(
     holder while the app has both actions live on ``ctrl+g`` — measured: three
     presses fired ``new_session`` every time and ``resume`` was reachable by no
     key at all (review round 2, M4). Any overlap is a collision, because any
-    single shared alternate is enough to make one action unreachable.
+    single shared alternate is enough to make one action unreachable. Desktop
+    values are one canonical chord instead — see :func:`_canonical_variants`.
     """
-    wanted = alternates(key)
+    wanted = _canonical_variants(excluding, key)
     if not wanted:
         return None
     for action in KEY_ACTIONS:
         if action.id == excluding:
             continue
-        if wanted & alternates(effective_key(action, values)):
+        if wanted & _canonical_variants(action.id, effective_key(action, values)):
             return action
     return None
 
@@ -463,7 +880,10 @@ def group_conflict(action_id: str, key: str, values: Mapping[str, Any]) -> str |
     other = action_holding(key, values, excluding=action_id)
     if other is None:
         return None
-    shared = sorted(alternates(key) & alternates(effective_key(other, values)))
+    shared = sorted(
+        _canonical_variants(action_id, key)
+        & _canonical_variants(other.id, effective_key(other, values))
+    )
     return (
         f"{other.label.lower()} already uses {', '.join(shared)}"
         " — pick another, or change that row first"
@@ -500,10 +920,17 @@ def resolved_keymap(values: Mapping[str, Any]) -> tuple[dict[str, str], list[str
         raw = values.get(action.id)
         if raw is None:
             continue
-        if validate_key(raw) is not None:
+        # Scope-aware: a desktop value is neither a Textual key nor a comma
+        # set, so the app rules would reject every one of them, and the app
+        # normalization would not touch its canonical form.
+        if validate_key(raw, scope=action.scope, action_id=action.id) is not None:
             rejected.append(action.id)
             continue
-        key = normalize_key(str(raw))
+        key = (
+            normalize_desktop_key(str(raw), action_id=action.id)
+            if action.scope == "desktop"
+            else normalize_key(str(raw))
+        )
         if key and key != action.default:
             resolved[action.id] = key
     return resolved, rejected
@@ -533,17 +960,55 @@ def format_key_display(key: str) -> str:
     return ",".join(format_key(part) for part in key.split(",") if part)
 
 
+def display_key(value: str, *, scope: str = "app", platform: str | None = None) -> str:
+    """``value`` the way a user should READ it, for its own scope.
+
+    App scope is Textual's footer vocabulary (:func:`format_key_display`).
+    Desktop scope maps the platform tokens for DISPLAY — ``primary`` reads
+    ``cmd`` on macOS and ``ctrl`` on Windows/Linux, ``meta`` reads
+    ``cmd``/``win``/``super`` — because neither token is a key any terminal can
+    press or show. A hold token reads ``<Side>-<ModifierLabel> (hold)``
+    (``alt-right-hold`` -> ``Right-Option (hold)`` on macOS). Presentation
+    only: the stored value is untouched.
+    """
+    if scope != "desktop":
+        return format_key_display(value)
+    plat = platform or sys.platform
+    hold = value.strip().lower()
+    if hold in _HOLD_TOKENS:
+        return _display_hold(hold, plat)
+    shown: list[str] = []
+    for part in value.split("+"):
+        token = _DESKTOP_MODIFIER_ALIASES.get(part.strip().lower(), part.strip().lower())
+        if not token:
+            continue
+        if token == "primary":
+            shown.append("cmd" if plat == "darwin" else "ctrl")
+        elif token == "meta":
+            shown.append({"darwin": "cmd", "win32": "win"}.get(plat, "super"))
+        else:
+            shown.append(token)
+    return "+".join(shown)
+
+
 __all__ = [
     "BY_ID",
     "COMPOSER_KEYS",
+    "DESKTOP_RESERVED_COMBOS",
     "KEYMAP_PREFIX",
     "KEY_ACTIONS",
+    "SCOPE_BY_ID",
     "KeyAction",
     "RESERVED_KEYS",
+    "capturable_in_terminal",
     "conflict_note",
+    "display_key",
     "effective_key",
     "format_key_display",
+    "normalize_desktop_key",
     "normalize_key",
     "resolved_keymap",
+    "scope_of",
+    "validate_desktop_key",
     "validate_key",
 ]

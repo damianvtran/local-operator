@@ -598,16 +598,41 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the known CI-vs-local offset (~25 billed) it clears CI rather than this
 #: machine alone — and the tighten band below (1,200) is not in play.
 #:
-#: RAISED 34,587 -> 34,676 for the PROJECTS CREATE-DEFAULTS wording slice: the
-#: ``project`` tool's ``description`` / ``title`` / ``progress`` / ``attach``
-#: field text now says what those fields already do (a markdown description
-#: that is rendered, a short display title, every NEW progress line appended
-#: to the history, attachments stored on that entry), and the empty-listing
-#: receipt teaches the same create default. Measured same-host, one tree after
-#: the other:
+#: RAISED 34,587 -> 34,716 for slice 3 of the same Monitor design (§14 —
+#: origin-aware notifications: the ``notify`` parameter carried on wake and
+#: monitor deliveries, plus the §13.4 guidance sentences). Measured same-host,
+#: one tree after the other; the baseline is ``origin/main`` (a5007c8e6):
 #:
-#:   baseline (origin/main 28b46dcb5)      96,044 chars = ~34,548 billed
-#:   head (this branch)                    96,247 chars = ~34,621 billed
+#:   baseline (origin/main a5007c8e6)       96,044 chars = ~34,548 billed
+#:                                           (PASS, 39 billed of headroom)
+#:   head (this branch)                     96,357 chars = ~34,661 billed
+#:     = +313 chars = +113 billed: the wake tool's ``notify`` field and its
+#:       guidance sentence (+230 chars), and system.md's §13.4 sentence
+#:       (+83). The guide bullet rides ``guide://monitor`` and never enters
+#:       the prefix.
+#:
+#: THE TRIM ALTERNATIVE WAS ASSESSED AND DOES NOT FIT: the field ALONE costs
+#: +200 chars (~+72 billed) against main's 39 billed of headroom, so dropping
+#: both guidance sentences would still blow the ceiling by ~33; and the
+#: field's description IS §14.4's discovery surface, so shrinking it to fit
+#: would trade the feature for the number. The raise lands at head + 55 — the
+#: band this file keeps, and together with the known CI-vs-local offset (~25
+#: billed) it clears CI rather than this machine alone — and the tighten band
+#: below (1,200) is not in play.
+#:
+#: RAISED 34,716 -> 34,789 for the PROJECTS CREATE-DEFAULTS wording slice —
+#: folded OVER the monitor-notify raise above: the ``project`` tool's
+#: ``description`` / ``title`` / ``progress`` / ``attach`` field text now says
+#: what those fields already do (a markdown description that is rendered, a
+#: short display title, every NEW progress line appended to the history,
+#: attachments stored on that entry), and the empty-listing receipt teaches
+#: the same create default. Measured on the MERGED tree with the sanctioned
+#: command; the slice's own delta (+203 chars = +73 billed, measured
+#: same-host on its pre-fold trees) carries over exactly — the four field
+#: texts ride ``tool_schemas`` and are the only block this slice moves:
+#:
+#:   baseline (origin/main 8c5b762df)      96,357 chars = ~34,661 billed
+#:   head (this branch, folded)            96,560 chars = ~34,734 billed
 #:     = +203 chars = +73 billed: the four field descriptions on ONE tool.
 #:       The empty-listing receipt that teaches the same create default is
 #:       runtime text — it never enters the measured start context and costs
@@ -620,7 +645,7 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise lands at head + 55 — the band this file keeps, and together with
 #: the known CI-vs-local offset (~25 billed) it clears CI rather than this
 #: machine alone — and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 34_676
+BUDGET_BILLED_TOKENS = 34_789
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

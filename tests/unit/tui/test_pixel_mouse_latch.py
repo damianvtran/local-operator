@@ -47,7 +47,7 @@ resolves to nothing, so the prefix is what makes it greppable).
 from __future__ import annotations
 
 import os
-import select
+import selectors
 import sys
 import time
 from pathlib import Path
@@ -378,19 +378,29 @@ def _capture_boot_bytes(child_source: str, timeout: float = 30.0) -> bytes:
     os.close(slave_fd)
     chunks: list[bytes] = []
     deadline = time.monotonic() + timeout
+    # A selector rather than ``select.select``: ``select`` refuses any
+    # descriptor at or above ``FD_SETSIZE`` (1024), and in a loaded pytest
+    # worker ``os.openpty()`` hands back the next free fd, which can sit above
+    # that ceiling — where the wait raised ``ValueError: filedescriptor out of
+    # range in select()`` instead of ever reading the wire (runs 36417346882
+    # and 36418462296; reproduced deterministically by holding 1100 fds before
+    # calling this helper). ``selectors.DefaultSelector`` is epoll on Linux and
+    # kqueue on macOS, neither of which has the limit, and it watches the same
+    # bytes on the same pty.
     try:
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([master_fd], [], [], 0.25)
-            if not readable:
-                continue
-            try:
-                data = os.read(master_fd, 65536)
-            except OSError:
-                # EIO: the slave side closed, i.e. the child is gone.
-                break
-            if not data:
-                break
-            chunks.append(data)
+        with selectors.DefaultSelector() as selector:
+            selector.register(master_fd, selectors.EVENT_READ)
+            while time.monotonic() < deadline:
+                if not selector.select(0.25):
+                    continue
+                try:
+                    data = os.read(master_fd, 65536)
+                except OSError:
+                    # EIO: the slave side closed, i.e. the child is gone.
+                    break
+                if not data:
+                    break
+                chunks.append(data)
     finally:
         try:
             os.kill(pid, 9)

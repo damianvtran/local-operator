@@ -162,7 +162,23 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: measured skeleton is 95 B because the ``goal_judge`` KEY itself costs 20 B and
 #: cannot be dropped while the field exists on the model. The measured frame is
 #: the authority; raise this number only with a fresh measurement.
-_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_145
+#:
+#: RAISED BY 16 B for §14's ``notify`` (origin-aware notifications), from 2,145
+#: to 2,161, and that is the whole of this feature's ceiling spend. MEASURED on
+#: this head by serializing the arm's own frame twice — once as the shipped
+#: fixture leaves it, and once with ``notify`` dropped from the attention state
+#: — with the second reading 1,050,721 B, exactly the total this comment's
+#: 2,145 already stood for (1,048,576 + 2,145). So the delta is 16 B and it is
+#: ADDITIVE here: the released arm's catalogue is already pinned at
+#: ``MODEL_CATALOGUE_FLOOR_ROWS`` (the frame is over the line even at the
+#: floor), so nothing else can absorb the bytes.
+#:
+#: The 16 B is the serialized key in full — ``"notify": true`` and the
+#: separator that leaves with it — a fixed-width bool that cannot grow with the
+#: session (``true``/``false`` differ by one byte; nothing else rides the
+#: field). Its size-policy review is the comment on the key-set assertion
+#: above.
+_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_161
 
 #: No comms node: these released children have no lineage, which is the smaller
 #: of the two shapes `_with_lineage` can produce and the only one this arm needs
@@ -918,6 +934,12 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "revision",
         "reason",
         "cause",
+        # §14's ``notify``: ONE BOOL per conversation. O(1) bytes — "true" /
+        # "false", 4-5 on the wire — fixed width, unable to grow with the
+        # session, so the store's string caps (which bound ``reason`` and
+        # ``cause``) are unaffected. That is the whole size policy: there is no
+        # string here to cap.
+        "notify",
     }
     # Published at the store's own cap: the field is one string per
     # conversation, and the ceiling this fixture exists to police is why it is
