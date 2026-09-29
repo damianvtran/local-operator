@@ -78,8 +78,21 @@ class DetailRow(Static):
 class DetailHeadingRow(DetailRow):
     """``milestones (1/3)`` and its underline — the section's first row."""
 
-    def __init__(self, name: str, count: str | None, style_for: StyleFor) -> None:
-        super().__init__(classes="projects-detail-heading")
+    def __init__(
+        self, name: str, count: str | None, style_for: StyleFor, *, gap: bool = True
+    ) -> None:
+        """``gap`` carries the blank row above the heading (``.gap-above``).
+
+        That class is the sheet's ONLY vertical spacing declaration — the
+        minimalism guard pins the count at one, so a rule-level margin here
+        would be a second source AND could silently double with the class.
+        The page withholds it from its first row: the heading that opens the
+        page must not push every following row (and every section anchor)
+        down one.
+        """
+        super().__init__(
+            classes="projects-detail-heading gap-above" if gap else "projects-detail-heading"
+        )
         self.section = (name, count)
         head, underline = detail_section_heading(name, count)
         text = Text(no_wrap=True)
@@ -284,7 +297,7 @@ class ProjectDetailPage(VerticalScroll):
         project = project_value if isinstance(project_value, dict) else {}
         rows: list[DetailRow] = []
 
-        rows.append(DetailHeadingRow("overview", None, self._style_for))
+        rows.append(DetailHeadingRow("overview", None, self._style_for, gap=False))
         rows.append(DetailMetaRow(view, self._style_for))
 
         rows.append(DetailHeadingRow("description", None, self._style_for))
@@ -335,11 +348,6 @@ class ProjectDetailPage(VerticalScroll):
                 )
         else:
             rows.append(DetailSentenceRow("no sessions linked", self._style_for))
-        # The FIRST heading opens the page; the blank-line-before-section
-        # margin it inherits from the stylesheet would push the whole page
-        # down one row (and with it every section anchor).
-        if rows:
-            rows[0].styles.margin = 0
         return rows
 
     # -- cursor -------------------------------------------------------------
