@@ -125,6 +125,40 @@ class PreflightStream(ScriptedStream):
         await self.notice_handler("anthropic quota low — falling back to openai", "warning")
 
 
+class CompactionAwareStream(ScriptedStream):
+    """ScriptedStream that answers the compaction summariser's one-shot call.
+
+    The pass summarises through ``_one_shot_complete``, which is a real
+    ``stream_fn`` call carrying ``purpose="compaction"`` — it is not a model
+    turn of the conversation, so it must not consume a turn script. It gets a
+    constant reply and is counted apart from the turn index (the requests list
+    still records it, so tests can assert nothing else was asked for).
+    """
+
+    def __init__(self, turns: list[list[StreamEvent]]) -> None:
+        super().__init__(turns)
+        self._turns_seen = 0
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        if getattr(request, "purpose", "") == "compaction":
+            self.requests.append(request)
+
+            async def summarize():
+                yield StreamTextDelta(delta="SUMMARY")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return summarize()
+        self.requests.append(request)
+        turn = self.turns[self._turns_seen]
+        self._turns_seen += 1
+
+        async def gen():
+            for event in turn:
+                yield event
+
+        return gen()
+
+
 def echo_tool(executed: list[str], delay: float = 0.0, name: str = "echo") -> AgentTool:
     async def execute(tool_call_id, args, signal, on_update, context):
         if delay:
@@ -1710,6 +1744,235 @@ async def test_continuation_provider_usage_supersedes_compaction_estimate(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_post_compaction_readout_settles_once_and_never_resurrects(tmp_path, monkeypatch):
+    """The desktop footer's bounce, as a frames series.
+
+    After a post-turn compaction settles the occupancy, the next turn's tool
+    calls must grow the reading from the settled level. The regression this
+    pins: the tail refresh at a usage-bearing message end replayed the
+    session's lagging ``_last_usage`` -- still the PRE-pass 404.9k until the
+    first tool-batch boundary -- over the fresh receipt the event fold had
+    just painted, so the reading alternated between the two scales (and
+    repainted the pre-compaction count) at every boundary.
+
+    Reproduced through the real event pipeline: a receipt ladder ramps past
+    the trigger, a post-turn pass stamp settles ``tokens_after``, and the
+    following tool-call turn's receipts are all post-pass. No frame after the
+    settle may carry the pre-pass count, and the settled series must be
+    non-decreasing.
+    """
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="first"),
+                StreamEndEvent(
+                    stop_reason="stop",
+                    usage=Usage(input_tokens=404_900, context_tokens=404_900),
+                ),
+            ],
+            [
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                StreamEndEvent(
+                    stop_reason="toolUse",
+                    usage=Usage(input_tokens=150_100, context_tokens=150_100),
+                ),
+            ],
+            [
+                StreamToolCallDelta(index=0, id="c2", name="echo", argument_delta="{}"),
+                StreamEndEvent(
+                    stop_reason="toolUse",
+                    usage=Usage(input_tokens=150_400, context_tokens=150_400),
+                ),
+            ],
+            [
+                StreamTextDelta(delta="done"),
+                StreamEndEvent(
+                    stop_reason="stop",
+                    usage=Usage(input_tokens=150_700, context_tokens=150_700),
+                ),
+            ],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[echo_tool([])])
+    calls = {"n": 0}
+
+    async def fake_compact() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The settled post-pass level a real pass stamps on the held end.
+            session._held_context_tokens = 131_100
+
+    monkeypatch.setattr(session, "_maybe_compact", fake_compact)
+
+    store = session._frontend_state_store
+    values: list[int] = []
+
+    def watch(update) -> None:
+        change = update.changes.get("context_tokens")
+        if change is not None and (not values or values[-1] != change):
+            values.append(int(change))
+
+    session.subscribe_frontend(watch)
+
+    await session.prompt("first question")
+    await session.prompt("tool question")
+    await session.dispose()
+
+    settle = 131_100
+    assert settle in values, f"the pass's stamped settle never painted: {values}"
+    settled = values[values.index(settle) :]
+    assert 404_900 not in settled, f"the pre-compaction count repainted after the settle: {values}"
+    assert settled == sorted(settled), f"the settled readout did not grow monotonically: {values}"
+    assert store.state.context_tokens == 150_700
+
+
+@pytest.mark.asyncio
+async def test_an_off_record_reading_keeps_the_settled_context_from_being_replayed_over(
+    tmp_path,
+):
+    """Agent review round 1, R1-1: the aside path's third writer.
+
+    An aside reads the live conversation off the record; its figures reach the
+    store through the host's ``on_usage`` (``FrontendStateStore.accrue_usage``),
+    which advances the store's occupancy and ``last_usage`` together. Before
+    this test's fix the session's own reading stayed behind, so the next
+    reconciliation refresh saw differing receipts and installed the session's
+    stale pre-pass count — round 1 measured exactly that: settle 148.0k →
+    aside 148.8k → both replay sites yield 404 900.
+    """
+    usage_aside = Usage(input_tokens=148_800, context_tokens=148_800, output_tokens=5)
+
+    def aside_stream(request, signal):
+        async def gen():
+            yield StreamTextDelta(delta="sure")
+            yield StreamUsageEvent(usage=usage_aside)
+            yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    session = make_session(tmp_path, aside_stream)
+    store = session._frontend_state_store
+    stale = Usage(input_tokens=404_900, context_tokens=404_900)
+    # The settled window a compaction pass leaves behind, with the PRE-pass
+    # receipt still the store's `last_usage` basis and the session's reading
+    # not yet caught up — the state the next refresh used to repair with the
+    # wrong receipt.
+    store.mutate(context_tokens=148_000, context_is_estimate=True, last_usage=stale)
+    session._last_usage = stale
+
+    assert await session.complete_aside([Message.user("what does this do?")]) == "sure"
+    # The host charges the call (what the seams do with ``on_usage``).
+    store.accrue_usage(session, usage_aside)
+
+    # Both sides of the reconciliation hold the aside's reading...
+    assert session._last_usage is not None
+    assert session._last_usage.context_tokens == 148_800
+    assert store.state.context_tokens == 148_800
+    # ...so either replay site is a no-op rather than a resurrection.
+    store.refresh_from_session(session)
+    assert store.state.context_tokens == 148_800
+    store.refresh_restored_usage(session)
+    assert store.state.context_tokens == 148_800
+    assert store.state.last_usage is not None
+    assert store.state.last_usage.context_tokens == 148_800
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_pass_settles_once_and_the_run_continues_clean(tmp_path):
+    """The mid-turn gate's settle, as a frames series (agent review round 1, R1-2).
+
+    The pass that fires at a tool-batch boundary INSIDE a run settles the same
+    way the post-turn one does, and the run then continues against the
+    compacted window. The rig-only evidence showed the sequence
+    (``03-series-midturn-after.log``); this pins it in CI through the real
+    pipeline, with a real pass: the pre-pass count may never repaint after the
+    settle, and the readings must grow monotonically from it.
+    """
+    padding = "detail " * 700
+    stream = CompactionAwareStream(
+        [
+            [
+                StreamTextDelta(delta=f"step one {padding}"),
+                StreamToolCallDelta(index=0, id="c1", name="echo", argument_delta="{}"),
+                StreamEndEvent(
+                    stop_reason="toolUse",
+                    usage=Usage(input_tokens=100_000, context_tokens=100_000),
+                ),
+            ],
+            [
+                StreamTextDelta(delta=f"step two {padding}"),
+                StreamToolCallDelta(index=0, id="c2", name="echo", argument_delta="{}"),
+                StreamEndEvent(
+                    stop_reason="toolUse",
+                    usage=Usage(input_tokens=200_000, context_tokens=200_000),
+                ),
+            ],
+            [
+                StreamTextDelta(delta=f"step three {padding}"),
+                StreamToolCallDelta(index=0, id="c3", name="echo", argument_delta="{}"),
+                StreamEndEvent(
+                    stop_reason="toolUse",
+                    usage=Usage(input_tokens=300_000, context_tokens=300_000),
+                ),
+            ],
+            [
+                StreamToolCallDelta(index=0, id="c4", name="echo", argument_delta="{}"),
+                StreamEndEvent(
+                    stop_reason="toolUse",
+                    usage=Usage(input_tokens=404_900, context_tokens=404_900),
+                ),
+            ],
+            [
+                StreamToolCallDelta(index=0, id="c5", name="echo", argument_delta="{}"),
+                StreamEndEvent(
+                    stop_reason="toolUse",
+                    usage=Usage(input_tokens=150_100, context_tokens=150_100),
+                ),
+            ],
+            [
+                StreamTextDelta(delta="done"),
+                StreamEndEvent(
+                    stop_reason="stop",
+                    usage=Usage(input_tokens=150_400, context_tokens=150_400),
+                ),
+            ],
+        ]
+    )
+    session = make_session(
+        tmp_path,
+        stream,
+        tools=[echo_tool([])],
+        compaction_settings=CompactionSettings(
+            keep_recent_tokens=40, threshold_tokens=400_000, strategy="context-full"
+        ),
+    )
+    store = session._frontend_state_store
+    values: list[int] = []
+
+    def watch(update) -> None:
+        change = update.changes.get("context_tokens")
+        if change is not None and (not values or values[-1] != change):
+            values.append(int(change))
+
+    session.subscribe_frontend(watch)
+
+    await session.prompt("go")
+    await session.dispose()
+
+    assert any(
+        getattr(request, "purpose", "") == "compaction" for request in stream.requests
+    ), "the real compaction pass never asked the summariser"
+    cut = values.index(404_900)
+    settled = values[cut + 1 :]
+    assert settled and settled[0] < 404_900, f"the pass never settled the readout: {values}"
+    assert 404_900 not in settled, f"the pre-pass count repainted mid-run: {values}"
+    assert settled == sorted(settled), f"the settled readout did not grow monotonically: {values}"
+    assert values[-1] == 150_400, f"the tail receipt never painted: {values}"
+    assert store.state.context_tokens == 150_400
+
+
+@pytest.mark.asyncio
 async def test_the_auto_continuation_prompt_is_never_announced_as_user(tmp_path, monkeypatch):
     """The post-compaction continuation is harness chrome, not the user's words.
 
@@ -2678,17 +2941,21 @@ async def test_mid_turn_compaction_disabled_by_setting(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_context_hint_advances_at_every_boundary_even_with_mid_turn_compaction_off(
+async def test_context_hint_advances_with_each_call_receipt_even_with_mid_turn_compaction_off(
     tmp_path,
 ):
-    """The prompt-cache TTL hint moves with ``_last_usage`` at the tool-loop
-    boundary, and that update is NOT gated on mid-turn compaction (review
-    F9): with ``mid_turn_enabled=False`` a session's asides and advisor
-    calls during a long tool run would otherwise be stamped with the
-    previous TURN's count. The boundary hook fires AFTER a tool batch lands,
-    so the tool that runs after call 1 still sees no hint, the one after
-    call 2 sees call 1's 200k, and every request the loop builds is stamped
-    from the previous call of the same run.
+    """The prompt-cache TTL hint moves with ``_last_usage`` at each completed
+    call's own message end, and that update is NOT gated on mid-turn
+    compaction (review F9): with ``mid_turn_enabled=False`` a session's asides
+    and advisor calls during a long tool run would otherwise be stamped with
+    the previous TURN's count. The note used to wait for the tool-batch
+    boundary, which ALSO left it -- and ``_last_usage``, the frontend store's
+    reconciliation figure -- a call behind the receipts the store folds (the
+    measured post-compaction readout regression, 404.9k repainted over a
+    settled 148.0k). Now the tool after call 1 sees call 1's own 200k, the
+    one after call 2 sees 210k, and every request the loop builds is still
+    stamped from the previous call of the same run, because the loop prefers
+    its own in-run count over the host's seed once a call has reported.
     """
     seen_by_tool: list[int | None] = []
 
@@ -2727,14 +2994,19 @@ async def test_context_hint_advances_at_every_boundary_even_with_mid_turn_compac
 
     await session.prompt("go")
 
-    # The boundary hook advanced the session's hint after call 1 even though
-    # its compaction half was switched off (the second tool run saw 200k)...
-    assert seen_by_tool == [None, 200_000]
+    # The note advanced the session's hint at each call's own receipt even
+    # though the compaction half of the boundary hook is switched off (the
+    # first tool run saw call 1's 200k, the second call 2's 210k)...
+    assert seen_by_tool == [200_000, 210_000]
     # ...the loop stamped each request from the previous call of THIS run, and
     # the post-run scan left the session on the final count as the next
     # turn's seed.
     assert [r.context_tokens_hint for r in stream.requests] == [None, 200_000, 210_000]
     assert session._context_tokens_hint == 220_000
+    # The lockstep contract: the trigger figure cannot be staler than the hint
+    # it is documented beside.
+    assert session._last_usage is not None
+    assert session._last_usage.context_tokens == 220_000
     await session.dispose()
 
 
