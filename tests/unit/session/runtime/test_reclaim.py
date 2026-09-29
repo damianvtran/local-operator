@@ -1633,3 +1633,40 @@ def test_an_unattestable_signal_is_logged_and_still_sent(
     assert kill == [(4242, signal.SIGTERM)]
     messages = [record.getMessage() for record in caplog.records]
     assert any("could not attest" in message for message in messages), messages
+
+
+def test_a_signal_that_never_lands_withdraws_its_marker(tmp_path: Path) -> None:
+    """The act did not complete: the attestation goes back, like the ladder's.
+
+    A candidate can die between the decision and the signal (``os.kill`` raising
+    ``ProcessLookupError``), or refuse the signal (``PermissionError``) — in both
+    the sweep's act is NOT taken, and a marker left behind would narrate a death
+    this sweep did not cause as this sweep (the misreading
+    ``update.withdraw_involuntary_stops`` exists to prevent). The withdrawal
+    re-reads the file and compares the whole run key, which is why the record is
+    built once per candidate in production — a second ``time.time()`` would
+    refuse its own marker.
+    """
+    conversation = session_dir(tmp_path, "s1")
+    conversation.mkdir(parents=True, exist_ok=True)
+    sightings = Sightings()
+
+    def refuse(pid: int, sig: int) -> None:
+        raise ProcessLookupError(pid)
+
+    report = None
+    for now in (NOW, NOW + CONFIRM_S):
+        report = reclaim_runtimes(
+            tmp_path,
+            apply=True,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_session_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            kill=refuse,
+            now=now,
+        )
+    assert report is not None
+    assert report.signalled == []
+    assert registry.read_stop_marker(conversation) is None
