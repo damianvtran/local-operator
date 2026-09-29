@@ -79,6 +79,12 @@ from textual.widgets import Static
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
 
+# The cross-session view filter's single predicate, shared with the phone fold
+# (`mobile/projection.py`). Import-cheap by construction — its only heavy
+# import, `tui.settings`, is function-local — so the boot path this module's
+# lazy-import discipline protects pays nothing.
+from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
+
 # The approval gate's authorization rule, shared with the runtime host so the two
 # cannot drift on which writes may loosen a live gate (issue #1282). Pure and
 # import-cheap: `harness.approval` pulls in `inspect` and nothing else.
@@ -14047,9 +14053,19 @@ class OperatorApp(App[None]):
         """
         painted: list[str] = []
         epochs = live_tool_start_epochs(session)
+        # ONCE per pass, mirroring the replay fold's narration read: a display
+        # preference cannot change part-way through one repaint.
+        hide_cross_session = cross_session_hidden()
         for call in calls:
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
+                continue
+            if hide_cross_session and (getattr(call, "name", "") or "") == SEND_TOOL_NAME:
+                # `display.hide_cross_session`, second door: `_replay_tool_call`
+                # never feeds a hidden `send` into `_projection_skipped_live`,
+                # but if one arrived anyway this painter must not mount a row
+                # for it. Skipped rather than returned — the list may carry
+                # other calls.
                 continue
             if queued_cards is not None and call_id in queued_cards:
                 # The panel this row would be painted into already owns it —
@@ -49371,6 +49387,14 @@ class OperatorApp(App[None]):
             # through `_painted_tool_card` instead of beside it.
             card = self._painted_tool_card(event.tool_call_id)
             if card is None:
+                if cross_session_hidden() and event.tool_name == SEND_TOOL_NAME:
+                    # `display.hide_cross_session`: never mint a card for a
+                    # hidden `send`; the frame is consumed with nothing
+                    # painted. Both adopt lookups above ran first ON PURPOSE:
+                    # a card created while the flag was off keeps settling
+                    # normally after a mid-session flip (forward-only), so the
+                    # gate fires only when there is no row to adopt.
+                    return
                 card = ToolCard(event.tool_call_id, event.tool_name)
                 self._append_block(card)
             self._composing_cards[event.tool_call_id] = card
@@ -49455,6 +49479,14 @@ class OperatorApp(App[None]):
         if card is not None:
             card.begin_running(event.tool_name, event.args, event.intent, started_at=started_at)
         else:
+            if cross_session_hidden() and event.tool_name == SEND_TOOL_NAME:
+                # `display.hide_cross_session`: no row was adopted (both
+                # lookups above ran first) and none may be created, so the
+                # start is consumed without paint. Nothing is registered
+                # either — `_tool_cards` must stay free of a card that does
+                # not exist, and the working line derives from the registries,
+                # so there is nothing to refresh.
+                return
             # Seeded from the same instant as the adopt path. A start event that
             # reaches a view with no row for its call — the owner's live seed
             # re-delivered to a rebuilt transcript — would otherwise mount a
@@ -49657,6 +49689,14 @@ class OperatorApp(App[None]):
         history replay (``/resume`` into this same conversation) does not mount
         a second copy — the same double-paint guard the wake receipt uses.
         """
+        if cross_session_hidden():
+            # `display.hide_cross_session`: skip BEFORE the de-dup id is
+            # recorded — nothing was painted, so there is nothing to de-dup,
+            # and a later replay under the flag off can still mount the row
+            # (`_live_peer_receipts` exists to prevent a DOUBLE paint). An
+            # already-mounted receipt is never touched: forward-only, like
+            # every display flag (`tui/settings.py`'s `_DEFAULT_NOTES`).
+            return
         if message.message_id:
             self._live_peer_receipts.add(message.message_id)
         self._append_block(PeerMessageBlock(message.body, message.sender))

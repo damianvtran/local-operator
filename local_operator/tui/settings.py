@@ -10,12 +10,14 @@ This module READS. Writes go through ``local_operator.settings_io``, which the
 running TUI painting the old flag and the change would look lost until
 relaunch.
 
-There is now a SECOND invalidator: the TUI's config-watch listener calls
-:func:`settings_reload` when another process changes a ``display.*`` key. That
-distinction matters to :func:`_load`, not just as trivia — the first
-invalidator only ever fires after a write this process just made, so the file
-was well-formed by construction, while the second fires on bytes the user may
-be part-way through hand-editing.
+There is now a SECOND invalidator: a config-watch subscription calls
+:func:`settings_reload` when another process changes a ``display.*`` key — the
+TUI's app listener for its own page, and :func:`follow_display_settings` for
+the processes with no app (the phone daemon, the session-runtime children
+that fold for the phone). That distinction matters to :func:`_load`, not just
+as trivia — the first invalidator only ever fires after a write this process
+just made, so the file was well-formed by construction, while the second fires
+on bytes the user may be part-way through hand-editing.
 
 The keys here are LITERAL dotted top-level keys: ``values["display.shimmer"]``,
 not ``values["display"]["shimmer"]``. See ``settings_io`` for why that
@@ -30,7 +32,7 @@ registry in at module scope would put it on every startup.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 #: Documentation of the flags this module serves, kept as prose beside the
 #: derivation below. The VALUES come from ``settings_io`` (see
@@ -192,6 +194,30 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # roster and on a live edit (applied only if the user has not cycled it
     # this session). Unknown strings read as full.
     "display.dock": "full",
+    # Cross-session traffic — `lop send`'s own traces (tool rows named `send`)
+    # and the inbound peer receipts — hidden from transcript views when ON.
+    # Read through `local_operator.cross_session.cross_session_hidden()` by the
+    # TUI gates AND by the phone fold, so the surfaces cannot disagree about
+    # what is hidden; OFF is today's rendering.
+    #
+    # A mid-session flip applies FORWARD ONLY, the same contract
+    # `display.narration` documents above and for the same reason
+    # (re-projecting mounted blocks in one synchronous pass paints a blank
+    # frame, and a display toggle must never risk that). Rows already on screen
+    # are left exactly as they are; a live receipt suppressed while hidden is
+    # also NOT recorded in the de-dup set, because nothing was painted (see
+    # `app.on_peer_message_delivered`). The restore path is therefore a
+    # re-projection under the current value — `/resume` for the transcript;
+    # for the phone, the next durable read (a cross-process write reaches the
+    # folding process's config watcher, which drops the display cache AND the
+    # fold cache — see `mobile/daemon.py`), and a re-seed for a live runtime.
+    #
+    # A VIEW filter for the human reader, not a privacy boundary and not a data
+    # change: the model still receives the peer message (`harness/render.py`
+    # keeps it in the injected-user-message allow-list), the transcript files
+    # keep every row, and the raw-journal surfaces (`jobs`, `hub op='peek'`,
+    # the picker's verbose preview) still show them.
+    "display.hide_cross_session": False,
     # --- the composer widget-visibility family (operator request, 2026-09-27) ---
     #
     # One BOOL per composable piece of the composer, all default True because
@@ -293,3 +319,35 @@ def settings_reload() -> None:
     """Drop the cache so the next lookup re-reads the config file."""
     global _cache
     _cache = None
+
+
+def follow_display_settings(
+    watcher: Any, *, also: Callable[[], None] | None = None
+) -> Callable[[], None]:
+    """Drop the display cache when ``watcher`` reports a ``display.*`` change.
+
+    THE cross-process invalidator, in one place for every process that reads
+    display flags. The cache has two: a write through ``settings_io`` in THIS
+    process (which calls :func:`settings_reload` itself) and a subscription to
+    the process :class:`~local_operator.config_watch.ConfigWatcher` — and only
+    the TUI's own app listener held the second. The phone daemon and the
+    session-runtime children that fold for the phone started none, so a
+    ``display.*`` edit by another process never reached them at all: a running
+    daemon kept the value from its first read and the fold kept its pre-flip
+    render (design review round 1 on #1746, D1/D2).
+
+    Returns the unsubscribe. ``also`` runs after each reload, for a caller
+    that owns a derived cache of its own — the daemon drops its durable fold
+    cache there, because that cache re-derives its render only when the
+    transcript GROWS, never on a flag change.
+    """
+
+    def _reload(change: Any) -> None:
+        changed = getattr(change, "changed_keys", None) or ()
+        if not any(str(key).startswith("display.") for key in changed):
+            return
+        settings_reload()
+        if also is not None:
+            also()
+
+    return watcher.subscribe(_reload)

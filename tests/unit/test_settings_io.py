@@ -43,6 +43,7 @@ def _consumer_defaults() -> dict[str, object]:
     test would then guard nothing.
     """
     from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import (
         DEFAULT_MODEL_CHOICE,
@@ -139,6 +140,10 @@ def _consumer_defaults() -> dict[str, object]:
         # user explicitly on `dark` as having changed the setting (round 1, M1).
         "tui.theme": DEFAULT_THEME,
         "display.time_format": DEFAULT_TIME_FORMAT,
+        # The opt-in hider's own constant, beside the predicate that reads it
+        # (`local_operator.cross_session`), so a registry default that drifts
+        # from the code's is a red test rather than a page that lies.
+        "display.hide_cross_session": DEFAULT_HIDE_CROSS_SESSION,
         "tui.sidebar_visible": DEFAULT_SIDEBAR_VISIBLE,
         "tui.sidebar_position": DEFAULT_SIDEBAR_POSITION,
         "tui.sidebar_show_subagents": DEFAULT_SIDEBAR_SHOW_SUBAGENTS,
@@ -504,6 +509,7 @@ def test_display_keys_are_flat_dotted() -> None:
         "display.images",
         "display.notifications",
         "display.dock",
+        "display.hide_cross_session",
     }
 
 
@@ -534,6 +540,41 @@ def test_display_flag_round_trips_through_the_reader(
     # And visible to the reader WITHOUT a manual reload, because the facade
     # invalidated the cache itself.
     assert settings_get("display.shimmer") is False
+
+
+def test_the_hide_cross_session_flag_round_trips_through_the_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absent ⇒ False (today's rendering); written flat, read back by the fast path.
+
+    Same contract as the sibling above, for the one display flag whose absent
+    reading is the SAFE side rather than the shipped one: an untouched config
+    must hide nothing, and the predicate every gate consults
+    (``cross_session_hidden``) must agree with the registry and obey a write
+    in both directions without a relaunch.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    from local_operator.cross_session import cross_session_hidden
+    from local_operator.tui.settings import settings_get, settings_reload
+
+    settings_reload()
+    manager = ConfigManager(tmp_path)
+    assert settings_get("display.hide_cross_session") is False
+    assert cross_session_hidden() is False
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["display.hide_cross_session"], True)
+
+    # Flat on disk, under the literal dotted key.
+    stored = yaml.safe_load((tmp_path / "config.yml").read_text())["values"]
+    assert stored["display.hide_cross_session"] is True
+    assert "display" not in stored, "wrote a nested mapping nothing reads"
+
+    assert settings_get("display.hide_cross_session") is True
+    assert cross_session_hidden() is True
+
+    # And back off — the same round trip, not a separate mechanism.
+    settings_io.write_setting(manager, settings_io.BY_KEY["display.hide_cross_session"], False)
+    assert cross_session_hidden() is False
 
 
 def test_the_narration_key_is_flat_dotted() -> None:
