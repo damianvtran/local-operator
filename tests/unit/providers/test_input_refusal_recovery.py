@@ -11,10 +11,13 @@ and the terminal message are exercised through the same walk every consumer
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from local_operator.harness.types import (
     ChatRequest,
+    Content,
     ImageContent,
     Message,
     ModelSpec,
@@ -63,9 +66,7 @@ def _long_request(*, images: bool = True, rows: int = 40) -> ChatRequest:
     messages: list[Message] = [Message.user("Task: find the candidates")]
     for index in range(rows):
         messages.append(Message.assistant(text=f"thinking {index}"))
-        content: list[TextContent | ImageContent] = [
-            TextContent(text=f"Step: {index} observation " + "x" * 40)
-        ]
+        content: list[Content] = [TextContent(text=f"Step: {index} observation " + "x" * 40)]
         if images:
             content.append(ImageContent(data="aGVsbG8=", mime_type="image/png"))
         messages.append(
@@ -97,7 +98,9 @@ def _short_request() -> ChatRequest:
     )
 
 
-def _scripted(refusals: int, seen: list[ChatRequest]) -> tuple[object, dict[str, int], object]:
+def _scripted(
+    refusals: int, seen: list[ChatRequest]
+) -> tuple[Any, dict[str, int], list[ChatRequest]]:
     """A client_for + bookkeeping: refuse the first ``refusals`` attempts."""
 
     calls = {"n": 0}
