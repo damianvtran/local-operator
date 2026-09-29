@@ -238,8 +238,11 @@ async def test_tooltip_survives_in_row_movement_and_the_catalog_poll():
         await pilot.pause()
         await pilot.press("ctrl+b")
         await pilot.pause()
-        assert app._sidebar_timer is not None
-        app._sidebar_timer.pause()
+        # Quiesce BOTH catalog reads ``ctrl+b`` starts — pausing the poll
+        # alone leaves the one-shot worker free to replace these rows with the
+        # real (empty) catalog when it lands late under load (observed here:
+        # the row lookup below raised ``IndexError`` in 1 of 11 loaded runs).
+        _quiesce_sidebar_refresh(app)
         sidebar = app._session_sidebar
         sidebar.set_entries(_hover_entries(tuple(f"s{i}" for i in range(1, 7))))
         await pilot.pause()
@@ -269,11 +272,43 @@ async def test_tooltip_survives_in_row_movement_and_the_catalog_poll():
         assert tooltip.display, "the catalog poll blanked a resting description"
         assert str(tooltip.render()) == shown_for
 
-        # A different row is a fresh arrival: hidden until the delay passes,
-        # then THAT row's description — never the previous row's.
+        # A different row is a fresh arrival: the description shows only once
+        # the delay has passed since the row change — and then it is THAT
+        # row's description, never the previous row's. The old shape asserted
+        # `not tooltip.display` after one `pause()`, a bet that the beat
+        # between the row change and the assertion stays inside
+        # `TOOLTIP_DELAY`. Under load it does not: the row change's own
+        # one-shot (`SessionSidebar.on_mouse_move`) fires first, the NEW
+        # description comes up — correct — and the assertion read it as the
+        # old one popping. Measured at the assertion under an induced beat:
+        # hover on the new row, `_tooltip_due()` true, 1.30 s since the
+        # change; CI reded here twice (runs 36534374152 / 36543147986). Wait
+        # for the change itself, then discriminate on content and on the
+        # product's own delay gate — never on how long `pause()` took.
+        expected_row = sidebar._entry_at(first_row)
+        assert expected_row is not None
+        assert (
+            expected_row.id != sidebar._hover_id
+        ), "the target row must differ from the hovered one"
         await pilot.hover("#session-sidebar", offset=(8, first_row))
-        await pilot.pause()
-        assert not tooltip.display, "a row change must not pop the old description"
+        for _ in range(20):
+            if sidebar._hover_id == expected_row.id:
+                break
+            await pilot.pause()
+        assert (
+            sidebar._hover_id == expected_row.id
+        ), f"the hover never moved to the new row (still {sidebar._hover_id!r})"
+        if tooltip.display:
+            # The delay may already have elapsed under load — the new
+            # description up at the first look is then correct. The OLD one
+            # never is, and neither is a show before the product's own gate
+            # says the delay has elapsed.
+            assert (
+                str(tooltip.render()) != shown_for
+            ), "a row change must not pop the old description"
+            assert (
+                sidebar._tooltip_due()
+            ), "a row change showed a description before its delay elapsed"
         await asyncio.sleep(float(app.TOOLTIP_DELAY) + 0.2)
         await pilot.pause()
         assert tooltip.display and str(tooltip.render()) != shown_for
