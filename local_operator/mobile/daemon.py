@@ -1954,7 +1954,10 @@ class MobileDaemon:
         — and nothing in ``mobile/`` started one, so a running daemon kept
         the value from its first read, and ``/history`` kept a pre-flip render
         in the durable fold cache (which re-derives its render only when the
-        transcript GROWS, never on a flag change), until a restart.
+        transcript GROWS, never on a flag change), until a restart. The
+        retained per-route projections are the same class of stale payload
+        (QA round 2, Q1: a route the phone had viewed live kept re-serving
+        them on every reconnect): the callback below drops BOTH.
 
         Called once at boot from ``service.amain``, on the daemon's own loop.
         Idempotent; degrades to the old behaviour (restart to apply) when
@@ -1971,19 +1974,41 @@ class MobileDaemon:
             watcher = process_watcher(config_dir())
             watcher.start(asyncio.get_running_loop())
 
-            def _drop_durable_folds() -> None:
-                # The settings reload alone is not enough: a cached fold's
-                # ``render`` is re-derived only on transcript growth, so the
-                # phone's scroll-back pages would serve the pre-flip rows
-                # until an unrelated append (D2). ``invalidate_all`` costs one
-                # full fold per session on its next open — rare, and the fold
-                # is the thing that must be RIGHT.
+            def _drop_display_derived_state() -> None:
+                # The settings reload alone is not enough, twice over.
+                # 1. A cached fold's ``render`` is re-derived only on
+                # transcript growth, so the phone's scroll-back pages would
+                # serve the pre-flip rows until an unrelated append (D2).
+                # ``invalidate_all`` costs one full fold per session on its
+                # next open — rare, and the fold is the thing that must be
+                # RIGHT.
                 cache = _DURABLE_FOLD_CACHE
                 if cache is not None:
                     cache.invalidate_all()
+                # 2. ``session_projections`` retains the last repaint per route
+                # so a reconnect renders immediately without a fold — and the
+                # stale branch of ``capture_subagent_details`` re-serves that
+                # exact object whenever a fresh durable fold loses against the
+                # route's generation ledger, so a route the phone had VIEWED
+                # kept republishing its pre-flip rows on every reconnect until
+                # a restart (QA round 2, Q1). Dropped, the next seed
+                # rematerializes at the retained epoch from the fresh fold
+                # (that branch is built to tolerate a missing retained
+                # payload), and one repaint rebuilds the summary for a
+                # still-live route. Loop-thread-only state: listener fan-out
+                # runs on the loop thread (ConfigWatcher's threading
+                # contract), the same thread as every other mutation, so this
+                # needs no lock. ``subagent_details`` deliberately stays: a
+                # child transcript is never carried in it (``transcript=[]``
+                # on the wire; the drill-in history reads the child's dir
+                # through the fold cache above), and nothing else in it is
+                # cross-session content. The generation ledgers stay too —
+                # they are ordering, not payload, and they are what keeps an
+                # open browser's observed epoch monotonic across the flip.
+                self.session_projections.clear()
 
             self._display_watch_unsubscribe = follow_display_settings(
-                watcher, also=_drop_durable_folds
+                watcher, also=_drop_display_derived_state
             )
         except Exception:  # noqa: BLE001 — a missing invalidator costs a restart, not the boot
             logger.warning("display settings follower could not be attached", exc_info=True)
