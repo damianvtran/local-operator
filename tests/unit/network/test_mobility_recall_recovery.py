@@ -273,6 +273,9 @@ def test_a_sync_refusal_names_the_verified_staged_copy(
     refused = sync.request_sync(SESSION, root=server_a.root)
 
     assert refused["ok"] is False, refused
+    # The refusal's OWN code, split off ``unreachable`` (R1 design finding D1) so
+    # the clause gate can key on it without parsing the sentence.
+    assert refused["code"] == "no_holder", refused
     message = str(refused.get("message") or "")
     assert f"network/staging/{SESSION}" in message, message
     assert f"lop sessions move {SESSION} --to local" in message, message
@@ -285,6 +288,73 @@ def test_a_sync_refusal_names_the_verified_staged_copy(
     plain = sync.request_sync(SESSION, root=server_a.root)
     assert plain["ok"] is False, plain
     assert f"network/staging/{SESSION}" not in str(plain.get("message") or ""), plain
+
+
+def test_the_peer_unreachable_refusal_gets_no_staged_copy_clause(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design review round 1, D1: the clause is gated to the NO-HOLDER refusal.
+
+    Both ``resolve_remote_owner`` refusals used to carry the code
+    ``unreachable``, so the round-1 clause also composed onto "cloud-node-1 is
+    not answering right now (last seen 42s ago); nothing was changed" — a state
+    where ``lop sessions move <id> --to local`` cannot complete while the peer
+    stays down (adoption still needs the owner through
+    ``_reconcile_destination``), so the advice promised what nothing could keep.
+    The state fed here is §8.3's shape for a peer that stopped answering — a
+    peer block with ``reachable: false`` — crafted to the contract because the
+    live fan-out emits NO rows for such a peer ("a listing must not show
+    phantom rows", relay.py's ``_fan_out_catalog``), which is exactly why the
+    gate must not depend on the live fan-out being able to produce it. With a
+    verified staged copy present, the refusal must still arrive WITHOUT the
+    clause; the no-row case (the same device, no row at all) must keep it.
+    """
+    server_a, server_b = _offload_to_peer(request.getfixturevalue("pair"), monkeypatch)
+
+    staged = sync.staging_dir(server_a.root, SESSION)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(server_b.root / "sessions" / SESSION), str(staged))
+    (staged / "ready.json").write_text(json.dumps({"at": time.time()}), encoding="utf-8")
+
+    unreachable_row = {
+        "session_id": SESSION,
+        "locality": "remote",
+        "peer": {
+            "device_id": server_b.identity.device_id,
+            "name": "cloud-node-1",
+            "reachable": False,
+            "age_s": 42,
+        },
+    }
+    monkeypatch.setattr(
+        server_a, "federated_rows", lambda: {"sessions": [unreachable_row], "peers": {}}
+    )
+    refused = sync.local_sync_handler(server_a)({"session_id": SESSION})
+
+    assert refused["ok"] is False, refused
+    assert refused["code"] == "unreachable", refused
+    message = str(refused.get("message") or "")
+    assert "not answering right now" in message, message
+    assert f"network/staging/{SESSION}" not in message, (
+        "the clause composed onto the peer-unreachable refusal, where the named "
+        "verb cannot complete while the peer stays down"
+    )
+
+    # THE NO-ROW CASE STILL NAMES IT: same device, same verified copy, and its
+    # own code — the other half of the gate, read in one cell so the decision is
+    # the pair rather than either half alone.
+    monkeypatch.delattr(server_a, "federated_rows")
+    write_tombstone(
+        SESSION,
+        device_id=server_a.identity.device_id,
+        device_name=server_a.identity.name,
+        network_id="n_test",
+        config_dir=server_b.root,
+    )
+    named = sync.request_sync(SESSION, root=server_a.root)
+    assert named["ok"] is False, named
+    assert named["code"] == "no_holder", named
+    assert f"network/staging/{SESSION}" in str(named.get("message") or ""), named
 
 
 # ---------------------------------------------------------------------------

@@ -3167,12 +3167,16 @@ def local_sync_handler(server: "RelayServer") -> Any:
             # A "nobody holds it" answer must not deny bytes THIS device is
             # holding (measured 2026-09-29): a verified staged copy from an
             # interrupted move is NAMED — with the one verb that adopts it —
-            # rather than hidden behind the absence of a row. See
-            # ``mobility.staged_copy_clause``; the clause self-gates on the
-            # copy's own ``ready.json``, so it cannot point at an empty
-            # staging directory.
+            # rather than hidden behind the absence of a row. Gated to the
+            # ``no_holder`` refusal ALONE (design review round 1, D1): the
+            # per-peer ``unreachable`` refusal is about a device that stopped
+            # answering, and the named verb cannot complete while it stays down
+            # (the adoption still needs the owner through ``_reconcile_destination``),
+            # so composing the advice there would promise what nothing can keep.
+            # ``staged_copy_clause`` self-gates on the copy's own ``ready.json``,
+            # so it cannot point at an empty staging directory.
             message = str(refusal.message)
-            if str(refusal.code or "") == "unreachable":
+            if str(refusal.code or "") == "no_holder":
                 message += staged_copy_clause(server, session_id)
             return {
                 "ok": False,

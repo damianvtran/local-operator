@@ -306,6 +306,11 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         # protocol one: the source holds an entry the copy set does not carry, so
         # moving it would delete that entry with nothing to copy it from (B-M2).
         "unlisted_content",
+        # PR #1756 round 1 (design finding D1), and it exists for the SENTENCE
+        # discipline rather than the wire: split off ``unreachable`` so a consumer
+        # can tell "a peer stopped answering" (its remedy is time) from "no row
+        # at all" (its remedy is looking where the id was last staged, HERE).
+        "no_holder",
     }
 )
 
@@ -2673,8 +2678,14 @@ def resolve_remote_owner(server: "RelayServer", session_id: str) -> tuple[str, s
                 + "; nothing was changed",
             )
         return device_id, str(peer.get("name") or "")
+    # Its OWN code, distinct from the per-peer ``unreachable`` above (design
+    # review round 1, D1): the two sentences have DIFFERENT remedies — a device
+    # that stopped answering may recover on its own, while "no row at all" is
+    # answered by looking at THIS device's own staging area — and the sync
+    # clause that names a staged copy must compose onto the latter only, where
+    # the named verb can actually complete.
     raise Moved(
-        "unreachable",
+        "no_holder",
         f"no device in this network holds {session_id}, so nothing was moved",
     )
 
