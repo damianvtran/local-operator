@@ -1,6 +1,6 @@
 ---
 name: agents
-description: "Use Local Operator agent profiles, roles, and subagents: discover, create, select, interact, delegate, and choose the correct collaboration mode."
+description: "Use Local Operator agent profiles, roles, subagents and Agent Hub pull/push/update: create, select, delegate, choose a collaboration mode."
 ---
 
 # Agent profiles and subagents
@@ -136,3 +136,12 @@ Use `jobs` to inspect background work, and `hub` to question or steer a running 
 - No clear specialization or concurrency benefit: do not delegate.
 
 Never inject or enumerate every registered agent speculatively. The registry can be large and may contain private descriptions; discover it only in response to a relevant task.
+
+## Agent Hub: pull, push, update
+
+- `agents pull <id>` copies a hub agent (add `--org <tenant>` for an organization's). The pull remembers the hub id and the text it pulled — the *baseline*.
+- Updates are a three-way merge of baseline, your copy and the hub's. What each side changed is kept; a section you deleted stays deleted, one the hub deleted goes; a shortened paragraph stays shortened. Both sides editing the same sentence is combined by your default model when the meaning is preserved, otherwise left for you.
+- Auto-update is on by default (`hub.auto_update.agents`); off, you still see "update available" and apply it yourself: `agents sync --name X`. `--check` only reports. `--prefer local|remote` decides a conflict. `--replace --yes` (CLI/UI only) discards your copy for the hub's and echoes what it discarded. `--force` is a deprecated alias of that.
+- `agent op='sync'` merges; `resolve='local'|'remote'` decides a conflict. It can never discard the user's copy.
+- FAQ — *Will a pull/update overwrite my local changes?* No: edits and deliberate deletions on your side survive; anything replaced is backed up (`hub/backups/`) and echoed. *Will my publish clobber someone else's edits?* Push runs the same merge against the hub copy first; their changes and removals are kept unless you choose `--replace`.
+- Best practice: pull once, edit freely, let updates flow. To drop a section for good, delete it — do not blank it. Publish after an update, not before.
