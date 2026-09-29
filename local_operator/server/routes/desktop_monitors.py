@@ -9,19 +9,22 @@ keeps:
 
 **Who writes.** ``Session._persist_monitor_schedules`` is the one writer of
 monitor state, and this module never becomes a second one. It resolves the
-OWNER first, exactly as the wake surface does — and this is the one place the
-two surfaces part ways, because the wake twin has a routed command ladder
-(``serving._wake_slash``, reached by ``route_shared_slash("wake", …)``) and
-monitors deliberately have none yet:
+OWNER first, exactly as the wake surface does, and reaches it the same way —
+the wake twin's routed command ladder now has a monitor twin
+(``serving._monitor_slash``, reached by ``route_shared_slash("monitor", …)``):
 
-- no live owner  ⇒ ``monitors/arm.py`` (transcript first, index second);
-- a live owner, reachable or wedged ⇒ a retryable 503 refusal, in the writer's
-  own sentences, and NEVER a file write. An append from here would be deleted
-  by that session's next persist (which republishes its whole in-memory list)
-  while this route answered 200, and until then nothing would tick the watch
-  either — the silently dead reminder both families' writers exist to remove.
-  Its own ``monitor`` tool is the writer that may touch a live conversation's
-  list; the refusal says so.
+- a live, answering owner ⇒ the ladder: the mutation runs INSIDE the process
+  that owns the schedules, so the in-memory list, the transcript entry and the
+  derived index move together through the session's own machinery;
+- no live owner ⇒ ``monitors/arm.py`` (transcript first, index second);
+- an owner that cannot be used at all ⇒ a retryable 503 refusal, in the
+  writer's own sentences, and NEVER a file write. That covers a wedged runtime
+  (its process holds the transcript lease), a dialable owner whose ladder call
+  came back with no answer, and a live process with no discovery record (the
+  WRITER's own guard). An append from here would be deleted by that session's
+  next persist (which republishes its whole in-memory list) while this route
+  answered 200, and until then nothing would tick the watch either — the
+  silently dead reminder both families' writers exist to remove.
 
 **Why the listing is not a per-session field.** ``GET /v1/desktop/sessions`` is
 ranked by recency and capped at 500, and a session armed once and never opened
@@ -43,6 +46,7 @@ carry no ``request_id``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -55,7 +59,6 @@ from fastapi import Query, Request
 from pydantic import Field, StrictBool
 
 from local_operator.monitors.arm import (
-    OWNER_ANSWERED_MESSAGE,
     WEDGED_MESSAGE,
     MonitorWriteError,
     MonitorWriteOutcome,
@@ -100,16 +103,20 @@ _STATUS_FOR_CODE = {
     "monitor_refused": 409,
     "monitor_not_found": 404,
     "session_not_found": 404,
+    "monitor_unavailable": 409,
     "monitor_write_conflict": 409,
     # 409, NOT 503: the lock FILE could not be created (a read-only session
     # directory), so nothing was contended and a retry changes nothing until
     # the directory's mode does — the "conflict with the state itself" class.
     "monitor_write_unavailable": 409,
     # 503 for every "nothing was written; retrying is the fix": a contended
-    # lock, and the two owner states (present, wedged).
+    # lock, and the owner states — an owner that cannot be used at all
+    # (present-but-not-dialable, wedged), and a dialable owner whose ladder
+    # call came back with no answer at all.
     "monitor_write_busy": 503,
     "monitor_owner_present": 503,
     "monitor_owner_wedged": 503,
+    "monitor_owner_unavailable": 503,
 }
 
 
@@ -398,13 +405,13 @@ async def _mutate(
     async with host(request).session(session_id) as bridge:
         assert bridge.remote is not None
         if bridge.remote.owner_reachable:
-            # NO LADDER, SO NO OWNER MUTATION — see the module docstring. The
-            # sentence is the writer's own constant, so a client that meets this
-            # state through either check reads one wording.
-            raise MonitorWriteError(
-                OWNER_ANSWERED_MESSAGE,
-                status=_refusal_status("monitor_owner_present"),
-                code="monitor_owner_present",
+            return await _via_owner(
+                root,
+                bridge,
+                session_id,
+                op=op,
+                monitor_id=monitor_id,
+                monitor_request=monitor_request,
             )
         wedged = await asyncio.to_thread(_wedged, root, session_id)
         if wedged is not None:
@@ -422,6 +429,84 @@ async def _mutate(
         else:
             outcome = await cancel_monitor(root, session_id, monitor_id)
     return _receipt(outcome)
+
+
+async def _via_owner(
+    config_dir: Path,
+    bridge: Any,
+    session_id: str,
+    *,
+    op: str,
+    monitor_id: str,
+    monitor_request: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Run the mutation inside the process that owns the schedules.
+
+    The runtime's ``monitor`` word is the ladder twin of the wake route's
+    (``serving._monitor_slash``), and it ends in ``scheduler.create``/
+    ``scheduler.cancel`` -> ``Session._persist_monitor_schedules``. Nothing
+    here writes a transcript or an index entry: doing so is what would produce
+    a watch the session's next persist deletes and nothing ticks.
+    """
+    payload = json.dumps({"op": op, "monitor_id": monitor_id, "request": monitor_request or {}})
+    outcome = await bridge.remote.route_shared_slash("monitor", payload)
+    if not isinstance(outcome, Mapping):
+        # NOT a monitor refusal the runtime decided: the bridge answered
+        # nothing at all (no ack shape from the owner). Typed for the client
+        # all the same — it is raised before any write and its sentence asks
+        # the caller to come back.
+        raise MonitorWriteError(
+            "The conversation's runtime answered nothing for this monitor.",
+            status=_refusal_status("monitor_owner_unavailable"),
+            code="monitor_owner_unavailable",
+        )
+    if outcome.get("kind") == "error":
+        data = outcome.get("data") or {}
+        code = str(data.get("code") or "monitor_refused")
+        raise MonitorWriteError(
+            str(outcome.get("text") or "The monitor was refused."),
+            status=_refusal_status(code),
+            code=code,
+        )
+    data = outcome.get("data") or {}
+    root = Path(config_dir)
+    # VERIFIED, not assumed (the wake route's rule): the owner's index write is
+    # best-effort and swallows its failure (the transcript is what matters),
+    # so this asks the file rather than reporting the intent.
+    index_written = await asyncio.to_thread(
+        _index_reflects, root, session_id, op, str(data.get("monitor_id") or monitor_id)
+    )
+    return _receipt(
+        MonitorWriteOutcome(
+            session_id=session_id,
+            monitor_id=str(data.get("monitor_id") or ""),
+            name=str(data.get("name") or ""),
+            remaining=_as_int(data.get("remaining")) or 0,
+            index_written=index_written,
+            next_due_at=_as_int(data.get("next_due_at")) if op != "cancel" else None,
+            already_armed=bool(data.get("already_armed")),
+            reactivated=bool(data.get("reactivated")),
+        )
+    )
+
+
+def _index_reflects(config_dir: Path, session_id: str, op: str, monitor_id: str) -> bool:
+    from local_operator.monitors.store import read_entry
+
+    try:
+        entry = read_entry(Path(config_dir), session_id)
+    except Exception:  # noqa: BLE001 — an unreadable index is reported, not raised
+        return False
+    ids = {
+        str(raw.get("id") or "")
+        for raw in (entry or {}).get("monitors") or ()
+        if isinstance(raw, Mapping)
+    }
+    if op == "cancel":
+        # An empty remainder REMOVES the entry (``store.write_entry``), so a
+        # missing entry is exactly what a reflected cancel looks like.
+        return monitor_id not in ids
+    return monitor_id in ids
 
 
 def _wedged(config_dir: Path, session_id: str) -> Any:

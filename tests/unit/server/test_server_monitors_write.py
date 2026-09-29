@@ -2,8 +2,11 @@
 
 The whole point of these routes is WHICH WRITER they reach, so that is what
 most of this file pins: a session with no live runtime is mutated through
-``monitors/arm.py`` (transcript first, index second), and the one case where
-that would be wrong — a runtime that exists and answers (or that is wedged) —
+``monitors/arm.py`` (transcript first, index second); a live runtime that
+ANSWERS is mutated through the ``monitor`` ladder word, inside the process
+that owns the schedules (the serving-level half lives in
+``tests/unit/session/runtime/test_serving_monitor_command.py``); and an owner
+that cannot be used at all — wedged, or a dialable one that answers nothing —
 is refused with a 503 rather than written around. A monitor appended behind a
 live session's back is deleted by that session's next persist *and* skipped by
 nothing until then, so "the request succeeded" and "the watch will tick" come
@@ -33,7 +36,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.monitors.store import read_entry
+from local_operator.monitors.store import read_entry, remove_entry, write_entry
 from local_operator.server.routes import desktop_monitors
 
 TOKEN = "desktop-monitors-write-token"
@@ -142,6 +145,13 @@ def _snapshot_count(directory: Path) -> int:
         if line.strip()
         and (json.loads(line).get("payload") or {}).get("custom_type") == "monitor_schedules"
     )
+
+
+def _write_index(root: Path, session_id: str, monitors: list[dict[str, Any]]) -> None:
+    """One session's derived monitor index entry, written directly for a
+    fixture that needs the route's verification to find it already reflecting
+    a change the owner's persist would have made."""
+    write_entry(root, session_id, cwd="/repo", monitors=monitors)
 
 
 def _arm_body(session_id: str, **extra: Any) -> dict[str, Any]:
@@ -337,45 +347,289 @@ async def test_a_wedged_owner_is_refused_rather_than_written_around(
 
 
 class _StubRemote:
+    """The owner's control face: records the ladder calls and answers with the
+    runtime's own envelope shape (``route_shared_slash``'s contract)."""
+
     owner_reachable = True
+
+    def __init__(self, outcome: dict[str, Any] | None, on_call: Any = None) -> None:
+        self.outcome = outcome
+        self.on_call = on_call
+        self.calls: list[tuple[str, str]] = []
+
+    async def route_shared_slash(self, command: str, args: str) -> dict[str, Any] | None:
+        self.calls.append((command, args))
+        if self.on_call is not None:
+            self.on_call(json.loads(args))
+        return self.outcome
 
 
 class _StubBridge:
-    remote = _StubRemote()
+    def __init__(self, outcome: dict[str, Any] | None, on_call: Any = None) -> None:
+        self.remote = _StubRemote(outcome, on_call)
+        self.cwd = "/repo"
 
 
 class _StubPool:
     """A host whose session owner is reachable — the state a live desktop
-    conversation is in. Monitors have no routed command ladder, so both ops
-    must refuse rather than fall through to the file writer."""
+    conversation is in. The owner stub plays the runtime's side of the
+    ladder; what is worth pinning at THIS level is the contract the route owes
+    it: the command word, the payload it lands with, and the mapping from the
+    runtime's typed reply back to an HTTP body."""
+
+    def __init__(self, bridge: _StubBridge) -> None:
+        self._bridge = bridge
 
     @contextlib.asynccontextmanager
     async def session(self, session_id: str):
-        yield _StubBridge()
+        yield self._bridge
+
+
+def _owner_index_effect(root: Path, session_id: str):
+    """The effect a live persist has on the derived index, played by the
+    owner stub: an arm rewrites the entry, a cancel removes it with its last
+    row. The route must still VERIFY the file rather than take the stub's word
+    for it."""
+
+    def on_call(payload: dict[str, Any]) -> None:
+        if payload.get("op") == "cancel":
+            remove_entry(root, session_id)
+            return
+        request = payload.get("request") or {}
+        _write_index(
+            root,
+            session_id,
+            [{"id": "m1", "name": request.get("name") or "watch the build"}],
+        )
+
+    return on_call
 
 
 @pytest.mark.asyncio
-async def test_an_answering_owner_is_refused_because_no_monitor_ladder_exists(
+async def test_the_owner_path_sends_the_ladder_word_and_reports_the_index(
+    tmp_path: Path,
+) -> None:
+    """The route never writes: it asks the owner through ``route_shared_slash``
+    and then VERIFIES the derived index rather than reporting the owner's
+    intent (the session's own index write is best-effort and swallows its
+    failure)."""
+    root = tmp_path / "cfg"
+    _session(root, "aaaaaaaaaaaa")
+    _write_index(root, "aaaaaaaaaaaa", [{"id": "m1", "name": "watch the build"}])
+    bridge = _StubBridge(
+        {
+            "kind": "notice",
+            "text": "Armed monitor 'watch the build' (m1)",
+            "data": {
+                "monitor_id": "m1",
+                "name": "watch the build",
+                "next_due_at": 42,
+                "remaining": 1,
+                "already_armed": False,
+                "reactivated": False,
+            },
+        }
+    )
+
+    receipt = await desktop_monitors._via_owner(
+        root,
+        bridge,
+        "aaaaaaaaaaaa",
+        op="create",
+        monitor_id="",
+        monitor_request={"tool": "bash", "arguments": {"command": "ls"}, "every": "60s"},
+    )
+
+    command, args = bridge.remote.calls[0]
+    assert command == "monitor"
+    assert json.loads(args) == {
+        "op": "create",
+        "monitor_id": "",
+        "request": {"tool": "bash", "arguments": {"command": "ls"}, "every": "60s"},
+    }
+    assert receipt["monitor_id"] == "m1"
+    assert receipt["name"] == "watch the build"
+    assert receipt["next_due_at"] == 42
+    assert receipt["remaining"] == 1
+    assert receipt["receipt"] == "applied"
+    assert receipt["index_written"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_owner_refusal_keeps_the_runtime_s_own_sentence(tmp_path: Path) -> None:
+    """One wording for one mistake: the sentence the agent's tool gets is the
+    sentence the desktop client is shown, and the code — not the prose — is
+    what decides the status."""
+    bridge = _StubBridge(
+        {
+            "kind": "error",
+            "text": "No monitor with id 'm9' (known: none)",
+            "data": {"code": "monitor_not_found"},
+        }
+    )
+
+    with pytest.raises(desktop_monitors.MonitorWriteError) as refused:
+        await desktop_monitors._via_owner(
+            tmp_path / "cfg",
+            bridge,
+            "aaaaaaaaaaaa",
+            op="cancel",
+            monitor_id="m9",
+            monitor_request=None,
+        )
+
+    assert refused.value.status == 404
+    assert refused.value.code == "monitor_not_found"
+    assert str(refused.value) == "No monitor with id 'm9' (known: none)"
+
+
+@pytest.mark.asyncio
+async def test_an_owner_that_answers_nothing_is_a_retryable_503(tmp_path: Path) -> None:
+    """A dialable owner whose ladder call came back with no envelope at all is
+    the "cannot answer" state: nothing was written, and the client's move is
+    to come back — 503, never a file write."""
+    bridge = _StubBridge(None)
+
+    with pytest.raises(desktop_monitors.MonitorWriteError) as refused:
+        await desktop_monitors._via_owner(
+            tmp_path / "cfg",
+            bridge,
+            "aaaaaaaaaaaa",
+            op="create",
+            monitor_id="",
+            monitor_request={"tool": "bash"},
+        )
+
+    assert refused.value.status == 503
+    assert refused.value.code == "monitor_owner_unavailable"
+    assert "answered nothing" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_a_live_owner_arm_lands_through_the_ladder_over_http(
     desktop, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The deliberate gap of this slice, pinned as behaviour: ``monitors`` has
-    no ``_wake_slash`` sibling, so a conversation whose runtime answers gets the
-    writer's own retryable sentence — never a file write that its next persist
-    would delete."""
+    """The arm path for a live conversation, end to end through the route: the
+    ladder word carries the client's own request, the owner's persist moves the
+    index, and the receipt reports the VERIFIED file — not the stub's intent."""
     client, root = desktop
-    directory = _session(root, "aaaaaaaaaaaa")
-    monkeypatch.setattr(desktop_monitors, "host", lambda request: _StubPool())
+    _session(root, "aaaaaaaaaaaa")
+    bridge = _StubBridge(
+        {
+            "kind": "notice",
+            "text": "Armed monitor 'watch the build' (m1)",
+            "data": {
+                "monitor_id": "m1",
+                "name": "watch the build",
+                "next_due_at": 42,
+                "remaining": 1,
+                "already_armed": False,
+                "reactivated": False,
+            },
+        },
+        on_call=_owner_index_effect(root, "aaaaaaaaaaaa"),
+    )
+    monkeypatch.setattr(desktop_monitors, "host", lambda request: _StubPool(bridge))
 
-    arm = await client.post("/v1/desktop/monitors", json=_arm_body("aaaaaaaaaaaa"))
-    cancel = await client.delete("/v1/desktop/monitors/aaaaaaaaaaaa/m1")
+    response = await client.post("/v1/desktop/monitors", json=_arm_body("aaaaaaaaaaaa"))
 
-    assert arm.status_code == 503, arm.text
-    assert arm.json()["detail"]["code"] == "monitor_owner_present"
-    assert "open in a running session" in arm.json()["detail"]["message"]
-    assert "Nothing was written" in arm.json()["detail"]["message"]
-    assert cancel.status_code == 503, cancel.text
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["monitor_id"] == "m1"
+    assert result["name"] == "watch the build"
+    assert result["receipt"] == "applied"
+    assert result["index_written"] is True
+    assert result["already_armed"] is False
+    assert bridge.remote.calls[0][0] == "monitor"
+    payload = json.loads(bridge.remote.calls[0][1])
+    assert payload["op"] == "create"
+    assert payload["request"]["tool"] == "bash"
+    entry = read_entry(root, "aaaaaaaaaaaa")
+    assert entry is not None and [row["id"] for row in entry["monitors"]] == ["m1"]
+
+
+@pytest.mark.asyncio
+async def test_a_live_owner_cancel_lands_through_the_ladder_over_http(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancel the daemon used to refuse with ``monitor_owner_present`` now
+    lands in the owning session; the receipt reports the shrunken count and the
+    index entry's removal."""
+    client, root = desktop
+    _session(root, "aaaaaaaaaaaa")
+    _write_index(root, "aaaaaaaaaaaa", [{"id": "m1", "name": "watch the build"}])
+    bridge = _StubBridge(
+        {
+            "kind": "notice",
+            "text": "Cancelled monitor 'm1'.",
+            "data": {
+                "monitor_id": "m1",
+                "name": "watch the build",
+                "remaining": 0,
+                "already_armed": False,
+                "reactivated": False,
+            },
+        },
+        on_call=_owner_index_effect(root, "aaaaaaaaaaaa"),
+    )
+    monkeypatch.setattr(desktop_monitors, "host", lambda request: _StubPool(bridge))
+
+    response = await client.delete("/v1/desktop/monitors/aaaaaaaaaaaa/m1")
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["monitor_id"] == "m1"
+    assert result["remaining"] == 0
+    assert result["next_due_at"] is None
+    assert result["index_written"] is True
+    assert json.loads(bridge.remote.calls[0][1]) == {
+        "op": "cancel",
+        "monitor_id": "m1",
+        "request": {},
+    }
     assert read_entry(root, "aaaaaaaaaaaa") is None
-    assert _rows_on_disk(directory) == []
+
+
+@pytest.mark.asyncio
+async def test_a_live_owner_retried_arm_keeps_the_dedupe_answer(
+    desktop, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dedupe identity is the retry's idempotency key on the live path
+    too: the owner answers ``already_armed`` and nothing is appended — the
+    index still holds the one row that was already in force."""
+    client, root = desktop
+    _session(root, "aaaaaaaaaaaa")
+    _write_index(root, "aaaaaaaaaaaa", [{"id": "m1", "name": "watch the build"}])
+    bridge = _StubBridge(
+        {
+            "kind": "notice",
+            "text": "Monitor 'watch the build' (m1) already watches that call every 1m.",
+            "data": {
+                "monitor_id": "m1",
+                "name": "watch the build",
+                "next_due_at": 42,
+                "remaining": 1,
+                "already_armed": True,
+                "reactivated": False,
+            },
+        },
+        # A duplicate appends NOTHING — that is the point — so the owner stub
+        # deliberately has no index effect at all.
+        on_call=None,
+    )
+    monkeypatch.setattr(desktop_monitors, "host", lambda request: _StubPool(bridge))
+
+    response = await client.post("/v1/desktop/monitors", json=_arm_body("aaaaaaaaaaaa"))
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["monitor_id"] == "m1"
+    assert result["already_armed"] is True
+    assert result["reactivated"] is False
+    assert result["remaining"] == 1
+    assert result["index_written"] is True
+    entry = read_entry(root, "aaaaaaaaaaaa")
+    assert entry is not None and len(entry["monitors"]) == 1
 
 
 @pytest.mark.asyncio
