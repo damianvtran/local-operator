@@ -115,6 +115,60 @@ def test_late_subscriber_uses_durable_not_envelope_sequence(tmp_path):
     assert any(f["type"] == "notification" for f in drain(late))
 
 
+def test_subscribe_takes_a_prefetched_baseline_without_touching_the_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync API keeps a door for callers that already read the floor.
+
+    ``subscribe`` reads ``AttentionStore.revision`` itself -- which blocks the
+    calling thread -- so an event-loop caller reads it in a worker and passes
+    the value in (``DesktopFeed.subscribe_off_loop``). This pins the door
+    itself: with an explicit baseline, the store must not be touched at all.
+    """
+    feed = DesktopFeed(tmp_path)
+    monkeypatch.setattr(feed, "_ensure_poller", lambda: None)
+
+    def explode() -> tuple[int, int]:
+        raise AssertionError("a prefetched baseline must not read the store")
+
+    monkeypatch.setattr(feed.store, "revision", explode)
+    subscription = feed.subscribe(baseline_completion_sequence=3)
+    assert subscription.baseline_completion_sequence == 3
+
+
+def test_subscribe_off_loop_reads_the_baseline_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The desk's connect route must not pay a store wait on its own loop.
+
+    ``AttentionStore.revision`` rides the store's bounded contention budget out
+    (up to ~10.8 s), and ``GET /v1/desktop/events`` is what a connecting client
+    waits on. The read must therefore happen on a WORKER thread -- asserted
+    structurally, by thread identity, not by timing.
+    """
+    publish(tmp_path, "aaaaaaaaaaaa")
+    feed = DesktopFeed(tmp_path)
+    monkeypatch.setattr(feed, "_ensure_poller", lambda: None)
+    original = feed.store.revision
+    reader_threads: list[int] = []
+
+    def recording_revision() -> tuple[int, int, int]:
+        reader_threads.append(threading.get_ident())
+        return original()
+
+    monkeypatch.setattr(feed.store, "revision", recording_revision)
+
+    async def scenario() -> int:
+        loop_thread = threading.get_ident()
+        subscription = await feed.subscribe_off_loop()
+        assert subscription.baseline_completion_sequence >= 1
+        return loop_thread
+
+    loop_thread = asyncio.run(scenario())
+    assert reader_threads, "the floor must have been read"
+    assert reader_threads[0] != loop_thread, "the floor read ran ON the event loop"
+
+
 def test_pre_subscription_unpolled_publication_is_not_replayed(tmp_path):
     feed = DesktopFeed(tmp_path)
     feed.subscribe()
