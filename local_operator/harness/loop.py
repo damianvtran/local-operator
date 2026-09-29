@@ -70,6 +70,7 @@ from local_operator.harness.types import (
     ChatRequest,
     Content,
     CustomMessage,
+    FinalResponseCheck,
     InvalidToolArgumentsError,
     LoopConfig,
     Message,
@@ -79,6 +80,7 @@ from local_operator.harness.types import (
     ModelChangeEvent,
     ModelSpec,
     NoticeEvent,
+    OutputValidationEvent,
     ProviderTurnStartEvent,
     ReasoningDeltaEvent,
     RenderedStreamError,
@@ -1252,6 +1254,12 @@ class AgentLoop:
         # that DID produce text or calls is truncated, not silent, and keeps
         # the old pair-and-stop behaviour.
         empty_truncation_retries = 0
+        # The output contract's budget for THIS run (== per turn: a ``--loop``
+        # iteration re-enters ``_run`` fresh). Counted only on the terminal
+        # seam, so every non-clean exit -- abort, stream error, continuation
+        # limit -- is untouched by enforcement and an enforcement failure can
+        # never mask a real failure.
+        final_response_attempts = 0
         # Turns this run has retried with thinking turned OFF after DeepSeek
         # refused a request for a missing reasoning echo -- and, separately,
         # turns it has re-sent with the echo FILLED. Run-scoped and topped up
@@ -2224,6 +2232,56 @@ class AgentLoop:
                     pending = [m for _, m in late]
                     has_more_tool_calls = True
                     continue
+                # The OUTPUT CONTRACT gate: the one seam where a turn ends
+                # CLEANLY, so it is the only place a final response exists to
+                # check. Every other exit (abort, stream error, continuation
+                # limit, repeated-error limit) returned earlier, which is what
+                # keeps an enforcement failure from ever masking a real one.
+                #
+                # A rejected response becomes ONE MORE MODEL STEP inside the
+                # same turn: the retry is a visible, persisted user message
+                # (the repeated-error recovery notice's shape below), not an
+                # invisible injection, so exactly one AgentEndEvent still ends
+                # the run and a resumed transcript explains the continuation.
+                if config.final_response_gate is not None:
+                    gate = config.final_response_gate
+                    final_response_attempts += 1
+                    # None means no assistant message at all ("" is a value:
+                    # an empty answer is a failing answer, not a missing one).
+                    text = _last_assistant_text(context.messages)
+                    check = (
+                        FinalResponseCheck(
+                            ok=False, error="the turn produced no assistant message"
+                        )
+                        if text is None
+                        else gate.check(text)
+                    )
+                    yield OutputValidationEvent(
+                        format=gate.label,
+                        attempt=final_response_attempts,
+                        max_attempts=gate.max_attempts,
+                        ok=check.ok,
+                        exhausted=(not check.ok and final_response_attempts >= gate.max_attempts),
+                        error="" if check.ok else check.error,
+                        payload_text=check.payload_text if check.ok else "",
+                    )
+                    if not check.ok:
+                        if final_response_attempts < gate.max_attempts:
+                            retry = gate.retry_message(
+                                attempt=final_response_attempts + 1, error=check.error
+                            )
+                            context.messages.append(retry)
+                            new_messages.append(retry)
+                            has_more_tool_calls = True
+                            continue
+                        yield AgentEndEvent(
+                            messages=new_messages,
+                            error=gate.exhausted_error(
+                                attempts=final_response_attempts, error=check.error
+                            ),
+                            generation=generation,
+                        )
+                        return
                 break
 
             yield AgentEndEvent(messages=new_messages, generation=generation)
@@ -4620,6 +4678,22 @@ def _materialize_asides(asides: Sequence[Aside]) -> list[AgentMessage]:
             continue
         out.append(message)
     return out
+
+
+def _last_assistant_text(messages: Sequence[AgentMessage]) -> str | None:
+    """The last assistant message's text, or ``None`` when there is none.
+
+    Backwards scan, and the distinction between ``None`` and ``""`` is
+    load-bearing: a turn whose assistant message carried no text produced an
+    EMPTY answer (a failing answer under a contract), while a turn with no
+    assistant message at all produced no answer to check (also a failure, but
+    reported differently). Only ``Message`` rows count — a ``CustomMessage``
+    has no ``role``/``text`` pair here and is never an assistant answer.
+    """
+    for message in reversed(messages):
+        if isinstance(message, Message) and message.role == "assistant":
+            return message.text
+    return None
 
 
 def validate_tool_arguments(

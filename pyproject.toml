@@ -79,6 +79,21 @@ dependencies = [
     "dill",
     "tiktoken",
     "mcp>=1.2",
+    # JSON Schema validation for ``--output-schema`` files (and an SDK caller's
+    # raw-schema spelling): ``local_operator/output_contract.py`` imports it
+    # lazily, inside the mapping-schema branch only, and this declaration is
+    # deliberately explicit for the same reason ``cryptography`` is declared
+    # above — it already arrives as a transitive of the ``mcp`` extra (a "JSON
+    # Schema validator with a Rust-backed store"), but a direct import belongs
+    # in a direct dependency: if that extra were ever narrowed or replaced the
+    # transitive copy would vanish, and every structured-output schema would
+    # fail at import time with no declaration pointing at the cause. The floor
+    # is API, not arbitrary: 4.18 (2023) is where the ``validator_for`` /
+    # Draft 2020-12 surface this module uses settled, and it is far below what
+    # ``mcp`` already resolves, so nobody's install is constrained. jsonschema
+    # itself is pure Python; its ``rpds-py`` store is a compiled wheel, but one
+    # the ``mcp`` dependency already installs on every supported platform.
+    "jsonschema>=4.18",
     "pillow-heif",
 ]
 requires-python = ">=3.12"

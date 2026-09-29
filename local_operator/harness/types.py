@@ -2170,6 +2170,33 @@ class RetryEndEvent(AgentEvent[Literal["retry_end"]]):
     success: bool
 
 
+class OutputValidationEvent(AgentEvent[Literal["output_validation"]]):
+    """The harness checked a turn's final response against the output contract.
+
+    One of these is emitted per checked attempt (so a passing first try is one
+    event with ok=True). ``payload_text`` is the exact payload span that
+    validated — the deterministic extraction result, not the whole message;
+    assigning it the whole message's text is an easy and invisible misread of
+    the contract, so it is named for what it is.
+
+    ``exhausted`` says this rejection was the LAST one the budget allowed (the
+    turn then ends with an ``AgentEndEvent(error=…)``); a rejected attempt
+    with retries left is followed by one more model step, inside the same
+    turn. Emitted only for sessions that installed a contract: with no
+    contract there is no event, and the turn is byte-identical to before this
+    event type existed.
+    """
+
+    type: Literal["output_validation"] = "output_validation"
+    format: str = ""
+    attempt: int = 1
+    max_attempts: int = 1
+    ok: bool = False
+    exhausted: bool = False
+    error: str = ""
+    payload_text: str = ""
+
+
 EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
 
 
@@ -2179,6 +2206,44 @@ EventHandler = Callable[[AgentEvent], Awaitable[None] | None]
 
 
 DEFAULT_MAX_PARALLEL_TOOLS = 8
+
+
+class FinalResponseCheck(BaseModel):
+    """One verdict from a ``FinalResponseGate`` on a turn's final response.
+
+    ``error`` is bounded and human-readable — it is fed back to the model (as
+    a retry instruction), carried on the ``OutputValidationEvent`` and, on
+    exhaustion, into the turn's ``AgentEndEvent.error``. ``payload_text`` is
+    the EXACT span that validated (the winning candidate, stripped), which is
+    what ``lop exec`` prints on stdout so ``--output-format json | jq .``
+    works even when the payload arrived inside a fence or prose.
+    """
+
+    ok: bool = False
+    error: str = ""
+    payload_text: str = ""
+
+
+@runtime_checkable
+class FinalResponseGate(Protocol):
+    """What the loop requires of an installed final-response gate.
+
+    The concrete implementation is ``output_contract.OutputContract``; the
+    protocol lives here so the harness owns the contract the loop reads
+    (``LoopConfig.final_response_gate``) without importing the contract
+    vocabulary. ``max_attempts`` is 1 + retries and is always >= 1.
+    """
+
+    #: 1 + retries: how many final answers one run may spend on the gate.
+    max_attempts: int
+    #: The format label ("json" | "yaml" | "toml" | "markdown").
+    label: str
+
+    def check(self, text: str) -> FinalResponseCheck: ...
+
+    def retry_message(self, *, attempt: int, error: str) -> "AgentMessage": ...
+
+    def exhausted_error(self, *, attempts: int, error: str) -> str: ...
 
 
 class LoopConfig(BaseModel):
@@ -2343,6 +2408,12 @@ class LoopConfig(BaseModel):
         ]
         | None
     ) = Field(default=None, exclude=True)
+    #: Validates the turn's terminal assistant text and drives bounded retries.
+    #: Implements the ``FinalResponseGate`` protocol above (typing-only — the
+    #: field is ``Any`` because pydantic cannot validate a Protocol; do not
+    #: "fix" this). ``None`` (the default) leaves every turn byte-identical to
+    #: today's behaviour: no check, no event, no retry.
+    final_response_gate: Any = Field(default=None, exclude=True)
     on_before_yield: Callable[[], Awaitable[None] | None] | None = Field(default=None, exclude=True)
 
     # Fallback routing for unknown tool names (e.g. deferred MCP tools).
