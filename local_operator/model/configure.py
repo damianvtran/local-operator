@@ -1628,6 +1628,10 @@ def _map_entry(model: Any, template: ModelInfo) -> ModelInfo:
     modalities = _extra_mapping(model, "architecture").get("input_modalities") or []
     if modalities:
         info.supports_images = "image" in modalities
+        # The same statement answers the audio question: a described list that
+        # omits ``audio`` is a denial, and an absent or empty list is silence
+        # that leaves the template's ``None`` deferring downstream.
+        info.supports_audio_input = "audio" in modalities
 
     pricing_extra = model.pricing.model_extra or {}
     cache_read = pricing_extra.get("input_cache_read")
@@ -2033,6 +2037,11 @@ def info_from_discovered_model(
         # already carries ``Optional[bool]`` with the same meaning, and
         # ``build_model_spec`` reads ``is not None`` before trusting it.
         info.supports_images = row.supports_images
+    if row.supports_audio_input is not None:
+        # Same three-state contract as ``supports_images`` above: a stated
+        # ``false`` is the provider's denial of audio input, and only silence
+        # defers to whatever the registry or catalogue paths supplied.
+        info.supports_audio_input = row.supports_audio_input
     if row.supports_tools is not None:
         info.supports_tools = row.supports_tools
     if row.reasoning is not None:

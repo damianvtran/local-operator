@@ -263,6 +263,20 @@ def sane_listing_max_tokens(max_tokens: int, context_window: int) -> int:
 #: every install that already has a listing. Same one-time synchronous refetch
 #: the earlier bumps describe, paid by the same two aggregators, since they are
 #: the only transports that quote a price at all.
+#:
+#: Version 7 for ``openrouter`` and ``radient``/``radient-key`` is
+#: ``_row_from_openai_entry`` reading ``architecture.input_modalities`` (or the
+#: legacy ``modality`` string) into ``supports_audio_input`` — a FIELD the
+#: version-6 writer never recorded, which is the plain case for this stamp. A
+#: version-6 document parses to rows whose ``supports_audio_input`` is
+#: ``None``, and ``None`` is precisely "the listing said nothing", so the
+#: audio capability this read exists for would stay invisible on every install
+#: that already has a listing until its TTL rolled over. Same one-time
+#: synchronous refetch the earlier bumps describe, paid by the same two
+#: aggregators. Only they are bumped: no other transport's reader starts
+#: reading a field its writer could not record (the ChatGPT catalogue's
+#: ``input_modalities`` is read for images, not audio, so ``openai``'s stamp
+#: does not move).
 LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     "anthropic": 2,
     # Version 1 could normalize malformed nonempty /models data to []. The
@@ -270,9 +284,9 @@ LISTING_CAPTURE_VERSIONS: dict[str, int] = {
     # inventory. Only DeepSeek pays the refetch; other caches stay valid.
     "deepseek": 2,
     "openai": 2,
-    "openrouter": 6,
-    "radient": 6,
-    "radient-key": 6,
+    "openrouter": 7,
+    "radient": 7,
+    "radient-key": 7,
 }
 #: What a transport not named above is stamped with. Version 1 is the original
 #: shape; a transport only earns a bump when its own reader starts needing a
@@ -358,6 +372,13 @@ class DiscoveredModel:
     text-only model would keep advertising vision forever. The provider is the
     authority on its own capabilities; only a silent listing defers to us.
 
+    ``supports_audio_input`` mirrors ``supports_images`` in every respect but
+    its sources: the same two encodings, the same three-state meaning, and the
+    same rule that a stated denial from the provider outranks any bundled
+    guess. It is also the one capability value models.dev contributes (see
+    ``prices._row``, the OQ-2 resolution), so a ``None`` here can mean either
+    source was silent — which is exactly what the merge defers on.
+
     ``supports_prompt_cache`` stays a plain boolean because NO listing in the tree
     states it: Anthropic's ``capabilities`` object has no prompt-caching key at
     all, and the OpenAI-compatible wires only imply it through a priced cache-read
@@ -420,6 +441,11 @@ class DiscoveredModel:
     #: the point of use when its own listing declines to price it.
     routed: bool = False
     supports_images: bool | None = None
+    #: Three-state like ``supports_images`` (see the class docstring): ``None``
+    #: means no source stated anything, and a stated ``False`` is the
+    #: provider's denial of audio input, which may not be overruled by a
+    #: bundled ``True``.
+    supports_audio_input: bool | None = None
     # Valid fields explicitly supplied by a native endpoint. This distinguishes
     # zero prices/false flags from omissions through a JSON cache round-trip.
     authoritative_fields: tuple[str, ...] = ()
@@ -809,6 +835,28 @@ def _has_image_input(architecture: Mapping[str, object]) -> bool | None:
     return None
 
 
+def _has_audio_input(architecture: Mapping[str, object]) -> bool | None:
+    """Audio-input support from either OpenRouter modality encoding, or ``None``.
+
+    :func:`_has_image_input`'s sibling, with the same two encodings and the same
+    three-state discipline: a gateway that describes modalities and omits
+    ``audio`` has SAID the model is text-only, and one that describes no
+    modalities at all has said nothing — returning ``False`` for it would deny
+    audio to every model on every lean OpenAI-compatible endpoint, including
+    the gpt-audio family a direct-OpenAI install depends on these rows for.
+    """
+    modalities = architecture.get("input_modalities")
+    if isinstance(modalities, (list, tuple)):
+        return any(isinstance(item, str) and item.strip().lower() == "audio" for item in modalities)
+    modality = architecture.get("modality")
+    if isinstance(modality, str):
+        # Only the left of the arrow is INPUT, the same rule the image reader
+        # documents: a model that GENERATES audio is not one you can send
+        # audio to.
+        return "audio" in modality.split("->")[0].lower()
+    return None
+
+
 def _bills_in_tokens(architecture: Mapping[str, object]) -> bool:
     """Whether a token price of zero can be this model's WHOLE price.
 
@@ -1023,6 +1071,11 @@ def _row_from_openai_entry(
             if provider_id == "deepseek" and _stated_bool(entry.get("supports_images")) is not None
             else _has_image_input(architecture)
         ),
+        # The audio sibling of the read above: same encodings, same three-state
+        # discipline. No DeepSeek carve here — no wire in the tree states an
+        # audio-support boolean today, so there is nothing to read; if one
+        # starts to, it earns the same carve the image flags have.
+        supports_audio_input=_has_audio_input(architecture),
         supports_tools=(
             _stated_bool(entry.get("supports_tools")) if provider_id == "deepseek" else None
         ),
@@ -1591,10 +1644,11 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
     both become ``0`` here so downstream code has one unknown-marker to check
     instead of three.
 
-    ``supports_images`` is carried across unchanged, including ``None``: a bundled
-    row that never stated the capability has not denied it, and this row is what a
-    registry-only model is resolved from. Collapsing it to ``False`` here would
-    hand such a model a denial nothing ever wrote down.
+    ``supports_images`` and ``supports_audio_input`` are carried across
+    unchanged, including ``None``: a bundled row that never stated a capability
+    has not denied it, and this row is what a registry-only model is resolved
+    from. Collapsing either to ``False`` here would hand such a model a denial
+    nothing ever wrote down.
     """
     return DiscoveredModel(
         id=model_id,
@@ -1608,6 +1662,7 @@ def _from_static(model_id: str, info: ModelInfo) -> DiscoveredModel:
         cache_read_price=_positive_float(info.cache_reads_price),
         cache_write_price=_positive_float(info.cache_writes_price),
         supports_images=_stated_bool(info.supports_images),
+        supports_audio_input=_stated_bool(info.supports_audio_input),
         supports_tools=info.supports_tools,
         reasoning=info.reasoning,
         time_of_use=info.time_of_use,
@@ -1709,6 +1764,15 @@ def _merge_one(row: DiscoveredModel, info: ModelInfo | None) -> DiscoveredModel:
             row.supports_images
             if row.supports_images is not None
             else _stated_bool(info.supports_images)
+        ),
+        # The same contract for audio input: the provider's own statement,
+        # including a ``false``, wins; only a silent row defers to the
+        # registry, whose hand-transcribed ``True`` is what keeps the gpt-audio
+        # family detectable on an ids-only listing.
+        supports_audio_input=(
+            row.supports_audio_input
+            if row.supports_audio_input is not None
+            else _stated_bool(info.supports_audio_input)
         ),
         # OR, not three-state: no listing in the tree states prompt caching, so
         # there is no explicit denial to respect — only silence, and silence must
@@ -1884,6 +1948,7 @@ def _rows_from_payload(
                 # a cache round-trip turn "unstated" into a denial, so the same
                 # model would resolve differently live than from disk.
                 supports_images=_stated_bool(entry.get("supports_images")),
+                supports_audio_input=_stated_bool(entry.get("supports_audio_input")),
                 supports_tools=_stated_bool(entry.get("supports_tools")),
                 reasoning=_stated_bool(entry.get("reasoning")),
                 active_context_window=_positive_int(entry.get("active_context_window")) or None,

@@ -38,8 +38,9 @@ from local_operator.model.prices import (
 
 #: Captured from https://models.dev/api.json on 2026-09-01 (ETag
 #: ``"2afcb862acafd97c7717b83be8fa940b"``), trimmed to the providers and
-#: fields the tests need. ``description``, ``modalities`` and the rest of a real
-#: entry are kept on one row so the projection can be shown to drop them.
+#: fields the tests need. ``description`` and the rest of a real entry are kept
+#: on one row so the projection can be shown to drop them, while the two
+#: modality lists that ARE carried are shown normalised.
 _MODELS_DEV_BODY: dict[str, Any] = {
     "anthropic": {
         "id": "anthropic",
@@ -230,7 +231,7 @@ def _stored(tmp_path) -> dict[str, Any]:
 # -- projection ---------------------------------------------------------------
 
 
-def test_the_projection_keeps_only_mapped_providers_and_the_six_fields() -> None:
+def test_the_projection_keeps_only_mapped_providers_and_the_seven_fields() -> None:
     document = project(_MODELS_DEV_BODY, _ETAG)
 
     assert document["capture"] == PRICE_CATALOGUE_CAPTURE
@@ -257,9 +258,13 @@ def test_the_projection_keeps_only_mapped_providers_and_the_six_fields() -> None
         # Carried so ``_row`` can refuse to call a per-artifact-billed model
         # free; normalised to a list here, ``[]`` when models.dev said nothing.
         "output_modalities",
+        # Carried so ``_row`` can answer the audio-input question (OQ-2); same
+        # normalisation, ``[]`` when models.dev said nothing.
+        "input_modalities",
     }
     assert "description" not in json.dumps(document)
     assert fable["cost"] == {"input": 10, "output": 50, "cache_read": 0.25, "cache_write": 12.5}
+    assert fable["input_modalities"] == ["text", "image", "pdf"]
 
 
 def test_the_projection_skips_malformed_entries_rather_than_raising() -> None:
@@ -494,6 +499,34 @@ def test_supports_images_is_never_taken_from_the_price_catalogue(tmp_path) -> No
     row = _lookup("anthropic", "claude-fable-5-1", tmp_path)
     assert row is not None
     assert row.supports_images is None
+
+
+def test_models_dev_states_audio_input_three_valued() -> None:
+    """OQ-2: audio input is the one capability this catalogue DOES answer, and
+    it keeps the field's three states — a stated list answers by membership in
+    both directions, while an absent or empty one hands the question on. Without
+    the positive half, the 756 audio rows models.dev reports would be
+    unreachable for the direct providers whose own listings carry no modality."""
+    providers = _providers()
+    fable = prices._row("claude-fable-5-1", providers["anthropic"]["claude-fable-5-1"], "anthropic")
+    assert fable.supports_audio_input is False, "a stated text+image list denies audio"
+
+    silent = prices._row("claude-opus-4.5", providers["anthropic"]["claude-opus-4.5"], "anthropic")
+    assert silent.supports_audio_input is None, "no modalities at all is silence, not denial"
+
+    body = json.loads(json.dumps(_MODELS_DEV_BODY))
+    body["anthropic"]["models"]["claude-fable-5-1"]["modalities"]["input"].append("audio")
+    voice = prices._row(
+        "claude-fable-5-1", _providers(body)["anthropic"]["claude-fable-5-1"], "anthropic"
+    )
+    assert voice.supports_audio_input is True
+
+
+def test_the_price_capture_version_carries_the_audio_field() -> None:
+    """Version 3 adds ``input_modalities`` — a FIELD the version-2 writer never
+    recorded — so an existing document must be refetched, not served with every
+    row reading as silent."""
+    assert PRICE_CATALOGUE_CAPTURE == 3
 
 
 # -- the ranked chain: models.dev, then OpenRouter, then nothing ----------------

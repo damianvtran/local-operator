@@ -2819,6 +2819,26 @@ class TestInfoFromListing:
             _info_from_listing(text_only, "vendor/model", openrouter_default_model_info, "or")
         ).supports_images is False
 
+    def test_audio_modality_maps_to_supports_audio_input(self):
+        from local_operator.model.configure import _info_from_listing
+        from local_operator.model.registry import openrouter_default_model_info
+
+        voice, _ = self._listing(architecture={"input_modalities": ["text", "audio"]})
+        assert (
+            _info_from_listing(voice, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_audio_input is True
+        text_only, _ = self._listing(architecture={"input_modalities": ["text"]})
+        assert (
+            _info_from_listing(text_only, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_audio_input is False
+        # A listing with no modality field is silence, not a denial: the
+        # template's ``None`` must survive so the registry can answer for a
+        # direct provider whose own listing is lean.
+        unstated, _ = self._listing(architecture={})
+        assert (
+            _info_from_listing(unstated, "vendor/model", openrouter_default_model_info, "or")
+        ).supports_audio_input is None
+
     def test_missing_model_raises(self):
         from local_operator.model.configure import _info_from_listing
         from local_operator.model.registry import openrouter_default_model_info
