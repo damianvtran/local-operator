@@ -19610,7 +19610,13 @@ class OperatorApp(App[None]):
             return []
         return [
             ArgumentChoice(
-                f"{first.casefold()} {choice.name}", choice.description, detail=choice.detail
+                # U7: a name whose OWN spelling starts with `=` completes
+                # DOUBLED (`class ==foo`), because the class resolver strips
+                # exactly one `=` like the attach seams — completing it raw
+                # offered a compound the grammar itself refused.
+                f"{first.casefold()} {'=' if choice.name.startswith('=') else ''}{choice.name}",
+                choice.description,
+                detail=choice.detail,
             )
             for choice in names
         ]

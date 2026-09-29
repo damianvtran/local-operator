@@ -157,10 +157,11 @@ async def test_the_routed_attach_strips_the_escape_for_an_agent_named_class(rout
     """U4's companion: the ``=`` escape reaches the router too.
 
     The reserved word made an agent literally named ``class`` unreachable on
-    the attach path; the escape resolves it, and ``=`` cannot occur in a
-    resolved name so stripping one shadows nothing. Without the strip the
-    owner looked up the literal ``=class`` (the drift class U1 found — the
-    local seam had the strip, this one did not).
+    the attach path; the escape resolves it. The escape is positional (``=``
+    is not reserved in profile names) and the strip removes exactly ONE, so
+    the doubled form reaches a name that itself starts with ``=``. Without
+    the strip the owner looked up the literal ``=class`` (the drift class U1
+    found — the local seam had the strip, this one did not).
     """
     handle, session = routed
     session.agent_registry.create_agent(
@@ -174,6 +175,28 @@ async def test_the_routed_attach_strips_the_escape_for_an_agent_named_class(rout
     control = await handle.run_slash_authoritative("agent", "class", [])
     assert session.attached == ["class"]
     assert "class" in control.get("text", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_the_routed_class_grammar_strips_exactly_one_escape(routed) -> None:
+    """U7: ``class ==odd`` reaches the profile literally named ``=odd``.
+
+    The class resolver stripped ALL leading ``=`` (``lstrip("=")``), so no
+    spelling of the class grammar could reach a name whose own spelling
+    starts with the escape — while the four attach seams strip exactly one
+    and resolve the doubled form. The picker offers exactly this compound;
+    it must resolve the name it shows.
+    """
+    handle, session = routed
+    session.agent_registry.create_agent(_fields(name="=odd", description="Odd name", tags=["role"]))
+    outcome = await handle.run_slash_authoritative("agent", "class ==odd", [])
+
+    assert "no agent named" not in outcome.get("text", ""), outcome
+    assert "=odd" in outcome.get("text", ""), outcome
+    # Control: the SINGLE escape names ``odd`` — which does not exist — so the
+    # doubled spelling is the only reachable one, exactly as on attach.
+    control = await handle.run_slash_authoritative("agent", "class =odd", [])
+    assert "no agent named 'odd'" in control.get("text", ""), control
 
 
 @pytest.mark.asyncio

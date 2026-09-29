@@ -266,6 +266,10 @@ async def test_the_agent_picker_offers_the_class_verb(tmp_path: Path) -> None:
     # After the verb the names are offered as ``class <name>`` compounds, which
     # complete to the report form.
     assert compounds and all(row.name.startswith("class ") for row in compounds), compounds
+    # U7: a name whose own spelling starts with ``=`` completes DOUBLED in the
+    # second slot too, so the offered compound resolves the name it shows.
+    assert any(row.name == "class ==odd" for row in compounds), compounds
+    assert not any(row.name == "class =odd" for row in compounds), compounds
 
 
 async def _type(pilot, text: str) -> None:

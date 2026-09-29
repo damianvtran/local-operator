@@ -313,11 +313,18 @@ async def class_switch_receipt(session: Any, rest: str, SlashResult: Any) -> Any
             text="usage: /agent class <name> [proactive|reactive] — omit the class to show it",
             style="info",
         )
-    # A leading ``=`` on the name is the literal-name escape (see
-    # ``tui/app.py::_cmd_agent``'s subcommand comment): ``=` is not a legal
-    # name character, so ``/agent =class …`` reaches an agent literally named
-    # ``class`` through the grammar itself.
-    name = tokens[0].lstrip("=").strip()
+    # The ``=`` escape, exactly as the four attach seams spell it: the strip
+    # removes ONE leading ``=`` and the remainder is resolved literally, so a
+    # profile literally named ``class`` is reached as ``class =class`` and a
+    # name that itself starts with ``=`` is reached by DOUBLING it
+    # (``class ==foo`` → ``=foo``). ``lstrip("=")`` stripped EVERY ``=`` and
+    # so contradicted the seams — the picker offered a ``class =foo`` compound
+    # its own grammar could not resolve (UX round 3, U7). ``=`` is not a
+    # reserved character in profile names; the escape is positional.
+    name = tokens[0]
+    if name.startswith("="):
+        name = name[1:]
+    name = name.strip()
     target = tokens[1].strip().casefold() if len(tokens) > 1 else ""
     if target and target not in VALID_CLASSES:
         return SlashResult(
