@@ -5988,6 +5988,8 @@ class ServingSessionHandle(SessionHandle):
             return self._compact_slash(session, SlashResult)
         if command == "wake":
             return await self._wake_slash(session, args, SlashResult)
+        if command == "monitor":
+            return await self._monitor_slash(session, args, SlashResult)
         if command == "loop":
             from local_operator.slash_commands import unknown_flag_refusal
 
@@ -6282,6 +6284,117 @@ class ServingSessionHandle(SessionHandle):
 
     @staticmethod
     def _wake_failure(SlashResult: Any, text: str, code: str) -> Any:
+        """One shape for every refusal this command produces, so the route can
+        map a code to a status without reading prose."""
+        return SlashResult(kind="error", text=text, data={"code": code})
+
+    async def _monitor_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """Run one monitor mutation INSIDE the session that owns the schedules.
+
+        Reached from the desktop by ``POST/DELETE /v1/desktop/monitors`` when
+        a live runtime holds the session (see ``routes/desktop_monitors``),
+        never by a user typing ``/monitor``: the name is a routed-command word
+        in the ladder above, not a registry entry, so no palette row exists
+        for it and no terminal offers it — the ``_wake_slash`` shape.
+
+        WHY THIS PATH EXISTS AT ALL. ``Session._persist_monitor_schedules`` is
+        the one writer of monitor state, and a live session republishes its
+        WHOLE in-memory list on any change. An external write that appended a
+        transcript row would therefore be overwritten by the session's next
+        persist — and until then nothing would tick the watch either. That is
+        a silently dead watch with a 200 response (the wound
+        ``monitors/arm._refuse_if_owned`` names), so the mutation has to
+        happen in this process.
+
+        ARM and CANCEL run the SAME helpers the agent's ``monitor`` tool runs
+        (``tools/builtin``), so a monitor armed here and one armed by the
+        model are validated, allocated, deduped and persisted identically;
+        they end in ``scheduler.create``/``scheduler.cancel`` ->
+        ``scheduler.update`` -> ``_persist_monitor_schedules``, which appends
+        the transcript, rewrites the derived index and re-arms the timer under
+        the scheduler's lock.
+        """
+        import json
+
+        from local_operator.tools.builtin import (
+            FAULT_INVALID_ARGUMENTS,
+            FAULT_KEY,
+            MonitorParams,
+            _monitor_cancel,
+            _monitor_create,
+        )
+
+        try:
+            payload = json.loads(arg) if arg and arg.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("monitor payload must be an object")
+        except (TypeError, ValueError):
+            # The caller is our own route, so this is a protocol bug rather
+            # than user input; refusing in the same typed shape keeps the
+            # route's error mapping in one place instead of adding a case.
+            return self._monitor_failure(
+                SlashResult, "The monitor request could not be read.", "monitor_invalid"
+            )
+
+        op = str(payload.get("op") or "")
+        request = payload.get("request") or {}
+        if not isinstance(request, dict):
+            return self._monitor_failure(
+                SlashResult, "The monitor request could not be read.", "monitor_invalid"
+            )
+        monitor_id = str(payload.get("monitor_id") or "")
+        scheduler = getattr(session, "monitor_scheduler", None)
+        if scheduler is None:
+            return self._monitor_failure(
+                SlashResult,
+                "Monitor scheduling is not available in this session (no scheduler attached).",
+                "monitor_unavailable",
+            )
+        known_ids = {row.id for row in scheduler.monitors}
+
+        # The cwd is the SESSION's — the same value the tool's own context
+        # carries (``Session._build_tool_context``), so a watch armed from
+        # the desktop records the directory its checks run in identically.
+        cwd = str(getattr(session, "_cwd", "") or "")
+        # A synthetic call id: nothing here came from a model, so there is no
+        # real tool call to correlate with. Deliberately not shaped like one.
+        tool_call_id = "desktop-monitor"
+        if op == "create":
+            try:
+                params = MonitorParams.model_validate({**request, "op": "create"})
+            except Exception:  # noqa: BLE001 — a malformed body, refused below
+                return self._monitor_failure(
+                    SlashResult, "The monitor request was not a valid create.", "monitor_invalid"
+                )
+            result = await _monitor_create(tool_call_id, params, scheduler, cwd)
+        elif op == "cancel":
+            params = MonitorParams.model_validate({"op": "cancel", "id": monitor_id})
+            result = await _monitor_cancel(tool_call_id, params, scheduler)
+        else:
+            return self._monitor_failure(
+                SlashResult, f"Unknown monitor operation {op!r}.", "monitor_invalid"
+            )
+
+        if result.is_error:
+            details = result.details or {}
+            malformed = details.get(FAULT_KEY) == FAULT_INVALID_ARGUMENTS
+            code = "monitor_invalid" if malformed else "monitor_refused"
+            # A refused cancel may be refused because the handle does not
+            # exist, which the route answers 404 for. Asked of the scheduler
+            # rather than matched out of the helper's sentence: the sentence
+            # is shared prose that may be reworded, and a status decided by
+            # prose is a status that silently changes meaning one edit later
+            # (the wake twin's rule).
+            if op == "cancel" and monitor_id and monitor_id not in known_ids:
+                code = "monitor_not_found"
+            return self._monitor_failure(SlashResult, result.text, code)
+        # ``notice`` rather than ``block``: the caller is a route that reads
+        # ``data``, and a notice is what the frontier renderer prints for a
+        # receipt it has nothing special to do with.
+        return SlashResult(kind="notice", text=result.text, data=dict(result.details or {}))
+
+    @staticmethod
+    def _monitor_failure(SlashResult: Any, text: str, code: str) -> Any:
         """One shape for every refusal this command produces, so the route can
         map a code to a status without reading prose."""
         return SlashResult(kind="error", text=text, data={"code": code})

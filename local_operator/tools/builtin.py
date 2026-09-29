@@ -12067,20 +12067,33 @@ async def _monitor_create(
             return _invalid_arguments(tool_call_id, "monitor", str(outcome["error"]))
         return _error(tool_call_id, "monitor", str(outcome["error"]))
     spec = outcome["spec"]
+    # The structured receipt facts, so a caller that is not a model reading
+    # prose (the desktop owner command, whose reply becomes an HTTP body)
+    # reads them instead of parsing the sentence back out — the
+    # ``_wake_create`` precedent. ``remaining`` is read AFTER the scheduler
+    # answered, off its own list: it is the list the persist just published.
+    facts: dict[str, Any] = {
+        "monitor_id": spec.id,
+        "name": spec.name,
+        "next_due_at": outcome.get("next_due_at"),
+        "remaining": len(scheduler.monitors),
+        "already_armed": bool(outcome.get("duplicate")),
+        "reactivated": bool(outcome.get("reactivated")),
+    }
     if outcome.get("duplicate"):
         return _text(
             tool_call_id,
             "monitor",
             f"Monitor '{spec.name}' ({spec.id}) already watches that call every "
             f"{format_duration(spec.every_ms)}.",
-            details={"monitor_id": spec.id},
+            details=facts,
         )
     if outcome.get("reactivated"):
         return _text(
             tool_call_id,
             "monitor",
             f"Reactivated monitor '{spec.id}'.",
-            details={"monitor_id": spec.id},
+            details=facts,
         )
     from local_operator.wakes.display import format_wake_time
 
@@ -12092,7 +12105,7 @@ async def _monitor_create(
         f"Armed monitor '{spec.name}' ({spec.id}): {spec.tool} {call} every "
         f"{format_duration(spec.every_ms)}, {bound}. First check in ~2s captures the "
         "baseline; you'll be told only what changes.",
-        details={"monitor_id": spec.id, "next_due_at": outcome.get("next_due_at")},
+        details=facts,
     )
 
 
@@ -12106,11 +12119,25 @@ async def _monitor_cancel(
     outcome = await scheduler.cancel(params.id)
     if "error" in outcome:
         return _error(tool_call_id, "monitor", str(outcome["error"]))
+    spec = outcome.get("spec")
     return _text(
         tool_call_id,
         "monitor",
         f"Cancelled monitor '{params.id}'.",
-        details={"monitor_id": params.id},
+        # The same structured receipt facts the arm carries (see
+        # ``_monitor_create``): a cancel's receipt names the row it removed
+        # and the count that remains.
+        details={
+            "monitor_id": params.id,
+            "name": str(getattr(spec, "name", "") or ""),
+            "remaining": len(scheduler.monitors),
+            # Present-and-null rather than absent, matching the arm's facts:
+            # the receipt contract is one shape either way (null after a
+            # cancel).
+            "next_due_at": None,
+            "already_armed": False,
+            "reactivated": False,
+        },
     )
 
 
