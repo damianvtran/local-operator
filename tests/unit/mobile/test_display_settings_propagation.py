@@ -15,11 +15,15 @@ the clock: ``poll_now()`` is the tick. The frame this pins is "no restart".
 The retained-route cells extend that to QA round 2's Q1: a route the daemon
 has served live keeps a per-route projection, and the flip must drop that too
 (the stale branch would otherwise re-serve the retained frame on reconnect).
+A second retained-route cell pins QA round 3's Q2: a clear that lands WHILE
+the seed's fold is in flight must not re-materialize the fold in hand — the
+resumed seed recomputes for the state the flip established.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -174,14 +178,14 @@ async def _retained_route(daemon: MobileDaemon, *, live_version: int = 53) -> in
 
 async def _reconnect_seed(daemon: MobileDaemon) -> SessionProjection:
     """``api_session_events``' opening seed, in the handler's own order: the
-    live projection when a live entry has one, else a fresh durable fold
-    captured against the route's generation ledger."""
+    live projection when a live entry has one, else the stamped durable
+    capture — the same ``_capture_durable_projection`` call the handler makes,
+    so the cells cannot drift from the production order they exercise."""
     live = _entry_for_session(daemon, SESSION)
     projection: SessionProjection | None = live.projection if live is not None else None
     if projection is None:
-        projection = await asyncio.to_thread(_durable_projection, SESSION)
+        projection = await daemon._capture_durable_projection(SESSION)
         assert projection is not None  # the fixture seeds this session on disk
-        projection = daemon.capture_subagent_details(projection)
     return projection
 
 
@@ -354,6 +358,93 @@ async def test_a_retained_routes_sse_seed_follows_the_flip_without_a_restart(
     seed = await _reconnect_seed(daemon)
     assert _kinds(seed.transcript) == ["user", "peer_message", "tool", "assistant"]
     assert seed.version == epoch
+
+
+@pytest.mark.asyncio
+async def test_a_fold_that_straddles_the_flip_is_not_retained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 3 Q2 / agent review round 3 MAJOR: the clear can land DURING
+    the seed's fold, and the resumed capture must not re-materialize the
+    pre-flip fold it is holding.
+
+    The seed awaits its durable fold off-loop (``asyncio.to_thread``), so the
+    loop is free for the follower tick between the fold starting and its
+    capture; the fold in hand is then pre-flip, and the missing-payload branch
+    would re-materialize it — every reconnect after that re-serving the stale
+    frame through the stale branch (the probe's ``v54`` frozen shape). The
+    interleave here is deterministic: the fold is computed, then PARKED while
+    the flip's clear runs, so the resumed seed sees a display generation that
+    moved under it. It must recompute once for the state the flip established,
+    retain THAT, and the reconnects that follow must serve the clean frame.
+    The refusal backstop is pinned directly too: a capture stamped before the
+    last clear is dropped, not re-inserted.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    await _seed_session(config_dir)
+
+    daemon = MobileDaemon(port=0, password="pw")
+    daemon.watch_display_settings()
+    epoch = await _retained_route(daemon)
+    seed = await _reconnect_seed(daemon)
+    assert _kinds(seed.transcript) == ["user", "peer_message", "tool", "assistant"]
+
+    # The seed's fold: computed while the flag is still OFF, then parked until
+    # AFTER the flip's clear — exactly the window ``to_thread`` opens.
+    import local_operator.mobile.daemon as daemon_mod
+
+    real = daemon_mod._durable_projection
+    fold_in_hand = threading.Event()
+    release_fold = threading.Event()
+    calls: list[int] = []
+    folds: list[SessionProjection] = []
+
+    def gated(session_id: str) -> SessionProjection | None:
+        calls.append(1)
+        projection = real(session_id)
+        if len(calls) == 1:
+            assert projection is not None  # the fixture seeds this session on disk
+            folds.append(projection)
+            fold_in_hand.set()
+            assert release_fold.wait(timeout=10), "the test never released the fold"
+        return projection
+
+    monkeypatch.setattr(daemon_mod, "_durable_projection", gated)
+    gen_before = daemon.display_generation
+
+    seed_task = asyncio.create_task(_reconnect_seed(daemon))
+    assert await asyncio.to_thread(fold_in_hand.wait, 10), "the fold never started"
+    _write_elsewhere(config_dir, KEY, True)
+    assert process_watcher(config_dir).poll_now() is not None
+    release_fold.set()
+    seed = await seed_task
+
+    # The recompute happens exactly once, and it is what the seed serves: the
+    # post-flip frame at the retained epoch.
+    assert len(calls) == 2
+    assert _kinds(seed.transcript) == ["user", "assistant"]
+    assert seed.version == epoch
+
+    # ``session_projections`` holds the recomputed payload, not the pre-flip
+    # fold the seed was holding when the clear landed.
+    retained = daemon.session_projections[SESSION]
+    assert _kinds(retained.transcript) == ["user", "assistant"]
+
+    # The refusal backstop: the pre-flip fold, stamped before the clear, is
+    # dropped rather than re-inserted (and leaves the retained payload alone).
+    from local_operator.mobile.daemon import _StaleProjection
+
+    with pytest.raises(_StaleProjection):
+        daemon.capture_subagent_details(folds[0], display_generation=gen_before)
+    assert daemon.session_projections[SESSION] is retained
+
+    # The reconnects that follow the race are served the clean frame.
+    for _ in range(2):
+        seed = await _reconnect_seed(daemon)
+        assert _kinds(seed.transcript) == ["user", "assistant"]
+        assert seed.version == epoch
 
 
 @pytest.mark.asyncio
