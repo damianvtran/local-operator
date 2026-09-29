@@ -404,7 +404,13 @@ KEY_BUDGET_CELLS = 25
 #: below budgets a worst-case key against them, and a longer sentence would
 #: raise it and drop the tip row on narrow terminals.
 KEYED_TIPS: tuple[tuple[str, str | None], ...] = tuple(
-    (action.tip, action.id) for action in keymap_mod.KEY_ACTIONS
+    # `tip == ""` means "no splash tip" and is SKIPPED rather than rendered:
+    # the first such row is a desktop-scope action ("Quick send"), whose key
+    # is not a terminal key at all — promoting it on the splash would advertise
+    # a chord this screen cannot press. It must not ride the rotation either:
+    # an empty template would still be budgeted here and could move the tip
+    # row's count on narrow terminals, which `_tip_lines` forbids.
+    (action.tip, action.id) for action in keymap_mod.KEY_ACTIONS if action.tip
 ) + (("/settings → Hotkeys remaps these keys", None),)
 
 #: The ``ctrl+v`` paste sentence. Defined before :data:`TIPS` so the pool can

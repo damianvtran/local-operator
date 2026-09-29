@@ -73,6 +73,13 @@ class SettingView(BaseModel):
     warning: str = ""
     placeholder: str = ""
     gated_by: str | None = None
+    #: The value grammar of a HOTKEY row (``"app"`` / ``"desktop"``), DERIVED
+    #: in ``settings_io``'s registry from ``keymap.KEY_ACTIONS`` — never
+    #: authored twice, so the wire cannot disagree with what the writers
+    #: enforce. Additive on the same terms as the three fields above: a client
+    #: that ignores it sees the previous response, and an app that predates it
+    #: keeps rendering hotkeys by the rules it already shipped.
+    hotkey_scope: str = ""
 
 
 class SettingsView(BaseModel):
@@ -119,6 +126,7 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         warning=setting.warning,
         placeholder=setting.placeholder,
         gated_by=setting.gated_by,
+        hotkey_scope=setting.hotkey_scope,
     )
 
 

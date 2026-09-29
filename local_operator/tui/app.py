@@ -4254,6 +4254,14 @@ class OperatorApp(App[None]):
         *(
             Binding(action.default, action.action, action.label, show=False, id=action.id)
             for action in _keymap.KEY_ACTIONS
+            # `scope == "app"` ONLY. A desktop-scoped action is not a Textual
+            # binding — it has no `action_*` method and its key is an Electron
+            # accelerator no terminal can send, so deriving a `Binding` for it
+            # would both ship a dead binding re-keyed by `_apply_keymap` and
+            # break the anti-drift test's "desktop ids are not bindings" half
+            # (`test_keymap.py`). The registry is generic over scope; THIS is
+            # the one place the app says which half it drives.
+            if action.scope == "app"
         ),
         # Open the aside WITHOUT spending the composer's contents, which is the
         # gesture `/btw <question>` cannot offer: submitting a slash command
