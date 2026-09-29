@@ -983,6 +983,7 @@ def project_settled_rows(
         COMPACTION_MARKER_TYPE,
         COMPACTION_REFUSED_TYPE,
     )
+    from local_operator.cross_session import cross_session_hidden
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
 
     # ``job_result`` is declared beside the job manager that writes it, not with
@@ -1128,6 +1129,8 @@ def project_settled_rows(
     # runs over hundreds of messages and a display preference cannot change
     # part-way through a single projection.
     hide_narration = not settings_get("display.narration", DEFAULT_NARRATION)
+    # The cross-session row filter reads ONCE per pass for the same reason.
+    hide_cross_session = cross_session_hidden()
     # ONE mount for the whole conversation. Per-block mounting made Textual
     # re-walk its stylesheet, invalidate the container and schedule a settle
     # callback 297 times over on a 396-message session, for a layout that is
@@ -1173,14 +1176,19 @@ def project_settled_rows(
             if getattr(message, "custom_type", None) == PEER_MESSAGE_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 if str(getattr(message, "id", "")) not in self._live_peer_receipts:
-                    self._append_block(
-                        PeerMessageBlock(
-                            str(details.get("body", "")),
-                            details.get("sender") or {},
-                            fold_width=fold_width,
+                    # `display.hide_cross_session`: the branch and its
+                    # `continue` are kept (the message is still consumed), but
+                    # the mount is gated — nothing is painted and `appended`
+                    # stays as it was, because nothing was appended.
+                    if not hide_cross_session:
+                        self._append_block(
+                            PeerMessageBlock(
+                                str(details.get("body", "")),
+                                details.get("sender") or {},
+                                fold_width=fold_width,
+                            )
                         )
-                    )
-                    appended = True
+                        appended = True
                 continue
             # A gate that timed out unattended is the most expensive event
             # in the detached feature — up to a day of held residency ends
@@ -1567,11 +1575,20 @@ def replay_tool_call(
     empty there and killed-mid-turn calls still render ``interrupted``
     exactly as before.
     """
+    from local_operator.cross_session import SEND_TOOL_NAME, cross_session_hidden
     from local_operator.harness.rows import output_limit_call_receipt
     from local_operator.harness.types import FAULT_KEY, INTERRUPTED_FAULTS
     from local_operator.tui.app import ImageContent, ToolCard, _first_line
     from local_operator.tui.widgets.tool_card import parse_duration
 
+    # `display.hide_cross_session`: a hidden `send` mounts NOTHING. The return
+    # sits at the very TOP on purpose — before the live-skip feeder
+    # (`_projection_skipped_live.append` below) could receive the call —
+    # because the feeder's owner would otherwise paint the very row this
+    # filter exists to suppress (`_paint_skipped_live_tool_rows` carries the
+    # second door).
+    if cross_session_hidden() and (getattr(call, "name", "") or "") == SEND_TOOL_NAME:
+        return
     call_id = getattr(call, "id", "") or ""
     result = results.get(call_id)
     if result is not None:
