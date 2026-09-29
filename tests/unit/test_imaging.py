@@ -1054,9 +1054,12 @@ def test_the_context_frame_memo_evicts_oldest_first(monkeypatch) -> None:
     _CONTEXT_FRAME_CACHE.clear()
     frames = [_ui_frame((1200 + index, 800)) for index in range(4)]
     encoded = [base64.b64encode(frame).decode("ascii") for frame in frames]
-    results = [downscale_context_frame(item, "image/png", max_edge=1024) for item in encoded]
-    assert all(result is not None for result in results)
-    lengths = sorted(len(result[0]) for result in results)
+    shrunk: list[tuple[str, str]] = []
+    for item in encoded:
+        result = downscale_context_frame(item, "image/png", max_edge=1024)
+        assert result is not None
+        shrunk.append(result)
+    lengths = sorted(len(payload) for payload, _mime in shrunk)
     cap = max(lengths[-1], lengths[0] + lengths[1])
     monkeypatch.setattr(imaging, "_CONTEXT_FRAME_CACHE_MAX_BYTES", cap)
     _CONTEXT_FRAME_CACHE.clear()

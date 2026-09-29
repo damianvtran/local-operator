@@ -1130,7 +1130,8 @@ def downscale_context_frame(
     info = sniff_image(raw)
     if info is not None:
         line_art = _is_line_art_bytes(raw, info)
-        payload: bytes | None
+        payload: bytes | None = None
+        wire_mime = mime_type
         try:
             payload, wire_mime, _summary = bound_image_for_model(raw, info, max_edge=max_edge)
         except ValueError:

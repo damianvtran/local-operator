@@ -248,6 +248,7 @@ def _real_frame_b64(seed: int, size: tuple[int, int] = (1280, 800)) -> str:
     rng = random.Random(seed)
     image = Image.new("RGB", size)
     pixels = image.load()
+    assert pixels is not None
     for y in range(size[1]):
         base = (30 + y * 40 // size[1], 40 + y * 30 // size[1], 60 + y * 60 // size[1])
         for x in range(0, size[0], 2):

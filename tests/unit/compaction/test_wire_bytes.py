@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+from typing import Sequence
 
 import pytest
 from PIL import Image
@@ -309,6 +310,7 @@ def _frame_png(width: int = 1280, height: int = 800, seed: int = 11) -> bytes:
     rng = random.Random(seed)
     image = Image.new("RGB", (width, height))
     pixels = image.load()
+    assert pixels is not None
     for y in range(height):
         base = (30 + y * 40 // height, 40 + y * 30 // height, 60 + y * 60 // height)
         for x in range(0, width, 2):
@@ -348,6 +350,20 @@ def _real_history(count: int = 6) -> tuple[list[Message], list[Message]]:
     return history, frames
 
 
+def _image_blocks_of(messages: Sequence[Message]) -> list[ImageContent]:
+    """The image blocks of ``messages``, in order.
+
+    A helper rather than an inline comprehension so every assertion below sees
+    ``ImageContent`` (typed), not the message content union.
+    """
+    return [
+        block
+        for message in messages
+        for block in message.content
+        if isinstance(block, ImageContent)
+    ]
+
+
 def test_downscale_stale_frames_keeps_the_newest_and_never_removes_a_message() -> None:
     """The sibling contract to the prune's: the newest frame message is reused
     BY IDENTITY, victims are copied with the smaller bytes, frame-free
@@ -362,10 +378,10 @@ def test_downscale_stale_frames_keeps_the_newest_and_never_removes_a_message() -
     assert [m.id for m in out] == [m.id for m in history]
     assert out[4] is frames[2], "the newest frame message was copied or changed"
     assert out[2] is not frames[1]
-    changed = out[0]
-    assert isinstance(changed.content[1], ImageContent)
-    assert changed.content[1].data != frames[0].content[1].data
-    assert changed.content[1].mime_type in {"image/png", "image/jpeg"}
+    blocks = _image_blocks_of(out)
+    originals = _image_blocks_of(frames)
+    assert blocks[0].data != originals[0].data
+    assert blocks[0].mime_type in {"image/png", "image/jpeg"}
     assert out[1] is history[1], "a frame-free message was not reused by identity"
 
 
@@ -376,8 +392,10 @@ def test_downscale_stale_frames_zero_downscales_everything_and_rejects_negative(
     out, downscaled = downscale_stale_frames(history, keep_recent_frames=0, max_edge=1024)
 
     assert downscaled == 2
-    assert out[0].content[1].data != frames[0].content[1].data
-    assert out[2].content[1].data != frames[1].content[1].data
+    blocks = _image_blocks_of(out)
+    originals = _image_blocks_of(frames)
+    assert blocks[0].data != originals[0].data
+    assert blocks[1].data != originals[1].data
     with pytest.raises(ValueError):
         downscale_stale_frames(history, keep_recent_frames=-1, max_edge=1024)
 
@@ -400,7 +418,7 @@ def test_fit_downscales_and_keeps_every_frame_when_a_rung_fits() -> None:
     back under it with EVERY frame still present — the newest at full
     fidelity — and ZERO frames dropped."""
     history, frames = _real_history(6)
-    original = frames[-1].content[1].data
+    original = _image_blocks_of(frames)[-1].data
     total = estimate_wire_bytes(history)
     budget = int(total * 0.75)
     _CONTEXT_FRAME_CACHE.clear()
@@ -412,10 +430,10 @@ def test_fit_downscales_and_keeps_every_frame_when_a_rung_fits() -> None:
     assert estimate_wire_bytes(out) <= budget
     assert len(out) == len(history)
     assert [m.id for m in out] == [m.id for m in history]
-    blocks = [b for m in out for b in m.content if isinstance(b, ImageContent)]
+    blocks = _image_blocks_of(out)
     assert len(blocks) == 6, "a frame became a notice"
-    assert out[10].content[1].data == original, "the newest frame lost fidelity"
-    assert out[0].content[1].data != original, "no old frame was re-rendered"
+    assert blocks[-1].data == original, "the newest frame lost fidelity"
+    assert blocks[0].data != original, "no old frame was re-rendered"
 
 
 def test_fit_stops_at_the_first_rung_that_fits() -> None:
@@ -485,8 +503,8 @@ def test_fit_is_deterministic_across_calls() -> None:
     first, _d1, _r1 = fit_frames_to_wire_budget(history, budget=budget)
     second, _d2, _r2 = fit_frames_to_wire_budget(history, budget=budget)
 
-    assert [b.data for m in first for b in m.content if isinstance(b, ImageContent)] == [
-        b.data for m in second for b in m.content if isinstance(b, ImageContent)
+    assert [block.data for block in _image_blocks_of(first)] == [
+        block.data for block in _image_blocks_of(second)
     ]
 
 
