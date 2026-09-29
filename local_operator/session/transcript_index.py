@@ -963,6 +963,24 @@ class _Derivation:
             index = bisect_right(self.user_ords, ordinal) - 1
             if index < 0 or self.user_ords[index] < start:
                 continue
+            if marker_kind == "closed":
+                # A NEUTRAL CLOSURE (v2 directive, 2026-09-29, session
+                # 23fc556c3799) is INERT for the rail: it records that a
+                # zero-work follow-up run ended after the previous turn's
+                # output was delivered, so it may neither claim the tick
+                # (``closed`` is not a rail outcome) nor CLEAR it — the
+                # earlier ``complete`` marker for the same turn must stand,
+                # which is exactly the masking this fix exists to stop.
+                continue
+            if marker_kind == "retired":
+                # RETIRE-FOR-BUILD (2026-09-29): the rail's vocabulary is
+                # frozen (``CheckpointOutcome``), so the kind is normalized to
+                # an EXISTING cut value — and ``interrupted`` (CircleSlash,
+                # warning) is the honest one: ``error`` is the failure framing
+                # this arm exists to remove, while the warning slash is the
+                # rail's "cut short" mark and matches the row's own warning
+                # tier. Eligibility keeps its usual no-claim rule below.
+                marker_kind = OUTCOME_INTERRUPTED
             outcomes[index] = marker_kind if eligible else None
 
         # Only markers bound to a run by token count as evidence: an orphan

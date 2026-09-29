@@ -26408,6 +26408,13 @@ class OperatorApp(App[None]):
                 )
             if kind == "error":
                 return notifier.notify_error(body=body)
+            if kind == "retired":
+                # THE RETIRE-FOR-BUILD DELIVERY LEG (round 2, MAJOR-1): the
+                # error/waiting arms below are semantic helpers over one kind
+                # each, so the new kind routes through the same composer-fed
+                # ``send`` — its subtitle "Retired" and its house sentence come
+                # from the shared vocabulary, and no failure wording is added.
+                return notifier.send("retired", body=body)
             if kind in ("approval", "ask"):
                 return notifier.notify_waiting(kind, body=body)
         except Exception:  # pragma: no cover - defensive; chrome must not raise
@@ -26462,7 +26469,12 @@ class OperatorApp(App[None]):
         wording (the live `interrupted`/error sentence): it is the live,
         turn-scoped statement and restating it as the poller's dimmer
         `Interrupted`/`Stopped with an error` would rewrite a row the user has
-        already read for no gain.
+        already read for no gain. The ONE exception is `retired` (2026-09-29):
+        it restates the row it adopts, because the live cut row carries the
+        classified sentence rather than the canonical receipt — already in the
+        warning tier since design round 2 D2, so the restate swaps the WORDING
+        to `RETIRED_NOTICE_TEXT` and adds the anchor (see the tail of this
+        method).
 
         BOTH KINDS, and the kind must MATCH. This used to accept only
         `interrupted`, on the reasoning that an `error` outcome "is a different
@@ -26494,10 +26506,19 @@ class OperatorApp(App[None]):
         outcome was on screen the whole time.
         """
         block = self._own_interrupt_notice
-        if kind not in {"interrupted", "error"} or block is None:
+        if kind not in {"interrupted", "error", "retired"} or block is None:
             return False
         if self._own_interrupt_kind and self._own_interrupt_kind != kind:
-            return False
+            # THE RETIRE-FOR-BUILD ARM'S ONE CORRESPONDENCE (2026-09-29): the
+            # live row for a cut turn is painted by the error branch — the
+            # classified end arrives as `aborted=False, error=<cut sentence>`,
+            # its tier flipped to warning for the retired token (design round
+            # 2, D2) — so a `retired` outcome must adopt THAT row. Refusing
+            # here (the pre-arm behaviour for unknown kinds) would append the
+            # poller's warning row beside the live cut row, two rows for one
+            # cut.
+            if not (kind == "retired" and self._own_interrupt_kind == "error"):
+                return False
         if block not in self._transcript_view().blocks():
             # NOT consumed. Clearing the reference before this test burnt it on
             # a failure that is routinely transient: a sidebar switch parks the
@@ -26512,6 +26533,15 @@ class OperatorApp(App[None]):
         # adoption, and a later publication must get its own row.
         self._own_interrupt_notice = None
         self._own_interrupt_kind = ""
+        # RETIRED RESTATES ITS ADOPTED ROW, the one exception to the docstring's
+        # rule that an adopted row keeps its own wording. The live cut row IS
+        # the classified sentence in the error tier; adopting it unchanged
+        # would keep exactly the failure framing this arm removes. `restate`
+        # re-freezes the block in place, so one cut stays one row.
+        if kind == "retired":
+            from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+
+            block.restate(RETIRED_NOTICE_TEXT, "warning")
         block.completion_anchor_id = anchor
         return True
 
@@ -27389,7 +27419,17 @@ class OperatorApp(App[None]):
             if (
                 anchor
                 and state.get("unseen")
-                and state.get("kind") in {"error", "interrupted"}
+                # ``closed`` joins the replay kinds (v2, 2026-09-29): a neutral
+                # closure must still paint a row when its conversation is
+                # reopened. The words AND the info tier come from
+                # ``completion_notice``'s own closed arm — nothing here may
+                # upgrade it to danger, and `_adopt_own_interrupt_notice`
+                # refuses the kind so this branch appends rather than adopts.
+                # ``retired`` joins too (retire-for-build arm, 2026-09-29): a
+                # bound-cut turn must paint its warning row on reopen, from
+                # ``completion_notice``'s retired arm, and its OWN adopt arm
+                # below restates a live cut row rather than duplicating it.
+                and state.get("kind") in {"error", "interrupted", "closed", "retired"}
                 and getattr(self, "_attention_retry_token", None) != (id(session), token)
             ):
                 transcript = self._transcript_view()
@@ -47710,7 +47750,14 @@ class OperatorApp(App[None]):
             cost=cost_text,
         )
         if message.error:
-            notice = NoticeBlock(self._with_recovery_hint(message.error), "error")
+            # TIER AT THE CLASSIFIER, not on the next poller tick (design round
+            # 2, D2): a retire-for-build cut is the same fact the toast raises
+            # as `retired`, and the live row must agree from its FIRST frame —
+            # waiting for the ~1 s restate painted ✗ danger over a cut that is
+            # warning ink everywhere else. Every other errored end keeps the
+            # error tier.
+            live_tier = "warning" if message.cut_off_cause == "runtime-retired" else "error"
+            notice = NoticeBlock(self._with_recovery_hint(message.error), live_tier)
             self._append_block(notice)
             # HELD for the same reason `_finalize_turn` holds the interrupted
             # row: the attention poller reads the same durable outcome back a
@@ -47737,8 +47784,11 @@ class OperatorApp(App[None]):
             # carries. Passed rather than inferred from `aborted`/`error`: the
             # whole taxonomy flip is that a cut-off arrives as
             # `aborted=False, error=<notice>`, so an inference here would read
-            # every cut-off as a completion (design review round 1, D2).
+            # every cut-off as a completion (design review round 1, D2). The
+            # CAUSE TOKEN rides beside the bool for the notification ladder's
+            # retire-for-build arm (round 2, MAJOR-1).
             cut_off=message.cut_off,
+            cut_off_cause=message.cut_off_cause,
             # §14: the session's ONE notify value, forwarded untouched; the
             # funnel gates the completion/error toasts on it below.
             notify=message.notify,
@@ -47996,6 +48046,7 @@ class OperatorApp(App[None]):
         source: str,
         outcome_known: bool = True,
         cut_off: bool = False,
+        cut_off_cause: str = "",
         notify: bool = True,
     ) -> None:
         """Retire the turn. The ONE exit, however the turn ended.
@@ -48006,6 +48057,12 @@ class OperatorApp(App[None]):
         and its one use is the wording of the stranded tool cards: a turn cut
         off says ``cut off`` on each card instead of ``interrupted``, which is
         now reserved for a recorded stop (design review round 1, D2).
+        ``cut_off_cause`` is the TOKEN behind it, and it decides which toast
+        this turn raises: a ``runtime-retired`` cut is a warning-tier update
+        transition, not a failure, so the ladder raises the ``retired`` kind
+        whose composer words say so (agent review round 2, MAJOR-1 — the live
+        OS toast is the one surface the poller's restate cannot reach). Every
+        other errored end keeps the ``error`` kind.
 
         Every terminal side effect a turn owes the user lives here — the
         working line, the band, the waiting latch, the per-turn cost accrual,
@@ -48253,7 +48310,15 @@ class OperatorApp(App[None]):
             # session's rule; the gate is read anyway so this funnel never
             # contradicts the ONE value it was handed.
             if notify:
-                self._notify("error")
+                # THE RETIRE-FOR-BUILD CUT RAISES ITS OWN TOAST (round 2,
+                # MAJOR-1): ``runtime-retired`` is an update-phase transition
+                # that really did cut a turn, so the banner must be TRUTHFUL
+                # but DISTINGUISHED FROM A FAILURE — the kind decides both its
+                # words and its category (``Notifier.send`` reads
+                # CONTEXTS/BODIES), and "Stopped with an error" is the sentence
+                # this arm exists to remove from a surface that fires once.
+                # Every other errored end keeps the error kind.
+                self._notify("retired" if cut_off_cause == "runtime-retired" else "error")
         else:
             # Counts QUEUED and backgrounded work too (see
             # `_outstanding_delegated_jobs`): a child parked at the capacity
@@ -51506,6 +51571,18 @@ class _TreeRow(Text):
 NOTIFICATIONS_LISTING_ROWS = 10
 
 
+#: The words ``/notifications`` prints for kinds whose STORE TOKEN is not the
+#: word a person reads. The original kinds keep their token because it already
+#: reads as itself (``complete``/``error``/``interrupted``); the v2 kinds do
+#: not — "— closed" is a journal token, not English (agent review round 1,
+#: NIT-1), and ``retired`` needs its why. An UNKNOWN kind keeps its raw token
+#: on purpose: a receipt may be terse, never wrong.
+NOTIFICATION_KIND_WORDS: dict[str, str] = {
+    "closed": "completed",
+    "retired": "retired for an update",
+}
+
+
 def _notifications_listing(
     entries: Sequence[CatalogEntry], budget: int, *, clearing: bool = False
 ) -> str:
@@ -51553,8 +51630,11 @@ def _notifications_listing(
         mark = COMPLETION_MARKERS.get(entry.completion_kind, COMPLETION_MARKERS["complete"])[0]
         lead = f"  {mark} "
         # The kind is dropped rather than left empty when the store's row predates
-        # the taxonomy: "✓ name —  · 2h" would read as a missing column.
-        kind = f" — {entry.completion_kind}" if entry.completion_kind else ""
+        # the taxonomy: "✓ name —  · 2h" would read as a missing column. The
+        # WORD comes from ``NOTIFICATION_KIND_WORDS`` where the token is not one
+        # (see its own note): the v2 kinds must not surface as journal tokens.
+        word = NOTIFICATION_KIND_WORDS.get(entry.completion_kind, entry.completion_kind)
+        kind = f" — {word}" if entry.completion_kind else ""
         tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
         label = entry.row.name or UNTITLED_CONVERSATION
         if budget <= 0:

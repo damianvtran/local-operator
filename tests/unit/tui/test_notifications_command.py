@@ -169,6 +169,31 @@ async def test_the_listing_names_the_count_and_stops_at_ten_rows(config_root: Pa
 
 
 @pytest.mark.asyncio
+async def test_the_listing_names_the_v2_kinds_in_english(config_root: Path) -> None:
+    """Agent review round 1, NIT-1: journal tokens must not reach the listing.
+
+    ``— closed`` was the store's token leaking to a person — and ``retired``
+    would have arrived the same way — so the words come from the listing's own
+    map, while the original kinds keep their tokens because those already read
+    as themselves.
+    """
+    _make_session(config_root, "0000000c105a", "a closed conversation")
+    _publish(config_root, "0000000c105a", kind="closed")
+    _make_session(config_root, "0000000e7ed0", "a retired conversation")
+    _publish(config_root, "0000000e7ed0", kind="retired")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _run(pilot, app, "/notifications")
+        text = _notices(app)[-1]
+
+    assert "— completed ·" in text, text
+    assert "— retired for an update ·" in text, text
+    assert "— closed" not in text, text
+    assert "— retired ·" not in text, text
+
+
+@pytest.mark.asyncio
 async def test_a_zero_state_says_so_and_names_no_gesture(config_root: Path) -> None:
     _make_session(config_root, "00000000000a", "a read conversation")
 

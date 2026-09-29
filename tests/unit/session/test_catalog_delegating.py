@@ -163,6 +163,15 @@ class TestEveryLouderRungStillWins:
             "interrupted",
             "Unseen interruption",
         ),
+        # The retired arm (design round 2, D3): same code and ink, and the label
+        # gains its cause — "Interrupted" alone means the operator stopped it.
+        (
+            "unseen retirement",
+            {},
+            {"unseen": True, "completion_kind": "retired"},
+            "interrupted",
+            "Unseen interruption — retired for an update",
+        ),
         # "Where am I?" — the row the user is sitting in.
         ("attached", {"live_state": "attached"}, {}, "attached", "Open"),
         # A runtime committed to exiting, which in `status` already outranks

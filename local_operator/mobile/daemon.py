@@ -1821,7 +1821,7 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
     # EMPTY field there silently withheld the button from a deliberate stop.
     if not projection.streaming and projection.stop_reason != "aborted":
         kind = str(attention.get("kind") or "")
-        if kind in {"error", "interrupted"}:
+        if kind in {"error", "interrupted", "retired"}:
             from local_operator.incidents import is_deliberate_cause
 
             data["stop_reason"] = "aborted"
@@ -1829,11 +1829,18 @@ def _projection_frame(projection: SessionProjection) -> dict[str, Any]:
             # ``error`` kind that is not a recorded deliberate act is the
             # involuntary one. ``error`` with no cause at all is still a cut-off
             # — that is the "cause could not be determined" row, whose notice
-            # above already says so.
-            data["cut_off"] = kind == "error" and not is_deliberate_cause(
+            # above already says so. ``retired`` follows the same involuntary
+            # rule (a build drain cut the turn — nothing the user asked for),
+            # so resuming it is the offered action.
+            data["cut_off"] = kind in {"error", "retired"} and not is_deliberate_cause(
                 str(attention.get("cause") or "")
             )
-    if not projection.streaming and attention.get("kind") in {"error", "interrupted"}:
+    if not projection.streaming and attention.get("kind") in {
+        "error",
+        "interrupted",
+        "closed",
+        "retired",
+    }:
         # The sentence AND its severity come from `harness/rows.py`, which owns
         # row decisions for both surfaces: the phone's `NoticeRow` picks its
         # glyph and ink from `details.severity`, so a frame that carried an empty

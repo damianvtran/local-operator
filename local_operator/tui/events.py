@@ -108,6 +108,7 @@ class TurnEnded(SessionEvent):
         usage: Any = None,
         context_is_estimate: bool = False,
         cut_off: bool = False,
+        cut_off_cause: str = "",
         notify: bool = True,
     ) -> None:
         super().__init__()
@@ -120,6 +121,15 @@ class TurnEnded(SessionEvent):
         #: cut-off carrying an error notice beside it. Consumers that need the
         #: WORD (the stranded ledger cards) read this.
         self.cut_off = cut_off
+        #: The cause TOKEN behind ``cut_off`` (``AgentEndEvent.cut_off_cause``,
+        #: e.g. ``runtime-retired``), carried for the one consumer that must
+        #: tell the ARMS apart rather than just say "involuntary": the
+        #: notification ladder, which raises a retire-for-build cut as the
+        #: ``retired`` toast rather than the failure banner (agent review round
+        #: 2, MAJOR-1 — the live OS toast is the one surface a poller restate
+        #: cannot reach). Empty on synthetics, which keeps them on the
+        #: pre-existing error wording.
+        self.cut_off_cause = cut_off_cause
         #: §14: whether this turn's completion may notify — the session's ONE
         #: computed value, carried straight off ``AgentEndEvent.notify`` and
         #: consumed by ``_finalize_turn``'s notification tail. Defaulted True
@@ -914,6 +924,10 @@ class EventController:
                 # `aborted=False, error=<notice>`, so the fact that this was an
                 # involuntary stop exists nowhere else on the wire.
                 cut_off=bool(getattr(event, "cut_off_cause", "") or getattr(event, "cut_off", "")),
+                # The TOKEN behind that verdict, for the notification ladder's
+                # retire-for-build arm (round 2, MAJOR-1): the bool alone cannot
+                # tell `runtime-retired` apart from every other cut.
+                cut_off_cause=str(getattr(event, "cut_off_cause", "") or ""),
                 # §14: the session's ONE notify value, forwarded untouched;
                 # `_finalize_turn` gates the completion/error toasts on it.
                 notify=bool(getattr(event, "notify", True)),

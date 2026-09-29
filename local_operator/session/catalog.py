@@ -216,9 +216,17 @@ class CatalogEntry:
         if self.row.live_state in {"wedged", "busy"}:
             return self.row.live_state
         if self.shows_completion_mark:
-            return {"error": "error", "interrupted": "interrupted"}.get(
-                self.completion_kind, "complete"
-            )
+            # ``retired`` normalizes to the ``interrupted`` treatment, mirroring
+            # ``transcript_index``'s rail: the sidebar's glyph vocabulary has no
+            # separate warning-cut word, and the two alternatives are both
+            # wrong — "complete" claims a cut turn finished, "error" wears the
+            # failure framing the retire-for-build arm exists to remove
+            # (2026-09-29).
+            return {
+                "error": "error",
+                "interrupted": "interrupted",
+                "retired": "interrupted",
+            }.get(self.completion_kind, "complete")
         if self.row.live_state == "attached":
             return "attached"
         # THE ``delegating`` RUNG, below ``attached`` and above the armed wake,
@@ -250,9 +258,11 @@ class CatalogEntry:
         # A receipt is evidence of an outcome even after viewing; no receipt is
         # not evidence of success. Never turn an old unknown transcript green.
         if self.completion_token:
-            return {"error": "error", "interrupted": "interrupted"}.get(
-                self.completion_kind, "complete"
-            )
+            return {
+                "error": "error",
+                "interrupted": "interrupted",
+                "retired": "interrupted",
+            }.get(self.completion_kind, "complete")
         return "recent"
 
     @property
@@ -365,7 +375,7 @@ class CatalogEntry:
         if self.shows_completion_mark:
             if self.completion_kind == "error":
                 return self._error_label("Unseen error")
-            if self.completion_kind == "interrupted":
+            if self.completion_kind in {"interrupted", "retired"}:
                 return self._stop_label("Unseen interruption")
             return {"interrupted": "Unseen interruption"}.get(
                 self.completion_kind, "Unseen completion"
@@ -428,7 +438,7 @@ class CatalogEntry:
         if self.completion_token:
             if self.completion_kind == "error":
                 return self._error_label("Error")
-            if self.completion_kind == "interrupted":
+            if self.completion_kind in {"interrupted", "retired"}:
                 return self._stop_label("Interrupted")
             return {"interrupted": "Interrupted"}.get(self.completion_kind, "Complete")
         return "Recent"
@@ -449,9 +459,18 @@ class CatalogEntry:
         parenthetical stack — and the same tolerance: an empty reason returns
         the spelling BYTE-IDENTICAL to today's, so every pre-taxonomy record and
         every plain stop renders exactly as it always has.
+
+        THE RETIRED ARM (design round 2, D3) suffixes with the cause that
+        actually produced the row, not a stop rung: in this app ``Interrupted``
+        means the OPERATOR stopped the thing (the rung phrases read "killed by
+        /stop"), and a build drain has no operator act behind it — the label
+        must not misattribute agency. Same suffix pattern, same warning ink and
+        status code; only the words gain the cause.
         """
         from local_operator.incidents import stop_rung_phrase
 
+        if self.completion_kind == "retired":
+            return f"{base} — retired for an update"
         phrase = stop_rung_phrase(self.completion_reason or "")
         return f"{base} — {phrase}" if phrase else base
 

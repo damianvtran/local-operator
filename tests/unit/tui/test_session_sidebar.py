@@ -1813,6 +1813,14 @@ async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
         ("error", "✗", "Unseen error"),
         # `⊘`, not `✗`: an interruption is unfinished work, not a failure.
         ("interrupted", "⊘", "Unseen interruption"),
+        # The retire-for-build arm normalizes to the interruption treatment on
+        # the sidebar too (2026-09-29): "complete" would claim the cut turn
+        # finished and "error" would wear the failure framing the arm exists
+        # to remove — the rail's ``transcript_index`` makes the same call. The
+        # label gains the cause (design round 2, D3): "Interrupted" alone
+        # means the OPERATOR stopped it, and a build drain has no operator act
+        # behind it.
+        ("retired", "⊘", "Unseen interruption — retired for an update"),
     ]
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 30)) as pilot:
@@ -1976,7 +1984,7 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
     ALLOWED = {
         "✓": {"Unseen completion"},
         "✗": {"Unseen error"},
-        "⊘": {"Unseen interruption"},
+        "⊘": {"Unseen interruption", "Unseen interruption — retired for an update"},
         WEDGED_MARKER: {WEDGED_STATUS},
         "!": {"Approval needed", "Answer needed"},
     }
