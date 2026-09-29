@@ -221,6 +221,19 @@ def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
     return _search_interception_config()
 
 
+def _child_knowledge_slimming(_watcher: ConfigWatcher) -> bool:
+    """What a child build resolves for ``subagents.slim_child_knowledge``.
+
+    Read through ``harness.subagent.read_slim_child_knowledge``, the very reader
+    ``_construct_child_session`` calls, which resolves ``paths.config_dir()``
+    itself — the probe points that at the watcher's directory, so a write from
+    another process lands on the next delegation.
+    """
+    from local_operator.harness.subagent import read_slim_child_knowledge
+
+    return read_slim_child_knowledge()
+
+
 def _spawn_model(session: Session, tier: str, watcher: ConfigWatcher | None = None) -> str:
     """The subagent ModelSpec the session resolves for an effort tier.
 
@@ -501,6 +514,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "subagents.models.lo": ("openai/lo-model", lambda s, w: _spawn_model(s, "lo")),
     "subagents.models.med": ("openai/med-model", lambda s, w: _spawn_model(s, "med")),
     "subagents.models.hi": ("openai/hi-model", lambda s, w: _spawn_model(s, "hi")),
+    # Read-per-use like the models above, and observed through the very reader
+    # the next child build calls, so the probe fails the day the build stops
+    # re-reading config (the false-green the read-per-use block below exists to
+    # prevent). Probed False because the default is True.
+    "subagents.slim_child_knowledge": (False, lambda s, w: _child_knowledge_slimming(w)),
     # -- read-per-use consumers: observed THROUGH the consumer ------------------
     # Not through the watcher's snapshot (review round 3, M2). Asserting that a
     # key reached `watcher.values` is bookkeeping: it cannot tell "this key is
