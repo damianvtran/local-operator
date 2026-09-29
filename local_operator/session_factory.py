@@ -54,7 +54,7 @@ from local_operator.ecosystem_instructions import (
     read_ecosystem_instructions,
 )
 from local_operator.harness.approval import ApprovalUnavailableError
-from local_operator.harness.rows import is_harness_notice_row
+from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 from local_operator.harness.types import AgentMessage, Message
 
 # Imported as an alias: ``config_dir`` is a parameter/local name in other
@@ -920,6 +920,17 @@ def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     return prompt_approval
 
 
+def _payload_user_text(payload: dict[str, Any]) -> str:
+    """The text a stored ``role="user"`` payload carries, joined and stripped.
+
+    The twin of the join the scan below performs, kept as its own function so
+    the indexed path can ask the chrome recogniser the same question the scan
+    does without a second copy of the block-flattening rule.
+    """
+    blocks = payload.get("content") or []
+    return "".join(block.get("text", "") for block in blocks if isinstance(block, dict)).strip()
+
+
 def _latest_user_query(transcript: Any) -> str:
     """Extract the skill-selection query from the transcript.
 
@@ -935,6 +946,9 @@ def _latest_user_query(transcript: Any) -> str:
     ``role="user"`` row and is not a query: handing selection the harness's
     prose would search the skills index for "[model switch] You are now
     running as …" and freeze the result against it as the block's task id.
+    The same holds for a CHROME prompt that lost its stamp — a goal
+    continuation a pre-stamp build spooled reads as a plain user row — so the
+    scan also applies the shared :func:`is_harness_chrome` recogniser.
     """
     try:
         # Production transcripts index these at durable append time. Keep the
@@ -942,12 +956,15 @@ def _latest_user_query(transcript: Any) -> str:
         if hasattr(transcript, "latest_user_entry"):
             newest_user = transcript.latest_user_entry()
             candidates: Any = [transcript.latest_entry("compaction"), newest_user]
-            if newest_user is not None and is_harness_notice_row(
-                getattr(newest_user, "payload", None) or {}
+            newest_payload = getattr(newest_user, "payload", None) or {}
+            if newest_user is not None and (
+                is_harness_notice_row(newest_payload)
+                or is_harness_chrome(_payload_user_text(newest_payload))
             ):
-                # The indexed path names ONE user row, so a notice there would
-                # end the scan with nothing to select on. Fall back to the
-                # journal and walk back to the newest row the operator wrote.
+                # The indexed path names ONE user row, so a notice OR a chrome
+                # prompt there would end the scan with nothing to select on.
+                # Fall back to the journal and walk back to the newest row the
+                # operator wrote.
                 candidates = transcript.entries()
             entries = [entry for entry in candidates if entry is not None]
         else:
@@ -983,10 +1000,16 @@ def _latest_user_query(transcript: Any) -> str:
         if not user_text and entry_type == "message" and payload.get("role") == "user":
             if is_harness_notice_row(payload):
                 continue
-            content = payload.get("content") or []
-            user_text = "".join(
-                block.get("text", "") for block in content if isinstance(block, dict)
-            ).strip()
+            candidate = _payload_user_text(payload)
+            if is_harness_chrome(candidate):
+                # A harness prompt that lost its stamp — a continuation row a
+                # pre-stamp build spooled — is still not a query the operator
+                # wrote: handing selection the harness's prose searches the
+                # skills index for "Continue working toward this goal: …" and
+                # freezes the block's task id against it. The same shared
+                # recogniser every display surface makes the call with.
+                continue
+            user_text = candidate
         if user_text and summary:
             break
     return "\n".join(part for part in (user_text, summary) if part)
