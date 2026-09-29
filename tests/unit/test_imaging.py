@@ -27,8 +27,10 @@ from PIL import Image
 
 from local_operator import imaging
 from local_operator.imaging import (
+    _CONTEXT_FRAME_CACHE,
     _REBOUND_CACHE,
     _REBOUND_CACHE_MAX_BYTES,
+    IMAGE_CONTEXT_EDGES,
     IMAGE_INGEST_MAX_EDGE,
     IMAGE_MAX_BYTES,
     IMAGE_MAX_EDGE,
@@ -37,6 +39,7 @@ from local_operator.imaging import (
     IMAGE_SCREEN_MAX_EDGE,
     _is_line_art,
     bound_image_for_model,
+    downscale_context_frame,
     rebound_oversize_image,
 )
 from local_operator.media import ImageInfo, sniff_image
@@ -937,3 +940,132 @@ def test_screen_edge_leaves_a_720p_frame_verbatim() -> None:
 
     assert payload == frame, "a frame already at the screen edge was re-encoded"
     assert mime == "image/png"
+
+
+# ---------------------------------------------------------------------------
+# The context downscale: the image-budget fidelity policy
+# ---------------------------------------------------------------------------
+
+
+def test_downscale_context_frame_shrinks_a_screenshot_to_the_rung() -> None:
+    """The core promise: fewer bytes, still a decodable, sendable image, and
+    the long edge bounded to the rung it was asked for."""
+    frame = _ui_frame((1280, 800))
+    encoded = base64.b64encode(frame).decode("ascii")
+    _CONTEXT_FRAME_CACHE.clear()
+
+    result = downscale_context_frame(encoded, "image/png", max_edge=IMAGE_INGEST_MAX_EDGE)
+
+    assert result is not None
+    data, mime = result
+    assert len(data) < len(encoded), "the rung did not save a byte"
+    assert mime in {"image/png", "image/jpeg"}
+    info = sniff_image(base64.b64decode(data))
+    assert info is not None and info.width is not None and info.height is not None
+    assert max(info.width, info.height) <= IMAGE_INGEST_MAX_EDGE
+
+
+def test_downscale_context_frame_tighter_rungs_are_smaller() -> None:
+    """The rung walk depends on the ordering, and each rung renders from the
+    ORIGINAL bytes — never from a previous rung's result, so no generation
+    loss compounds between rungs."""
+    frame = _ui_frame((1280, 800))
+    encoded = base64.b64encode(frame).decode("ascii")
+    _CONTEXT_FRAME_CACHE.clear()
+
+    wide = downscale_context_frame(encoded, "image/png", max_edge=IMAGE_CONTEXT_EDGES[0])
+    tight = downscale_context_frame(encoded, "image/png", max_edge=IMAGE_CONTEXT_EDGES[-1])
+
+    assert wide is not None and tight is not None
+    assert len(tight[0]) < len(wide[0])
+    tight_info = sniff_image(base64.b64decode(tight[0]))
+    assert tight_info is not None and tight_info.width is not None
+    assert max(tight_info.width or 0, tight_info.height or 0) <= IMAGE_CONTEXT_EDGES[-1]
+
+
+def test_downscale_context_frame_leaves_unshrinkable_and_unreadable_blocks_alone() -> None:
+    """``None`` is the fallback for everything this cannot improve: a frame
+    already inside the rung with no codec win, bytes that are not an image,
+    and bytes that are not even base64 — the caller's contract is that the
+    original block then survives verbatim."""
+    _CONTEXT_FRAME_CACHE.clear()
+    tiny = base64.b64encode(_png((200, 150))).decode("ascii")
+    assert downscale_context_frame(tiny, "image/png", max_edge=1024) is None
+
+    not_an_image = base64.b64encode(b"just prose, not a picture").decode("ascii")
+    assert downscale_context_frame(not_an_image, "image/png", max_edge=1024) is None
+
+    assert downscale_context_frame("not base64 at all!!", "image/png", max_edge=1024) is None
+
+
+def test_downscale_context_frame_is_memoized_per_bytes_and_rung() -> None:
+    """The walk re-runs on every render; without the memo every context frame
+    would be decoded and re-encoded again on each turn. The rung is part of
+    the key because the same frame is re-rendered when the ladder steps down."""
+    frame = _ui_frame((1280, 800))
+    encoded = base64.b64encode(frame).decode("ascii")
+    _CONTEXT_FRAME_CACHE.clear()
+
+    first = downscale_context_frame(encoded, "image/png", max_edge=1024)
+    assert len(_CONTEXT_FRAME_CACHE) == 1, "a settled result was not memoized"
+    assert downscale_context_frame(encoded, "image/png", max_edge=1024) == first
+    assert len(_CONTEXT_FRAME_CACHE) == 1
+
+    tight = downscale_context_frame(encoded, "image/png", max_edge=512)
+    assert tight is not None and tight != first
+    assert len(_CONTEXT_FRAME_CACHE) == 2, "the rung is not part of the memo key"
+
+
+def test_downscale_context_frame_caches_a_no_op_negative() -> None:
+    """A frame this rung cannot shrink is cached as a NEGATIVE, so the walk
+    that re-runs on every render does not pay a sniff and an encode attempt
+    for it again."""
+    tiny = base64.b64encode(_png((200, 150))).decode("ascii")
+    _CONTEXT_FRAME_CACHE.clear()
+    assert downscale_context_frame(tiny, "image/png", max_edge=1024) is None
+    assert len(_CONTEXT_FRAME_CACHE) == 1
+    assert downscale_context_frame(tiny, "image/png", max_edge=1024) is None
+    assert len(_CONTEXT_FRAME_CACHE) == 1, "the negative was recomputed"
+
+
+def test_downscale_context_frame_keeps_line_art_bilevel_and_png() -> None:
+    """One-pixel strokes do not survive the JPEG step, so a bilevel source is
+    resized with NEAREST and stays PNG — the same exemption the refit ladder
+    makes."""
+    frame = _bilevel_png((1568, 500))
+    encoded = base64.b64encode(frame).decode("ascii")
+    _CONTEXT_FRAME_CACHE.clear()
+
+    result = downscale_context_frame(encoded, "image/png", max_edge=1024)
+
+    assert result is not None
+    data, mime = result
+    assert mime == "image/png", "line art took the lossy rung"
+    assert len(data) < len(encoded)
+    image = Image.open(io.BytesIO(base64.b64decode(data))).convert("L")
+    colors = image.getcolors(maxcolors=8)
+    assert colors is not None and len(colors) <= 2, "the downscale greyed the strokes"
+
+
+def test_the_context_frame_memo_evicts_oldest_first(monkeypatch) -> None:
+    """Same shape the rebound memo is held to: the cap counts payload bytes,
+    and an over-cap walk drops the oldest entries rather than clearing (a
+    clear would be re-triggered by every later frame in the same walk)."""
+    _CONTEXT_FRAME_CACHE.clear()
+    frames = [_ui_frame((1200 + index, 800)) for index in range(4)]
+    encoded = [base64.b64encode(frame).decode("ascii") for frame in frames]
+    shrunk: list[tuple[str, str]] = []
+    for item in encoded:
+        result = downscale_context_frame(item, "image/png", max_edge=1024)
+        assert result is not None
+        shrunk.append(result)
+    lengths = sorted(len(payload) for payload, _mime in shrunk)
+    cap = max(lengths[-1], lengths[0] + lengths[1])
+    monkeypatch.setattr(imaging, "_CONTEXT_FRAME_CACHE_MAX_BYTES", cap)
+    _CONTEXT_FRAME_CACHE.clear()
+    for item in encoded:
+        downscale_context_frame(item, "image/png", max_edge=1024)
+    retained = sum(len(value[0]) for value in _CONTEXT_FRAME_CACHE.values() if value is not None)
+    assert retained <= cap
+    assert _CONTEXT_FRAME_CACHE, "the cap evicted so aggressively that nothing is cached"
+    assert len(_CONTEXT_FRAME_CACHE) < len(encoded), "nothing was evicted; the cap is not binding"

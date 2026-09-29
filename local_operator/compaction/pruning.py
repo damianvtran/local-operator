@@ -51,6 +51,8 @@ __all__ = [
     "compute_suffix_tokens",
     "count_frame_messages",
     "count_stale_observations",
+    "downscale_stale_frames",
+    "fit_frames_to_wire_budget",
     "prune_stale_frames",
     "prune_stale_frames_in_place",
     "prune_tool_outputs",
@@ -169,19 +171,99 @@ def prune_stale_frames(
     return out, dropped
 
 
+def downscale_stale_frames(
+    messages: Sequence[Message], *, keep_recent_frames: int, max_edge: int
+) -> tuple[list[Message], int]:
+    """Replace every image except those in the newest ``keep_recent_frames``
+    frame-bearing messages with a smaller re-rendering bounded to ``max_edge``.
+
+    The fidelity-preserving sibling of :func:`prune_stale_frames`: same walk,
+    same copy/identity contract (messages that lose bytes are COPIED so a
+    caller holding the original can still tell untouched from rewritten by
+    ``is``; every other message is reused by identity), same guarantee that no
+    message is ever removed. The difference is what happens to the old frame —
+    the prune replaces it with :data:`STALE_FRAME_NOTICE`, this replaces it
+    with a smaller copy of itself. A notice is information destroyed; a
+    smaller frame is information concentrated, and keeping every block in
+    place preserves the history's SHAPE, which is what the model's ability to
+    reference earlier observations (and a prompt cache's prefix) both rest on.
+
+    A block the transform cannot shrink (undecodable, or the rung cannot beat
+    its current bytes) is left EXACTLY as it was: shrinking history must never
+    be able to destroy context on its own, so the fallback is always the
+    original bytes. ``max_edge`` is a concrete rung, not a policy — WHEN to
+    downscale and how far to walk is :func:`fit_frames_to_wire_budget`'s
+    decision, so the two callers of a downscale cannot disagree about the
+    frontier.
+
+    Returns ``(messages, frames_downscaled)``; ``frames_downscaled`` counts
+    image blocks whose bytes were replaced, not messages touched.
+    ``keep_recent_frames`` counts frame-bearing MESSAGES from the end, so a
+    message with two frames costs one slot (the same unit the prune uses).
+    """
+    # Imported HERE, not at module scope, and the placement is load-bearing:
+    # this module sits on the shared renderer's import closure
+    # (``harness.render`` -> ``compaction.api`` -> this file), and a benchmark
+    # episode importing that renderer must not drag the application in —
+    # ``local_operator.imaging`` is explicitly on the episode denylist
+    # (tests/unit/evaluation/runner/test_isolation.py). The downscale itself
+    # only ever runs on the session side, where the decode is wanted.
+    from local_operator.imaging import downscale_context_frame
+
+    if keep_recent_frames < 0:
+        raise ValueError("keep_recent_frames must be non-negative")
+    remaining = keep_recent_frames
+    out: list[Message] = []
+    downscaled = 0
+    for message in reversed(messages):
+        if not _has_frame(message):
+            out.append(message)
+            continue
+        if remaining > 0:
+            remaining -= 1
+            out.append(message)
+            continue
+        content: list[Content] = []
+        changed = False
+        for block in message.content:
+            if isinstance(block, ImageContent):
+                shrunk = downscale_context_frame(block.data, block.mime_type, max_edge=max_edge)
+                if shrunk is not None:
+                    data, mime_type = shrunk
+                    block = block.model_copy(update={"data": data, "mime_type": mime_type})
+                    changed = True
+                    downscaled += 1
+            content.append(block)
+        if changed:
+            # A copy rather than in-place mutation, so the caller's identity
+            # test (see the docstring) holds; ``model_copy`` keeps the id,
+            # which is what the token-estimate cache is keyed on, so
+            # invalidate it — the same dance ``prune_stale_frames`` does.
+            replaced = message.model_copy(update={"content": content})
+            invalidate_message_cache(replaced)
+            out.append(replaced)
+        else:
+            out.append(message)
+    out.reverse()
+    return out, downscaled
+
+
 def shed_frames_to_wire_budget(
     messages: Sequence[Message], *, budget: int
 ) -> tuple[list[Message], int]:
     """Replace the OLDEST frames with notices until the request fits ``budget``
     bytes, keeping as many recent frames as possible.
 
-    The last-resort transport guard. Ordinary compaction decides what to keep
-    by *context* value; this decides by whether the provider will accept the
-    request at all, which is a different and strictly narrower question — so
-    it engages only when the payload is already over a ceiling set below the
-    provider's cap, and does nothing at all below it. The early return is not
-    an optimisation detail: it is the guarantee that every session under
-    budget behaves byte-identically to one without this function.
+    The last-resort transport guard, and the DROP step of
+    :func:`fit_frames_to_wire_budget` (which downscales context frames first
+    and calls this only when none of its rungs fit). Ordinary compaction
+    decides what to keep by *context* value; this decides by whether the
+    provider will accept the request at all, which is a different and strictly
+    narrower question — so it engages only when the payload is already over a
+    ceiling set below the provider's cap, and does nothing at all below it.
+    The early return is not an optimisation detail: it is the guarantee that
+    every session under budget behaves byte-identically to one without this
+    function.
 
     Built on :func:`prune_stale_frames` rather than as a second
     frame-dropping primitive, so there is ONE definition of "which frames are
@@ -223,6 +305,89 @@ def shed_frames_to_wire_budget(
         if estimate_wire_bytes(working) <= budget:
             break
     return working, dropped
+
+
+def fit_frames_to_wire_budget(
+    messages: Sequence[Message], *, budget: int, keep_recent_frames: int = 1
+) -> tuple[list[Message], int, int, int | None]:
+    """Fit the request under ``budget`` by DOWNSCALING context frames first
+    and shedding the oldest only as the last resort.
+
+    The byte ladder every wire-history path runs, ordered by how much visual
+    history each step costs the user:
+
+    1. Replace every frame older than the newest ``keep_recent_frames``
+       frame-bearing messages with a downscaled re-rendering
+       (:func:`downscale_stale_frames`), walking
+       :data:`~local_operator.imaging.IMAGE_CONTEXT_EDGES` from its widest
+       rung and stopping at the first rung that fits. The newest frame keeps
+       full fidelity — it is the one the model is reasoning about (and, for
+       screen-driving callers, clicking on) — while every older frame keeps
+       its place in the conversation as reference. This is deliberately NOT
+       ``SESSION_KEEP_RECENT_FRAMES`` (2): that constant governs the
+       browser-sweep's DROP rule, where a blanked frame cannot be consulted at
+       all and the window therefore has to be wider; a downscale keeps every
+       frame, so it protects exactly the one that is a live target.
+    2. Only when no rung fits, hand the tightest candidate to the existing
+       :func:`shed_frames_to_wire_budget`, whose minimal-drop loop stays the
+       backstop.
+
+    WHY DOWNSCALE FIRST, stated as the failure it repairs: the shed's steady
+    state on a long screenshot session is one MORE frame dropped per turn
+    (each new frame costs bytes, so the minimum shed to fit grows by one)
+    with every request still pinned at the ceiling — the model loses visual
+    context frame by frame while the wire never gets cheaper. Downscaling is
+    the fix that failure could not reach: a context frame re-renders to a
+    fraction of its bytes at the first rung (measured on a real 1280x720
+    code-UI capture: 304 KB → 106 KB), so the whole history fits where only a
+    handful of full-size frames did. And because each frame's replacement is
+    deterministic and memoized per ``(bytes, rung)``, a frame's bytes change
+    at most once per rung it renders at — the turn it stops being the newest
+    frame, and again only on a step down a rung (at most three changes across
+    the ladder) — so the provider's prompt-cache prefix is rewritten at most
+    once per rung transition rather than churned on every render.
+
+    Driven by the SAME ``budget`` the shed was driven by (the number
+    ``resolve_wire_bytes_budget`` resolves; the render seam and the
+    compaction trigger already agree on it) — deliberately not a second knob,
+    and not a second resolver.
+
+    The under-budget guarantee is inherited unchanged: when the request
+    already fits, or ``budget`` is non-positive, every element of the input
+    is returned by identity and both counts are 0, so a session under budget
+    behaves byte-identically to one predating this function.
+
+    Cost, stated because this runs at the render seam: the rung walk decodes
+    each stale frame once per ``(frame, rung)`` per PROCESS (memoized in
+    ``imaging._CONTEXT_FRAME_CACHE``, exactly like the repair path); later
+    renders pay a base64 decode and a digest lookup per block. A session over
+    budget is already paying multiples of that in request bytes.
+
+    Returns ``(messages, frames_downscaled, frames_dropped, rung)``, where
+    ``rung`` is the long-edge rung every re-rendered frame settled at —
+    ``None`` when nothing was downscaled — so the render seam's diagnostic can
+    name how aggressive the re-render was.
+    """
+    # Imported HERE for the reason ``downscale_stale_frames`` documents: a
+    # module-scope import would put ``local_operator.imaging`` on the import
+    # closure of the shared renderer an episode imports.
+    from local_operator.imaging import IMAGE_CONTEXT_EDGES
+
+    if budget <= 0:
+        return list(messages), 0, 0, None
+    if estimate_wire_bytes(messages) <= budget:
+        return list(messages), 0, 0, None
+    working: list[Message] = list(messages)
+    downscaled_total = 0
+    for edge in IMAGE_CONTEXT_EDGES:
+        candidate, downscaled = downscale_stale_frames(
+            messages, keep_recent_frames=keep_recent_frames, max_edge=edge
+        )
+        working, downscaled_total = candidate, downscaled
+        if estimate_wire_bytes(working) <= budget:
+            return working, downscaled_total, 0, edge
+    working, dropped = shed_frames_to_wire_budget(working, budget=budget)
+    return working, downscaled_total, dropped, IMAGE_CONTEXT_EDGES[-1]
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:
