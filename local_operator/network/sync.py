@@ -3142,6 +3142,7 @@ def local_sync_handler(server: "RelayServer") -> Any:
             LinkTransport,
             Moved,
             resolve_remote_owner,
+            staged_copy_clause,
         )
 
         session_id = str(frame.get("session_id") or "")
@@ -3163,10 +3164,20 @@ def local_sync_handler(server: "RelayServer") -> Any:
             transport = LinkTransport(server, link, session_id)
             return sync_from(server.root, session_id, ask=transport.ask, owner_device=owner)
         except Moved as refusal:
+            # A "nobody holds it" answer must not deny bytes THIS device is
+            # holding (measured 2026-09-29): a verified staged copy from an
+            # interrupted move is NAMED — with the one verb that adopts it —
+            # rather than hidden behind the absence of a row. See
+            # ``mobility.staged_copy_clause``; the clause self-gates on the
+            # copy's own ``ready.json``, so it cannot point at an empty
+            # staging directory.
+            message = str(refusal.message)
+            if str(refusal.code or "") == "unreachable":
+                message += staged_copy_clause(server, session_id)
             return {
                 "ok": False,
                 "code": refusal.code or "unreachable",
-                "message": refusal.message,
+                "message": message,
                 "session_id": session_id,
             }
         except SyncRefused as refusal:
