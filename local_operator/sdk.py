@@ -777,8 +777,7 @@ def _refuse_attach_extras(spec: SessionSpec) -> None:
         # cannot install it), and an inert setting a caller believes in is the
         # failure shape this surface refuses to have.
         raise SessionSpecError(
-            "output enforcement cannot be set on an attached session; the owning "
-            "runtime decides"
+            "output enforcement cannot be set on an attached session; the owning " "runtime decides"
         )
     # Value equality, deliberately: ``refuse()`` is the default, so a caller
     # who spells it out is indistinguishable from one who does not — and every

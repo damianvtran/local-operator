@@ -2250,9 +2250,7 @@ class AgentLoop:
                     # an empty answer is a failing answer, not a missing one).
                     text = _last_assistant_text(context.messages)
                     check = (
-                        FinalResponseCheck(
-                            ok=False, error="the turn produced no assistant message"
-                        )
+                        FinalResponseCheck(ok=False, error="the turn produced no assistant message")
                         if text is None
                         else gate.check(text)
                     )

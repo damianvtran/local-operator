@@ -371,8 +371,10 @@ async def test_sdk_pydantic_schema_and_retry_round_trip(exec_server, tmp_path):
     reconstructed from the validated payload span on the event stream."""
     from pydantic import BaseModel
 
-    from local_operator.output_contract import OUTPUT_FORMATS  # noqa: F401 — import weight
-    from local_operator.sdk import SessionSpec, SessionRoots, events, open_session
+    from local_operator.output_contract import (  # noqa: F401 — import weight
+        OUTPUT_FORMATS,
+    )
+    from local_operator.sdk import SessionRoots, SessionSpec, events, open_session
 
     run, requests, root = exec_server
 

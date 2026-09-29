@@ -470,9 +470,7 @@ class SessionSpec:
         # written, before anything is constructed.
         if self.output_format is not None:
             if self.output_format not in _OUTPUT_FORMATS:
-                raise SessionSpecError(
-                    "output_format must be one of " + ", ".join(_OUTPUT_FORMATS)
-                )
+                raise SessionSpecError("output_format must be one of " + ", ".join(_OUTPUT_FORMATS))
         if self.output_schema is not None and self.output_format is None:
             raise SessionSpecError("output_schema requires output_format")
         if self.output_retries is not None and self.output_format is None:

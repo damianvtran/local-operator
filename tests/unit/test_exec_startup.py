@@ -499,9 +499,7 @@ def test_output_contract_flags_resolve_apply_and_reach_the_worker(tmp_path):
 
     schema_path = tmp_path / "schema.json"
     schema_path.write_text(json.dumps({"type": "object", "required": ["name"]}))
-    args = ExecArgs(
-        output_format="json", output_schema=str(schema_path), output_retries=1
-    )
+    args = ExecArgs(output_format="json", output_schema=str(schema_path), output_retries=1)
     resolve_startup(args)  # preflight parses the file and passes
     session = RecordingSession()
     apply_startup(session, args, None)
@@ -558,9 +556,7 @@ def test_output_schema_file_failures(tmp_path):
     wrong_markdown = tmp_path / "sections.json"
     wrong_markdown.write_text(json.dumps({"sections": ["Summary"]}))
     with pytest.raises(ValueError, match="required_sections"):
-        resolve_startup(
-            ExecArgs(output_format="markdown", output_schema=str(wrong_markdown))
-        )
+        resolve_startup(ExecArgs(output_format="markdown", output_schema=str(wrong_markdown)))
 
     # The markdown spelling that IS accepted resolves to a contract whose
     # section check is live.

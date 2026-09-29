@@ -5705,9 +5705,7 @@ async def test_no_gate_emits_no_output_validation_events() -> None:
     stream = ScriptedStream([_good_reply("plain prose, no contract")])
     context = LoopContext(tools=[])
     events = []
-    async for event in AgentLoop().run(
-        [Message.user("go")], context, make_config(stream), None
-    ):
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
         events.append(event)
 
     assert not [e for e in events if e.type == "output_validation"]
@@ -5797,9 +5795,7 @@ async def test_final_response_gate_ignores_non_clean_exits() -> None:
             return gen()
 
     context = LoopContext(tools=[])
-    config = make_config(
-        _AbortingStream(), final_response_gate=OutputContract(format="json")
-    )
+    config = make_config(_AbortingStream(), final_response_gate=OutputContract(format="json"))
     events = []
     async for event in AgentLoop().run([Message.user("go")], context, config, abort):
         events.append(event)

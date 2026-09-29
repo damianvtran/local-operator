@@ -345,9 +345,7 @@ def test_output_contract_field_refusals() -> None:
 
 
 def test_output_contract_fields_default_off_and_survive_with_resume() -> None:
-    spec = SessionSpec(
-        output_format="json", output_schema={"type": "object"}, output_retries=1
-    )
+    spec = SessionSpec(output_format="json", output_schema={"type": "object"}, output_retries=1)
     resumed = spec.with_resume("abc123def456")
     assert resumed.output_format == "json"
     assert resumed.output_schema == {"type": "object"}
