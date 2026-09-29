@@ -280,17 +280,40 @@ async def test_yolo_pins_the_gate_against_the_key(isolated_config: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_an_unsupervised_run_reports_the_original_gate(isolated_config: Path) -> None:
-    """Review round 1, M1: no gates installed, so no config-derived posture.
+async def test_an_unsupervised_run_reports_the_gate_its_decisions_use(
+    isolated_config: Path,
+) -> None:
+    """The original gate reads the saved mode now, so the report names it.
 
-    ``/approvals`` on a run whose gates were never installed describes the
-    session's ORIGINAL headless gate, which is built from ``--yolo`` alone.
-    Before the seed was scoped to supervised runs, a config-``auto`` run with
-    no ``--yolo`` reported "(--yolo is active)" while the deciding gate still
-    denied non-TTY requests — and contradicted the launch advisory this PR
-    prints for the same run.
+    Superseded premise (review round 1, M1 — kept in the record): the
+    session's ORIGINAL headless gate was built from ``--yolo`` alone, so a
+    config-``auto`` run with no ``--yolo`` had to report "non-TTY requests
+    deny" — and did, while the deciding gate denied with it. The gate now
+    honours the file (``session_factory._approval_mode_is_auto``; the
+    2026-09-28 incident's addendum), so the report and the decisions agree on
+    ONE value: the saved ``auto``. Reporting "--yolo is active" here would be
+    the M1 false posture in a new costume — pinned by the negative assertion.
     """
     ConfigManager(isolated_config).set_config_value("tool_approval_mode", "auto")
+    from local_operator.session.frontend_state import SlashResult
+
+    control = await start_exec_control(FakeSession(), cwd="/tmp", supervised=False)
+    try:
+        assert control.handle._auto_approve is True
+        notice = control.handle._approvals_slash(FakeSession(), "", SlashResult)
+        assert "tool_approval_mode: auto is in effect" in notice.text
+        assert "--yolo is active" not in notice.text
+    finally:
+        await control.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_unsupervised_run_without_the_key_still_denies(isolated_config: Path) -> None:
+    """The default — no saved mode — keeps the flag-only posture exactly.
+
+    The positive control for the cell above: nothing seeds an unsupervised
+    handle from an ABSENT key, and the report still says what the gate does.
+    """
     from local_operator.session.frontend_state import SlashResult
 
     control = await start_exec_control(FakeSession(), cwd="/tmp", supervised=False)
@@ -298,7 +321,6 @@ async def test_an_unsupervised_run_reports_the_original_gate(isolated_config: Pa
         assert control.handle._auto_approve is False
         notice = control.handle._approvals_slash(FakeSession(), "", SlashResult)
         assert "non-TTY requests deny" in notice.text
-        assert "--yolo is active" not in notice.text
     finally:
         await control.aclose()
 
