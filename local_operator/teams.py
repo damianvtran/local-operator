@@ -472,7 +472,15 @@ def _preflight_hub_team_document(document: Mapping[str, Any]) -> None:
         )
     for member in members:
         role = str(member.get("role") or "")
-        if not role.strip() or len(role) > HUB_TEAM_MEMBER_ROLE_MAX_CHARS:
+        if not role.strip():
+            # No magnitude on the blank arm: a count here would contradict the
+            # sentence it is meant to explain (copy review round 1, C-1), and
+            # the hub's own blank-role refusal carries none either.
+            raise TeamDocumentError(
+                "members",
+                f"must hold slots whose role is 1 to {HUB_TEAM_MEMBER_ROLE_MAX_CHARS} characters",
+            )
+        if len(role) > HUB_TEAM_MEMBER_ROLE_MAX_CHARS:
             raise TeamDocumentError(
                 "members",
                 _submitted_rule(
@@ -502,6 +510,11 @@ def _preflight_hub_team_document(document: Mapping[str, Any]) -> None:
             )
 
     instructions = str(document.get("instructions") or "")
+    # A blank brief is refused by the hub -- "it IS the team" -- so a 0-byte
+    # ``instructions.md`` (a real row state) is refused here too, before an
+    # upload it could never pass (review round 1, M1).
+    if not instructions.strip():
+        raise TeamDocumentError("instructions", "must not be empty")
     if len(instructions) > MAX_TEAM_INSTRUCTIONS_CHARS:
         raise TeamDocumentError(
             "instructions",
@@ -535,10 +548,11 @@ def hub_team_document(team: Team) -> dict[str, Any]:
     it (its decoder stores what the author wrote; see ``requests.TeamMemberSlot``
     in agent-server), and the pull side decides what it recognises.
 
-    The document is preflighted against the hub's own caps and name rule
+    The document is preflighted against the hub's own caps and rules
     (:func:`_preflight_hub_team_document`) before it is returned, so a team
-    the hub would refuse is refused HERE, by the surface that knows why,
-    without spending an upload or building a hub client.
+    the hub would refuse is refused HERE, by the surface that knows why: no
+    upload is spent, and the desktop route additionally never builds a hub
+    client for it.
 
     Raises:
         TeamDocumentError: When the document breaks one of the hub's rules;
@@ -1289,9 +1303,15 @@ class TeamRegistry:
                 manager=(fields.manager or "manager").strip() or "manager",
                 members=list(fields.members or []),
                 instructions=(
-                    _bounded(fields.instructions) if fields.instructions is not None else ""
+                    _bounded(fields.instructions, label="team instructions")
+                    if fields.instructions is not None
+                    else ""
                 ),
-                project=_bounded(fields.project) if fields.project is not None else "",
+                project=(
+                    _bounded(fields.project, label="team project")
+                    if fields.project is not None
+                    else ""
+                ),
             )
             return self._save_team_locked(team, briefs_authoritative=True)
 
@@ -1333,9 +1353,11 @@ class TeamRegistry:
             if "instructions" in updates and updates["instructions"] is not None:
                 # An explicit "" is a DELIBERATE clear. This path hydrated first,
                 # so the empty string is authoritative rather than transported.
-                candidate.instructions = _bounded(updates["instructions"])
+                candidate.instructions = _bounded(
+                    updates["instructions"], label="team instructions"
+                )
             if "project" in updates and updates["project"] is not None:
-                candidate.project = _bounded(updates["project"])
+                candidate.project = _bounded(updates["project"], label="team project")
             return self._save_team_locked(candidate, briefs_authoritative=True)
 
     def save_team(self, team: Team) -> Team:
@@ -1718,12 +1740,17 @@ def parse_members(raw: Iterable[str] | None) -> list[TeamMember]:
     return [TeamMember(role=role, count=slots[(kind, role)], kind=kind) for (kind, role) in order]
 
 
-def _bounded(text: str) -> str:
+def _bounded(text: str, *, label: str) -> str:
     body = text or ""
     if len(body) > MAX_TEAM_INSTRUCTIONS_CHARS:
+        # One bound covers two files, so the label says WHICH brief overflowed
+        # ("team instructions" on a project overflow points at the wrong
+        # remedy), and the magnitude is the number a trim is made of (copy
+        # review round 1, C-2).
         raise ValueError(
-            f"team instructions exceed {MAX_TEAM_INSTRUCTIONS_CHARS} characters; "
-            "they ride in front of every run of this team, so they must stay short."
+            f"{label} exceeded the {MAX_TEAM_INSTRUCTIONS_CHARS}-character cap "
+            f"(submitted {len(body)}); a brief this size rides in front of every run "
+            "of this team, so it must stay short."
         )
     return body
 

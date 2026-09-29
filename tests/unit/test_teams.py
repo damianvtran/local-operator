@@ -329,14 +329,21 @@ def test_the_two_manager_prompts_agree_on_the_projects_duty(registry: TeamRegist
 
 
 def test_oversized_briefs_are_refused(registry: TeamRegistry) -> None:
-    with pytest.raises(ValueError, match="exceed"):
-        registry.create_team(
-            TeamEditFields(
-                name="huge",
-                manager="manager",
-                instructions="x" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1),
-            )
-        )
+    """Round-1 C-2: the refusal says WHICH brief overflowed and by how much.
+
+    One bound covers two files, so "team instructions" on a project overflow
+    names the wrong remedy; and a trim needs the gap between brief and cap.
+    """
+    over = "x" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1)
+
+    with pytest.raises(ValueError, match=r"team instructions exceeded .*\(submitted 32769\)"):
+        registry.create_team(TeamEditFields(name="huge", manager="manager", instructions=over))
+    with pytest.raises(ValueError, match=r"team project exceeded .*\(submitted 32769\)"):
+        registry.create_team(TeamEditFields(name="huge", manager="manager", project=over))
+
+    created = registry.create_team(TeamEditFields(name="small", manager="manager"))
+    with pytest.raises(ValueError, match=r"team project exceeded .*\(submitted 32769\)"):
+        registry.update_team(created.id, TeamEditFields(project=over))
 
 
 def test_reload_from_disk(tmp_path: Path) -> None:
@@ -2620,3 +2627,30 @@ def test_import_hub_team_accepts_a_brief_over_the_old_cap(tmp_path: Path) -> Non
     assert outcome.team.project == "rad-1"
     stored = TeamRegistry(tmp_path).get_team(outcome.team.id)
     assert stored.instructions == brief
+
+
+@pytest.mark.parametrize("brief", ["", "   \n\t"])
+def test_hub_team_document_refuses_a_blank_brief(brief: str) -> None:
+    """Round-1 M1: the hub refuses a blank brief ("it IS the team"), so a
+    0-byte ``instructions.md`` -- a real row state -- is refused here too."""
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(_hub_cap_team(instructions=brief))
+
+    assert (refusal.value.field, refusal.value.rule) == ("instructions", "must not be empty")
+
+
+@pytest.mark.parametrize("role", ["", "   "])
+def test_hub_team_document_refuses_a_blank_role_without_a_count(role: str) -> None:
+    """Round-1 C-1: the blank arm states the rule alone -- there is no magnitude
+    to report, and a count would contradict the sentence it explains."""
+    slot = TeamMember.model_construct(role=role, kind="agent", count=1)
+    team = _hub_cap_team(members=[slot])
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == (
+        "members",
+        "must hold slots whose role is 1 to 128 characters",
+    )
+    assert "submitted" not in refusal.value.rule
