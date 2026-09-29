@@ -232,9 +232,13 @@ def park_edges(
       peer recovered (agent review round 1, MINOR-1). When the device answers
       again, an absent key is a real clear and a present one with the same kind
       is no edge — so the episode survives the outage without a second notice.
-      A WHOLE-RELAY failure delivers neither rows nor names (``_read``'s empty
-      answer), so that one stays ambiguous and the caller must not read it as
-      an answer either.
+      A WHOLE-RELAY failure is the RESIDUAL, stated rather than hidden:
+      ``_read``'s empty answer delivers neither rows nor names, so an outage and
+      an all-clear are indistinguishable at this seam and this helper READS IT
+      AS A CLEAR — the caller withdraws the card, and the same park fires again
+      as a second episode once the relay answers. Distinguishing the two needs
+      an answered/not-answered signal out of ``_read`` itself; that is recorded
+      as the follow-up (round-2 review NIT-1, PR body), not claimed as handled.
 
     THE STORED-HALF CAVEAT, and it is the discriminator rather than a filter
     here: a park counts only when ``pending`` is present AND ``live_state`` is

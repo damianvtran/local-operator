@@ -15,6 +15,8 @@ and what a machine hears:
   MAJOR-1);
 * a device that does NOT answer is not a clear: its episode survives the
   outage and is not re-announced on recovery (agent review round 1, MINOR-1);
+  a whole-RELAY failure is the documented residual — indistinguishable from an
+  all-clear at this seam, so it reads as one (see `park_edges`);
 * the OS banner goes through the app's existing notifier, naming the DEVICE,
   and stays quiet while the user is looking at the terminal (the notifier's own
   focus gate, unchanged);
@@ -38,7 +40,7 @@ from typing import Any
 import pytest
 
 from local_operator.resume import SessionRow
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import REMOTE_PARK_POLL_S, OperatorApp
 from local_operator.tui.notify import remote_park_banner, remote_park_card
 from local_operator.tui.widgets.toast import Toast
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
@@ -303,6 +305,60 @@ async def test_a_park_while_the_list_is_closed_is_announced(
         for _ in range(40):
             await pilot.pause()
         assert toast.generation == generation, "the open list re-raised the watch's card"
+
+
+@pytest.mark.asyncio
+async def test_the_always_on_watch_is_armed_and_fires_on_its_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 5 s watch is ARMED BY THE APP and fires without a caller (round 2).
+
+    The cell above drives the watch's own method; this one proves the app
+    actually SCHEDULES it: the arming is intercepted on the way to
+    ``set_interval`` — identity against the live attribute, the shape
+    ``test_attention.py`` holds its tick with, so a wrapper cannot make the pin
+    vacuous — and then the card must arrive from the app's OWN tick, with
+    ``_watch_remote_parks`` never called by the test. Delete the
+    ``set_interval(REMOTE_PARK_POLL_S, ...)`` line in ``on_mount`` and this
+    fails while the other still passes, which is exactly how round-1's
+    MAJOR-1 was silent in the default configuration.
+    """
+    from local_operator.session import peer_rows as peer_rows_module
+
+    rows = (_parked(),)
+    monkeypatch.setattr(peer_rows_module, "peer_session_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(peer_rows_module, "unanswered_peers", lambda *a, **k: ())
+
+    armed: list[tuple[float, dict[str, Any]]] = []
+    original = OperatorApp.set_interval
+
+    def spy(self: OperatorApp, *args: Any, **kwargs: Any) -> Any:
+        callback = args[1] if len(args) > 1 else kwargs.get("callback")
+        if callback is not None and callback == getattr(self, "_watch_remote_parks", None):
+            armed.append((args[0] if args else kwargs.get("interval", 0.0), kwargs))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(OperatorApp, "set_interval", spy)
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        toast = _toast(app)
+        assert not app._session_sidebar.display, "this cell is about the closed list"
+
+        assert armed, "the always-on park watch is not armed on mount"
+        ((interval, kwargs),) = armed
+        assert interval == REMOTE_PARK_POLL_S == 5.0
+        assert not kwargs.get(
+            "pause"
+        ), "armed paused — it would never fire while the list is closed"
+
+        # The app's own tick, no caller: wait past the interval (with slack for
+        # a loaded host) and require the card to arrive from the timer alone.
+        for _ in range(200):
+            await pilot.pause(0.1)
+            if toast.display:
+                break
+        assert toast.display, "no card arrived from the app's own 5 s watch"
 
 
 @pytest.mark.asyncio
