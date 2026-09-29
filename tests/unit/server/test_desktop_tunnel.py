@@ -24,6 +24,7 @@ from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
 from local_operator.server.routes import auth, desktop_tunnel
+from local_operator.tunnels import gateway
 
 TOKEN = "desktop-tunnel-test-token"
 pytestmark = pytest.mark.asyncio
@@ -108,17 +109,24 @@ async def test_the_route_reports_the_park_rather_than_a_dead_gateway(desktop) ->
     assert result["connector"]["reason"] == "login_required"
     assert result["connector"]["since"] == 1_800_000_000
     # The remedy is a terminal command, reported rather than run: this route has
-    # no write half, so the UI shows it and the operator runs it.
-    assert result["remedy"] == {"command": "lop login radient", "url": "https://console.invalid"}
+    # no write half, so the UI shows it and the operator runs it. The PARK's own
+    # sign-in command does not survive beside the login verdict below: that
+    # verdict is `owner_missing`, and a sign-in cannot clear it (a new sign-in is
+    # a new row and nothing re-points the configuration — issue #1711), so the
+    # verdict's re-point command stands in.
+    assert result["remedy"] == {
+        "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
+        "url": gateway.CONSOLE_URL,
+    }
     # Never a live claim: this route answers about the machine without calling
     # Radient, which is also the only answer available when the login is dead.
     assert result["cloud"] == {"status": "active", "source": "cached", "reason": ""}
     # No credential row exists in this fixture, so the login verdict is the
-    # honest "sign in": there is nothing stored for this tunnel to refresh, which
-    # is why no call is made at all. (A row that is merely STALE does make one —
-    # bounded and memoised, see REFRESH_WAIT_S — which the tests at the end of
-    # this file drive.)
-    assert result["login"] == {"credential_id": 7, "state": "login_required"}
+    # honest one for "the configuration names a login this device does not
+    # have": `owner_missing` — not `login_required`, which a sign-in clears and
+    # this cannot. (A row that is merely STALE does make a bounded call — see
+    # REFRESH_WAIT_S — which the tests at the end of this file drive.)
+    assert result["login"] == {"credential_id": 7, "state": "owner_missing"}
 
 
 async def test_a_machine_with_no_tunnel_says_so_instead_of_stopped(desktop) -> None:
@@ -149,17 +157,19 @@ async def test_a_deliberately_stopped_tunnel_is_not_reported_as_parked(desktop) 
 
 async def test_the_account_status_carries_the_login_verdict(desktop) -> None:
     """The account section's honesty: a stored row can be `configured` with an
-    unexpired token and still be refused, which is the incident's own shape."""
+    unexpired token and still be refused, or the login the tunnel was enrolled
+    with can be gone entirely — `owner_missing` here — and both are the
+    incident's own shapes."""
     client, tmp_path, _app = desktop
     _configure(tmp_path)
     _park(tmp_path)
 
     result = (await client.get("/v1/auth/status")).json()["result"]
     assert result["accounts"] == []
-    assert result["radient_login"] == {"credential_id": 7, "state": "login_required"}
+    assert result["radient_login"] == {"credential_id": 7, "state": "owner_missing"}
     assert result["tunnel_remedy"] == {
-        "command": "lop login radient",
-        "url": "https://console.invalid",
+        "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
+        "url": gateway.CONSOLE_URL,
     }
 
 
