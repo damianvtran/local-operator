@@ -706,9 +706,12 @@ class MeshCredentialBroker:
             # the token it has died and the refresh above could not replace it (no
             # reachable authorization server, a grant the server already rejected).
             # Only an interactive login can produce a live one, and that login can
-            # only happen HERE. The peer is told `interactive_required` and the owner's
-            # operator gets a notice — never the other way round, because the borrower
-            # has no browser flow to offer.
+            # only happen HERE. The peer is told `interactive_required`; the OWNER
+            # gets no pushed notice — the mechanism is the `credential.report` row
+            # written below, which `credentials/repair.py` derives into the repair
+            # row that `lop network doctor` and the `/network` panel show here.
+            # Never the other way round, because the borrower has no browser flow to
+            # offer.
             #
             # WHY AN EXPIRED TOKEN IS A REFUSAL AND NOT A GRANT (audit round 2): the
             # owner can see the expiry it is about to lend, and serving it would hand
