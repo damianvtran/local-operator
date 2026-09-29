@@ -480,7 +480,13 @@ class SessionSidebar(Widget, can_focus=True):
         # left to show: past either, the candidate is describing rows that do
         # not exist.
         high = min(len(self.entries) - self._offset, max(1, self.size.height - 1))
-        best = low
+        # The seed can exceed the rows left to show — its chrome count is the
+        # WHOLE list's — and near the tail that leaves `low > high`, so the loop
+        # never runs. Returning the bare seed there would describe rows that do
+        # not exist (`page_size` larger than the slice it windows, which the
+        # page arithmetic then trusts). Clamp the starting best to `high`; while
+        # `low <= high` this is `low` unchanged.
+        best = min(low, high)
         while low <= high:
             middle = (low + high) // 2
             window = self.entries[self._offset : self._offset + middle]
@@ -510,7 +516,15 @@ class SessionSidebar(Widget, can_focus=True):
         # this accounting exists to prevent.
         tiers |= self._silent_peer_tiers()
         chrome = len(tiers) * 2 + (len(tiers) - 1)
-        if any(rank == 0 for rank, _heading in tiers) and self._pinned_overflow(window):
+        # The `+N more pinned` note is chrome too, and the charge must follow
+        # the PAINT: `_display_rows` emits the note whenever a pinned row is not
+        # on the window's page — including a page that carries no pinned row at
+        # all — so the predicate here is exactly its own (`_pinned_overflow`).
+        # The old rank-0 guard charged only windows that DID carry a pinned row,
+        # so a page past the pinned block painted one line more than
+        # `page_size` reserved: the frame overran its height, and the line the
+        # compositor cropped off the bottom was the footer.
+        if self._pinned_overflow(window):
             chrome += 1
         return chrome
 
@@ -551,25 +565,29 @@ class SessionSidebar(Widget, can_focus=True):
         # this number is allowed to be wrong in — it is `page_size`'s safe seed
         # and a spare line is headroom, where the other direction hides a row.
         chrome = len(tiers) * 2 + (len(tiers) - 1)
-        # The `+N more pinned` note (`_display_rows`) is chrome too, and both
-        # sides have to charge it identically or the frame overruns its height.
-        # Sized against a window computed WITHOUT the note: adding the note can
-        # only shrink that window, which can only push more pinned rows out, so
-        # this never claims a note that `_display_rows` then declines to emit.
-        if any(rank == 0 for rank, _heading in tiers):
-            base = max(1, self.size.height - 1 - chrome)
-            window = self.entries[self._offset : self._offset + base]
-            if self._pinned_overflow(window):
-                chrome += 1
+        # The `+N more pinned` note (`_display_rows`) is chrome too, and the
+        # charge follows the same predicate the paint uses (`_chrome_for`): a
+        # pinned row missing from the window. The old rank-0 guard charged only
+        # windows that carried a pinned row, so a page past the pinned block
+        # under-reserved by one line and the frame overran its height. Sized
+        # against a window computed WITHOUT the note: adding the note can only
+        # shrink that window, which can only push more pinned rows out, so this
+        # never claims a note that `_display_rows` then declines to emit.
+        base = max(1, self.size.height - 1 - chrome)
+        window = self.entries[self._offset : self._offset + base]
+        if self._pinned_overflow(window):
+            chrome += 1
         return chrome
 
     def _pinned_overflow(self, window: Sequence[CatalogEntry]) -> int:
         """How many pinned rows exist that ``window`` does not contain.
 
-        Pinned rows are NOT hoisted into the window — that keeps `page_size`,
-        `action_move` and `_entry_at` on one geometry — so at a short height a
-        pinned row can rank below the page. Without this the `★ Pinned` heading
-        silently claims to be the whole pinned set while showing part of it.
+        Pinned rows are NOT hoisted into the window — the scroll axis is
+        pin-blind (`_unpinned_rank`), which keeps `page_size`, `action_move`
+        and `_entry_at` on one geometry — so at a short height a pinned row's
+        slot can sit below the page. Without this the `★ Pinned` heading
+        silently claims to be the whole pinned set while showing part of it,
+        and the `+N more pinned` note has nothing to be counted from.
         """
         shown = {entry.id for entry in window}
         return sum(1 for entry in self.entries if entry.id in self._pins and entry.id not in shown)
@@ -620,9 +638,25 @@ class SessionSidebar(Widget, can_focus=True):
 
         A REMOTE row takes the peer rank here but its SECTION is per device —
         see :meth:`_section_key`, which is what the sort and the paint both use.
+
+        This is the PAINT the pin lifts into: :meth:`_unpinned_rank` is the rank
+        without it, and the scroll axis uses that one (see `_axis_key`).
         """
         if entry.id in self._pins:
             return 0
+        return self._unpinned_rank(entry)
+
+    def _unpinned_rank(self, entry: CatalogEntry) -> int:
+        """Where the row files when nothing is pinned — the SCROLL AXIS' rank.
+
+        Split out of `_section_of` so the two orders that read it cannot drift:
+        the axis (`_axis_key`, and through it `_presentation_order`) places a
+        row by the section it belongs to with NO pin, and the paint
+        (`_section_key`) lets the pin lift it under `★ Pinned` when the window
+        carries it. The pin is a display lift in both directions — it moves
+        what a window shows, never where the row travels — which is what keeps
+        pins out of view until the page reaches their slot (`_pinned_overflow`).
+        """
         if entry.subagent:
             return 4
         if entry.row.is_remote and entry.row.owner_device:
@@ -652,7 +686,7 @@ class SessionSidebar(Widget, can_focus=True):
         return _peer_heading_text(row.owner_label or UNNAMED_DEVICE, bool(row.reachable))
 
     def _section_key(self, entry: CatalogEntry) -> tuple[int, str]:
-        """``(rank, section heading)`` — the ONE key the sort and the paint share.
+        """``(rank, section heading)`` — the ONE key the PAINT's sort uses.
 
         The heading is the section's IDENTITY here, not a label looked up later:
         a peer's rows form their own contiguous section per DEVICE, so two peers
@@ -660,11 +694,53 @@ class SessionSidebar(Widget, can_focus=True):
         why the pair (and not :meth:`_section_of`) is what `_display_rows` and
         `render` both call — the two cannot disagree about a heading they each
         derive from one function.
+
+        :meth:`_axis_key` is its pin-blind sibling — the key the WINDOW slides
+        over (`_presentation_order`). Both read the heading through
+        :meth:`_peer_heading`, so the axis and the paint cannot disagree about
+        which rows are one peer's section either.
         """
         rank = self._section_of(entry)
         if rank == _SECTION_PEER_RANK:
             return rank, _PEER_HEADER_PREFIX + self._peer_heading(entry.row)
         return rank, _SECTION_NAMES[rank]
+
+    def _axis_key(self, entry: CatalogEntry) -> tuple[int, str]:
+        """`(rank, section heading)` for the SCROLL AXIS — the pin is not a section.
+
+        See `_unpinned_rank` for why the axis is pin-blind: a pinned row that
+        jumped to the head of the axis would be LIFTED INTO VIEW, and the
+        `+N more pinned` note exists precisely because that deferral was made
+        (`_pinned_overflow`).
+        """
+        rank = self._unpinned_rank(entry)
+        if rank == _SECTION_PEER_RANK:
+            return rank, _PEER_HEADER_PREFIX + self._peer_heading(entry.row)
+        return rank, _SECTION_NAMES[rank]
+
+    def _presentation_order(self, ranked: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
+        """The order the list presents — and therefore the order it SCROLLS.
+
+        `rank_entries` has decided the ranking; this only regroups it so each
+        section is one block in the order the frame paints them (active,
+        previous, one block per peer device, subagents — the placement
+        ``mesh-ui.md`` decision 1 specifies: "a peer's rows form one contiguous
+        section each, placed after `previous` and before `subagent`"). Within a
+        section the ranking's own order survives: the sort is stable.
+
+        WHY THE WINDOW SLIDES OVER THIS ORDER (operator report, 2026-09-29:
+        remote sessions "disappear when scrolling down ... among previous
+        sessions"). The window used to slide over the RANK order — where a
+        peer's rows sit interleaved with `previous` by birth — while the frame
+        painted them regrouped into their own per-device sections. The two
+        orders disagreed, so the frame's edges and the window's edges disagreed:
+        a remote row left the window while it was drawn in the MIDDLE of the
+        frame (the rows below it stayed put), and rows near it slid DOWN while
+        the user scrolled down. With one order, a window's edges are the frame's
+        edges: rows leave and enter at the top and bottom of the list, in the
+        order they are shown.
+        """
+        return tuple(sorted(ranked, key=self._axis_key))
 
     @staticmethod
     def _draws_section_headers(rows: tuple[tuple[str, CatalogEntry | None], ...]) -> bool:
@@ -702,16 +778,23 @@ class SessionSidebar(Widget, can_focus=True):
         rows: list[tuple[str, CatalogEntry | None]] = []
         # Sections must be CONTIGUOUS, and a pinned row can come from anywhere
         # in the ranking. Group the window's rows by section key, then paint the
-        # groups in key order: the catalog's own order survives inside each
-        # section, and the sections themselves come out in the ranking's order
-        # because the key IS the ranking's own sort key.
-        # `self.entries` itself is NOT resorted and `visible_entries` is NOT
-        # widened: `action_move`, `_cursor_index` and `_switch_session_from`
-        # all index `entries` and must keep seeing the ranking's order. A
-        # consequence, accepted: a pinned row ranked below the window is not
-        # visible until the user pages to it — the same as any other row
-        # outside the window, and what keeps `page_size`/`action_move`/
-        # `_entry_at` on one geometry.
+        # groups in key order; inside a section the order the rows arrived in
+        # survives (the sort is stable).
+        #
+        # `self.entries` ALREADY ARRIVES in this order (`_presentation_order`),
+        # so the grouping below is idempotent for everything but the pin: the
+        # window is a slice of the presented list and the frame is that slice —
+        # its edges are the frame's edges, which is what makes scrolling move
+        # rows up and down the frame instead of re-sorting them under the
+        # cursor (the operator report `_presentation_order` records).
+        # `action_move`, `_cursor_index` and `_switch_session_from` all index
+        # `entries`, so they walk the order the user sees, and `page_size`/
+        # `action_move`/`_entry_at` stay on one geometry.
+        #
+        # The pin is the one lift left in here: a pinned row inside the window
+        # paints under `★ Pinned` at the top. A pinned row the window does NOT
+        # carry is not visible until the page reaches its slot — the pin never
+        # reaches the axis — which is what the `+N more pinned` note is for.
         #
         # A SECTION WITHOUT ROWS IS STILL A SECTION (design round 4, D27). The
         # silent peers are put through the SAME key as the live ones inside this
@@ -829,7 +912,10 @@ class SessionSidebar(Widget, can_focus=True):
         }
 
     def set_entries(self, entries: Sequence[CatalogEntry]) -> None:
-        ordered = rank_entries(entries)
+        # The order the list presents — and scrolls in — not the bare ranking:
+        # see `_presentation_order` for why the window has to slide over the
+        # sections the frame paints.
+        ordered = self._presentation_order(rank_entries(entries))
         # A refresh between mouse-down and click must not change what was
         # pressed. Freeze the entire order until that gesture has completed.
         if self._pressed_id is not None:
@@ -1223,7 +1309,67 @@ class SessionSidebar(Widget, can_focus=True):
             self._reveal()
 
     def action_page(self, delta: int) -> None:
-        self.action_move(delta * self.page_size)
+        """Move a page: the VIEWPORT travels and the cursor rides it.
+
+        WHY NOT `action_move(delta * page_size)` — the old spelling — AND WHAT
+        IT FIXED (operator report, 2026-09-29): paging by moving the CURSOR and
+        revealing it is contiguous only while the page size is constant, and
+        this list's page size varies with the sections a window carries (each
+        peer device's section spends three chrome lines, and the pinned note
+        appears and disappears). When the window shrank across the move, the
+        reveal walk advanced the offset PAST rows the move never showed — a full
+        pagedown sweep skipped four peer rows in one fixture and a pinned row in
+        another — and a wheel-scrolled viewport, whose cursor the wheel
+        deliberately leaves behind, teleported back to the cursor on the first
+        page key, dropping every remote row it was showing.
+
+        A page key moves the PAGE, then: the next window starts where this one
+        ended — overlap is allowed, a gap never — and the cursor keeps its row
+        in the frame where that row still exists, clamped into the new window
+        when it shrank. A press whose page already carries the whole tail is a
+        no-op, because the bottom is a destination rather than something to
+        re-show smaller. Upward, the mirror: the window moves back a page and
+        walks forward (never past its old start) until it reaches the row above
+        the window it came from, so a traversal retraces rows instead of
+        stepping over them.
+        """
+        if not self.entries or not delta:
+            return
+        for _ in range(abs(delta)):
+            if not self._page_once(-1 if delta < 0 else 1):
+                break
+        self._sync_animation()
+        self.refresh()
+
+    def _page_once(self, direction: int) -> bool:
+        """One page of travel; False when the viewport cannot move that way."""
+        start = self._offset
+        page = self.page_size
+        cursor = self._cursor_index()
+        if direction > 0:
+            if start + page >= len(self.entries):
+                # The whole tail is already on the page: the bottom is a
+                # destination, and a further press must not re-show it smaller.
+                return False
+            new_start = min(start + page, len(self.entries) - 1)
+        else:
+            new_start = max(0, start - page)
+        if new_start == start:
+            return False
+        self._offset = new_start
+        new_page = self.page_size
+        if direction < 0:
+            # A window that shrank as it moved must still reach the row above
+            # the one it came from, or the rows between the two windows were
+            # never shown: walk it forward (never past `start - 1`) until it
+            # does.
+            while new_start < start - 1 and new_start + new_page - 1 < start - 1:
+                new_start += 1
+                self._offset = new_start
+                new_page = self.page_size
+        index = max(new_start, min(new_start + new_page - 1, cursor + (new_start - start)))
+        self.cursor_id = self.entries[index].id
+        return True
 
     def action_edge(self, end: bool) -> None:
         if self.entries:
