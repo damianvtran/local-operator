@@ -37,7 +37,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures and he
     pair,
 )
 from tests.unit.network.test_relay_e2e import (  # noqa: F401 — the fixture `pair` reaches for
-    _pair,
+    _pair_settled,
     devices,
 )
 
@@ -122,7 +122,7 @@ def test_a_half_moved_session_is_legible_from_the_refusal(
 
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     write_handoff_entry(
         server_a.root,
@@ -171,7 +171,7 @@ def test_a_handoff_entry_without_a_timestamp_is_not_given_a_fake_age(
 
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     entry = {
         "role": "source",
@@ -228,7 +228,7 @@ def test_an_offload_with_a_wait_re_probes_a_busy_source(
     """
     both: Devices = request.getfixturevalue("pair")
     server_a, server_b, _host, _port = both
-    _pair(both, monkeypatch, role="admin", settings=server_b.settings)
+    _pair_settled(both, monkeypatch, role="admin", settings=server_b.settings)
     _owned_session(server_a)
     flaky = _FlakyRetire()
     monkeypatch.setattr(mobility, "_retire_local_runtime", flaky)

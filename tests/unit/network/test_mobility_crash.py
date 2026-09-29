@@ -62,7 +62,7 @@ def _child_body(setup: Path, window: str, ready_marker: Path, crash_marker: Path
         SessionPlacement,
         write_stamp,
     )
-    from tests.unit.network.test_relay_e2e import _pair
+    from tests.unit.network.test_relay_e2e import _pair_settled
 
     root_a = setup / "a"
     root_b = setup / "b"
@@ -83,7 +83,7 @@ def _child_body(setup: Path, window: str, ready_marker: Path, crash_marker: Path
     server_b.start()
     mp = MonkeyPatch()
     mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root_b))
-    record, _host, _port = _pair((server_a, server_b, host, port), mp, role="admin")
+    record, _host, _port = _pair_settled((server_a, server_b, host, port), mp, role="admin")
 
     # The conversation, on A, owned by A — the ordinary shape of a session a move
     # is asked about.

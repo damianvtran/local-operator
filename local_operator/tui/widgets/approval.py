@@ -1015,6 +1015,13 @@ class ApprovalPrompt(AskPickerScreen):
     #: to remove.
     _ANSWER_KEYS = frozenset(key for _label, key, _why in APPROVAL_CHOICES)
 
+    #: This card's REMOTE hint speaks the approval vocabulary: an allow from
+    #: the origin viewer is refused by the owner's runtime by design (the
+    #: origin holds no key a peer can verify), a deny is ordinary. The ask
+    #: card's hint says the different truth its own gate has (see
+    #: ``AskPickerScreen.set_remote_device``).
+    REMOTE_HINT_KIND = "approval"
+
     #: Escape must reach the APP, which stops the run, rather than answering
     #: this one question.
     #:

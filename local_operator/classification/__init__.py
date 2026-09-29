@@ -94,6 +94,7 @@ from local_operator.classification.recommend import (
 from local_operator.classification.service import (
     CACHE_SIZE,
     CIRCUIT_FAILURE_THRESHOLD,
+    DECIDE_CACHE_SIZE,
     DEFAULT_AUTO,
     DEFAULT_TIMEOUT_MS,
     ClassificationService,
@@ -176,6 +177,7 @@ __all__ = [
     # -- §4: the service ---------------------------------------------------
     "CACHE_SIZE",
     "CIRCUIT_FAILURE_THRESHOLD",
+    "DECIDE_CACHE_SIZE",
     "DEFAULT_AUTO",
     "DEFAULT_TIMEOUT_MS",
     "ClassificationService",
