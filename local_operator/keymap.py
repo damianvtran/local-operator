@@ -497,23 +497,21 @@ def _is_desktop_modifier(token: str) -> bool:
     return token in _DESKTOP_MODIFIER_ORDER
 
 
+def _is_desktop_function_key(token: str) -> bool:
+    """The one key class that may stand BARE in a desktop value: F1..F24
+    (design §A.5: "Bare function keys are allowed (they are not typable)")."""
+    if token.startswith("f") and token[1:].isdigit():
+        return 1 <= int(token[1:]) <= 24
+    return False
+
+
 def _is_valid_desktop_key_token(token: str) -> bool:
     """Whether ``token`` can be the ONE key half of a desktop value."""
     if token in _DESKTOP_NAMED_KEY_TOKENS or token == "space":
         return True
     if len(token) == 1 and token.isascii() and (token.isalpha() or token.isdigit()):
         return True
-    if token.startswith("f") and token[1:].isdigit():
-        return 1 <= int(token[1:]) <= 24
-    return False
-
-
-def _is_typable_token(token: str) -> bool:
-    """Whether a text field would consume ``token`` — the class a global
-    shortcut must not take without a modifier: it would otherwise fire while
-    the user types (the same refusal reason the app scope gives a bare
-    character)."""
-    return token == "space" or (len(token) == 1 and token.isprintable())
+    return _is_desktop_function_key(token)
 
 
 def _canonical_desktop_tokens(text: str) -> tuple[list[str], list[str]]:
@@ -588,7 +586,15 @@ def _validate_accelerator(value: Any) -> str | None:
             f"not a key: `{key_token}` — use space, a letter, a digit, "
             "F1–F24, or a named key like pageup"
         )
-    if len(tokens) == 1 and _is_typable_token(key_token):
+    if len(tokens) == 1 and not _is_desktop_function_key(key_token):
+        # THE bare carve-out is F1..F24 ONLY (design §A.5, "Bare function
+        # keys are allowed (they are not typable)"). Every other bare key is
+        # refused: a printable character and `space` fire while the user
+        # types, and a NAMED key (`delete`, `backspace`, an arrow, `pageup`, …)
+        # is consumed by every editing app all the same — a global binding on
+        # one steals it system-wide. Review round 1, F1: the first cut
+        # accepted the whole non-typable class, and QA reproduced a bare
+        # `delete` storing on all three write paths.
         return "a global shortcut needs a modifier — it would otherwise fire while you type"
     return None
 

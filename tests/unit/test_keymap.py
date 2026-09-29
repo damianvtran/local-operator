@@ -58,7 +58,7 @@ def test_every_binding_action_exists_on_the_app() -> None:
 
     Textual resolves the action lazily, so a typo here ships as a hotkey that
     does nothing on the one machine that presses it. Checked structurally
-    instead — and INVERTED for desktop scope: a desktop action must have NO
+    instead — and INVERTED for desktop scope: a desktop row must have NO
     ``action_*`` method, because its key is not a Textual binding and an
     app-level method would be the first half of a dead binding.
     """
@@ -66,7 +66,16 @@ def test_every_binding_action_exists_on_the_app() -> None:
 
     for action in keymap.KEY_ACTIONS:
         if action.scope == "desktop":
-            assert not hasattr(OperatorApp, f"action_{action.action}"), action.id
+            # The INVERSE guard, made ABLE TO FAIL (review round 1, F2):
+            # `action=""` is the contract for a desktop row, and the method
+            # the id tail would name must not exist — Textual resolves it
+            # only when an impossible key is pressed, which is exactly the
+            # dead binding this guard exists to catch. (The old spelling
+            # interpolated the empty `action` and so checked `action_`, a
+            # name that fails only once the contract is already broken.)
+            assert action.action == "", action.id
+            row_method = action.id.removeprefix(keymap.KEYMAP_PREFIX)
+            assert not hasattr(OperatorApp, f"action_{row_method}"), action.id
             continue
         assert hasattr(OperatorApp, f"action_{action.action}"), action.action
 
@@ -387,14 +396,26 @@ def test_desktop_validation_refuses_comma_alternates() -> None:
     assert keymap.validate_key("ctrl+n,f5") is None
 
 
-def test_desktop_validation_needs_a_modifier_for_typable_keys() -> None:
-    """A bare letter/digit/space would fire while the user types; a bare
-    function key is not typable and is allowed (it is the classic media-key
-    chord)."""
-    reason = keymap.validate_desktop_key("n")
-    assert reason is not None and "modifier" in reason
-    assert keymap.validate_desktop_key("space") is not None
-    assert keymap.validate_desktop_key("f8") is None
+def test_desktop_validation_allows_only_bare_function_keys() -> None:
+    """The bare carve-out is F1..F24 ONLY (design §A.5).
+
+    Everything else bare is refused with the modifier sentence: a printable
+    character or `space` fires while the user types, and a NAMED key
+    (`delete`, `backspace`, `insert`, an arrow, `home`, `pageup`) is consumed
+    by every editing app all the same. Review round 1, F1: the first cut
+    accepted the whole non-typable class, and QA reproduced a bare `delete`
+    storing on all three write paths.
+    """
+    for bare in ("n", "7", "space", "delete", "backspace", "insert", "pageup", "up", "home"):
+        reason = keymap.validate_desktop_key(bare)
+        assert reason is not None and "modifier" in reason, bare
+    assert keymap.validate_desktop_key("f5") is None
+    assert keymap.validate_desktop_key("f24") is None
+    # WITH a modifier the named keys are ordinary: the carve-out is about
+    # bare values only — the same keys the desktop row's own detail line
+    # tells the user the terminal can send.
+    assert keymap.validate_desktop_key("ctrl+pageup") is None
+    assert keymap.validate_desktop_key("alt+delete") is None
 
 
 def test_desktop_validation_refuses_shape_errors() -> None:
