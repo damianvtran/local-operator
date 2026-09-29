@@ -2779,7 +2779,7 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
             defer_materialise=False,
         )
         pid = child.pid
-        _wait_for_record(config_dir)
+        _wait_for_record(config_dir, child=child)
 
         dump = config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
         assert dump.is_file(), (
@@ -2895,7 +2895,7 @@ def test_a_real_runtime_child_engages_at_publication_and_moves_its_own_bound(
             defer_materialise=False,
         )
         pid = child.pid
-        _wait_for_record(config_dir)
+        _wait_for_record(config_dir, child=child)
 
         logs = config_dir / "logs"
         dump = logs / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
@@ -4190,7 +4190,7 @@ def test_a_real_runtime_child_fires_the_progress_leg(
         monkeypatch.setenv("PYTHONPATH", str(_write_sitecustomize(root / "site", body)))
         child = launch_module._spawn_runtime(_SESSION_ID, str(config_dir), defer_materialise=False)
         spawned.append((child, config_dir))
-        _wait_for_record(config_dir)
+        _wait_for_record(config_dir, child=child)
         return (
             child,
             config_dir,

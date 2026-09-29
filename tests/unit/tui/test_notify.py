@@ -54,6 +54,9 @@ from local_operator.tui.notify import (
     notification_writes,
     notifications_enabled,
     osc99_id,
+    remote_park_banner,
+    remote_park_card,
+    remote_park_hints,
     sanitize_text,
     should_use_desktop_fallback,
     wrap_tmux_passthrough,
@@ -926,3 +929,87 @@ def test_the_neutral_body_reveals_nothing_about_the_session() -> None:
     # Still routing rather than outcome: repeating a state category here is the
     # tautology design round 1 removed (D5).
     assert not any(context.lower() in BODY_BACKGROUND.lower() for context in CONTEXTS.values())
+
+
+# ---------------------------------------------------------------------------
+# A park on ANOTHER device: the copy (slice 2, design note §4).
+
+
+def test_the_remote_park_copy_is_pinned() -> None:
+    """The design note's copy table, spelled ONCE and pinned here.
+
+    The strings name the device in every sentence that would otherwise read as
+    an instruction for THIS machine, and the approval half says where the
+    gesture happens — the origin's own allow is refused by the owner's runtime
+    by design. The designer round owns the final phrasing; a change lands here
+    first, which is what makes the round's rewrite a decision rather than a
+    drift.
+    """
+    assert remote_park_card("demo-laptop", "approval") == (
+        "Waiting for approval on demo-laptop\n"
+        "Open the session here to deny it. Allowing it happens on demo-laptop (Touch ID) or "
+        "on a phone paired with it. If nothing there can check a signature: run "
+        "`lop operator install` on demo-laptop (one privileged step) — `lop network ready "
+        "--peer demo-laptop` shows the operator_authority row."
+    )
+    assert remote_park_card("demo-laptop", "approval", name="Backfill the audit log") == (
+        "Backfill the audit log\n" + remote_park_card("demo-laptop", "approval")
+    )
+    assert remote_park_card("demo-laptop", "ask") == (
+        "Waiting for your answer on demo-laptop\nOpen the session here to answer it."
+    )
+    assert remote_park_banner("demo-laptop", "approval") == (
+        "Waiting for approval on demo-laptop — allow there or on its paired phone; "
+        "deny after opening."
+    )
+    assert remote_park_banner("demo-laptop", "ask") == (
+        "Waiting for your answer on demo-laptop — open it to answer."
+    )
+
+
+def test_the_remote_park_banner_stays_inside_its_delivery_budget() -> None:
+    """≤ ~110 characters: one line of Notification Centre body.
+
+    Measured with an ordinary device name, which is what the budget is written
+    against — the device name is substituted verbatim because truncating a
+    device name mid-word would be the one part of the sentence a reader cannot
+    reconstruct.
+    """
+    for kind in ("approval", "ask"):
+        assert len(remote_park_banner("demo-laptop", kind)) <= 110
+
+
+def test_no_remote_park_string_offers_an_allow_from_here() -> None:
+    """The one thing the copy must never imply (§8's checkable constraint)."""
+    strings = [remote_park_card("demo-laptop", kind) for kind in ("approval", "ask")]
+    strings += [remote_park_banner("demo-laptop", kind) for kind in ("approval", "ask")]
+    strings += list(remote_park_hints("demo-laptop", "approval"))
+    strings += list(remote_park_hints("demo-laptop", "ask"))
+    for text in strings:
+        lowered = text.lower()
+        assert "allow from here" not in lowered
+        assert "allow it here" not in lowered
+
+
+def test_the_remote_park_hint_rungs_shed_whole_clauses() -> None:
+    """Longest first, each rung a whole clause shorter, floor = the locality.
+
+    The card walks this ladder at narrow widths (``_remote_hint_text``), so a
+    rung that truncated a clause instead of dropping one would reach a reader
+    as an instruction this machine cannot honour.
+    """
+    approval = remote_park_hints("demo-laptop", "approval")
+    assert approval[0] == (
+        "runs on demo-laptop — allow there (Touch ID) or its paired phone; deny works here"
+    )
+    assert approval[-1] == "runs on demo-laptop"
+    widths = [len(rung) for rung in approval]
+    assert widths == sorted(widths, reverse=True) and len(set(widths)) == len(widths)
+    assert all(rung.startswith("runs on demo-laptop") for rung in approval)
+
+    ask = remote_park_hints("demo-laptop", "ask")
+    assert ask[0] == "runs on demo-laptop — answer it from here"
+    # An ask is answerable from here and the card has no deny: neither word may
+    # leak into its copy (the note's "either" row was sloppy about this and the
+    # manager approved the kind-correct split).
+    assert not any("deny" in rung or "Touch ID" in rung for rung in ask)

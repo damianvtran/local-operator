@@ -1074,6 +1074,27 @@ depends on exactly this).
     It does **not** auto-engage a runtime: the session is now an ordinary local
     session and the first use engages it (`attached.py:3299`), which is the
     residency model the repo already has. `--open` engages and attaches immediately.
+
+    **`lop sessions move --engage-on-arrival` is that `--open` narrowed to the act
+    the operator asked for** (implemented after this document was written, so the
+    flag name is the code's; there is no `--open` verb yet). It is **opt-in and
+    default-off**: absent, every caller gets exactly the paragraph above, and this is
+    the shape an older destination — one that never learned the field — reads too,
+    since an unknown frame key is ignored and the conversation arrives cold.
+    Set, `D` engages the adopted id once, after the promote and after its `move.done`
+    (so `O`'s confirmation never waits on a runtime spawn), through the same single
+    entry point every other engage uses (`launch.engage_runtime`, via the relay's
+    own `net_session_engage` path) — so the lease arbitrates it like any other engage
+    and a runtime that got there first is joined rather than fought. A failed engage
+    is **not a failed move**: the receipt carries an `engagement` block beside a
+    successful one, and nothing in that step can un-promote or re-journal anything.
+
+    **IT IS NOT TURN HANDOFF, and this is the distinction to keep** — the one §6.4
+    above rejects stays rejected. Nothing here resumes, replays or continues a turn:
+    the engage hands the runtime no work, it runs only on a conversation that has
+    already committed, and a source whose turn is in flight is refused with `busy`
+    and the `--wait` remedy exactly as before, flag or no flag. A turn that has to
+    cross devices mid-flight is still out of scope and still has no design here.
 18. `D → O: move.done {}` (best-effort; `O` has already committed).
 19. Audit (R18): `session.handoff.prepare`, `.ready`, `.handing_off`, `.committed`,
     `.rolled_back`, `.done` — one record per *semantic* event, never per chunk

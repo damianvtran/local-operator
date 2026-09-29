@@ -1444,9 +1444,9 @@ one.
 | `wake` tool wire object (shipped) | 1,551 | 487 | ~558 |
 | `monitor` tool wire object (new) | 2,133 | 620 | ~767 |
 | `wake` tool + `notify` field | 1,723 | 535 | ~620 |
-| classifier request — choice (representative) | 1,037 | 253 | ~373 |
-| classifier request — noul (representative) | 862 | 217 | ~310 |
-| classifier question alone: choice / noul | 616 / 441 | 138 / 102 | ~222 / ~159 |
+| classifier question alone — `monitor_materiality` (body / as sent) | 616 / 641 | 138 / 144 | ~222 / ~231 |
+| classifier request — `monitor_materiality`, representative state | 931 | 265 | ~335 |
+| classifier request — `monitor_materiality`, max-bounded state | 1,986 | 722 | ~714 |
 | classifier, 2 changed monitors: per-monitor calls vs one 2-question request | 1,896 vs 1,916 | 460 vs 467 | ~682 vs ~689 |
 | injection: envelope only | 163 | 53 | ~59 |
 | injection: representative (8 lines) | 668 | 207 | ~240 |
@@ -1455,12 +1455,31 @@ one.
 | no-action sentence (new) | 161 | 34 | ~58 |
 | guide description line | 150 | 37 | ~54 |
 
+**Slice-2 re-measurement — the implemented classifier call (2026-09-28).** The
+classifier rows were re-run on the SHIPPED shape: the request is built by
+`vendors.questions_payload` + `request_body` from
+`monitors.classify.materiality_question`, `model` = the Radient leg's default
+`jev-1.13`, default `json.dumps` separators. Probe:
+`probe_monitor_classifier_costs.py` (the slicing session's scratchpad, the
+worktree venv interpreter — Python 3.12.13, has `tiktoken`), same three rulers
+as Method. The question-BODY control reproduces the design-time 616 chars /
+138 cl100k EXACTLY, so the implemented question is the measured one. The two
+request rows are new measurements of that shape: "representative" = the
+shipped `diff.render_delta` output for a two-line status-flip change (211
+chars, 2 changed lines), "max-bounded" = a realistic 1,200-char state (the
+`classifyMaxChars` ceiling). The design-time `1,037 / 253` request row (and
+its `noul` sibling, never implemented) sampled a differently composed 358-char
+state; §8.3 keeps that comparison as the decision record. The per-monitor
+attribution row above stays §8.3's measurement: the shapes cost the same
+within ~1%, and the decision was attribution, not bytes.
+
 **Per-event accounting.**
 
 - *Armed, quiet tick:* 0 model tokens, 0 injected context; one ≤ ~1 KB atomic
   state write; 0 classifier calls.
-- *Heuristic hit:* one classifier call **per changed monitor** ≈ 373 billed
-  tokens each ≈ **$0.000010** each — at the classification layer's measured
+- *Heuristic hit:* one classifier call **per changed monitor** ≈ 335 billed
+  tokens each (the representative row; the `classifyMaxChars` ceiling is
+  ~714) ≈ **$0.0000092** each — at the classification layer's measured
   Radient-route rate ($0.00003 per ~1,091 input tokens,
   `classification-layer.md` §8), derived from that measured rate, not a new
   run.

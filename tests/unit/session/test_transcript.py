@@ -405,6 +405,9 @@ def _forward_transcript_page(
     *,
     before_id: str | None = None,
     through_id: str | None = None,
+    around_id: str | None = None,
+    before: int | None = None,
+    after: int | None = None,
     limit: int = 100,
 ) -> TranscriptPage:
     """The pre-rewrite forward implementation, kept as the differential oracle."""
@@ -415,6 +418,8 @@ def _forward_transcript_page(
     path = Path(directory) / TRANSCRIPT_FILENAME
     if not path.exists():
         raise FileNotFoundError(path)
+    if around_id is not None:
+        return _forward_around_page(directory, around_id, before=before, after=after, limit=limit)
     retained: deque[TranscriptEntry] = deque(maxlen=limit + 1)
     found = before_id is None and through_id is None
     with path.open("r", encoding="utf-8") as handle:
@@ -440,6 +445,53 @@ def _forward_transcript_page(
     return TranscriptPage(entries=rows[-limit:], has_more=len(rows) > limit)
 
 
+def _forward_around_page(
+    directory: str | Path,
+    around_id: str,
+    *,
+    before: int | None,
+    after: int | None,
+    limit: int,
+) -> TranscriptPage:
+    """The anchored read, restated FORWARD from the contract (never the reader).
+
+    The differential oracle for ``around_id``: the anchor's NEWEST occurrence,
+    up to ``before`` rows older and ``after`` newer, a one-row lookahead
+    deciding each flag (a False means the file itself ran out), unset counts
+    centring a window of at most ``limit`` rows, and a missing anchor as the
+    empty reconciled page. Written by slicing a fully parsed journal rather
+    than by any byte discipline, because that is the one implementation the
+    reader's locator/walk split must agree with.
+    """
+    if before is None:
+        before = limit // 2
+    if after is None:
+        after = max(0, limit - before - 1)
+    path = Path(directory) / TRANSCRIPT_FILENAME
+    rows: list[TranscriptEntry] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            entry = TranscriptEntry.from_json(line)
+            if entry is not None:
+                rows.append(entry)
+    index = None
+    for position, entry in enumerate(rows):
+        if entry.id == around_id:
+            index = position
+    if index is None:
+        return TranscriptPage((), False, True)
+    older = rows[max(0, index - before) : index]
+    newer = rows[index + 1 : index + 1 + after]
+    return TranscriptPage(
+        tuple(older) + (rows[index],) + tuple(newer),
+        index > before,
+        False,
+        index + 1 + after < len(rows),
+    )
+
+
 def _page_signature(page: TranscriptPage) -> tuple[Any, ...]:
     """Everything the contract promises, exactly as a caller can observe it."""
     return (
@@ -447,6 +499,7 @@ def _page_signature(page: TranscriptPage) -> tuple[Any, ...]:
         tuple(entry.to_json() for entry in page.entries),
         page.has_more,
         page.reconciled,
+        page.has_newer,
     )
 
 
@@ -505,7 +558,13 @@ def _variant_journal(
 def _page_cases(ids: list[str]) -> list[dict[str, Any]]:
     """Cursor shapes, including both "row appended after the snapshot" halves."""
     if not ids:
-        return [{}, {"limit": 3}, {"before_id": "row-00000"}, {"through_id": "row-00000"}]
+        return [
+            {},
+            {"limit": 3},
+            {"before_id": "row-00000"},
+            {"through_id": "row-00000"},
+            {"around_id": "row-00000"},
+        ]
     middle = ids[len(ids) // 2]
     return [
         {},  # bare tail
@@ -524,6 +583,15 @@ def _page_cases(ids: list[str]) -> list[dict[str, Any]]:
         {"through_id": "no-such-row"},  # missing cut -> empty + reconciled
         {"through_id": "row-huge"},  # cursor inside a larger-than-chunk row
         {"before_id": "row-huge"},
+        # Anchored windows: head, middle, tail, zero bounds, defaults, missing.
+        {"around_id": middle, "before": 3, "after": 2},
+        {"around_id": middle, "before": 0, "after": 0},
+        {"around_id": middle},  # defaults from the limit
+        {"around_id": ids[0], "before": 2, "after": 3},  # anchor at the head
+        {"around_id": ids[-1], "before": 3, "after": 2},  # anchor at the tail
+        {"around_id": ids[0], "limit": 1},
+        {"around_id": "no-such-row", "before": 2, "after": 2},
+        {"around_id": "row-huge", "before": 1, "after": 1},
     ]
 
 
@@ -719,6 +787,180 @@ def test_backward_page_answers_a_duplicated_id_with_its_newest_row(tmp_path):
     assert [
         entry.id for entry in read_transcript_page(directory, before_id="dup", limit=1).entries
     ] == ["row-00003"]
+
+
+def test_around_page_serves_head_middle_and_tail_with_honest_flags(tmp_path):
+    """The anchored read's three boundary shapes, each flag answered as a fact.
+
+    Head and tail are where a lookahead and a guess differ: at the head
+    ``has_more`` must be False because the walk saw the file's start, and at the
+    tail ``has_newer`` False because it saw the end — while the same page one row
+    in from either edge reports True. The middle case proves the split itself:
+    ``before`` and ``after`` bound the two sides independently.
+    """
+    directory, ids = _variant_journal(tmp_path, "plain", rows=12, pad=0)
+
+    middle = read_transcript_page(directory, around_id=ids[5], before=2, after=3)
+    assert [entry.id for entry in middle.entries] == ids[3:9]
+    assert (middle.has_more, middle.has_newer, middle.reconciled) == (True, True, False)
+
+    head = read_transcript_page(directory, around_id=ids[0], before=2, after=3)
+    assert [entry.id for entry in head.entries] == ids[0:4]
+    assert (head.has_more, head.has_newer) == (False, True)
+
+    tail = read_transcript_page(directory, around_id=ids[-1], before=3, after=2)
+    assert [entry.id for entry in tail.entries] == ids[-4:]
+    assert (tail.has_more, tail.has_newer) == (True, False)
+
+    # One row in from the head the lookahead has teeth: the older edge is no
+    # longer the file's own, so has_more flips True while still bounded.
+    near_head = read_transcript_page(directory, around_id=ids[1], before=2, after=1)
+    assert [entry.id for entry in near_head.entries] == ids[0:3]
+    assert (near_head.has_more, near_head.has_newer) == (False, True)
+
+
+def test_around_page_zero_bounds_and_the_lookahead_at_exact_edges(tmp_path):
+    """``before=0``/``after=0`` trim to the anchor, and a False means PROVEN no more.
+
+    A three-row journal is the smallest shape that separates "the window ran
+    out" from "the file did": at the middle anchor each side has exactly its
+    bound's worth of rows, so both flags must be False — a reader that guessed
+    from the bound alone would say True. ``before=0`` still reports True while
+    any older row exists, which is the other half of the same rule.
+    """
+    directory = tmp_path / "around-edges"
+    directory.mkdir()
+    (directory / TRANSCRIPT_FILENAME).write_text(
+        "\n".join([_row_line(0), _row_line(1), _row_line(2)]) + "\n", encoding="utf-8"
+    )
+
+    anchor_only = read_transcript_page(directory, around_id="row-00001", before=0, after=0)
+    assert [entry.id for entry in anchor_only.entries] == ["row-00001"]
+    assert (anchor_only.has_more, anchor_only.has_newer) == (True, True)
+
+    exact = read_transcript_page(directory, around_id="row-00001", before=1, after=1)
+    assert [entry.id for entry in exact.entries] == ["row-00000", "row-00001", "row-00002"]
+    assert (exact.has_more, exact.has_newer) == (False, False)
+
+    at_head = read_transcript_page(directory, around_id="row-00000", before=5, after=5)
+    assert [entry.id for entry in at_head.entries] == ["row-00000", "row-00001", "row-00002"]
+    assert (at_head.has_more, at_head.has_newer) == (False, False)
+
+    at_tail = read_transcript_page(directory, around_id="row-00002", before=5, after=5)
+    assert [entry.id for entry in at_tail.entries] == ["row-00000", "row-00001", "row-00002"]
+    assert (at_tail.has_more, at_tail.has_newer) == (False, False)
+
+
+def test_around_page_missing_anchor_is_the_empty_reconciled_page(tmp_path):
+    """Same honesty as a missing ``through_id``: nothing is served under a lie."""
+    directory, _ = _variant_journal(tmp_path, "plain", rows=4, pad=0)
+    page = read_transcript_page(directory, around_id="no-such-row", before=2, after=2)
+    assert page.entries == ()
+    assert page.reconciled is True and page.has_more is False
+    assert page.has_newer is None, "an unanswerable edge is None, never False"
+
+
+def test_around_page_answers_a_duplicated_id_with_its_newest_row(tmp_path):
+    """The cursor direction rule, carried to the anchor.
+
+    An ``around_id`` naming two rows resolves to the NEWEST occurrence — the
+    one answer that cannot send a caller into rows already behind them — and
+    the older twin stays visible as an ordinary older row of the page.
+    """
+    directory = tmp_path / "around-dupes"
+    directory.mkdir()
+
+    def _dup_row(content: str) -> str:
+        return TranscriptEntry(
+            "dup", 1.0, ENTRY_MESSAGE, {"role": "user", "content": content}
+        ).to_json()
+
+    written = [
+        _row_line(0),
+        _row_line(1),
+        _dup_row("dup older"),
+        _row_line(2),
+        _dup_row("dup newer"),
+        _row_line(3),
+    ]
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(written) + "\n", encoding="utf-8")
+
+    page = read_transcript_page(directory, around_id="dup", before=3, after=1)
+    assert [entry.id for entry in page.entries] == [
+        "row-00001",
+        "dup",
+        "row-00002",
+        "dup",
+        "row-00003",
+    ]
+    # The anchor is the NEWER twin — the page's LAST dup, at the before-index —
+    # and the older twin stays visible as an ordinary older row.
+    assert json.loads(page.entries[1].to_json())["payload"]["content"] == "dup older"
+    assert json.loads(page.entries[3].to_json())["payload"]["content"] == "dup newer"
+    assert (page.has_more, page.has_newer) == (True, False)
+
+
+def test_around_page_serves_a_row_the_byte_needle_cannot_name(tmp_path):
+    """The locator is an optimisation, never the authority (the fallback path).
+
+    ``_locate_cursor_row`` matches rows that OPEN with their id, which is every
+    row this codebase writes and not every row a store can hold. A row written
+    with its keys in another order must still resolve — the walk finds it by
+    parse — and the anchor's own bytes are then located so the NEWER half of
+    the page is read forward from its position rather than guessed at.
+    """
+    directory = tmp_path / "legacy-layout"
+    directory.mkdir()
+    legacy = json.dumps(
+        {
+            "ts": 9.0,
+            "id": "legacy-mid",
+            "type": ENTRY_MESSAGE,
+            "payload": {"role": "user", "content": "legacy"},
+        },
+        separators=(",", ":"),
+    )
+    written = [_row_line(0), _row_line(1), legacy, _row_line(2), _row_line(3)]
+    (directory / TRANSCRIPT_FILENAME).write_text("\n".join(written) + "\n", encoding="utf-8")
+
+    page = read_transcript_page(directory, around_id="legacy-mid", before=1, after=1)
+    assert [entry.id for entry in page.entries] == ["row-00001", "legacy-mid", "row-00002"]
+    assert (page.has_more, page.has_newer) == (True, True)
+
+
+def test_around_page_defaults_centre_a_limit_sized_window_on_the_anchor(tmp_path):
+    """Unset counts keep the surface's one page size: at most ``limit`` rows.
+
+    The split is ``before = limit // 2`` and ``after`` the remainder minus the
+    anchor itself, so a caller that names no counts gets a page it can size
+    like every other read: ``limit=4`` at a middle anchor is two older rows,
+    the anchor, and one newer.
+    """
+    directory, ids = _variant_journal(tmp_path, "plain", rows=8, pad=0)
+
+    page = read_transcript_page(directory, around_id=ids[4], limit=4)
+    assert [entry.id for entry in page.entries] == ids[2:6]
+
+    only = read_transcript_page(directory, around_id=ids[4], limit=1)
+    assert [entry.id for entry in only.entries] == [ids[4]]
+
+
+def test_around_page_rejects_an_anchor_with_a_cursor_or_counts_without_one(tmp_path):
+    """The combinations that describe no window, refused rather than substituted."""
+    directory, ids = _variant_journal(tmp_path, "one-row")
+
+    with pytest.raises(ValueError, match="choose at most one"):
+        read_transcript_page(directory, before_id=ids[0], around_id=ids[0])
+    with pytest.raises(ValueError, match="choose at most one"):
+        read_transcript_page(directory, through_id=ids[0], around_id=ids[0])
+    with pytest.raises(ValueError, match="only meaningful with around_id"):
+        read_transcript_page(directory, before=2)
+    with pytest.raises(ValueError, match="only meaningful with around_id"):
+        read_transcript_page(directory, after=2)
+    with pytest.raises(ValueError, match="must not be negative"):
+        read_transcript_page(directory, around_id=ids[0], before=-1)
+    with pytest.raises(ValueError, match="must not be negative"):
+        read_transcript_page(directory, around_id=ids[0], after=-1)
 
 
 @pytest.mark.asyncio
@@ -1992,6 +2234,13 @@ def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypa
     cursor is in the sweep on purpose: its answer is the RECONCILED tail page,
     which a locator that "decided" the cursor was missing could silently turn
     into an empty or unreconciled page.
+
+    The anchored mode rides the same rule (design §D4) and is in the sweep for
+    both of its edges: an absent anchor's answer is the EMPTY reconciled page
+    (the same trap, with the opposite page as the wrong answer), and the forward
+    half — the one part with no cursor precedent — must not depend on which
+    pass found the anchor: when the walk is what found it, its own bytes are
+    located so the newer rows still read from its true position.
     """
     directory, ids = _variant_journal(tmp_path, "plain", rows=600, pad=300)
     cases = [
@@ -2001,8 +2250,12 @@ def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypa
         ("through_id", ids[1]),
         ("through_id", ids[len(ids) // 2]),
         ("through_id", ids[-1]),
+        ("around_id", ids[1]),
+        ("around_id", ids[len(ids) // 2]),
+        ("around_id", ids[-1]),
         ("before_id", "f" * 32),
         ("through_id", "f" * 32),
+        ("around_id", "f" * 32),
     ]
     real_locate = transcript_module._locate_cursor_row
 
@@ -2013,12 +2266,16 @@ def test_the_cursor_locator_never_changes_the_page_it_answers(tmp_path, monkeypa
     for window in (transcript_module._PAGE_LOCATE_WINDOW_BYTES, 1024):
         monkeypatch.setattr(transcript_module, "_PAGE_LOCATE_WINDOW_BYTES", window)
         for kind, cursor in cases:
-            located = read_transcript_page(directory, **{kind: cursor}, limit=100)
+            # ``Any`` rather than ``str``: the keyword NAME comes from the case
+            # table, and a checker validating a str against every parameter the
+            # signature could take rightfully rejects ``before``/``after``.
+            window_kwargs: dict[str, Any] = {kind: cursor}
+            located = read_transcript_page(directory, **window_kwargs, limit=100)
             if cursor != "f" * 32:
                 assert located.entries, f"{kind}={cursor} answered nothing to compare"
             transcript_module._locate_cursor_row = _locate_nothing
             try:
-                unlocated = read_transcript_page(directory, **{kind: cursor}, limit=100)
+                unlocated = read_transcript_page(directory, **window_kwargs, limit=100)
             finally:
                 transcript_module._locate_cursor_row = real_locate
             assert located == unlocated, f"{kind}={cursor} at window {window}"

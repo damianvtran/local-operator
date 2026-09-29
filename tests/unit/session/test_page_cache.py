@@ -143,6 +143,76 @@ async def test_a_cursor_page_and_a_tail_page_of_one_file_do_not_collide(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_around_pages_are_keyed_by_window_not_just_by_anchor(tmp_path, monkeypatch):
+    """The anchored mode rides the same cache, with its whole request in the key.
+
+    Three loads of one anchor: the identical window is one read and one shared
+    object, while a different ``before`` — and a different anchor — are misses.
+    A key that carried only the id would serve the first window under the second
+    request, and the served page would look perfectly plausible; the reader is
+    counted so a cache that simply stored nothing fails the identity leg too.
+    """
+    directory = tmp_path / "sess"
+    _journal(directory, ["a", "b", "c", "d", "e"])
+    reads = 0
+    real = page_cache_module.read_transcript_page
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        nonlocal reads
+        reads += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(page_cache_module, "read_transcript_page", counting)
+
+    first = await load_transcript_page(directory, around_id="c", before=1, after=1)
+    again = await load_transcript_page(directory, around_id="c", before=1, after=1)
+    assert _ids(first) == ["b", "c", "d"]
+    assert again is first, "the identical window must be a cache hit"
+    assert reads == 1, "the identical window must not be read twice"
+
+    wider = await load_transcript_page(directory, around_id="c", before=2, after=1)
+    assert _ids(wider) == ["a", "b", "c", "d"]
+    assert reads == 2, "a different before is a different page, never the first served twice"
+
+    other = await load_transcript_page(directory, around_id="d", before=1, after=1)
+    assert _ids(other) == ["c", "d", "e"]
+    assert reads == 3
+    assert first.has_newer is True and other.has_newer is False
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_around_loads_issue_one_read(tmp_path, monkeypatch):
+    """Single-flight for the anchored key: a far jump is a burst of one."""
+    directory = tmp_path / "sess"
+    _journal(directory, ["a", "b", "c"])
+    reads = 0
+    entered, release = threading.Event(), threading.Event()
+    real = page_cache_module.read_transcript_page
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        nonlocal reads
+        reads += 1
+        entered.set()
+        if not release.wait(_BACKSTOP_S):
+            raise AssertionError("the test never released the parked read")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(page_cache_module, "read_transcript_page", counting)
+
+    first = asyncio.create_task(load_transcript_page(directory, around_id="b", before=2, after=2))
+    assert await asyncio.to_thread(entered.wait, _BACKSTOP_S), "the read never started"
+    second = asyncio.create_task(load_transcript_page(directory, around_id="b", before=2, after=2))
+    for _ in range(_JOIN_TURNS):
+        await asyncio.sleep(0)
+    release.set()
+    leader, follower = await asyncio.wait_for(asyncio.gather(first, second), _BACKSTOP_S)
+
+    assert reads == 1, "the follower started its own read of the same bytes"
+    assert leader is follower
+    assert _ids(leader) == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
 async def test_an_append_is_a_miss_and_never_serves_a_stale_tail(tmp_path):
     """Size in the key, driven by the append the operator actually makes."""
     directory = tmp_path / "sess"
@@ -406,14 +476,18 @@ async def test_the_facade_keeps_the_readers_preconditions(tmp_path):
     directory = tmp_path / "sess"
     _journal(directory, ["a"])
 
-    with pytest.raises(ValueError, match="choose before_id or through_id, not both"):
+    with pytest.raises(
+        ValueError, match="choose at most one of before_id, through_id or around_id"
+    ):
         await load_transcript_page(directory, before_id="a", through_id="b")
     with pytest.raises(ValueError, match="limit must be at least 1"):
         await load_transcript_page(directory, limit=0)
     with pytest.raises(FileNotFoundError):
         await load_transcript_page(tmp_path / "absent")
     # Wrong twice: the programming error wins, exactly as it does in the reader.
-    with pytest.raises(ValueError, match="choose before_id or through_id, not both"):
+    with pytest.raises(
+        ValueError, match="choose at most one of before_id, through_id or around_id"
+    ):
         await load_transcript_page(tmp_path / "absent", before_id="a", through_id="b")
 
 

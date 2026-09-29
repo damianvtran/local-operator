@@ -28,6 +28,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolResult,
 )
+from local_operator.monitors import state as monitor_state
 from local_operator.monitors import store as monitor_store
 from local_operator.monitors.spec import MonitorSpec
 from local_operator.session.session import Session
@@ -247,5 +248,75 @@ async def test_a_normalized_quiet_tick_is_silent(tmp_path: Path, config_dir: Pat
         counters_path = config_dir / "monitors" / "state" / "sess" / "m1.json"
         counters = json.loads(counters_path.read_text(encoding="utf-8"))
         assert counters["checks"] == 2 and counters["deliveries"] == 0
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_session_gate_suppresses_a_non_material_change(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """The §8 wiring's session path: ``Session(monitor_classify=...)`` reaches
+    the scheduler the session builds, and a suppression writes the counters
+    and emits NO delta — the whole fork, one layer above the scheduler's own
+    suite.
+
+    The callback is a fake seam on purpose: the classification package is
+    ``tests/unit/classification``'s subject, and this rig is about the
+    plumbing between the session and its scheduler.
+    """
+    watch = tmp_path / "watched.txt"
+    watch.write_text("A\nB\n", encoding="utf-8")
+    calls: list[str] = []
+
+    async def classify(state: str) -> str | None:
+        calls.append(state)
+        return "non-material-metadata"
+
+    session = Session(
+        model=MODEL,
+        stream_fn=_stream,
+        tools=[make_read_tool(watch)],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: [],
+        cwd=str(tmp_path),
+        monitor_classify=classify,
+    )
+    clock = [1_756_000_000_000]
+    session._monitors._now = lambda: clock[0]  # type: ignore[method-assign]
+    events: list[Any] = []
+
+    async def record(event: Any) -> None:
+        events.append(event)
+
+    session._emit = record  # type: ignore[method-assign]
+    spec = MonitorSpec(
+        id="m1",
+        name="watch",
+        tool="read",
+        arguments={"path": str(watch)},
+        every_ms=60_000,
+        created_at=1,
+    )
+    try:
+        await session.set_monitor_schedules([spec])
+        await session._monitors.pump(now_ms=clock[0] + 5_000)  # baseline
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        clock[0] += 70_000  # past the interval plus the scheduler's jitter
+        watch.write_text("A\nB\nC\n", encoding="utf-8")
+        await session._monitors.pump(now_ms=clock[0] + 5_000)
+        for _ in range(30):
+            await asyncio.sleep(0)
+
+        deltas = [event for event in events if getattr(event, "type", "") == "monitor_delta"]
+        assert deltas == [], "a suppressed change must not reach the conversation"
+        assert calls, "the gate ran exactly because the heuristic hit"
+        assert "C" in calls[0], calls[0]
+        counters = monitor_state.read_counters(config_dir, session.session_id, "m1")
+        assert counters is not None
+        assert counters["suppressed"]["non_material_metadata"] == 1
+        assert counters["deliveries"] == 0
     finally:
         await session.dispose()
