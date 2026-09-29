@@ -3620,7 +3620,7 @@ class RelayServer:
         #: Computed ONCE: the build stamp is decoration, and asking packaging
         #: metadata again on every heartbeat would be a per-15-seconds import for a
         #: string that cannot change while this process lives.
-        self.build = _build_stamp()
+        self.build = build_stamp()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -9821,13 +9821,18 @@ def _session_protocol() -> int:
     return int(PROTOCOL_VERSION)
 
 
-def _build_stamp() -> dict[str, str]:
+def build_stamp() -> dict[str, str]:
     """This build's version and source ref, for the record and the hello frame.
 
     Best effort and never fatal: a stamp is decoration, and a relay that refused to
     start because packaging metadata was unreadable would be a worse failure than a
     record with an empty version. Both imports are function-local because both reach
     past the stdlib, and this module is imported while ``lop network --help`` builds.
+
+    Public since the ``peers`` row compares it against a reachable peer's stamp
+    (``readiness.compare_builds``, design §4): the row's suffix must read THIS
+    device's stamp through the same function the relay announced, so the two cannot
+    disagree about which side is behind.
     """
     try:
         from importlib.metadata import PackageNotFoundError, version

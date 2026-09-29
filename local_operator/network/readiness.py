@@ -38,7 +38,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple, Protocol, Sequence
 
 from local_operator.network import wire
 
@@ -247,13 +247,39 @@ def _transport_of(raw: Mapping[str, Any]) -> str:
 
 
 def _mcp_row_exists(store: Any | None, url: str) -> bool | None:
-    """Whether a credential row exists for ``url``; ``None`` = unreadable store."""
+    """Whether a credential row exists for ``url``; ``None`` = unreadable store.
+
+    ``store is None`` — this root has no database (``_open_store`` refuses to
+    create one) — is answered HERE as a definite ``False``, never handed to
+    ``McpTokenStorage``: its ``store=None`` means the OPPOSITE thing ("build the
+    ambient store"), so the construction resolved to ``AuthStore()`` for the
+    process's ambient root — which CREATES the database. A read-only report would
+    write on the device it is describing as having no store, and would read the
+    wrong root's rows whenever the two roots differ (found by the shareability
+    ledger's creates-nothing cell, design §2; the rule is the one
+    ``ViewerFacts.holds_mcp_login`` / ``has_local_provider_credential`` already
+    apply at their own call sites).
+    """
+    if store is None:
+        return False
     try:
         from local_operator.mcp.auth import McpTokenStorage
 
         return McpTokenStorage(url, store=store).has_stored_row()
     except Exception:  # noqa: BLE001 — an unreadable store is "not known"
         return None
+
+
+def mcp_login_remedy(url: str) -> str:
+    """The ONE spelling of the "sign in here first" clause for an MCP server URL.
+
+    Three surfaces compose it — the share verb's refusal (``cli``'s
+    ``_require_local_credential``), the readiness row's detail (this module), and
+    the shareability ledger's ``no login here yet`` row — and a second copy is
+    exactly how one of them starts sending the operator to sign in somewhere other
+    than "here".
+    """
+    return f"run '/mcp login {url}' here first"
 
 
 def mcp_servers_fact(root: Path) -> dict[str, Any]:
@@ -278,7 +304,12 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
     entries = document.get("mcpServers") if isinstance(document, dict) else None
     if not isinstance(entries, Mapping):
         entries = {}
-    store = _open_store(root)
+    store = None
+    store_unreadable = False
+    try:
+        store = _open_store(root)
+    except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
+        store_unreadable = True
     try:
         for name, raw in sorted(entries.items(), key=lambda pair: str(pair[0])):
             if not isinstance(raw, Mapping):
@@ -301,7 +332,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
             has_row: bool | None = None
             has_placement = False
             if transport in ("http", "sse") and url:
-                has_row = _mcp_row_exists(store, url)
+                has_row = None if store_unreadable else _mcp_row_exists(store, url)
                 # THIS device's own placement document: does an entry for the
                 # server exist HERE? It is what tells the viewer whether a share
                 # on the owner's books has REACHED this device — the pull is paid
@@ -332,6 +363,41 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
             except Exception:  # noqa: BLE001 — a close failure must not fail the report
                 pass
     return {"servers": servers, "withheld": withheld, "config_path": str(path)}
+
+
+def shareable_lines(rows: Iterable[Mapping[str, Any]]) -> list[str]:
+    """The ``shareable here`` block — one spelling for the CLI and the agent digest.
+
+    Rendered from ``lop network credentials``'s own ``--json`` rows (the
+    device-level ledger, design §2), so the two surfaces cannot drift the way the
+    readiness rows once did: ``login held`` names the share command, ``no login here
+    yet`` reuses :func:`mcp_login_remedy` verbatim, and an unreadable store says so
+    rather than reading as "no login" (the three-valued rule the MCP credential rows
+    already follow). An already-shared server nests its holders the way the network
+    blocks do. Empty input renders NOTHING — the block is additive, and a device that
+    declares no HTTP/SSE servers has no ledger to print.
+    """
+    materialized = [row for row in rows if isinstance(row, Mapping)]
+    if not materialized:
+        return []
+    lines = ["shareable here:"]
+    for row in materialized:
+        login = row.get("login_here")
+        if login is True:
+            summary = f"login held — share: {row.get('remedy') or ''}"
+        elif login is False:
+            summary = f"no login here yet — {row.get('remedy') or ''}"
+        else:
+            summary = "login state not known — this device's credential store could not be read"
+        lines.append(f"  {row.get('server')}  {row.get('transport')}  {summary}")
+        for holder in row.get("shared_with") or []:
+            if not isinstance(holder, Mapping):
+                continue
+            lines.append(
+                f"      shared with {holder.get('name') or holder.get('device')} "
+                f"({holder.get('scope')})"
+            )
+    return lines
 
 
 def default_model_fact(root: Path) -> dict[str, Any]:
@@ -394,7 +460,10 @@ def has_local_provider_credential(root: Path, provider: str) -> bool | None:
     """
     if not provider:
         return False
-    store = _open_store(root)
+    try:
+        store = _open_store(root)
+    except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
+        return None
     if store is None:
         return False
     try:
@@ -522,10 +591,15 @@ class ViewerFacts:
         self.device_id = device_id
         self._store: Any = None
         self._opened = False
+        self._store_unreadable = False
 
     def _open(self) -> Any:
         if not self._opened:
-            self._store = _open_store(self.root)
+            try:
+                self._store = _open_store(self.root)
+            except Exception:  # noqa: BLE001 — unopenable is "could not be read"
+                self._store = None
+                self._store_unreadable = True
             self._opened = True
         return self._store
 
@@ -535,7 +609,7 @@ class ViewerFacts:
             return []
         store = self._open()
         if store is None:
-            return []
+            return None if self._store_unreadable else []
         try:
             return list(store.list_credentials(provider))
         except Exception:  # noqa: BLE001
@@ -544,7 +618,7 @@ class ViewerFacts:
     def holds_mcp_login(self, url: str) -> bool | None:
         store = self._open()
         if store is None:
-            return False
+            return None if self._store_unreadable else False
         return _mcp_row_exists(store, url)
 
     def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:
@@ -713,6 +787,69 @@ def operator_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> d
     )
 
 
+class BuildComparison(NamedTuple):
+    """``compare_builds``'s answer: the verdict, plus the versions it compared.
+
+    ``state`` is ``equal``/``behind``/``ahead``/``unknown`` — and ``unknown`` covers
+    an absent OR unparsable version on either side, never a default: the
+    ``build_row`` contract since slice 1 is that an unknown build must not read as
+    parity.
+    """
+
+    state: str
+    peer_version: str
+    own_version: str
+
+
+def compare_builds(peer_build: Any, own_build: Any) -> BuildComparison:
+    """Order two build stamps — the ONE version comparison every surface reads.
+
+    Extracted from :func:`build_row` so the ``peers`` row (``cli._peer_line`` and
+    the agent digest) can state the same verdict in one segment without a second
+    comparison drifting from this one: the same ``update.parse_version`` ordering
+    and the same three-valued degradation — a stamp that is absent, or present but
+    unparsable, on EITHER side comes back ``unknown``.
+    """
+    peer_version = (
+        _bounded(peer_build.get("version") or "", 40) if isinstance(peer_build, Mapping) else ""
+    )
+    own_version = (
+        _bounded(own_build.get("version") or "", 40) if isinstance(own_build, Mapping) else ""
+    )
+    if not peer_version:
+        return BuildComparison("unknown", peer_version, own_version)
+    from local_operator.update import parse_version
+
+    mine = parse_version(own_version)
+    theirs = parse_version(peer_version)
+    if mine is None or theirs is None:
+        return BuildComparison("unknown", peer_version, own_version)
+    if theirs == mine:
+        return BuildComparison("equal", peer_version, own_version)
+    if theirs < mine:
+        return BuildComparison("behind", peer_version, own_version)
+    return BuildComparison("ahead", peer_version, own_version)
+
+
+def build_suffix(comparison: BuildComparison) -> str:
+    """The reachable row's build segment — ONE spelling for the CLI and the digest.
+
+    ``""`` when nothing is known (the row must render exactly as it always has,
+    never a default), the bare version when the parity is not actionable from here,
+    and the ``lop-update`` hint ONLY when the peer is behind — that is the case
+    whose remedy runs on the peer's side; an ahead peer's remedy would be on THIS
+    device and stays ``ready``'s business.
+    """
+    if comparison.state == "unknown":
+        return ""
+    if comparison.state == "behind":
+        return (
+            f"  build {comparison.peer_version} — behind this device "
+            f"({comparison.own_version}); run `lop-update` there"
+        )
+    return f"  build {comparison.peer_version}"
+
+
 def build_row(
     member: Any,
     *,
@@ -721,12 +858,9 @@ def build_row(
     peer_label: str,
 ) -> dict[str, Any]:
     """(b) Is the peer on the same build? Composed here, works for old peers."""
-    peer_version = (
-        _bounded(peer_build.get("version") or "", 40) if isinstance(peer_build, Mapping) else ""
-    )
-    own_version = (
-        _bounded(own_build.get("version") or "", 40) if isinstance(own_build, Mapping) else ""
-    )
+    comparison = compare_builds(peer_build, own_build)
+    peer_version = comparison.peer_version
+    own_version = comparison.own_version
     observed = {
         "this": own_version,
         "peer": peer_version,
@@ -751,11 +885,7 @@ def build_row(
             source=SOURCE_PEER,
             observed=observed,
         )
-    from local_operator.update import parse_version
-
-    mine = parse_version(own_version)
-    theirs = parse_version(peer_version)
-    if mine is None or theirs is None:
+    if comparison.state == "unknown":
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -770,7 +900,7 @@ def build_row(
             source=SOURCE_PEER,
             observed=observed,
         )
-    if theirs == mine:
+    if comparison.state == "equal":
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -780,7 +910,7 @@ def build_row(
             source=SOURCE_PEER,
             observed=observed,
         )
-    if theirs < mine:
+    if comparison.state == "behind":
         return _capability_row(
             device_id=member.device_id,
             device_name=peer_label,
@@ -843,6 +973,17 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
     missing = " and ".join(
         label for label, value in (("user.name", name), ("user.email", email)) if not value
     )
+    # THE REMEDY IS FILLED WITH THIS DEVICE'S OWN VALUES (design §3): an identity is
+    # non-secret, one-time, per-device config, so the suggestion is made
+    # copy-pasteable when this device has a value to suggest — verified against the
+    # design note, which decided documented one-time setup rather than brokering
+    # (brokering would cost a grants store, TTLs and a repair path for something
+    # that is not a secret). A value this device lacks keeps the shipped ``"…"``
+    # placeholder: inventing one for the peer would be a suggestion that cannot run,
+    # and this row stays read-only — it is a suggestion the operator may replace.
+    local = git_identity_fact()
+    suggested_name = local.get("user_name") or "…"
+    suggested_email = local.get("user_email") or "…"
     return _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
@@ -855,8 +996,8 @@ def git_row(member: Any, facts: Mapping[str, Any], *, peer_label: str) -> dict[s
             "author"
         ),
         remedies=[
-            f'on {peer_label} run `git config --global user.name "…"` and '
-            '`git config --global user.email "…"`'
+            f'on {peer_label} run `git config --global user.name "{suggested_name}"` and '
+            f'`git config --global user.email "{suggested_email}"`'
         ],
         source=SOURCE_PEER,
     )
@@ -1375,9 +1516,7 @@ def _mcp_credential_row(
             capability=CAPABILITY_MCP_CREDENTIAL,
             ok=False,
             code=CODE_NO_CREDENTIAL,
-            detail=(
-                f"this device has no MCP login for {url}; run '/mcp login {url}' here " "first"
-            ),
+            detail=f"this device has no MCP login for {url}; {mcp_login_remedy(url)}",
             remedies=[
                 f"run '/mcp login {url}' here, then "
                 f"`lop network credential share {key} --with {peer_label}`"
@@ -1396,8 +1535,8 @@ def _mcp_credential_row(
         ok=False,
         code=CODE_NO_CREDENTIAL,
         detail=(
-            f"if the `{name}` server needs a sign-in, this device has no MCP login for {url} — run "
-            f"'/mcp login {url}' here first"
+            f"if the `{name}` server needs a sign-in, this device has no MCP login for {url} — "
+            f"{mcp_login_remedy(url)}"
         ),
         remedies=[
             f"run '/mcp login {url}' here, then "
