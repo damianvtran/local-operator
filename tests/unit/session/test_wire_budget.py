@@ -309,7 +309,10 @@ async def test_older_screenshots_are_downscaled_at_the_seam_not_dropped(tmp_path
     assert blocks[-1].data == frame, "the newest frame lost fidelity"
     assert blocks[0].data != frame, "no older frame was re-rendered"
     assert FRAMES_SHED_NOTICE not in notices, "the user was told frames were dropped"
-    assert "downscaled 5 older screenshot(s)" in caplog.text
+    assert (
+        "downscaled 5 older screenshot(s) from the rendered context at the 1024 px rung"
+        in caplog.text
+    )
     await session.dispose()
 
 

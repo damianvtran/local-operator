@@ -1730,7 +1730,7 @@ def _history_captured_browser_views(messages: Sequence[Message]) -> bool:
 
 def _fit_frames_to_budget(
     messages: list[Message], *, budget: int
-) -> tuple[list[Message], int, int]:
+) -> tuple[list[Message], int, int, int | None]:
     """Fit the rendered history under ``budget`` — downscale first, shed last.
 
     The transport backstop, and the piece that rescues a session already
@@ -1761,14 +1761,16 @@ def _fit_frames_to_budget(
 
     Degrades to a no-op rather than raising: an unavailable compaction package
     already means no compaction, and a session that cannot import it must
-    still render. Returns ``(messages, frames_downscaled, frames_dropped)``.
+    still render. Returns ``(messages, frames_downscaled, frames_dropped,
+    rung)`` — ``rung`` is the long-edge rung the ladder settled at, which the
+    once-per-session diagnostic logs (``None`` when nothing was downscaled).
     """
     if budget <= 0:
-        return messages, 0, 0
+        return messages, 0, 0, None
     try:
         from local_operator.compaction.api import fit_frames_to_wire_budget
     except ImportError:
-        return messages, 0, 0
+        return messages, 0, 0, None
     return fit_frames_to_wire_budget(messages, budget=budget)
 
 
@@ -3708,11 +3710,11 @@ class Session:
         # render rather than in a client, and why it never touches the
         # transcript. Older frames are downscaled and KEPT; only a rung walk
         # that cannot fit drops any.
-        rendered, downscaled, shed = _fit_frames_to_budget(
+        rendered, downscaled, shed, rung = _fit_frames_to_budget(
             rendered, budget=self._wire_bytes_budget()
         )
         if downscaled:
-            self._announce_frames_downscaled_once(downscaled)
+            self._announce_frames_downscaled_once(downscaled, rung)
         if shed:
             self._announce_frames_shed_once(shed)
         return rendered
@@ -3780,7 +3782,7 @@ class Session:
         )
         self._spawn_background(self._emit(NoticeEvent(text=FRAMES_SHED_NOTICE, kind="warning")))
 
-    def _announce_frames_downscaled_once(self, downscaled: int) -> None:
+    def _announce_frames_downscaled_once(self, downscaled: int, rung: int | None) -> None:
         """Log, once per session, that older screenshots were downscaled.
 
         The shed's sibling, and deliberately a LOG LINE rather than a notice:
@@ -3789,8 +3791,10 @@ class Session:
         consult it — whereas ``FRAMES_SHED_NOTICE`` exists because frames
         actually LEFT, which is news a user acts on. What this line owes is
         the next reader of an episode log: it says the request was over the
-        size limit, how many older frames were re-rendered to fit it, and
-        (via :meth:`_image_drop_diagnostic`) the shape of the image payload at
+        size limit, how many older frames were re-rendered to fit it, and at
+        which rung — the ladder's long-edge size (1024/768/512), so a mild
+        re-render is distinguishable from a floor-rung one — plus (via
+        :meth:`_image_drop_diagnostic`) the shape of the image payload at
         that moment, so "what did the harness do to my screenshots" is
         answerable without a code read.
 
@@ -3811,9 +3815,10 @@ class Session:
             return
         self._frames_downscaled_announced = True
         logger.warning(
-            "downscaled %d older screenshot(s) from the rendered context to stay under "
-            "the provider request size limit (%s)",
+            "downscaled %d older screenshot(s) from the rendered context at the %s px rung "
+            "to stay under the provider request size limit (%s)",
             downscaled,
+            rung,
             self._image_drop_diagnostic(),
         )
 

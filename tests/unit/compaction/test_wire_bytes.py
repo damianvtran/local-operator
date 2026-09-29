@@ -423,7 +423,7 @@ def test_fit_downscales_and_keeps_every_frame_when_a_rung_fits() -> None:
     budget = int(total * 0.75)
     _CONTEXT_FRAME_CACHE.clear()
 
-    out, downscaled, dropped = fit_frames_to_wire_budget(history, budget=budget)
+    out, downscaled, dropped, _rung = fit_frames_to_wire_budget(history, budget=budget)
 
     assert dropped == 0, "a frame was dropped although a rung fit"
     assert downscaled == 5
@@ -451,10 +451,11 @@ def test_fit_stops_at_the_first_rung_that_fits() -> None:
     widest_bytes = estimate_wire_bytes(widest)
     assert estimate_wire_bytes(next_rung) < widest_bytes
 
-    out, downscaled, dropped = fit_frames_to_wire_budget(history, budget=widest_bytes - 1)
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=widest_bytes - 1)
 
     assert dropped == 0
     assert downscaled == 5
+    assert rung == IMAGE_CONTEXT_EDGES[1], "the reported rung must match the walk"
     assert estimate_wire_bytes(out) <= widest_bytes - 1
     assert estimate_wire_bytes(out) == estimate_wire_bytes(
         next_rung
@@ -468,10 +469,11 @@ def test_fit_sheds_from_the_tightest_rung_when_no_rung_fits() -> None:
     history, _frames = _real_history(6)
     _CONTEXT_FRAME_CACHE.clear()
 
-    out, downscaled, dropped = fit_frames_to_wire_budget(history, budget=40_000)
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=40_000)
 
     assert dropped > 0
     assert downscaled == 5, "the rungs were not applied before the shed"
+    assert rung == IMAGE_CONTEXT_EDGES[-1], "the shed reports the tightest rung"
     assert estimate_wire_bytes(out) <= 40_000
     assert len(out) == len(history)
     assert [m.id for m in out] == [m.id for m in history]
@@ -483,12 +485,14 @@ def test_fit_is_a_no_op_under_budget_and_when_disabled() -> None:
     history, _frames = _real_history(2)
     total = estimate_wire_bytes(history)
 
-    out, downscaled, dropped = fit_frames_to_wire_budget(history, budget=total + 1)
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=total + 1)
     assert (downscaled, dropped) == (0, 0)
+    assert rung is None, "nothing was walked, so no rung"
     assert all(a is b for a, b in zip(out, history)), "under budget must not copy"
 
-    out, downscaled, dropped = fit_frames_to_wire_budget(history, budget=0)
+    out, downscaled, dropped, rung = fit_frames_to_wire_budget(history, budget=0)
     assert (downscaled, dropped) == (0, 0)
+    assert rung is None
     assert all(a is b for a, b in zip(out, history))
 
 
@@ -500,12 +504,13 @@ def test_fit_is_deterministic_across_calls() -> None:
     total = estimate_wire_bytes(history)
     budget = int(total * 0.8)
 
-    first, _d1, _r1 = fit_frames_to_wire_budget(history, budget=budget)
-    second, _d2, _r2 = fit_frames_to_wire_budget(history, budget=budget)
+    first, _d1, _r1, g1 = fit_frames_to_wire_budget(history, budget=budget)
+    second, _d2, _r2, g2 = fit_frames_to_wire_budget(history, budget=budget)
 
     assert [block.data for block in _image_blocks_of(first)] == [
         block.data for block in _image_blocks_of(second)
     ]
+    assert g1 == g2, "the walk lands on the same rung across fits"
 
 
 # ---------------------------------------------------------------------------

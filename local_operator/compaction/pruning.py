@@ -309,7 +309,7 @@ def shed_frames_to_wire_budget(
 
 def fit_frames_to_wire_budget(
     messages: Sequence[Message], *, budget: int, keep_recent_frames: int = 1
-) -> tuple[list[Message], int, int]:
+) -> tuple[list[Message], int, int, int | None]:
     """Fit the request under ``budget`` by DOWNSCALING context frames first
     and shedding the oldest only as the last resort.
 
@@ -342,9 +342,10 @@ def fit_frames_to_wire_budget(
     code-UI capture: 304 KB → 106 KB), so the whole history fits where only a
     handful of full-size frames did. And because each frame's replacement is
     deterministic and memoized per ``(bytes, rung)``, a frame's bytes change
-    at most ONCE — the turn it stops being the newest frame — so the
-    provider's prompt-cache prefix is rewritten once per frame rather than
-    churned on every render.
+    at most once per rung it renders at — the turn it stops being the newest
+    frame, and again only on a step down a rung (at most three changes across
+    the ladder) — so the provider's prompt-cache prefix is rewritten at most
+    once per rung transition rather than churned on every render.
 
     Driven by the SAME ``budget`` the shed was driven by (the number
     ``resolve_wire_bytes_budget`` resolves; the render seam and the
@@ -362,7 +363,10 @@ def fit_frames_to_wire_budget(
     renders pay a base64 decode and a digest lookup per block. A session over
     budget is already paying multiples of that in request bytes.
 
-    Returns ``(messages, frames_downscaled, frames_dropped)``.
+    Returns ``(messages, frames_downscaled, frames_dropped, rung)``, where
+    ``rung`` is the long-edge rung every re-rendered frame settled at —
+    ``None`` when nothing was downscaled — so the render seam's diagnostic can
+    name how aggressive the re-render was.
     """
     # Imported HERE for the reason ``downscale_stale_frames`` documents: a
     # module-scope import would put ``local_operator.imaging`` on the import
@@ -370,9 +374,9 @@ def fit_frames_to_wire_budget(
     from local_operator.imaging import IMAGE_CONTEXT_EDGES
 
     if budget <= 0:
-        return list(messages), 0, 0
+        return list(messages), 0, 0, None
     if estimate_wire_bytes(messages) <= budget:
-        return list(messages), 0, 0
+        return list(messages), 0, 0, None
     working: list[Message] = list(messages)
     downscaled_total = 0
     for edge in IMAGE_CONTEXT_EDGES:
@@ -381,9 +385,9 @@ def fit_frames_to_wire_budget(
         )
         working, downscaled_total = candidate, downscaled
         if estimate_wire_bytes(working) <= budget:
-            return working, downscaled_total, 0
+            return working, downscaled_total, 0, edge
     working, dropped = shed_frames_to_wire_budget(working, budget=budget)
-    return working, downscaled_total, dropped
+    return working, downscaled_total, dropped, IMAGE_CONTEXT_EDGES[-1]
 
 
 def compute_suffix_tokens(messages: Sequence[Message]) -> list[int]:

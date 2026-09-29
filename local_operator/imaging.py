@@ -1092,8 +1092,14 @@ def downscale_context_frame(
 
     The caller (``compaction.pruning.downscale_stale_frames``) has already
     decided WHICH frames are context; this function owns only the byte-level
-    transform, so both the render seam and the evaluation runner's prefix fit
-    go through ONE definition of what a downscaled frame is.
+    transform, so the render seam has ONE definition of what a downscaled
+    context frame is. The evaluation runner's prefix fit is deliberately NOT a
+    caller: that path is drop-only because its frames are bound to a published
+    ``model_visible`` geometry (a frame's decoded pixels must equal it, and the
+    supervisor refuses any runner-side rewrite), so it may blank a stale frame
+    but never re-encode one. It adopts this transform only once that geometry
+    contract admits a rewrite — the same bound ``compaction.pass_`` states in
+    place.
 
     WHY PIXELS AND NOT ONLY A RECOMPRESS. The wire refit
     (:func:`refit_image_to_budget`) spends the codec before the pixels because
@@ -1116,8 +1122,11 @@ def downscale_context_frame(
     Deterministic and memoized: the same (bytes, rung) always yields the same
     result for the life of the process, which is what lets a caller treat the
     downscaled form as STABLE across turns — a frame's bytes change at most
-    once (the turn it stops being the newest frame), so the prompt-cache
-    prefix is rewritten once rather than churned every render.
+    once per rung it renders at (the turn it stops being the newest frame, and
+    again only if a growing session steps down a rung, re-rendering every
+    older frame): at most three changes across the ladder. The prompt-cache
+    prefix is rewritten at most once per rung transition, never churned every
+    render.
     """
     try:
         raw = base64.b64decode(data_b64, validate=True)
