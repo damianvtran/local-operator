@@ -202,6 +202,28 @@ class TestBuildSchedule:
         )
         assert "error" in build_wake_schedule({"message": "x", "in": "5m", "limit": 0}, [], NOW)
 
+    def test_notify_round_trips_and_an_edit_keeps_it(self):
+        """§14.4: the request key lands on the schedule, and an edit keeps it
+        unless the request moves it (a PRESENT ``notify: false`` clears it)."""
+        from local_operator.harness.wake import build_wake_edit
+
+        built = build_wake_schedule({"message": "x", "in": "5m", "notify": True}, [], NOW)
+        assert "error" not in built
+        schedule = built["schedule"]
+        assert schedule.notify is True
+
+        default = build_wake_schedule({"message": "x", "in": "5m"}, [], NOW)
+        assert "error" not in default
+        assert default["schedule"].notify is False
+
+        kept = build_wake_edit({"message": "y"}, [schedule], schedule.id, NOW)
+        assert "error" not in kept
+        assert kept["schedule"].notify is True
+
+        cleared = build_wake_edit({"notify": False}, [schedule], schedule.id, NOW)
+        assert "error" not in cleared
+        assert cleared["schedule"].notify is False
+
 
 class TestAdvance:
     def one_shot(self, **kw) -> WakeSchedule:

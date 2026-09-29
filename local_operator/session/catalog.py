@@ -73,6 +73,12 @@ class CatalogEntry:
     #: the capped page. Empty for every main row.
     agent: str = ""
     label: str = ""
+    #: §14: whether this row's completion may notify — the observer's gate,
+    #: straight off the attention state. Additive and defaulted True so every
+    #: existing construction site (including the positional sidebar tests)
+    #: keeps announcing exactly as before, and a pre-field store state reads
+    #: the same way.
+    completion_notify: bool = True
 
     @property
     def id(self) -> str:
@@ -523,8 +529,9 @@ def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEn
 
     ``attention`` is ONE session's state as ``AttentionStore.state_many``
     returns it (``unseen``/``kind``/``completion_token``/``anchor_id``/
-    ``reason``), or ``None``/``{}`` for a session with no state yet. Read
-    defensively by key: an absent store contributes the empty state, which is
+    ``reason``/``notify``), or ``None``/``{}`` for a session with no state yet.
+    Read defensively by key: an absent store contributes the empty state, which
+    is
     exactly what ``state_many`` hands back for an unknown conversation.
     """
     state = attention or {}
@@ -535,6 +542,7 @@ def entry_for(row: SessionRow, attention: Mapping[str, Any] | None) -> CatalogEn
         str(state.get("completion_token") or ""),
         str(state.get("anchor_id") or ""),
         str(state.get("reason") or ""),
+        completion_notify=bool(state.get("notify", True)),
     )
 
 

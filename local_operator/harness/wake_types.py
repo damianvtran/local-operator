@@ -81,6 +81,15 @@ class WakeSchedule(BaseModel):
     #: request id to record; those keep the id-plus-message fallback that
     #: ``wakes/arm.py`` documents.
     request_id: str | None = None
+    #: Whether this wake's turn completion NOTIFIES (docs/design/monitor-tool.md
+    #: §14): the value rides the delivery's ``details`` and the session ORs it
+    #: over a run's wake/monitor deliveries. Default False — a wake is quiet
+    #: unless its arm asked to be told ("pass notify:true when the user asked to
+    #: be told", the wake tool's guidance); an errored turn notifies regardless.
+    #: Additive, with the usual skew rule: a build that predates the field drops
+    #: a row carrying it (``extra="forbid"`` + ``load()``'s drop-with-warning),
+    #: and a new build reads an old row as quiet — how those rows behaved.
+    notify: bool = False
 
 
 class DueWake(BaseModel):

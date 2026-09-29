@@ -1218,6 +1218,13 @@ class DesktopFeed:
         mock sessions in, from a process that never touched the mock itself.
         Without it, that store's conversations banner the operator with "Hello
         from the mock provider!" on the machine-wide channel.
+
+        A THIRD FILTER IS §14, and it is not a test-hosting gate: the session
+        computed one ``notify`` value per completion and the projected state
+        carries it (``state["notify"]``), so a quiet wake/monitor completion
+        is filtered here without the feed re-deriving anything from the row's
+        kind or origin. ``.get``'s default True keeps rows from older builds
+        exactly as loud as they were.
         """
         from local_operator.tui.notify import notifications_enabled
 
@@ -1236,6 +1243,10 @@ class DesktopFeed:
                 continue
             state = states.get(identity)
             if state is None or not state.get("unseen"):
+                continue
+            if not state.get("notify", True):
+                # §14: quiet — the session decided this once, and the feed
+                # reads it; nothing here re-derives it from kind or origin.
                 continue
             # ONE presence read per candidate SET (review round 2, R14), taken
             # lazily so a tick whose rows are all bridged still pays none: the

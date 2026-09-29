@@ -1610,6 +1610,13 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     # the session releases it. Keep the billed messages intact while letting the
     # session replace their now-invalid pre-compaction occupancy reading.
     context_tokens: int | None = None
+    #: §14 (docs/design/monitor-tool.md): whether this turn's completion may
+    #: notify. The SESSION computed the value once, at turn end, and stamped it
+    #: here; every consumer gates on it and none re-derives it from the event's
+    #: other fields. Defaults True so an event constructed without the field —
+    #: a synthetic end, or one produced by a pre-field build — keeps every
+    #: existing reader's behaviour.
+    notify: bool = True
 
 
 class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
