@@ -46,7 +46,7 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 # one module owns the scan, its cache and its invalidation, and this adapter is
 # only the door. Imported as a module so tests can drive its decision paths off
 # the bridge without a second seam.
-from local_operator.session import transcript_index
+from local_operator.session import transcript_find, transcript_index
 
 # The pin store is the sidebar's OWN module, reused rather than re-implemented —
 # for the reason the `move_targets` import above cites, which is also that
@@ -3421,6 +3421,30 @@ class DesktopSessionBridge:
             "accepted": [str(item) for item in (data.get("accepted") or [])],
             "pending": [str(item) for item in (data.get("pending") or [])],
         }
+
+    async def find(self, query: str, limit: int) -> dict[str, Any]:
+        """In-thread search over THIS conversation's message docs (D3/D9).
+
+        LOCAL sessions only, for ``checkpoints``' reason one method up: the
+        index is derived from this device's journal, and a peer's journal is
+        not here. A peer answers ``state: "unsupported"`` (D4) — a fact about
+        where the bytes are, not a failure — and the renderer hides find for
+        remote conversations.
+
+        Everything else — the tiered pipeline and the warm/cold ladder — lives
+        in :mod:`local_operator.session.transcript_find`, which reuses the
+        same index view ``checkpoints`` rides: the two surfaces cannot
+        disagree about whether the index is warm.
+        """
+        if self.remote_row is not None:
+            return {
+                "query": query,
+                "state": "unsupported",
+                "partial": False,
+                "hits": [],
+                "truncated": False,
+            }
+        return await transcript_find.find_view(self.root, self.session_id, query=query, limit=limit)
 
     async def watch(self, subscription_id: str, *, visible: bool, can_notify: bool) -> None:
         sub = self.subscribers.get(subscription_id)
