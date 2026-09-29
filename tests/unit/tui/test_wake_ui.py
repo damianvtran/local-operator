@@ -578,12 +578,18 @@ class TestMonitorDeltaBlock:
 
     def test_collapsed_line_strips_the_model_facing_prefix(self) -> None:
         block = MonitorDeltaBlock(MONITOR_TEXT)
-        rendered = block._build_row(80).plain
+        # AT A FITTING WIDTH (round 1 review, F1): at width 80 the row
+        # truncated before the envelope's cancel sentence, so the old pin
+        # passed while the sentence was still in the string — it reached the
+        # user at fold widths ≥160. 200 cells fits the whole collapsed line,
+        # which makes "no cancel anywhere" a real assertion.
+        rendered = block._build_row(200).plain
         assert "m1" in rendered
         assert "monitor" in rendered  # the name column
         assert "(monitor)" not in rendered
+        assert "cancel" not in rendered.lower()
+        assert "Watching for: the deploy queue to drain" in rendered
         assert "Diff vs" not in rendered  # the delta stays collapsed
-        assert "cancel" not in rendered
 
     def test_expand_shows_the_envelope_and_the_bounded_delta(self) -> None:
         block = MonitorDeltaBlock(MONITOR_TEXT)
@@ -593,6 +599,24 @@ class TestMonitorDeltaBlock:
         assert "Diff vs the previous check:" in expanded
         assert "+ running 3 -> 5" in expanded
         assert "m1" in expanded  # the summary row stays
+        # The collapse's polish applies here too (design review round 1, D2):
+        # the expansion's first line no longer keeps the model-facing prefix
+        # the collapsed line strips — but the cancel HINT it is meant to
+        # audit stays (only the prefix is polished).
+        assert "(monitor)" not in expanded
+        assert 'Cancel with monitor({op:"cancel",id:"m1"})' in expanded
+
+    def test_the_body_strip_removes_only_the_prefix(self) -> None:
+        """``monitor_receipt_body`` is a prefix strip, not a rewrite: the
+        expansion keeps the cancel hint and the delta it is meant to audit."""
+        from local_operator.harness.rows import monitor_receipt_body
+
+        body = monitor_receipt_body(MONITOR_TEXT)
+        assert body.startswith("'watch the deploy queue' m1:")
+        assert 'Cancel with monitor({op:"cancel",id:"m1"})' in body
+        assert "Diff vs the previous check:" in body
+        # A text that never carried the prefix is returned unchanged.
+        assert monitor_receipt_body("plain text") == "plain text"
 
     def test_the_row_wears_the_monitors_own_name_and_glyph(self) -> None:
         """The name column says ``monitor`` and the glyph table knows it — not

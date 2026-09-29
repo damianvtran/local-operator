@@ -3020,8 +3020,11 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "wakes_dormant",
         # The monitors pair rides the wakes argument (design §12): a watch can
         # be armed or cancelled while the list is open — the session rewrites
-        # the index and the catalogue re-reads it — and the rank key bands on
-        # it, so two ticks of one open picker can differ in ORDER here.
+        # the index and the catalogue re-reads it — so the row this screen
+        # holds changes under it. The BANDING the rank value adds lands on the
+        # SIDEBAR; this picker orders by recency, so no position here moves
+        # (design review round 1, D3 corrected the first wording of this note,
+        # which claimed an order change this screen does not make).
         "monitors",
         "monitors_dormant",
         "kind",
