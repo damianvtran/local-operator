@@ -82,6 +82,11 @@ that when the work needs one of those it stops that step and escalates through
 own team carry the team brief without that line; the base safety rules cover
 them.
 
+That line is prompt-level, not enforcement: session-wide auto-approve reaches
+delegated work, so a grandchild under `--yolo` has no human gate. The escalation
+wording is what stands in for one — keep it in force when you edit a team's
+instructions.
+
 A lead that holds `task` (a sub-team's manager) gets the parent-shaped `hub`
 over **its own** subtree: list, peek, send, ask, steer, pause, cancel and
 resume its workers, and nothing else — an id outside its descendants is refused

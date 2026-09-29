@@ -1650,6 +1650,12 @@ class SubagentComms:
             live = self.live_ids(scope)
             return (live, None) if live else ([], "no running subagents")
         allowed = self.descendant_ids(scope) if scope else None
+        # Canonicalize through the attempt aliases BEFORE matching, as
+        # ``_job_from`` does: a resumed child's pre-resume id is not a record
+        # key, so without this the address fell through to the label path and
+        # a lead aiming at its own resumed worker read as ``unknown subagent``
+        # (or missed the ``not your subagent`` refusal outside its subtree).
+        target = self._aliases.get(target, target)
         if target in self._records:
             if allowed is not None and target not in allowed:
                 return [], f"not your subagent: {target!r}"
