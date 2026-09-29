@@ -311,8 +311,7 @@ DESKTOP_RESERVED_COMBOS: dict[str, str] = {
     "ctrl+space": "input-source switching uses Ctrl+Space",
     "meta+ctrl+space": "the emoji picker uses ⌃⌘Space",
     "alt+space": (
-        "on Windows this opens the window menu; on macOS Option+Space "
-        "types a non-breaking space"
+        "on Windows this opens the window menu; on macOS Option+Space " "types a non-breaking space"
     ),
     "meta+tab": "⌘Tab switches apps",
     "alt+f4": "closes the window on Windows",
