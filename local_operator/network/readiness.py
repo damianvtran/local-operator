@@ -304,7 +304,12 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
     entries = document.get("mcpServers") if isinstance(document, dict) else None
     if not isinstance(entries, Mapping):
         entries = {}
-    store = _open_store(root)
+    store = None
+    store_unreadable = False
+    try:
+        store = _open_store(root)
+    except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
+        store_unreadable = True
     try:
         for name, raw in sorted(entries.items(), key=lambda pair: str(pair[0])):
             if not isinstance(raw, Mapping):
@@ -327,7 +332,7 @@ def mcp_servers_fact(root: Path) -> dict[str, Any]:
             has_row: bool | None = None
             has_placement = False
             if transport in ("http", "sse") and url:
-                has_row = _mcp_row_exists(store, url)
+                has_row = None if store_unreadable else _mcp_row_exists(store, url)
                 # THIS device's own placement document: does an entry for the
                 # server exist HERE? It is what tells the viewer whether a share
                 # on the owner's books has REACHED this device — the pull is paid
@@ -455,7 +460,10 @@ def has_local_provider_credential(root: Path, provider: str) -> bool | None:
     """
     if not provider:
         return False
-    store = _open_store(root)
+    try:
+        store = _open_store(root)
+    except Exception:  # noqa: BLE001 — an unopenable store is "could not be read"
+        return None
     if store is None:
         return False
     try:
@@ -583,10 +591,15 @@ class ViewerFacts:
         self.device_id = device_id
         self._store: Any = None
         self._opened = False
+        self._store_unreadable = False
 
     def _open(self) -> Any:
         if not self._opened:
-            self._store = _open_store(self.root)
+            try:
+                self._store = _open_store(self.root)
+            except Exception:  # noqa: BLE001 — unopenable is "could not be read"
+                self._store = None
+                self._store_unreadable = True
             self._opened = True
         return self._store
 
@@ -596,7 +609,7 @@ class ViewerFacts:
             return []
         store = self._open()
         if store is None:
-            return []
+            return None if self._store_unreadable else []
         try:
             return list(store.list_credentials(provider))
         except Exception:  # noqa: BLE001
@@ -605,7 +618,7 @@ class ViewerFacts:
     def holds_mcp_login(self, url: str) -> bool | None:
         store = self._open()
         if store is None:
-            return False
+            return None if self._store_unreadable else False
         return _mcp_row_exists(store, url)
 
     def placement(self, *, provider: str = "", mcp_url: str = "") -> dict[str, Any]:

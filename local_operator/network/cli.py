@@ -1686,18 +1686,23 @@ def _require_local_credential(key: str, provider: str) -> None:
 
 
 def _open_local_store(config: Any) -> Any | None:
-    """This device's credential store, or ``None`` when no database exists yet.
+    """This device's credential store, or ``None`` when none can be read.
 
-    THE GUARD IS THE READ-ONLY PROMISE (``readiness._open_store``'s rule, reused
-    here): ``AuthStore.__init__`` CREATES its database, so the share path must
-    never construct one on a device that never signed in — a refused share would
-    then be the reason a store appeared (review round 1, MINOR; QA round 1, Q1).
-    ``None`` is the definite "nothing is stored here" answer these callers
-    already render for an absent row.
+    TWO ABSENCES, ONE ANSWER, deliberately: no database at all (the store's
+    absence — ``readiness._open_store`` refuses to create one; review round 1,
+    MINOR; QA round 1, Q1) and a database that EXISTS but cannot be opened
+    (corrupt bytes, a ``000`` mode — ``AuthStore.__init__`` connects eagerly)
+    both answer ``None`` here (convergence round 2, MAJOR). Every caller below
+    already renders ``None`` as its own degrade — the default shape, the
+    no-local-credential refusal, no rows — which is what the pre-open-first code
+    answered from inside its per-call ``try``.
     """
     from local_operator.network import readiness as readiness_mod
 
-    return readiness_mod._open_store(config)  # noqa: SLF001 — the one read-only store guard
+    try:
+        return readiness_mod._open_store(config)  # noqa: SLF001 — the one read-only store guard
+    except Exception:  # noqa: BLE001 — an unopenable store answers None, never raises
+        return None
 
 
 def _close_quietly(store: Any) -> None:
