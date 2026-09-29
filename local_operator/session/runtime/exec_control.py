@@ -202,12 +202,13 @@ async def start_exec_control(
     does not notify subscribers), so before this seed a ``tool_approval_mode:
     auto`` run parked its first write/exec call until the pending-request
     timeout denied it — the "User denied approval for 'bash'." incident on a
-    run whose owner had set full-auto. An UNSUPERVISED run reads no mode at
-    all, because it owns no gates: its decisions are made by the session's
-    ORIGINAL headless gate, which is built from ``--yolo`` alone. Seeding
-    this handle from the file for such a run changed no decision while making
-    ``/approvals`` report "(--yolo is active)" for a run with no ``--yolo``
-    and a gate that still denies non-TTY requests (review round 1, M1).
+    run whose owner had set full-auto. An UNSUPERVISED run now reads the same
+    mode for the SAME reason (2026-09-28 addendum): its decisions are made by
+    the session's ORIGINAL headless gate, which reads ``tool_approval_mode``
+    itself (``session_factory._approval_mode_is_auto``), so a handle seeded
+    from anything else would report a posture the decisions do not have — the
+    M1 hazard reversed. The value is a one-shot read (no gates, no watcher):
+    the launch-time mode governs, exactly as a ``--yolo`` flag does.
     Without ``--yolo`` or ``auto`` a supervised run's gates park for an
     attached supervisor — the behavioural difference this module's header
     calls out.
@@ -258,6 +259,10 @@ async def start_exec_control(
     # mirrored at both seats, keeps gate and posture equal by construction.
     # Unsupervised still differs where it always did: no gates installed, no
     # config watcher, so its value is a one-shot read rather than a follower.
+    # One read, mirrored at both seats, keeps gate and posture equal — except
+    # for a config edit landing BETWEEN the two reads (session build, then
+    # control start, seconds apart), which can disagree briefly; named rather
+    # than overstated (review R1-4).
     auto_approve = yolo
     if not yolo:
         try:

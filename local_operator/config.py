@@ -460,13 +460,14 @@ DEFAULT_CONFIG = Config(
             # "prompting is off" in one place and "auto is off" in another.
             #
             # Read at mount by the TUI, at boot by phone-started sessions
-            # (``spawn_owned_session``), and — since this key seeds it — at boot
-            # by a ``lop exec --control`` run (``exec_control.start_exec_control``),
-            # whose value then keeps following the file. The plain headless path
-            # keeps ``--yolo`` as its one control: without ``--control`` there
-            # are no runtime gates to seed, so a saved file still cannot disarm
-            # the gate of a ``lop exec`` running in CI, where nobody is watching
-            # the tools it approves.
+            # (``spawn_owned_session``), by a ``lop exec --control`` run
+            # (``exec_control.start_exec_control``; its gates then keep
+            # following the file), and — since 2026-09-28 — by the PLAIN
+            # headless gate itself, the one a ``lop exec`` running in CI
+            # decides on (``session_factory._approval_mode_is_auto``), which
+            # previously took only ``--yolo``. A saved ``auto`` is the
+            # operator's standing instruction that a run with nobody to ask
+            # must not park or deny; ``--yolo`` still wins for one run.
             "tool_approval_mode": "ask",
             # Direct OpenAI GPT-5 calls use the public Responses API by default.
             # Set `providers.openai.api` to `chat_completions` for an explicit

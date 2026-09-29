@@ -3919,13 +3919,13 @@ async def _prepare(
 
     # THE HEADLESS GATE HONOURS THE OPERATOR'S SAVED DEFAULT. ``--yolo`` still
     # wins for one run (and pins, downstream); without it,
-    # ``tool_approval_mode: auto`` — the key whose own default comment names
-    # "the gate of a ``lop exec`` running in CI" — now reaches the gate this
-    # run decides on. Built from the flag ALONE before this, a config that said
-    # auto still refused every write/exec call of an exec-launched headless
-    # session (the 2026-09-28 incident's addendum), and the posture surfaces had
-    # to carve an exception around a gate that ignored the file they report
-    # against.
+    # ``tool_approval_mode: auto`` — the key whose default comment has always
+    # described exactly this gate ("a ``lop exec`` running in CI") — now
+    # reaches the gate this run decides on. Built from the flag ALONE before
+    # this, a config that said auto still refused every write/exec call of an
+    # exec-launched headless session (the 2026-09-28 incident's addendum), and
+    # the posture surfaces had to carve an exception around a gate that ignored
+    # the file they report against.
     request_approval = _make_request_approval(yolo or _approval_mode_is_auto(config_manager))
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and
