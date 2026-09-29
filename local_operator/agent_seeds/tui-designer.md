@@ -33,4 +33,4 @@ from it.
 
 Capture is targeted: frames and measurements for the surfaces under review,
 batched into one remediation round. Full-suite runs are terminal or CI's — never
-mid-round, and never a reason to wait on CI.
+mid-round; read CI asynchronously instead of blocking a round on it.
