@@ -493,6 +493,47 @@ def test_shed_stale_frames_stops_at_a_compaction_marker_and_at_a_frameless_prefi
         shed_stale_frames(messages, limit=-1)
 
 
+def test_a_rendered_markers_frames_are_never_shed_and_are_not_counted_stale() -> None:
+    """The render stamp protects a REPLAY-rendered marker's frames.
+
+    ``render_compaction_marker`` stamps every rendered marker, so a
+    snapcompact replay's frames — the compacted history itself — reach the
+    shed tagged: excluded from ``count_stale_observations`` and left in place
+    by ``shed_stale_frames`` while the stale turns around it go. Before the
+    stamp was universal only the pass's rebuilt head was tagged, so a
+    replay-rendered marker counted as a stale observation and the shed could
+    delete the very content the compaction kept (measured on the pre-stamp
+    tree: removed=5 with the marker lost, against removed=4 and the marker
+    kept here)."""
+    from local_operator.compaction.marker import (
+        build_compaction_marker,
+        render_compaction_marker,
+    )
+    from local_operator.compaction.pruning import (
+        count_stale_observations,
+        shed_stale_frames,
+    )
+
+    snap = build_compaction_marker(
+        "SNAP", preserve_data={"snapcompact": {"frames": [PNG], "text": "old history"}}
+    )
+    rendered = render_compaction_marker(snap, entry_id="e1")
+    assert _frames(rendered) == 1  # the archive replayed as a frame
+
+    stale = [_frame_turn(f"observation {index}") for index in range(5)]
+    messages = [rendered, *stale]
+
+    # Framed, but not a stale observation: it IS the compacted history.
+    assert count_stale_observations(messages) == 5
+    out, removed = shed_stale_frames(messages, limit=0)
+    # The stale turns go down to the current observation; the marker stays,
+    # frames intact.
+    assert removed == 4
+    assert out[0] is rendered
+    assert _frames(out[0]) == 1
+    assert out[1] is stale[-1]
+
+
 def test_shed_stale_frames_sheds_a_whole_turn_and_an_orphaned_turn_end() -> None:
     """A turn is its observation plus everything up to the next observation.
 

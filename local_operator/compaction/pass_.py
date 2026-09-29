@@ -309,9 +309,11 @@ def _refused(
 def _lift_markers(messages: Sequence[Message]) -> list[AgentMessage]:
     """The same positions, with rendered markers lifted back to ``CustomMessage``.
 
-    Only the cut-point walker and the summarizer's serializer need the lifted
-    form; the sent list keeps the rendered messages. Positions are preserved
-    one-to-one so an index into the lifted list indexes the working list.
+    The cut-point walker is the only caller that needs the lifted form now:
+    the summarize call hands a leading marker to ``previous_summary`` instead
+    of serializing it (``marker.split_leading_marker``), and the sent list
+    keeps the rendered messages. Positions are preserved one-to-one so an
+    index into the lifted list indexes the working list.
     """
     lifted: list[AgentMessage] = []
     for message in messages:
