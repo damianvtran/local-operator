@@ -19541,16 +19541,28 @@ class OperatorApp(App[None]):
         ]
 
     def _agent_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
-        """Rows for the ``/agent <…>`` list: the reserved verb, then names.
+        """Rows for the ``/agent <…>`` list: agent NAMES first, then the reserved verb.
 
-        The ``/project`` grammar, applied to this command's one reserved first
-        token: before the first space the argument IS the verb slot — ``class``
-        is offered from ``agent_subcommand_rows()``, the same table the
-        handler reads, so the row a user picks is the word the handler runs
-        (UX round 1, U3: the switch was previously findable only by guessing
-        it) — and once a space is there the argument is a NAME slot.
-        ``/agent class `` offers the profile names as ``class <name>``
-        compounds, which complete to the report form.
+        The ``/team`` ordering rule, applied to this command's one reserved
+        first token. In the first slot the agent NAMES come first and the
+        reserved ``class`` row is appended AFTER them: ``argument_suggestions``
+        returns rows in list order for an empty query, so a bare ``/agent `` +
+        Tab completes the sole (or first) AGENT — the common action is
+        attaching/messaging — and the verb can never be what Tab silently
+        lands in (UX round 2, U4; the same collision-safety ``/team``'s
+        ``chart`` row documents). The verb stays fully discoverable: the row
+        is visible in the list, and the matcher ranks it up the moment the
+        user types ``c``/``cl``/``class`` — a typed query is scored, not
+        list-ordered.
+
+        An agent literally named ``class`` collides with the reserved word
+        exactly as a team named ``chart`` collides with its subcommand: its
+        row completes to the ``=class `` ESCAPE (both resolvers strip one
+        leading ``=``), which its detail names.
+
+        Once ``class `` is in the buffer the second slot re-offers the profile
+        names as ``class <name>`` compounds, which complete to the report
+        form.
         """
         from local_operator.tui.widgets.command_picker import slash_argument
 
@@ -19565,9 +19577,28 @@ class OperatorApp(App[None]):
         first, space, _rest = argument.partition(" ")
         names = self._agent_choices()
         if not space:
-            return [
-                ArgumentChoice(word, help_text) for word, help_text in agent_subcommand_rows()
-            ] + names
+            rows: list[ArgumentChoice] = []
+            for choice in names:
+                if choice.name.casefold() == "class":
+                    # The collision row: completing the bare name would route
+                    # to the subcommand, so it completes to the escape and its
+                    # detail says which path it takes.
+                    rows.append(
+                        ArgumentChoice(
+                            f"={choice.name}",
+                            choice.description,
+                            detail=f"attach · {choice.detail}",
+                        )
+                    )
+                else:
+                    rows.append(choice)
+            # The reserved row is offered AFTER the names — discoverable, and
+            # rank-able by a typed query, but never the default Tab completion.
+            rows.extend(
+                ArgumentChoice(word, help_text, detail="subcommand")
+                for word, help_text in agent_subcommand_rows()
+            )
+            return rows
         if first.casefold() not in {word for word, _help in agent_subcommand_rows()}:
             return []
         return [

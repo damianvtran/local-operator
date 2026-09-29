@@ -1806,7 +1806,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         "agent",
         # D4: "agents", standardizing the noun with the listing header and the
         # attach/detach notices rather than saying "agent profiles" here.
-        "List agents, or speak to this session as one",
+        "List agents, switch an agent's class, or speak to this session as one",
         aliases=("agents",),
         arguments=ArgumentMode.OPTIONAL,
         # Same name slot as `/team`, whose every surface this mirrors.

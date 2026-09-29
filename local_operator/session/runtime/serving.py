@@ -6765,6 +6765,15 @@ class ServingSessionHandle(SessionHandle):
             return await self._agent_class_slash(session, rest.strip(), SlashResult)
         name, _, request = arg.partition(" ")
         name = name.strip()
+        # The ``=`` escape, mirroring ``_team_attach_slash`` and the TUI-local
+        # ``_cmd_agent``: ``=`` cannot occur in a resolved profile name, so
+        # stripping one can never shadow a real agent, and it is the only way
+        # to reach an agent literally named ``class`` (the first token then no
+        # longer matches the reserved word above). The local seam has had this
+        # since U1; without it here the routed owner refused ``/agent =class``
+        # while the same command worked locally — the drift class U1 found.
+        if name.startswith("="):
+            name = name[1:]
         request = request.strip()
         # ``clear``/``none`` is the DETACH verb, mirroring ``_cmd_agent``: only
         # the bare verb detaches, so ``/agent clear <text>`` stays a (mistyped)

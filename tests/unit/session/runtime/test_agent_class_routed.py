@@ -28,7 +28,7 @@ from tests.unit.session.runtime.test_serving import FakeSession
 
 
 class _ClassSession(FakeSession):
-    """FakeSession + the two surfaces the routed class handler reads.
+    """FakeSession + the surfaces the routed class and attach handlers read.
 
     A SUBCLASS rather than attributes bolted on at runtime, so the shape stays
     part of the double's contract for the type checker every gate runs.
@@ -42,10 +42,16 @@ class _ClassSession(FakeSession):
             "patience_cancelled": ["patience-1"],
             "cadence_dropped": False,
         }
+        self.attached: list[str] = []
 
     async def cleanup_after_class_switch(self, profile_name: str) -> dict[str, Any]:
         self.cleanups.append(profile_name)
         return self.cleanup_outcome
+
+    def attach_agent_profile(self, name: str) -> str:
+        """The attach seam, recording the name the handler resolved to."""
+        self.attached.append(name)
+        return name
 
 
 @pytest_asyncio.fixture
@@ -63,6 +69,33 @@ def _row(session: _ClassSession) -> Any:
     row = session.agent_registry.get_agent_by_name("reviewer")
     assert row is not None, "the routed switch must not lose the row it flipped"
     return row
+
+
+def _fields(**overrides: Any):  # noqa: ANN202 — the slash suite's helper shape
+    """``AgentEditFields`` with every field spelled out (strict mode)."""
+    from local_operator.agents import AgentEditFields
+
+    base: dict[str, Any] = dict(
+        name=None,
+        description=None,
+        tags=None,
+        categories=None,
+        security_prompt=None,
+        hosting=None,
+        model=None,
+        last_message=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        max_tokens=None,
+        stop=None,
+        frequency_penalty=None,
+        presence_penalty=None,
+        seed=None,
+        current_working_directory=None,
+    )
+    base.update(overrides)
+    return AgentEditFields(**base)
 
 
 @pytest.mark.asyncio
@@ -117,6 +150,30 @@ async def test_the_routed_switch_accepts_a_case_variant_spelling(routed) -> None
 
     assert "agent reviewer is now proactive" in outcome["text"]
     assert class_from_tags(_row(session).tags) == "proactive"
+
+
+@pytest.mark.asyncio
+async def test_the_routed_attach_strips_the_escape_for_an_agent_named_class(routed) -> None:
+    """U4's companion: the ``=`` escape reaches the router too.
+
+    The reserved word made an agent literally named ``class`` unreachable on
+    the attach path; the escape resolves it, and ``=`` cannot occur in a
+    resolved name so stripping one shadows nothing. Without the strip the
+    owner looked up the literal ``=class`` (the drift class U1 found — the
+    local seam had the strip, this one did not).
+    """
+    handle, session = routed
+    session.agent_registry.create_agent(
+        _fields(name="class", description="The named-class agent", tags=["role"])
+    )
+    outcome = await handle.run_slash_authoritative("agent", "=class", [])
+
+    assert session.attached == ["class"], session.attached
+    assert "must be one of" not in outcome.get("text", "")
+    # Control: without the escape the same word IS the verb, and nothing attaches.
+    control = await handle.run_slash_authoritative("agent", "class", [])
+    assert session.attached == ["class"]
+    assert "class" in control.get("text", "").lower()
 
 
 @pytest.mark.asyncio

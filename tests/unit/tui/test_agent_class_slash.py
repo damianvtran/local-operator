@@ -17,6 +17,7 @@ import pytest
 from local_operator.action_class import class_from_tags
 from local_operator.agents import AgentRegistry
 from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -251,9 +252,110 @@ async def test_the_agent_picker_offers_the_class_verb(tmp_path: Path) -> None:
         rows = app._agent_argument_choices(_PickerEditor("/agent "))
         compounds = app._agent_argument_choices(_PickerEditor("/agent class "))
 
-    assert rows[0].name == "class"
-    assert "proactive" in rows[0].description
     assert any(row.name == "auditor" for row in rows), rows
+    # U4: agent NAMES lead; the reserved verb is present but LAST, so it is
+    # never the default Tab completion (never first).
+    assert rows[0].name == "auditor", rows
+    assert rows[-1].name == "class" and rows[-1].detail == "subcommand", rows
+    assert "proactive" in rows[-1].description
     # After the verb the names are offered as ``class <name>`` compounds, which
     # complete to the report form.
     assert compounds and all(row.name.startswith("class ") for row in compounds), compounds
+
+
+async def _type(pilot, text: str) -> None:
+    """Type ``text`` into the focused editor via real key presses.
+
+    The picker's argument detection is caret-anchored, so setting ``editor.text``
+    directly no longer opens the argument list — driving real key presses is the
+    path the app actually takes (the test_team_chart/test_slash_echo idiom).
+    """
+    for char in text:
+        await pilot.press("slash" if char == "/" else ("space" if char == " " else char))
+
+
+@pytest.mark.asyncio
+async def test_bare_tab_completes_an_agent_not_the_class_verb(tmp_path: Path) -> None:
+    """U4: Tab on a bare ``/agent `` fills the first AGENT, never the verb.
+
+    Walk-shaped on purpose — driven through the running composer, because the
+    direct builder call above cannot see the Tab path (``_resolve_argument``
+    accepts the HIGHLIGHTED row; ``set_name_choices`` only feeds the
+    highlighter). The rule is ``/team``'s: the common action on ``/agent `` is
+    attaching/messaging, so Tab must never silently land in the class grammar.
+    """
+    registry = AgentRegistry(tmp_path)
+    registry.create_agent(_fields(name="auditor", description="Audit changes", tags=["role"]))
+    session = FakeSession()
+    session.agent_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app.query_one(Editor).focus()
+        await _type(pilot, "/agent ")
+        editor = app.query_one(Editor)
+        assert editor.picker.is_open(), "the agent list must open"
+        first_row = editor.picker._choices[0].name
+        assert first_row != "class", editor.picker._choices
+        await pilot.press("tab")
+        await pilot.pause()
+        text = editor.text
+    # Tab accepted the HIGHLIGHTED (first) row, and that row is a NAME: the
+    # mutation this pins is the old verb-first order, under which both the
+    # highlight and the completed buffer were `class`.
+    assert text == f"/agent {first_row} ", text
+
+
+@pytest.mark.asyncio
+async def test_picker_second_slot_reoffers_names_feeding_the_class_report(
+    tmp_path: Path,
+) -> None:
+    """U5: ``/agent class `` crosses into the second slot and repaints.
+
+    The slot tracker must post a refresh on the boundary (the `chart ` rule),
+    or the compounds the builder returns are never fetched by the running
+    editor — the round-2 finding: no rows at all under a query that no longer
+    matches the first-slot choice set.
+    """
+    registry = AgentRegistry(tmp_path)
+    registry.create_agent(_fields(name="auditor", description="Audit changes", tags=["role"]))
+    session = FakeSession()
+    session.agent_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app.query_one(Editor).focus()
+        await _type(pilot, "/agent class ")
+        editor = app.query_one(Editor)
+        names = [c.name for c in editor.picker._choices]
+    assert "class auditor" in names, names
+    assert all(name.startswith("class ") for name in names), names
+
+
+@pytest.mark.asyncio
+async def test_the_class_verb_shows_no_switch_hint(tmp_path: Path) -> None:
+    """U5 second half: ``/agent class `` must not print the switch/send hint.
+
+    The hint promises a switch-or-send choice; after the verb the slot is a
+    report argument whose list is up — the hint's own contract excludes the
+    reserved word (it excluded ``/team chart`` for the same reason).
+    """
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        app.query_one(Editor).focus()
+        await _type(pilot, "/agent class ")
+        editor = app.query_one(Editor)
+        notice = editor.picker._notice or ""
+        hint_shown = "Enter to switch" in notice
+    assert not hint_shown, notice
