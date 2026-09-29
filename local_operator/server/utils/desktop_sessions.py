@@ -353,7 +353,12 @@ ATTENTION_SNAPSHOT_WAIT_S = 0.05
 #: makes. The counter-argument (on the desktop an interruption can come from
 #: another surface) is real but undecidable here: ``AgentEndEvent`` carries
 #: ``aborted`` with no actor. One frozenset entry away if that ever changes.
-BRIDGE_NOTIFIABLE_KINDS = frozenset({"complete", "error"})
+#:
+#: ``retired`` JOINS (retire-for-build arm, 2026-09-29; seed 7e797aaaf6e7): a
+#: turn was cut for an update and the user needs to know — the whole point of
+#: that arm is that the transition is announced truthfully, in warning ink,
+#: rather than framed as a failure or quietly dropped.
+BRIDGE_NOTIFIABLE_KINDS = frozenset({"complete", "error", "retired"})
 
 
 async def _no_takeover() -> None:

@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 #: cannot drift from the TUI's. Not every kind is reachable on every surface:
 #: the desktop bridge narrows it further (``BRIDGE_NOTIFIABLE_KINDS``) because
 #: ``ask``/``approval`` already reach that app as ``pending_gate``.
-NotificationKind = Literal["complete", "error", "interrupted", "ask", "approval"]
+NotificationKind = Literal["complete", "error", "interrupted", "ask", "approval", "retired"]
 
 #: Wire contract version for the ``notification`` frame's payload shape,
 #: advertised as ``features.notification_contract`` in ``/v1/capabilities``.

@@ -276,6 +276,20 @@ def test_legacy_metadata_mtime_is_not_a_completion(tmp_path: Path) -> None:
         ),
         ("error", "", "Stopped with an error", "error"),
         ("interrupted", "the session was stopped by the user", "Interrupted", "info"),
+        # The v2 neutral closure (2026-09-29, session 23fc556c3799): a
+        # disposal that caught a zero-work run renders as a receipt on the
+        # phone too, in the info tier, and the words come from the shared row
+        # decision in ``harness/rows.py`` — never "Stopped with an error".
+        ("closed", "", "Completed — runtime retired/disposed", "info"),
+        # The retire-for-build arm (2026-09-29, seed 7e797aaaf6e7): a cut for an
+        # update is WARNING ink on the phone too, and its own sentence —
+        # truthful, distinguished from a failure, and never the danger tier.
+        (
+            "retired",
+            "the runtime retired so the next engage would run a newer build",
+            "Retired for an update — a turn was in flight and was cut; its earlier output is kept",
+            "warning",
+        ),
     ],
 )
 def test_the_phone_notice_carries_the_tier_the_row_deserves(
@@ -373,6 +387,20 @@ def test_the_phone_frame_fills_the_end_the_runtime_could_not_send(
     assert frame["transcript"][-1]["text"].startswith(
         "Stopped with an error" if kind == "error" else "Interrupted"
     )
+
+
+def test_the_phone_frame_offers_resume_for_a_retired_cut() -> None:
+    """The retire-for-build arm fills the end like any involuntary cut.
+
+    A bound-expired drain cut a live turn, so the phone must offer the resume
+    affordance with the INVOLUNTARY word (``cut_off=True``) — while the notice
+    above the button says the arm's own sentence, never "Stopped with an
+    error".
+    """
+    frame = _end_frame(kind="retired", cause="runtime-retired")
+    assert frame["stop_reason"] == "aborted"
+    assert frame["cut_off"] is True
+    assert frame["transcript"][-1]["text"].startswith("Retired for an update")
 
 
 def test_the_phone_frame_never_overrides_an_abort_the_fold_saw() -> None:

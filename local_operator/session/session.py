@@ -2499,6 +2499,17 @@ class Session:
         #: itself evidence for a cut-off verdict, even before the first
         #: round-trip is spent.
         self._attention_run_carried_prompt: bool = False
+        #: The run's NEUTRAL CLOSURE, armed by :meth:`Session.dispose` when it
+        #: meets a live run that spent no provider round-trip yet CARRIED a
+        #: person's or peer's prompt: the exit cuts a real run whose ask was
+        #: never served, and the honest record is the neutral ``closed`` kind
+        #: rather than the ``error|disposed`` this used to publish (operator
+        #: directive, 2026-09-29; session 23fc556c3799). Holds the cause token
+        #: the closure preserves — the serving rung's more specific cause when
+        #: one was noted before the handover, else ``disposed`` itself — and is
+        #: consumed by :meth:`_publish_closed_disposal` from the disposal's
+        #: synthesis.
+        self._attention_run_closed_cause: str | None = None
         #: Armed by :meth:`Session.dispose` when it meets a live run with no
         #: evidence behind it: the exit has decided that run settles with NO
         #: verdict, and an end arriving afterwards — the abort's own tail, or a
@@ -9946,6 +9957,16 @@ class Session:
             if (outcome.error or cut_off)
             else "interrupted" if outcome.aborted else "complete"
         )
+        # THE RETIRE-FOR-BUILD ARM (architect addendum, 2026-09-29; seed
+        # 7e797aaaf6e7 and its 33k/37k/40k/41k siblings): a cut caused by a
+        # build drain is TRUTHFUL but must stay DISTINGUISHED FROM A FAILURE.
+        # A sweep-bounded latched drain cut a turn that was mid-work, and
+        # "Stopped with an error" framed a routine update-phase transition as
+        # a failure on every surface. Only the KIND changes here; the cause and
+        # reason below ride along VERBATIM, so every reader still learns the
+        # turn was cut and why. Every other cut keeps ``error``.
+        if kind == "error" and cut_off and self._cut_off_cause == "runtime-retired":
+            kind = "retired"
         # §14.3: the run's ONE notify value, read off the end event the session
         # already stamped (``_emit``) — never re-derived here. A synthesised end
         # (the disposal rung) never passed ``_emit``, and its kinds are
@@ -10156,6 +10177,114 @@ class Session:
                     "eligible": False,
                 },
             )
+
+    async def _publish_closed_disposal(self, cause: str) -> None:
+        """Close a zero-work run NEUTRALLY when the exit cuts it (``closed``).
+
+        THE FOURTH DISPOSITION, added by the 2026-09-29 directive (session
+        23fc556c3799). The settle arm above silences runs that assert nothing;
+        this arm is for a run that DOES have something to say — a person or a
+        peer opened it, so it was a real ask — but spent no provider
+        round-trip before the disposal caught it. The old behaviour published
+        ``error|disposed`` for exactly this shape, and because the record
+        supersedes the previous ``complete`` row for latest-wins readers, a
+        successfully completed turn rendered as "Stopped with an error" on
+        both surfaces. The directive: any dispose that catches a run which
+        spent nothing renders NEUTRALLY.
+
+        WHY ``closed`` AND NOT ONE OF THE THREE VERDICT KINDS:
+
+        * ``error`` is the old claim, and it is the one the operator re-reported;
+          it is also shared with real mid-work cuts, so it cannot be remapped at
+          a surface without lying about those.
+        * ``interrupted`` means the deliberate stop; nobody stopped this.
+        * ``complete`` would assert an outcome the run did not produce.
+        * silence (``_settle_run_without_an_outcome``) would hide an ask that a
+          peer may still be waiting on — the run's presence is a fact worth a
+          durable row, it just is not a verdict.
+
+        ``closed`` is deliberately NOT a key of ``incidents.CUT_OFF_CAUSES``,
+        which is what keeps the successor quiet: ``bootstrap_transcript``
+        replays the row (the durable marker below re-lands it idempotently) but
+        its journaling branch requires ``kind == "error"``, so no
+        ``session_incident`` is narrated and no surface is told a finished
+        turn was cut off.
+
+        ``notify=False`` — a closure is not a result the user must be pulled
+        back for, and §14's flag is the existing gate every announce path
+        reads (the background observer skips the row, the desktop bridge's
+        ``BRIDGE_NOTIFIABLE_KINDS`` never carries it).
+
+        ORDERING, the same rule as the settle: one critical section with
+        ``_publish_attention_outcome`` (same lock) so the exit's decision
+        cannot interleave with an outcome publish — ``sequence`` is insert
+        order, and a verdict landing after this row would flip a newest-wins
+        reader back to a claim the exit refused to make. The intent armed at
+        the decision site has already dropped the abort's own tail, so this
+        method is the run's remaining writer.
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            AttentionStore,
+            AttentionWriteDeferred,
+            conversation_identity,
+            provisional_anchor,
+        )
+
+        token = self._attention_run_token
+        if token is None:
+            return
+        kind = "closed"
+        # The closure carries no sentence of its own: the copy lives with the
+        # row decision (``harness/rows.py`` CLOSED_NOTICE_TEXT, reused by the
+        # notification vocabulary), so no reader has to render a reason here.
+        reason = ""
+        async with self._attention_publish_lock:
+            self._attention_run_settled = True
+            anchor = provisional_anchor(token)
+            # The journal precedes publication, exactly as the outcome path
+            # does: a replay re-lands the same row idempotently by token.
+            await self._transcript.append_custom(
+                ATTENTION_CUSTOM_TYPE,
+                {
+                    "conversation_id": conversation_identity(self._transcript.directory),
+                    "token": token,
+                    "anchor": anchor,
+                    "kind": kind,
+                    "cause": cause,
+                    "reason": reason,
+                    "notify": False,
+                },
+            )
+            try:
+                self._attention = await asyncio.to_thread(
+                    AttentionStore().publish,
+                    conversation_identity(self._transcript.directory),
+                    token,
+                    anchor,
+                    kind,
+                    reason=reason,
+                    cause=cause,
+                    notify=False,
+                )
+            except AttentionWriteDeferred as deferred:
+                # Same contract as the outcome path: the durable marker above
+                # keeps the closure, and the republish ladder retries it
+                # against the live store from this process.
+                logger.warning(
+                    "attention: closure for %s deferred; retrying it against "
+                    "the store in-process: %s",
+                    conversation_identity(self._transcript.directory),
+                    deferred,
+                )
+                self._schedule_attention_republish()
+            except Exception:  # noqa: BLE001 — attention is an observability nicety
+                logger.warning(
+                    "attention: could not publish the closure for %s",
+                    conversation_identity(self._transcript.directory),
+                    exc_info=True,
+                )
+        self.refresh_frontend_state()
 
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
@@ -10912,6 +11041,7 @@ class Session:
         self._attention_run_request_dispatched = False
         self._attention_run_carried_prompt = carried_prompt
         self._attention_run_settle_intent = False
+        self._attention_run_closed_cause = None
         # §14.3: the trigger record, reset per run beside the outcome and the
         # token. Populated from the opening messages here ("at admission") and
         # by ``_drain_steering`` as delivery/steer messages fold in; consumed
@@ -18763,6 +18893,13 @@ class Session:
         zero provider statements, and the ``error | cause=disposed`` row it
         was branded with superseded the completed turn's own marker for every
         latest-wins reader.
+
+        THE TWO TERMS ARE KEPT APART AT THE POINT OF USE (v2, 2026-09-29):
+        ``Session.dispose`` reads the flags directly because the dispositions
+        now differ by WHICH evidence there is — dispatched → the honest
+        error, carried-without-dispatch → the neutral ``closed`` closure (see
+        :meth:`_publish_closed_disposal`) — so this predicate stays the
+        documented summary of the pair rather than the decision itself.
         """
         return self._attention_run_request_dispatched or self._attention_run_carried_prompt
 
@@ -18814,9 +18951,11 @@ class Session:
                 # began dispatching inside that window had its real cut
                 # suppressed by the armed intent and was then settled as
                 # zero-work). A disposal that catches a live run publishes a
-                # cut-off only when the run has evidence behind one (see
-                # ``_attention_run_has_evidence``); without evidence it settles
-                # silently. The decision must still come before the abort for
+                # cut-off only when the run actually DISPATCHED a provider
+                # round-trip; a run that carried a prompt but spent nothing
+                # closes NEUTRALLY (``closed``, the v2 directive), and a run
+                # with neither settles silently. The decision must still come
+                # before the abort for
                 # two reasons: ``note_cut_off`` is first-writer-wins, so a
                 # note written for a settled run would brand a cause nobody
                 # may publish; and the settle intent must be armed before the
@@ -18843,13 +18982,54 @@ class Session:
                 # row preceded them by minutes (six with the retirement label,
                 # more with this one), each rendered as a cut-off of work that
                 # had finished (2026-09-17).
-                settles_silently = (
-                    self._attention_run_token is not None
-                    and not self._attention_run_settled
-                    and not self._attention_run_has_evidence()
-                )
-                if settles_silently:
-                    self._attention_run_settle_intent = True
+                if self._attention_run_token is not None and not self._attention_run_settled:
+                    if self._deliberate_stop_noted:
+                        # A STOP THE USER ASKED FOR OUTRANKS THIS EXIT'S
+                        # DISPOSITION (agent review round 1, BLOCKER-1). The
+                        # stop already cleared the cut-off note
+                        # (``note_cut_off`` refuses once one is recorded), and
+                        # it must outrank the neutral closure too: `/stop` on a
+                        # carried, not-yet-dispatched run published ``closed``
+                        # while the user had ASKED for the stop, and the honest
+                        # record for that is ``interrupted|user-stop`` — which
+                        # the run's own classify path produces once nothing
+                        # here overrides it. Nothing to decide, nothing to
+                        # note: the run's verdict is already recorded.
+                        #
+                        # ALL SHAPES, deliberately (manager decision, round 2,
+                        # MINOR-1): the NON-carried zero-work run — the
+                        # harness-opened wake/job-delivery shape — publishes
+                        # the same ``interrupted|user-stop``, where v1 settled
+                        # it silently. The user's act outranks the silence the
+                        # same way it outranks the closure; narrowing this
+                        # clause to the carried shape would reintroduce the
+                        # asymmetry this round was raised on, and
+                        # ``test_a_deliberate_stop_of_a_non_carried_zero_work_run_is_still_an_interruption``
+                        # pins the third shape.
+                        pass
+                    elif self._attention_run_request_dispatched:
+                        # EVIDENCE: work reached the provider, so a cut is a
+                        # real cut and keeps the honest verdict.
+                        self.note_cut_off("disposed")
+                    elif self._attention_run_carried_prompt:
+                        # NEUTRAL CLOSURE (operator directive, 2026-09-29;
+                        # session 23fc556c3799): the ask was real — a person
+                        # or a peer is waiting on it — but the run spent no
+                        # provider round-trip, so this exit cannot honestly
+                        # claim it was cut off mid-work. ``closed`` records the
+                        # fact without the error framing the operator
+                        # re-reported; the settle intent rides along so the
+                        # abort tail cannot republish the verdict this decision
+                        # refused (``_publish_attention_outcome``). The cause is
+                        # captured HERE because ``note_cut_off`` is
+                        # first-writer-wins and the serving rung may have noted
+                        # its more specific cause before handing over: the
+                        # closure PRESERVES that token, or names the disposal
+                        # itself when nobody did.
+                        self._attention_run_closed_cause = self._cut_off_cause or "disposed"
+                        self._attention_run_settle_intent = True
+                    else:
+                        self._attention_run_settle_intent = True
                 else:
                     self.note_cut_off("disposed")
                 self.abort("session disposed")
@@ -18902,7 +19082,16 @@ class Session:
                     # reclassifies as "the cause could not be determined"
                     # (reproduced: serving_cause_hole.py). The same clause
                     # covers the ``_deliberate_stop_noted`` variant.
-                    if self._attention_outcome is None and (
+                    # A NEUTRAL CLOSURE OWED TO THE DECISION ABOVE (v2): the
+                    # disposition chose ``closed`` before the abort; the run
+                    # reaches here unsettled and without an outcome (the intent
+                    # dropped the abort tail), so the closure is published now.
+                    if (
+                        self._attention_run_closed_cause is not None
+                        and self._attention_outcome is None
+                    ):
+                        await self._publish_closed_disposal(self._attention_run_closed_cause)
+                    elif self._attention_outcome is None and (
                         self._attention_run_settle_intent
                         or not (self._cut_off_cause or self._deliberate_stop_noted)
                     ):

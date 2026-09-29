@@ -824,6 +824,31 @@ def compaction_refused_notice(details: dict[str, Any]) -> tuple[str, NoticeSever
     return text, severity
 
 
+#: THE NEUTRAL CLOSURE'S sentence (v2, operator directive 2026-09-29, session
+#: 23fc556c3799): a disposal caught a run that had spent no provider
+#: round-trip, so it renders as a receipt on both surfaces rather than the
+#: ``Stopped with an error`` the operator re-reported. Defined HERE — the module
+#: that owns this row on both surfaces — and reused verbatim by the
+#: notification vocabulary (``tui/notify.py`` BODY_CLOSED) so the banner cannot
+#: drift from the row.
+CLOSED_NOTICE_TEXT = "Completed — runtime retired/disposed"
+
+#: The row a turn cut by a build drain paints — TRUTHFUL but DISTINGUISHED
+#: FROM A FAILURE (retire-for-build arm, 2026-09-29; seed 7e797aaaf6e7): the
+#: turn really was cut, but the update was routine and the operator asked for
+#: these transitions to stop reading as errors. One sentence shared by the TUI
+#: poller, the phone projection and the desktop notice, so no two surfaces can
+#: disagree about the same record.
+#:
+#: THE KEPT-OUTPUT CLAUSE (design round 2, D1) is the one fact a user who lost
+#: work needs — the partial work survives — which the live cut sentence carries
+#: ("the transcript holds what it wrote before that") and the terse receipt had
+#: dropped. It rides byte-identical in the desktop's ``RETIRED_OUTCOME_TEXT``.
+RETIRED_NOTICE_TEXT = (
+    "Retired for an update — a turn was in flight and was cut; its earlier output is kept"
+)
+
+
 def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]:
     """A RETURNED-TO turn's outcome row: its sentence and the ink it deserves.
 
@@ -850,6 +875,20 @@ def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]
     the reason away, so the one surface the phone and the TUI poller share said
     nothing about who killed what.
     """
+    if kind == "closed":
+        # A RECEIPT, not a failure: the row STATES the closure and keeps the
+        # info tier, so a disposal no longer paints danger ink over a turn
+        # whose output had already been delivered (v2 directive). The reason
+        # is ignored on purpose — the closure has no sentence to explain.
+        return CLOSED_NOTICE_TEXT, "info"
+    if kind == "retired":
+        # WARNING, NEVER DANGER (architect addendum, 2026-09-29): a latched
+        # build drain bounded by a signal sweep cut a live turn, and the row
+        # must say so in warning ink — the update was routine; the lost work
+        # is real but it is not a failure. The reason is ignored on purpose:
+        # the cause token survives in the store for readers that want it, and
+        # this row's one-line budget goes to the fact.
+        return RETIRED_NOTICE_TEXT, "warning"
     if kind == "error":
         text = f"Stopped with an error — {reason}" if reason else "Stopped with an error"
         return text, "error"

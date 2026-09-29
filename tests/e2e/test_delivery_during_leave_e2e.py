@@ -720,16 +720,22 @@ async def test_a_run_cut_after_its_first_request_still_errors(
 
 
 @pytest.mark.asyncio
-async def test_a_typed_prompt_cut_with_zero_round_trips_still_errors(
+async def test_a_typed_prompt_cut_with_zero_round_trips_closes_neutrally(
     headless_tui_env: Path,
 ) -> None:
-    """NEGATIVE CONTROL: provenance = a person's words. Still an error.
+    """A person's zero-work run closes as ``closed``, not as an error.
 
-    Zero provider round-trips, no note of any kind: on evidence alone this run
-    would settle silently. It does not, because ``prompt()`` opened it — a
-    person (or a peer) is waiting on the answer, and their turn being cut is
-    theirs to be told about. This is the boundary of the settle arm, and it is
-    the case a too-wide suppression would swallow first.
+    INTENTIONAL REVERSAL, with the receipts (2026-09-29 directive): this cell
+    shipped in v1 (PR #1731) pinning the opposite — a typed prompt cut with
+    zero round-trips published ``error|disposed``. The operator reopened the
+    class on session 23fc556c3799: on the installed build, a run cut after the
+    COMPLETED turn's output was delivered still rendered "Stopped with an
+    error" on both surfaces, and the directive is that any disposal which
+    catches a run that spent nothing (no provider round-trip) must render
+    neutrally instead. A typed prompt is the same zero-work shape, so it takes
+    the same neutral record: ``closed``, cause preserved, no incident.
+    The v1 negative control survives WHERE IT MUST: a run that DID dispatch
+    still errors (``test_a_run_cut_after_its_first_request_still_errors``).
     """
     config = headless_tui_env
     directory = config / "typed-prompt-cut-pre-dispatch"
@@ -751,24 +757,26 @@ async def test_a_typed_prompt_cut_with_zero_round_trips_still_errors(
         await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
 
     rows = _completion_rows(directory)
-    assert [row.get("kind") for row in rows] == ["error"], rows
+    assert [row.get("kind") for row in rows] == ["closed"], rows
     assert rows[-1].get("cause") == "disposed", rows[-1]
     assert stream.exhausted_at is None, "the run must not have consumed a scripted turn"
 
 
 @pytest.mark.asyncio
-async def test_a_peer_prompt_cut_with_zero_round_trips_still_errors(
+async def test_a_peer_prompt_cut_with_zero_round_trips_closes_neutrally(
     headless_tui_env: Path,
 ) -> None:
-    """NEGATIVE CONTROL: the peer arm carries provenance, not just ``prompt()``.
+    """The peer arm carries provenance, not just ``prompt()`` — closed, not error.
 
     Both peer arms of ``receive_peer_message`` spawn
-    ``_prompt_messages([message], carried_prompt=True)``, and a peer's ask cut
-    before its first round-trip is owed the same ``error|disposed`` a typed
-    prompt gets ("a person at the other end of ``lop send``"). Review round 1
+    ``_prompt_messages([message], carried_prompt=True)``, and review round 1
     (MAJOR-2) caught the keyword never being forwarded to the pipeline, which
-    sent every peer-opened run down the settle arm; this cell drives the exact
-    spawn the peer arms make and asserts the answer is the error, not silence.
+    sent every peer-opened run down the settle arm silently. The forwarding is
+    pinned here still — the run must CARRY the peer's provenance — but the
+    verdict it earns is the v2 neutral one (``closed``): the run spent no
+    provider round-trip, so the disposal must not claim it was cut off. See
+    ``test_a_typed_prompt_cut_with_zero_round_trips_closes_neutrally`` for the
+    intentional reversal of the v1 pin.
     """
     config = headless_tui_env
     directory = config / "peer-prompt-cut-pre-dispatch"
@@ -797,9 +805,89 @@ async def test_a_peer_prompt_cut_with_zero_round_trips_still_errors(
         await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
 
     rows = _completion_rows(directory)
-    assert [row.get("kind") for row in rows] == ["error"], rows
+    assert [row.get("kind") for row in rows] == ["closed"], rows
     assert rows[-1].get("cause") == "disposed", rows[-1]
     assert stream.exhausted_at is None, "the run must not have consumed a scripted turn"
+
+
+@pytest.mark.asyncio
+async def test_a_completed_turn_then_a_peer_prompt_disposal_closes_neutrally(
+    headless_tui_env: Path,
+) -> None:
+    """THE 23fc RECORD CELL: completion delivered, then the disposal.
+
+    Session 23fc556c3799 (2026-09-29, the operator's re-report): the turn
+    completed at 12:05:25.975 and its output was delivered; the peer closeout
+    opened a run 16 s later, and the disposal aborted that zero-round-trip run
+    and published ``error|disposed`` (row 46912) — which superseded the
+    completion for latest-wins readers and put "Stopped with an error" on a
+    finished turn. The directive: a dispose that catches a run which spent
+    nothing renders NEUTRALLY. The run carried a peer's ask, so it publishes
+    ``closed`` (cause preserved), the completion is never masked by an error,
+    and the successor journals no cut-off card.
+    """
+    config = headless_tui_env
+    directory = config / "completed-then-peer-closed"
+    stream = _ParkedWorkTurn([text_turn("first"), text_turn("peer reply")])
+
+    with bounded(120, "a peer-opened run cut after a delivered completion"):
+        directory.mkdir(parents=True, exist_ok=True)
+        session = build_session(directory, stream)
+        # The first turn COMPLETES — its honest ``complete`` row is the one the
+        # disposal must not mask. The peer run is arranged only afterwards.
+        await session.prompt("first")
+        assert stream.requests, "the first turn must reach the provider"
+        assert [row.get("kind") for row in _completion_rows(directory)] == [
+            "complete"
+        ], "precondition: the completed turn's own row"
+
+        # The 23fc ordering: the peer's ask is delivered and admitted, then the
+        # exit arrives before the run spends its first round-trip.
+        parked, release = _park_runs_before_dispatch(session, except_token=None)
+        message = session._peer_custom_message(
+            "peer closeout after the turn",
+            {"pid": 999999, "conversation_name": "peer", "model_label": "m"},
+        )
+        task = asyncio.ensure_future(session._prompt_messages([message], carried_prompt=True))
+        await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+        assert session._attention_run_carried_prompt is True
+        assert session._turn_task is not None and not session._turn_task.done()
+
+        dispose_task = asyncio.ensure_future(session.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == ["complete", "closed"], rows
+    assert not [row for row in rows if row.get("kind") == "error"], rows
+    assert rows[-1].get("cause") == "disposed", rows[-1]
+    # LATEST-WINS, THE OPERATOR'S SYMPTOM: the store's newest row is the closed
+    # record — never the ``error|disposed`` that used to supersede the result.
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state.get("kind") == "closed", state
+    assert (
+        _incident_rows(directory) == []
+    ), "the successor must not be told a closed run was cut off"
+
+    # THE SUCCESSOR: a real boot. Its next turn gets no cut-off card and no
+    # re-verification instruction about the finished work.
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(directory, successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        assert successor_stream.requests, "the successor never called the provider"
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "[session incident]" not in sent, sent[-2000:]
+    finally:
+        await successor.dispose()
 
 
 @pytest.mark.asyncio
