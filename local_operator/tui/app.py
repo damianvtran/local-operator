@@ -18614,8 +18614,14 @@ class OperatorApp(App[None]):
             # view it is framed as hers; at the splash it stands alone.
             unsent_part = " — your message was not sent" if unsent else ""
             if self._aida_setup_view:
+                # Addressed by the CONFIGURED name (#1699's key) like every
+                # other surface: a renamed operator must not meet "Aida"
+                # here and their chosen name a row above (fold resolution).
+                from local_operator.aida import naming as aida_naming
+
                 return (
-                    f"{AIDA_MARKER} Aida can't reply yet{unsent_part}: {AIDA_NO_PROVIDER_CUE}",
+                    f"{AIDA_MARKER} {aida_naming.display_name()} can't reply yet"
+                    f"{unsent_part}: {AIDA_NO_PROVIDER_CUE}",
                     starting,
                 )
             # The shared cue already carries the diagnosis, so the splash arm
@@ -42775,14 +42781,19 @@ class OperatorApp(App[None]):
         state intact) rather than the receipt path that retires it.
         """
         from local_operator import aida as aida_pkg
+        from local_operator.aida import naming as aida_naming
 
+        # The configured display name (#1699), read once for the sentences
+        # below — never raises (the default stands in). The fold's resolution
+        # keeps her rename propagating through THIS first-run surface too.
+        name = aida_naming.display_name()
         self._aida_setup_view = True
         try:
             await aida_pkg.ensure_session()
         except Exception:  # noqa: BLE001 — the view must render regardless
             logger.warning("aida: ensure in the no-provider view failed", exc_info=True)
         block = (
-            f"{AIDA_MARKER} Aida — your chief of staff. She can't reply yet: "
+            f"{AIDA_MARKER} {name} — your chief of staff. She can't reply yet: "
             f"{AIDA_NO_PROVIDER_CUE}"
         )
         if text:
@@ -42798,7 +42809,7 @@ class OperatorApp(App[None]):
         # frame reads as HER waiting state rather than generic setup; the
         # toast is the short form for a user who missed the block.
         self._announce_on_splash(
-            AIDA_NO_PROVIDER_CUE, "warning", headline="Aida — connect a provider"
+            AIDA_NO_PROVIDER_CUE, "warning", headline=f"{name} — connect a provider"
         )
 
     async def _open_aida_first_run(self, notice: NoticeFn) -> bool:
@@ -42844,7 +42855,9 @@ class OperatorApp(App[None]):
         except Exception:  # noqa: BLE001
             logger.warning("aida: first-run greet failed", exc_info=True)
         self._session_factory = lambda: self._resume_factory(session_id)  # type: ignore[misc]
-        notice(f"{AIDA_MARKER} opening Aida, your chief of staff…")
+        from local_operator.aida import naming as aida_naming
+
+        notice(f"{AIDA_MARKER} opening {aida_naming.display_name()}, your chief of staff…")
         return True
 
     def _aida_resume_targets_her(self, resume_id: str) -> bool:
