@@ -155,3 +155,101 @@ describe("submitContinuation", () => {
 		}
 	});
 });
+
+describe("the input-mode annotation (input-mode-v1)", () => {
+	it("rides a fresh envelope and reaches sendCommand", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "prompt sent" });
+
+		const receipt = await submitContinuation("root", "prompt", "hello", undefined, {
+			input_mode: "dictated",
+			input_path: "provider_stt_radient",
+		});
+
+		expect(receipt.envelope).toEqual({
+			op: "prompt",
+			command_id: "12345678-1234-4678-9234-567812345678",
+			text: "hello",
+			images: undefined,
+			input_mode: "dictated",
+			input_path: "provider_stt_radient",
+		});
+		expect(mockedSendCommand).toHaveBeenCalledWith("root", receipt.envelope);
+	});
+
+	it("is replayed from the STORED envelope, never re-derived from a later draft", async () => {
+		mockedSendCommand
+			.mockRejectedValueOnce(new Error("response lost"))
+			.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+
+		await expect(
+			submitContinuation("root", "prompt", "Original", undefined, {
+				input_mode: "dictated",
+				input_path: "provider_stt_radient",
+			}),
+		).rejects.toThrow("response lost");
+
+		/* The retry is asked with a DIFFERENT annotation (the draft has been
+		   edited since); the stored envelope's own bytes must win, exactly as
+		   text/images already do. */
+		const retry = await submitContinuation("root", "prompt", "Edited draft", undefined, {
+			input_mode: "typed",
+		});
+
+		expect(retry.envelope.input_mode).toBe("dictated");
+		expect(retry.envelope.input_path).toBe("provider_stt_radient");
+		expect(mockedSendCommand.mock.calls[1]?.[1]).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+	});
+
+	it("a pre-annotation stored envelope replays without inventing one", async () => {
+		/* Exactly what the build before this change wrote: a v1 wrapper whose
+		   envelope has no annotation keys. It must stay valid (absent = legacy)
+		   and the retry must send those bytes. */
+		localStorage.setItem(
+			"lo-mobile-command:root",
+			JSON.stringify({
+				version: 1,
+				saved_at: Date.now(),
+				envelope: {
+					op: "prompt",
+					command_id: "12345678-1234-4678-9234-567812345678",
+					text: "stored before annotations",
+				},
+			}),
+		);
+		mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+
+		const retry = await submitContinuation("root", "prompt", "edited now", undefined, {
+			input_mode: "mixed",
+			input_path: "provider_stt_radient",
+		});
+
+		const sent = mockedSendCommand.mock.calls[0]?.[1] as Record<string, unknown>;
+		expect(sent.text).toBe("stored before annotations");
+		expect(sent.input_mode).toBeUndefined();
+		expect(sent.input_path).toBeUndefined();
+		expect(retry.envelope).toEqual(sent);
+	});
+
+	it("retires a stored envelope whose annotation is malformed", async () => {
+		localStorage.setItem(
+			"lo-mobile-command:root",
+			JSON.stringify({
+				version: 1,
+				saved_at: Date.now(),
+				envelope: {
+					op: "prompt",
+					command_id: "12345678-1234-4678-9234-567812345678",
+					text: "corrupt",
+					input_mode: "shout",
+				},
+			}),
+		);
+		mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "prompt sent" });
+
+		await submitContinuation("root", "prompt", "fresh", undefined, { input_mode: "typed" });
+
+		const sent = mockedSendCommand.mock.calls[0]?.[1] as Record<string, unknown>;
+		expect(sent.text).toBe("fresh");
+		expect(sent.input_mode).toBe("typed");
+	});
+});

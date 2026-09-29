@@ -67,6 +67,22 @@ def _user_texts(created: _NamedRemoteCreate) -> list[str]:
     return texts
 
 
+def _user_payload_with(created: _NamedRemoteCreate, text: str) -> dict[str, Any] | None:
+    """The journalled user ROW whose content carries ``text``, or ``None`` until it lands.
+
+    ``_user_texts`` flattens rows to their content blobs; keeping the whole payload
+    is what lets a test read the silent metadata the carriage writes beside the text
+    (see ``Message.input_mode``).
+    """
+    for entry in created.owner.transcript_entries():
+        payload = entry.get("payload") or {}
+        if payload.get("role") != "user":
+            continue
+        if text in json.dumps(payload.get("content")):
+            return payload
+    return None
+
+
 async def _open(created: _NamedRemoteCreate, monkeypatch: pytest.MonkeyPatch) -> Any:
     from local_operator.session.remote_open import open_remote_viewer
 
@@ -625,5 +641,101 @@ async def test_a_peer_bound_command_carries_its_image_to_the_owner(
                 "the /command door's image is unreadable on the device that sent it: "
                 f"{read.status_code}: {read.text[:200]}"
             )
+    finally:
+        await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_the_remote_client_mirrors_the_input_mode_carriage_gate(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-1: the remote dial resolves ``input-mode-v1`` from the OWNER's record.
+
+    WHY THIS PIN CAN FAIL. Before commit 5bf1518e8 the carriage builders read
+    ``_input_mode_supported`` directly, so a remote dial that never set the flag
+    failed LOUD — the AttributeError that reddened CI's mesh pilot run. The same
+    commit moved every read onto ``getattr(..., False)``, which makes the mirror
+    in ``RemoteSessionClient.connect`` the only thing standing between a
+    carriage-capable owner and a SILENT strip of the pair for every remote
+    session: drop that line and every existing test still passes. So this cell
+    is the counterpart of the local pins in
+    ``tests/unit/mobile/test_attach_client.py`` (agent review round 2, R2-1),
+    and it pins BOTH directions over a real pair: a capable owner ⇒ the flag
+    resolves True and the pair rides to the owner's durable row; a record
+    carrying no token this client gates on ⇒ False, fail closed, and the pair
+    never leaves this device.
+    """
+    from local_operator.network import projection as projection_mod
+    from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="carriage-mirror",
+        prompt="",
+    )
+    try:
+        viewer = await _open(created, monkeypatch)
+        try:
+            await viewer.bind_runtime()
+            client = viewer._client
+            assert client is not None, "the remote viewer bound no client"
+            # The rig's owner MUST advertise the token, or the pair could fail to
+            # reach the row below for a reason this test is not about.
+            assert INPUT_MODE_CAPABILITY in client._facts.capabilities, client._facts.capabilities
+            assert client._input_mode_supported is True, (
+                "the remote mirror missed the owner's advertisement: dropping it "
+                "strips the pair for every remote session, silently"
+            )
+            await viewer.admit_prompt(
+                "spoken on the other device",
+                command_id=str(uuid.uuid4()),
+                images=[],
+                input_mode="dictated",
+                input_path="provider_stt_radient",
+            )
+            assert await _wait(
+                lambda: _user_payload_with(created, "spoken on the other device") is not None
+            ), _user_texts(created)
+            carried = _user_payload_with(created, "spoken on the other device")
+            assert carried is not None
+            assert carried.get("input_mode") == "dictated", carried
+            assert carried.get("input_path") == "provider_stt_radient", carried
+            await asyncio.to_thread(created.owner.wait_for_turn)
+        finally:
+            await viewer.dispose()
+
+        # THE OTHER DIRECTION: the owner still advertises its real token, but this
+        # client gates on one the record does not carry — the shape a non-carriage
+        # owner presents to a remote dial — and the read must fail closed rather
+        # than carry.
+        monkeypatch.setattr(projection_mod, "INPUT_MODE_CAPABILITY", "input-mode-v1-not-advertised")
+        stripped_viewer = await _open(created, monkeypatch)
+        try:
+            await stripped_viewer.bind_runtime()
+            stripped_client = stripped_viewer._client
+            assert stripped_client is not None
+            assert INPUT_MODE_CAPABILITY in stripped_client._facts.capabilities
+            assert stripped_client._input_mode_supported is False, (
+                "an unadvertised token must fail closed: a mirror that carries it "
+                "anyway sends the pair to an owner whose record never promised it"
+            )
+            await stripped_viewer.admit_prompt(
+                "typed on the other device",
+                command_id=str(uuid.uuid4()),
+                images=[],
+                input_mode="mixed",
+                input_path="provider_stt_elevenlabs",
+            )
+            assert await _wait(
+                lambda: _user_payload_with(created, "typed on the other device") is not None
+            ), _user_texts(created)
+            stripped = _user_payload_with(created, "typed on the other device")
+            assert stripped is not None
+            assert "input_mode" not in stripped, stripped
+            assert "input_path" not in stripped, stripped
+        finally:
+            await stripped_viewer.dispose()
     finally:
         await asyncio.to_thread(created.stop)

@@ -1,5 +1,5 @@
 import { sendCommand } from "./api";
-import type { PromptImage } from "./types";
+import type { InputMode, PromptImage } from "./types";
 
 /*
  * ============================================================================
@@ -52,6 +52,11 @@ export interface ContinuationEnvelope {
 	op: ContinuationOp;
 	text: string;
 	images?: PromptImage[];
+	/** The reserved annotation (input-mode-v1). Part of the envelope's identity:
+	    a retry replays these bytes, so the annotation must not be re-derived from
+	    whatever the composer holds at retry time. Absent = the legacy reading. */
+	input_mode?: InputMode;
+	input_path?: string;
 }
 
 export interface ContinuationReceipt {
@@ -71,6 +76,10 @@ const COMMAND_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_STORED_COMMAND_CHARS = 4 * 1024 * 1024;
 const MAX_COMMAND_TEXT_CHARS = 100_000;
 const MAX_COMMAND_IMAGES = 8;
+/* Mirrors the server's ``INPUT_PATH_MAX_CHARS`` (mobile/types.py): the bound is
+   enforced where the value lands (the daemon), and this copy exists so a
+   corrupt stored envelope is retired here rather than 422ing on every retry. */
+const MAX_COMMAND_INPUT_PATH_CHARS = 96;
 /* Envelopes are scoped per session so navigating between my own conversations
    never drops one (U1). Storage is instead bounded by COUNT: only a handful of
    distinct conversations can hold an unresolved uncertain instruction at once,
@@ -110,7 +119,14 @@ function validEnvelope(value: Partial<ContinuationEnvelope>): value is Continuat
 						typeof image.data_b64 === "string" &&
 						typeof image.mime_type === "string" &&
 						image.mime_type.startsWith("image/"),
-				)))
+				))) &&
+		(value.input_mode === undefined ||
+			value.input_mode === "typed" ||
+			value.input_mode === "dictated" ||
+			value.input_mode === "mixed") &&
+		(value.input_path === undefined ||
+			(typeof value.input_path === "string" &&
+				value.input_path.length <= MAX_COMMAND_INPUT_PATH_CHARS))
 	);
 }
 
@@ -206,6 +222,12 @@ function storedEnvelope(key: string): ContinuationEnvelope | null {
 	return null;
 }
 
+/** The provenance a FRESH send annotates; a retry replays the stored envelope. */
+export interface SendAnnotation {
+	input_mode: InputMode;
+	input_path?: string;
+}
+
 /** Retain the exact producer envelope until acknowledgement. The UUID is the
  * identity of this body, not a mutable composer slot: after uncertain delivery,
  * retries replay these bytes while later edits remain a separate draft.
@@ -217,12 +239,18 @@ function storedEnvelope(key: string): ContinuationEnvelope | null {
  * choose: a caller generating its own would be the second identity rule the
  * contract above exists to prevent, and a retry must reuse the stored id rather
  * than a fresh one. It fires on the retry path too, with the stored envelope, so
- * a replayed send paints its row the same way a first attempt does. */
+ * a replayed send paints its row the same way a first attempt does.
+ *
+ * ``annotation`` (mobile STT, input-mode-v1) is consulted ONLY for a fresh
+ * send: a stored envelope carries its own annotation and a retry replays IT,
+ * never the provenance of a draft typed since — the same rule text/images
+ * already follow. */
 export async function submitContinuation(
 	sessionId: string,
 	op: ContinuationOp,
 	text: string,
 	images?: PromptImage[],
+	annotation?: SendAnnotation,
 	onEnvelope?: (envelope: ContinuationEnvelope) => void,
 ): Promise<ContinuationReceipt> {
 	const key = commandStorageKey(sessionId);
@@ -232,6 +260,7 @@ export async function submitContinuation(
 		command_id: crypto.randomUUID(),
 		text,
 		images: images?.map((image) => ({ ...image })),
+		...(annotation ?? {}),
 	};
 	if (!validEnvelope(envelope)) {
 		clearPendingContinuation(sessionId);

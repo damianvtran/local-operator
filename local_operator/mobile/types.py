@@ -73,6 +73,39 @@ from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
 #: runtime's auth reader and the attach client's handshake verification.
 OPERATOR_CAP_HEX_CHARS = OPERATOR_CAP_BYTES * 2
 
+#: The ``input_mode`` vocabulary (mobile STT, input-mode-v1). Absence and an
+#: explicit empty string BOTH read as legacy — every pre-carriage producer sends
+#: nothing — while a present non-empty value must be one of these: the value is
+#: stored on the durable user row (cf9f's carriage) and read by the model-side
+#: annotation consumer, so a silently coerced mode would write a fact no
+#: consumer agreed to.
+INPUT_MODES = ("typed", "dictated", "mixed")
+
+#: How long an ``input_path`` token may be. The frozen vocabulary's longest
+#: token is ``provider_stt_superwhisper`` (25 chars); the bound leaves room for
+#: a future token without letting an arbitrary string ride a control frame into
+#: durable state.
+INPUT_PATH_MAX_CHARS = 96
+
+
+def _input_annotation(data: Any) -> tuple[str, str]:
+    """Validate the reserved ``input_mode``/``input_path`` pair on a payload.
+
+    Optional on BOTH boundaries this module serves (HTTP body, control frame):
+    absence is the legacy reading. A PRESENT field is validated and a bad one is
+    refused rather than coerced or dropped — dropping would mislabel a dictated
+    turn as typed, and coercing would persist a mode nobody sent.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("annotation payload must be an object")
+    mode = data.get("input_mode", "")
+    if not isinstance(mode, str) or (mode and mode not in INPUT_MODES):
+        raise ValueError("input_mode must be one of 'typed', 'dictated' or 'mixed'")
+    path = data.get("input_path", "")
+    if not isinstance(path, str) or len(path) > INPUT_PATH_MAX_CHARS:
+        raise ValueError("input_path must be a bounded string")
+    return mode, path
+
 
 @dataclass(frozen=True)
 class ContinuationCommand:
@@ -80,6 +113,14 @@ class ContinuationCommand:
 
     Process discovery and request ids are transport details. This identity is
     the conversation-level receipt that survives reconnects and host changes.
+
+    ``input_mode``/``input_path`` are the reserved SILENT annotation
+    (mobile STT, input-mode-v1): how the user produced the text, and which
+    voice path produced the dictated part. Absence ("") is the legacy reading;
+    see ``_input_annotation`` for the validation rule. They ride the same
+    envelope as text/images so a retry replays the annotation under the same
+    UUID — the fields are part of the command's immutable identity, not a
+    transport option.
     """
 
     command_id: str
@@ -87,6 +128,8 @@ class ContinuationCommand:
     text: str
     images: list[dict[str, str]] = field(default_factory=list)
     submitted_at: float = field(default_factory=time.time)
+    input_mode: str = ""
+    input_path: str = ""
 
     @staticmethod
     def create(
@@ -135,12 +178,15 @@ class ContinuationCommand:
         submitted_at = data.get("submitted_at", time.time())
         if not isinstance(submitted_at, (int, float)) or isinstance(submitted_at, bool):
             raise ValueError("submitted_at must be a number")
+        input_mode, input_path = _input_annotation(data)
         return ContinuationCommand(
             command_id=command_id,
             session_id=session_id,
             text=text,
             images=[dict(item) for item in images],
             submitted_at=float(submitted_at),
+            input_mode=input_mode,
+            input_path=input_path,
         )
 
 
@@ -235,6 +281,11 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         images = frame.get("images", [])
         if not isinstance(images, list) or not all(isinstance(item, dict) for item in images):
             raise ValueError("images must be a list of objects")
+        # The annotation pair is shape-checked HERE because this validator is the
+        # boundary that refuses malformed frames before any runtime sees them;
+        # unknown fields are deliberately not rejected in general, so without
+        # this a mangled input_mode would ride silently to a durable row.
+        _input_annotation(frame)
         # Protocol-v3 producers send identity on both paths. Older authenticated
         # loopback clients omitted it, so absence remains compatible; a supplied
         # id is always validated before reaching transcript or steering state.

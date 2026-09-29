@@ -10,6 +10,7 @@
  */
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type {
+	Capabilities,
 	SessionProjection,
 	SubagentRow,
 	TodoPhase,
@@ -59,6 +60,12 @@ export interface ProjectionSlot {
 
 let sessions: SessionSummary[] = [];
 let sessionsConnected = false;
+/* Server capabilities off the SAME list frames that carry the sessions (see
+   the daemon's ``_list_frame``): one answer, two transports. ``null`` means an
+   older daemon omitted the key — read it as "no capabilities", never as
+   "unchanged" — and the voice mic's rule for it is the rule for
+   ``available: false``: hide. */
+let capabilities: Capabilities | null = null;
 /* The pins the user has ASKED FOR and the daemon has not answered for yet,
    held as the value that was asked for. An overlay on the server's list, never
    a rewrite of it, and the distinction is the whole point.
@@ -114,6 +121,11 @@ export function useSessions(): {
     `useSyncExternalStore` compares. */
 export function usePinMarks(): ReadonlyMap<string, boolean> {
 	return useSyncExternalStore(subscribe, () => pinMarks);
+}
+
+/** The daemon's capability answer (``capabilities`` on the list payload). */
+export function useCapabilities(): Capabilities | null {
+	return useSyncExternalStore(subscribe, () => capabilities);
 }
 
 export function useProjection(sessionId: string): ProjectionSlot {
@@ -197,8 +209,10 @@ export function retainSessionListStream(): () => void {
 				try {
 					const payload = JSON.parse(data) as {
 						sessions: SessionSummary[];
+						capabilities?: Capabilities;
 					};
 					sessions = payload.sessions;
+					capabilities = payload.capabilities ?? null;
 					sessionsConnected = true;
 					/* A frame is the daemon's answer for every row it carries, so a mark
 					   it AGREES with has been confirmed and is dropped: from here the

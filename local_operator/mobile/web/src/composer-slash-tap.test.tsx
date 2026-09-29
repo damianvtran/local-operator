@@ -96,7 +96,7 @@ async function openSheet() {
 			onCloseEffort={() => {}}
 		/>,
 	);
-	const field = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+	const field = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
 	fireEvent.change(field, { target: { value: "/" } });
 	await waitFor(() => expect(screen.getByRole("button", { name: /\/goal/ })).toBeTruthy());
 	return field;

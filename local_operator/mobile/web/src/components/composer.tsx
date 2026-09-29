@@ -9,11 +9,23 @@
  * command) and a stop button appears beside it.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getCommands, sendCommand } from "../api";
+import { getCommands, HttpError, sendCommand, transcribeAudio } from "../api";
 import {
 	getPendingContinuation,
 	submitContinuation,
 } from "../continuation-command";
+import {
+	annotationForSend,
+	applyEdit,
+	computeEdit,
+	emptyProvenance,
+	formatDuration,
+	joinDraft,
+	MAX_RECORDING_MS,
+	noteDictation,
+	pickRecorderMime,
+	type DictationProvenance,
+} from "../lib/dictation";
 import {
 	markPendingEchoAccepted,
 	projectionCarriesCommand,
@@ -22,7 +34,7 @@ import {
 } from "../pending-echo";
 import { Sheet } from "./ui/sheet";
 import { cn } from "../lib/cn";
-import { useDraft } from "../store";
+import { useCapabilities, useDraft } from "../store";
 import type { PromptImage, SessionProjection, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
@@ -78,6 +90,25 @@ function slashQuery(text: string): string | null {
 	if (text.includes("\n")) return null;
 	const space = text.indexOf(" ");
 	return (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
+}
+
+/** The voice state machine's four resting points (error surfaces as `idle` + copy). */
+type DictationState = "idle" | "recording" | "transcribing";
+
+/**
+ * The failure copy for one transcription attempt.
+ *
+ * 402/413/422/503 carry the DAEMON's own actionable sentence (top up, shorten,
+ * wrong format, no path) and are shown verbatim — the user can act on every
+ * one. 502/500 and transport failures are transient or diagnostic, so they get
+ * the one retry sentence; the server's upstream diagnostics belong in a log,
+ * not on a phone.
+ */
+function dictationErrorCopy(error: unknown): string {
+	if (error instanceof HttpError && [402, 413, 422, 503].includes(error.status)) {
+		return error.message;
+	}
+	return "Couldn't transcribe that. Try again.";
 }
 
 /**
@@ -277,7 +308,25 @@ const CONNECTING_STATUS = "Connecting…";
    ways of saying one thing). It appears only when there IS a draft that cannot
    go, which is the moment the question is asked. */
 const SENDING_HINT = `${CONNECTING_STATUS} — send again when this one lands.`;
-const COMPOSER_PLACEHOLDER = "Message Local Operator…";
+/* D1: the placeholder must FIT the textarea's narrowest resting width (184px
+   beside the mic at 390×844) or the empty box wraps to two lines and the
+   first keystroke collapses it 45→24 with a visible reflow above the
+   composer (design round 1, D1). The old string measured 188.5px at 16px
+   system-ui — 4.5px over — this one measures 77.8px, which survives narrower
+   viewports and font fallbacks too. The product name is carried by the app
+   shell (document title, header mark). */
+const COMPOSER_PLACEHOLDER = "Message…";
+/* The dictation outcome lines (U2/U3/D2), rendered in the same polite status
+   row the live states use. DICTATION_ADDED is the completion announcement:
+   focus is deliberately NOT returned to the field with it — a programmatic
+   focus() on iOS pops the keyboard over wherever the user moved on to — so a
+   screen reader hears the line while a sighted user taps the field to keep
+   typing. DICTATION_EMPTY answers a transcript that came back empty; the
+   discarded line surfaces the dictation a send/steer just dropped, which used
+   to be silent. */
+const DICTATION_ADDED = "Transcript added";
+const DICTATION_EMPTY = "Didn't catch that — try again.";
+const DICTATION_DISCARDED = "Voice input discarded.";
 
 export function Composer({
 	pid,
@@ -313,6 +362,48 @@ export function Composer({
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 
+	/* ---- voice dictation (mobile STT) ------------------------------------ */
+
+	/* The mic exists iff the daemon knows a path that can RUN and this browser
+	   can record one: a secure context, getUserMedia and MediaRecorder. The old
+	   plain-HTTP case is deliberately excluded — a mic that appears and fails is
+	   worse than one that never does. */
+	const capabilities = useCapabilities();
+	const micAvailable =
+		capabilities?.stt?.available === true &&
+		typeof window !== "undefined" &&
+		window.isSecureContext === true &&
+		typeof navigator !== "undefined" &&
+		!!navigator.mediaDevices?.getUserMedia &&
+		typeof MediaRecorder !== "undefined";
+	const [dictation, setDictation] = useState<DictationState>("idle");
+	/* The transient outcome line (added / empty / discarded); lives in the same
+	   status row as the live states so nothing moves between them (D3). */
+	const [dictationNotice, setDictationNotice] = useState("");
+	const dictationRef = useRef<DictationState>("idle");
+	dictationRef.current = dictation;
+	const [recordSeconds, setRecordSeconds] = useState(0);
+	const recorderRef = useRef<MediaRecorder | null>(null);
+	const streamRef = useRef<MediaStream | null>(null);
+	const chunksRef = useRef<Blob[]>([]);
+	const dictationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+	const dictationCapRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	/* An epoch per attempt: the permission prompt is async, so a cancel or a
+	   send during it must refuse the stream when it arrives (and a stale result
+	   must never append to a draft it did not record into). */
+	const dictationEpochRef = useRef(0);
+	const dictationActiveRef = useRef(false);
+	const dictationCancelledRef = useRef(false);
+	/* U5: the in-flight transcribe request, so the status row's cancel aborts
+	   it rather than only hiding the wait. Null whenever nothing is in flight. */
+	const transcribeAbortRef = useRef<AbortController | null>(null);
+	/* U1: set when a transcript has just been committed, consumed by the [text]
+	   layout effect to reveal the appended span (scroll, never focus). */
+	const revealAppendRef = useRef(false);
+	/* The send window's provenance (see lib/dictation.ts). A ref, not state: it
+	   changes with every keystroke and renders nothing itself. */
+	const provenanceRef = useRef<DictationProvenance>(emptyProvenance());
+
 	/* U1: what the retry button is about to resend.
 	 *
 	 * The withdrawn row took the failed message's only visible copy with it, and
@@ -347,12 +438,19 @@ export function Composer({
 		? "turn cut off — tap to resume"
 		: "interrupted — tap to resume";
 
-	/* Auto-grow: reset to auto so shrink works, then clamp at six lines. */
+	/* Auto-grow: reset to auto so shrink works, then clamp at six lines; when a
+	   transcript just landed, also reveal it (U1). The reveal is a plain
+	   scrollTop assignment on the field — never focus(), which on iOS would
+	   pop the keyboard over whatever the user was doing while it transcribed. */
 	useEffect(() => {
 		const el = textareaRef.current;
 		if (!el) return;
 		el.style.height = "auto";
 		el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`;
+		if (revealAppendRef.current) {
+			revealAppendRef.current = false;
+			el.scrollTop = el.scrollHeight;
+		}
 	}, [text]);
 
 	const disabled = false;
@@ -394,7 +492,221 @@ export function Composer({
 		});
 	};
 
+	/* ---- the dictation state machine -------------------------------------- */
+
+	const releaseDictationTracks = () => {
+		streamRef.current?.getTracks().forEach((track) => track.stop());
+		streamRef.current = null;
+	};
+
+	const clearDictationTimers = () => {
+		if (dictationTimerRef.current) {
+			clearInterval(dictationTimerRef.current);
+			dictationTimerRef.current = null;
+		}
+		if (dictationCapRef.current) {
+			clearTimeout(dictationCapRef.current);
+			dictationCapRef.current = null;
+		}
+	};
+
+	/** Stop the in-flight dictation and DISCARD it: tracks released, timers
+	    cleared, any in-flight result dropped when it lands. Idempotent, and
+	    safe while the permission prompt is still up (the epoch refuses the
+	    stream when it resolves). */
+	const cancelDictation = () => {
+		dictationCancelledRef.current = true;
+		dictationActiveRef.current = false;
+		dictationEpochRef.current++;
+		clearDictationTimers();
+		/* U5: a transcription in flight is cancelled for REAL — the abort reaches
+		   the request, not just the UI. A no-op when nothing is in flight. */
+		transcribeAbortRef.current?.abort();
+		transcribeAbortRef.current = null;
+		const recorder = recorderRef.current;
+		recorderRef.current = null;
+		if (recorder && recorder.state !== "inactive") {
+			try {
+				recorder.stop();
+			} catch {
+				/* Already stopping. */
+			}
+		}
+		releaseDictationTracks();
+		chunksRef.current = [];
+		setDictation("idle");
+		setRecordSeconds(0);
+		setDictationNotice("");
+	};
+
+	const startDictation = async () => {
+		if (dictationRef.current !== "idle" || !micAvailable) return;
+		setError("");
+		setNotice("");
+		setDictationNotice("");
+		const epoch = ++dictationEpochRef.current;
+		dictationCancelledRef.current = false;
+		dictationActiveRef.current = true;
+		let stream: MediaStream;
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({
+				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+			});
+		} catch (e) {
+			if (epoch !== dictationEpochRef.current) return;
+			dictationActiveRef.current = false;
+			setError(
+				e instanceof DOMException && e.name === "NotAllowedError"
+					? "Microphone access is blocked for this site. Allow it in your browser settings and try again."
+					: "Couldn't start recording. Check your microphone and try again.",
+			);
+			return;
+		}
+		if (epoch !== dictationEpochRef.current) {
+			/* A cancel (or a send) resolved while the permission prompt was up. */
+			stream.getTracks().forEach((track) => track.stop());
+			return;
+		}
+		let recorder: MediaRecorder;
+		try {
+			const mimeType = pickRecorderMime((mime) => MediaRecorder.isTypeSupported(mime));
+			recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+		} catch {
+			stream.getTracks().forEach((track) => track.stop());
+			dictationActiveRef.current = false;
+			setError("Couldn't start recording. Check your microphone and try again.");
+			return;
+		}
+		streamRef.current = stream;
+		recorderRef.current = recorder;
+		chunksRef.current = [];
+		recorder.ondataavailable = (event) => {
+			if (event.data && event.data.size > 0) chunksRef.current.push(event.data);
+		};
+		recorder.onstop = () => {
+			void finishDictation(recorder);
+		};
+		recorder.start(1000);
+		setRecordSeconds(0);
+		setDictation("recording");
+		dictationTimerRef.current = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+		/* The 120 s cap stops the recorder and TRANSCRIBES what it has — the cap
+		   is a bound on the recording, not a discard. */
+		dictationCapRef.current = setTimeout(() => {
+			if (recorderRef.current === recorder) stopDictation();
+		}, MAX_RECORDING_MS);
+	};
+
+	const stopDictation = () => {
+		const recorder = recorderRef.current;
+		if (!recorder || recorder.state === "inactive") return;
+		clearDictationTimers();
+		setDictation("transcribing");
+		try {
+			recorder.stop();
+		} catch {
+			/* Racing the cap timer's own stop. */
+		}
+	};
+
+	const finishDictation = async (recorder: MediaRecorder) => {
+		clearDictationTimers();
+		releaseDictationTracks();
+		if (recorderRef.current === recorder) recorderRef.current = null;
+		const chunks = chunksRef.current;
+		chunksRef.current = [];
+		if (dictationCancelledRef.current) return;
+		if (chunks.length === 0) {
+			dictationActiveRef.current = false;
+			setDictation("idle");
+			setRecordSeconds(0);
+			return;
+		}
+		const blob = new Blob(chunks, { type: recorder.mimeType });
+		/* U5: the request is abortable, so the status row's own cancel reaches
+		   the network rather than only hiding the wait. */
+		const controller = new AbortController();
+		transcribeAbortRef.current = controller;
+		let result: { text: string; path: string };
+		try {
+			result = await transcribeAudio(blob, controller.signal);
+		} catch (e) {
+			if (dictationCancelledRef.current) return;
+			dictationActiveRef.current = false;
+			setError(dictationErrorCopy(e));
+			setDictation("idle");
+			setRecordSeconds(0);
+			return;
+		} finally {
+			/* Only THIS attempt's controller is unmounted; the cancel or a fresher
+			   attempt may already own the ref. */
+			if (transcribeAbortRef.current === controller) transcribeAbortRef.current = null;
+		}
+		/* A send (or unmount) may have cancelled while the request was out: the
+		   result is DISCARDED — appending it after the draft moved out would be
+		   a clobber by another name. */
+		if (dictationCancelledRef.current) return;
+		dictationActiveRef.current = false;
+		const previous = textRef.current;
+		const joined = joinDraft(previous, result.text);
+		const cleaned = result.text.trim();
+		if (cleaned !== "" && joined !== previous) {
+			provenanceRef.current = noteDictation(provenanceRef.current, {
+				start: joined.length - cleaned.length,
+				end: joined.length,
+				path: result.path ?? "",
+			});
+			/* U1: the [text] layout effect reveals the appended span after React
+			   commits it — scroll, never focus. */
+			revealAppendRef.current = true;
+			setText(joined);
+			/* U3: a polite completion line, the announcement a screen reader was
+			   missing; see the DICTATION_ADDED comment for the focus tradeoff. */
+			setDictationNotice(DICTATION_ADDED);
+		} else if (cleaned === "") {
+			/* D2: silence (or a cut-off) is answered instead of the silent
+			   return to idle the design review caught. */
+			setDictationNotice(DICTATION_EMPTY);
+		}
+		setDictation("idle");
+		setRecordSeconds(0);
+	};
+
+	/** Clear the draft AND its provenance window: a fresh message starts clean. */
+	const clearDraft = () => {
+		provenanceRef.current = emptyProvenance();
+		setText("");
+	};
+
+	/** Classify one USER-driven draft change (typing, a slash fill): sticky
+	    `sawTyping`, spans trimmed, reset when the draft empties. */
+	const applyUserEdit = (value: string) => {
+		const edit = computeEdit(textRef.current, value);
+		if (edit) provenanceRef.current = applyEdit(provenanceRef.current, edit);
+		if (value.trim() === "") provenanceRef.current = emptyProvenance();
+	};
+
+	/* Navigating away must not leave the microphone hot (or a permission
+	   prompt pending): the cleanup releases tracks and discards any in-flight
+	   result. */
+	useEffect(() => {
+		return () => cancelDictation();
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- refs + stable setters only
+	}, []);
+
 	const send = async (raw: string, op?: "prompt" | "steer") => {
+		/* SEND CANCELS AN IN-FLIGHT DICTATION: tracks released and a result still
+		   in the air discarded (aborted, U5). A transcript landing after this
+		   message left the composer is a clobber by another name — the
+		   transcript belongs to the NEXT message, and the next tap of the mic
+		   starts one. THE DROP IS SAID (U2): a brief line in the status row,
+		   because speech the user just gave otherwise vanishes with nothing said,
+		   and send/steer is not a deliberate cancel. */
+		setDictationNotice("");
+		if (dictationActiveRef.current) {
+			cancelDictation();
+			setDictationNotice(DICTATION_DISCARDED);
+		}
 		const trimmed = raw.trim();
 		if ((!trimmed && images.length === 0 && !retryPending) || sending || disabled) return;
 		setSending(true);
@@ -436,6 +748,9 @@ export function Composer({
 					submittedEnvelope.op,
 					trimmed,
 					payloadImages,
+					/* The annotation is consulted only for a FRESH send (a retry replays
+					   the stored envelope's own bytes, annotation included). */
+					annotationForSend(provenanceRef.current),
 					/* The user's message leaves the composer HERE, into a row of its own,
 					   before the daemon has answered — the whole point of the optimistic
 					   path. It is painted under the ENVELOPE's id rather than a fresh one,
@@ -465,7 +780,7 @@ export function Composer({
 							envelope.text === trimmed &&
 							JSON.stringify(envelope.images) === JSON.stringify(payloadImages)
 						) {
-							setText("");
+							clearDraft();
 						}
 					},
 				);
@@ -490,7 +805,7 @@ export function Composer({
 				if (acknowledgedCurrentDraft) {
 					imagesRef.current.forEach((i) => URL.revokeObjectURL(i.preview));
 					setImages([]);
-					setText("");
+					clearDraft();
 				} else {
 					/* The acknowledged envelope covers the submission, but NOT everything
 					   the user is looking at: they started another message while this one was
@@ -503,7 +818,7 @@ export function Composer({
 				}
 				return;
 			}
-			setText("");
+			clearDraft();
 		} catch {
 			/* Previous conversations can fail at every layer between fetch and
 			   provider construction. Those mechanics are intentionally invisible:
@@ -525,7 +840,13 @@ export function Composer({
 			/* Only into an empty composer, on the same reading the acknowledgement
 			   uses: text the user has typed since is theirs, and the retained envelope
 			   behind the retry button still carries the body this submit sent. */
-			if (submitted.echo && textRef.current.trim() === "") setText(submitted.echo.text);
+			if (submitted.echo && textRef.current.trim() === "") {
+				/* A restored draft opens a FRESH provenance window: the retained
+				   envelope behind the retry button still carries the failed send's own
+				   annotation, which is what a retry replays. */
+				provenanceRef.current = emptyProvenance();
+				setText(submitted.echo.text);
+			}
 			setRetryEnvelope(getPendingContinuation(pid));
 			setError(projection.streaming ? STEER_ERROR : CONTINUATION_ERROR);
 		} finally {
@@ -542,8 +863,12 @@ export function Composer({
 	};
 
 	const onChange = (value: string) => {
+		applyUserEdit(value);
 		setText(value);
 		setSlashOpen(slashQuery(value) !== null);
+		/* Typing is the next action: a lingering dictation outcome line is done
+		   being useful. */
+		setDictationNotice("");
 	};
 
 	/* The sheet ALSO watches the value: the driver/IME paths that set it
@@ -555,6 +880,7 @@ export function Composer({
 
 
 	const onSlashPick = (fill: string, submit: boolean) => {
+		applyUserEdit(fill);
 		setText(fill);
 		if (submit) {
 			void send(fill);
@@ -635,6 +961,59 @@ export function Composer({
 				</div>
 			) : null}
 
+			{/* The dictation status row: recording shows a live dot + elapsed time and
+			    a cancel; transcribing shows the wait and its own cancel (U5); the
+			    outcome lines (added / empty / discarded) reuse the row, so one
+			    `min-h-11` height covers every state and stopping a recording does not
+			    move the line (design round 1, D3). `role="status"` (polite) so a
+			    screen reader hears the state without stealing focus; colour is never
+			    the only carrier (dot + word + timer). */}
+			{dictation !== "idle" || dictationNotice ? (
+				<div className="flex min-h-11 items-center gap-2 px-0.5">
+					{dictation === "recording" ? (
+						<>
+							<p
+								role="status"
+								aria-live="polite"
+								className="flex items-center gap-1.5 text-body-sm text-ink-muted"
+							>
+								<span aria-hidden className="lo-dictation-dot size-2 rounded-full bg-danger" />
+								Recording {formatDuration(recordSeconds)}
+							</p>
+							<button
+								type="button"
+								onClick={cancelDictation}
+								aria-label="cancel recording"
+								className="flex min-h-11 items-center rounded-sm px-2 text-body-sm text-ink-muted active:text-ink"
+							>
+								cancel
+							</button>
+						</>
+					) : dictation === "transcribing" ? (
+						<>
+							<p role="status" aria-live="polite" className="text-body-sm text-ink-muted">
+								Transcribing…
+							</p>
+							{/* U5: the wait has an exit. It discards what was recorded (the same
+							    deal as cancelling a recording) and says nothing extra — a
+							    deliberate cancel needs no notice. */}
+							<button
+								type="button"
+								onClick={cancelDictation}
+								aria-label="cancel transcription"
+								className="flex min-h-11 items-center rounded-sm px-2 text-body-sm text-ink-muted active:text-ink"
+							>
+								cancel
+							</button>
+						</>
+					) : (
+						<p role="status" aria-live="polite" className="text-body-sm text-ink-muted">
+							{dictationNotice}
+						</p>
+					)}
+				</div>
+			) : null}
+
 			<div
 				className="flex items-end gap-2"
 				onDragOver={(e) => {
@@ -668,6 +1047,43 @@ export function Composer({
 						<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
 					</svg>
 				</button>
+				{/* The voice mic: same 44px round control as attach/send/stop, left
+				    cluster beside attach. Visible iff the daemon advertised an available
+				    path AND this browser can record one; `sending`/`retryPending` do NOT
+				    disable it — the draft stays editable while a send is in flight. */}
+				{micAvailable ? (
+					<button
+						type="button"
+						onClick={() => {
+							if (dictationRef.current === "recording") stopDictation();
+							else if (dictationRef.current === "idle") void startDictation();
+						}}
+						disabled={dictation === "transcribing"}
+						aria-label={
+							dictation === "recording"
+								? "stop and transcribe"
+								: dictation === "transcribing"
+									? "transcribing"
+									: "start voice input"
+						}
+						className={cn(
+							"flex size-11 shrink-0 items-center justify-center rounded-full border active:bg-elevated disabled:opacity-50",
+							dictation === "recording"
+								? "border-danger-border bg-danger-wash text-danger"
+								: "border-control text-ink-muted",
+						)}
+					>
+						{dictation === "transcribing" ? (
+							<span aria-hidden className="text-meta">…</span>
+						) : (
+							<svg width="18" height="18" viewBox="0 0 24 24" fill={dictation === "recording" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+								<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+								<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+								<line x1="12" y1="19" x2="12" y2="22" />
+							</svg>
+						)}
+					</button>
+				) : null}
 				<div
 					className={cn(
 						"flex min-w-0 flex-1 items-end rounded-md border bg-elevated px-3 py-2",

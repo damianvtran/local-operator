@@ -430,3 +430,89 @@ def test_an_old_ask_payload_without_the_new_keys_still_rebuilds() -> None:
     rebuilt = _ask_question_from_pending(from_gate)
     assert rebuilt.recommended is None
     assert [option.label for option in rebuilt.options] == ["Beta", "Gamma"]
+
+
+# ---------------------------------------------------------------------------
+# The input-mode annotation (mobile STT, input-mode-v1)
+# ---------------------------------------------------------------------------
+
+
+def test_a_prompt_frame_shape_checks_the_annotation_pair() -> None:
+    """A mangled annotation is REFUSED, not dropped: the value is durable."""
+    base = {
+        "op": "prompt",
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "session_id": "s1",
+        "text": "hello",
+    }
+    # Present and valid, present-and-empty (legacy reading), and absent (legacy):
+    # all three pass, because absence is exactly what older producers send.
+    validate_control_frame({**base, "input_mode": "dictated", "input_path": "provider_stt_radient"})
+    validate_control_frame({**base, "input_mode": "mixed"})
+    validate_control_frame({**base, "input_mode": ""})
+    validate_control_frame(base)
+
+    with pytest.raises(ValueError, match="input_mode"):
+        validate_control_frame({**base, "input_mode": "shouted"})
+    with pytest.raises(ValueError, match="input_mode"):
+        validate_control_frame({**base, "input_mode": 7})
+    with pytest.raises(ValueError, match="input_path"):
+        validate_control_frame({**base, "input_path": "x" * 200})
+    with pytest.raises(ValueError, match="input_path"):
+        validate_control_frame({**base, "input_path": ["provider_stt_radient"]})
+
+
+def test_a_steer_frame_shape_checks_the_annotation_pair_too() -> None:
+    frame = {"op": "steer", "text": "more"}
+    validate_control_frame({**frame, "input_mode": "typed"})
+
+    with pytest.raises(ValueError, match="input_mode"):
+        validate_control_frame({**frame, "input_mode": "yelled"})
+
+
+def test_continuation_command_round_trips_the_annotation() -> None:
+    from local_operator.mobile.types import ContinuationCommand
+
+    payload = {
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "session_id": "s1",
+        "text": "hello",
+        "input_mode": "mixed",
+        "input_path": "provider_stt_elevenlabs",
+    }
+    command = ContinuationCommand.from_json(payload)
+    assert command.input_mode == "mixed"
+    assert command.input_path == "provider_stt_elevenlabs"
+    # The envelope is the immutable identity a retry replays: the annotation
+    # must survive the round trip, not be re-derived.
+    round_tripped = ContinuationCommand.from_json(command.to_json())
+    assert round_tripped.input_mode == "mixed"
+    assert round_tripped.input_path == "provider_stt_elevenlabs"
+
+
+def test_a_legacy_command_payload_reads_as_no_annotation() -> None:
+    from local_operator.mobile.types import ContinuationCommand
+
+    command = ContinuationCommand.from_json(
+        {
+            "command_id": "12345678-1234-4678-9234-567812345678",
+            "session_id": "s1",
+            "text": "hello",
+        }
+    )
+    assert command.input_mode == ""
+    assert command.input_path == ""
+
+
+def test_a_malformed_annotation_refuses_the_command_payload() -> None:
+    from local_operator.mobile.types import ContinuationCommand
+
+    base = {
+        "command_id": "12345678-1234-4678-9234-567812345678",
+        "session_id": "s1",
+        "text": "hello",
+    }
+    with pytest.raises(ValueError, match="input_mode"):
+        ContinuationCommand.from_json({**base, "input_mode": "bogus"})
+    with pytest.raises(ValueError, match="input_path"):
+        ContinuationCommand.from_json({**base, "input_path": "z" * 200})

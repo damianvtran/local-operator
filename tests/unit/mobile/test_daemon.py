@@ -277,9 +277,24 @@ def test_http_gate_and_login_flow() -> None:
     authed = client.get("/api/sessions")
     assert authed.status_code == 200
     # The listing carries the durable-read marker beside the rows (present on
-    # every frame, empty when everything was read). Asserted in full rather than
-    # by key so a field appearing here is a decision this test sees.
-    assert authed.json() == {"sessions": [], "degraded": []}
+    # every frame, empty when everything was read) and the capabilities block
+    # the phone renders the voice mic from (mobile STT) — the same builder
+    # serves both transports, so its keys are asserted in full here. The top
+    # level is asserted BY KEY so a field appearing there is a decision this
+    # test sees; `features` is a build fact (an object), and `stt` is the
+    # availability probe, pinned to the isolated fixture's answer (no
+    # credentials are stored there).
+    payload = authed.json()
+    assert sorted(payload) == ["capabilities", "degraded", "sessions"]
+    assert payload["sessions"] == [] and payload["degraded"] == []
+    capabilities = payload["capabilities"]
+    assert sorted(capabilities) == ["features", "stt"]
+    assert isinstance(capabilities["features"], dict)
+    stt = capabilities["stt"]
+    assert sorted(stt) == ["available", "path", "reason"]
+    assert stt["available"] is False, "the isolated fixture stores no credentials"
+    assert stt["path"] is None
+    assert isinstance(stt["reason"], str)
 
     logout = client.get("/logout")
     assert logout.status_code == 303
