@@ -528,12 +528,12 @@ def test_a_stored_notice_row_is_hidden_in_the_audit_phase_too() -> None:
 
 
 def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
-    """D9: the phone suppressed ONE of the three continuation prompts and
-    rendered the other two as the user's own words — a partially copied
-    list, which is the drift signature itself. All three now come from one
+    """D9: the phone suppressed ONE of the continuation prompts and
+    rendered the others as the user's own words — a partially copied
+    list, which is the drift signature itself. All of them now come from one
     shared list."""
     prompts = harness_chrome_prompts()
-    assert len(prompts) == 3
+    assert len(prompts) == 4
 
     assert _page_rows([Message.user(p) for p in prompts]) == []
 

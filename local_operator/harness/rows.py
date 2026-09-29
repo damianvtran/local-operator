@@ -27,9 +27,10 @@ decision on a third surface, so it belongs here rather than in that fold.
 
 CONSTRAINT — this module must stay host-free. It sits below both renderers
 the same way ``compaction/marker.py`` sits below the hosts that must not
-import the session. The three chrome prompts live in modules that would be
+import the session. The chrome prompts live in modules that would be
 the wrong import direction from here (``session.goal_loop``,
-``session.session``), so they are gathered behind a function that imports
+``session.session``, ``harness.loop``), so they are gathered behind a
+function that imports
 them lazily. That keeps ONE list rather than a copy per host — the partial
 copy is precisely the drift signature the review named: the phone had
 suppressed one of the three prompts and rendered the other two as the
@@ -145,7 +146,7 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     not type any of them, and painting one attributes the harness's words to
     them. The live path never shows them, so replay must not either.
 
-    The three, and why each is persisted:
+    The four, and why each is persisted:
 
     - ``LOOP_PROMPT`` — the goal loop's self-continuation.
     - ``_CONTINUATION_PROMPT`` — the session's auto-continuation after a
@@ -153,6 +154,8 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     - ``CONNECTIVITY_CONTINUATION_PROMPT`` — records why ONE answer arrived
       in two pieces across a network interruption; the live run showed a
       notice instead.
+    - ``NAMELESS_CALL_RECOVERY_PROMPT`` — the re-ask after a tool call arrived
+      with no name and was dropped; the live run showed a notice instead.
 
     This is the EXACT-match half of the decision, and it is no longer the whole
     of it: two fixed prompts that look like the user's words do not, because the
@@ -177,11 +180,19 @@ def harness_chrome_prompts() -> tuple[str, ...]:
     decision, and it is this function plus those recognisers, not a list per
     surface.
     """
-    from local_operator.harness.loop import CONNECTIVITY_CONTINUATION_PROMPT
+    from local_operator.harness.loop import (
+        CONNECTIVITY_CONTINUATION_PROMPT,
+        NAMELESS_CALL_RECOVERY_PROMPT,
+    )
     from local_operator.session.goal_loop import LOOP_PROMPT
     from local_operator.session.session import _CONTINUATION_PROMPT
 
-    return (LOOP_PROMPT, _CONTINUATION_PROMPT, CONNECTIVITY_CONTINUATION_PROMPT)
+    return (
+        LOOP_PROMPT,
+        _CONTINUATION_PROMPT,
+        CONNECTIVITY_CONTINUATION_PROMPT,
+        NAMELESS_CALL_RECOVERY_PROMPT,
+    )
 
 
 def is_harness_chrome(text: str) -> bool:
@@ -236,8 +247,8 @@ def is_harness_injection(row: Any) -> bool:
     human-facing surface may paint it as their words. The live path never
     paints one either (the failover moment has its own receipt), which makes
     dropping it live/replay parity rather than a second opinion — the same
-    doctrine :func:`is_harness_chrome` follows for the three continuation
-    prompts.
+    doctrine :func:`is_harness_chrome` follows for the continuation and
+    recovery prompts.
 
     Accepts EITHER a message-like object or a raw payload mapping, because
     the surfaces do not all read the same shape: the TUI and phone folds hold
