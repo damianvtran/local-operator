@@ -38,7 +38,6 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 from local_operator.harness.types import Content, ImageContent, Message, TextContent
-from local_operator.imaging import IMAGE_CONTEXT_EDGES, downscale_context_frame
 
 from .marker import marker_exists
 from .tokens import estimate_tokens, estimate_wire_bytes, invalidate_message_cache
@@ -202,6 +201,15 @@ def downscale_stale_frames(
     ``keep_recent_frames`` counts frame-bearing MESSAGES from the end, so a
     message with two frames costs one slot (the same unit the prune uses).
     """
+    # Imported HERE, not at module scope, and the placement is load-bearing:
+    # this module sits on the shared renderer's import closure
+    # (``harness.render`` -> ``compaction.api`` -> this file), and a benchmark
+    # episode importing that renderer must not drag the application in —
+    # ``local_operator.imaging`` is explicitly on the episode denylist
+    # (tests/unit/evaluation/runner/test_isolation.py). The downscale itself
+    # only ever runs on the session side, where the decode is wanted.
+    from local_operator.imaging import downscale_context_frame
+
     if keep_recent_frames < 0:
         raise ValueError("keep_recent_frames must be non-negative")
     remaining = keep_recent_frames
@@ -356,6 +364,11 @@ def fit_frames_to_wire_budget(
 
     Returns ``(messages, frames_downscaled, frames_dropped)``.
     """
+    # Imported HERE for the reason ``downscale_stale_frames`` documents: a
+    # module-scope import would put ``local_operator.imaging`` on the import
+    # closure of the shared renderer an episode imports.
+    from local_operator.imaging import IMAGE_CONTEXT_EDGES
+
     if budget <= 0:
         return list(messages), 0, 0
     if estimate_wire_bytes(messages) <= budget:
