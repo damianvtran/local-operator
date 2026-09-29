@@ -1208,6 +1208,42 @@ def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | No
     return message.model_copy(update={"tool_calls": calls})
 
 
+#: User-facing copy for the input-refusal recovery tokens the failover walk
+#: records on the end event (``provider_payload["input_refusal_recovery"]``).
+#: A token this map does not know degrades to its underscores read as spaces:
+#: a future rung must still produce a sentence, never an empty one.
+_INPUT_REFUSAL_DEGRADE_COPY = {
+    "screenshots_removed": "screenshots omitted",
+    "older_observations_removed": "older observations removed",
+}
+
+
+def _input_refusal_recovery_notice(recovery: Mapping[str, Any]) -> str:
+    """The one line a recovered input refusal shows the user.
+
+    The turn succeeded, but on a request that is NOT the one the caller built:
+    the provider's content screen refused the original bytes and the answer
+    came back from a narrowed retry (see ``providers.failover``,
+    ``_next_input_refusal_degrade``). A silent degradation would be a
+    correctness problem -- the model reasoned over less than the transcript
+    shows -- so it is stated, the same transparency rule the sticky
+    image-degrade notice follows. Composed rather than a constant so the
+    sentence names exactly what was removed.
+    """
+    degradations = recovery.get("degradations")
+    names = (
+        [name for name in degradations if isinstance(name, str)]
+        if isinstance(degradations, list)
+        else []
+    )
+    parts = [_INPUT_REFUSAL_DEGRADE_COPY.get(name, name.replace("_", " ")) for name in names]
+    detail = ", then ".join(parts) if parts else "the content it could not send"
+    return (
+        "the provider refused the request as inappropriate input content — "
+        f"the turn was re-sent with {detail} and continued"
+    )
+
+
 class AgentLoop:
     """Runs turns: model streaming, tool execution, steering re-entry.
 
@@ -2902,6 +2938,19 @@ class AgentLoop:
                         usage = event.usage
                     provider_payload = event.provider_payload
                     error = event.error
+                    if isinstance(provider_payload, dict):
+                        recovery = provider_payload.get("input_refusal_recovery")
+                        if isinstance(recovery, dict):
+                            # The turn succeeded on a DEGRADED request: the
+                            # provider's content screen refused the original
+                            # bytes and the failover walk re-asked with content
+                            # removed. Say so -- the payload key is the durable
+                            # record, this notice is the visible one, and an
+                            # answer whose inputs changed silently would be
+                            # worse than either.
+                            yield NoticeEvent(
+                                text=_input_refusal_recovery_notice(recovery), kind="warning"
+                            )
                     if stop_reason == "refusal" and not error:
                         # Belt-and-braces: every wire client composes a refusal
                         # message, but a bare "refusal" end from a client that
