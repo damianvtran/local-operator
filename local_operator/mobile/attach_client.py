@@ -1723,6 +1723,12 @@ class AttachClient:
             raise ConnectionError("not attached")
         self._req_seq += 1
         req = self._req_seq
+        # THE CARRIAGE GATE'S LAST MILE — see _strip_unsupported_annotation.
+        # Applied HERE, not only in the builders, because the wake path calls
+        # request_ack_with_duplicate directly and never passes through them:
+        # an owner that did not advertise ``input-mode-v1`` must receive
+        # byte-identical frames on EVERY path (agent review round 1, R1-1).
+        fields = self._strip_unsupported_annotation(fields)
         # FITTED BEFORE THE FUTURE IS REGISTERED, because this can raise
         # `OversizedRequest` and a future parked in `_pending` for a request
         # that was never written is never resolved by anything: it sits there
@@ -1798,24 +1804,60 @@ class AttachClient:
             self._raise_for_reply_error(reply)
         return reply.get("data")
 
-    def _annotation_fields(self, input_mode: str, input_path: str) -> dict[str, str]:
-        """The carriage fields, ONLY for an owner that advertised the capability.
+    def _strip_unsupported_annotation(self, fields: dict[str, Any]) -> dict[str, Any]:
+        """Drop ``input_mode``/``input_path`` unless the owner advertised the capability.
 
-        This is the second half of the gate — the relay's strip in
-        ``MobileDaemon.request`` is the first — and both say the same thing: a
+        THE CLIENT'S HALF OF THE CARRIAGE GATE — the relay's strip in
+        ``MobileDaemon.request`` is the sibling — and this is the copy that a
+        frame cannot route around, because it runs at the one point every
+        control frame is written (:meth:`_request_frame`). The pair reaches
+        the wire through more than one door: ``prompt``/``steer``/
+        ``send_command`` build it in :meth:`_annotation_fields`, but the wake
+        path (``launch._deliver``) and the desktop admit path
+        (``attached.admit_prompt``) hand it straight to
+        ``request_ack_with_duplicate``, which never passes that builder. A
         frame to an owner that never advertised ``input-mode-v1`` must be the
-        frame that owner would have seen before this feature existed. Absence is
-        the legacy reading, so empty values are omitted too rather than sent as
-        empty strings.
+        frame that owner would have seen before this feature existed, on every
+        path — absence is the legacy reading. Fail-closed as everywhere else:
+        ``_input_mode_supported`` is False when the constant is absent or the
+        record did not advertise it, and ``getattr`` reads it because
+        construction-free doubles (``object.__new__(AttachClient)``) drive the
+        request paths without ever having connected — the same courtesy
+        ``authority_proof`` extends to its members, and False is the fail-closed
+        answer for a client that never saw a record.
         """
-        if not self._input_mode_supported:
-            return {}
+        if getattr(self, "_input_mode_supported", False):
+            return fields
+        if "input_mode" not in fields and "input_path" not in fields:
+            return fields
+        return {
+            key: value for key, value in fields.items() if key not in ("input_mode", "input_path")
+        }
+
+    def _annotation_fields(self, input_mode: str, input_path: str) -> dict[str, Any]:
+        """The builder-side carriage fields, empty values and old owners omitted.
+
+        ``prompt``/``steer``/``send_command`` construct their envelope here.
+        The capability half of the rule lives in
+        :meth:`_strip_unsupported_annotation` (called below) and is re-applied
+        at the write point for the doors that never build through here; empty
+        values are omitted because absence is the legacy reading and an
+        explicit empty is nothing a consumer should have to interpret.
+
+        The declared value type is ``Any``, not ``str``, because every caller
+        SPREADS the result into a frame builder's ``**fields`` beside declared
+        keyword parameters (``_request``'s ``deadline_s: float`` /
+        ``on_delta``): pyright checks a ``dict[str, str]`` spread against THOSE
+        parameters and refuses the frame on paper only — the values are the
+        annotation pair, and the cast semantics it wants are the payload
+        catch-all's.
+        """
         fields: dict[str, str] = {}
         if input_mode:
             fields["input_mode"] = input_mode
         if input_path:
             fields["input_path"] = input_path
-        return fields
+        return self._strip_unsupported_annotation(fields)
 
     async def prompt(
         self,

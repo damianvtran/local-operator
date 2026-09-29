@@ -44,8 +44,12 @@ Two constraints shaped the whole design:
 - Wire gate: the attach-record capability token `input-mode-v1`, advertised by
   the runtime only when its handle can store the fields. Two layers apply it and
   they must agree: the relay strips the fields for an uncapable owner
-  (`MobileDaemon.request`), and the attach client omits them (`_annotation_fields`).
-  The mobile side never gates on the HTTP `features` key.
+  (`MobileDaemon.request`), and the attach client strips them where every
+  control frame is written (`AttachClient._request_frame` →
+  `_strip_unsupported_annotation`) — so no door can carry the pair to an owner
+  that did not advertise it, including the wake path's
+  `request_ack_with_duplicate`, which never passes the builders (agent review
+  round 1, R1-1). The mobile side never gates on the HTTP `features` key.
 
 ### 2.2 The provider table
 
@@ -96,16 +100,28 @@ mean the same thing: hide.
 
 ### 2.5 Web behaviour
 
+- The composer's resting height is stable (D1): the placeholder is sized to fit
+  the field's narrowest resting width beside the mic, so the empty and one-line
+  states are equal and the first keystroke does not reflow the composer.
 - Record → stop → **append** to the current draft (`joinDraft`; one separator,
-  never a clobber); insertion never calls `focus()`.
+  never a clobber); insertion never calls `focus()` — the appended span is
+  revealed by scrolling the field, not by focusing it (U1).
 - The 120 s cap **stops and transcribes**; explicit cancel discards and sends no
-  request; `send()` cancels an in-flight dictation and discards its result.
+  request, and an in-flight transcription is aborted for real (U5); `send()`
+  cancels an in-flight dictation, aborts its request, discards its result, and
+  says so in the status row (U2).
+- Outcome lines, in the same polite status row the live states use: a landed
+  transcript announces `Transcript added` (U3; focus is deliberately not
+  returned to the field — a programmatic focus pops the iOS keyboard), an empty
+  transcript answers `Didn't catch that — try again.` (D2), and a cancelled
+  dictation notes `Voice input discarded.` (U2).
 - Failure copy: the daemon's own sentence for 402/413/422/503; a retry sentence
   for 502/transport. 401 keeps the shared reload rule.
-- Voice controls are `size-11` with per-state `aria-label`s, the status row is
-  `role="status"` (polite), and the pulse only animates under
-  `prefers-reduced-motion: no-preference` — the word, dot and timer carry the
-  state without it.
+- Voice controls are `size-11` with per-state `aria-label`s; the status row is
+  `role="status"` (polite) and holds one height across recording / transcribing
+  / outcome states (D3), so stopping a recording does not move the line; the
+  pulse only animates under `prefers-reduced-motion: no-preference` — the word,
+  dot and timer carry the state without it.
 
 ## 3. Boundaries and non-goals
 
@@ -132,9 +148,14 @@ mean the same thing: hide.
 - QA (owned by the QA pass, sketched here so the seams are known): the browser
   recorder path needs a real engine — a heavy pilot with
   `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream
-  --use-file-for-fake-audio-capture=<wav>` for the success cell and
-  `Browser.setPermission` (denied) for the refusal cell; the mime picker's
-  iOS reality is a device check.
+  --use-file-for-fake-audio-capture=<wav> --disable-features=AudioServiceOutOfProcess`
+  for the success cell. WITHOUT the last flag the fake stream resolves but reads
+  silence: measured RMS 0 over 5 s on Chrome 154, against RMS peak 128 / avg 60
+  for the same wav with it — a silent mic that reads as an empty-transcript bug
+  rather than a harness fault (QA round 1, Q1). The refusal cell uses
+  `Browser.setPermission` (denied) with the descriptor `{"name": "microphone"}`
+  — Chrome 154 rejects `audioCapture` with `Invalid PermissionDescriptor name`.
+  The mime picker's iOS reality is a device check.
 
 ## 5. Known residuals
 

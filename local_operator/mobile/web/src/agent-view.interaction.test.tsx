@@ -203,7 +203,7 @@ describe("AgentConversation", () => {
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
 		expect(location.hash).toBe("#/s/root");
-		const composer = screen.getByPlaceholderText("Message Local Operator…");
+		const composer = screen.getByPlaceholderText("Message…");
 		const steer = screen.getByRole("button", { name: "steer" });
 		expect((steer as HTMLButtonElement).disabled).toBe(true);
 		fireEvent.change(composer, { target: { value: "Please report back once" } });
@@ -250,7 +250,7 @@ describe("AgentConversation", () => {
 			expect(screen.getByRole("button", { name: "Open parent to steer" })).toBeTruthy(),
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
-		const composer = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+		const composer = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
 		fireEvent.change(composer, { target: { value: "Original instruction" } });
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));
 		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(1));
@@ -299,7 +299,7 @@ describe("AgentConversation", () => {
 		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
 		history.replaceState({}, "", "#/s/root");
 		const mounted = render(<App />);
-		const composer = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+		const composer = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
 		fireEvent.change(composer, { target: { value: "Original instruction" } });
 		fireEvent.click(screen.getByRole("button", { name: "send" }));
 		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(1));
@@ -310,7 +310,7 @@ describe("AgentConversation", () => {
 		projectionSpy.mockReturnValue({ projection: { ...projection, streaming: true }, connected: true });
 		mounted.unmount();
 		render(<App />);
-		const reloadedComposer = screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+		const reloadedComposer = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
 		expect(reloadedComposer.value).toBe("Edited draft");
 		expect(screen.getByRole("alert").textContent).toContain("earlier instruction may have been delivered");
 		const retry = screen.getByRole("button", { name: "Retry earlier instruction" });
@@ -352,7 +352,7 @@ describe("AgentConversation", () => {
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
 		const composer = screen.getByPlaceholderText(
-			"Message Local Operator…",
+			"Message…",
 		) as HTMLTextAreaElement;
 		fireEvent.change(composer, { target: { value: "Retry this instruction" } });
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));

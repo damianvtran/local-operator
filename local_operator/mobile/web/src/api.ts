@@ -226,8 +226,15 @@ function recordingFilename(blob: Blob): string {
     body's `error` becomes the `HttpError` message (413/422/402/503 carry the
     daemon's own actionable copy) and `code` its typed category. `path` is the
     token that ACTUALLY ran — the caller stores it as the send envelope's
-    `input_path` and must not re-derive it from a cached capability. */
-export function transcribeAudio(blob: Blob): Promise<{
+    `input_path` and must not re-derive it from a cached capability.
+
+    `signal` is for U5's cancel: the composer's status row aborts an in-flight
+    transcription rather than only hiding the wait; a fetch aborted through it
+    rejects with an AbortError, which the caller already treats as a discard. */
+export function transcribeAudio(
+	blob: Blob,
+	signal?: AbortSignal,
+): Promise<{
 	text: string;
 	provider: string;
 	model: string | null;
@@ -235,7 +242,7 @@ export function transcribeAudio(blob: Blob): Promise<{
 }> {
 	const form = new FormData();
 	form.append("audio", blob, recordingFilename(blob));
-	return fetch("/api/transcribe", { method: "POST", body: form }).then(async (res) => {
+	return fetch("/api/transcribe", { method: "POST", body: form, signal }).then(async (res) => {
 		if (res.status === 401) {
 			handleUnauthorized();
 			throw new Error("unauthorized");

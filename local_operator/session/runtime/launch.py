@@ -137,8 +137,10 @@ class PromptErrand:
     input-mode-v1): how the text was produced (typed / dictated / mixed) and
     which voice path dictated the part that was. They ride the errand so the
     WAKE path (a cold session's first prompt) carries exactly what the live
-    path carries; ``_deliver`` hands them to the attach client, which drops
-    them for an owner that did not advertise the capability. EMPTY (the
+    path carries; ``_deliver`` hands them to the attach client, which strips
+    them at its frame-write point for an owner that did not advertise the
+    capability — the same gate the live path passes, applied at the wire
+    rather than at the builder (agent review round 1, R1-1). EMPTY (the
     default) is the legacy reading, so every existing producer is unchanged.
     """
 
@@ -853,10 +855,13 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         # seam is unchanged.
         #
         # The annotation rides UNCONDITIONALLY from here: the CLIENT is the one
-        # that drops it for an owner which did not advertise the capability
-        # (``AttachClient._annotation_fields``), so the wake path and the
+        # that drops it for an owner which did not advertise the capability,
+        # at its single frame-write point (``AttachClient._request_frame`` →
+        # ``_strip_unsupported_annotation``), so the wake path and the
         # follower path apply one rule in one place rather than two gates that
-        # could disagree.
+        # could disagree — and neither can route around it by not calling
+        # ``prompt``/``steer``, which is exactly what this path used to do
+        # (agent review round 1, R1-1).
         annotation: dict[str, str] = {}
         for name in ("input_mode", "input_path"):
             value = getattr(work, name, "")

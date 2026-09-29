@@ -155,7 +155,7 @@ function open(transcript: TranscriptEntry[] = [], streaming = false) {
 
 async function type(text: string) {
 	const composer = (await screen.findByPlaceholderText(
-		"Message Local Operator…",
+		"Message…",
 	)) as HTMLTextAreaElement;
 	fireEvent.change(composer, { target: { value: text } });
 	return composer;

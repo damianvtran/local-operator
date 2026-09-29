@@ -127,7 +127,7 @@ function renderComposer() {
 }
 
 function field(): HTMLTextAreaElement {
-	return screen.getByPlaceholderText("Message Local Operator…") as HTMLTextAreaElement;
+	return screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
 }
 
 function availableCapability(): Capabilities {
@@ -247,6 +247,31 @@ describe("record → transcribe → append", () => {
 		expect(envelope.input_mode).toBe("typed");
 		expect(envelope.input_path).toBeUndefined();
 	});
+
+	it("reveals the appended span without focusing the field (U1)", async () => {
+		renderComposer();
+		fireEvent.change(field(), { target: { value: "line one\nline two" } });
+		const ta = field();
+		// happy-dom computes no layout, so give the field the geometry a long draft
+		// has in the browser: the append must scroll the appended span into view.
+		Object.defineProperty(ta, "scrollHeight", { configurable: true, value: 480 });
+		const focusSpy = vi.spyOn(ta, "focus");
+
+		await dictate({ text: "tail words", path: "provider_stt_radient" });
+
+		await waitFor(() => expect(ta.scrollTop).toBe(480));
+		expect(focusSpy).not.toHaveBeenCalled();
+		expect(document.activeElement).not.toBe(ta);
+	});
+
+	it("announces the append politely without stealing focus (U3)", async () => {
+		renderComposer();
+		await dictate({ text: "hello world", path: "provider_stt_radient" });
+
+		await waitFor(() => expect(field().value).toBe("hello world"));
+		expect(screen.getByText("Transcript added")).toBeTruthy();
+		expect(document.activeElement).not.toBe(field());
+	});
 });
 
 describe("cancel, refusal and failure", () => {
@@ -354,5 +379,63 @@ describe("interaction with send", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe("empty transcript, discards and cancels", () => {
+	it("answers an empty transcript with one non-alarming sentence (D2)", async () => {
+		renderComposer();
+		await dictate({ text: "", path: "provider_stt_radient" });
+
+		await waitFor(() =>
+			expect(screen.getByText("Didn't catch that — try again.")).toBeTruthy(),
+		);
+		expect(field().value).toBe("");
+	});
+
+	it("says so when a send discards an in-flight dictation (U2)", async () => {
+		renderComposer();
+		fireEvent.change(field(), { target: { value: "typed text" } });
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+
+		fireEvent.click(screen.getByRole("button", { name: "send" }));
+
+		await waitFor(() => expect(mockedSendCommand).toHaveBeenCalledOnce());
+		expect(screen.getByText("Voice input discarded.")).toBeTruthy();
+		expect(mockedTranscribe).not.toHaveBeenCalled();
+	});
+
+	it("cancels an in-flight transcription from the status row (U5)", async () => {
+		renderComposer();
+		let held:
+			| ((v: { text: string; provider: string; model: string | null; path: string }) => void)
+			| undefined;
+		mockedTranscribe.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					held = resolve;
+				}),
+		);
+		const recorder = await startRecording();
+		recorder.emitChunk("audio-bytes");
+		fireEvent.click(screen.getByRole("button", { name: "stop and transcribe" }));
+
+		const cancel = await screen.findByRole("button", { name: "cancel transcription" });
+		expect(screen.getByText("Transcribing…")).toBeTruthy();
+		const signal = mockedTranscribe.mock.calls[0]![1] as AbortSignal;
+		expect(signal.aborted).toBe(false);
+
+		fireEvent.click(cancel);
+
+		expect(signal.aborted).toBe(true);
+		await waitFor(() =>
+			expect(screen.getByRole("button", { name: "start voice input" })).toBeTruthy(),
+		);
+
+		// The late answer is dropped: the abort was a discard, not a pause.
+		held!({ text: "too late", provider: "radient", model: null, path: "provider_stt_radient" });
+		await new Promise((r) => setTimeout(r, 0));
+		expect(field().value).toBe("");
 	});
 });

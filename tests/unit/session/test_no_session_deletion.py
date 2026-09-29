@@ -2131,6 +2131,17 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears a half-written seal.reserve under the record root before refusing",
     ),
+    # -- speech-to-text temp scratch (mobile STT) ---------------------------
+    # The Radient leg writes the uploaded clip into a directory THIS call
+    # minted one line above via ``tempfile.mkdtemp(prefix="lop-stt-")`` — a
+    # fresh path under the SYSTEM temp root, never a session id, a config dir,
+    # or caller input — and the ``finally`` clears that same local. It
+    # provably cannot name a directory under ``sessions/``.
+    (
+        "local_operator/clients/stt.py::_transcribe_radient_sync",
+        "shutil.rmtree",
+        "Removes this call's own mkdtemp under the system temp root; no session path",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
