@@ -18770,6 +18770,17 @@ class Session:
                         # the run's own classify path produces once nothing
                         # here overrides it. Nothing to decide, nothing to
                         # note: the run's verdict is already recorded.
+                        #
+                        # ALL SHAPES, deliberately (manager decision, round 2,
+                        # MINOR-1): the NON-carried zero-work run — the
+                        # harness-opened wake/job-delivery shape — publishes
+                        # the same ``interrupted|user-stop``, where v1 settled
+                        # it silently. The user's act outranks the silence the
+                        # same way it outranks the closure; narrowing this
+                        # clause to the carried shape would reintroduce the
+                        # asymmetry this round was raised on, and
+                        # ``test_a_deliberate_stop_of_a_non_carried_zero_work_run_is_still_an_interruption``
+                        # pins the third shape.
                         pass
                     elif self._attention_run_request_dispatched:
                         # EVIDENCE: work reached the provider, so a cut is a

@@ -86,6 +86,14 @@ class RecordingNotifier:
         self.bodies.append(body)
         return not self.focused
 
+    def send(self, kind: str, *, body: str = "") -> bool:
+        """The generic leg the app's new kinds route through (round 2)."""
+        if self.focused:
+            return False
+        self.calls.append((kind, None))
+        self.bodies.append(body)
+        return True
+
     @property
     def kinds(self) -> list[str]:
         """Just the notification kinds, in order — focus changes excluded."""
@@ -239,6 +247,63 @@ async def test_a_failed_turn_notifies_the_error() -> None:
         await _boot(pilot, app)
         app._notifier = notifier  # type: ignore[assignment]
         _end_turn(app, TurnEnded(aborted=False, error="provider refused"))
+        await pilot.pause()
+    assert notifier.kinds == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_retire_for_build_cut_notifies_as_retired_not_as_an_error() -> None:
+    """Round 2, MAJOR-1: the LIVE toast must not say "Stopped with an error".
+
+    An attached, unfocused TUI of a retiring runtime receives the classified
+    end the restate arm describes (``aborted=False, error=<cut sentence>``,
+    ``cut_off_cause=runtime-retired``). The ladder used to hand it the literal
+    "error", so the one live surface a poller restate cannot reach — a toast
+    fires once — carried the failure sentence this whole class exists to
+    remove. The kind must be ``retired`` and the body its own copy.
+    """
+    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        _end_turn(
+            app,
+            TurnEnded(
+                aborted=False,
+                error="the runtime retired so the next engage would run a newer build",
+                cut_off=True,
+                cut_off_cause="runtime-retired",
+            ),
+        )
+        await pilot.pause()
+    assert notifier.kinds == ["retired"]
+    assert notifier.bodies == [RETIRED_NOTICE_TEXT]
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_cut_off_still_notifies_as_an_error() -> None:
+    """The control that keeps the new arm narrow: every OTHER cut is error.
+
+    ``runtime-shutdown``/``runtime-killed`` and friends really are failures to
+    a user who walked away; only the build-drain token takes the warning arm.
+    """
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        _end_turn(
+            app,
+            TurnEnded(
+                aborted=False,
+                error="the runtime stopped answering while this turn was running",
+                cut_off=True,
+                cut_off_cause="runtime-killed",
+            ),
+        )
         await pilot.pause()
     assert notifier.kinds == ["error"]
 

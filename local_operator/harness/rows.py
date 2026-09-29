@@ -839,7 +839,14 @@ CLOSED_NOTICE_TEXT = "Completed — runtime retired/disposed"
 #: these transitions to stop reading as errors. One sentence shared by the TUI
 #: poller, the phone projection and the desktop notice, so no two surfaces can
 #: disagree about the same record.
-RETIRED_NOTICE_TEXT = "Retired for an update — a turn was in flight and was cut"
+#:
+#: THE KEPT-OUTPUT CLAUSE (design round 2, D1) is the one fact a user who lost
+#: work needs — the partial work survives — which the live cut sentence carries
+#: ("the transcript holds what it wrote before that") and the terse receipt had
+#: dropped. It rides byte-identical in the desktop's ``RETIRED_OUTCOME_TEXT``.
+RETIRED_NOTICE_TEXT = (
+    "Retired for an update — a turn was in flight and was cut; its earlier output is kept"
+)
 
 
 def completion_notice(kind: str, reason: str = "") -> tuple[str, NoticeSeverity]:

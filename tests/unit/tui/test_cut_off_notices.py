@@ -84,7 +84,12 @@ class OutcomeSession(FakeSession):
 
 
 async def _start_and_end_turn(
-    app: OperatorApp, pilot: Any, *, aborted: bool, error: str | None
+    app: OperatorApp,
+    pilot: Any,
+    *,
+    aborted: bool,
+    error: str | None,
+    cut_off_cause: str = "",
 ) -> None:
     """Drive a turn to the point where the app has painted its own end row."""
     from local_operator.tui.events import TurnEnded, TurnStarted
@@ -103,7 +108,7 @@ async def _start_and_end_turn(
     await pilot.pause()
     app.post_message(TurnStarted())
     await pilot.pause()
-    app.post_message(TurnEnded(aborted, error))
+    app.post_message(TurnEnded(aborted, error, cut_off_cause=cut_off_cause))
     await pilot.pause()
     await pilot.pause()
 
@@ -167,6 +172,10 @@ async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_i
     outcome adopts THAT row (the kind correspondence is the arm's own) and
     restates it: leaving the live cut sentence in the error tier would keep
     exactly the failure framing the arm exists to remove. One cut, one row.
+
+    Since design round 2 D2 the live row is ALSO painted in the warning tier at
+    the classifier (``cut_off_cause``), so there is no ~1 s of danger ink
+    waiting for the restate; the two assertions below pin both halves.
     """
     session = OutcomeSession(tmp_path / "attention.db")
     monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
@@ -175,8 +184,13 @@ async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_i
 
     async with app.run_test(size=(100, 30)) as pilot:
         sentence = "the runtime retired so the next engage would run a newer build"
-        await _start_and_end_turn(app, pilot, aborted=False, error=sentence)
+        await _start_and_end_turn(
+            app, pilot, aborted=False, error=sentence, cut_off_cause="runtime-retired"
+        )
         assert _notice_texts(app) == [sentence]
+        # D2: warning ink from the FIRST frame, never the ~1 s of danger the
+        # restate used to correct.
+        assert all(block._token != "danger" for block in _notice_blocks(app))
 
         session.publish("retired", cause="runtime-retired")
         anchor = session.store.state(session.identity)["anchor_id"]
@@ -487,7 +501,11 @@ def test_the_retired_row_reads_retired_for_an_update_and_keeps_the_warning_tier(
     text, severity = completion_notice(
         "retired", "the runtime retired so the next engage would run a newer build"
     )
-    assert text == RETIRED_NOTICE_TEXT == "Retired for an update — a turn was in flight and was cut"
+    assert (
+        text
+        == RETIRED_NOTICE_TEXT
+        == ("Retired for an update — a turn was in flight and was cut; its earlier output is kept")
+    )
     assert severity == "warning", "a cut for an update is warning, never danger"
 
 

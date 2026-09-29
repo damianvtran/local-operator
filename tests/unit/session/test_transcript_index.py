@@ -322,6 +322,29 @@ def test_a_closed_marker_never_claims_or_clears_a_turn_outcome(tmp_path):
     ], "a closure alone must not claim the tick"
 
 
+def test_a_retired_marker_reads_as_the_rails_existing_cut_treatment(tmp_path):
+    """Round 2, NIT-2: the retired kind must never reach the frozen wire literal.
+
+    ``CheckpointOutcome`` has no ``retired``, so the derivation normalizes it to
+    ``interrupted`` — CircleSlash in warning ink, the rail's "cut short" mark:
+    ``error`` would be the failure framing the arm exists to remove and
+    ``complete`` would claim the cut turn finished. The control beside this is
+    the cell above (``closed`` stays fully inert); this one pins that a marker
+    which really did cut a turn still lands on an EXISTING outcome value.
+    """
+    write_rows(
+        tmp_path,
+        [
+            start("s1", 1.0, "t1"),
+            user("u1", 1.1, "verify the migration"),
+            assistant("a1", 1.2, "halfway through"),
+            marker("m1", 1.3, "t1", kind="retired"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    assert outcomes(index) == [("u1", None), ("a1", "interrupted")]
+
+
 def test_eligible_false_settles_without_an_outcome(tmp_path):
     write_rows(
         tmp_path,
