@@ -14,7 +14,9 @@ from local_operator.harness.types import (
     DEFAULT_TURN_OUTPUT_TOKENS,
     AskOption,
     AskQuestion,
+    AudioContent,
     ChatRequest,
+    ImageContent,
     Message,
     ModelSpec,
     TextContent,
@@ -310,3 +312,50 @@ def test_the_policy_ceiling_is_configurable() -> None:
     # override must not silently uncap a turn.
     assert turn_output_budget(_spec(943_718), ceiling=None) == DEFAULT_TURN_OUTPUT_TOKENS
     assert turn_output_budget(_spec(943_718), ceiling=0) == DEFAULT_TURN_OUTPUT_TOKENS
+
+
+def test_an_audio_block_mirrors_the_image_block() -> None:
+    """``AudioContent`` mirrors ``ImageContent`` field for field, with one extra.
+
+    ``duration_ms`` is capture-side information no provider is ever sent (every
+    wire renderer builds its part from ``data``/``mime_type``), and unlike
+    ``marker`` it is NOT excluded from dumps: it is a property of the recording,
+    so a durable row keeping it is how a later surface can show a duration
+    without re-measuring.
+    """
+    audio = AudioContent(data="QUJD", mime_type="audio/wav", duration_ms=4200, marker=3)
+
+    dumped = audio.model_dump()
+    assert dumped["type"] == "audio"
+    assert dumped["duration_ms"] == 4200
+    assert "marker" not in dumped, "a presentation fact must not reach a row or a provider"
+
+
+def test_message_user_orders_text_then_images_then_audio() -> None:
+    """The block order is the reading order every serializer expects: the
+    instruction first, then what it is about, in the order a human sees them."""
+    message = Message.user(
+        "look and listen",
+        images=[ImageContent(data="a", mime_type="image/png")],
+        audio=[AudioContent(data="b", mime_type="audio/wav")],
+    )
+
+    assert [type(block).__name__ for block in message.content] == [
+        "TextContent",
+        "ImageContent",
+        "AudioContent",
+    ]
+
+
+def test_a_spec_does_not_take_audio_unless_it_is_stated() -> None:
+    """The wrong-True asymmetry (see the field's comment): silence reads False.
+
+    A wrong False degrades to the STT cascade — a working path; a wrong True
+    spends a paid turn the model refuses mid-stream — so only a STATED
+    capability opens the audio door.
+    """
+    assert ModelSpec(provider="p", model_id="m").supports_audio_input is False
+    assert (
+        ModelSpec(provider="p", model_id="m", supports_audio_input=True).supports_audio_input
+        is True
+    )
