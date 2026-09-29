@@ -5460,6 +5460,31 @@ class AttachedSession:
             if page.status == "reset":
                 raise RuntimeError("history changed while materializing; reconnect")
             if page.status == "full_required":
+                # A REMOTE PLACEMENT CANNOT REPLAY LOCALLY — the §3.4 rule, one
+                # arm over (agent review round 1, MAJOR-1; reproduced by a stub
+                # probe and, with every element shipped, on the real wire by
+                # QA's pilot). The escalation tells the reader to rebuild the
+                # model's history from THIS device's transcript, which for a
+                # session on another device is the one read §3.4 refuses: the
+                # local directory is absent — or a DIFFERENT conversation's
+                # history wearing the same id. Running it anyway left the bare
+                # ``sessions/<id>/created_at.json`` corpse (the class this PR
+                # exists to eliminate) and then failed the page fetch with
+                # ``ValueError: history cursor is no longer retained`` from the
+                # replay over bytes that never held the cursor.
+                #
+                # A RuntimeError rather than ``ConnectionError`` on purpose:
+                # the transport is healthy, no retry can change the owner's
+                # frame budget, and the TUI's paging classifier reads every
+                # ``ConnectionError`` as "reconnecting" — a promise nothing
+                # here can keep. The refusal comes BEFORE the construction, so
+                # a reader on a device that owns nothing leaves no trace here.
+                if self.runtime_locality == "another-machine":
+                    raise RuntimeError(
+                        "older history for this conversation is too large to serve over "
+                        "the mesh, and this device holds no copy to replay; open the "
+                        "conversation on the device that holds it"
+                    )
 
                 def replay() -> list[Any]:
                     # ``Transcript``'s own store is the env default
