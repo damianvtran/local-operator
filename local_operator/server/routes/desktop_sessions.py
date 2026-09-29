@@ -4161,7 +4161,10 @@ async def desktop_events(request: Request):
     engine = feed(request)
     if len(engine.subscribers) >= SUBSCRIBER_COUNT:
         raise HTTPException(503, "Too many desktop feed subscribers")
-    subscription = engine.subscribe()
+    # Off the loop: the connect floor's store read can wait the contention
+    # budget out, and this is the route a client is waiting on (see
+    # ``DesktopFeed.subscribe_off_loop``).
+    subscription = await engine.subscribe_off_loop()
     released = False
 
     async def release_once() -> None:

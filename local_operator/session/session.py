@@ -9557,6 +9557,57 @@ class Session:
             self._attention_republish_due = False
             return True
 
+    async def _flush_pending_attention_republish(self) -> None:
+        """The teardown-side half of the republish ladder: ONE guarded attempt.
+
+        WHY IT EXISTS: `dispose` cancels every tracked background task, and the
+        ladder is one of them. For an interactive quit that is a fair trade --
+        the process lives on and a viewer can fire the parked rung -- but for a
+        ONE-SHOT exec (and any exit) the cancellation is final: `17ea09afe588`
+        (2026-09-29) armed the ladder seconds before its process exited, died
+        with its first rung still parked, and its `complete` marker only ever
+        reached the transcript journal -- five hours later the store still had
+        no row, because the next importer (the mobile daemon's boot) met the
+        same lock and skipped. Nothing retries a dead process's rung, so the
+        one attempt the first rung would have made is made HERE, before the
+        cancel block can drop it.
+
+        WHAT MAKES IT SAFE: exactly the same call the rungs make
+        (:meth:`_republish_journalled_outcome`) -- it re-reads the journal's
+        LATEST marker, takes the publish lock, and the store's insert is
+        idempotent by token, so racing a live rung or the turn's own publish
+        cannot double-insert or revive an older completion. Bounded: one
+        attempt, and the store's own retry inside it (ms typical on the WAL
+        store; the contended worst case is the same budget that was being
+        deferred against, which is the point). Guarded: the latch
+        short-circuits a process with nothing owed, and no failure escapes --
+        teardown outranks this receipt.
+
+        WHEN IT CANNOT LAND IT SAYS SO, ONCE: the cancellation that follows
+        used to be silent, and a stranded completion needs a line that names
+        it (the ladder's own exhaustion message is for a process that lives
+        on).
+        """
+        if not self._attention_republish_due:
+            return
+        from local_operator.session.attention import conversation_identity
+
+        try:
+            landed = await self._republish_journalled_outcome()
+        except Exception:  # noqa: BLE001 -- teardown must not raise
+            logger.warning(
+                "attention: dispose could not attempt the owed republish for %s",
+                conversation_identity(self._transcript.directory),
+                exc_info=True,
+            )
+            return
+        if not landed:
+            logger.warning(
+                "attention: the store never took the republish owed for %s; the "
+                "durable marker waits for the next boot's import",
+                conversation_identity(self._transcript.directory),
+            )
+
     def _schedule_attention_republish(self, attempt: int = 0) -> None:
         """Arm the latch and put the republish ladder in flight.
 
@@ -18851,6 +18902,16 @@ class Session:
             # in-memory list consistent with what was persisted rather than
             # leaving a notice stranded in the FIFO at teardown.
             self._flush_context_journal()
+            # AND THE ONE WRITE THAT WAS BEING CANCELLED INSTEAD OF SENT: a
+            # republish the ladder still owes. The cancel block below takes the
+            # ladder down with it, and for a one-shot process that exit is
+            # seconds after the deferral that armed it -- the completion then
+            # waited for a boot import that could (and did -- session
+            # 17ea09afe588, 2026-09-29) meet the same lock and be skipped. The
+            # flush is ONE guarded attempt on the same path the ladder's first
+            # rung uses: bounded by the store's own retry, idempotent by token,
+            # under the publish lock, and it never raises into teardown.
+            await self._flush_pending_attention_republish()
             # HC-11: cancel tracked background tasks (wake deliveries, aside
             # persistence), then close the session task group.
             for task in list(self._background_tasks):

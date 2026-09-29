@@ -89,6 +89,21 @@ class McpToolCache:
                 os.close(fd)
             conn = sqlite3.connect(str(self._path), timeout=1.0)
             conn.execute("PRAGMA busy_timeout=1000")
+            # A WAL ATTEMPT, on the same reasoning as the other state stores
+            # (``analytics/store.py::_set_wal``,
+            # ``session/attention.py::_adopt_wal``): journal-mode conversion is
+            # not covered by ``busy_timeout``, and every reader blocking every
+            # writer at COMMIT is exactly what an auxiliary cache does not
+            # need. Deliberately SMALL: the windows stay at 1 s, there is no
+            # dedicated retry loop (a refused conversion costs this cache one
+            # stale entry, not a user gesture), and the attempt must never be
+            # what disables the cache -- hence the inner catch, because a raise
+            # would fall into the outer one and turn a working cache into a
+            # miss.
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.Error:
+                logger.debug("MCP tool cache could not adopt WAL", exc_info=True)
             conn.execute(_SCHEMA)
             self._migrate_legacy(conn)
             try:

@@ -13,10 +13,62 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import closing
 from pathlib import Path
 from typing import Any
+
+from local_operator.session.store_failures import BUSY_ERRONAMES
+
+#: How long a lock wait on this store's connections may last, in milliseconds.
+#: Matches the attention store's house window rather than the driver's own
+#: ``timeout=10`` above it, and for the same reason: the wait exists for an
+#: OVERLAPPING request handler, not for a queue.
+_RECEIPT_BUSY_TIMEOUT_MS = 10000
+
+#: The WAL adoption's own retry budget and window -- see :func:`_adopt_wal`.
+_WAL_ATTEMPTS = 6
+_WAL_RETRY_BACKOFF_S = 0.05
+_WAL_BUSY_TIMEOUT_MS = 250
+
+
+def _adopt_wal(db: sqlite3.Connection) -> None:
+    """Convert the receipts store to WAL: bounded retry, short window, optional.
+
+    Mirrors ``analytics/store.py::_set_wal`` and
+    ``session/attention.py::_adopt_wal``. The journal-mode change is NOT covered
+    by ``busy_timeout`` -- SQLite needs an exclusive lock for it and, against a
+    RESERVED holder, fails the acquisition without invoking the busy handler --
+    so the statement gets a SHORT WINDOW of its own plus a bounded retry, and
+    the window is restored on every path.
+
+    BOTH REFUSAL SHAPES ARE ACCEPTED: a raised ``sqlite3.Error`` and a
+    non-"wal" answer both leave this store working exactly as it did, in
+    whatever journal mode it has. Conversion is persistent per file, so a
+    process that wins makes every later attempt a no-op.
+    """
+    db.execute(f"PRAGMA busy_timeout={_WAL_BUSY_TIMEOUT_MS}")
+    try:
+        for attempt in range(_WAL_ATTEMPTS):
+            try:
+                # The answer itself is not inspected: a non-"wal" reply is
+                # SQLite declining (a filesystem that cannot host WAL), which
+                # is accepted just as quietly as a raise.
+                db.execute("PRAGMA journal_mode=WAL").fetchone()
+            except sqlite3.Error as error:
+                # The SHARED busy set, not a restated pair: the retry set and the
+                # classify-as-busy set are one fact or they drift -- the exact
+                # shape of the attention store's review-round-1 MINOR-1 (its
+                # local copy held two of five names).
+                name = str(getattr(error, "sqlite_errorname", ""))
+                if name not in BUSY_ERRONAMES or attempt + 1 >= _WAL_ATTEMPTS:
+                    return
+                time.sleep(_WAL_RETRY_BACKOFF_S * (attempt + 1))
+                continue
+            return
+    finally:
+        db.execute(f"PRAGMA busy_timeout={_RECEIPT_BUSY_TIMEOUT_MS}")
 
 
 class ReceiptConflict(ValueError):
@@ -55,10 +107,24 @@ class DesktopReceipts:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.path, timeout=10)
         self.path.chmod(0o600)
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, fingerprint "
-            "TEXT NOT NULL, result TEXT)"
-        )
+        # THE BUSY POLICY, spelled where the connection is opened. This store is
+        # served by ONE desktop host process, but overlapping request handlers
+        # reach `_claim` concurrently, and the journal it shipped with
+        # (rollback) makes every reader block every writer at COMMIT -- the same
+        # mechanism as the 2026-09 attention incident, one database over.
+        db.execute(f"PRAGMA busy_timeout={_RECEIPT_BUSY_TIMEOUT_MS}")
+        _adopt_wal(db)
+        # The DDL is skipped when the table already exists: it ran on EVERY
+        # open, and `CREATE TABLE IF NOT EXISTS` still takes the schema lock
+        # even when it creates nothing. The IF NOT EXISTS stays for the race a
+        # probe cannot close on its own.
+        if not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipts'"
+        ).fetchone():
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, fingerprint "
+                "TEXT NOT NULL, result TEXT)"
+            )
         return db
 
     def _claim(self, key: str, fingerprint: str, retry_safe: bool) -> dict[str, Any] | None:
