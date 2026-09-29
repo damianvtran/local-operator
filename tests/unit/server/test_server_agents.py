@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from local_operator.agents import AgentEditFields, AgentRegistry
+from local_operator.agents import AgentEditFields, AgentImport, AgentRegistry
 from local_operator.server.app import app
 from local_operator.server.models.schemas import AgentCreate, AgentUpdate
 from local_operator.types import (
@@ -1711,7 +1711,9 @@ async def test_download_agent_from_radient_success(test_app_client, dummy_regist
         patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
         patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
         patch.object(
-            dummy_registry, "download_agent_from_radient", return_value=(mock_agent, None)
+            dummy_registry,
+            "download_agent_from_radient",
+            return_value=AgentImport(agent=mock_agent, renamed_from=None),
         ),
     ):
         mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
@@ -1729,6 +1731,55 @@ async def test_download_agent_from_radient_success(test_app_client, dummy_regist
     # Always present, so a client can tell "nothing was renamed" (null) from
     # "this backend does not report renames at all" (a missing key).
     assert result["renamed_from"] is None
+    # Same always-present rule for the model suggestion: null when nothing was
+    # suggested or the suggestion applied.
+    assert result["model_notice"] is None
+
+
+@pytest.mark.asyncio
+async def test_download_agent_reports_a_skipped_model_suggestion(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """The download route relays the carried notice as data (§4.3)."""
+    from local_operator.agents import AgentImport
+    from local_operator.model.suggestion import ModelNotice
+
+    agent_id = "radient-agent-123"
+    mock_agent = MagicMock()
+    mock_agent.model_dump.return_value = {
+        "id": "imported-agent-123",
+        "name": "Imported Agent",
+        "created_date": "2024-01-01T00:00:00",
+        "version": "0.2.16",
+        "security_prompt": "Example security prompt",
+        "hosting": "",
+        "model": "",
+        "description": "An imported agent",
+        "last_message": "",
+        "last_message_datetime": "2024-01-01T00:00:00",
+    }
+    notice = ModelNotice(reason="unknown_provider", requested_hosting="nope", requested_model="m")
+
+    with (
+        patch("local_operator.config.ConfigManager") as mock_cfg_mgr,
+        patch("local_operator.server.routes.agents.RadientClient") as mock_radient_client,
+        patch.object(
+            dummy_registry,
+            "download_agent_from_radient",
+            return_value=AgentImport(agent=mock_agent, renamed_from=None, model_notice=notice),
+        ),
+    ):
+        mock_cfg_mgr.return_value.get_config_value.return_value = "https://api.radienthq.com"
+        mock_radient_client.return_value = MagicMock()
+
+        response = await test_app_client.get(f"/v1/agents/{agent_id}/download")
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["model_notice"] == {
+        "reason": "unknown_provider",
+        "requested": {"hosting": "nope", "model": "m"},
+    }
 
 
 @pytest.mark.asyncio
