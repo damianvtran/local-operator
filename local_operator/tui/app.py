@@ -4285,6 +4285,14 @@ class OperatorApp(App[None]):
         *(
             Binding(action.default, action.action, action.label, show=False, id=action.id)
             for action in _keymap.KEY_ACTIONS
+            # `scope == "app"` ONLY. A desktop-scoped action is not a Textual
+            # binding — it has no `action_*` method and its key is an Electron
+            # accelerator no terminal can send, so deriving a `Binding` for it
+            # would both ship a dead binding re-keyed by `_apply_keymap` and
+            # break the anti-drift test's "desktop ids are not bindings" half
+            # (`test_keymap.py`). The registry is generic over scope; THIS is
+            # the one place the app says which half it drives.
+            if action.scope == "app"
         ),
         # Open the aside WITHOUT spending the composer's contents, which is the
         # gesture `/btw <question>` cannot offer: submitting a slash command
@@ -26984,6 +26992,10 @@ class OperatorApp(App[None]):
                 if (
                     not entry.unseen
                     or not entry.completion_token
+                    # §14: a quiet wake/monitor completion — computed once by the
+                    # session and carried on the entry — is skipped here rather
+                    # than re-derived from its kind or origin.
+                    or not entry.completion_notify
                     or entry.row.pending
                     or entry.id == current
                     or entry.row.live_state not in _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES
@@ -47424,6 +47436,9 @@ class OperatorApp(App[None]):
             # `aborted=False, error=<notice>`, so an inference here would read
             # every cut-off as a completion (design review round 1, D2).
             cut_off=message.cut_off,
+            # §14: the session's ONE notify value, forwarded untouched; the
+            # funnel gates the completion/error toasts on it below.
+            notify=message.notify,
         )
         # LAST, and after `_finalize_turn` on purpose (see
         # `_maybe_judge_goal_turn`): the standing goal is judged off THIS turn's
@@ -47678,6 +47693,7 @@ class OperatorApp(App[None]):
         source: str,
         outcome_known: bool = True,
         cut_off: bool = False,
+        notify: bool = True,
     ) -> None:
         """Retire the turn. The ONE exit, however the turn ended.
 
@@ -47739,6 +47755,16 @@ class OperatorApp(App[None]):
         hint, and the worker's `except` has a branch for a message typed into a
         stopped viewer that the event path does not. Printing here would either
         double up or lose that branch. It is the one asymmetry in this seam.
+
+        ``notify`` is §14's origin-aware gate, carried off the end event
+        untouched: a quiet wake/monitor turn passes False, and this method is
+        the last hop before the toast funnel, so its completion — and any
+        deferral of one — is skipped. Nothing is DEFERRED for a quiet
+        completion: deferral exists to hand the announcement to the moment the
+        children settle, and a completion that must never be announced has no
+        announcement to hand over. Default True keeps the abandoned fallback
+        (which has no end event to read) and every synthetic end notifying
+        exactly as today.
         """
         logger.debug("retiring turn from %s (aborted=%s, error=%s)", source, aborted, bool(error))
         # READ then cleared, in that order, and the reading is what the tail is
@@ -47920,7 +47946,11 @@ class OperatorApp(App[None]):
         if aborted:
             pass
         elif error:
-            self._notify("error")
+            # §14: an errored turn is always stamped notify=True by the
+            # session's rule; the gate is read anyway so this funnel never
+            # contradicts the ONE value it was handed.
+            if notify:
+                self._notify("error")
         else:
             # Counts QUEUED and backgrounded work too (see
             # `_outstanding_delegated_jobs`): a child parked at the capacity
@@ -47943,6 +47973,12 @@ class OperatorApp(App[None]):
                 # completion toast per turn — the notification fatigue the goal
                 # mode exists to remove. Numeric mode does not set the flag, so
                 # its per-turn behaviour is unchanged.
+                pass
+            elif not notify:
+                # §14: a quiet delivery's completion is announced nowhere, and
+                # nothing is DEFERRED for it — deferral exists to hand the
+                # announcement to the moment the children settle, and there is
+                # no announcement to hand over.
                 pass
             elif self._notify("complete", running_children=outstanding):
                 self._completion_deferred = False

@@ -45,6 +45,10 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
+    from local_operator.hook_forwarding import (
+        FORWARD_CLAUDE_DEFAULT,
+        FORWARD_CODEX_DEFAULT,
+    )
     from local_operator.memory_guard import (
         BASH_MEMORY_ENABLED_DEFAULT,
         BASH_MEMORY_LIMIT_MB_DEFAULT,
@@ -147,6 +151,8 @@ def _consumer_defaults() -> dict[str, object]:
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
+        "hooks.forward_claude": FORWARD_CLAUDE_DEFAULT,
+        "hooks.forward_codex": FORWARD_CODEX_DEFAULT,
         # The four memory_guard keys. The consumer constants live next to the
         # reader in memory_guard.py, so this mapping is what stops the registry
         # default and the code default drifting.
@@ -2527,3 +2533,63 @@ def test_declared_endpoints_must_be_host_port_pairs() -> None:
     ):
         problem = settings_io.validate(setting, bad, None)
         assert problem and "host:port" in problem, (bad, problem)
+
+
+# ---------------------------------------------------------------------------
+# Desktop-scope hotkeys: the facade applies the ROW's own grammar
+# ---------------------------------------------------------------------------
+
+
+def test_a_desktop_hotkey_row_validates_with_the_desktop_rules() -> None:
+    """The facade dispatches by the row's scope.
+
+    Judged by the app rules, the shipped default itself would be refused (it is
+    not a terminal key) and an OS-reserved chord would PASS. One shared answer
+    is what keeps the page, ``lop config edit`` and ``PATCH /v1/settings`` from
+    disagreeing — the writers all reach ``validate`` rather than a private
+    predicate.
+    """
+    setting = settings_io.BY_KEY["keymap.quick_send"]
+
+    assert settings_io.validate(setting, setting.default) is None
+    for bad in ("meta+space", "n", "ctrl+n,f5"):
+        problem = settings_io.validate(setting, bad)
+        assert problem, f"the desktop row accepted {bad!r}"
+    # The app-scope rows keep the terminal rules, unchanged.
+    assert settings_io.validate(settings_io.BY_KEY["keymap.new_session"], "primary+alt+space")
+
+
+def test_a_desktop_hotkey_write_canonicalizes_through_the_facade(
+    manager: ConfigManager,
+) -> None:
+    """``write_setting`` normalizes in the row's grammar (a value typed as
+    ``CMD+SHIFT+N`` stores as the canonical ``meta+shift+n``), and ``coerce``
+    agrees with it so the CLI and the page spell the same stored value."""
+    setting = settings_io.BY_KEY["keymap.quick_send"]
+
+    assert settings_io.coerce(setting, "CMD+SHIFT+N") == "meta+shift+n"
+    settings_io.write_setting(manager, setting, "CMD+SHIFT+N")
+    assert settings_io.read_setting(manager, setting) == "meta+shift+n"
+    # The app-scope normalization is untouched beside it.
+    assert settings_io.coerce(settings_io.BY_KEY["keymap.new_session"], "CTRL+G") == "ctrl+g"
+
+
+def test_a_hotkey_row_without_a_derived_scope_falls_back_to_the_app_rules() -> None:
+    """An empty/unknown ``hotkey_scope`` means the APP grammar — the behaviour
+    every row had before the scope axis existed — never a crash and never a
+    silent desktop acceptance. A hand-built ``Setting`` or a future row shape
+    meets this fallback first, so it is pinned rather than incidental."""
+    setting = settings_io.Setting(
+        key="keymap.unknown_row",
+        path=("keymap.unknown_row",),
+        section="keymap",
+        label="Unknown",
+        kind=Kind.HOTKEY,
+        default="ctrl+g",
+        help="",
+        hotkey_scope="",
+    )
+
+    assert settings_io.validate(setting, "ctrl+g") is None
+    assert settings_io.validate(setting, "banana") is not None
+    assert settings_io.validate(setting, "primary+alt+space") is not None

@@ -22,6 +22,13 @@ Two rules the code below keeps, both of them lessons from that incident:
   read from the row and never memoised, and every surface prints it without a
   command: it clears by itself, and a sign-in offered for it is advice to fix
   something that is not broken.
+* A configuration that names a login this device no longer has is reported as
+  that — `owner_missing` — and never as `login_required`: a fresh sign-in makes
+  a NEW row and nothing here re-points the configuration, so the remedy a
+  refused grant earns would loop the operator forever. Like `deferred` it is a
+  fact read from the store ahead of the memo and never memoised (a row can be
+  deleted at any moment, and the memo's key cannot watch a row that is gone),
+  and its remedy is the command that re-points the device.
 * A check that costs a network call is BOUNDED, and a negative answer is reused
   for the window in which re-asking cannot learn anything new. The login verdict
   is the one check here that reaches the network at all (see REFRESH_WAIT_S and
@@ -290,15 +297,44 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     in fact deferred. Reading the row first also means the reverse is true: once the
     marker clears, the next poll recomputes rather than holding a stale `deferred`
     for the remainder of the window.
+
+    AND THE LOGIN ITSELF CAN BE GONE FROM THIS DEVICE — `owner_missing`, not
+    `login_required`. The two used to be one verdict, and the cost was an operator
+    sent to a sign-in that could never clear what they were looking at: a new
+    sign-in produces a NEW row and nothing re-points ``tunnel/config.json``, so
+    `lop login radient` was advice to repeat forever (issue #1711). It is read
+    from the store LIKE the deferral — ahead of the memo, never remembered — for
+    the same reason the row-first ordering exists: the fact moves with no write
+    this key can watch (deletion removes the row the key is built from), and
+    re-deciding it costs one store read, so a held answer would be staleness with
+    nothing bought. The two arms below are ONE fact: a `credential_id` that cannot
+    name a row (absent here, or not an int at all) and one naming a row this
+    device does not have are both "the configuration points at a login that is not
+    here", and neither is cleared by signing in.
+
+    WHY NOT HEAL IT AT THE CREDENTIAL-WRITE HOOK (where ``install.rearm_if_parked``
+    already runs): re-pointing safely needs a CLOUD read — `tunnel/config.json`
+    does not persist the record's owner account — and that hook is deliberately
+    cheap by construction (stats and small file reads), so the read would turn
+    every login into a network call; and surfaces must be honest anyway for the
+    cases no heal can fix (a tunnel owned by another account; an unrecoverable
+    account). A deliberate decision, not an omission — see issue #1711.
     """
     selected = value.get("credential_id")
     dead: dict[str, Any] = {"credential_id": selected, "state": "login_required"}
     if not isinstance(selected, int) or isinstance(selected, bool):
-        return dead
+        # No usable id at all is the same operator-facing fact as an id with no
+        # row (see the docstring): the configuration names no login that exists
+        # here, and a sign-in cannot re-point it. `dead` stays for the one arm
+        # below that a sign-in DOES clear — the store's own refused-grant verdict.
+        return {"credential_id": selected, "state": gateway.OWNER_MISSING}
     with closing(AuthStore()) as store:
         row = store.get_credential(selected)
         if row is None or row.provider != "radient" or row.credential_type != "oauth":
-            return dead
+            # Read from the store BEFORE the memo below, and never remembered:
+            # the row can be deleted (logout) at any moment, with no write this
+            # memo's key can watch, and one store read is all re-deciding costs.
+            return {"credential_id": selected, "state": gateway.OWNER_MISSING}
         if store.refresh_deferred(selected):
             # The row itself says an exchange's outcome is unsettled and the
             # bearer it holds is spent, so the store will not present that token
@@ -381,6 +417,13 @@ def remedy(
     a login, an install or a re-enrolment); nothing else has one to offer, and
     `null` says so rather than inventing a command.
 
+    ONE PARK YIELDS TO THE LOGIN VERDICT: a `login_required` park whose login is
+    `owner_missing` (the stored row is GONE from this device, below). The park's
+    own command there is provably unable to clear anything — a fresh sign-in is a
+    new row and nothing re-points the configuration — so the verdict's re-point
+    command stands in. Every other park, including a genuine refused grant
+    (`login_required` with a row still present), keeps its own remedy.
+
     A deliberately stopped tunnel has NO remedy even when the credential behind
     it is dead: `stopped` means the operator is not using the tunnel, and
     handing them a sign-in command for remote access they turned off is the nag
@@ -392,9 +435,31 @@ def remedy(
         return None
     parked = connector.get("remedy")
     if isinstance(parked, dict) and parked.get("command"):
+        # The ONE park the login verdict can contradict (issue #1711): a
+        # connector parked for a login it could not use, on a device whose
+        # stored row for that login is GONE (`owner_missing` below). The park's
+        # own command cannot clear that state — a fresh sign-in is a NEW row and
+        # nothing re-points the configuration at it — while the verdict's command
+        # does, so the verdict's stands in. Every other park keeps its own
+        # remedy: the connector knows better than this module what its own fix is.
+        if not (
+            connector.get("reason") == gateway.LOGIN_REQUIRED
+            and login.get("state") == gateway.OWNER_MISSING
+        ):
+            return {
+                "command": str(parked["command"]),
+                "url": str(parked.get("url") or gateway.CONSOLE_URL),
+            }
+    if login.get("state") == gateway.OWNER_MISSING:
+        # The re-point command, never a sign-in: the login this tunnel was
+        # enrolled with is not on this device, and only re-pointing the
+        # configuration (or signing in to the account that owns the tunnel, which
+        # the command's own refusal explains) brings remote access back. The
+        # command is pinned in `gateway`'s table so every surface renders one
+        # spelling of it.
         return {
-            "command": str(parked["command"]),
-            "url": str(parked.get("url") or gateway.CONSOLE_URL),
+            "command": gateway.TERMINAL_REMEDY[gateway.OWNER_MISSING],
+            "url": gateway.CONSOLE_URL,
         }
     if login.get("state") == "login_required":
         return {

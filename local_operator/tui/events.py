@@ -107,6 +107,7 @@ class TurnEnded(SessionEvent):
         usage: Any = None,
         context_is_estimate: bool = False,
         cut_off: bool = False,
+        notify: bool = True,
     ) -> None:
         super().__init__()
         self.aborted = aborted
@@ -118,6 +119,12 @@ class TurnEnded(SessionEvent):
         #: cut-off carrying an error notice beside it. Consumers that need the
         #: WORD (the stranded ledger cards) read this.
         self.cut_off = cut_off
+        #: §14: whether this turn's completion may notify — the session's ONE
+        #: computed value, carried straight off ``AgentEndEvent.notify`` and
+        #: consumed by ``_finalize_turn``'s notification tail. Defaulted True
+        #: so a synthetic end (the follower's local ``_end_turn_locally``) and
+        #: any pre-field producer keep notifying exactly as before.
+        self.notify = notify
         self.context_tokens = context_tokens
         self.usage = usage
         self.context_is_estimate = context_is_estimate
@@ -885,6 +892,9 @@ class EventController:
                 # `aborted=False, error=<notice>`, so the fact that this was an
                 # involuntary stop exists nowhere else on the wire.
                 cut_off=bool(getattr(event, "cut_off_cause", "") or getattr(event, "cut_off", "")),
+                # §14: the session's ONE notify value, forwarded untouched;
+                # `_finalize_turn` gates the completion/error toasts on it.
+                notify=bool(getattr(event, "notify", True)),
             )
         )
 

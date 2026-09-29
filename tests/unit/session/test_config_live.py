@@ -201,6 +201,14 @@ def _bash_shell(watcher: ConfigWatcher) -> str:
     return resolve_bash_shell(_configured_bash_shell())
 
 
+def _hook_forwarding(_watcher: ConfigWatcher) -> tuple[bool, bool]:
+    """What `hook_forwarding.forwarding_enabled` reads per tool call, from the
+    directory `LOCAL_OPERATOR_CONFIG_DIR` points at (the watcher's, in this test)."""
+    from local_operator.hook_forwarding import forwarding_enabled
+
+    return forwarding_enabled()
+
+
 def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
     """What ``execute_bash`` resolves per call for the search-interception keys.
 
@@ -535,6 +543,11 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.max_attempts": (1, lambda s, w: _fetch_settings(w).max_attempts),
     "web_fetch.blocked_retry": (False, lambda s, w: _fetch_settings(w).blocked_retry),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
+    # ``hooks.*`` is read per tool call through a fresh ``ConfigManager``
+    # (``hook_forwarding.forwarding_enabled``), so an edit lands on the very
+    # next call — observed through that same reader, not the raw mapping.
+    "hooks.forward_claude": (True, lambda s, w: _hook_forwarding(w)[0]),
+    "hooks.forward_codex": (True, lambda s, w: _hook_forwarding(w)[1]),
     # ``tools.search_interception.*`` is read per ``bash`` call through a fresh
     # ConfigManager (``builtin._search_interception_config``), so an edit lands on
     # the next command — observed through that same reader, not the raw mapping.
