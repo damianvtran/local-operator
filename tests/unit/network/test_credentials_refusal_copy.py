@@ -48,7 +48,7 @@ def _client(root) -> MeshCredentialClient:
     )
 
 
-def _reply(code: str, message: str) -> dict[str, object]:
+def _reply(code: str, message: str, **extra: object) -> dict[str, object]:
     """A leg-2 ``ack`` carrying a refusal, exactly as the owner's relay frames one."""
     return {
         "op": "ack",
@@ -60,6 +60,7 @@ def _reply(code: str, message: str) -> dict[str, object]:
             "message": message,
             "owner_device": OWNER,
             "owner_device_name": "damian-mbp",
+            **extra,
         },
     }
 
@@ -156,3 +157,35 @@ def test_no_sentence_a_person_reads_carries_a_device_id(tmp_path, code: str) -> 
     sentence = str(detail.get("message") or "")
     assert BORROWER not in sentence, sentence
     assert "d_" not in sentence, sentence
+
+
+def test_the_quota_refusal_renders_the_remainder_it_was_sent(tmp_path) -> None:
+    """D1 (design round 1): the sentence shows the measured remainder, not "for now".
+
+    The owner's producer sends the earliest unblock as ``retry_after_ms`` and the
+    cache honours it; before this the operator read "rate-limited for now" for a cap
+    with a known, shrinking end. The duration is rendered from the code's own number —
+    never from the owner's prose — which is what keeps a cached re-serve honest too.
+    """
+    client = _client(tmp_path)
+
+    detail = client._detail_from_owner(  # noqa: SLF001
+        _reply("quota_blocked", "the account hit its cap", retry_after_ms=45_000), "zai", "zai"
+    )
+
+    sentence = str(detail.get("message") or "")
+    assert "rate-limited for another 45 s" in sentence, sentence
+    assert "for now" not in sentence, sentence
+    assert "nothing was borrowed" in sentence, sentence
+
+
+def test_the_quota_refusal_without_a_remainder_keeps_for_now(tmp_path) -> None:
+    """An older owner (or a value the boundary dropped) says nothing to count down."""
+    client = _client(tmp_path)
+
+    detail = client._detail_from_owner(  # noqa: SLF001
+        _reply("quota_blocked", "the account hit its cap"), "zai", "zai"
+    )
+
+    sentence = str(detail.get("message") or "")
+    assert "rate-limited for now" in sentence, sentence

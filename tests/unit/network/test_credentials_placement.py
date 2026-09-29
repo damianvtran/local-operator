@@ -433,6 +433,59 @@ def test_build_auth_store_returns_the_mesh_store_when_borrowing(
         store.close()
 
 
+def test_a_session_built_before_the_first_share_keeps_a_local_only_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """audit caveat A, settled: a predating session never brokers, and a new one does.
+
+    THE PROBE the audit asked for (Q5 #5). ``build_auth_store`` decides plain-vs-mesh
+    at CONSTRUCTION, so the store a session receives is fixed for its life: a share
+    that arrives later reaches the device's document but not that store. The test
+    pins BOTH halves — the predating store keeps answering locally without ever
+    reaching the broker, and the same call after the share builds the mesh store —
+    which is why "start a new session" is the remedy and not an apology.
+    """
+    from local_operator.network.identity import mint
+    from local_operator.providers.auth_store import AuthStore
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    identity = mint(root, name="borrower")
+
+    predating = mesh_store.build_auth_store(root)
+    assert type(predating) is AuthStore
+
+    # The share arrives: the owner's document is merged into this device's file
+    # (what a pull runs), and the device is now a holder for it.
+    owner_document = placement_mod.PlacementDocument(NETWORK, written_by=OWNER)
+    owner_document.declare("openai", owner_device=OWNER, provider="openai", by=OWNER)
+    owner_document.grant("openai", identity.device_id, scope="session", by=OWNER)
+    changed = placement_mod.merge_from_peer(
+        NETWORK,
+        owner_document.to_json(),
+        from_device=OWNER,
+        self_device=identity.device_id,
+        root=root,
+    )
+    assert changed == ["openai"]
+
+    # The PREDATING session's store cannot reach it — not now, not ever: it is the
+    # plain class, and nothing about this key will change that.
+    assert type(predating) is AuthStore
+    assert asyncio.run(predating.get_api_key("openai", "sess-1")) is None
+    predating.close()
+
+    # A store built now IS mesh-aware, which is what the restart remedy buys.
+    fresh = mesh_store.build_auth_store(root)
+    try:
+        assert isinstance(fresh, mesh_store.MeshAwareAuthStore)
+        assert fresh.mesh_client is not None
+        assert fresh.mesh_client.should_borrow("openai")
+    finally:
+        fresh.close()
+
+
 def test_a_borrowed_credential_is_never_refreshed_and_is_never_blocked_locally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -720,6 +773,188 @@ def test_one_contended_merge_does_not_stop_the_other_members_being_merged(
     assert asked == [OWNER, OTHER]
     assert merged == [OTHER], "the contended merge stopped the loop"
     assert result["changed"] == ["deepseek"] and result["owners"] == 2
+
+
+def test_a_merge_that_makes_this_device_a_holder_clears_a_standing_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A re-share must not be shadowed by the refusal cache's TTL (audit caveat B).
+
+    THE ORDER THIS PINS, as it happens on a real device: a borrow is refused and
+    remembered; the operator re-shares on the owner; the pull merges the new
+    document; the very next provider call used to answer from the cached refusal
+    WITHOUT dialling, so the share looked like it had not taken effect. The refusal
+    is cached in the session's client and the pull runs on the relay's — two objects
+    here, two PROCESSES in production — so the clearing has to travel through
+    ``placement.state.json``, which is what the session's re-read of it is for.
+    """
+    from local_operator.network.credentials import client as client_mod
+    from local_operator.network.credentials.state import PlacementState
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    identity = mint(root, name="borrower")
+
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare(
+        "deepseek",
+        owner_device=OWNER,
+        owner_device_name="owner-laptop",
+        provider="deepseek",
+        by=OWNER,
+    )
+    document.grant("deepseek", identity.device_id, scope="session", by=OWNER)
+    document.save()
+
+    def _client() -> Any:
+        return client_mod.MeshCredentialClient(
+            root=root,
+            self_device=identity.device_id,
+            network_id=NETWORK,
+            placement=placement_mod.PlacementDocument.load(
+                NETWORK, root, self_device=identity.device_id
+            ),
+        )
+
+    session = _client()  # the session's copy: it holds the refusal
+    relay = _client()  # the process that runs the pull
+
+    dials: list[str] = []
+
+    def _refuse(record: Any, op: str, **_: Any) -> dict[str, Any]:
+        dials.append(op)
+        return {
+            "detail": {
+                "kind": "error",
+                "code": "not_a_holder",
+                "key": "deepseek",
+                "message": "owner-laptop does not share 'deepseek' with this device",
+            }
+        }
+
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda root=None: object())
+    monkeypatch.setattr("local_operator.network.relay.control_request", _refuse)
+
+    refused = session.request_grant_sync("deepseek", session_id="sess-1")
+    assert isinstance(refused, BrokerError) and refused.code == "not_a_holder", refused
+    assert session.cached_refusal("deepseek") is not None, "the refusal was not cached"
+    assert dials == ["credential_grant"]
+
+    # The owner re-shares: the same row re-granted (a widen), a higher revision —
+    # what a second `credential share` writes on the owner. The borrower pulls it.
+    reshared = placement_mod.PlacementDocument(NETWORK, written_by=OWNER)
+    reshared.declare(
+        "deepseek",
+        owner_device=OWNER,
+        owner_device_name="owner-laptop",
+        provider="deepseek",
+        by=OWNER,
+    )
+    reshared.grant("deepseek", identity.device_id, scope="session", by=OWNER)
+    reshared.grant("deepseek", identity.device_id, scope="device", by=OWNER)
+
+    monkeypatch.setattr(relay, "_other_active_members", lambda: [OWNER])
+    monkeypatch.setattr(
+        relay,
+        "_ask_owner_directly",
+        lambda device, frame: {
+            "op": "ack",
+            "detail": {"kind": "placement", "document": reshared.to_json()},
+        },
+    )
+    pulled = relay.pull_placement()
+    assert pulled["changed"] == ["deepseek"], pulled
+
+    # The device-level observation is gone...
+    assert PlacementState.load(NETWORK, root).status("deepseek") == ""
+    # ...and the SESSION — a different client, the stand-in for a different process —
+    # stops serving it: its next call dials again instead of answering from memory.
+    assert session.cached_refusal("deepseek") is None
+    dials.clear()
+    again = session.request_grant_sync("deepseek", session_id="sess-1")
+    assert dials == ["credential_grant"], "the next call did not ask the owner again"
+    assert isinstance(again, BrokerError) and again.code == "not_a_holder", again
+
+
+def test_a_report_carries_the_lent_rows_id_and_the_peer_frame_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """audit Q5 #4, this device's half: the lent row's id travels with the report.
+
+    ``report_sync`` reads the cached grant BEFORE dropping it — the failing bearer's
+    grant may be inside the re-ask margin, where ``get`` reads as absent — and
+    ``serve_report`` carries it onto the peer frame. Without a grant to attribute,
+    the field is ``0`` and the owner falls back exactly as it did for older peers.
+    """
+    from local_operator.network.credentials import client as client_mod
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    identity = mint(root, name="borrower")
+
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare("openai", owner_device=OWNER, provider="openai", by=OWNER)
+    document.grant("openai", identity.device_id, scope="session", by=OWNER)
+    document.save()
+
+    client = client_mod.MeshCredentialClient(
+        root=root,
+        self_device=identity.device_id,
+        network_id=NETWORK,
+        placement=document,
+    )
+    sent: list[dict[str, Any]] = []
+
+    def _control(record: Any, op: str, **fields: Any) -> dict[str, Any]:
+        sent.append({"op": op, **fields})
+        return {"detail": {"kind": "ack", "action": "noted"}}
+
+    monkeypatch.setattr("local_operator.network.store.find_own_relay", lambda root=None: object())
+    monkeypatch.setattr("local_operator.network.relay.control_request", _control)
+
+    client.grants.put("openai", "sess-1", _borrower_grant())
+    client.report_sync("openai", kind="quota", session_id="sess-1")
+    assert sent[0].get("credential_id") == 7, sent
+
+    # The relay half: the id a runtime sent rides the peer frame to the owner.
+    frames: list[dict[str, Any]] = []
+    monkeypatch.setattr(client, "_ask_owner_directly", lambda device, frame: frames.append(frame))
+    client.serve_report("openai", kind="quota", session_id="sess-1", credential_id=7)
+    assert frames[0].get("credential_id") == 7, frames
+
+    # No grant to attribute: 0 travels, and the owner's first-row fallback answers —
+    # the pre-existing behaviour for a frame without the field.
+    sent.clear()
+    client.report_sync("openai", kind="quota", session_id="sess-2")
+    assert sent[0].get("credential_id") == 0, sent
+
+
+def test_the_relay_validates_a_reports_credential_id_at_the_boundary() -> None:
+    """The id is a number a frame carries, so it is validated where frames stop.
+
+    ``_LocalOps.report`` checks the field with ``peer_int`` — the same choke point
+    every broker number passes — and drops an absent or garbled one to ``None``
+    rather than forwarding a runtime's garbage to the owner's frame (audit Q5 #4).
+    """
+    from local_operator.network.credentials import _LocalOps
+
+    received: list[dict[str, Any]] = []
+
+    class _FakeClient:
+        def serve_report(self, key: str, **fields: Any) -> dict[str, Any]:
+            received.append(fields)
+            return {"kind": "ack", "key": key}
+
+    ops = _LocalOps(server=None)
+    ops._client = _FakeClient()  # noqa: SLF001 — the seam ``_source`` would build
+    ops.report({"credential_key": "openai", "kind": "quota", "credential_id": "41"})
+    ops.report({"credential_key": "openai", "kind": "quota", "credential_id": "not-a-number"})
+    ops.report({"credential_key": "openai", "kind": "quota"})
+    assert received[0].get("credential_id") == 41
+    assert received[1].get("credential_id") is None
+    assert received[2].get("credential_id") is None
 
 
 def test_forgetting_a_network_removes_its_placement_and_state(tmp_path: Path) -> None:
@@ -1472,3 +1707,140 @@ def test_a_skipped_member_is_named_on_the_listing(
     payload = json.loads(capsys.readouterr().out)
     assert "skipped" not in payload
     assert stderr.getvalue() == ""
+
+
+def test_the_listing_names_the_restart_remedy_for_a_share_that_just_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """audit Q5 #5's message half: the one state where a share exists but a session
+    cannot use it, said on the surface where the share lands.
+
+    The pull returns ``newly_borrowable`` — keys this device could not reach before
+    the pull — and the listing is where the operator learns a share arrived. Folded
+    into the statement is the remedy that follows from the construction-time
+    predicate; a pull that changed nothing borrowable prints nothing, so the
+    ordinary listing is byte-identical to before this change.
+    """
+    from local_operator.network import cli as network_cli
+    from local_operator.network.identity import mint
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    _point_config_at(monkeypatch, root)
+    identity = mint(root, name="borrower-laptop")
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare(
+        "deepseek",
+        owner_device=OWNER,
+        owner_device_name="damian-mbp",
+        provider="deepseek",
+        by=OWNER,
+    )
+    document.grant("deepseek", identity.device_id, scope="session", by=OWNER)
+    document.save()
+    monkeypatch.setattr(network_cli, "_networks", lambda: [])
+    monkeypatch.setattr(
+        network_cli,
+        "_relay_call",
+        lambda *a, **k: {
+            "kind": "ack",
+            "changed": ["deepseek"],
+            "owners": 1,
+            "newly_borrowable": ["deepseek"],
+        },
+    )
+
+    args = _parser().parse_args(["network", "credentials"])
+    assert network_cli.main(args) == 0
+    out = capsys.readouterr().out
+    assert "note: 'deepseek' is now available to borrow on this device" in out, out
+    assert "Start a new session" in out, out
+    assert "wired in when a session starts" in out, out
+
+    # A pull that makes nothing newly borrowable (or a relay that did not answer)
+    # prints no note: the ordinary listing stays as it was.
+    monkeypatch.setattr(
+        network_cli,
+        "_relay_call",
+        lambda *a, **k: {"kind": "ack", "changed": [], "owners": 1, "newly_borrowable": []},
+    )
+    args = _parser().parse_args(["network", "credentials", "--json"])
+    assert network_cli.main(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["newly_borrowable"] == []
+    assert "note:" not in json.dumps(payload)
+
+
+def test_a_cached_quota_refusal_counts_down_and_renders_the_remainder(tmp_path: Path) -> None:
+    """D1 + M2 (review round 2): the countdown is the OWNER's number — never ours.
+
+    Recorded the way the wire records it (``_remember``), an owner-stated remainder
+    is re-served from the state file and counted down: what is still ahead is that
+    number MINUS the row's age. A refusal whose owner stated NONE (review round 2,
+    M2) is the other case — its row still bounds the cache for this device's default
+    lifetime, but that default must not be rendered back as "the owner's
+    remainder": the sentence keeps "for now", exactly as the fresh one does.
+    ``cached_refusal`` takes ``now`` for the same reason ``PlacementState.status``
+    does: the countdown is arithmetic, and a test that slept would be testing the
+    sleep.
+    """
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.network.credentials.types import BrokerError
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    borrower = "d_" + "b" * 32
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare(
+        "openai",
+        owner_device=OWNER,
+        owner_device_name="owner-laptop",
+        provider="openai",
+        by=OWNER,
+    )
+    document.grant("openai", borrower, scope="session", by=OWNER)
+    client = MeshCredentialClient(
+        root=root, self_device=borrower, network_id=NETWORK, placement=document
+    )
+
+    # The owner stated 45 s.
+    client._remember(  # noqa: SLF001 — the recorder the wire path itself uses
+        "openai",
+        BrokerError(code="quota_blocked", key="openai", owner_device=OWNER, retry_after_ms=45_000),
+    )
+
+    live = client.cached_refusal("openai")
+    assert live is not None and live.code == "quota_blocked"
+    assert 43_000 <= live.retry_after_ms <= 45_000, live
+
+    observed = float(client.state.observation("openai")["observed_at"])  # type: ignore[index]
+    exact = client.cached_refusal("openai", now=observed)
+    assert exact is not None and exact.retry_after_ms == 45_000, exact
+
+    later = client.cached_refusal("openai", now=observed + 10.0)
+    assert later is not None
+    assert 34_000 <= later.retry_after_ms <= 35_000, later
+
+    rendered = client._render(  # noqa: SLF001 — the cached path's own renderer
+        BrokerError(code="quota_blocked", retry_after_ms=35_000), "openai", "openai"
+    )
+    assert "rate-limited for another 35 s" in rendered.message, rendered.message
+
+    # The end-to-end cached path (no dial: the refusal short-circuits before the
+    # relay is consulted) renders the live countdown, not the old wording.
+    served = client.request_grant_sync("openai", session_id="s-1")
+    assert isinstance(served, BrokerError), served
+    assert "for another " in served.message, served.message
+    assert "for now" not in served.message, served.message
+
+    # No stated remainder: the cache still guards (the observation stands for this
+    # device's own default lifetime), but nothing may be presented as a countdown.
+    client.state.clear("openai")
+    client._remember(  # noqa: SLF001 — the recorder the wire path itself uses
+        "openai", BrokerError(code="quota_blocked", key="openai", owner_device=OWNER)
+    )
+    cached = client.cached_refusal("openai")
+    assert cached is not None and cached.retry_after_ms == 0, cached
+    quiet = client.request_grant_sync("openai", session_id="s-1")
+    assert isinstance(quiet, BrokerError), quiet
+    assert "rate-limited for now" in quiet.message, quiet.message

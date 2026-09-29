@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -745,6 +745,10 @@ def merge_from_peer(
     after the relay started was reverted by the next merge (review round 1, F2).
     Loading INSIDE the lock means the document merged into is the one on disk now,
     and nothing is written when nothing changed.
+
+    A MERGE ALSO INVALIDATES THE OBSERVATIONS IT CONTRADICTS — see
+    :func:`_clear_refusals_the_merge_contradicts`, which is the half of a re-share
+    that used to be shadowed by the refusal cache's TTL.
     """
     path = placement_path(network_id, root)
     with _document_lock(path):
@@ -752,4 +756,65 @@ def merge_from_peer(
         changed = document.merge(incoming, from_device=from_device, self_device=self_device)
         if changed:
             document.save()
-        return changed
+    if changed:
+        _clear_refusals_the_merge_contradicts(
+            network_id, changed, self_device=self_device, root=root
+        )
+    return changed
+
+
+def _clear_refusals_the_merge_contradicts(
+    network_id: str, changed: list[str], *, self_device: str, root: Path | None
+) -> None:
+    """Clear refusal observations for keys the merge just made borrowable here.
+
+    WHY A MERGE INVALIDATES THE CACHE (audit caveat B). A refusal is cached in
+    ``placement.state.json`` for up to its TTL (``not_a_holder``: 60 s), and until
+    now nothing invalidated it when the sharing list changed — so after the operator
+    re-shared a credential, this device's own document said it MAY borrow while the
+    cache still answered "does not share" without dialling, and the operator read
+    that as the share not having taken effect. The merge is fresh evidence on both
+    counts the commonest refusals name: the owner's document arrived over a live
+    link (it is reachable), and it lists this device as a holder (it does share).
+
+    ONLY REFUSALS ARE CLEARED. A positive (``active``) observation is kept: the
+    merge says nothing about whether the token itself works, and clearing it would
+    throw away the ``last_grant_at`` sighting the owner-offline sentence reads. The
+    cost of over-clearing (an ``interactive_required`` that the merge does not
+    actually fix) is one re-ask, which is the honest price of not reasoning about
+    which refusal codes a document change could contradict.
+
+    BEST EFFORT: this runs after the merge has already committed, so a cache that
+    cannot be written (a read-only config dir, a missing one) must not fail the
+    merge or the pull it belongs to.
+
+    NOT TRANSACTIONAL, AND BOUNDED ON PURPOSE (review round 1, M1). The clear is a
+    cross-process read-modify-write — this function loads and saves the state file
+    while a session may ``_remember`` into it — and ``PlacementState.save``'s lock
+    serialises THREADS WITHIN ONE PROCESS, so last-writer-wins is the residual: a
+    refusal written between the load below and the save at the end loses that ROW
+    and is re-observed on the next dial, while a refusal written after the save
+    survives for at most its own TTL (60 s for ``not_a_holder``) — the same shadow
+    this clearing removes, bounded to one dial in flight around a pull and
+    self-healing on the next expiry. Closing it would need the state module's
+    writers to reload under a cross-process lock; that is a change to its contract,
+    not to this function.
+    """
+    from local_operator.network.credentials.state import PlacementState
+
+    document = PlacementDocument.load(network_id, root, self_device=self_device)
+    state = PlacementState.load(network_id, root)
+    cleared = False
+    for key in changed:
+        entry = document.entry(key)
+        if entry is None or entry.owner_device == self_device:
+            continue
+        if not entry.is_holder(self_device):
+            continue
+        status = state.status(key)
+        if status and status != "active":
+            state.clear(key)
+            cleared = True
+    if cleared:
+        with suppress(OSError):
+            state.save()

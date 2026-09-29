@@ -413,3 +413,119 @@ def test_a_pull_of_a_document_with_a_401_digit_field_still_merges(
     assert isinstance(
         _borrower_client(mesh).request_grant_sync(STUB_PROVIDER, session_id="s-w"), Grant
     )
+
+
+# ---------------------------------------------------------------------------
+# Q1 (review round 1): the STORE path's report must name the lent row
+# ---------------------------------------------------------------------------
+
+
+class _NoLocalRows:
+    """The local half of a ``MeshAwareAuthStore``, never consulted on this path.
+
+    ``rotate_sibling`` only reaches the local store when the mesh does not claim
+    the failure, and the bearer handed in below is exactly what the grant cache is
+    holding — so the ``api_key`` arm attributes it before any local read. The
+    methods exist so a regression that falls through fails an assertion instead of
+    an ``AttributeError``.
+    """
+
+    def list_credentials(self, provider: str) -> list[Any]:
+        return []
+
+    def rotate_sibling(self, *args: Any, **kwargs: Any) -> bool:
+        return False
+
+
+def test_the_stores_report_carries_the_lent_rows_id_over_the_link(mesh: Any) -> None:
+    """Q1: a report raised through ``MeshAwareAuthStore`` targets the row it was lent.
+
+    ``providers/failover`` reaches the owner through
+    ``MeshAwareAuthStore.rotate_sibling`` → ``_report_failure`` → ``report_sync`` —
+    the path a real turn uses, and the one the direct ``report_sync`` cells do not
+    traverse. With the drop BEFORE the report, the grant cache was already empty
+    when the id was read, so the frame carried no id and the owner refreshed its
+    FIRST row: on this two-row owner — row 1 model-blocked so the lend lands on row
+    2 — the refresh token the IdP sees is the observable, and it must be row 2's.
+    """
+    from local_operator.network.credentials import store as credentials_store
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.providers.failover import ProviderError
+
+    _share(mesh)
+    _pull(mesh)
+
+    store = AuthStore(config_dir=mesh.a.root)
+    try:
+        rows = store.list_credentials(STUB_PROVIDER)
+        assert len(rows) == 1, rows
+        first = rows[0]
+        token0 = mesh.idp.current_refresh
+        second = store.upsert_credential(
+            STUB_PROVIDER,
+            {
+                "type": "oauth",
+                "access": "-".join(("row2", "stale")),
+                "expires": int(time.time() * 1000) - 60_000,
+                "refresh": token0,
+                "email": "row2@example.test",
+            },
+        )
+        assert second.id != first.id
+        # Row 1 is out of rotation FOR THIS MODEL ONLY — a real block row, so the
+        # owner's resolve skips it for the lend while it stays in the id space a
+        # report's first-row fallback would pick. That is exactly the two-row shape
+        # the fallback can mis-target.
+        store.block_credential(first.id, STUB_PROVIDER, block_scope="model:fable", block_ms=600_000)
+
+        client = _borrower_client(mesh)
+        grant = client.request_grant_sync(
+            STUB_PROVIDER, session_id="sess-inv", model_id="claude-fable-5"
+        )
+        assert isinstance(grant, Grant), grant
+        assert grant.credential_ref.credential_id == second.id, grant
+        assert mesh.idp.posts == [token0], mesh.idp.posts
+
+        row2 = next(r for r in store.list_credentials(STUB_PROVIDER) if r.id == second.id)
+        token_after_lend = str(row2.data.get("refresh") or "")
+        assert token_after_lend and token_after_lend != token0, token_after_lend
+        # Expire row 2 again through the product's own write path, so a refresh
+        # aimed at it POSTs — and the token it posts is by construction the one the
+        # report resolved.
+        store.upsert_credential(
+            STUB_PROVIDER,
+            {
+                "type": "oauth",
+                "access": "-".join(("row2", "expired-again")),
+                "expires": int(time.time() * 1000) - 60_000,
+                "refresh": token_after_lend,
+                "email": "row2@example.test",
+            },
+        )
+
+        side = credentials_store.MeshAwareAuthStore(
+            _NoLocalRows(), mesh=client, config_dir=mesh.b.root
+        )
+        rotated = side.rotate_sibling(
+            STUB_PROVIDER,
+            "sess-inv",
+            ProviderError(401, "invalid_grant"),
+            str(grant.access_token),
+        )
+        assert rotated is False, rotated  # no local sibling: the report IS the answer
+
+        assert mesh.idp.posts == [token0, token_after_lend], (
+            "the owner refreshed a row other than the one the grant named: "
+            f"{mesh.idp.posts!r} — row 2's pre-report token is {token_after_lend!r}, "
+            f"the never-lent row 1's is {token0!r}"
+        )
+        # The never-lent row is untouched in the other direction too.
+        after = [
+            r
+            for r in store.list_credentials(STUB_PROVIDER, include_disabled=True)
+            if r.id == first.id
+        ]
+        assert after and after[0].disabled_cause is None, after
+        assert str(after[0].data.get("refresh") or "") == token0, after[0].data
+    finally:
+        store.close()
