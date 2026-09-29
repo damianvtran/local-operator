@@ -124,15 +124,21 @@ else on the frame. `/help` still lists `ctrl+b`.
 When the list holds the keyboard the ladder re-ranks: `f10 pin` rides it from
 27 cells of list width up (the pin cell's `☆` is invisible until hovered, so
 the footer is its one standing teacher; between 17 and 26 the chip outranks it,
-and a 30-column terminal lands there), and `ctrl+a ⌥` renders on an UNPAGED list
-at 38 cells or more — on a paged list the four-fact rung is 49 cells against
-the 43-cell ceiling and `{position} · esc return · f10 pin · ⌥N` (38) fits
-first, so the layer chord is not taught on-frame there at all (design round 1,
-D1). The position yields BEFORE the pin — recoverable by scrolling, while
-`f10 pin` is not taught anywhere else on the frame — so the focused rungs are
-`esc return · f10 pin [· ctrl+a ⌥]{ · ⌥N}` above the floor fallbacks. `ctrl+o`
-has no spelling that fits a real content width beside the chip and the pin, so
-it stays a documented chord rather than an invisible candidate.
+and a 30-column terminal lands there), and `ctrl+a ⌥` renders exactly where the
+position form does not fit — on an unpaged list at 38 cells or more, and on a
+paged one in the band from 38 up to one cell under `{position} · esc return ·
+f10 pin · ⌥N`. That band is empty for a position string of 8 cells or fewer
+(`1–18/21`, whose form is 38 and wins at 38) and opens for longer ones: a
+152-entry list on a deep page (`128–152/152`, its form 41) shows
+`esc return · f10 pin · ctrl+a ⌥ · ⌥N` at content 38–40 and the position form
+returns from 41. Every width here moves with the position string and the chip,
+so the code's fit test is the authority, not a quoted figure (design round 1
+D1, corrected by review round 2). The position yields BEFORE the pin —
+recoverable by scrolling, while `f10 pin` is not taught anywhere else on the
+frame — so the focused rungs are `esc return · f10 pin [· ctrl+a ⌥]{ · ⌥N}`
+above the floor fallbacks. `ctrl+o` has no spelling that fits a real content
+width beside the chip and the pin, so it stays a documented chord rather than
+an invisible candidate.
 
 The layer is capped at 40 rows and does not page. A sub row is labelled by what
 it was delegated to do (`label · role`, degrading to whichever half exists),

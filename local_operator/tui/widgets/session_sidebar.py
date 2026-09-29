@@ -2139,21 +2139,29 @@ class SessionSidebar(Widget, can_focus=True):
         #
         # THE MEASURED FLOORS, because "rides every rung" was an overstatement
         # (review round 1, MINOR 2). Reading down the widths, what yields is:
-        # `ctrl+a ⌥` first, then the position, then the pin, then the chip,
-        # never the lead (main's D4/U1). With a chip, the pin rung
-        # (`esc return · f10 pin · ⌥1k+`) is 27 cells and renders at >= 27;
-        # between 17 and 26 the chip outranks it (`esc return · ⌥1k+` — a
-        # 30-column terminal lands exactly here, and NO pin is taught); below
-        # 17 only the lead remains. `ctrl+a ⌥` needs the chip and 38 cells:
-        # `esc return · f10 pin · ctrl+a ⌥ · ⌥1k+` renders on an UNPAGED list
-        # at >= 38; the paged four-fact form is 49 against the 43-cell
-        # ceiling, and `{position} · esc return · f10 pin · ⌥1k+` (38) is
-        # tried first and fits, so a paged list never shows the layer rung
-        # (design round 1, D1: the docs say so rather than a reorder that
-        # trades the position away). `ctrl+o` is deliberately absent: no
-        # spelling of it fits a real content width beside the chip and the
-        # pin, and a bare chord would break this footer's key-and-what-it-does
-        # contract — recorded on the PR rather than smuggled in as an append.
+        # the paged four-fact form, then the position form, then the pin,
+        # then the chip, never the lead (main's D4/U1). With a chip, the pin
+        # rung (`esc return · f10 pin · ⌥1k+`) is 27 cells and renders at
+        # >= 27; between 17 and 26 the chip outranks it (`esc return · ⌥1k+` —
+        # a 30-column terminal lands exactly here, and NO pin is taught);
+        # below 17 only the lead remains. `ctrl+a ⌥` needs the chip and 38
+        # cells — `esc return · f10 pin · ctrl+a ⌥ · ⌥1k+` is 38 and is tried
+        # AFTER the position form, so it renders exactly where that form does
+        # not fit: unpaged, every width >= 38; paged, the band from 38 up to
+        # one cell under `{position} · esc return · f10 pin · ⌥1k+`, which is
+        # EMPTY for a position string of <= 8 cells (`1–18/21`: that form is
+        # 38 and wins at 38) and OPENS for longer ones — a 152-entry list on
+        # a deep page (`128–152/152`, its form 41) shows the layer rung at
+        # content 38–40 and the position form returns from 41 (review round
+        # 2 measured exactly this; round 1's "a paged list never shows it"
+        # was false). Every width here moves with the position string AND
+        # the chip — the paged four-fact form is 48/49/52 at 7/8/11 position
+        # cells, and a two-digit chip shifts the whole band two cells down —
+        # so the fit test, not this comment, is the authority (design round
+        # 1, D1). `ctrl+o` is deliberately absent: no spelling of it fits a
+        # real content width beside the chip and the pin, and a bare chord
+        # would break this footer's key-and-what-it-does contract — recorded
+        # on the PR rather than smuggled in as an append.
         if self.has_focus:
             pin = f"{lead} · f10 pin"
             layer = " · ctrl+a ⌥" if chip else ""
