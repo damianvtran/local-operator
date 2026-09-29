@@ -531,6 +531,105 @@ def test_an_offload_to_a_peer_that_cannot_move_is_refused_before_the_invite(
     assert (server_b.root / "sessions" / SESSION).is_dir()
 
 
+def test_a_second_offload_after_a_round_trip_is_a_real_move_not_a_stale_signal(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE FALSE SUCCESS, on the wire: move out, come back, move out again.
+
+    Measured live 2026-09-29 (relay pid 20929, session ``ec51d0c8a9c7``, 0.64.1):
+    after its FIRST move out completed, every later offload of that session answered
+    ``committed`` in microseconds — no audit lines, no tombstone, nothing moved, and
+    the busy refusal the protocol did produce was never consulted. The source relay's
+    ``_source_done`` sets a completion event; ``forget`` cleared phases and refusals
+    but not events, so the next move's first poll consumed it as its own completion.
+    This is the same sequence on two real relays over loopback.
+
+    THE ASSERTIONS ARE THE WIRE'S OWN FACTS: a receipt that says the move finished
+    must leave the conversation on the destination with the source tombstoned, and
+    the history must carry every phase the move went through — the broken shape was
+    an instant ``[prepared, committed]`` pair 3.8 µs apart against the real move's
+    four phases over 8.7 s.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    source = _owned_session(server_a)
+    target = server_b.identity.device_id
+
+    first = _move(server_a, SESSION, to=target, monkeypatch=monkeypatch)
+    assert first["ok"] is True, first
+    assert first["phase"] == "done"
+    # The conversation comes home — the live episode's own middle step (06:23 out,
+    # ~06:30 back) — which is what makes the next offload a duplicate of the first.
+    back = _move(server_a, SESSION, to="local", monkeypatch=monkeypatch)
+    assert back["ok"] is True, back
+    assert (server_a.root / "sessions" / SESSION).is_dir()
+
+    second = _move(server_a, SESSION, to=target, monkeypatch=monkeypatch)
+
+    assert second["ok"] is True, second
+    assert (
+        second["phase"] == "done"
+    ), "the relay answered a success the protocol never ran: " + repr(second)
+    assert [stamp["phase"] for stamp in second["phases"]] == [
+        "prepared",
+        "handing_off",
+        "committed",
+        "done",
+    ]
+    assert not source.exists(), "the receipt claimed a move that never left this device"
+    assert (server_b.root / "sessions" / SESSION).is_dir()
+
+    from local_operator.network.projection import read_tombstones
+
+    assert read_tombstones(server_a.root)[SESSION]["device_id"] == target
+
+
+def test_a_mid_turn_second_offload_refuses_instead_of_faking_success(
+    pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The busy refusal must RUN; the stale signal used to answer before it could.
+
+    The same round trip as the sibling cell, then the second offload is attempted
+    with the session mid-turn (the owner's retire refuses ``busy`` — the state a
+    self-move from inside the conversation is in). That refusal travels back over the
+    link the invite used, which the inviter can only read while it is still LOOKING
+    for an answer: with the stale ``done`` event in play the first poll returned
+    instantly, so the receipt claimed success and the protocol's own refusal was
+    recorded but never consulted. Nothing may move and the answer must be the refusal.
+    """
+    server_a, server_b, _host, _port = pair
+    _pair_settled(pair, monkeypatch, role="admin", settings=server_b.settings)
+    _owned_session(server_a)
+    target = server_b.identity.device_id
+
+    assert _move(server_a, SESSION, to=target, monkeypatch=monkeypatch)["ok"] is True
+    assert _move(server_a, SESSION, to="local", monkeypatch=monkeypatch)["ok"] is True
+
+    sentence = (
+        "this session is working right now, so nothing was moved; try again when the "
+        "turn finishes, or pass --wait <seconds> to re-check"
+    )
+    monkeypatch.setattr(
+        mobility,
+        "_retire_local_runtime",
+        lambda root, session_id, deadline_s=0: {"result": "busy", "sentence": sentence},
+    )
+
+    result = _move(server_a, SESSION, to=target, monkeypatch=monkeypatch)
+
+    assert result["ok"] is False, f"a mid-turn move faked success: {result!r}"
+    assert result["code"] == "busy", result
+    assert result["message"] == sentence, result
+    assert result["changed"] is False, result
+    # NOTHING CHANGED, ON EITHER DEVICE.
+    assert (server_a.root / "sessions" / SESSION).is_dir()
+    assert not (server_b.root / "sessions" / SESSION).exists()
+
+    from local_operator.network.projection import read_tombstones
+
+    assert read_tombstones(server_a.root).get(SESSION) is None
+
+
 def _grant_via_the_real_cli(
     server: relay.RelayServer, network_id: str, device_id: str, monkeypatch: pytest.MonkeyPatch
 ) -> list[str]:
@@ -979,6 +1078,34 @@ def test_an_offload_receipt_carries_every_phase_the_move_went_through(
         assert [stamp["phase"] for stamp in disk_only] == ["committed"]
     finally:
         progress.forget(private)
+
+
+def test_forget_drops_the_completion_signal_a_previous_move_set() -> None:
+    """``forget``'s contract: EVERYTHING a move start must not inherit — signals too.
+
+    ``signal`` stores a level-triggered ``threading.Event`` under ``<id>:<marker>``
+    and nothing else clears it; ``forget`` used to drop only phases and refusals, so
+    one completed move-out left its ``done`` set for the relay process's lifetime and
+    the NEXT offload's first poll consumed it as its own completion — an instant
+    synthetic ``committed`` for a move that never ran (live, 2026-09-29; the sibling
+    cells above pin the wire-level symptoms). This pins the reset itself, with no
+    relay in the way: after ``forget`` there is no history, no refusal, no signal.
+    """
+    progress = mobility._Progress()
+    session_id = "ef56ab12cd34"
+
+    progress.note(session_id, "done")
+    progress.signal(session_id, "done")
+    assert progress.wait_for(session_id, "done", 0.05) is True
+
+    progress.note_refusal(session_id, code="busy", message="mid-turn", from_device="d_peer")
+    progress.forget(session_id)
+
+    assert progress.phases(session_id) == []
+    assert progress.refusal(session_id) is None, "a refusal outlived its move"
+    assert (
+        progress.wait_for(session_id, "done", 0.05) is False
+    ), "a set completion event survived forget(); the next move would read it as its own"
 
 
 def test_the_phase_order_is_the_contracts_not_the_clock(pair: Devices) -> None:
