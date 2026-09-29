@@ -170,16 +170,45 @@ def _delivery_row(path: Path, conversation: str) -> tuple[object, ...] | None:
 async def _wait_for_store(
     path: Path, conversation: str, token: str, *, seconds: float = 30.0
 ) -> dict[str, Any]:
-    """Wait for THAT token to be the store's completion, or fail saying where it stood."""
+    """Wait for THAT token to be the store's completion, or fail saying where it stood.
+
+    A DEFERRED READ IS RETRIED, NEVER FAILED, and that is the store's own
+    contract acted out: ``AttentionReadDeferred`` means the read met sustained
+    contention and changed NOTHING, and a surface is told to keep its last good
+    frame and "re-read on the next tick" -- which is what this polling loop is.
+    Propagating the deferral instead failed the cell on loaded runners (jobs
+    109194223077, 109273907711: "attention store stayed busy through 2 attempts:
+    database is locked" out of this call), because the shrunken retry budget
+    (``_shrink_the_budget``: 2 x 50 ms) can be outlasted by a sibling writer's
+    commit stall -- and the busy window itself inflates several-fold under load
+    (measured on the fleet 2026-09-29: ``PRAGMA busy_timeout=50`` returned after
+    348-472 ms across samples, so the doubled window is really ~0.7-1 s of wall
+    time, and a loaded runner's stall can still beat that).
+
+    The deadline remains the bound that ends the wait, and the last deferral is
+    named in its failure, so a store that never answers fails the wait LOUDLY
+    rather than being retried forever -- the never-answers cell beside this
+    helper's callers is the probe that keeps that failure mode reachable.
+    """
     store = AttentionStore(path)
     deadline = time.monotonic() + seconds
-    state = store.state(conversation)
-    while state["completion_token"] != token:
+    state: dict[str, Any] | None = None
+    deferred: AttentionReadDeferred | None = None
+    while True:
+        try:
+            state = store.state(conversation)
+            deferred = None
+        except AttentionReadDeferred as busy:
+            deferred = busy
+        if state is not None and state["completion_token"] == token:
+            return state
         if time.monotonic() >= deadline:
-            raise AssertionError(f"{token} never reached the store; it holds {state}")
+            held = f"it holds {state}" if state is not None else "no read returned state"
+            raise AssertionError(
+                f"{token} never reached the store; {held}"
+                + (f"; the last read deferred: {deferred}" if deferred is not None else "")
+            )
         await asyncio.sleep(0.02)
-        state = store.state(conversation)
-    return state
 
 
 async def _wait_until(predicate, *, seconds: float = 30.0, what: str = "condition") -> None:
@@ -715,6 +744,36 @@ async def test_a_deferred_completion_is_republished_in_process_by_the_ladder(
 
 
 @pytest.mark.asyncio
+async def test_the_store_wait_still_surfaces_a_store_that_never_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry tolerance retries DEFERRALS; it never hides a store that is gone.
+
+    The load fix makes ``_wait_for_store`` ride a deferred read out instead of
+    failing the wait on it, so this is the probe that the failure mode is still
+    reachable: with an EXCLUSIVE lock held for the whole cell, every read defers
+    (the store's bounded answer, see ``AttentionReadDeferred``), and the wait must
+    STOP at its own deadline and fail NAMING the deferral. Before the tolerance,
+    the same call raised the bare ``AttentionReadDeferred`` out of the helper --
+    which is the exact shape both CI flakes wore; this pins that the fix made the
+    wait patient, not blind.
+    """
+    _shrink_the_budget(monkeypatch)
+    path = tmp_path / "attention.db"
+    _seed(path)
+    holder = _HeldExclusiveLock(path)
+    try:
+        with pytest.raises(AssertionError) as raised:
+            await _wait_for_store(path, "session/a", str(uuid.uuid4()), seconds=0.2)
+    finally:
+        holder.release()
+        holder.close()
+    message = str(raised.value)
+    assert "never reached the store" in message, message
+    assert "deferred" in message, f"the wait must name the deferral: {message}"
+
+
+@pytest.mark.asyncio
 async def test_a_ladder_that_never_gets_the_store_gives_up_bounded_and_says_so_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1091,15 +1150,31 @@ async def test_an_armed_latch_costs_a_tick_no_store_write_of_its_own(
             await session._publish_attention_outcome()
             assert session._attention_republish_due
             monkeypatch.setattr(AttentionStore, "publish", counting_publish)
-            for _ in range(8):
+            # TICKS KEEP COMING UNTIL THE LATCH CLEARS -- which is what a viewer
+            # does, and what the fixed eight-tick burst got wrong under load: the
+            # sets collapse while a rung publishes (one `asyncio.Event` means N
+            # ticks landing inside one publish hurry ONE rung), so the eight ticks
+            # could all be spent inside the first rungs' publishes -- reproduced
+            # 10/10 locally on the loaded fleet (2026-09-29: a deferred publish
+            # measured 0.65-1.03 s, four rungs ~3.5-4 s, while all eight ticks
+            # were gone by ~0.5 s; later rungs then waited their full 30 s rung
+            # delay and the cell timed out). BOUND: 15 s -- a backstop, not the
+            # assertion -- about 3x the worst ladder observed under load (~4.5 s)
+            # and strictly BELOW one 30 s rung delay, so a ladder that stopped
+            # being hurried at all (the wake path broken, every rung falling
+            # through to its delay) still fails this cell instead of passing.
+            deadline = time.monotonic() + 15.0
+            while session._attention_republish_due and time.monotonic() < deadline:
                 await session.refresh_attention()
                 await asyncio.sleep(0.05)
-            await _wait_until(
-                lambda: not session._attention_republish_due,
-                what="the ladder to spend its rungs and stand down",
+            assert not session._attention_republish_due, (
+                "ticks kept firing but the ladder never stood down: with the wake "
+                "path live every rung fires on a tick, so four rungs cost four "
+                "deferred publishes -- a ladder still armed after 15 s means the "
+                "firing path is broken (or a rung fell through to its 30 s delay)"
             )
             assert 0 < len(attempts) <= len(delays), (
-                f"8 ticks must cost the ladder's {len(delays)} rungs, not one write "
+                f"ticks must cost the ladder's {len(delays)} rungs, not one write "
                 f"each: {attempts}"
             )
             spent = len(attempts)
