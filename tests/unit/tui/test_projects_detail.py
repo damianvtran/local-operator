@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from local_operator.projects import MilestoneEdit, ProjectEdit, ProjectMilestone, ProjectRegistry
+from local_operator.projects import (
+    MilestoneEdit,
+    ProjectEdit,
+    ProjectMilestone,
+    ProjectRegistry,
+)
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.projects_render import (
     detail_meta_line,
