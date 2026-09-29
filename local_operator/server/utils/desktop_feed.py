@@ -114,6 +114,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, cast
 
+from local_operator.monitors.store import read_index as read_monitor_index
 from local_operator.notifications import notification_payload
 from local_operator.notifications.compose import NotificationKind
 from local_operator.resume import SessionRow
@@ -582,6 +583,13 @@ class DesktopFeed:
         #: this clock: the index is outside ``run/mobile``, so no record write
         #: announces an armed or dormant wake.
         self._wake_index: dict[str, dict[str, Any]] = {}
+        #: ``session_id -> monitor-index entry``, the ``_wake_index`` twin on
+        #: the same clock and for the same reason: the monitor index lives
+        #: outside ``run/mobile`` too (a monitor can be armed for a session
+        #: with no record at all), and besides ``monitors``/``monitors_dormant``
+        #: it feeds the ORDER KEY — an arm or a park moves a cold row's band
+        #: even when nothing else about it does.
+        self._monitor_index: dict[str, dict[str, Any]] = {}
         #: ``session_id -> (code, label)`` as last PUBLISHED. The whole dedupe:
         #: a heartbeat rewrite moves ``heartbeat_at`` and nothing the pair is
         #: derived from, so it publishes nothing.
@@ -955,6 +963,7 @@ class DesktopFeed:
         self._record_fingerprints = fingerprints
         self._registry_fingerprint = _fingerprint(self._registry_dir)
         self._wake_index = read_index(self.root)
+        self._monitor_index = read_monitor_index(self.root)
         # The user-session cache is primed by ``_catalogue_probe`` itself, which
         # is why this asks for no names of its own: the marker read is the one
         # per-directory cost ``_snapshot`` already calls affordable once per
@@ -971,7 +980,7 @@ class DesktopFeed:
         # than the clock means the first tick re-probes and still publishes
         # nothing — so a change landing in that first second is still caught.
         self._authoring_token = self._authoring_probe()
-        candidates = [*records, *self._wake_index, *names]
+        candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
             self._attention[self._session_id(identity)] = state
@@ -1786,6 +1795,13 @@ class DesktopFeed:
             age = registry.classify(record, check_zombie=False).heartbeat_age_s
         entry = self._wake_index.get(session_id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
+        # The monitors PAIR, read from this feed's own index cache — the
+        # ``decorate_rows`` transcription this method promises extends to it,
+        # and the ORDER KEY an arm or a park moves is derived from these fields,
+        # so the frame this feed publishes and the list the client refetches
+        # agree about the row's band.
+        monitor_entry = self._monitor_index.get(session_id) or {}
+        monitors = (monitor_entry.get("monitors") or ()) if isinstance(monitor_entry, dict) else ()
         return SessionRow(
             session_id,
             0.0,
@@ -1798,6 +1814,10 @@ class DesktopFeed:
             wakes=len(schedules),
             wakes_dormant=bool(
                 isinstance(entry, dict) and (entry.get("stopped_at") or entry.get("held_at"))
+            ),
+            monitors=len(monitors),
+            monitors_dormant=bool(
+                isinstance(monitor_entry, dict) and monitor_entry.get("stopped_at")
             ),
             kind=kind,
             heartbeat_age_s=age,
@@ -1877,12 +1897,15 @@ class DesktopFeed:
         it needs this clock at all), and ``live -> wedged`` is an AGE crossing
         with no file write anywhere.
 
-        The candidate set is a UNION of four populations rather than a diff:
+        The candidate set is a UNION of six populations rather than a diff:
         every record the scan returned, every record that VANISHED since the last
         probe (an exit whose directory move the doorbell happened to miss), every
         session the wake index names — a wake can be armed for a session with no
-        record at all, which is the cold-row case the sidebar shows — and every
-        session that LEFT the index since the last probe.
+        record at all, which is the cold-row case the sidebar shows — every
+        session that LEFT the wake index since the last probe, and the monitor
+        index's two, read on the same clock for the same reason (its entry also
+        rides the row's ORDER KEY, so an arm or a park must publish even where
+        the wake pair does not move).
 
         THAT LAST TERM IS NOT OPTIONAL, and it is the one place this differs from
         the obvious reading of "every session in the wake index": a session whose
@@ -1910,12 +1933,16 @@ class DesktopFeed:
         self._status_probed_at = time.monotonic()
         scanned: list[tuple[Any, str]] = []
         if self._registry_dir.is_dir():
-            scanned, wake_index = await asyncio.gather(
+            scanned, wake_index, monitor_index = await asyncio.gather(
                 asyncio.to_thread(registry.scan, self.root, check_zombie=None, reap=False),
                 asyncio.to_thread(read_index, self.root),
+                asyncio.to_thread(read_monitor_index, self.root),
             )
         else:
-            wake_index = await asyncio.to_thread(read_index, self.root)
+            wake_index, monitor_index = await asyncio.gather(
+                asyncio.to_thread(read_index, self.root),
+                asyncio.to_thread(read_monitor_index, self.root),
+            )
         records: dict[str, tuple[Any, str]] = {}
         paths: dict[str, Path] = {}
         fingerprints: dict[str, tuple[int, int, int] | None] = {}
@@ -1930,11 +1957,22 @@ class DesktopFeed:
             fingerprints[session_id] = _fingerprint(path)
         vanished = [session_id for session_id in self._records if session_id not in records]
         disarmed = [session_id for session_id in self._wake_index if session_id not in wake_index]
+        disarmed_monitors = [
+            session_id for session_id in self._monitor_index if session_id not in monitor_index
+        ]
         self._records = records
         self._record_paths = paths
         self._record_fingerprints = fingerprints
         self._wake_index = wake_index
-        candidates = [*records, *vanished, *wake_index, *disarmed]
+        self._monitor_index = monitor_index
+        candidates = [
+            *records,
+            *vanished,
+            *wake_index,
+            *disarmed,
+            *monitor_index,
+            *disarmed_monitors,
+        ]
         if candidates:
             await self._publish_status_changes(candidates)
 
