@@ -131,7 +131,13 @@ logger = logging.getLogger(__name__)
 #: Bumped when the cache's SHAPE changes. An older file is discarded (scan
 #: sections) rather than migrated — it is derived and rebuildable, and a
 #: migration path for a cache is code that exists to be wrong.
-TRANSCRIPT_INDEX_VERSION = 1
+#:
+#: 2: ``MessageDoc`` carries ``custom_type`` (the find filter's discriminator).
+#: The bump IS the correctness: a version-1 file would load its peer docs with
+#: ``custom_type=None`` — the key is simply absent — and slip them past
+#: ``transcript_find``'s hidden-cross-session gate, a silent leak rather than
+#: the stale-cache miss a version mismatch is allowed to be.
+TRANSCRIPT_INDEX_VERSION = 2
 
 #: Per-doc cap on stored message text. A match beyond the cap is a stated miss.
 DOC_TEXT_CAP = 32 * 1024
@@ -206,9 +212,16 @@ class MessageDoc:
     text: str
     injected: bool
     seq: int
+    #: The injecting custom row's ``custom_type`` (``"peer_message"``,
+    #: ``"hub_message"``, ...); ``None`` on genuine user/assistant rows.
+    #: Carried so ``transcript_find`` can drop hidden cross-session docs
+    #: (``display.hide_cross_session``) without re-reading the journal. The
+    #: scanner already reads this discriminator for its injection rule, so
+    #: this is a field copy, not new scanning (design §5.3).
+    custom_type: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "id": self.id,
             "ts": self.ts,
             "role": self.role,
@@ -216,12 +229,18 @@ class MessageDoc:
             "injected": self.injected,
             "seq": self.seq,
         }
+        # Omitted when None, like ``Checkpoint.outcome``: genuine rows pay no
+        # bytes for a discriminator they do not carry.
+        if self.custom_type is not None:
+            payload["custom_type"] = self.custom_type
+        return payload
 
     @staticmethod
     def from_payload(raw: Any) -> "MessageDoc | None":
         if not isinstance(raw, dict):
             return None
         try:
+            custom_type = raw.get("custom_type")
             return MessageDoc(
                 id=str(raw["id"]),
                 ts=float(raw["ts"]),
@@ -229,6 +248,7 @@ class MessageDoc:
                 text=str(raw["text"]),
                 injected=bool(raw["injected"]),
                 seq=int(raw["seq"]),
+                custom_type=str(custom_type) if custom_type is not None else None,
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -530,6 +550,9 @@ class _Row:
     token: str = ""
     marker_kind: str | None = None
     eligible: bool = True
+    #: ``payload.custom_type`` of an inject row — the same payload field the
+    #: injection rule at ``_classify`` already inspects; None on other kinds.
+    custom_type: str | None = None
 
 
 def _head_id(head: bytes) -> str:
@@ -644,6 +667,7 @@ def _classify(
                 ts=ts,
                 kind="inject",
                 text=_inject_text(payload.get("details")),
+                custom_type=str(payload.get("custom_type")),
             )
         role = payload.get("role")
         if role == "user" or role == "assistant":
@@ -857,7 +881,8 @@ class _Derivation:
             )
         elif kind == "inject":
             # Injected rows are conversation INPUTS and stay searchable; the
-            # find slice demotes them by ``injected``. Role is "user" because the
+            # find slice demotes them by ``injected`` and drops the hidden
+            # cross-session ones by ``custom_type``. Role is "user" because the
             # wire's role vocabulary is user|agent and these are not the agent.
             self.messages.append(
                 MessageDoc(
@@ -867,6 +892,7 @@ class _Derivation:
                     text=row.text[:DOC_TEXT_CAP],
                     injected=True,
                     seq=row.ordinal,
+                    custom_type=row.custom_type,
                 )
             )
         elif kind == "start":
