@@ -285,6 +285,30 @@ STEERING_INTERRUPT_POLL_S = 0.25
 REPEATED_TOOL_ERROR_WARNING = 3
 REPEATED_TOOL_ERROR_LIMIT = 6
 
+#: How many times ONE run re-asks the model after a tool call arrived with no
+#: NAME at all. ``_model_turn`` drops such calls before anything executes them
+#: (a nameless call is wire-illegal, so keeping it killed later requests), and
+#: when one was the turn's only output, this budget buys the model the chance
+#: to re-issue it knowingly. One nameless call is a stream/decode accident; a
+#: model that produces another after two nudges needs an operator, not a third
+#: request. Each nudge is one extra model call; the budget is run-scoped like
+#: the echo and connectivity retries, because a fresh allowance per turn would
+#: re-buy the same diagnosis.
+MAX_NAMELESS_CALL_RECOVERIES = 2
+
+#: What the loop tells the model after dropping a tool call that arrived with
+#: no name. The drop is invisible to the model otherwise -- there is no call to
+#: attach a result to, and the transcript row cannot be replayed on any wire --
+#: so this message is the only record of why the conversation continues. It
+#: names the one repair the model can make: re-send the call with a name.
+#: Harness chrome -- see ``harness.rows.harness_chrome_prompts``.
+NAMELESS_CALL_RECOVERY_PROMPT = (
+    "Harness recovery notice: a tool call in your last message arrived without "
+    "a tool name. It was not executed, and its result is not in this "
+    "conversation. Re-issue the call with the tool name included, or continue "
+    "without it if it is no longer needed."
+)
+
 #: How many times an EMPTY ``length`` truncation (no text, no tool calls — the
 #: reasoning model that spent its whole output budget thinking) is retried one
 #: effort rung lower before the turn ends the ordinary way. Two covers the
@@ -1290,6 +1314,9 @@ class AgentLoop:
         run_context_tokens: int | None = None
         last_error_batch: str | None = None
         repeated_error_batches = 0
+        # Re-asks this run has spent on turns whose tool calls arrived with no
+        # name; see ``MAX_NAMELESS_CALL_RECOVERIES``.
+        nameless_call_recoveries = 0
 
         yield AgentStartEvent(generation=generation)
 
@@ -1330,6 +1357,7 @@ class AgentLoop:
 
                     assistant, stop_reason, stream_error = None, "stop", None
                     turn_connectivity_loss = False
+                    nameless_call_drops = 0
                     # The spec this call was BUILT with, which is not
                     # ``config.model`` whenever the host resolves per call. The
                     # echo fill below is gated on what was actually sent.
@@ -1354,6 +1382,7 @@ class AgentLoop:
                             )
                             turn_model = event.model
                             turn_connectivity_loss = event.connectivity_loss
+                            nameless_call_drops = event.nameless_call_drops
                         else:
                             yield event
                     if assistant is None:
@@ -1841,6 +1870,67 @@ class AgentLoop:
                         )
                         self._discard_pending_custom(pending)
                         return
+
+                    if nameless_call_drops:
+                        # A tool call with no name cannot execute and cannot be
+                        # replayed on any wire (see the assembly guard in
+                        # ``_model_turn``), so the transcript has no row for it
+                        # and no result the model could read. When it was the
+                        # turn's ONLY output, the turn would end here with the
+                        # model unaware its call vanished -- so it is re-asked
+                        # with the one fact only this layer knows, bounded like
+                        # every other recovery in this loop. With a surviving
+                        # call the turn continues on its own; the drop is still
+                        # told to the user, because it is real either way.
+                        reasks_left = nameless_call_recoveries < MAX_NAMELESS_CALL_RECOVERIES
+                        recovering = (
+                            not assistant.tool_calls and stop_reason == "toolUse" and reasks_left
+                        )
+                        ending = (
+                            not assistant.tool_calls
+                            and stop_reason == "toolUse"
+                            and not reasks_left
+                        )
+                        if recovering:
+                            nameless_call_recoveries += 1
+                            # Appended after the turn's own message (already in
+                            # ``context.messages`` above) so it reads as the
+                            # harness explaining why the conversation continues,
+                            # and persisted for the same reason every recovery
+                            # prompt is: a resumed session must be able to see
+                            # why it was re-asked. Harness chrome -- see
+                            # ``harness.rows.harness_chrome_prompts``.
+                            recovery = Message.user(NAMELESS_CALL_RECOVERY_PROMPT)
+                            context.messages.append(recovery)
+                            new_messages.append(recovery)
+                        if recovering:
+                            notice = (
+                                "a tool call arrived without a tool name and was "
+                                "not executed — re-asking the model to re-issue it"
+                            )
+                        elif ending:
+                            # The budget is spent, so this drop is what ends the
+                            # turn -- and an ending left unnamed reads as a
+                            # completed answer on every surface (the
+                            # continuation-limit doctrine; review N1). "turn",
+                            # not "run": a queued steering/aside/follow-up
+                            # message can still re-open the loop after this, and
+                            # copy claiming the run's end would then be false.
+                            notice = (
+                                "a tool call arrived without a tool name and was "
+                                "not executed — no further re-asks; ending the turn"
+                            )
+                        else:
+                            notice = "a tool call arrived without a tool name and was not executed"
+                        yield NoticeEvent(text=notice, kind="warning")
+                        if recovering:
+                            # No TurnEndEvent on this path, deliberately: the
+                            # call was never announced (announcements are minted
+                            # on the first name fragment) and nothing was shown
+                            # for it, so there is no live row to settle -- same
+                            # shape as the reasoning-echo re-send above.
+                            has_more_tool_calls = True
+                            continue
 
                     tool_results: list[ToolResult] = []
                     if stop_reason == "length":
@@ -2850,9 +2940,36 @@ class AgentLoop:
         # constructed with and what every provider already handles.
         if text_parts:
             assistant.content = [TextContent(text="".join(text_parts))]
-        assistant.tool_calls = [
-            self._assemble_tool_call(state) for _, state in sorted(tool_states.items())
-        ]
+        # A tool call whose NAME never arrived is not a call. The stream labels
+        # calls by index and the name rides its own fragment; when that fragment
+        # never arrives (seen live 2026-09-29: a model's third attempt at the
+        # same call streamed argument deltas and no name at all), the assembled
+        # ToolCall would carry name "" -- and a nameless call is wire-illegal
+        # EVERYWHERE. It used to be kept: it executed as an unknown tool, the
+        # paired result kept the turn legal locally, and then the NEXT request
+        # replayed the row, the provider refused the whole body (HTTP 400,
+        # non-retryable), and a 44-step run ended as stop_reason "error" with
+        # no finish. There is nothing to execute and nothing to salvage -- the
+        # name is the identity -- so the call is dropped here, where it enters
+        # the transcript, and the run loop re-asks (see
+        # ``MAX_NAMELESS_CALL_RECOVERIES``). The warning is the durable record;
+        # the count rides ``_ModelTurnResult``.
+        assembled_calls: list[ToolCall] = []
+        nameless_call_drops = 0
+        for index, state in sorted(tool_states.items()):
+            if not state["name"].strip():
+                nameless_call_drops += 1
+                logger.warning(
+                    "dropping a tool call that arrived with no name "
+                    "(index %d, %d argument bytes, id %r); a nameless call cannot "
+                    "be executed and cannot be replayed to any provider",
+                    index,
+                    state["bytes"],
+                    state["id"] or "<none>",
+                )
+                continue
+            assembled_calls.append(self._assemble_tool_call(state))
+        assistant.tool_calls = assembled_calls
         assistant.stop_reason = stop_reason
         assistant.usage = usage
         if stop_reason == "refusal" and error:
@@ -2883,6 +3000,7 @@ class AgentLoop:
             error=error,
             connectivity_loss=connectivity_loss,
             model=request_model,
+            nameless_call_drops=nameless_call_drops,
         )
 
     @staticmethod
@@ -2895,7 +3013,23 @@ class AgentLoop:
                 if isinstance(parsed, dict):
                     arguments = parsed
             except json.JSONDecodeError:
-                # Leave arguments empty; validation reports the bad JSON.
+                # Leave arguments empty; validation reports the bad JSON. The
+                # warning is the ONE record of where a replay-salvaged fragment
+                # was born: from here on ``_replayable_tool_arguments`` salvages
+                # this call on every later request (once per call, by then), and
+                # without this line the corruption's origin -- a stream that
+                # ended mid-call, or fragments that never joined to valid JSON
+                # -- is invisible. Seen live: an audit could count 221 salvage
+                # lines for 8 calls and still not say when or why the fragments
+                # formed.
+                logger.warning(
+                    "tool call assembled from streamed deltas does not parse "
+                    "(%d bytes, starts %r, name %r); arguments stay empty, raw "
+                    "kept for replay",
+                    len(raw),
+                    raw[:80],
+                    state["name"] or None,
+                )
                 pass
         call = ToolCall(name=state["name"], arguments=arguments, raw_arguments=raw or None)
         if state["id"]:
@@ -4737,3 +4871,8 @@ class _ModelTurnResult:
     #: answered badly. Carried out to the run loop, which continues such a turn
     #: instead of ending the run on it — see ``MAX_CONNECTIVITY_CONTINUATIONS``.
     connectivity_loss: bool = False
+    #: How many tool calls this turn emitted and had DROPPED because they
+    #: arrived with no name (see ``_model_turn``'s assembly guard). There is no
+    #: row to replay for such a call, so only the run loop can tell the model;
+    #: carried out for the recovery in ``run``.
+    nameless_call_drops: int = 0

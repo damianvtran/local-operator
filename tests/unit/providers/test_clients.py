@@ -3157,6 +3157,133 @@ def test_non_object_raw_arguments_fall_back_to_parsed_arguments() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Nameless tool calls: dropped at the render boundary (incident 2026-09-29)
+# ---------------------------------------------------------------------------
+
+
+def _nameless_pair() -> list[Message]:
+    """A history with one nameless call AND the result answering it.
+
+    The shape the live incident left in the transcript: a call whose name
+    fragment never arrived, refused under its minted id, plus the tool message
+    that refusal was stored as. Replaying it on an OpenAI-family wire made the
+    provider refuse the WHOLE request (``tool_calls[0].function.name must be a
+    non-empty string``) — non-retryable, and it ended a 44-step run as
+    ``stop_reason: error`` with no finish.
+    """
+    call = ToolCall(id="nk1", name="", arguments={}, raw_arguments="{}")
+    return [
+        Message(
+            role="assistant",
+            content=[TextContent(text="trying again")],
+            tool_calls=[call],
+        ),
+        Message(
+            role="tool",
+            tool_call_id="nk1",
+            content=[TextContent(text="Tool not found:")],
+        ),
+        Message(role="user", content=[TextContent(text="carry on")]),
+    ]
+
+
+def test_wire_builders_drop_a_nameless_call_and_its_result() -> None:
+    """Every wire refuses an empty tool name, so the pair must leave the
+    request TOGETHER — the call cannot be rendered, and a result whose call is
+    gone is an orphan strict providers reject right after it."""
+    from local_operator.providers.clients import (
+        _messages_to_openai_responses,
+        _without_unrenderable_tool_calls,
+    )
+
+    messages = _nameless_pair()
+
+    # The repair pass itself: call and result both gone, everything else kept.
+    repaired = _without_unrenderable_tool_calls(messages)
+    assert [m.role for m in repaired] == ["assistant", "user"]
+    assert repaired[0].tool_calls == []
+    assert "carry on" in repaired[1].text
+
+    # OpenAI chat-completions body.
+    body = OpenAICompatClient(base_url="https://api.openai.com/v1")._build_body(
+        ChatRequest(model=_spec(), messages=messages)
+    )
+    assert all(not entry.get("tool_calls") for entry in body["messages"])
+    assert all(entry.get("role") != "tool" for entry in body["messages"])
+    assert any(entry.get("content") == "carry on" for entry in body["messages"])
+
+    # Responses body.
+    items = _messages_to_openai_responses(messages)
+    assert all(item.get("type") not in ("function_call", "function_call_output") for item in items)
+    assert any(
+        entry.get("role") == "user"
+        and any(part.get("text") == "carry on" for part in entry.get("content") or [])
+        for entry in items
+    )
+
+    # Anthropic body.
+    request = ChatRequest(
+        model=_spec(provider="anthropic", model_id="claude-sonnet-4"), messages=messages
+    )
+    body = AnthropicClient()._build_body(request)
+    blocks = [
+        block
+        for entry in body["messages"]
+        for block in (entry.get("content") or [])
+        if isinstance(block, dict)
+    ]
+    assert all(block.get("type") not in ("tool_use", "tool_result") for block in blocks)
+    assert any(block.get("text") == "carry on" for block in blocks)
+
+    # Google body.
+    gbody = GoogleClient()._build_body(
+        ChatRequest(model=_spec(provider="google", model_id="gemini-2.5-pro"), messages=messages)
+    )
+    parts = [part for content in gbody["contents"] for part in (content.get("parts") or [])]
+    assert all("functionCall" not in part and "functionResponse" not in part for part in parts)
+    assert any(part.get("text") == "carry on" for part in parts)
+
+
+def test_a_nameless_call_is_reported_once_not_once_per_request(caplog) -> None:
+    """Observability contract: the repair runs on EVERY request build, so the
+    line must count DISTINCT repairs. The sibling family (unparseable raw
+    arguments) let one run produce 221 lines for 8 calls — a reader counting
+    lines counted incidents that were not distinct."""
+    from local_operator.providers import clients as clients_mod
+
+    clients_mod._log_once.cache_clear()
+    messages = _nameless_pair()
+    with caplog.at_level("WARNING", logger="local_operator.providers.clients"):
+        for _ in range(3):
+            clients_mod._without_unrenderable_tool_calls(messages)
+    lines = [
+        record.getMessage() for record in caplog.records if "has no name" in record.getMessage()
+    ]
+    assert len(lines) == 1, lines
+    assert "nk1" in lines[0], "the line must carry the call's identity"
+
+
+def test_unparseable_replay_arguments_warn_once_per_call_with_identity(caplog) -> None:
+    """The salvage path's warning must name the call and fire once, not on
+    every later request that replays the same permanent fragment."""
+    from local_operator.providers import clients as clients_mod
+
+    clients_mod._log_once.cache_clear()
+    message = _assistant_with([_truncated_call()])
+    with caplog.at_level("WARNING", logger="local_operator.providers.clients"):
+        for _ in range(3):
+            _message_to_openai(message)
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "unparseable raw arguments" in record.getMessage()
+    ]
+    assert len(lines) == 1, lines
+    assert "t1" in lines[0] and "write" in lines[0], lines[0]
+    assert '{"path": "/tmp/x.py"' in lines[0], "the fragment leads the line"
+
+
+# ---------------------------------------------------------------------------
 # Refusal surfacing: the provider said no, and the user must see its words
 # ---------------------------------------------------------------------------
 
