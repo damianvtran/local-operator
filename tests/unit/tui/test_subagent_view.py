@@ -1464,6 +1464,14 @@ async def _wait_history(pilot: Any, view: SubagentView) -> None:
     ``wait_for_complete`` treats an empty list as falsy and falls back to
     waiting on EVERY worker. Empty here legitimately means the read already
     finished, so the pause below is enough to let its callback land.
+
+    A request that is SCHEDULED but not yet STARTED is not covered: the mount's
+    first page request rides ``call_after_refresh``, so under a loaded
+    scheduler it can fire after this helper returns — during whatever the
+    caller does next. A test that mutates the child directory right after this
+    returns must issue that request deterministically first and drain it (see
+    ``test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh``),
+    or the late read observes the mutation instead of the empty directory.
     """
     workers = [w for w in view.workers if w.group == "subagent-history"]
     if workers:
@@ -2620,6 +2628,11 @@ async def test_history_unavailable_and_error_retry_keep_trajectory_fallback(
         # directory is discovered on that worker — so the note is not painted
         # until it settles. Asserting straight after _open read whatever state
         # happened to be current one frame in.
+        # Pin the request so "until it settles" is deterministically this
+        # wait's job (``_wait_history``'s docstring): the mount schedules it
+        # through ``call_after_refresh``, and a loaded scheduler can otherwise
+        # leave it scheduled-but-not-started past this point.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
         assert "Reading the ingest path." in " ".join(view.rendered_rows())
@@ -4731,6 +4744,10 @@ async def test_the_unavailable_note_clears_when_the_transcript_appears(tmp_path)
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         # Correct at this instant: there genuinely is no transcript yet.
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
@@ -4808,6 +4825,10 @@ async def test_a_missing_transcript_costs_one_stat_per_refresh_and_no_read(
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
 
@@ -4860,6 +4881,10 @@ async def test_a_swept_child_with_a_deleted_transcript_reads_honestly(tmp_path) 
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
 
         # The directory outlived the file, which is the sweep this covers.
@@ -4900,6 +4925,10 @@ async def test_a_transient_probe_error_does_not_disable_the_re_look(tmp_path, mo
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial request before the wait (``_wait_history``'s
+        # docstring): a loaded scheduler can otherwise fire it late and the
+        # assert below reads a page whose first call never landed.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
         assert HISTORY_UNAVAILABLE_NOTE in view._history_state_text()
 
@@ -5027,6 +5056,18 @@ async def test_a_persistently_failing_probe_costs_no_extra_reads_per_refresh(
     app = OperatorApp(_async_factory(session))
     async with app.run_test(size=(90, 28)) as pilot:
         view = await _open(pilot, app, job)
+        # Pin the initial page request BEFORE the append below. The mount issues
+        # it through ``call_after_refresh``, so under a loaded scheduler it can
+        # still be scheduled-but-not-started when ``_wait_history`` returns and
+        # then fire inside the append's await: the read observes the just-written
+        # row, SUCCEEDS, and the exhausted guard then refuses every probe below —
+        # the failing reader is never exercised and the footer reads
+        # "start of transcript" instead of the asserted "no saved transcript"
+        # (CI run 36529571725, shard 3.13/3). Issuing the request here and
+        # draining its worker makes the order deterministic: the read concludes
+        # against the empty directory, and a later scheduled request is refused
+        # by the unavailable guard.
+        view._maybe_load_history(initial=True)
         await _wait_history(pilot, view)
 
         transcript = Transcript(child_dir)
