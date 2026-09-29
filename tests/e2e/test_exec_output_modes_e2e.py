@@ -462,11 +462,17 @@ async def test_sdk_pydantic_schema_and_retry_round_trip(exec_server, tmp_path):
 
 def test_background_reports_failed_status_and_log(exec_server, tmp_path):
     """Cell 10. `--background` on an always-invalid cell: the durable record
-    reaches ``failed`` and its log carries the contract error. The schema file
-    is named RELATIVELY from the child's cwd: the CLI absolutises it for the
-    detached worker, which re-reads it on its own side — a "cannot read
-    --output-schema" in the log would mean the path stopped crossing the
-    boundary (review R-2)."""
+    reaches ``failed`` and its log carries the contract error.
+
+    The schema is named RELATIVELY (it lives in the child's cwd). What the
+    no-"cannot read --output-schema" assertion observes is that the file the
+    run was handed RESOLVED on the far side of the spawn boundary — a
+    resolution canary, not a test of the CLI's absolutisation: the worker
+    inherits the spawner's cwd, so a relative value would resolve too
+    (mutant-checked: removing the abspath or dropping the schema leaves this
+    cell green; only a worker whose cwd stops covering the file reds it).
+    The discriminating guard for the absolutisation is the unit test
+    (``test_cli_new.test_main_exec_output_flags_land_in_exec_args``)."""
     run, requests, root = exec_server
     (tmp_path / "report.schema.json").write_text('{"type": "object", "required": ["cell"]}')
     launched = run(
