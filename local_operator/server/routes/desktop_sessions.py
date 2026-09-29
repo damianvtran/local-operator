@@ -35,6 +35,7 @@ from local_operator.server.models.desktop_sessions import (
     ArchiveState,
     AttentionState,
     CheckpointManifest,
+    CheckpointWarmReceipt,
     ChildTrajectoryRelease,
     ChildTrajectoryWindow,
     ChildTranscriptPage,
@@ -95,6 +96,7 @@ from local_operator.session.catalog import (
     SCOPE_NAME_MAX_LENGTH,
     CatalogueScope,
 )
+from local_operator.session.checkpoint_naming import MAX_WARM_IDS
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import (
     MoveIndeterminate,
@@ -1097,6 +1099,25 @@ class Warm(Input):
     applies: a client that invents an option gets a 422 naming it, instead of
     having it silently ignored and believing it took effect.
     """
+
+
+class CheckpointsWarm(Input):
+    """Which checkpoints to buy names for (``sessions.checkpoints.warm``, D9).
+
+    Both fields are optional: ``ids`` names specific ticks (a hover) and
+    ``limit`` bounds the rail-open default selection — "the most recent <= 8
+    checkpoints missing names" when neither is sent. Sending neither is the
+    common case, not an omission to correct, which is what makes the op
+    usable from a rail before the client has classified anything.
+
+    ``ids`` entries are journal entry ids (a tick's own id, D1); the cap is
+    the module's own :data:`~local_operator.session.checkpoint_naming.MAX_WARM_IDS`
+    so an over-cap request is a 422 naming the field rather than a silently
+    truncated batch.
+    """
+
+    ids: list[str] | None = Field(default=None, max_length=MAX_WARM_IDS)
+    limit: int | None = Field(default=None, ge=1, le=MAX_WARM_IDS)
 
 
 class Interrupt(Input):
@@ -2488,6 +2509,43 @@ async def checkpoints(session_id: str, request: Request):
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         return reply(await bridge.checkpoints())
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/checkpoints/warm",
+    response_model=CRUDResponse[CheckpointWarmReceipt],
+)
+async def checkpoints_warm(session_id: str, body: CheckpointsWarm, request: Request):
+    """Buy names for this conversation's checkpoint ticks (D2/D9), lazily.
+
+    The rail calls this when it opens (no ids: the backend selects the most
+    recent names still missing, bounded) and on hover of one tick
+    (``ids: [id]``). The call only ADMITS work: the owner schedules the
+    generation as background tasks and answers at once, so this route never
+    waits on a provider — a name arrives on a later manifest poll.
+
+    A WRITE only in that it spends a model call per accepted checkpoint. The
+    conversation, its runtime and its transcript are untouched, so this rides
+    the READ envelope — the bounded attach whose failure is a cold answer
+    rather than a refusal, the same reading ``/watch`` takes — and a draft
+    answers the empty receipt exactly as the manifest beside it answers
+    empty.
+
+    The work runs on the OWNER (provider credentials and the errand tier are
+    session state; see ``Bridge.checkpoints_warm``): a cold conversation's
+    empty acceptance is the honest answer, and the rail's fallback text
+    stands until a warm lands on a live runtime.
+
+    Declared beside the manifest it feeds. A nested fixed suffix, so the
+    route-order rule (``search`` before ``{session_id}``) is untouched: no
+    earlier route can shadow ``.../checkpoints/warm``, and this cannot shadow
+    a later one.
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        return reply(await bridge.checkpoints_warm(ids=body.ids, limit=body.limit))
 
 
 @router.get(
