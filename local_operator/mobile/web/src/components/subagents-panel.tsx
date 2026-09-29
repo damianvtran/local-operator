@@ -147,11 +147,22 @@ export function AgentRoster({
 			   every coordinating session. */
 			defaultOpen={false}
 			forceClosed={forceCollapsed}
+			/* THE HINT STANDS DOWN below the measured fit width (mobile UX batch
+			   2, 320x568). This row's fixed parts — chevron 16 + gaps 12 +
+			   `1/5 running` 79.5 + `· 1 queued` 72.3 + `· 1 failed` 72.3 + the
+			   hint 72.9 — need 353px of viewport once the label has fully
+			   yielded (the row is viewport - 24). Under that the row overflowed
+			   and the hint, a later sibling, painted over the tail of the
+			   danger count; the counts win (D4). The tasks row is one short
+			   phrase and keeps its hint at every width. */
+			hintClassName="max-[352px]:hidden"
 			className={cn(
 				"border-t border-hairline",
-				/* `min-h-0` so this panel can give space back to the column
-				   instead of pushing a sibling past its clipped foot (D1). */
-				"min-h-0",
+				/* `min-h-11`, not `min-h-0` — see the todos panel's fuller note:
+				   the collapsed header is the floor, because a container squeezed
+				   below its 44px row made the row overflow onto the pending card
+				   at 320x568 (mobile UX batch 2, D1). The card yields instead. */
+				"min-h-11",
 				embedded ? "pt-1" : "px-3",
 			)}
 			header={

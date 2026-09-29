@@ -44,7 +44,7 @@
 // `scripts/mobile_reachability_check.py`, which drives the real bundle in
 // headless Chrome with real touch input and asserts those pixels. Do not read a
 // green run of this file as proof of reachability.
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { COLUMN_HEIGHT_VAR } from "./lib/column";
 import { SessionScreen } from "./screens/session-view";
@@ -274,8 +274,16 @@ describe("ask card reachability", () => {
 		expect(screen.getByRole("button", { name: /option-10/ })).toBeTruthy();
 
 		const card = cardRoot();
-		// It does not shrink to nothing when the transcript is long.
-		expect(card.className).toContain("shrink-0");
+		/* THE CARD YIELDS (batch 2, 320x568 interleave). `min-h-0` — with the
+		   default flex-shrink — is what lets the column take the deficit out of
+		   the element that can afford it: this card scrolls internally and keeps
+		   its pinned meta row, while the collapsed panel headers below are single
+		   44px rows whose content has nowhere to go. `shrink-0` here is what
+		   overprinted this card's header at 320 (tasks y128-172 and subagents
+		   y129-173 against a card top of 129); the panels' side of the bargain —
+		   their own floor — is pinned in the test below. */
+		expect(card.className).toContain("min-h-0");
+		expect(card.className).not.toContain("shrink-0");
 
 		// The cap TRACKS THE COLUMN. With the column pinned to a keyboard-open
 		// 480px, the card's bound resolves against that 480 rather than against
@@ -301,6 +309,47 @@ describe("ask card reachability", () => {
 		expect(scroller?.className).toContain("min-h-0");
 		// Arbitrary agent text cannot scroll the card sideways (C7).
 		expect(scroller?.className).toContain("overflow-x-hidden");
+	});
+
+	it("holds the collapsed panels at their 44px floor while the card yields (batch 2, 320x568)", () => {
+		slot = {
+			projection: projection({
+				subagents: roster(),
+				todos: [{ name: "Todos", items: [{ text: "audit", status: "pending", reason: "" }] }],
+				pending: askPending(10),
+				pending_count: 1,
+			}),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		for (const name of [/tasks/, /subagents/]) {
+			const header = screen.getByRole("button", { name });
+			// The row keeps its own 44px tap-target floor...
+			expect(header.className).toContain("min-h-11");
+			/* ...and the container AROUND it must not undercut that floor — the
+			   `min-h-0` the container used to carry let the column squeeze it
+			   below its own row, which is how the row's box then overflowed and
+			   painted over its sibling and the card. The deficit has to come from
+			   the card instead (asserted in the reachability test above). */
+			expect(header.parentElement?.className).toContain("min-h-11");
+			expect(header.parentElement?.className).not.toContain("min-h-0");
+		}
+
+		/* The subagents hint stands down below the measured fit width so the
+		   danger count's tail is never painted over (320x568: the hint, a later
+		   sibling, covered ~28px of `· 1 failed`). The tasks row is one short
+		   phrase and keeps its hint at every width. */
+		expect(
+			within(screen.getByRole("button", { name: /subagents/ }))
+				.getByText(/answer first/)
+				.className,
+		).toContain("max-[352px]:hidden");
+		expect(
+			within(screen.getByRole("button", { name: /tasks/ }))
+				.getByText(/answer first/)
+				.className,
+		).not.toContain("max-[352px]:hidden");
 	});
 
 	it("pins the card's meta row above the scroller so it keeps its identity", () => {

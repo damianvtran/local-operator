@@ -155,4 +155,49 @@ describe("the slash sheet's open lifecycle", () => {
 		expect(filter.value).toBe("de");
 		expect(document.activeElement).toBe(filter);
 	});
+
+	it("a space typed in the filter hands the composed line back to the composer (U13, batch 2)", async () => {
+		const field = renderComposer();
+		// A real phone is typing, so the field holds focus when the sheet opens
+		// — which is what the sheet remembers as its opener and restores on
+		// unmount (the guard under test keeps that, our hand-off relies on it).
+		field.focus();
+		fireEvent.change(field, { target: { value: "/" } });
+		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+
+		// Continuous typing happens IN the filter (U8 moved the focus there):
+		const filter = screen.getByPlaceholderText("filter commands") as HTMLInputElement;
+		fireEvent.change(filter, { target: { value: "delete" } });
+		// The space is the hand-off. Before batch 2 the arguments stayed in the
+		// filter, matched nothing ("no matching commands") and were discarded
+		// on dismissal while the composer kept a bare `/`.
+		fireEvent.change(filter, { target: { value: "delete " } });
+
+		expect(screen.queryByRole("dialog")).toBeNull();
+		expect(field.value).toBe("/delete ");
+		expect(document.activeElement).toBe(field);
+
+		// And the arguments keep composing in the field the reader now holds.
+		fireEvent.change(field, { target: { value: "/delete x" } });
+		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+
+	it("re-arms on a draft backspaced to a bare `/` after a dismissal (MINOR 2, batch 2)", async () => {
+		const field = renderComposer();
+		fireEvent.change(field, { target: { value: "/delete" } });
+		await waitFor(() => expect(screen.getByRole("button", { name: /\/delete/ })).toBeTruthy());
+		fireEvent.click(screen.getByRole("button", { name: /\/delete/ }));
+		expect(field.value).toBe("/delete ");
+		expect(screen.queryByRole("dialog")).toBeNull();
+
+		// The strict half stays: a mid-token draft keeps the dismissal.
+		fireEvent.change(field, { target: { value: "/delete" } });
+		expect(screen.queryByRole("dialog")).toBeNull();
+
+		// A bare `/` is a fresh query — the reader is starting over — so the
+		// sheet re-arms. Before batch 2 this was shut until the slash itself
+		// was deleted (the review's MINOR 2).
+		fireEvent.change(field, { target: { value: "/" } });
+		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+	});
 });
