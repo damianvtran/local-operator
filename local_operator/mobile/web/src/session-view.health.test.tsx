@@ -20,10 +20,10 @@
 // captures and their measured y-stability numbers. What IS pinned here is the
 // structure that makes it true (`absolute` + `pointer-events-none` on the
 // ladder container, `pointer-events-auto` on the resume control).
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionScreen } from "./screens/session-view";
-import type { SessionProjection } from "./types";
+import type { SessionProjection, TranscriptEntry } from "./types";
 
 const mocks = vi.hoisted(() => ({
 	setSessionPin: vi.fn(async () => ({ ok: true })),
@@ -36,18 +36,25 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("./router", () => ({ navigate: mocks.navigate }));
 
-vi.mock("./api", () => ({
-	getHistory: vi.fn(async () => ({ entries: [], has_more: false })),
-	getSubagentHistory: vi.fn(async () => ({ entries: [], has_more: false })),
-	getSubagentDetail: vi.fn(async () => null),
-	imageUrl: vi.fn(() => ""),
-	getCommands: vi.fn(async () => ({ commands: [] })),
-	getModels: vi.fn(async () => ({ models: [] })),
-	sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
-	markSessionSeen: vi.fn(async () => ({ ok: true })),
-	setSessionPin: mocks.setSessionPin,
-	resumeSession: mocks.resumeSession,
-}));
+vi.mock("./api", async () => {
+	/* The REAL refusal class, so `instanceof HttpError` in the refusal helper
+	   behaves exactly as in production; every function stays a stub (spreading
+	   the real module would hand unlisted callers a live fetch). */
+	const { HttpError } = await vi.importActual<typeof import("./api")>("./api");
+	return {
+		HttpError,
+		getHistory: vi.fn(async () => ({ entries: [], has_more: false })),
+		getSubagentHistory: vi.fn(async () => ({ entries: [], has_more: false })),
+		getSubagentDetail: vi.fn(async () => null),
+		imageUrl: vi.fn(() => ""),
+		getCommands: vi.fn(async () => ({ commands: [] })),
+		getModels: vi.fn(async () => ({ models: [] })),
+		sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
+		markSessionSeen: vi.fn(async () => ({ ok: true })),
+		setSessionPin: mocks.setSessionPin,
+		resumeSession: mocks.resumeSession,
+	};
+});
 
 let slot: { projection: SessionProjection | null; connected: boolean } = {
 	projection: null,
@@ -95,6 +102,27 @@ function projection(over: Partial<SessionProjection> = {}): SessionProjection {
 		version: 1,
 		...over,
 	} satisfies SessionProjection;
+}
+
+/** One user row, so the transcript (not the empty state) is on screen — the
+    U23 = D7 reserve only exists where a scroller does. */
+function userRow(text: string): TranscriptEntry {
+	return {
+		id: text,
+		kind: "user",
+		text,
+		tool_call_id: "",
+		tool_name: "",
+		tool_state: "done",
+		summary: "",
+		intent: "",
+		diff_added: 0,
+		diff_removed: 0,
+		elapsed_s: 0,
+		error: "",
+		details: {},
+		final: false,
+	};
 }
 
 beforeEach(() => {
@@ -195,7 +223,105 @@ describe("an ended session (U7)", () => {
 	it("says where a resume reopens the conversation (U18)", () => {
 		slot = { projection: projection({ ended: true }), connected: true };
 		render(<SessionScreen sessionId="s1" />);
-		expect(screen.getByText("resume reopens it in ~")).toBeTruthy();
+		/* The words are spelled out, not a bare `~` (UX round 2, U25 = D8). */
+		expect(screen.getByText("resume reopens it in your home folder")).toBeTruthy();
+	});
+
+	it("a resume that succeeds without a live frame says so (U24)", async () => {
+		slot = { projection: projection({ ended: true }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		expect(
+			await screen.findByText("reopening — this can take a few seconds"),
+		).toBeTruthy();
+	});
+
+	it("and the line says what is true if the session still has not come up (U24)", async () => {
+		vi.useFakeTimers();
+		try {
+			slot = { projection: projection({ ended: true }), connected: true };
+			render(<SessionScreen sessionId="s1" />);
+			fireEvent.click(screen.getByRole("button", { name: "resume" }));
+			// Flush the POST's promise without advancing the clock.
+			await act(async () => {
+				await Promise.resolve();
+			});
+			expect(screen.getByText("reopening — this can take a few seconds")).toBeTruthy();
+			await act(async () => {
+				vi.advanceTimersByTime(21_000);
+			});
+			expect(screen.getByText("still reopening — it has not come up yet")).toBeTruthy();
+			expect(screen.queryByText("reopening — this can take a few seconds")).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("maps the resume 404 onto the reader's sentence, not the raw id (U26)", async () => {
+		const api = await import("./api");
+		mocks.resumeSession.mockImplementation(async () => {
+			throw new api.HttpError(404, "no such past session: s1");
+		});
+		slot = { projection: projection({ ended: true }), connected: true };
+		render(<SessionScreen sessionId="s1" />);
+		fireEvent.click(screen.getByRole("button", { name: "resume" }));
+		await waitFor(() =>
+			expect(screen.getByRole("alert").textContent).toBe(
+				"Could not resume: this session is no longer saved",
+			),
+		);
+	});
+
+	it("anchors the ladder under the spend/context glance, not over it (D9)", () => {
+		slot = {
+			projection: projection({
+				ended: true,
+				context_tokens: 12400,
+				context_window: 200000,
+			}),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+		const status = screen.getByTestId("session-status");
+		const row = screen.getByText("this session has ended — its history is kept");
+		const ladder = row.closest("div.absolute");
+		/* One wrapper holds the header, the glance row and the ladder, so the
+		   ladder's `top-full` anchor is BELOW the glance row by construction:
+		   the strip can no longer paint over the numbers a struggling session
+		   most needs. */
+		expect(ladder).toBeTruthy();
+		expect(status.parentElement).toBe(ladder?.parentElement);
+	});
+
+	it("reserves the rung's measured height inside the transcript (U23 = D7)", () => {
+		/* happy-dom lays nothing out (every rect is 0), so the rung's height is
+		   injected at the one place the screen measures it — the ladder
+		   container's own rect — and the assertion reads the spacer the screen
+		   then hands the transcript. */
+		const original = Element.prototype.getBoundingClientRect;
+		Element.prototype.getBoundingClientRect = function (this: Element) {
+			if (
+				typeof this.className === "string" &&
+				this.className.includes("top-full")
+			) {
+				return { height: 52 } as unknown as DOMRect;
+			}
+			return original.call(this);
+		};
+		try {
+			slot = {
+				projection: projection({ ended: true, transcript: [userRow("prompt")] }),
+				connected: true,
+			};
+			render(<SessionScreen sessionId="s1" />);
+			const spacer = document.querySelector<HTMLElement>("[data-scroll-top-inset]");
+			expect(spacer).toBeTruthy();
+			expect(spacer?.style.height).toBe("52px");
+			// Above every reachable row, not between them.
+			expect(spacer?.parentElement?.firstElementChild).toBe(spacer);
+		} finally {
+			Element.prototype.getBoundingClientRect = original;
+		}
 	});
 });
 

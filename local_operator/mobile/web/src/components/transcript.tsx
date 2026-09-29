@@ -8,7 +8,7 @@
  * Auto-scroll: the view follows the tail only while the user is already at
  * the bottom. Scrolling up to read must never be yanked back by a repaint.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "./markdown"
 import { ToolRow } from "./tool-row"
 import { RowBoundary } from "./row-boundary";
@@ -335,6 +335,7 @@ export function Transcript({
 	scrollKey = `${pid}:${jobId ?? "root"}`,
 	pending = [],
 	streaming = false,
+	topInset = 0,
 	tailContent,
 	emptyContent,
 }: {
@@ -353,6 +354,17 @@ export function Transcript({
 	 *  message rather than for the step running now. Defaults to false, which is
 	 *  what the subagent transcript (no pending rows) means by it. */
 	streaming?: boolean;
+	/** The height of anything OVERLAYING this scroller's top edge (the session
+	 *  view's state ladder), reserved INSIDE the scroller so the first row can
+	 *  never sit under a strip (round 2, U23 = D7). The strip is an overlay so
+	 *  the column never jumps (round 1, U19/D4); the price was that the top of
+	 *  the history was painted over, and on a transcript that does not scroll
+	 *  there was no gesture that could reveal it — measured: 28 of the first
+	 *  row's 35px hidden at 390, 38 of 56px at 320, in the exact shape that
+	 *  says "its history is kept". The owner measures the strip and hands its
+	 *  height here; zero (the default) means nothing overlays this scroller and
+	 *  the spacer is not rendered at all. */
+	topInset?: number;
 	/** Lifecycle outcomes belong in the conversation's one discoverable scroll
 	 * surface, not in a clipped nested footer beneath it. */
 	tailContent?: ReactNode;
@@ -502,6 +514,27 @@ export function Transcript({
 		}
 	};
 
+	/* The reserve above every row must not move what the reader is looking at
+	   (round 2, U23 = D7). The spacer adds `topInset` of content ABOVE all the
+	   rows, so with the browser keeping `scrollTop` the whole transcript slides
+	   up by that much; at the tail that reads as the newest message sinking
+	   below the fold. Follow the delta when the reader is not at the very top —
+	   there the slide is the POINT: the first row comes out from under the strip
+	   with no gesture, and `scrollTop` cannot go below zero anyway. `min`/`max`
+	   keep it inside the scroller's own range as the reserve clears again. */
+	const prevInset = useRef(topInset);
+	useLayoutEffect(() => {
+		const el = scrollRef.current;
+		const delta = topInset - prevInset.current;
+		prevInset.current = topInset;
+		if (el && delta !== 0 && el.scrollTop > 0) {
+			el.scrollTop = Math.max(
+				0,
+				Math.min(el.scrollTop + delta, el.scrollHeight - el.clientHeight),
+			);
+		}
+	}, [topInset]);
+
 	return (
 		<div
 			ref={scrollRef}
@@ -513,6 +546,21 @@ export function Transcript({
 				"lo-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden px-3 py-2",
 			)}
 		>
+			{/* THE OVERLAY'S HEIGHT, RESERVED (round 2, U23 = D7). First child on
+			    purpose: everything the reader can reach through this scroller —
+			    the load indicator, the "show N more" control, the rows — has to
+			    start below anything painted over the scroller's top edge. The
+			    height is the owner's measurement of the rung (see `topInset`); it
+			    is CONTENT and not padding, because `scrollHeight` has to carry it
+			    or the reserved space itself could not be scrolled past. */}
+			{topInset > 0 ? (
+				<div
+					aria-hidden
+					data-scroll-top-inset=""
+					className="shrink-0"
+					style={{ height: `${topInset}px` }}
+				/>
+			) : null}
 			{/* History loads automatically as the user scrolls up — no button. A
 			   subtle top indicator is the only chrome: a thin accent bar that
 			   fills while a page is in flight, plus a hairline when more history
