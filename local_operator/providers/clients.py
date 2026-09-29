@@ -43,6 +43,7 @@ from local_operator.compaction.thresholds import (
 from local_operator.compaction.tokens import estimate_messages_tokens
 from local_operator.harness.types import (
     AgentTool,
+    AudioContent,
     ChatRequest,
     ImageContent,
     Message,
@@ -75,6 +76,7 @@ from local_operator.providers.replay import (
     reasoning_echo_placeholder_tokens,
     replay_items,
 )
+from local_operator.stt import audio as stt_audio
 
 if TYPE_CHECKING:
     from local_operator.providers.auth_store import OAuthAccess
@@ -1788,6 +1790,26 @@ def _replayable_tool_arguments_json(call: ToolCall) -> str:
     return json.dumps(_replayable_tool_arguments(call))
 
 
+class WireCannotCarryAudio(ProviderError):
+    """An audio block reached a wire that cannot carry one, structurally.
+
+    Raised by the renderers rather than dropping the block, because a dropped
+    recording is a message the user watched leave and the model never got. The
+    three cases that reach it are structural, not provider verdicts: the
+    OpenAI Responses API (audio input is a Chat Completions pattern today), the
+    Anthropic messages API (no audio input), and an OpenAI-compatible chat
+    request whose captured container is neither of the two ``input_audio``
+    formats (wav/mp3 — v1 does not transcode). A ``ProviderError`` so the loop
+    renders it exactly like the neighbouring structural refusals ("the
+    selected model does not support required tool use"): the sentence is the
+    diagnosis, and the turn neither retries the same body nor pretends the
+    request was the provider's to answer.
+    """
+
+    def __init__(self, sentence: str) -> None:
+        super().__init__(400, sentence, retryable=False)
+
+
 def _is_empty_assistant(message: Message) -> bool:
     """Is ``message`` an assistant turn with nothing on it a provider accepts?
 
@@ -1820,7 +1842,7 @@ def _is_empty_assistant(message: Message) -> bool:
     """
     if message.role != "assistant" or message.tool_calls:
         return False
-    if any(isinstance(block, ImageContent) for block in message.content):
+    if any(isinstance(block, (ImageContent, AudioContent)) for block in message.content):
         return False
     return not message.text.strip()
 
@@ -2035,6 +2057,28 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
                     "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
                 }
             )
+        elif isinstance(block, AudioContent):
+            plain_only = False
+            wire_format = stt_audio.format_for_model_wire(block.mime_type)
+            if wire_format is None:
+                # The ONE format gate on this wire, and it belongs here rather
+                # than in a caller: ``input_audio`` takes wav/mp3 only, and v1
+                # refuses what it cannot send instead of transcoding (OQ-3).
+                # The capability layer routes non-OpenAI wires elsewhere, so
+                # reaching this with a third container means a spec said the
+                # model takes audio and its capture side did not keep to the
+                # wav/mp3 contract; a typed refusal names the constraint.
+                raise WireCannotCarryAudio(
+                    f"The {message.role} message carries audio in a format the model "
+                    f"wire cannot take ({block.mime_type}); the OpenAI-compatible "
+                    f"audio part accepts wav or mp3 only."
+                )
+            parts.append(
+                {
+                    "type": "input_audio",
+                    "input_audio": {"data": block.data, "format": wire_format},
+                }
+            )
     role = message.role
     if plain_only:
         return {"role": role, "content": "".join(p["text"] for p in parts)}
@@ -2121,6 +2165,17 @@ def _messages_to_openai_responses(
                         "type": "input_image",
                         "image_url": f"data:{block.mime_type};base64,{block.data}",
                     }
+                )
+            elif isinstance(block, AudioContent):
+                # STRUCTURAL REFUSAL, not a silent drop: the Responses API
+                # describes text and image inputs, and audio input is a Chat
+                # Completions pattern (checked 2026-09-28). The capability
+                # layer already routes audio-capable sends to the chat wire;
+                # this guard is what turns a bypass into a named error instead
+                # of a request whose audio quietly vanished from the payload.
+                raise WireCannotCarryAudio(
+                    "The OpenAI Responses API cannot carry audio input; audio "
+                    "requests must use the chat-completions wire."
                 )
         items.append({"role": message.role, "content": content})
     return items
@@ -3698,6 +3753,15 @@ class AnthropicClient:
                         },
                     }
                 )
+            elif isinstance(block, AudioContent):
+                # No audio input on this wire — the spec's capability flag for
+                # every Anthropic model stays false, so reaching here means a
+                # bypass. Refuse loudly: a dropped recording would leave the
+                # message the user watched leave as text alone, silently.
+                raise WireCannotCarryAudio(
+                    "The Anthropic messages API cannot carry audio input; "
+                    "route the recording through speech-to-text instead."
+                )
         return blocks
 
     @staticmethod
@@ -4122,6 +4186,16 @@ class GoogleClient:
             parts: list[dict[str, Any]] = [{"text": message.text}] if message.text else []
             for block in message.content:
                 if isinstance(block, ImageContent):
+                    parts.append(
+                        {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
+                    )
+                elif isinstance(block, AudioContent):
+                    # Mirrors the image branch above, snake_case spelling and
+                    # all: the REST API accepts ``inline_data``/``inlineData``
+                    # interchangeably, and the sibling branch in THIS loop is
+                    # the convention the wire here already speaks. No format
+                    # gate: Gemini's supported-audio list is wider than the
+                    # OpenAI part's and is the provider's to judge.
                     parts.append(
                         {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                     )
