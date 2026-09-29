@@ -16,11 +16,24 @@ BLUE_REPLY = (
 _BLUE = host_theme.parse_replies(BLUE_REPLY)
 _LIGHT = ((0x20, 0x20, 0x20), (0xFA, 0xF8, 0xF0), {})
 _MID_GREY = ((0xFF, 0xFF, 0xFF), (0x70, 0x70, 0x70), {})
-# Every check the curated palettes must clear, reused rather than restated.
+# Every check the curated palettes must clear, reused rather than restated — MINUS
+# the names below, which are not per-palette checks and cannot take a theme
+# argument: ``test_default_theme_is_operator_dark`` asserts a global default, and
+# ``test_warning_ink_clears_aa_on_the_card_ground`` pins the BRAND ramps only
+# (registered palettes keep their own calibrated floors, measured against
+# ``bg``/``surface``). Calling either with a theme name is a ``TypeError`` — which
+# is the loud failure a future accidental 0-arg addition to the suite should
+# still get (QA round 2, Q-R2-1).
+_NOT_PER_PALETTE_CHECKS = frozenset(
+    {
+        "test_default_theme_is_operator_dark",
+        "test_warning_ink_clears_aa_on_the_card_ground",
+    }
+)
 _PALETTE_CHECKS = [
     getattr(contrast_suite, name)
     for name in dir(contrast_suite)
-    if name.startswith("test_") and name != "test_default_theme_is_operator_dark"
+    if name.startswith("test_") and name not in _NOT_PER_PALETTE_CHECKS
 ]
 
 
