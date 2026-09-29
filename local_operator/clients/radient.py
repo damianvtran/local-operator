@@ -1759,6 +1759,14 @@ INSTRUCTION_SET_TAG_MAX_CHARS = 64
 INSTRUCTION_SET_CATEGORIES_MAX_ITEMS = 8
 INSTRUCTION_SET_EFFORT_MAX_CHARS = 16
 
+#: Caps for the optional ``model_suggestion``, mirroring agent-server's
+#: ``ModelSuggestionHostingMaxChars``/``ModelSuggestionModelMaxChars``. The local
+#: preflight exists precisely so a push the hub would refuse spends no upload;
+#: these two numbers must not drift from the server's, or the local refusal and
+#: the hub's stop agreeing about the same document (the ``HUB_TEAM_*`` precedent).
+INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS = 64
+INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS = 128
+
 #: The two kinds a document may declare. `kind` is explicit in a published
 #: document because the receiving side cannot infer it the way local-operator
 #: does locally (from a registry tag or a category).
@@ -1790,6 +1798,14 @@ HUB_AGENT_CATEGORIES = (
 #: and `document_version` are deliberately absent: the CLIENT owns the schema it
 #: writes, and letting a caller declare a version this code does not implement is
 #: how a document gets sent that neither side understands.
+#:
+#: `model_suggestion` is deliberately absent too, and NOT because it is refused:
+#: it is a document field but not a CONTENT field. It is the author's advisory
+#: recommendation (consumed client-side at import), never a pin the receiver
+#: applies verbatim, and keeping it out of this tuple is what keeps the desktop
+#: republish OVERRIDES path (`validate_document_overrides`) unable to set it in
+#: v1 -- the suggestion stays row-derived, so every other override guarantee
+#: holds unchanged.
 INSTRUCTION_SET_CONTENT_FIELDS = (
     "name",
     "description",
@@ -1807,11 +1823,14 @@ INSTRUCTION_SET_CONTENT_FIELDS = (
 #: Every key a version-1 document is allowed to carry. The publish body's key set
 #: is asserted against this in the tests, because it is the property the whole
 #: standard exists to restore: an agent is its instruction set, and nothing about
-#: the machine it was authored on rides along.
+#: the machine it was authored on rides along -- the model suggestion is an
+#: explicit, advisory recommendation the author CHOSE to make, distinct from the
+#: local row's own `hosting`/`model` pin, which stays refused by name.
 INSTRUCTION_SET_FIELDS = (
     "document_type",
     "document_version",
     *INSTRUCTION_SET_CONTENT_FIELDS,
+    "model_suggestion",
 )
 
 #: The SHAPE each overridable content field must have. Anything absent is text.
@@ -1988,15 +2007,25 @@ def build_instruction_set_document(
     delegate: bool = False,
     categories: Optional[Sequence[str]] = None,
     tags: Optional[Sequence[str]] = None,
+    model_suggestion: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the version-1 instruction-set document the hub publishes.
 
-    The signature is the field set: every argument is a content field of the
-    document, so there is no parameter through which anything else — a
-    conversation, an execution history, a pickled context, a working directory, a
-    model, a hosting provider, a security prompt — could reach the wire. That is
-    the guarantee this standard exists to restore, and it is structural here
-    rather than a filter applied afterwards.
+    The signature is the field set: every argument is a field of the document,
+    so there is no parameter through which anything else — a conversation, an
+    execution history, a pickled context, a working directory, a security
+    prompt — could reach the wire. That is the guarantee this standard exists to
+    restore, and it is structural here rather than a filter applied afterwards.
+
+    The one argument that can name a model at all is ``model_suggestion``, and
+    it is not the exception that weakens that guarantee: an explicit, ADVISORY
+    ``{hosting, model}`` pair the author chose to recommend, consumed
+    client-side at import — distinct from the row's own ``hosting``/``model``
+    pin, whose names stay refused by the hub (a receiver that applied a pin
+    verbatim would run a model its operator never chose). It is validated HERE
+    with the hub's rules and stored trimmed, because on the consuming machine
+    both members are lookup keys: a stored ``" openrouter"`` would fail over
+    for a reason its author cannot see.
 
     The check order matches the hub's validator, because the order decides which
     field a malformed document is refused for and a client that reports a
@@ -2019,6 +2048,10 @@ def build_instruction_set_document(
             when false: it is a statement about the agent, not an absence.
         categories: Optional hub categories (<=8, from :data:`HUB_AGENT_CATEGORIES`).
         tags: Optional discovery tags (<=32 items of 1..64 characters).
+        model_suggestion: Optional advisory ``{"hosting": ..., "model": ...}``
+            recommendation for the profile. Omitted from the document entirely
+            when ``None``; validated LAST (after ``version``), mirroring the
+            server's order so both sides refuse a broken document the same way.
 
     Returns:
         The document, carrying `document_type`/`document_version` and only the
@@ -2080,6 +2113,34 @@ def build_instruction_set_document(
         raise InstructionSetError("tags", rule)
     if not version.strip():
         raise InstructionSetError("version", "must not be empty")
+    # LAST, mirroring where the server's validator places the suggestion (after
+    # `version`): refusal ORDER is part of the local/server agreement, so an
+    # existing refusal for an earlier field never moves because this one exists.
+    suggestion_pair: Optional[Dict[str, str]] = None
+    if model_suggestion is not None:
+        if not isinstance(model_suggestion, Mapping):
+            raise InstructionSetError("model_suggestion", "must be an object")
+        raw_hosting = model_suggestion.get("hosting")
+        raw_model = model_suggestion.get("model")
+        suggestion_hosting = raw_hosting.strip() if isinstance(raw_hosting, str) else ""
+        suggestion_model = raw_model.strip() if isinstance(raw_model, str) else ""
+        if not suggestion_hosting:
+            raise InstructionSetError("model_suggestion", "must hold a non-empty hosting")
+        if len(suggestion_hosting) > INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS:
+            raise InstructionSetError(
+                "model_suggestion",
+                "must hold a hosting of at most "
+                f"{INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS} characters",
+            )
+        if not suggestion_model:
+            raise InstructionSetError("model_suggestion", "must hold a non-empty model")
+        if len(suggestion_model) > INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS:
+            raise InstructionSetError(
+                "model_suggestion",
+                "must hold a model of at most "
+                f"{INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS} characters",
+            )
+        suggestion_pair = {"hosting": suggestion_hosting, "model": suggestion_model}
 
     document: Dict[str, Any] = {
         "document_type": INSTRUCTION_SET_DOCUMENT_TYPE,
@@ -2105,6 +2166,8 @@ def build_instruction_set_document(
         document["categories"] = category_list
     if tag_list:
         document["tags"] = tag_list
+    if suggestion_pair is not None:
+        document["model_suggestion"] = suggestion_pair
     return document
 
 

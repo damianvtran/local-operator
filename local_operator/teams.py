@@ -66,6 +66,7 @@ from pydantic import BaseModel, Field, field_validator
 # Shared identity with ``local_operator.types`` (see its docstring): the CLI
 # catches this at zero startup cost while ``teams`` raises it where the lock
 # times out. Importing the name (not redefining it) keeps the two identical.
+from local_operator.model.suggestion import ModelNotice, resolve_model_suggestion
 from local_operator.procstate import O_BINARY
 from local_operator.types import TeamRegistryLockTimeout, TeamRegistryRecoveryError
 
@@ -188,6 +189,29 @@ class TeamMember(BaseModel):
         return name
 
 
+class ModelSuggestion(BaseModel):
+    """A recommended ``{hosting, model}`` pair carried by a hub team (§3.2).
+
+    Both members are required BY CONSTRUCTION: a half pair is not expressible
+    anywhere in this feature -- "hosting with no model" would resolve to a
+    different model per reader, which is not a recommendation. Values are
+    trimmed on the way in because both are lookup keys on the consuming
+    machine. The emptiness and cap rules are enforced by the PUSH PREFLIGHT (in
+    the hub's own vocabulary, before an upload is spent), not here: a
+    hand-edited ``team.yml`` whose suggestion slips past them must still load,
+    because a row that fails ``Team.model_validate`` during ``_load`` vanishes
+    from every listing -- the wrong cost for an advisory field.
+    """
+
+    hosting: str = Field(..., description="Provider id the team's sessions should run on.")
+    model: str = Field(..., description="Model id the team's sessions should run on.")
+
+    @field_validator("hosting", "model")
+    @classmethod
+    def _trimmed(cls, value: str) -> str:
+        return value.strip()
+
+
 class TeamEditFields(BaseModel):
     """Partial update. ``None`` means leave the stored value alone."""
 
@@ -197,6 +221,11 @@ class TeamEditFields(BaseModel):
     members: list[TeamMember] | None = None
     instructions: str | None = None
     project: str | None = None
+    # The hub's model suggestion (§3.2), following this model's None rule: a
+    # None keeps the stored value, and explicit CLEARING is not expressible in
+    # v1. The import path is the only writer today (it sets the pair exactly
+    # when the consumer can run it).
+    model_suggestion: ModelSuggestion | None = None
 
 
 class Team(BaseModel):
@@ -232,6 +261,14 @@ class Team(BaseModel):
     # fields from ``team.yml`` either way.
     instructions: str = ""
     project: str = ""
+    #: The hub model suggestion stored on the row (§3.2). It exists so a
+    #: PULLED team's suggestion survives a re-push instead of being
+    #: re-derived -- re-deriving from a machine whose manager row has since
+    #: changed would silently rewrite the team's own recommendation (the echo
+    #: rule). ``None`` means "derive from the manager row at push time" when a
+    #: registry is available; see :func:`hub_team_document`. Optional field
+    #: with a default, so every old ``team.yml`` loads unchanged.
+    model_suggestion: ModelSuggestion | None = None
 
     @field_validator("id")
     @classmethod
@@ -532,8 +569,66 @@ def _preflight_hub_team_document(document: Mapping[str, Any]) -> None:
             ),
         )
 
+    # Last, mirroring where the server's validator places the suggestion:
+    # refusal ORDER is part of the local/server agreement, so no existing
+    # refusal moves because this field exists. The cap pair is declared once on
+    # the agent publication module and imported lazily -- same reason as
+    # ``_name_rule`` above: this module is on the app's teams path and the
+    # HTTP stack is not.
+    suggestion = document.get("model_suggestion")
+    if suggestion is not None:
+        from local_operator.clients.radient import (
+            INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS,
+            INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS,
+        )
 
-def hub_team_document(team: Team) -> dict[str, Any]:
+        if not isinstance(suggestion, Mapping):
+            raise TeamDocumentError("model_suggestion", "must be an object")
+        raw_hosting = suggestion.get("hosting")
+        raw_model = suggestion.get("model")
+        # A member of any other shape is refused by the same sentence as a
+        # blank one: neither is "a non-empty hosting/model", and a coercion
+        # here (str(5)) would publish a value no reader can look up.
+        # The blank arm carries no magnitude, like the roster's blank-role arm:
+        # a count would contradict the sentence it is meant to explain.
+        if not isinstance(raw_hosting, str) or not raw_hosting.strip():
+            raise TeamDocumentError("model_suggestion", "must hold a non-empty hosting")
+        if len(raw_hosting) > INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS:
+            raise TeamDocumentError(
+                "model_suggestion",
+                _submitted_rule(
+                    "must hold a hosting of at most "
+                    f"{INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS} characters",
+                    len(raw_hosting),
+                ),
+            )
+        if not isinstance(raw_model, str) or not raw_model.strip():
+            raise TeamDocumentError("model_suggestion", "must hold a non-empty model")
+        if len(raw_model) > INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS:
+            raise TeamDocumentError(
+                "model_suggestion",
+                _submitted_rule(
+                    "must hold a model of at most "
+                    f"{INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS} characters",
+                    len(raw_model),
+                ),
+            )
+
+
+def _strip_if_str(value: Any) -> Any:
+    """Trim a suggestion member for the wire; other shapes go to the preflight.
+
+    The stored/derived pair is always two strings (validated model or a
+    manager row), but an assembled-out-of-band ``Team`` must reach the
+    preflight's refusals rather than an ``AttributeError`` from this emit --
+    the same belt-and-braces class the oversize-brief and slot-kind checks
+    exist for.
+    """
+
+    return value.strip() if isinstance(value, str) else value
+
+
+def hub_team_document(team: Team, *, agent_registry: Any | None = None) -> dict[str, Any]:
     """The published team document for a local ``Team`` (design §1.6).
 
     One way and complete: every field the hub stores is one the local model
@@ -542,6 +637,14 @@ def hub_team_document(team: Team) -> dict[str, Any]:
     the local model has none, so a push sends the same constant the agent
     publication path starts from (``"1.0.0"``); a per-push value would make
     every round trip look like a new revision to anything comparing versions.
+
+    The model suggestion follows STORED-WINS, ELSE DERIVE (§3.2): a stored
+    ``team.model_suggestion`` (set by an import that honoured one) travels
+    verbatim, and only a team WITHOUT one derives from its manager row in
+    ``agent_registry`` -- exact name match, and only when the manager's own
+    ``hosting``/``model`` are both set. Callers pass the registry only when the
+    machine has an agents store (``agents_store_present``), so a storeless
+    machine derives nothing and creates nothing.
 
     The roster rides as ``{role, kind, count}`` slots: ``kind`` keeps the local
     spelling (``agent``/``team``) because the hub deliberately does not enums
@@ -558,6 +661,18 @@ def hub_team_document(team: Team) -> dict[str, Any]:
         TeamDocumentError: When the document breaks one of the hub's rules;
             ``field``/``rule`` say which, in the hub's own vocabulary.
     """
+    suggestion = team.model_suggestion
+    if suggestion is None and agent_registry is not None:
+        # DERIVE when unset: the manager is the session that actually runs the
+        # team, so its row's pair is "what this team runs on here" -- the same
+        # semantic the agent side derives from its own row. A manager the
+        # registry does not hold, or one without a whole pair, derives nothing.
+        manager = agent_registry.get_agent_by_name(team.manager)
+        if manager is not None:
+            derived_hosting = str(getattr(manager, "hosting", "") or "").strip()
+            derived_model = str(getattr(manager, "model", "") or "").strip()
+            if derived_hosting and derived_model:
+                suggestion = ModelSuggestion(hosting=derived_hosting, model=derived_model)
     document = {
         "name": team.name,
         "description": team.description,
@@ -570,6 +685,11 @@ def hub_team_document(team: Team) -> dict[str, Any]:
         "project": team.project,
         "version": "1.0.0",
     }
+    if suggestion is not None:
+        document["model_suggestion"] = {
+            "hosting": _strip_if_str(suggestion.hosting),
+            "model": _strip_if_str(suggestion.model),
+        }
     _preflight_hub_team_document(document)
     return document
 
@@ -630,6 +750,10 @@ class HubTeamImport:
     team: Team
     renamed_from: str | None = None
     invalid_name: bool = False
+    #: The carried, NON-BLOCKING report for a hub ``model_suggestion`` this
+    #: machine could not honour -- ``None`` when there was none, or when one
+    #: was available and stored on the row (``team.model_suggestion``).
+    model_notice: ModelNotice | None = None
 
 
 def _try_lock_exclusive(fd: int) -> bool:
@@ -1312,6 +1436,7 @@ class TeamRegistry:
                     if fields.project is not None
                     else ""
                 ),
+                model_suggestion=fields.model_suggestion,
             )
             return self._save_team_locked(team, briefs_authoritative=True)
 
@@ -1358,6 +1483,14 @@ class TeamRegistry:
                 )
             if "project" in updates and updates["project"] is not None:
                 candidate.project = _bounded(updates["project"], label="team project")
+            if (
+                "model_suggestion" in fields.model_fields_set
+                and fields.model_suggestion is not None
+            ):
+                # Like ``members``: keep the validated object, not the dumped
+                # dict, and treat None as "leave the stored value alone" --
+                # clearing is not expressible in v1.
+                candidate.model_suggestion = fields.model_suggestion
             return self._save_team_locked(candidate, briefs_authoritative=True)
 
     def save_team(self, team: Team) -> Team:
@@ -1595,7 +1728,9 @@ class TeamRegistry:
             self._teams.pop(team_id)
             self._briefs_loaded.discard(team_id)
 
-    def import_hub_team(self, document: Mapping[str, Any]) -> HubTeamImport:
+    def import_hub_team(
+        self, document: Mapping[str, Any], *, auth_store: Any | None = None
+    ) -> HubTeamImport:
         """Reconstruct one local team from a published hub-team document.
 
         The document is what ``GET /v1/teams/:teamid`` answers (design §4.5);
@@ -1623,6 +1758,22 @@ class TeamRegistry:
         """
         published = str(document.get("name") or "")
         local_name, invalid = _local_name_for_published(published)
+
+        # The suggestion is CONSUMED like the agent import's (§4.2): available
+        # -> the row STORES the pair, which is what `lop exec --team` launch
+        # applies; unavailable -> the row omits it and the caller carries the
+        # non-blocking notice. No suggestion: no new I/O at all.
+        suggestion = document.get("model_suggestion")
+        model_suggestion: ModelSuggestion | None = None
+        model_notice: ModelNotice | None = None
+        if suggestion is not None:
+            verdict = resolve_model_suggestion(suggestion, auth_store=auth_store)
+            if verdict.available:
+                model_suggestion = ModelSuggestion(
+                    hosting=verdict.hosting or "", model=verdict.model or ""
+                )
+            else:
+                model_notice = verdict.notice()
 
         members: list[TeamMember] = []
         raw_members = document.get("members")
@@ -1667,6 +1818,7 @@ class TeamRegistry:
                         members=members,
                         instructions=str(document.get("instructions") or ""),
                         project=str(document.get("project") or ""),
+                        model_suggestion=model_suggestion,
                     )
                 )
                 break
@@ -1688,6 +1840,7 @@ class TeamRegistry:
             # collision so the message can name the right reason.
             renamed_from=published if candidate != published else None,
             invalid_name=invalid,
+            model_notice=model_notice,
         )
 
 

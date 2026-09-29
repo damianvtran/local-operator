@@ -21,7 +21,7 @@ import logging
 import os
 import signal
 import sys
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     # Type-only: the worker's whole design is that engine imports stay lazy
@@ -172,11 +172,18 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
         logging.getLogger(__name__).warning("could not install the SIGHUP ignore", exc_info=True)
 
 
-def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionProtocol]:
+def _default_session_factory(
+    parsed: argparse.Namespace, team: Any | None = None
+) -> Awaitable[SessionProtocol]:
     """Build the real session via the shared composition root.
 
     Returns an awaitable session; all engine imports stay lazy inside
     ``session_factory.create_session``.
+
+    ``team`` is the worker's own ``resolve_startup`` result -- the detached run
+    re-resolves the saved registry rather than trusting the spawner's copy --
+    and only its stored model suggestion is forwarded, as the fresh-path
+    fallback the foreground factory also carries (design §4.4).
     """
     from local_operator.config import ConfigManager
     from local_operator.paths import config_dir
@@ -197,6 +204,12 @@ def _default_session_factory(parsed: argparse.Namespace) -> Awaitable[SessionPro
         # `--background --workstream` run would come back hidden while the
         # operator's own command said otherwise.
         workstream=bool(getattr(parsed, "workstream", False)),
+        # Same field, same semantics as ``exec_mode._make_default_session_factory``'s
+        # namespace: the team-launch model suggestion, or None. The worker is
+        # spawned with `--team` forwarded (``STARTUP_FIELDS``), so it resolves
+        # the same team object and carries the same suggestion across the
+        # process boundary.
+        team_model_suggestion=team.model_suggestion if team is not None else None,
     )
     # config_dir(), not ``Path.home() / ".local-operator"``: a missed copy of the
     # hardcoded root that ``exec_mode._make_default_session_factory`` already
@@ -236,7 +249,7 @@ def run(
     # selector is called agent_name by the launcher and agent on worker argv.
     parsed.agent_name = parsed.agent
     team = resolve_startup(parsed)
-    factory = session_factory or (lambda: _default_session_factory(parsed))
+    factory = session_factory or (lambda: _default_session_factory(parsed, team))
 
     async def async_main() -> int:
         loop = asyncio.get_running_loop()

@@ -267,6 +267,10 @@ async def test_import_export_roundtrip(test_app_client, dummy_registry: AgentReg
     # have (contract §3.6).
     assert imported_agent.name == f"{original_agent.name}-2"
     assert import_data["result"]["renamed_from"] == original_agent.name
+    # The model-suggestion key is always present on an importing result, null
+    # when nothing was suggested or the suggestion applied (the `renamed_from`
+    # rule): no suggestion rode this archive, so it is null.
+    assert import_data["result"]["model_notice"] is None
     assert imported_agent.description == original_agent.description
     assert imported_agent.security_prompt == original_agent.security_prompt
     assert imported_agent.hosting == ""
@@ -280,3 +284,77 @@ async def test_import_export_roundtrip(test_app_client, dummy_registry: AgentReg
     with open(imported_agent_dir / "test_file.txt", "r") as f:
         content = f.read()
         assert content == "Test content for roundtrip"
+
+
+# --- hub model suggestions through the import route (§4.2, §4.3) -------------------
+
+
+def _suggestion_zip(suggestion: dict[str, str]) -> io.BytesIO:
+    """A minimal importable archive carrying a hub model suggestion."""
+
+    agent_data = {
+        "id": "old-id",
+        "name": "Suggestion Carrier",
+        "created_date": "2024-01-01T00:00:00Z",
+        "version": "0.2.16",
+        "current_working_directory": "/some/old/path",
+        "model_suggestion": suggestion,
+    }
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("agent.yml", yaml.dump(agent_data))
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
+async def _post_suggestion_zip(test_app_client, zip_buffer: io.BytesIO):
+    upload_file = UploadFile(filename="agent.zip", file=zip_buffer)
+    with patch.object(upload_file, "read", return_value=zip_buffer.getvalue()):
+        pass
+    with patch("fastapi.File", return_value=upload_file):
+        return await test_app_client.post(
+            "/v1/agents/import",
+            files={"file": ("agent.zip", zip_buffer, "application/zip")},
+        )
+
+
+@pytest.mark.asyncio
+async def test_import_route_applies_an_available_model_suggestion(
+    test_app_client, dummy_registry: AgentRegistry, monkeypatch
+):
+    """Available ⇒ the imported row carries the pair; payload notice null."""
+
+    monkeypatch.setattr(
+        "local_operator.model.discovery.offered_model_ids",
+        lambda provider_id, *, cache_dir=None: None,
+    )
+
+    response = await _post_suggestion_zip(
+        test_app_client, _suggestion_zip({"hosting": "test", "model": "mock-1"})
+    )
+
+    assert response.status_code == 201, response.text
+    result = response.json()["result"]
+    assert result["model_notice"] is None
+    agent = dummy_registry.get_agent(result["id"])
+    assert (agent.hosting, agent.model) == ("test", "mock-1")
+
+
+@pytest.mark.asyncio
+async def test_import_route_reports_a_skipped_model_suggestion(
+    test_app_client, dummy_registry: AgentRegistry
+):
+    """Unavailable ⇒ default fields, the import still succeeds, notice on payload."""
+
+    response = await _post_suggestion_zip(
+        test_app_client, _suggestion_zip({"hosting": "no-such-provider", "model": "m"})
+    )
+
+    assert response.status_code == 201, response.text
+    result = response.json()["result"]
+    assert result["model_notice"] == {
+        "reason": "unknown_provider",
+        "requested": {"hosting": "no-such-provider", "model": "m"},
+    }
+    agent = dummy_registry.get_agent(result["id"])
+    assert (agent.hosting, agent.model) == ("", "")

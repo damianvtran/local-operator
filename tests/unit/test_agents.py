@@ -1665,7 +1665,9 @@ def test_import_agent_and_export_agent_roundtrip(temp_agents_dir: Path):
     with registry.exported_agent_archive(agent.id) as (zip_path, filename):
         assert zip_path.exists()
         # Import the agent (should create a new agent with a new id)
-        imported_agent, renamed_from = registry.import_agent(zip_path)
+        outcome = registry.import_agent(zip_path)
+        imported_agent = outcome.agent
+        renamed_from = outcome.renamed_from
     assert imported_agent.id != agent.id
     assert registry.get_agent(agent.id) == agent
     # The registry already holds this agent's name, so the roundtrip lands under
@@ -1950,7 +1952,8 @@ def test_import_strips_history_from_an_older_archive(temp_agents_dir: Path):
         zip_file.writestr("conversation.jsonl", '{"content": "private"}\n')
         zip_file.writestr("learnings.jsonl", '{"learning": "secret"}\n')
         zip_file.writestr("context.pkl", b"not-a-real-pickle")
-    imported, _ = registry.import_agent(zip_path)
+    outcome = registry.import_agent(zip_path)
+    imported = outcome.agent
     imported_dir = registry.agents_dir / imported.id
     assert (imported_dir / "system_prompt.md").read_text() == "You are a specialist."
     assert (
@@ -2017,7 +2020,8 @@ def test_import_agent_skips_context_pickle(temp_agents_dir: Path):
         zip_file.writestr("learnings.jsonl", "")
         zip_file.writestr("context.pkl", context_bytes.getvalue())
 
-    imported_agent, _ = registry.import_agent(zip_path)
+    outcome = registry.import_agent(zip_path)
+    imported_agent = outcome.agent
     imported_agent_dir = registry.agents_dir / imported_agent.id
 
     assert not (imported_agent_dir / "context.pkl").exists()
@@ -2158,7 +2162,9 @@ def test_download_agent_from_radient(tmp_path: Path):
         dest_path.write_bytes(zip_bytes)
 
     radient_client.download_agent_from_marketplace.side_effect = fake_download
-    imported_agent, renamed_from = registry.download_agent_from_radient(radient_client, "market-id")
+    outcome = registry.download_agent_from_radient(radient_client, "market-id")
+    imported_agent = outcome.agent
+    renamed_from = outcome.renamed_from
     # The pulled profile is the one exported from THIS registry, so its name is
     # already held here: the pull lands under the contract's suffix and reports
     # what it was renamed from (contract §3.6).
