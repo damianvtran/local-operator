@@ -2881,13 +2881,17 @@ def test_create_and_update_round_trip_the_stored_suggestion(tmp_path: Path) -> N
     # None keeps the stored value ("leave the stored value alone"); clearing is
     # not expressible in v1.
     registry.update_team(created.id, TeamEditFields(description="d"))
-    assert registry.get_team(created.id).model_suggestion.model == "vendor/model"
+    kept = registry.get_team(created.id)
+    assert kept.model_suggestion is not None
+    assert kept.model_suggestion.model == "vendor/model"
     # A value replaces the pair.
     registry.update_team(
         created.id,
         TeamEditFields(model_suggestion=ModelSuggestion(hosting="anthropic", model="other/m")),
     )
-    assert registry.get_team(created.id).model_suggestion.hosting == "anthropic"
+    replaced = registry.get_team(created.id)
+    assert replaced.model_suggestion is not None
+    assert replaced.model_suggestion.hosting == "anthropic"
 
 
 def _import_document(**overrides: Any) -> dict[str, Any]:
@@ -2923,6 +2927,7 @@ def test_import_hub_team_stores_an_available_suggestion(
     )
     # The row on disk agrees, and the round trip (case 5) echoes it back out.
     stored = TeamRegistry(tmp_path).get_team(outcome.team.id)
+    assert stored.model_suggestion is not None
     assert stored.model_suggestion.model == "vendor/model"
     assert hub_team_document(stored)["model_suggestion"] == {
         "hosting": "openrouter",
