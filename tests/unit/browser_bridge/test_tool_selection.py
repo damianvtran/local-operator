@@ -1891,6 +1891,46 @@ async def test_an_explicit_host_overrides_the_availability_order(
 
 
 @pytest.mark.asyncio
+async def test_the_backend_hint_is_normalized_before_it_is_judged(monkeypatch) -> None:
+    """`_backend_hint` is the ONE normalization both legs read.
+
+    A case/space variant must be ACCEPTED by the validator and must still
+    override the availability order at dispatch — a raw compare on either leg
+    would either refuse a valid spelling or let it through without the
+    override (the documented "`Extension` is the same request as
+    `extension`")."""
+    assert (
+        builtin._validate_browser_args(
+            "open",
+            builtin.BrowserParams(action="open", url="https://example.com", backend=" Extension "),
+        )
+        == ""
+    )
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    chosen: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        chosen.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "bridge")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        chosen.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "url": "https://example.com", "backend": " Extension "},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert result.is_error is False, result.text
+    assert chosen == ["bridge"]
+
+
+@pytest.mark.asyncio
 async def test_an_empty_backend_keeps_the_availability_order(monkeypatch) -> None:
     """`""` is not a hint: the all-hosts-available outcome stays the app's tab."""
     _availability(monkeypatch, cmux=True, bridge=True, ui=True)
