@@ -400,14 +400,24 @@ class ObservationRenderer:
 
 
 def split_prompt_content(blocks: Sequence[Any]) -> tuple[str, list[ImageContent]]:
-    """Split rendered content into (text, images) for ``Session.prompt``."""
+    """Split rendered content into (text, images) for ``Session.prompt``.
+
+    ``TextContent`` and ``ImageContent`` are the only two shapes this seam has
+    ever forwarded. NOTHING ELSE IS TOUCHED, deliberately: this splitter's
+    target is ``Session.prompt(text, images)`` and the evaluation arm captures
+    screenshots, never recordings, so an ``AudioContent`` (or any block a
+    future union adds) is dropped rather than reaching ``block.text`` — before
+    this guard the first audio block raised ``AttributeError``, invisible to
+    pyright behind the ``Sequence[Any]`` parameter (agent review round 1,
+    queued latent crash).
+    """
 
     texts: list[str] = []
     images: list[ImageContent] = []
     for block in blocks:
         if isinstance(block, ImageContent):
             images.append(block)
-        else:
+        elif isinstance(block, TextContent):
             texts.append(block.text)
     return "\n".join(texts), images
 

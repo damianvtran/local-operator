@@ -62,8 +62,10 @@ from local_operator.evaluation.session_arm import (
     declare_action_server,
     open_episode_session,
     session_tool_names,
+    split_prompt_content,
 )
 from local_operator.harness.types import (
+    AudioContent,
     ImageContent,
     TextContent,
     ToolContext,
@@ -368,6 +370,36 @@ class TestBridgeDiscipline:
         )
         reply = await bridge.call({"actions": [{"kind": "wait", "duration_ms": 50}]})
         assert reply["is_error"] is True
+
+
+class TestSplitPromptContent:
+    """The rendered-blocks → ``Session.prompt(text, images)`` seam.
+
+    ``split_prompt_content`` used to read ``block.text`` on everything that is
+    not an image, behind a ``Sequence[Any]`` parameter — so widening the
+    Content union with ``AudioContent`` made the first audio block an
+    AttributeError pyright could not see (agent review round 1, queued latent
+    crash). The guard drops what this seam was never meant to forward; these
+    tests pin the new drop AND that text/images still split exactly as before.
+    """
+
+    def test_text_and_images_split_exactly_as_before(self) -> None:
+        image = ImageContent(data="QUJD", mime_type="image/png")
+        text, images = split_prompt_content(
+            [TextContent(text="look"), image, TextContent(text="here")]
+        )
+        assert text == "look\nhere"
+        assert images == [image]
+
+    def test_an_audio_block_is_dropped_not_an_attribute_error(self) -> None:
+        audio = AudioContent(data="QUJD", mime_type="audio/wav")
+        image = ImageContent(data="QUJD", mime_type="image/png")
+        text, images = split_prompt_content([TextContent(text="listen"), audio, image])
+        assert text == "listen"
+        assert images == [image]
+        # Audio-only content yields the empty split, not a crash and not a
+        # stringified block.
+        assert split_prompt_content([audio]) == ("", [])
 
 
 class TestCompletionGate:
