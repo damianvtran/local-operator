@@ -546,6 +546,13 @@ class HistoryPage(BaseModel):
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool
+    #: Anchored reads only (design §D4): a row newer than this page's newest
+    #: exists beyond it. ``None`` on every other read, whose contract does not
+    #: bound the newer side — a ``before_id`` page has newer rows above it by
+    #: construction, so a ``False`` there would be a claim the reader never
+    #: made. The frozen wire (design §D9) draws the field as optional for
+    #: exactly this reason, and an older client ignores a key it does not know.
+    has_newer: bool | None = None
 
 
 #: How a child's transcript read ended, when the absence of rows needs naming.
@@ -570,6 +577,112 @@ class ChildTranscriptPage(HistoryPage):
     """
 
     state: ChildTranscriptState
+    #: EXCLUDED rather than defaulted (remediation round 1, Q1). A child read
+    #: has no anchored mode — the route takes no ``around_id`` — so the
+    #: newer-side question is never asked here, and the inherited default would
+    #: otherwise serialize as a ``null`` on every child page: a shape change to
+    #: an envelope that predates this field and is not part of §D9's extension.
+    #: The child shape has its own pins asserting the four keys exactly (unit:
+    #: ready/pending/gone; e2e: a real subagent's transcript), and keeping them
+    #: green is the point — an absent key and a null key are different
+    #: contracts, and only the parent page's contract gained this question.
+    has_newer: bool | None = Field(default=None, exclude=True)
+
+
+#: What one rail tick is: a user message or a completed agent turn (design D1).
+CheckpointKind = Literal["user", "completion"]
+
+#: A completion tick's outcome. ``open`` is the live tail that has no evidence
+#: of settling yet — the rail paints it as an in-progress dot rather than a tick
+#: (D1). The other three are the attention marker's own kinds.
+CheckpointOutcome = Literal["complete", "error", "interrupted", "open"]
+
+#: The manifest's own lifecycle state (D9). ``unsupported`` is the peer/remote
+#: degradation (D4): v1 derives checkpoints from THIS device's journal only.
+CheckpointIndexState = Literal["ready", "building", "stale", "error", "unsupported"]
+
+#: The naming overlay's state (D2/D9). ``pending`` is what the rail polls on.
+CheckpointNamingState = Literal["ready", "pending", "unavailable"]
+
+
+class CheckpointNaming(BaseModel):
+    """The naming overlay for one completion checkpoint (D2/D9).
+
+    ``ready`` carries a generated name and summary; ``pending`` is the
+    pre-generation state the rail polls on; ``unavailable`` is the failure /
+    cooldown state. Non-ready states carry null ``name``/``summary`` rather
+    than omitting the keys — this surface's nullable fields are all plain
+    nulls (``cold_reason``, ``replayed``), and the UI contract ships in
+    lockstep.
+    """
+
+    state: CheckpointNamingState
+    name: str | None = None
+    summary: str | None = None
+
+
+class CheckpointEntry(BaseModel):
+    """One rail tick: a user message or a completed agent turn (D1).
+
+    ``id`` is a REAL journal entry id — the user row, or the turn's closing
+    ANSWER row (its last assistant message row with non-empty content; the
+    collapse branch's ``closingAnswerId`` semantics — falling back to the last
+    message row only when the turn has no answer) — so click-to-jump needs no
+    translation and forks keep their checkpoints. ``seq`` is the journal row
+    ordinal (0-based), which places ticks proportionally in the rail; ``turn``
+    is 1-based. ``outcome`` is null unless the turn's own completion marker
+    carried a kind, and ``open`` on the live unsettled tail. ``naming`` is
+    present on completions only — user ticks have nothing to name.
+    """
+
+    id: str
+    kind: CheckpointKind
+    turn: int
+    ts: float
+    seq: int
+    text: str
+    outcome: CheckpointOutcome | None = None
+    naming: CheckpointNaming | None = None
+
+
+class CheckpointIndex(BaseModel):
+    """The manifest's own state block (D9).
+
+    ``ready`` is a fresh cache; ``building`` means a refresh is in flight and
+    ``checkpoints`` carries the previous scan where one exists; ``error`` means
+    the last refresh failed and is inside its cooldown; ``stale`` is reserved
+    for a manifest deliberately served out of date (no caller emits it today);
+    ``unsupported`` is a peer conversation.
+
+    ``built_at`` is the index cache file's mtime — the moment the served scan
+    was written, not the moment this request read it.
+    """
+
+    state: CheckpointIndexState
+    built_at: float | None = None
+
+
+class CheckpointManifest(BaseModel):
+    """``GET /v1/desktop/sessions/{session_id}/checkpoints`` (D9)."""
+
+    session_id: str
+    index: CheckpointIndex
+    checkpoints: list[CheckpointEntry]
+
+
+class CheckpointWarmReceipt(BaseModel):
+    """``POST /v1/desktop/sessions/{session_id}/checkpoints/warm`` (D9).
+
+    ``accepted`` are the ids the call took ownership of — the request's ids
+    echoed back, or the ids the rail-open default selection chose — so a
+    caller that sent none learns which ticks to watch. ``pending`` are the
+    subset still waiting for a name (queued, in flight, or named-but-stale
+    and regenerating); an id already named, or one inside its failure
+    cooldown, is accepted but NOT pending, and the rail's poll stops on it.
+    """
+
+    accepted: list[str]
+    pending: list[str]
 
 
 #: Why a child job's live window could not be handed over, when its absence

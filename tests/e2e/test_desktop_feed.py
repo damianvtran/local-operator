@@ -361,7 +361,16 @@ async def test_an_answered_gate_reaches_the_feed_and_the_lists_stamp_agrees(
         # session and nothing is watching it.
         parked_path = await asyncio.to_thread(_publish_record, root, session_id, pending="approval")
         assert len(list(parked_path.parent.glob("*.json"))) == 1, "a second record exists"
-        parked = await _next_frame(lines, lambda f: f["type"] == "session_status")
+        # BOTH waits are SCOPED to this session, matching the sibling completion
+        # test's predicate: the feed is machine-wide, and the app's boot hook
+        # ensures Aida's session on every server start, so her row's first edges
+        # ride this stream too. Under CI load one of them landed between the two
+        # publishes and the unscoped wait returned HER frame (tui-e2e ubuntu,
+        # run 36466096472: '4c85c86834bc' != the created id).
+        parked = await _next_frame(
+            lines,
+            lambda f: f["type"] == "session_status" and f["session_id"] == session_id,
+        )
         assert parked["session_id"] == session_id
         assert parked["epoch"]
         assert parked["payload"] == {"code": "approval", "label": "Approval needed", "revision": 1}
@@ -369,7 +378,10 @@ async def test_an_answered_gate_reaches_the_feed_and_the_lists_stamp_agrees(
         # ...and the answer reaches the row, which is the half the operator
         # reported as 5-10 s late.
         await asyncio.to_thread(_publish_record, root, session_id)
-        resumed = await _next_frame(lines, lambda f: f["type"] == "session_status")
+        resumed = await _next_frame(
+            lines,
+            lambda f: f["type"] == "session_status" and f["session_id"] == session_id,
+        )
         assert resumed["session_id"] == session_id
         assert resumed["payload"]["code"] != parked["payload"]["code"]
         assert resumed["payload"]["revision"] > parked["payload"]["revision"]

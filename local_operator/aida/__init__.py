@@ -11,6 +11,8 @@ module:
 - :mod:`local_operator.aida.bootstrap`  — :func:`ensure_session`, the ONE creator
 - :mod:`local_operator.aida.proactive`  — the cadence engine (arm / pause / resume)
 - :mod:`local_operator.aida.onboarding` — the one-time greeting baseline
+- :mod:`local_operator.aida.naming`     — her display name (``aida.name``) and
+  the sync between it and her conversation's title
 
 DISABLING HER. ``aida.enabled = false`` in config, or
 ``LOCAL_OPERATOR_NO_AIDA=1`` in the environment, is a supported steady state:
@@ -26,7 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_operator.aida import onboarding, proactive, state
+from local_operator.aida import naming, onboarding, proactive, state
 from local_operator.aida.bootstrap import ROLE_NAME, SESSION_TITLE, ensure_session
 from local_operator.aida.state import ENV_DISABLE
 
@@ -36,6 +38,7 @@ __all__ = [
     "SESSION_TITLE",
     "enabled",
     "ensure_session",
+    "naming",
     "onboarding",
     "proactive",
     "state",
