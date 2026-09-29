@@ -6075,17 +6075,12 @@ class FrontendStateStore:
         # receipt while that receipt remains authoritative for billing. Generic
         # source refreshes run after `agent_end`; replaying the unchanged receipt
         # there caused every frontend to paint `tokens_after` and then rebound to
-        # the pre-pass level. Only a genuinely newer receipt may supersede it.
+        # the pre-pass level. Only a genuinely newer receipt may supersede it --
+        # and "newer" is decidable BECAUSE the session's own reading advances
+        # with the receipts the store folds (see ``Session._emit``). The rule and
+        # its measured cases live in ``_replayed_context_change``, shared with
+        # the spend republish path so the two cannot drift.
         receipt_context = getattr(last_usage, "context_tokens", None) if last_usage else None
-        current_receipt_context = (
-            current.last_usage.context_tokens if current.last_usage is not None else None
-        )
-        preserve_settled_context = bool(
-            current.context_is_estimate
-            and current.context_tokens
-            and receipt_context
-            and receipt_context == current_receipt_context
-        )
         changes = dict(
             attention=dict(getattr(session, "_attention", {}) or {}),
             cwd=str(getattr(session, "cwd", "") or getattr(session, "_cwd", "") or os.getcwd()),
@@ -6122,13 +6117,7 @@ class FrontendStateStore:
                 if isinstance(last_usage, Usage)
                 else last_usage
             ),
-            context_tokens=(current.context_tokens if preserve_settled_context else receipt_context)
-            or current.context_tokens,
-            context_is_estimate=(
-                current.context_is_estimate
-                if preserve_settled_context
-                else False if receipt_context else current.context_is_estimate
-            ),
+            **_replayed_context_change(current, receipt_context),
             context_window=(
                 getattr(effective, "context_window", None) if effective is not None else None
             ),
@@ -6397,8 +6386,12 @@ class FrontendStateStore:
         state = self._state
         changes: dict[str, Any] = {
             "last_usage": _usage_with_decode_window(usage),
-            "context_tokens": usage.context_tokens,
-            "context_is_estimate": False if usage.context_tokens else state.context_is_estimate,
+            # Occupancy goes through the shared replay rule -- NOT a bare
+            # assignment: this path republishes on spend corrections and on
+            # session adopt, and the pre-compaction receipt it replayed here
+            # used to overwrite a settled post-pass estimate (and, on a wire
+            # with no context number, blank the reading outright).
+            **_replayed_context_change(state, usage.context_tokens),
         }
         self._seed_legacy_spend(session, usage)
         spend = self._spend_of(session)
@@ -7582,3 +7575,38 @@ def _aggregate_usage(usages: list[Usage]) -> Usage:
         context_tokens=last_context,
         cost_components=components,
     )
+
+
+def _replayed_context_change(
+    state: FrontendSessionState, receipt_context: int | None
+) -> dict[str, Any]:
+    """The occupancy change a REPLAYED session receipt may make, or ``{}``.
+
+    Both replay sites (``refresh_from_session``'s generic refresh and
+    ``refresh_restored_usage``'s spend republish) used to install
+    ``restored_usage()``'s context figure with their own arithmetic; the second
+    had no guard at all. This is that rule, in one place, and it is deliberately
+    NOT "copy the receipt":
+
+    * A receipt equal to the one ``state.last_usage`` already holds carries no
+      information: the reading is already at that receipt's own value, or
+      ABOVE it at a settled compaction estimate that must stand until a call
+      that knows about the pass reports. Installing it anyway is how a
+      spend-correction republish repainted the pre-compaction count (404.9k)
+      over the settled post-pass one (148.0k), and how every message boundary
+      reverted the fresh receipt the event fold had just painted to the older
+      one the session held. The session's ``_last_usage`` advances in step
+      with the folded receipts now (see ``Session._emit``), so a DIFFERENT
+      receipt here genuinely is newer.
+    * A receipt with no context number says nothing about occupancy (a wire
+      that reported only input/output), so it may not blank or move the
+      reading.
+    * A different receipt is a newer call and wins outright, with
+      ``context_is_estimate=False``.
+    """
+    if not receipt_context:
+        return {}
+    current_receipt = state.last_usage.context_tokens if state.last_usage is not None else None
+    if receipt_context == current_receipt:
+        return {}
+    return {"context_tokens": receipt_context, "context_is_estimate": False}

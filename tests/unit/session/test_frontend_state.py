@@ -405,6 +405,59 @@ def test_post_compaction_agent_end_keeps_settled_occupancy_and_provider_bill() -
     assert store.state.cumulative_parent_cost == pytest.approx(11.0)
 
 
+def test_replayed_receipts_cannot_lower_a_settled_context() -> None:
+    """The replay rule: a receipt the store already folded may not move the
+    reading.
+
+    Both replay sites -- the generic refresh and the spend republish -- used
+    to install ``restored_usage()``'s context figure. Once a compaction settles
+    ``tokens_after``, the session's receipt is still the PRE-pass reading until
+    a call that knows about the pass reports, so installing it repainted the
+    pre-compaction count over the settled estimate. Measured live: 404.9k
+    repainted over a settled 148.0k, alternating with the fresh value on
+    successive tool calls.
+    """
+    store = FrontendStateStore(
+        _state(
+            context_tokens=148_000,
+            context_is_estimate=True,
+            last_usage=Usage(input_tokens=404_900, context_tokens=404_900),
+        )
+    )
+    pre_pass = SimpleNamespace(
+        effective_model=_spec(),
+        restored_usage=lambda: Usage(input_tokens=404_900, context_tokens=404_900),
+    )
+    store.refresh_from_session(pre_pass)
+    assert store.state.context_tokens == 148_000
+    assert store.state.context_is_estimate is True
+    store.refresh_restored_usage(pre_pass)
+    assert store.state.context_tokens == 148_000
+    assert store.state.context_is_estimate is True
+
+    # A genuinely newer receipt still supersedes the settlement.
+    post_pass = SimpleNamespace(
+        effective_model=_spec(),
+        restored_usage=lambda: Usage(input_tokens=150_100, context_tokens=150_100),
+    )
+    store.refresh_from_session(post_pass)
+    assert store.state.context_tokens == 150_100
+    assert store.state.context_is_estimate is False
+
+
+def test_a_replayed_receipt_without_a_context_number_leaves_the_reading_alone() -> None:
+    """A wire that reported only input/output says nothing about occupancy -- the
+    republish must not blank the reading, nor clear a settled estimate."""
+    store = FrontendStateStore(_state(context_tokens=148_000, context_is_estimate=True))
+    session = SimpleNamespace(
+        effective_model=_spec(),
+        restored_usage=lambda: Usage(input_tokens=1, output_tokens=2),
+    )
+    store.refresh_restored_usage(session)
+    assert store.state.context_tokens == 148_000
+    assert store.state.context_is_estimate is True
+
+
 def test_real_async_job_roundtrips_progress_trajectory_and_accounting() -> None:
     job = AsyncJob(
         id="child-1",
