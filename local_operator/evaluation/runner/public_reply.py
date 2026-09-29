@@ -1680,12 +1680,14 @@ def tolerated_fields_note(dropped: Sequence[str]) -> str | None:
     model receives now says WHICH field was not accepted, on which kind, and
     what that kind does take, so the correction is read instead of probed.
 
-    Derived entirely from the fixed vocabulary -- every name rendered here was
-    matched against ``_ACTION_KIND_FIELDS`` before it could be dropped, so no
-    model-supplied text reaches the line -- deduplicated in first-seen order
-    (the model needs to learn the contract once; how many times the reply
-    repeated the mistake is the log line's business), and bounded at
-    ``_MAX_TOLERATED_FIELD_PAIRS``.
+    Derived entirely from the fixed vocabulary, and re-checked against it HERE
+    rather than only trusted from the caller: a pair renders only when both
+    names are vocabulary members and the field is not one the kind accepts,
+    so no model-supplied text reaches the line even if a future caller stops
+    consuming :func:`drop_sibling_action_fields` output -- deduplicated in
+    first-seen order (the model needs to learn the contract once; how many
+    times the reply repeated the mistake is the log line's business), and
+    bounded at ``_MAX_TOLERATED_FIELD_PAIRS``.
 
     ``None`` when nothing was dropped, which is also the callers' test: both
     deliveries -- the tool channel's result content and the prose channel's
@@ -1697,7 +1699,18 @@ def tolerated_fields_note(dropped: Sequence[str]) -> str | None:
     pairs: list[tuple[str, str]] = []
     for name in dropped:
         kind, _, field = name.partition(".")
-        if kind and field and (kind, field) not in pairs:
+        # The membership re-check, LOCAL to the function that renders the
+        # line: both names must be vocabulary members, and the field must be
+        # one the kind does not accept -- the exact shape the tolerance
+        # emits, and a shape an injected name cannot satisfy. The drop's own
+        # guard is upstream; this one makes the docstring's no-model-bytes
+        # claim true for this line regardless of what a caller passes.
+        if (
+            kind in _ACTION_KIND_FIELDS
+            and field in _ACTION_FIELD_NAMES
+            and field not in _ACTION_KIND_FIELDS[kind]
+            and (kind, field) not in pairs
+        ):
             pairs.append((kind, field))
     if not pairs:
         return None

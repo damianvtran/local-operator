@@ -565,6 +565,39 @@ class TestCompletionGate:
         assert len(reply["content"]) == 2
         assert reply["content"][1].text == "seen 0"
 
+    @pytest.mark.asyncio
+    async def test_a_challenge_does_not_re_deliver_a_dropped_fields_note(
+        self, tmp_path: Path
+    ) -> None:
+        """A drop's note is served once, on the result, never on a challenge.
+
+        The completion challenge re-attaches the state stored in
+        ``_last_shown`` -- the rendered screen -- and the note is a correction
+        about an EARLIER reply: re-attached to an unrelated challenge it reads
+        as guidance for the claim under challenge. Both challenge arms (the
+        finish call and the prose path) share ``_shown_blocks``, so this pin
+        covers both (review round 1, MINOR 1).
+        """
+
+        bridge = _bridge(tmp_path, execute=None)
+
+        result = await bridge.call(
+            {"actions": [{"kind": "wait", "duration_ms": 50, "frame_id": "screen"}]}
+        )
+        assert result["content"][0].text.startswith("Note: ")
+
+        bridge.fold(TurnEndEvent())
+        challenge = await bridge.call(
+            {"actions": [{"kind": "finish", "status": "done", "reason": "done"}]}
+        )
+
+        assert challenge["details"]["terminal"] == "completion-challenged"
+        # The challenge re-attaches the rendered observation alone; under the
+        # bug this list was ``[challenge, Note, "seen 1"]``.
+        assert len(challenge["content"]) == 2
+        assert challenge["content"][1].text == "seen 1"
+        assert all("was not accepted" not in block.text for block in challenge["content"])
+
 
 #: The prose-claim predicate's calibration table: every positive is a message
 #: the SEALED session-arm corpus actually shows asserting completion (post-

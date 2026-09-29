@@ -4724,6 +4724,35 @@ def test_the_tolerated_field_note_bounds_its_roster_and_handles_empty() -> None:
     assert note.endswith("and 2 more.")
 
 
+def test_the_tolerated_field_note_re_checks_vocabulary_membership() -> None:
+    """The no-model-bytes property is local to the function that renders it.
+
+    ``tolerated_fields_note`` output is written into a request, so the one
+    place the line's contents are decided must not rely on its caller: a pair
+    renders only when ``kind`` is a declared kind, ``field`` is a vocabulary
+    field, and the field is not one the kind accepts. A name outside the
+    vocabulary -- on either side of the pair -- is not something the tolerance
+    can drop, so it can never reach the line, whatever a future caller passes.
+    """
+
+    from local_operator.evaluation.runner.public_reply import tolerated_fields_note
+
+    assert tolerated_fields_note(["wait.frame_id"]) is not None
+    assert tolerated_fields_note(["wait.<injected>"]) is None
+    assert tolerated_fields_note(["<injected>.frame_id"]) is None
+    # A lookalike (trailing space) is not a vocabulary name either.
+    assert tolerated_fields_note(["wait.frame_id "]) is None
+    # A field the kind DOES accept is not a dropped pair: naming it as "not
+    # accepted" would contradict the clause that follows it.
+    assert tolerated_fields_note(["wait.duration_ms"]) is None
+    # A well-formed pair beside an unrenderable one still renders: the guard
+    # drops the clause, never the whole note.
+    assert tolerated_fields_note(["wait.frame_id", "bogus.also_bogus"]) == (
+        'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+        '(a "wait" action takes "duration_ms").'
+    )
+
+
 def test_the_action_field_table_is_derived_from_every_kind() -> None:
     """The table the drop measures against cannot drift from the vocabulary.
 

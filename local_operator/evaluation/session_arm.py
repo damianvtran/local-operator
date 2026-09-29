@@ -1067,6 +1067,13 @@ class ActionBridge:
             if self.record is not None:
                 self.record("batch", {"batch": batch, "result": result})
             rendered = self.render(result.observation)
+            # ``_last_shown`` holds the render WITHOUT the correction below:
+            # ``_shown_blocks`` re-attaches exactly this list to a later
+            # completion challenge, and a challenge must carry the screen
+            # state alone -- the note is a correction of an EARLIER reply, and
+            # re-attached to an unrelated claim it reads as guidance for the
+            # claim instead. It is delivered once, on the call's own result.
+            self._last_shown = (result.observation.observation_id, rendered)
             note = tolerated_fields_note(tolerated_fields)
             if note is not None:
                 # The correction for a sibling field this call carried and the
@@ -1076,7 +1083,6 @@ class ActionBridge:
                 # reads (the same note the loop-driven channel renders into
                 # the next observation's message).
                 rendered = [TextContent(text=note), *rendered]
-            self._last_shown = (result.observation.observation_id, rendered)
             self._last_observation = result.observation
             return {
                 "content": rendered,
