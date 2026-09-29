@@ -1185,6 +1185,29 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             if attempt:
                 raise
             continue
+        # A naming write can land WHILE this scan runs, and that pairing is by
+        # design rather than by accident: the daemon refreshes a stale cache
+        # for the manifest route while the session's owner writes a freshly
+        # bought name through ``patch_naming`` — a DIFFERENT process, so no
+        # process-local lock can span them. The scan carried its section from
+        # the document read before it ran, and the whole-document write below
+        # would silently drop anything that landed since: the rail then reads
+        # pending, the spend is gone, and nothing retries (agent review round
+        # 1, MAJOR-1, reproduced exactly here). Merging the on-disk section one
+        # last time — the same read-merge-write ``patch_naming`` performs, from
+        # the other side — shrinks that window from the scan's whole duration
+        # to this copy. Per-key the disk wins: an item there is the newer write
+        # for its turn key, while keys only the scan carries (version-bump
+        # preservation) stay put.
+        fresh_section = preserved_naming(
+            _read_raw(config_dir, session_id),
+            {c.id for c in index.checkpoints if c.kind == KIND_USER},
+        )
+        if fresh_section["items"]:
+            carried = index.naming.get("items") if isinstance(index.naming, dict) else None
+            merged = dict(carried) if isinstance(carried, dict) else {}
+            merged.update(fresh_section["items"])
+            index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": merged}
         write_index(config_dir, session_id, index)
         return index
     return None
@@ -1327,6 +1350,16 @@ def _manifest_state(
     """The D9 wire shape for the checkpoints manifest."""
     checkpoints: list[dict[str, Any]] = []
     if index is not None:
+        # The naming slice owns the STATE semantics for its section; this
+        # module only serves them. Function-local because the dependency runs
+        # the other way at module scope (``checkpoint_naming`` imports this
+        # module for the cache API, and a top-level import here would be a
+        # cycle). The derive covers all three states: a named item is
+        # ``ready``, an item inside ``NAMING_UNAVAILABLE_COOLDOWN_S`` of its
+        # ``failed_ts`` is ``unavailable`` (warm writes that marker on a
+        # failed call), and anything else is ``pending``.
+        from local_operator.session import checkpoint_naming
+
         naming = index.naming if isinstance(index.naming, dict) else {}
         items = naming.get("items") if naming.get("prompt_version") == NAMING_PROMPT_VERSION else {}
         items = items if isinstance(items, dict) else {}
@@ -1345,14 +1378,19 @@ def _manifest_state(
             if checkpoint.kind == KIND_COMPLETION:
                 turn_key = user_id_for_turn.get(checkpoint.turn)
                 item = items.get(turn_key) if turn_key else None
-                if isinstance(item, dict) and item.get("name"):
+                item_state = checkpoint_naming.naming_state(item)
+                if item_state == "ready" and isinstance(item, dict):
                     entry["naming"] = {
                         "state": "ready",
                         "name": item.get("name"),
                         "summary": item.get("summary") or "",
                     }
                 else:
-                    entry["naming"] = {"state": "pending", "name": None, "summary": None}
+                    entry["naming"] = {
+                        "state": item_state,
+                        "name": None,
+                        "summary": None,
+                    }
             checkpoints.append(entry)
     payload: dict[str, Any] = {"session_id": session_id, "index": {"state": state}}
     if built_at is not None:
