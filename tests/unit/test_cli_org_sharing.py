@@ -202,6 +202,29 @@ def test_teams_push_refuses_an_oversize_document_locally(
     assert org_hub.published_teams == []
 
 
+def test_teams_push_refuses_a_blank_brief_locally(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A 0-byte brief cannot be published (the hub's 'must not be empty'): the
+    refusal lands here, in the command's own shape, with no upload spent."""
+    from local_operator.paths import config_dir
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    TeamRegistry(config_dir()).create_team(
+        TeamEditFields(name="helpdesk", manager="manager", instructions="")
+    )
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "helpdesk"])
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert "cannot push this team: instructions must not be empty" in out
+    assert org_hub.published_teams == []
+
+
 def test_teams_push_sends_a_brief_over_the_old_cap(
     org_hub: _FakeOrgHub,
     tmp_home: Path,
