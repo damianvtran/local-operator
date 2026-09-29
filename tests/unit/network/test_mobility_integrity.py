@@ -54,7 +54,7 @@ from tests.unit.network.test_mobility import (  # noqa: F401 — fixtures
     devices,
     pair,
 )
-from tests.unit.network.test_relay_e2e import _pair, serve_shaped_relay
+from tests.unit.network.test_relay_e2e import _pair_settled, serve_shaped_relay
 
 
 def _transcript_with_scratchpad(
@@ -94,7 +94,7 @@ def test_a_move_carries_the_scratchpad_and_the_birth_time(
     directory is gone, which is what made this a blocker.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source, birth, plan_bytes = _transcript_with_scratchpad(server_a)
     before = _transcript(server_a.root, SESSION)
 
@@ -122,7 +122,7 @@ def test_an_entry_that_appears_after_prepare_refuses_the_commit(
     closed with the source directory untouched and no tombstone written.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
     real = mobility.LinkTransport.ask
@@ -160,7 +160,7 @@ def test_the_unlisted_entry_refusal_happens_before_a_single_byte_is_copied(
     on the wire: B's side asks for no chunks at all.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     (source / "something-nobody-classified.dat").write_bytes(b"\x00\x01\x02")
     fetched: list[str] = []
@@ -194,7 +194,7 @@ def test_a_move_refuses_a_session_holding_an_entry_the_copy_set_does_not_carry(
     the same rule is re-checked at the commit for an entry that appears in between.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     (source / "something-nobody-classified.dat").write_bytes(b"\x00\x01\x02")
     before = _transcript(server_a.root, SESSION)
@@ -234,7 +234,7 @@ def test_a_moved_conversation_s_attachments_land_where_the_store_reads_them(
     from local_operator.session.attachments import AttachmentStore
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     reference = AttachmentStore(server_a.root / "attachments").put(
         base64.b64encode(b"\x89PNG fake image bytes").decode(), "image/png"
@@ -279,7 +279,7 @@ def test_a_commit_refuses_a_destination_digest_that_does_not_match_its_bytes(
     each end derives from its own directory with ``sync.copy_content_digest``.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
     real = mobility.LinkTransport.ask
@@ -318,7 +318,7 @@ def test_a_truncated_staging_copy_is_never_committed(
     moment it declares the copy ready, so the truncation is a mismatch.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a, rows=50)
     before = _transcript(server_a.root, SESSION)
     real_sync_from = sync.sync_from
@@ -352,7 +352,7 @@ def test_damage_after_the_ready_handshake_is_never_promoted(
     refusal sentence says.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a, rows=20)
     real = mobility.LinkTransport.ask
     staged_path = sync.staging_dir(server_b.root, SESSION) / "transcript.jsonl"
@@ -401,7 +401,7 @@ def test_a_relay_start_recovers_a_stale_handoff_and_frees_the_owner_s_session(
     )
 
     server_a, _server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
     write_handoff_entry(
         server_a.root,
@@ -471,7 +471,7 @@ def test_an_engage_clears_a_stale_entry_left_by_a_dead_relay(
     )
 
     server_a, _server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
     # No relay on this root: an entry here is a leftover by definition.
     server_a.stop()
@@ -519,7 +519,7 @@ def test_the_destination_s_engage_refusal_names_the_source_device(
     from local_operator.session.placement import handoff_guard_refusal
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_b)
     write_handoff_entry(
         server_b.root,
@@ -554,7 +554,7 @@ def test_an_engage_recovers_a_stale_entry_when_no_relay_is_running(
     from local_operator.session.runtime.launch import recover_stale_handoff
 
     server_a, _server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     directory = _owned_session(server_a)
     server_a.stop()
     write_handoff_entry(
@@ -600,7 +600,7 @@ def test_a_push_makes_the_holder_pull_the_last_message_over_a_real_link(
     from tests.unit.network.test_sync import _publish_live_record
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_b.root))
 
@@ -698,7 +698,7 @@ def test_a_relay_built_the_way_network_serve_builds_it_admits_the_owner_s_push(
     # local of that name shadows it (flake8 F811), which pytest would then hand to any
     # test that asked for it.
     serve_pair: Devices = (server_a, server_b, host, port)
-    _pair(serve_pair, monkeypatch, role="admin")
+    _pair_settled(serve_pair, monkeypatch, role="admin")
     # B HAS TO ANSWER ITS OWN CONTROL SOCKET for the enrolment below, which is what
     # `lop sessions sync` does on the holder — the same reason test_mobility's `pair`
     # fixture starts B rather than leaving it dial-only.
@@ -772,7 +772,7 @@ def test_the_move_s_plan_does_not_register_a_replica_holder(
     from local_operator.network import sync
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     stamp_before = (source / "mesh.json").read_bytes()
     link = type(
@@ -820,7 +820,7 @@ def test_a_refused_move_does_not_rewrite_the_source_stamp(
     stamp changed (``p3``). Property 3 of the design says a refusal changes nothing.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     stamp_before = (source / "mesh.json").read_bytes()
     listing_before = sorted(child.name for child in source.iterdir())
@@ -865,7 +865,7 @@ def test_a_move_carries_a_torn_tail_whole(
     hashed through the same cut, so the two agreed on the truncated bytes.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     with (source / "transcript.jsonl").open("a", encoding="utf-8") as handle:
         handle.write('{"id": "e9", "type": "assistant", "content": "partial')
@@ -894,7 +894,7 @@ def test_a_move_carries_a_judged_goal(
     from local_operator.resume import GOAL_SIDECAR_NAME
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     record = json.dumps({"goal": "ship the move", "status": "active", "judge": {"run": 1}})
     (source / GOAL_SIDECAR_NAME).write_text(record, encoding="utf-8")
@@ -927,7 +927,7 @@ def test_a_promote_that_landed_and_then_failed_can_still_be_opened(
     from local_operator.session.placement import handoff_guard_refusal
 
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
     real_promote = mobility._promote
 
@@ -969,7 +969,7 @@ def test_a_move_of_a_session_whose_scratchpad_is_a_link_is_refused(
     reviewer's own ``test_r3_11`` reproduced exactly that).
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     directory = _owned_session(server_a)
     elsewhere = tmp_path / "other-volume"
     (elsewhere / "scratchpad").mkdir(parents=True)
@@ -1076,7 +1076,7 @@ def test_the_source_is_hashed_before_its_runtime_is_retired(
     call order, which is the property; a stopwatch would only say how fast this host is.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     _owned_session(server_a)
 
     order: list[str] = []
@@ -1114,7 +1114,7 @@ def test_a_source_that_changes_while_it_is_being_prepared_is_refused(
     caller can retry; accepting it would commit a copy of bytes the source has moved past.
     """
     server_a, server_b, _host, _port = pair
-    _pair(pair, monkeypatch, role="admin")
+    _pair_settled(pair, monkeypatch, role="admin")
     source = _owned_session(server_a)
     before = _transcript(server_a.root, SESSION)
 

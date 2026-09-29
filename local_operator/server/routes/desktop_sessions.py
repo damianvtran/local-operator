@@ -992,6 +992,17 @@ class Prompt(Input):
     text: str = Field(max_length=200_000)
     images: list[Image] = Field(default_factory=list, max_length=8)
     mode: Literal["prompt", "steer"] = "prompt"
+    # SILENT INPUT METADATA (see ``harness.types.Message.input_mode``): how the
+    # user produced this send, and the route slot beside it. The enum is
+    # enforced HERE, at the wire, so a client outside the vocabulary gets a 422
+    # before anything is admitted — the ``Message`` validator is the second
+    # place the same rule lives, and a message the READER refuses is a dropped
+    # row, not a refused request, so the refusal belongs at the door.
+    input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # An OPEN string on purpose (see ``Message.input_path``): the STT cascade
+    # owns this vocabulary and the carriage must not fork it behind an enum.
+    # Absent/null = the classic server-transcription path.
+    input_path: str | None = None
 
     @model_validator(mode="after")
     def nonempty(self):
@@ -2786,6 +2797,12 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         command_id=body.request_id,
                         images=images,
                         steer=body.mode == "steer",
+                        # Silent input metadata, omitted from the attach frame
+                        # when absent (``admit_prompt`` drops the None keys), so
+                        # a legacy-sender frame stays byte-identical and an
+                        # owner from before the carriage never sees the keys.
+                        input_mode=body.input_mode,
+                        input_path=body.input_path,
                     )
                     admitted = True
                     # Admission can bind a cold viewer while an event

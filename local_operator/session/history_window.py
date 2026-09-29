@@ -181,6 +181,90 @@ def strip_audit_fields(payload: dict[str, Any], *, audit_capable: bool) -> dict[
     return payload
 
 
+#: Message-level fields the input-mode carriage introduced (see
+#: ``harness.types.Message``). Stripped for a viewer that did not negotiate
+#: ``INPUT_MODE_CAPABILITY`` — the same hazard as ``AUDIT_WIRE_FIELDS`` one
+#: nesting level deeper: these keys serialize on EVERY message (the nulls
+#: included), and a pre-carriage viewer's ``Message`` forbids extras, so an
+#: unstripped page or event is a hard ValidationError on that viewer — a
+#: FAILED ATTACH, not a degrade. Only the WIRE drops them; the durable row
+#: keeps them.
+INPUT_WIRE_MESSAGE_FIELDS = ("input_mode", "input_path")
+
+
+def strip_input_message(payload: Any) -> bool:
+    """Pop the carriage fields from one serialized message, in place.
+
+    Returns whether anything moved, so a caller rebuilding an envelope can
+    pass the original through when there is nothing to strip. ``Any`` because
+    the carriers are JSON containers by the time this runs: a non-dict entry
+    (a custom row, a future encoding) is left alone rather than raising
+    inside a relay.
+    """
+    if not isinstance(payload, dict):
+        return False
+    moved = False
+    for name in INPUT_WIRE_MESSAGE_FIELDS:
+        if name in payload:
+            del payload[name]
+            moved = True
+    return moved
+
+
+def strip_input_from_event(payload: Any) -> None:
+    """Pop them from every message-bearing field of one serialized event.
+
+    The message events carry a whole message under ``message``; a ``messages``
+    list is walked too so a future batch-shaped event cannot reintroduce the
+    hazard. In place — callers that must preserve a SHARED frame copy first
+    (see ``server._strip_input_from_relay_frame``).
+    """
+    if not isinstance(payload, dict):
+        return
+    strip_input_message(payload.get("message"))
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            strip_input_message(message)
+
+
+def strip_input_metadata(payload: dict[str, Any], *, input_capable: bool) -> dict[str, Any]:
+    """Drop the carriage fields from every message carrier a payload serializes.
+
+    The counterpart of :func:`strip_audit_fields` for a message-level shape:
+    ``input_mode``/``input_path`` ride EVERY serialized message, so "strip the
+    page" means walking the carriers this wire has — a display page's
+    ``messages`` list (the ``history_page`` reply), the same list nested under
+    a sync payload's ``display_history``, and the sync payload's in-flight
+    seed (``snapshot.live_events``), whose event dicts serialize a ``message``
+    under the same model. ONE helper for all of them because stripping in only
+    some yields a viewer that attaches cleanly and then fails on its first
+    scroll or refresh — the audit precedent's own warning, one level deeper.
+
+    Mutates in place and returns the same dict, so it composes with either
+    serialization route.
+    """
+    if input_capable:
+        return payload
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            strip_input_message(message)
+    display_history = payload.get("display_history")
+    if isinstance(display_history, dict):
+        nested = display_history.get("messages")
+        if isinstance(nested, list):
+            for message in nested:
+                strip_input_message(message)
+    snapshot = payload.get("snapshot")
+    if isinstance(snapshot, dict):
+        events = snapshot.get("live_events")
+        if isinstance(events, list):
+            for event in events:
+                strip_input_from_event(event)
+    return payload
+
+
 def wire_payload(window: DisplayHistoryWindow, *, audit_capable: bool) -> dict[str, Any]:
     """Serialize a page for one viewer, honouring what that viewer negotiated."""
     return strip_audit_fields(window.model_dump(mode="json"), audit_capable=audit_capable)

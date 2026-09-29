@@ -100,6 +100,7 @@ from local_operator.session.runtime.types import (
     EVENT_MUTE_DROP_TYPES,
     EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
+    INPUT_MODE_CAPABILITY,
     OPERATOR_SIGNATURE_CAPABILITY,
     RUNTIME_RECORD_KIND,
     ClientKind,
@@ -386,6 +387,70 @@ def _reference_image_payloads(
             items.append(fresh)
         return (items, moved) if moved else (value, 0)
     return value, 0
+
+
+def _strip_input_from_relay_frame(frame: dict[str, Any]) -> dict[str, Any]:
+    """Shed the carriage keys from one relayed frame, copying only on change.
+
+    The per-frame counterpart of ``history_window.strip_input_metadata`` for the
+    RELAY chokepoint (``_enqueue_client_frame``), where an ``event`` or
+    ``frontend_update`` frame fans out to every recipient: the same frame
+    object is shared, so a strip for one viewer must never mutate it for the
+    others — each touched nested dict is REBUILT, never popped in place, and a
+    frame with nothing to strip is returned as the same object.
+
+    Only the two known carriers are checked (a message event's own ``message``,
+    and a frontend update's ``changes["live_events"]`` entries) rather than
+    the frame recursively: this runs on EVERY relayed frame for a viewer that
+    has not negotiated the carriage, and a full walk would tax every token
+    delta to protect keys only messages carry.
+    """
+    from local_operator.session.history_window import INPUT_WIRE_MESSAGE_FIELDS
+
+    def without_input(message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            name: value for name, value in message.items() if name not in INPUT_WIRE_MESSAGE_FIELDS
+        }
+
+    op = frame.get("op")
+    data = frame.get("data")
+    if not isinstance(data, dict):
+        return frame
+    if op == "event":
+        message = data.get("message")
+        if not isinstance(message, dict):
+            return frame
+        if not any(name in message for name in INPUT_WIRE_MESSAGE_FIELDS):
+            return frame
+        return {**frame, "data": {**data, "message": without_input(message)}}
+    if op == "frontend_update":
+        changes = data.get("changes")
+        if not isinstance(changes, dict):
+            return frame
+        events = changes.get("live_events")
+        if not isinstance(events, list):
+            return frame
+        fresh_events: list[Any] = []
+        moved = False
+        for event in events:
+            if not isinstance(event, dict):
+                fresh_events.append(event)
+                continue
+            message = event.get("message")
+            if isinstance(message, dict) and any(
+                name in message for name in INPUT_WIRE_MESSAGE_FIELDS
+            ):
+                moved = True
+                fresh_events.append({**event, "message": without_input(message)})
+            else:
+                fresh_events.append(event)
+        if not moved:
+            return frame
+        return {
+            **frame,
+            "data": {**data, "changes": {**changes, "live_events": fresh_events}},
+        }
+    return frame
 
 
 def _map_tool_results(
@@ -1049,6 +1114,36 @@ def _accepts_kw(fn: Any, name: str) -> bool:
 _KEYWORD_SUPPORT: "weakref.WeakKeyDictionary[Any, dict[str, bool]]" = weakref.WeakKeyDictionary()
 
 
+def _takes_input_mode(handle: Any) -> bool:
+    """Whether ``handle``'s ``prompt`` AND ``steer`` take BOTH carriage keywords.
+
+    The answer must match what the DISPATCH will DO, because the string it
+    gates makes a claim about the row: the dispatch passes each keyword only
+    when the literal parameter name is present
+    (``inspect.signature(h.prompt).parameters`` in ``_dispatch``), so a
+    ``**kwargs``-only method would silently DROP the metadata and must not be
+    advertised. Deliberately not ``_accepts_kw`` for exactly that reason:
+    VAR_KEYWORD counts as accepting there, which is right for its
+    slash-keyword callers and wrong for this claim. BOTH NAMES ARE PROBED, on
+    both ops, because the token advertises the whole carriage: a handle that
+    took ``input_mode`` but silently dropped ``input_path`` would advertise a
+    capability it cannot honour — the silent loss the token exists to prevent
+    (review round 1, M1). An unreadable or missing method answers no, which is
+    the conservative side.
+    """
+    for name in ("prompt", "steer"):
+        method = getattr(handle, name, None)
+        if method is None:
+            return False
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        if "input_mode" not in parameters or "input_path" not in parameters:
+            return False
+    return True
+
+
 @dataclass(frozen=True)
 class _ConnectionAuthority:
     """The two connection FACTS a dispatch may need, without the connection.
@@ -1245,6 +1340,15 @@ class _ClientConn:
     #: frame; see ``DISPLAY_HISTORY_AUDIT_CAPABILITY`` for what emitting them
     #: to a viewer that did not negotiate would do.
     audit_history: bool = False
+    #: Whether this viewer negotiated the input-metadata carriage
+    #: (``input-mode-v1``). While False, every message-bearing frame this
+    #: connection receives sheds ``input_mode``/``input_path`` — the three page
+    #: routes via ``strip_input_metadata`` and the ``event``/``frontend_update``
+    #: relay via ``_strip_input_from_relay_frame``. Same negotiation shape and
+    #: same reason as ``audit_history`` above: the keys serialize on EVERY
+    #: message (nulls included) and a pre-carriage viewer's ``Message`` forbids
+    #: extras, so an unstripped frame is a failed attach, not a degrade.
+    input_metadata: bool = False
     frontend_ready: bool = False
     #: True only while ``_push_to`` is writing THIS connection's welcome. It is
     #: what tells ``_readable_frame`` whether an unreadable projection has a
@@ -1700,6 +1804,14 @@ class RuntimeServer:
                 # breaks the attach outright. See
                 # ``DISPLAY_HISTORY_AUDIT_CAPABILITY``.
                 + (["display-history-audit-v1"] if hasattr(handle, "history_page") else [])
+                # INPUT-MODE CARRIAGE, gated on the handle that would HONOUR it
+                # rather than advertised unconditionally: the reader of this
+                # string (the mobile stream) must never send the fields to an
+                # owner whose ``prompt``/``steer`` would silently drop them.
+                # One token gates both fields AND both send modes, so the probe
+                # asks both methods — see ``_takes_input_mode``, which mirrors
+                # the dispatch's own check exactly.
+                + ([INPUT_MODE_CAPABILITY] if _takes_input_mode(handle) else [])
                 # ADVERTISED UNCONDITIONALLY (revision 2, §2.3). The runtime can
                 # always VERIFY an operator or device signature: the anchor is a
                 # file it reads, and the public half is all verification needs.
@@ -3222,6 +3334,7 @@ class RuntimeServer:
             )
             from local_operator.session.history_window import (
                 strip_audit_fields,
+                strip_input_metadata,
                 wire_payload,
             )
 
@@ -3233,6 +3346,13 @@ class RuntimeServer:
             # receives the fields it would reject.
             conn.audit_history = bool(frame.get("display_history_audit")) and (
                 "display-history-audit-v1" in self._record.capabilities
+            )
+            # The input-metadata twin of the line above: a viewer built before
+            # the carriage cannot name ``input_mode``, and one that does not
+            # keeps every message-bearing frame shed of the two keys (see
+            # ``_ClientConn.input_metadata``).
+            conn.input_metadata = bool(frame.get("input_mode")) and (
+                INPUT_MODE_CAPABILITY in self._record.capabilities
             )
 
             # THE FRONTEND BIND IS A SESSION-LOOP CALL, for a stronger reason
@@ -3375,6 +3495,11 @@ class RuntimeServer:
                 strip_audit_fields(
                     sync_payload["display_history"], audit_capable=conn.audit_history
                 )
+            # The message-level twin of the strip above, and it must walk both
+            # carriers this payload has: the display page's messages AND the
+            # snapshot's in-flight ``live_events`` seed, whose events serialize
+            # the same message model. A pre-carriage viewer validates both.
+            strip_input_metadata(sync_payload, input_capable=conn.input_metadata)
             conn.frontend_unsubscribe = subscription.unsubscribe
             # Registration and snapshot capture happened synchronously on the
             # authoritative loop. Mark ready only after queuing that snapshot;
@@ -5604,6 +5729,7 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
+                    input_capable=conn.input_metadata,
                     capabilities=conn.capabilities,
                     # Whether THIS connection PROVED it may loosen the gate,
                     # or ``None`` for "it has not said" (design round 2 D10, UX
@@ -6142,13 +6268,32 @@ class RuntimeServer:
         if op == "prompt":
             images = frame.get("images")
             fields: dict[str, Any] = {"images": images}
-            if "command_id" in inspect.signature(h.prompt).parameters:
+            parameters = inspect.signature(h.prompt).parameters
+            if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
+            # Silent input metadata (see ``Message.input_mode``), probed exactly
+            # like ``command_id`` above: a handle from before the carriage — the
+            # TUI's, a reduced test host — never receives a keyword it would
+            # drop, and an older CLIENT that omits the keys leaves its frames
+            # byte-identical (``frame.get`` answers ``None``, which
+            # ``Session.prompt`` turns back into an absent row field).
+            if "input_mode" in parameters:
+                fields["input_mode"] = frame.get("input_mode")
+            if "input_path" in parameters:
+                fields["input_path"] = frame.get("input_path")
             return await h.prompt(frame["text"], **fields)
         if op == "steer":
             fields = {"images": frame.get("images")}
-            if "command_id" in inspect.signature(h.steer).parameters:
+            parameters = inspect.signature(h.steer).parameters
+            if "command_id" in parameters:
                 fields["command_id"] = frame.get("command_id")
+            # Same probe and same reasoning as the prompt op: a mid-turn
+            # dictation rides the steer with its provenance, and a handle that
+            # predates the carriage keeps its exact old call shape.
+            if "input_mode" in parameters:
+                fields["input_mode"] = frame.get("input_mode")
+            if "input_path" in parameters:
+                fields["input_path"] = frame.get("input_path")
             return await h.steer(frame["text"], **fields)
         if op == "abort":
             return await h.abort()
@@ -6436,6 +6581,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
+        input_capable: bool = False,
         capabilities: frozenset[str] = frozenset(),
         may_loosen: bool | None = None,
     ) -> Any:
@@ -6447,7 +6593,9 @@ class RuntimeServer:
         the CONNECTION, not of the frame, and only the handle can act on it.
         ``audit_capable`` is a third of the same kind — whether this viewer
         negotiated ``display-history-audit-v1`` — and it decides whether a
-        display page may carry the audit fields at all.
+        display page may carry the audit fields at all. ``input_capable`` is
+        the fourth: whether this viewer negotiated ``input-mode-v1``, which
+        decides whether the two message-level carriage keys may ride a page.
         """
         h = self._handle
         if op == "fork_snapshot":
@@ -6705,7 +6853,10 @@ class RuntimeServer:
                 oversized_frame_report,
                 sync_wire_payload,
             )
-            from local_operator.session.history_window import strip_audit_fields
+            from local_operator.session.history_window import (
+                strip_audit_fields,
+                strip_input_metadata,
+            )
 
             capture = getattr(h, "subscribe_frontend", None)
             if not callable(capture):
@@ -6727,6 +6878,9 @@ class RuntimeServer:
                 # rather than a compaction-only or a racy failure.
                 if isinstance(payload.get("display_history"), dict):
                     strip_audit_fields(payload["display_history"], audit_capable=audit_capable)
+                # Both message carriers of a sync payload, same as the pushed
+                # frame above: the page's messages and the live_events seed.
+                strip_input_metadata(payload, input_capable=input_capable)
                 # Keep the existing live subscription. This temporary capture
                 # only supplies an atomic cut; it must not multiply observers.
                 response = {"op": "result", "req": frame.get("req"), "data": payload}
@@ -6767,9 +6921,13 @@ class RuntimeServer:
             # the audit capability must not be handed fields its page model
             # forbids.
             if isinstance(payload, dict):
-                from local_operator.session.history_window import strip_audit_fields
+                from local_operator.session.history_window import (
+                    strip_audit_fields,
+                    strip_input_metadata,
+                )
 
                 strip_audit_fields(payload, audit_capable=audit_capable)
+                strip_input_metadata(payload, input_capable=input_capable)
             return payload
         if op == "job_trajectory":
             # The other half of the frame-size fix: the attach snapshot omits
@@ -6853,6 +7011,15 @@ class RuntimeServer:
         # future relay caller can bypass it by forgetting to check. (The
         # ``frontend_sync`` frame does not come through here — it is written
         # directly at connect time and carries its own report.)
+        # THE MESSAGE-CARRIAGE STRIP SITS HERE for the same reason the guard
+        # does: a viewer that did not negotiate ``input-mode-v1`` must not
+        # receive ``input_mode``/``input_path`` on any relayed message, and
+        # both relay types carry message dumps (an event directly, a frontend
+        # update inside ``changes["live_events"]``). Copy-on-write, because
+        # the frame is shared across recipients — see
+        # ``_strip_input_from_relay_frame``.
+        if not conn.input_metadata:
+            frame = _strip_input_from_relay_frame(frame)
         # The fit pass sits in front of the guard so the guard is the last
         # resort rather than the normal path for a payload-bearing frame.
         frame = fit_frame_for_wire(frame, _MAX_LINE_BYTES)
