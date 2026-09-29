@@ -199,16 +199,50 @@ CHALLENGE_REPLY_GUIDANCE = (
     "action, unchanged, or your corrective batch -- and nothing else."
 )
 
+#: VETO shapes consulted before the assertion shapes below: a message that
+#: announces work still to come, limits the finished scope to a sub-step, or
+#: narrates a SUB-TASK's completion is mid-work narration even when it
+#: contains a completion word -- "I have finished the first two files and
+#: will continue with the rest", "The work is done for this step", "The first
+#: chart is complete". Found by the round-1 review of this PR (the first
+#: predicate fired on all eight of its adversarial probes); all eight shapes
+#: are pinned in ``tests/unit/evaluation/test_session_arm.py``.
+_PROSE_MORE_WORK_PENDING_RE = re.compile(
+    r"\b(?:"
+    r"will\s+continue|continuing|continues?\s+(?:with|to)|continued\s+(?:with|to)|"
+    r"still\s+(?:need|needs|needed|requires?|required|working\s+on)|"
+    r"not\s+yet|in\s+progress|moving\s+(?:to|on)|next\s+up|"
+    r"starting\s+(?:the|it|now|on|with|next)"
+    r")\b",
+    re.IGNORECASE,
+)
+#: "... for this step", "for now", "so far" scope the completion to a
+#: sub-step the message itself names.
+_PROSE_PARTIAL_SCOPE_RE = re.compile(
+    r"\b(?:for\s+(?:this|the)\s+(?:step|stage|phase|moment)|for\s+now|so\s+far)\b",
+    re.IGNORECASE,
+)
+#: "the first chart is complete", "the first file has been completed": the
+#: completion phrase binds an ordinal SUB-TASK, not the episode's task.
+_PROSE_SUB_STEP_CLAIM_RE = re.compile(
+    r"\b(?:first|second|third|fourth|fifth|initial)\s+(?:\w+\s+){0,3}"
+    r"(?:is|are|has|have|was|were)\s+(?:(?:now|fully|finally|just)\s+)?"
+    r"(?:been\s+)?(?:complete|completed|done|finished)\b",
+    re.IGNORECASE,
+)
+
 #: The prose arm's assertion shapes (see :func:`prose_claims_completion`). A
 #: POSITIVE list on purpose: a terminal message that matches nothing is left
 #: alone, and the shapes below are the ones the sealed session-arm corpus
-#: actually exhibits. Mid-work narration ("Filenames corrected. Opening all 12
-#: numbered document scans ...", "Downloads mostly succeeded. Now fix #20
-#: ...") and plain answers match none of them, and each pattern is pinned by a
-#: unit test against the real sample it was calibrated from.
+#: actually exhibits. Each pattern is pinned by a unit test against the real
+#: sample it was calibrated from where the corpus has one, and every shape in
+#: the veto set above is pinned against its measured probe. The residual
+#: over-fire class is named in the detector's docstring, not hidden.
 _PROSE_COMPLETION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "Done. ...", "**Done.**", "All done." -- the corpus's dominant shape.
-    re.compile(r"^[^\w\r\n]{0,8}(?:all\s+)?done\b", re.IGNORECASE),
+    # "Done WITH/FOR ..." qualifies a sub-object ("Done with the first
+    # document"), so it is not a whole-task claim.
+    re.compile(r"^[^\w\r\n]{0,8}(?:all\s+)?done\b(?!\s+(?:with|for)\b)", re.IGNORECASE),
     # "the task is complete", "the work is done", "task completed".
     re.compile(
         r"\b(?:the\s+)?(?:task|job|work|assignment)\s+"
@@ -216,20 +250,41 @@ _PROSE_COMPLETION_CLAIM_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     # "the route is complete and displayed", "the document content is complete".
+    # Subject-agnostic by design (which nouns are deliverables is not decidable
+    # from one message); the vetoes above keep ordinal sub-tasks and next-work
+    # tails out, and a ", <verb>ing ..." tail ("is done, unpacking it now") is
+    # a continuation clause, not a sentence end.
     re.compile(
-        r"\b(?:is|are)\s+(?:now\s+|fully\s+|finally\s+)?(?:complete|completed|done|finished)\b",
+        r"\b(?:is|are)\s+(?:now\s+|fully\s+|finally\s+)?(?:complete|completed|done|finished)\b"
+        r"(?!\s*[,;]\s*(?!including\b)(?:\w+ly\s+)?\w+ing\b)",
         re.IGNORECASE,
     ),
-    # "I have completed", "I've finished", "I completed / finished ...".
-    re.compile(r"\bi\s+(?:have\s+|'ve\s+)?(?:completed|finished)\b", re.IGNORECASE),
-    # "completed the task", "finished all deliverables".
+    # "I have completed", "I've finished", "I completed / finished ..." -- the
+    # 've contraction takes no whitespace after "I". The phrase must bind a
+    # whole-task object (or end the sentence): "I have finished the first two
+    # files" / "I have completed the initial setup" are progress reports.
     re.compile(
-        r"\b(?:completed|finished)\s+(?:the\s+|all\s+)?"
-        r"(?:task|job|work|assignment|deliverable)s?\b",
+        r"\b(?:i\s+have|i've|i)\s+(?:now\s+)?(?:completed|finished)\b"
+        r"(?:\s+(?:the\s+|all\s+)?(?:task|job|work|assignment|deliverable)s?\b"
+        r"|\s+everything\b|\s+it\s+all\b|(?=\s*(?:[.!?;:]|$)))",
         re.IGNORECASE,
     ),
-    # "has/have been completed", "has now been finished".
-    re.compile(r"\b(?:has|have)\s+(?:now\s+)?been\s+(?:completed|finished)\b", re.IGNORECASE),
+    # "completed the task", "finished all deliverables", "finished everything".
+    re.compile(
+        r"\b(?:completed|finished)\s+"
+        r"(?:(?:the\s+|all\s+)?(?:task|job|work|assignment|deliverable)s?"
+        r"|everything|it\s+all)\b",
+        re.IGNORECASE,
+    ),
+    # "the task has been completed", "everything has been completed" -- the
+    # subject must be the whole task ("the first file has been completed" is
+    # a progress report).
+    re.compile(
+        r"\b(?:(?:the\s+|all\s+)?(?:task|job|work|assignment|deliverable)s?"
+        r"|everything|it\s+all)\s+(?:has|have)\s+(?:now\s+)?been\s+"
+        r"(?:completed|finished)\b",
+        re.IGNORECASE,
+    ),
 )
 
 #: ``FinishAction.reason``'s field bound (``protocol.py``); a prose claim is
@@ -256,7 +311,11 @@ def prose_claims_completion(text: str) -> bool:
     corpus actually exhibits -- not a general "did the model succeed"
     classifier, and it cannot be one: a terminal prose message carries no
     other signal that separates a completion claim from mid-work narration or
-    a plain answer. The trade, in both directions:
+    a plain answer. Precision is carried by the veto set above (next-work
+    announcements, partial scopes, ordinal sub-tasks) and by the whole-task
+    objects the assertion shapes bind; the measured boundary is pinned by the
+    discrimination tables in ``tests/unit/evaluation/test_session_arm.py``.
+    The trade, in both directions:
 
     * a FALSE POSITIVE costs the one bounded challenge cycle the gate was
       entitled to anyway, and the challenge itself names continuing as a
@@ -265,12 +324,25 @@ def prose_claims_completion(text: str) -> bool:
       so this list may lag a phrasing the corpus grows into, and the unit test
       table is where a new real sample lands before it is added here.
 
-    The detector is English-language and structural (word shapes, not
-    semantics); it is deliberately NOT consulted for anything but an
+    One residual over-fire class is KNOWN and deliberate, named here rather
+    than left implicit: a subject-agnostic "X is done/complete/finished" whose
+    X is a non-ordinal sub-object and whose message carries no next-work
+    clause ("The download is done.") still reads as a claim. Which nouns are
+    deliverables is not decidable from one message, and every narrowing tried
+    against the corpus's real samples cost a genuine claim shape ("the route
+    is complete and displayed") -- the cost of the residual is the one
+    bounded cycle, not a wrong score. The detector is English-language and
+    structural (word shapes, not semantics) and is consulted ONLY for an
     episode's terminal message, so mid-run narration normally never reaches
     it at all.
     """
 
+    if (
+        _PROSE_MORE_WORK_PENDING_RE.search(text)
+        or _PROSE_PARTIAL_SCOPE_RE.search(text)
+        or _PROSE_SUB_STEP_CLAIM_RE.search(text)
+    ):
+        return False
     return any(pattern.search(text) for pattern in _PROSE_COMPLETION_CLAIM_PATTERNS)
 
 
@@ -684,9 +756,12 @@ class ActionBridge:
           number of challenges across BOTH paths;
         * the terminal assistant message carries NO tool call -- a message with
           one is ``call``'s business, not this arm's;
-        * its text matches :func:`prose_claims_completion` -- mid-work
-          narration, progress reports, plain answers and the empty terminal
-          messages of the silent-provider ending class never fire.
+        * its text matches :func:`prose_claims_completion` -- which the
+          round-1 review's eight adversarial narration shapes are the pinned
+          regression table for: next-work announcements, partial-scope
+          statements and ordinal sub-tasks do not fire, nor do plain answers
+          or the silent-provider ending class's empty terminal messages (the
+          residual class is named in the detector's docstring).
 
         RETURNS the challenge content (the challenge text plus the SAME
         rendered blocks the model was last shown, re-attached -- never

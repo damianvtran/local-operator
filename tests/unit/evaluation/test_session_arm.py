@@ -516,7 +516,9 @@ class TestCompletionGate:
 #: NOT read as a claim: the mid-work narration that ended arm 1716's 005/006
 #: (its last texts, and the empty terminal messages that followed them) and
 #: the step-budget notices. A new corpus shape lands HERE first, then in the
-#: pattern list in ``session_arm.py``.
+#: pattern list in ``session_arm.py``. The whole-task positives ('I've finished
+#: everything.', 'The task has been completed.') pin the object bindings and the
+#: 've contraction; the two review-round tables below pin the veto set.
 PROSE_CLAIM_SAMPLES = (
     "Done. Summary of what I determined and did:",
     "Done. Here's what I did: found the schedule",
@@ -526,6 +528,9 @@ PROSE_CLAIM_SAMPLES = (
     "The task is complete. **Result:** `/home/user/Desktop/Checklist.docx`",
     "The Google Maps walking route is complete and displayed: 8 stops, walking mode.",
     "I have completed the task and verified the file opens.",
+    "I've finished everything.",
+    "The task has been completed.",
+    "All deliverables have been completed.",
 )
 
 PROSE_NON_CLAIM_SAMPLES = (
@@ -544,6 +549,38 @@ PROSE_NON_CLAIM_SAMPLES = (
     "registration guide.",
     "**Episode closed on the step budget while I was still surveying the registration guide "
     "— the Google Maps deliverable was never set.**",
+)
+
+#: The eight adversarial narration shapes PR #1768's round-1 review measured
+#: firing on the first predicate (8 of 8) -- the regression table for the veto
+#: set in ``session_arm.py``. Each is a TERMINAL-shaped mid-work message: a
+#: progress report, a sub-task note, or a claim qualified into a sub-scope.
+#: Per-shape mechanisms: whole-task object binding (1, 6, 7), ordinal sub-step
+#: (2), partial scope (3), the "Done with/for" qualifier (4), the continuation
+#: tail after the completion phrase (5, 8), with the next-work phrases as the
+#: belt-and-braces veto several of them also carry.
+PROSE_REVIEW_ROUND_1_PROBES = (
+    "I have finished the first two files and will continue with the rest.",
+    "The first chart is complete; the second still needs data.",
+    "The work is done for this step; moving to the next one.",
+    "Done with the first document \u2014 starting the second now.",
+    "The download is done, unpacking it now.",
+    "The first file has been completed; continuing with the next.",
+    "I have completed the initial setup.",
+    "The installation is finished; launching the app.",
+)
+
+#: The DOCUMENTED residual over-fire class (see ``prose_claims_completion``'s
+#: docstring): a subject-agnostic "X is done/complete" about a non-ordinal
+#: sub-object whose message carries no continuation clause. Kept deliberately:
+#: every narrowing tried against the corpus's real samples cost a genuine
+#: claim shape ("the route is complete and displayed"), and the cost of the
+#: residual is the one bounded challenge cycle. Pinned so the boundary is
+#: explicit, not assumed -- a future tightening that kills these updates the
+#: docstring rather than silently drifting.
+PROSE_RESIDUAL_OVERFIRE_SAMPLES = (
+    "The download is done.",
+    "The installation is finished.",
 )
 
 
@@ -574,6 +611,30 @@ class TestProseClaimDetector:
     def test_narration_progress_reports_and_notices_are_not_claims(self, text: str) -> None:
         assert prose_claims_completion(text) is False
 
+    @pytest.mark.parametrize("text", PROSE_REVIEW_ROUND_1_PROBES, ids=lambda text: repr(text[:36]))
+    def test_round_one_review_probe_shapes_are_not_claims(self, text: str) -> None:
+        """The eight adversarial narration shapes from PR #1768's round-1 review.
+
+        They fired 8/8 on the first predicate (the review's own table); the
+        veto set in ``session_arm.py`` keeps them out -- see the table's header
+        for the per-shape mechanism.
+        """
+
+        assert prose_claims_completion(text) is False
+
+    @pytest.mark.parametrize(
+        "text", PROSE_RESIDUAL_OVERFIRE_SAMPLES, ids=lambda text: repr(text[:36])
+    )
+    def test_the_documented_residual_overfire_is_pinned(self, text: str) -> None:
+        """The residual class is DELIBERATE and disclosed, not accidental.
+
+        The detector's docstring names it; this test makes the boundary
+        executable so a future narrowing cannot silently diverge from the
+        documented behaviour without failing here first.
+        """
+
+        assert prose_claims_completion(text) is True
+
 
 class TestProseCompletionGate:
     """The gate's answer-side arm: a terminal PROSE claim earns the one challenge.
@@ -588,9 +649,11 @@ class TestProseCompletionGate:
     * a terminal message that CLAIMS completion earns the SAME one challenge a
       finish call earns -- the same shared budget, the same challenge text,
       delivered against the state the model last saw;
-    * everything else -- mid-work narration, empty terminal messages (the
-      silent-provider ending class 005/006 exhibit), messages that carry a tool
-      call, and any episode that already ended -- never fires.
+    * everything else -- the mid-work narration classes (including the eight
+      adversarial shapes the round-1 review found; the predicate's tables
+      above pin them), empty terminal messages (the silent-provider ending
+      class 005/006 exhibit), messages that carry a tool call, and any episode
+      that already ended -- does not fire.
     """
 
     @pytest.mark.asyncio

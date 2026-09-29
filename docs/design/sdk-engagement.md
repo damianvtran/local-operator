@@ -465,16 +465,29 @@ async with open_session(spec, roots=roots) as session:
   the SAME challenge -- same builder, same channel sentence, same shared
   ``completion_challenges`` budget -- is delivered as ONE harness-injected user
   turn (``Session.prompt(..., harness_injected=True)``) against the state the
-  model last saw. Mid-work narration (the ending both of arm 1716's 005/006
-  exhibit), plain answers and empty terminal messages never fire; a second
-  prose claim stands because the budget is one; the re-prompt is skipped when
-  the wall kill-switch fired. **Comparability, replayed rather than argued:**
+  model last saw. Mid-work narration does not fire: the veto set (next-work
+  phrases, partial scopes, ordinal sub-tasks, "Done with/for" qualifiers, and
+  continuation tails after the completion phrase) keeps out the eight
+  adversarial narration shapes the round-1 review found firing on the first
+  predicate -- all eight are the pinned regression table in
+  ``test_session_arm.py`` -- and plain answers or empty terminal messages
+  carry no assertion shape at all. One residual over-fire class is named
+  rather than hidden (a subject-agnostic "X is done/complete" about a
+  non-ordinal sub-object, e.g. "The download is done.": every narrowing tried
+  against the corpus cost a genuine claim shape, and the cost of the residual
+  is the one bounded cycle); a second prose claim stands because the budget is
+  one; the re-prompt is skipped when the wall kill-switch fired.
+  **Comparability, replayed rather than argued:**
   evaluated programmatically against every sealed session record, the prose
   arm fires ZERO times across all 13 arm-1716 records (the ten scored ones
   included -- their ``agent_stop`` endings all left empty/error terminal
-  messages) and exactly ONCE across all 23 session records to date: on
-  arm 1748's task_003 itself, the bypass it exists to close. It is a fix for
-  the class that was escaping, not a semantic shift for the comparison set --
+  messages) and exactly ONCE across all 24 session records written to date
+  (three of them are the silent-provider class with no assistant terminal
+  message at all) -- on arm 1748's task_003 itself, the bypass it exists to
+  close. The round-1 remediation re-ran the same replay against the tightened
+  predicate: same fire set, same match set on terminal messages. It is a fix
+  for the class that was escaping, not a semantic shift for the comparison
+  set --
   and as with every harness change it takes effect only through a NEW arm name
   (the campaign builds arms with ``git archive <commit>``). Pinned by the new
   unit tests and the spawned rig's ``--ending prose-claim``/``narration``
