@@ -171,7 +171,12 @@ def test_wire_bytes_are_unchanged_for_the_same_projection() -> None:
 
 
 #: The parent commit's real output for :func:`_multi_tier_projection`.
-_EXPECTED_DEGRADED_FRAME_DIGEST = "db0a3d83fcc3916c77105fa70ce8d1b59810c14690b64a4d1b9c67b26b8dc0bb"
+#:
+#: Re-pinned once, for the spend/context block (mobile parity phase 1): the
+#: frame gained exactly its eight defaulted keys and nothing else, verified by
+#: dropping those keys from the new frame and reproducing the previous digest
+#: (``db0a3d83...``) byte for byte — +213 bytes on this fixture.
+_EXPECTED_DEGRADED_FRAME_DIGEST = "230f38e818e34ae3b36c00f057f3d5374721c1e6698548441696f2bf54f5ca8b"
 
 
 # ---------------------------------------------------------------------------
