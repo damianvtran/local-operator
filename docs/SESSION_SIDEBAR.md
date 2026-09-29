@@ -152,10 +152,11 @@ is an explicit request for that row.
 
 A row's completion mark, and its place in **Active Sessions**, both read the
 durable attention row for that conversation, so a completion that could not be
-published yet is a mark that cannot be drawn yet. `attention.db` keeps SQLite's
-default rollback journal, so a reader blocks a writer's `COMMIT`, and under the
-contention of many concurrent sessions a publish gives up after its bounded
-budget (~11 s) and is DEFERRED rather than lost — the outcome is already durable
+published yet is a mark that cannot be drawn yet. `attention.db` adopts WAL on
+its write path, so on a converted store readers never block a writer's `COMMIT`
+at all; what remains, and stays rare, is writer-against-writer contention, under
+which a publish gives up after its bounded budget (~11 s) and is DEFERRED rather
+than lost — the outcome is already durable
 in the transcript journal. The owning session then republishes it in-process on a
 bounded ladder (four rungs, ~86 s), and a viewer already polling fires the parked
 rung early on its next tick — the tick itself never writes — so the mark normally
