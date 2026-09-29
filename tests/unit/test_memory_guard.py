@@ -655,3 +655,68 @@ def test_a_config_edit_is_read_on_the_next_command(tmp_path: object) -> None:
         override = _configured_memory_budget(123)
         assert override.source == "override"
         assert override.ceiling_mb == 123
+
+
+# ---------------------------------------------------------------------------
+# The machine (aggregate) budget
+# ---------------------------------------------------------------------------
+
+
+def _rows(*specs: tuple[int, int, int]) -> list[mg.ProcessNode]:
+    return [mg.ProcessNode(pid, ppid, mb) for pid, ppid, mb in specs]
+
+
+def test_machine_verdict_boundaries_are_inclusive() -> None:
+    """At a line is over it, matching ``over_hard``'s ``>= ceiling``."""
+    verdict = mg.machine_verdict(149, total_mb=200)
+    assert verdict.state == "ok"
+    assert (verdict.warn_mb, verdict.act_mb) == (150, 170)
+    assert mg.machine_verdict(150, total_mb=200).state == "warn"
+    assert mg.machine_verdict(169, total_mb=200).state == "warn"
+    assert mg.machine_verdict(170, total_mb=200).state == "act"
+
+
+def test_machine_verdict_unknown_host_is_never_judged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mg, "_total_memory_mb", lambda: None)
+    verdict = mg.machine_verdict(9999)
+    assert verdict.state == "unknown"
+    assert verdict.warn_mb == 0 and verdict.act_mb == 0
+    assert "could not be measured" in verdict.reason
+
+
+def test_machine_verdict_names_what_it_could_not_measure() -> None:
+    verdict = mg.machine_verdict(10, total_mb=1000, unmeasured=3)
+    assert verdict.state == "ok"
+    assert "3 of the fleet's processes could not be measured" in verdict.reason
+
+
+def test_fragments_rank_subtrees_largest_first_and_exclude_roots() -> None:
+    rows = _rows(
+        (1, 0, 10),  # the runtime root: never a candidate
+        (2, 1, 500),  # root's child, itself a parent
+        (3, 2, 300),  # under 2
+        (4, 1, 100),  # root's other child
+        (5, 4, 900),  # under 4
+    )
+    ranked = mg.fragments_ranked(rows, roots=[1])
+    assert [(fragment.pid, fragment.mb) for fragment in ranked] == [
+        (4, 1000),
+        (5, 900),
+        (2, 800),
+        (3, 300),
+    ]
+
+
+def test_fragments_survive_a_pid_recycle_cycle() -> None:
+    rows = _rows((7, 8, 50), (8, 7, 60), (9, 9, 10))
+    ranked = mg.fragments_ranked(rows, roots=())
+    assert {fragment.pid for fragment in ranked} == {7, 8, 9}
+    # The walk terminates and no fragment is negative; the numbers are whatever
+    # a cycle can honestly derive, and honesty here means "finite", not "right".
+    assert all(fragment.mb >= 0 for fragment in ranked)
+
+
+def test_fragments_tie_break_deterministically_by_pid() -> None:
+    rows = _rows((50, 1, 400), (40, 1, 400))
+    ranked = mg.fragments_ranked(rows, roots=[1])
+    assert [fragment.pid for fragment in ranked] == [40, 50]
