@@ -13,6 +13,8 @@ from local_operator.model.registry import (
     anthropic_models,
     deepseek_models,
     get_model_info,
+    google_models,
+    openai_models,
     qwencloud_token_plan_models,
     static_models,
     unknown_model_info,
@@ -121,6 +123,30 @@ def test_get_model_info() -> None:
     # Test Unsupported hosting provider
     with pytest.raises(ValueError, match="Unsupported hosting provider: unknown"):
         get_model_info("unknown", "any")
+
+
+def test_the_hand_transcribed_audio_rows_ship_for_the_providers_that_need_them():
+    """The registry half of the audio capability (OQ-2).
+
+    OpenAI's own listing is ids-only and models.dev (almost) misses the family,
+    so these rows are the only source a direct install has; Google's listing is
+    silent too, so its current-generation rows carry the answer. Claude takes
+    no audio, so no Anthropic row may claim it.
+    """
+    for model_id in ("gpt-audio", "gpt-audio-1.5", "gpt-audio-mini"):
+        row = openai_models[model_id]
+        assert row.supports_audio_input is True
+        assert row.supports_images is False, "input modalities are text + audio"
+    for model_id in (
+        "gemini-3.8-flash",
+        "gemini-2.5-flash-preview-05-20",
+        "gemini-2.5-pro-preview-05-06",
+    ):
+        assert google_models[model_id].supports_audio_input is True
+    # 2.0/1.5 are deliberately left silent rather than flipped: silence defers,
+    # while a wrong ``True`` is the one direction that costs a refused turn.
+    assert google_models["gemini-2.0-flash-001"].supports_audio_input is None
+    assert all(row.supports_audio_input is not True for row in anthropic_models.values())
 
 
 def test_current_fallback_chain_models_have_first_class_prices() -> None:

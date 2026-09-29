@@ -40,9 +40,9 @@ WHAT IS STORED
 --------------
 The source is 4.4 MB and 200+ providers. What lands on disk is a PROJECTION:
 only the providers this tree maps (:data:`_PRICE_CATALOGUE_KEYS`) and only the
-five fields a :class:`DiscoveredModel` can carry — measured at ~141 KB, a
-quarter of the OpenRouter listing, so the JSON parse the resolution memo exists
-to avoid stays in the tens of milliseconds. The ETag rides in the document so
+fields a :class:`DiscoveredModel` can carry — measured at ~200 KB on 2026-09-28,
+a quarter of the OpenRouter listing, so the JSON parse the resolution memo
+exists to avoid stays in the tens of milliseconds. The ETag rides in the document so
 the next fetch can be conditional. The document goes through
 :func:`local_operator.model.catalogue.read_listing` under the key
 ``models-dev.listing`` — same directory, same lease, same stale-while-revalidate
@@ -52,7 +52,14 @@ WHAT IS NOT TAKEN
 -----------------
 ``supports_images`` is left ``None``: it carries a three-valued contract in
 which a stated ``false`` is the PROVIDER's denial, and a second-hand catalogue
-has no standing to issue one. ``supports_prompt_cache`` is inferred from a
+has no standing to issue one. ``supports_audio_input`` is the one capability
+this catalogue DOES answer (the OQ-2 resolution): models.dev states
+``modalities.input`` on essentially every row (8,274 of 8,274 measured
+2026-09-28), and for a direct provider whose own listing carries no modality it
+is the only machine source. The three-valued contract is
+preserved — an absent or empty list is silence, a stated list answers by
+membership — and it is carried on the row so a merger can treat silence as
+"defer", never as a denial. ``supports_prompt_cache`` is inferred from a
 quoted cache-read price, the same inference discovery makes for an
 OpenAI-compatible listing and only ever widening.
 """
@@ -111,7 +118,19 @@ PRICE_CATALOGUE_KEY = "models-dev.listing"
 #: off-loop (:func:`_repair_unusable_capture`). Both drop the document before
 #: refetching, so the stale ETag cannot turn the repair into a 304 that rewrites
 #: the same unusable capture.
-PRICE_CATALOGUE_CAPTURE = 2
+#:
+#: Version 3 adds ``input_modalities``, which :func:`_row` reads into
+#: ``DiscoveredModel.supports_audio_input`` (the OQ-2 resolution): models.dev
+#: states ``modalities.input`` on most rows (measured 2026-09-28: 756 rows carry
+#: ``audio`` across the whole catalogue, 69 of them inside this projection's
+#: mapped providers), and for a direct provider whose own listing has no
+#: modality field it is the only machine source short of the hand-transcribed
+#: registry rows. A version-2 document carries no input modality at all, so
+#: every row would read as silent and the capability would stay invisible on an
+#: existing install for up to a day — the same one-refetch repair as version 2,
+#: on whichever surface reads the document first (single-id resolution repairs
+#: in-call, the picker's bulk read repairs off-loop).
+PRICE_CATALOGUE_CAPTURE = 3
 
 #: A local (canonical) provider id, mapped to the models.dev provider keys that
 #: describe the same models — FIRST MATCH WINS, per model id. The local id is the
@@ -228,8 +247,24 @@ def _output_modalities(modalities: Any) -> list[str]:
     return [item for item in output if isinstance(item, str)]
 
 
+def _input_modalities(modalities: Any) -> list[str]:
+    """models.dev's ``modalities.input`` as a list of strings, else ``[]``.
+
+    Normalised on the way IN for the same reason as ``output`` above: the
+    on-disk document must carry one shape regardless of what upstream sent,
+    and ``[]`` is this projection's "said nothing" (mirroring ``output``),
+    which :func:`_row` turns back into the field's third state, ``None``.
+    """
+    if not isinstance(modalities, Mapping):
+        return []
+    inputs = modalities.get("input")
+    if not isinstance(inputs, (list, tuple)):
+        return []
+    return [item for item in inputs if isinstance(item, str)]
+
+
 def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
-    """The on-disk document for a models.dev body: mapped providers, five fields.
+    """The on-disk document for a models.dev body: mapped providers, seven fields.
 
     Pure, so a test can hand it a captured body. Anything that is not the
     expected shape is skipped rather than raised — a key rename upstream must
@@ -266,6 +301,11 @@ def project(body: Mapping[str, Any], etag: str | None) -> dict[str, Any]:
                 # without this the second source would reintroduce the claim the
                 # first one now refuses to make.
                 "output_modalities": _output_modalities(model.get("modalities")),
+                # The INPUT half, normalised the same way. Carried so ``_row``
+                # can answer the audio-input question (OQ-2): models.dev is a
+                # standing second source for it, and for a provider whose own
+                # listing carries no modality it is the only machine source.
+                "input_modalities": _input_modalities(model.get("modalities")),
             }
         providers[provider_key] = projected
     return {"capture": PRICE_CATALOGUE_CAPTURE, "etag": etag, "providers": providers}
@@ -377,6 +417,16 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
     stated_zero = stated_input == 0.0 and stated_output == 0.0
     input_price = _positive_float(cost.get("input"))
     output_price = _positive_float(cost.get("output"))
+    input_modalities = entry.get("input_modalities")
+    if not isinstance(input_modalities, (list, tuple)):
+        input_modalities = []
+    # ``None`` when the list is absent or empty (silence); otherwise membership
+    # answers in BOTH directions — see the constructor comment below.
+    supports_audio = (
+        any(isinstance(item, str) and item.strip().lower() == "audio" for item in input_modalities)
+        if input_modalities
+        else None
+    )
     return DiscoveredModel(
         id=model_id,
         name=name if isinstance(name, str) else "",
@@ -408,6 +458,14 @@ def _row(model_id: str, entry: Mapping[str, Any], key: str = "") -> DiscoveredMo
         # Never from here: a second-hand catalogue cannot issue the provider's
         # denial that a stated ``False`` means. See the module docstring.
         supports_images=None,
+        # Unlike ``supports_images``, models.dev IS read for audio input
+        # (OQ-2): it states ``modalities.input`` on most rows, and for a
+        # provider whose own listing carries no modality this is the only
+        # machine source. Three-state discipline preserved: an absent or empty
+        # list is silence, and a stated list answers by membership in both
+        # directions — a wrong second-hand denial costs only the model-audio
+        # rung, which the STT chain still covers.
+        supports_audio_input=supports_audio,
         supports_prompt_cache=cache_read > 0,
     )
 
