@@ -944,6 +944,27 @@ def test_the_progress_deadline_is_taken_before_the_predicate_can_pre_empt_it(
             f"{probe.passes} sampler passes and no fire, so the deadline it recorded is "
             f"read after the predicate that pre-empts it:\n{_read(dump)[-600:]!r}"
         )
+        # THE SNAPSHOT BELOW WAITS FOR THE WALK TO FINISH, because the marker it just
+        # saw is written BEFORE the walk: :func:`_fire` flushes the ``Timeout (``
+        # header and then calls ``faulthandler.dump_traceback``, which the module
+        # itself measures at "hundreds of milliseconds" under load — a snapshot taken
+        # the moment the marker appears can catch the walk half-written. That is not
+        # hypothetical: CI run 36495158314 (PR #1712, attempts 1 and 2) read one whose
+        # blocks stopped at the relay thread and named no frame of this process, and
+        # the same read reproduces on this host under a chunked walk. The recording
+        # line is the completion event for the walk — :func:`_record_held_fire`
+        # appends it on the pass AFTER :func:`_fire` returned, and the sampler is the
+        # only re-armer in this cell — so waiting for it is what makes the three
+        # content assertions below read a finished dump rather than a prefix of one.
+        assert _wait_for(
+            lambda: any(
+                line.startswith(stall_watchdog.HELD_MARKER) for line in _read(dump).splitlines()
+            ),
+            timeout=120.0,
+        ), (
+            "the dump does not say the fire was held, so a reader cannot tell that this "
+            f"runtime survived it:\n{_read(dump)[-600:]!r}"
+        )
         text = _read(dump)
         assert (
             stall_watchdog.PROGRESS_MARKER in text
@@ -956,15 +977,6 @@ def test_the_progress_deadline_is_taken_before_the_predicate_can_pre_empt_it(
         assert Path(__file__).name in text, (
             "the dump does not name a frame of this process, so it is not the all-thread "
             f"walk the bound's evidence is:\n{text[-600:]!r}"
-        )
-        assert _wait_for(
-            lambda: any(
-                line.startswith(stall_watchdog.HELD_MARKER) for line in _read(dump).splitlines()
-            ),
-            timeout=120.0,
-        ), (
-            "the dump does not say the fire was held, so a reader cannot tell that this "
-            f"runtime survived it:\n{text[-600:]!r}"
         )
         # THE NEXT WAKE: the episode after the fire is re-armed for a whole bound, and a
         # sampler that stopped here would leave that deadline with nobody to take it --
