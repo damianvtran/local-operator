@@ -215,6 +215,10 @@ describe("AgentConversation", () => {
 			command_id: "12345678-1234-4678-9234-567812345678",
 			text: "Please report back once",
 			images: undefined,
+			/* New clients compute and send the annotation explicitly; a purely
+			   typed draft is "typed" (absence remains the legacy reading for
+			   producers that know nothing of the vocabulary). */
+			input_mode: "typed",
 		});
 		expect(location.hash).toBe("#/s/root");
 		history.back();
