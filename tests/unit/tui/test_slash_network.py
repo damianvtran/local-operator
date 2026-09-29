@@ -2230,6 +2230,79 @@ async def test_a_re_layout_leaves_the_band_the_same_three_rows(
         assert cleared["region"] == fresh["region"], (fresh, cleared)
 
 
+@pytest.mark.asyncio
+async def test_a_repair_notice_renders_in_this_device_block_or_not_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner-side notice (decision memo item D), when open — and only then.
+
+    The panel reads the ``doctor`` receipt's ``credential_repair`` checks and paints
+    the producer's sentence in the device block; a frame with no such check must not
+    gain a row, which is every existing panel cell's frame (they would catch a row
+    that leaked in unconditionally).
+    """
+    import json
+
+    import local_operator.tui.widgets.network_panel as panel_mod
+    from local_operator.tui.widgets.network_panel import NetworkRun, NetworkScreen
+
+    sentence = (
+        "laptop needs '/mcp login https://mcp.example.com' here — "
+        "its borrowed credential cannot be refreshed"
+    )
+
+    def stub(with_repair: bool) -> Any:
+        checks: list[dict[str, Any]] = (
+            [
+                {
+                    "check": "credential_repair",
+                    "network_id": "n_0123456789abcdef01234567",
+                    "ok": False,
+                    "credential_name": "mcp:https://mcp.example.com",
+                    "device_id": "d_peer",
+                    "device_name": "laptop",
+                    "detail": sentence,
+                    "remedies": ["run `/mcp login https://mcp.example.com` on this device"],
+                }
+            ]
+            if with_repair
+            else []
+        )
+        doctor = {"ok": False, "identity_present": True, "checks": checks}
+
+        def run(args: list[str], **kwargs: Any) -> NetworkRun:
+            if not args or args[0] != "doctor":
+                return NetworkRun(tuple(args), 0, stdout="")
+            return NetworkRun(tuple(args), 0, stdout=json.dumps(doctor))
+
+        return run
+
+    seen: dict[bool, str] = {}
+    for with_repair in (False, True):
+        monkeypatch.setattr(panel_mod, "run_network", stub(with_repair))
+        app = _app_fixture()
+        async with app.run_test(size=(100, 30)) as pilot:
+            screen = NetworkScreen(_panel_local())
+            app.push_screen(screen)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            await pilot.pause()
+            seen[with_repair] = "\n".join(screen.render_lines_for_test())
+
+    assert "repair:" not in seen[False], seen[False]
+    # The producer's sentence arrives whole — the wrap is the hanging-row helper's
+    # (its continuation repeats the row's own lead, so stitch it back and compare
+    # the lot, rather than pinning where this build happens to break the line).
+    assert "repair: laptop needs" in seen[True], seen[True]
+    # The wrap is indent-only under the label (design round 1, D1), so the
+    # continuation is the lead's own cell count of spaces — stitch that back.
+    flat = seen[True].replace("\n" + " " * cell_len("  repair: "), " ")
+    assert (
+        "laptop needs '/mcp login https://mcp.example.com' here — its borrowed "
+        "credential cannot be refreshed"
+    ) in flat, seen[True]
+
+
 def test_a_wedged_relay_gets_a_sentence_in_the_panel_where_the_numbers_would_be() -> None:
     """The SIGSTOP case: ``relay: null`` and no ``audit*`` key at all.
 

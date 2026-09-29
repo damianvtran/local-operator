@@ -63,7 +63,10 @@ def parse_move_to(arg: str) -> MoveTo | None:
     Accepted: ``--to X``, ``--to=X``, an optional leading session id, ``--keep``
     anywhere. Refused (a ``MoveTo`` with ``error``): ``--to`` with no value, more
     than one leading word (a path with spaces, or a path plus an id — the
-    ambiguous shape), and any other flag.
+    ambiguous shape), any other flag — and ``--wait`` by name, because the
+    producer's busy sentence sends readers to a shell for that flag
+    (``mobility._busy_sentence``) and a bare "unknown flag" here would be the same
+    dead end one surface over.
     """
     try:
         tokens = shlex.split(arg)
@@ -90,6 +93,19 @@ def parse_move_to(arg: str) -> MoveTo | None:
         elif token == "--keep":
             keep = True
         elif token.startswith("-"):
+            if token == "--wait" or token.startswith("--wait="):
+                # THE OTHER HALF OF THE BUSY PAPERCUT (``mobility._busy_sentence``):
+                # the producer's refusal tells the reader to wait from a shell — this
+                # view runs the CLI as one blocked subprocess with no phase feedback
+                # until it answers, so it cannot wait — and a reader who types the
+                # flag here anyway gets the shell route rather than a dead end about
+                # an unknown option.
+                return MoveTo(
+                    error=(
+                        "this view cannot wait — from a shell: "
+                        "`lop sessions move <id> --to <to> --wait <seconds>`"
+                    )
+                )
             return MoveTo(error=f"/move --to takes only --keep, not {token!r}")
         else:
             words.append(token)

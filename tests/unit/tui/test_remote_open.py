@@ -59,6 +59,27 @@ def test_the_phase_order_is_the_contracts() -> None:
         ("./x --to local", MoveTo(error=AMBIGUOUS_MOVE)),
         ("a b --to local", MoveTo(error=AMBIGUOUS_MOVE)),
         ("--to x --force", MoveTo(error="/move --to takes only --keep, not '--force'")),
+        # ``--wait`` is refused BY NAME, naming the shell route that can honour it:
+        # the producer's busy sentence sends readers to a shell for this flag, and a
+        # bare "unknown flag" here would be the papercut one surface over.
+        (
+            "--to x --wait 30",
+            MoveTo(
+                error=(
+                    "this view cannot wait — from a shell: "
+                    "`lop sessions move <id> --to <to> --wait <seconds>`"
+                )
+            ),
+        ),
+        (
+            "--wait=30 --to x",
+            MoveTo(
+                error=(
+                    "this view cannot wait — from a shell: "
+                    "`lop sessions move <id> --to <to> --wait <seconds>`"
+                )
+            ),
+        ),
     ],
 )
 def test_the_discriminant_is_the_presence_of_to(arg: str, expected: MoveTo | None) -> None:
@@ -476,6 +497,50 @@ async def test_a_refused_move_says_so_and_reopens_nothing(
         assert reopened == []
         # A refusal before any phase is ONE sentence: the empty phase row is gone.
         assert not any(n.startswith("moving other1") for n in _notices(app)), _notices(app)
+
+
+@pytest.mark.asyncio
+async def test_a_busy_refusal_names_the_shell_route_its_wait_belongs_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The producer's busy sentence, rendered here, sends ``--wait`` to a shell.
+
+    The papercut (2026-09-29): mid-turn ``/move … --to`` printed "…try again when
+    the turn finishes, or pass --wait <seconds> to re-check" — and typing that
+    flag at this composer refused it (``/move --to`` takes only ``--keep``), so
+    the printed remedy was one this surface could not run. The refusal is the
+    PRODUCER's sentence (``mobility._busy_sentence``) rendered verbatim, so the
+    frame is where the fix has to hold: this cell feeds the real producer's
+    output through the real app and asserts the rendered notice names the shell
+    route.
+    """
+    from local_operator.network import mobility
+
+    def fake_move(session_id: str, to: str, *, keep: bool = False) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "code": "busy",
+            "message": mobility._busy_sentence("busy"),
+            "session_id": session_id,
+            "phase_reached": None,
+            "changed": False,
+        }
+
+    monkeypatch.setattr("local_operator.tui.app.run_session_move", fake_move)
+    app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _booted(pilot, app)
+        app._run_slash_command("/move other1 --to pixel-8")
+        for _ in range(30):
+            await pilot.pause()
+            if any("Could not move" in n for n in _notices(app)):
+                break
+        shown = " ".join(_notices(app))
+        assert "Could not move other1:" in shown, shown
+        # THE REMEDY NAMES ITS SURFACE, in the rendered sentence itself — and it is
+        # the producer's words that arrive, not a composer rewrite of them.
+        assert "from a shell" in shown, shown
+        assert mobility._busy_sentence("busy") in shown, shown
 
 
 @pytest.mark.asyncio

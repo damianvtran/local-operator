@@ -5183,11 +5183,17 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
     a mesh it had not looked at (Q-R2-6).
     """
     from local_operator.network import store
+    from local_operator.network.audit import AuditLog
+    from local_operator.network.credentials.repair import repair_checks
     from local_operator.network.identity import identity_path
     from local_operator.network.relay import membership_state
 
     relay_line, relay_up = _relay_state()
     checks: list[dict[str, Any]] = []
+    # One reader for every network's derivation below: a reader instance holds no
+    # buffer, and ``tail`` flushes first so even a same-process writer's last second
+    # is visible.
+    repair_log = AuditLog()
     identity_file = identity_path()
     checks.append(
         {
@@ -5220,6 +5226,11 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
                     "remedies": standing["remedies"],
                 }
             )
+        # THE SAME REPAIR ROWS THE RELAY'S OWN DOCTOR EMITS, for the membership
+        # row's own reason: with the relay down the audit file is still here, and
+        # the owner of a dead login is exactly the device that needs the notice when
+        # nothing else answers it (``credentials/repair.py`` owns the derivation).
+        checks.extend(repair_checks(record, log=repair_log))
         for member in record.active_members():
             if member.device_id == record.self_device_id:
                 continue

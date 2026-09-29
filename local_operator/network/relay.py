@@ -81,6 +81,7 @@ from local_operator.network import dial as session_dial
 from local_operator.network import projection, store, wire
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
+from local_operator.network.credentials.repair import repair_checks
 from local_operator.network.handshake import (
     HANDSHAKE_TIMEOUT_S,
     MAX_DECLARED_ENDPOINTS,
@@ -9602,6 +9603,14 @@ class RelayServer:
                         "remedies": standing["remedies"],
                     }
                 )
+            # THE OWNER-SIDE REPAIR NOTICE, beside the membership row it shares a
+            # shape and a derivation discipline with (``credentials/repair.py`` owns
+            # the predicate, so the CLI's local fallback and this path cannot
+            # disagree). Read through THIS process's own log instance, whose
+            # buffered tail ``tail()`` flushes first: the file alone can lag the
+            # relay by a heartbeat, and the doctor is the one surface that must not
+            # report a state its own process has already moved past.
+            findings.extend(repair_checks(record, log=self.audit))
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
                     continue
