@@ -389,15 +389,15 @@ class MeshCredentialClient:
                 self._state_stamp = stamp
             return self._state
 
-    def cached_refusal(self, key: str) -> BrokerError | None:
+    def cached_refusal(self, key: str, *, now: float | None = None) -> BrokerError | None:
         """A refusal this device already has, or ``None``. Consulted BEFORE a dial."""
-        status = self.state.status(key)
+        status = self.state.status(key, now=now)
         if not status or status == "active":
             return None
         ttl = BROKER_ERROR_TTL_MS.get(status, 0)
         if ttl == NO_RETRY:
             ttl = UNSUPPORTED_OBSERVATION_MS
-        row = self.state.observation(key)
+        row = self.state.observation(key, now=now)
         if row is None:
             return None
         # ``reason`` is deliberately NOT read back here. The observation document
@@ -406,6 +406,17 @@ class MeshCredentialClient:
         # borrower that echoed a stored string would be presenting one device's
         # prose as another's, which is the failure ``render_broker_error`` exists to
         # prevent. The message is filled in by ``_render`` below.
+        if ttl <= 0:
+            # A ZERO IN THE TABLE MEANS "HONOUR THE OBSERVATION'S OWN REMAINDER"
+            # (design round 1, D1): for those codes the row's ``retry_after_ms`` IS
+            # the time the owner asked for, so what is still ahead is that number
+            # MINUS the row's age — a re-served refusal counts down instead of
+            # repeating the first one's figure, and a live row can never hand back
+            # a negative one.
+            stamp = float(row.get("observed_at") or 0.0)
+            current = time.time() if now is None else now
+            elapsed_ms = int(max(0.0, current - stamp) * 1000.0)
+            ttl = max(0, int(row.get("retry_after_ms") or 0) - elapsed_ms)
         return BrokerError(
             code=status,
             key=key,

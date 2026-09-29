@@ -787,6 +787,18 @@ def _clear_refusals_the_merge_contradicts(
     BEST EFFORT: this runs after the merge has already committed, so a cache that
     cannot be written (a read-only config dir, a missing one) must not fail the
     merge or the pull it belongs to.
+
+    NOT TRANSACTIONAL, AND BOUNDED ON PURPOSE (review round 1, M1). The clear is a
+    cross-process read-modify-write — this function loads and saves the state file
+    while a session may ``_remember`` into it — and ``PlacementState.save``'s lock
+    serialises THREADS WITHIN ONE PROCESS, so last-writer-wins is the residual: a
+    refusal written between the load below and the save at the end loses that ROW
+    and is re-observed on the next dial, while a refusal written after the save
+    survives for at most its own TTL (60 s for ``not_a_holder``) — the same shadow
+    this clearing removes, bounded to one dial in flight around a pull and
+    self-healing on the next expiry. Closing it would need the state module's
+    writers to reload under a cross-process lock; that is a change to its contract,
+    not to this function.
     """
     from local_operator.network.credentials.state import PlacementState
 
