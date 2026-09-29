@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from types import SimpleNamespace
 from typing import Any
 
@@ -99,7 +100,7 @@ async def test_fork_never_raises_when_the_host_refuses_to_spawn(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_ok_writes_the_exact_record_and_nothing_else(tmp_path, monkeypatch) -> None:
+async def test_ok_writes_the_exact_record_and_nothing_else(tmp_path, monkeypatch, caplog) -> None:
     transcript = Transcript(tmp_path / "sess")
     host = Host(transcript)
 
@@ -109,9 +110,14 @@ async def test_ok_writes_the_exact_record_and_nothing_else(tmp_path, monkeypatch
 
     monkeypatch.setattr(sidecar, "_model_transcript", fake)
 
-    await sidecar._run_audio_sidecar(
-        host, message_id="msg-1", audio=Block(), config_dir=tmp_path, store=Store()
-    )
+    with caplog.at_level(logging.WARNING, logger="local_operator.stt.sidecar"):
+        await sidecar._run_audio_sidecar(
+            host, message_id="msg-1", audio=Block(), config_dir=tmp_path, store=Store()
+        )
+
+    # THE HAPPY PATH IS SILENT (agent review round 1, m1): the WARNING the
+    # failed and timed-out paths owe the operator must not fire for an ok run.
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     record = _record(transcript)
     assert set(record) == {"message_id", "status", "path", "text", "error", "at"}
@@ -131,7 +137,7 @@ async def test_ok_writes_the_exact_record_and_nothing_else(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_failed_records_the_error(tmp_path, monkeypatch) -> None:
+async def test_failed_records_the_error(tmp_path, monkeypatch, caplog) -> None:
     transcript = Transcript(tmp_path / "sess")
     host = Host(transcript)
 
@@ -139,18 +145,27 @@ async def test_failed_records_the_error(tmp_path, monkeypatch) -> None:
         raise RuntimeError("the wire said no")
 
     monkeypatch.setattr(sidecar, "_model_transcript", fake)
-    await sidecar._run_audio_sidecar(
-        host, message_id="m2", audio=Block(), config_dir=tmp_path, store=Store()
-    )
+    with caplog.at_level(logging.WARNING, logger="local_operator.stt.sidecar"):
+        await sidecar._run_audio_sidecar(
+            host, message_id="m2", audio=Block(), config_dir=tmp_path, store=Store()
+        )
 
     record = _record(transcript)
     assert record["status"] == "failed"
     assert record["error"] == "the wire said no"
     assert record["path"] is None and record["text"] is None
+    # THE OPERATOR-FACING HALF (agent review round 1, m1 / QA Q2): a failure
+    # is written to the transcript AND logged at warning, because v1 renders
+    # the record nowhere and a sidecar that whispers only into a JSONL file
+    # is invisible in the one place failures are watched.
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("failed" in r.getMessage() and "m2" in r.getMessage() for r in warnings), [
+        r.getMessage() for r in warnings
+    ]
 
 
 @pytest.mark.asyncio
-async def test_unavailable_records_the_reason(tmp_path, monkeypatch) -> None:
+async def test_unavailable_records_the_reason(tmp_path, monkeypatch, caplog) -> None:
     transcript = Transcript(tmp_path / "sess")
     host = Host(transcript)
 
@@ -158,17 +173,24 @@ async def test_unavailable_records_the_reason(tmp_path, monkeypatch) -> None:
         raise sidecar.ModelTranscriptUnavailable("the anthropic wire cannot take audio")
 
     monkeypatch.setattr(sidecar, "_model_transcript", fake)
-    await sidecar._run_audio_sidecar(
-        host, message_id="m3", audio=Block(), config_dir=tmp_path, store=Store()
-    )
+    with caplog.at_level(logging.WARNING, logger="local_operator.stt.sidecar"):
+        await sidecar._run_audio_sidecar(
+            host, message_id="m3", audio=Block(), config_dir=tmp_path, store=Store()
+        )
 
     record = _record(transcript)
     assert record["status"] == "unavailable"
     assert record["error"] == "the anthropic wire cannot take audio"
+    # DELIBERATELY SILENT (agent review round 1, m1 disposition): unavailable
+    # is the deterministic honest answer on a machine with no route for the
+    # bounded model call — e.g. no provider key on a model-audio door send —
+    # not a fault; warning on it would train the operator to ignore the line
+    # the failed/timeout paths actually need read.
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 @pytest.mark.asyncio
-async def test_timeout_is_bounded_and_still_recorded(tmp_path, monkeypatch) -> None:
+async def test_timeout_is_bounded_and_still_recorded(tmp_path, monkeypatch, caplog) -> None:
     transcript = Transcript(tmp_path / "sess")
     host = Host(transcript)
     monkeypatch.setattr(sidecar, "SIDECAR_TIMEOUT_S", 0.05)
@@ -181,14 +203,19 @@ async def test_timeout_is_bounded_and_still_recorded(tmp_path, monkeypatch) -> N
         return "never"
 
     monkeypatch.setattr(sidecar, "_model_transcript", fake)
-    await sidecar._run_audio_sidecar(
-        host, message_id="m4", audio=Block(), config_dir=tmp_path, store=Store()
-    )
+    with caplog.at_level(logging.WARNING, logger="local_operator.stt.sidecar"):
+        await sidecar._run_audio_sidecar(
+            host, message_id="m4", audio=Block(), config_dir=tmp_path, store=Store()
+        )
 
     assert started.is_set()
     record = _record(transcript)
     assert record["status"] == "timeout"
     assert "did not return a transcript within" in record["error"]
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("timeout" in r.getMessage() and "m4" in r.getMessage() for r in warnings), [
+        r.getMessage() for r in warnings
+    ]
 
 
 @pytest.mark.asyncio
