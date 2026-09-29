@@ -519,6 +519,29 @@ def test_sonnet_5_carries_the_standard_price() -> None:
     )
 
 
+def test_sonnet_5_5_carries_the_standard_price() -> None:
+    """Sonnet 5.5's $2/$10/$2.50/$0.20 comes straight from the pricing table.
+
+    Read from https://platform.claude.com/docs/en/about-claude/pricing on
+    2026-09-29. Unlike Opus 5.5 — whose cache hit carries the page's 0.05x
+    footnote — Sonnet 5.5's cache hit is the standard 0.1x multiplier of its
+    $2 base input, with no footnote exception to transcribe.
+    """
+    info = anthropic_models["claude-sonnet-5-5"]
+    actual = (
+        info.input_price,
+        info.output_price,
+        info.cache_writes_price,
+        info.cache_reads_price,
+    )
+    assert actual == (2.0, 10.0, 2.50, 0.20), (
+        f"Claude Sonnet 5.5's registry price is {actual}, not the published "
+        "(2.0, 10.0, 2.50, 0.20). Re-verify against "
+        "https://platform.claude.com/docs/en/about-claude/pricing before "
+        "changing this."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cache-aware arithmetic
 # ---------------------------------------------------------------------------
