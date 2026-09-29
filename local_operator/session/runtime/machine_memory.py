@@ -30,14 +30,16 @@ non-runtime fragment at or above ``MACHINE_FRAGMENT_MIN_MB`` is ended). The
 stop walks the fragment's SUBTREE — every pid the sum counted, descendants
 first and the fragment root last — through ``procstate.terminate_process_tree``,
 the same stop primitive the per-command guard uses; a leader's group kill
-covers anything the walk missed. Immediately before the first signal the
-candidate's row is re-read, and any change withholds the stop (see
-:func:`_candidate_still_stands`). Never a session runtime: a conversation is
+covers anything the walk missed. Immediately before the first signal EVERY
+row the ranking summed is re-read in one batched ``ps``, and any change
+withholds the whole stop (see :func:`_fragment_refusal`). Never a session
+runtime: a conversation is
 not a runaway, the command under it is.
 
 **WHAT IT REFUSES.** Everything fails closed. An unreadable table, a host whose
 memory cannot be measured, a fragment below the floor, a withheld kill (the
-seat's cooldown), a candidate whose row changed between the snapshot and the
+seat's cooldown), a fragment whose rows changed — or could not be re-read —
+between the snapshot and the
 signal, or no live runtimes at all: each produces a report with no kill.
 Unknown never kills — the per-command sampler's rule, kept here.
 """
@@ -159,6 +161,8 @@ class MemoryPassReport:
                 parts.append("kill withheld: a fragment was ended within the cooldown")
             elif self.withheld_cause == "changed":
                 parts.append("kill withheld: the fragment changed before the signal")
+            elif self.withheld_cause == "unreadable":
+                parts.append("kill withheld: the fragment's rows could not be re-read")
             else:
                 parts.append("kill withheld")
         return "; ".join(part for part in parts if part)
@@ -197,8 +201,9 @@ def machine_memory_pass(
     children of runtimes are not leaders, and their descendants would survive
     the stop while the log credited the whole fragment. A leader's group kill
     still covers anything the walk missed. Immediately before the first signal
-    the candidate's row is re-read and any change withholds
-    (:func:`_candidate_still_stands`) — the snapshot-to-signal window the
+    every row the ranking summed is re-read in one batched ``ps`` and any
+    change withholds (:func:`_fragment_refusal`) — the snapshot-to-signal
+    window the
     residency pass closes the same way. A guard acting to keep the device alive
     cannot wait on a graceful exit it has no ladder to escalate; if the
     fragment's work cannot take SIGKILL, nothing here could have stopped it
@@ -372,8 +377,8 @@ def machine_memory_pass(
             + f"; would end the largest fragment (pid {candidate.pid}), kill withheld",
         )
 
-    refusal = _fragment_refusal(candidate, runner=base)
-    if refusal:
+    cause, message = _fragment_refusal(candidate, runner=base)
+    if cause:
         return MemoryPassReport(
             state="act",
             fleet_mb=fleet_mb,
@@ -382,8 +387,8 @@ def machine_memory_pass(
             unmeasured=unmeasured,
             top=top,
             kill_withheld=True,
-            withheld_cause="changed",
-            reason=verdict.reason + f"; {refusal}",
+            withheld_cause=cause,
+            reason=verdict.reason + f"; {message}",
         )
 
     stopper = kill or _default_kill
@@ -415,8 +420,10 @@ def machine_memory_pass(
     )
 
 
-def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> str:
-    """``""`` when every process of the fragment still matches the snapshot.
+def _fragment_refusal(
+    fragment: memory_guard.Fragment, *, runner: Runner
+) -> tuple[str, str]:
+    """``("", "")`` when every process of the fragment still matches the snapshot.
 
     **THE DECISION IS A SNAPSHOT AND THE SIGNAL IS NOT** — the same hazard the
     residency pass closes with ``reclaim.target_changed``, and this pass must
@@ -431,8 +438,13 @@ def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> str
     compares each row's ``(ppid, pgid)`` against the snapshot the ranking
     walked (``Fragment.rows``); any missing row or any change withholds the
     WHOLE stop — refusal, never a correction, ``reclaim.target_changed``'s
-    contract. The two messages differ by cause on purpose: "changed" and
-    "could not be re-read" send an operator to different places (R2-3).
+    contract.
+
+    Returns ``(cause, message)``: ``cause`` is ``"changed"`` or
+    ``"unreadable"`` and feeds ``MemoryPassReport.withheld_cause``, so the
+    summary and the reason say WHERE the withhold came from — a stale
+    snapshot and a ``ps`` that would not answer send an operator to different
+    places (round 3, R3-2).
     """
     if fragment.rows:
         snapshot = fragment.rows
@@ -442,8 +454,9 @@ def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> str
     code, out = runner(["ps", "-o", "pid=,ppid=,pgid=", "-p", csv])
     if code != 0:
         return (
+            "unreadable",
             f"the fragment's rows could not be re-read (pid set starting "
-            f"{fragment.pid}); withheld"
+            f"{fragment.pid}); withheld",
         )
     seen: dict[int, tuple[int, int]] = {}
     for line in out.splitlines():
@@ -456,8 +469,11 @@ def _fragment_refusal(fragment: memory_guard.Fragment, *, runner: Runner) -> str
             continue
     for pid, ppid, pgid in snapshot:
         if seen.get(pid) != (ppid, pgid):
-            return f"the fragment changed before the signal (pid {pid}); withheld"
-    return ""
+            return (
+                "changed",
+                f"the fragment changed before the signal (pid {pid}); withheld",
+            )
+    return "", ""
 
 
 def _default_kill(fragment: memory_guard.Fragment) -> bool:

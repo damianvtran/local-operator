@@ -70,6 +70,7 @@ def _fake_runner(
     rss: dict[int, int] | None = None,
     drift: bool = False,
     drift_pids: set[int] | None = None,
+    recheck_unreadable: bool = False,
 ) -> mm.Runner:
     """A runner keyed on argv shape: topology, the re-check rows, the RSS batch.
 
@@ -93,6 +94,8 @@ def _fake_runner(
         if argv[:3] == ["ps", "-axo", "pid=,ppid=,pgid="]:
             return (0, topology) if topology is not None else (1, "")
         if argv[:3] == ["ps", "-o", "pid=,ppid=,pgid="]:
+            if recheck_unreadable:
+                return 1, ""
             lines = []
             for token in argv[-1].split(","):
                 try:
@@ -226,6 +229,7 @@ def test_kill_is_withheld_when_the_seat_says_so() -> None:
     assert killer.fragments == []
     assert report.kill_withheld is True
     assert "withheld" in report.reason
+    assert "within the cooldown" in report.summary()
 
 
 def test_apply_false_measures_and_never_kills() -> None:
@@ -307,6 +311,7 @@ def test_a_changed_descendant_row_withholds_the_whole_stop() -> None:
     assert killer.fragments == []
     assert report.kill_withheld is True
     assert "9900003" in report.reason
+    assert "the fragment changed before the signal" in report.summary()
 
 
 def test_a_changed_candidate_row_withholds_the_stop() -> None:
@@ -325,6 +330,28 @@ def test_a_changed_candidate_row_withholds_the_stop() -> None:
     assert killer.fragments == []
     assert report.kill_withheld is True
     assert "changed before the signal" in report.reason
+
+
+def test_an_unreadable_recheck_states_that_cause() -> None:
+    """R3-2: 'could not be re-read' must not read as 'changed'.
+
+    A ``ps`` that will not answer is a different operator destination from a
+    snapshot that moved; the summary must say which one happened.
+    """
+    killer = _Killer()
+    report = _pass(
+        runner=_fake_runner(
+            topology=_table([(_ROOT, 1), (9900002, _ROOT), (9900003, 9900002)]),
+            rss={_ROOT: 50, 9900002: 500, 9900003: 600},
+            recheck_unreadable=True,
+        ),
+        kill=killer,
+    )
+    assert report.state == "act"
+    assert killer.fragments == []
+    assert report.kill_withheld is True
+    assert "could not be re-read" in report.summary()
+    assert "changed before the signal" not in report.summary()
 
 
 def test_no_live_runtimes_is_empty_and_never_kills() -> None:
