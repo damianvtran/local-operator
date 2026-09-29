@@ -436,16 +436,27 @@ export function contextReading(state: ContextInput): ContextReading {
 }
 
 /**
- * The reading as the phone paints it — `~` when the figure is an estimate.
+ * The estimate marker — the WORD `estimate`, or `""` when the figure is a
+ * measurement (or absent).
  *
- * The mark is composed HERE rather than inside the ported spelling because the
- * spelling must stay the Python's character-for-character; `~` is this
- * surface's display choice, matching the `/context` rows' convention for an
- * estimated token count (`serving.py`'s `estimated()` helper). A phone has no
- * tooltip to disambiguate an unmarked number, so the flag the wire carries is
- * rendered rather than left to hover.
+ * TWO PRECEDENTS, AND THE RULING THAT PICKED BETWEEN THEM. The TUI's
+ * `/context` rows mark an estimated token count with a `~` glyph
+ * (`serving.py`'s `estimated()` helper), and the phone's first cut copied it.
+ * The desktop strip — this surface's stated information-design reference
+ * (desktop-as-design-source) — appends the word `estimate` in `ink-dim`
+ * instead, under a rule against hints: "The estimate marker is a WORD, not a
+ * glyph or a dimmed colour … a tilde or a lighter ink is a hint the user has
+ * to have been taught" (§ 8: every claim checkable). Design review round 1
+ * (D2) ruled for the desktop convention on this surface; the `/context`
+ * precedent is recorded here so the divergence reads as a decision rather
+ * than an accident.
+ *
+ * The word is NOT part of the ported spelling — `reading.spelling` stays
+ * character-for-character the Python's — and it renders as its own dim
+ * segment beside the reading, because the qualifier describes the figure and
+ * must not inherit the reading's rung colour. It replaces a single-string
+ * composer (`contextDisplaySpelling`) that could not carry a two-tone marker.
  */
-export function contextDisplaySpelling(reading: ContextReading): string {
-	if (!reading.spelling) return "";
-	return reading.status === "estimate" ? `~${reading.spelling}` : reading.spelling;
+export function contextEstimateMarker(reading: ContextReading): string {
+	return reading.status === "estimate" ? "estimate" : "";
 }

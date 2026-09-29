@@ -38,10 +38,38 @@ function projection(overrides: Record<string, unknown> = {}): SessionProjection 
 }
 
 describe("SessionStatus", () => {
-	it("shows the spend and the context reading side by side", () => {
+	it("reads context before spend, each cell keeping its own edge", () => {
 		const { container } = render(<SessionStatus projection={projection()} />);
-		expect(container.textContent).toContain("$1.25");
-		expect(container.textContent).toContain("6.2%/200k");
+		// Reading order is the one both references use — the TUI band's right
+		// group and the desktop strip read context before spend (design round
+		// 1, D3).
+		const order = Array.from(container.querySelectorAll("span[data-testid]")).map((el) =>
+			el.getAttribute("data-testid"),
+		);
+		expect(order).toEqual(["session-status-context", "session-status-spend"]);
+		const context = container.querySelector('[data-testid="session-status-context"]');
+		const spend = container.querySelector('[data-testid="session-status-spend"]');
+		expect(context?.textContent).toBe("6.2%/200k");
+		expect(spend?.textContent).toBe("$1.25");
+		// `ml-auto` sits on the SECOND cell, so each keeps a fixed edge and a
+		// lone reading neither reflows nor floats: context hugs the left,
+		// spend the right — the single-cell states mirror the pair.
+		expect(spend?.className).toContain("ml-auto");
+		expect(context?.className).not.toContain("ml-auto");
+
+		const contextOnly = render(
+			<SessionStatus projection={projection({ cumulative_parent_cost: null })} />,
+		);
+		const loneContext = contextOnly.container.querySelector(
+			'[data-testid="session-status-context"]',
+		);
+		expect(loneContext?.textContent).toBe("6.2%/200k");
+		expect(loneContext?.className).not.toContain("ml-auto");
+
+		const spendOnly = render(<SessionStatus projection={projection({ context_tokens: null })} />);
+		const loneSpend = spendOnly.container.querySelector('[data-testid="session-status-spend"]');
+		expect(loneSpend?.textContent).toBe("$1.25");
+		expect(loneSpend?.className).toContain("ml-auto");
 	});
 
 	it("marks a lower-bound spend with the band's \u2265", () => {
@@ -64,13 +92,54 @@ describe("SessionStatus", () => {
 		expect(container.textContent).toContain("$\u2014");
 	});
 
-	it("flags an estimated context figure and leaves a measured one unmarked", () => {
+	it("appends the estimate marker as a dim WORD beside the reading", () => {
+		// The desktop's convention, per the design round's D2 ruling: a word,
+		// not a `~` glyph or a tinted number — a hint the user would have had
+		// to be taught. It renders in its own dim segment so it never inherits
+		// the reading's rung colour, and the spelling itself is untouched.
 		const { container } = render(
 			<SessionStatus projection={projection({ context_is_estimate: true })} />,
 		);
-		const [spend, context] = Array.from(container.querySelectorAll("span"));
-		expect(spend.textContent).toBe("$1.25");
-		expect(context.textContent).toBe("~6.2%/200k");
+		const context = container.querySelector('[data-testid="session-status-context"]');
+		expect(context?.textContent).toBe("6.2%/200kestimate");
+		const marker = context?.querySelector("span");
+		expect(marker?.textContent).toBe("estimate");
+		expect(marker?.className).toContain("text-ink-dim");
+
+		// A measured figure carries no marker at all.
+		const measured = render(
+			<SessionStatus projection={projection({ context_is_estimate: false })} />,
+		);
+		const measuredCell = measured.container.querySelector(
+			'[data-testid="session-status-context"]',
+		);
+		expect(measuredCell?.textContent).toBe("6.2%/200k");
+		expect(measuredCell?.querySelector("span")).toBeNull();
+	});
+
+	it("carries the TUI's colour-vision weight on the warm rungs only", () => {
+		// The band bolds the context reading on every rung but the base one
+		// (`status_line.py`: `bold=semantic != CONTEXT_COLOR_BASE`) because hue
+		// alone cannot carry the step under colour-vision deficiency; the
+		// phone mirrors that with 600 on label/danger, regular on signal.
+		const base = render(<SessionStatus projection={projection()} />);
+		const baseCell = base.container.querySelector('[data-testid="session-status-context"]');
+		expect(baseCell?.className).toContain("text-ink-muted");
+		expect(baseCell?.className).not.toContain("font-semibold");
+
+		const label = render(
+			<SessionStatus projection={projection({ context_tokens: 110_001 })} />,
+		);
+		const labelCell = label.container.querySelector('[data-testid="session-status-context"]');
+		expect(labelCell?.className).toContain("text-accent");
+		expect(labelCell?.className).toContain("font-semibold");
+
+		const danger = render(
+			<SessionStatus projection={projection({ context_tokens: 160_001 })} />,
+		);
+		const dangerCell = danger.container.querySelector('[data-testid="session-status-context"]');
+		expect(dangerCell?.className).toContain("text-danger");
+		expect(dangerCell?.className).toContain("font-semibold");
 	});
 
 	it("renders no row at all when there is nothing to state", () => {

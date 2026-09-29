@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { pyFixed } from "./fixed-point";
 import {
-	contextDisplaySpelling,
+	contextEstimateMarker,
 	contextReading,
 	contextSemanticColor,
 	contextSpelling,
@@ -207,7 +207,10 @@ describe("the context reading", () => {
 		});
 		expect(estimate.status).toBe("estimate");
 		expect(estimate.spelling).toBe("6.2%/200k");
-		expect(contextDisplaySpelling(estimate)).toBe("~6.2%/200k");
+		// The marker is a WORD, composed beside the spelling — never baked into
+		// it (design round 1, D2; see `contextEstimateMarker` for both
+		// precedents).
+		expect(contextEstimateMarker(estimate)).toBe("estimate");
 
 		const measured = contextReading({
 			context_tokens: 12_400,
@@ -215,14 +218,17 @@ describe("the context reading", () => {
 			context_is_estimate: false,
 		});
 		expect(measured.status).toBe("measured");
-		expect(contextDisplaySpelling(measured)).toBe("6.2%/200k");
+		expect(measured.spelling).toBe("6.2%/200k");
+		expect(contextEstimateMarker(measured)).toBe("");
 
 		const windowUnknown = contextReading({ context_tokens: 12_400, context_window: 0 });
 		expect(windowUnknown.status).toBe("window-unknown");
-		expect(contextDisplaySpelling(windowUnknown)).toBe("12.4k/\u2014");
+		expect(windowUnknown.spelling).toBe("12.4k/\u2014");
+		expect(contextEstimateMarker(windowUnknown)).toBe("");
 
 		const none = contextReading({});
 		expect(none.status).toBe("no-reading");
-		expect(contextDisplaySpelling(none)).toBe("");
+		expect(none.spelling).toBe("");
+		expect(contextEstimateMarker(none)).toBe("");
 	});
 });

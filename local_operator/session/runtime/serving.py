@@ -620,6 +620,31 @@ class ServingSessionHandle(SessionHandle):
             # Checkpoint state is not an instruction to spend more tokens. A
             # replaced owner reports interrupted work rather than resuming it.
             store.mutate(loop={**store.state.loop, "status": "interrupted"})
+        # THE DURABLE RECEIPT PAIR IS RE-MATERIALIZED HERE, at the edge where
+        # this host takes the session up — the twin of the TUI host's call on
+        # its own adopt edge (``OperatorApp._adopt_session`` ->
+        # ``refresh_frontend_usage()``, ``tui/app.py``), and the reason this
+        # host needed one of its own (QA round 1, Q1):
+        #
+        # A session restored from the durable checkpoint carries the money and
+        # the context reading but NOT the receipt pair. The turn-end
+        # checkpoint is written while the turn's final ``AgentEndEvent`` is
+        # still held (``Session._held_end``; it folds at the held-end flush in
+        # the pipeline's ``finally``, AFTER ``_run_turn``'s durable write), and
+        # that fold is what lands the aggregate receipt in ``last_usage``. A
+        # restored runtime therefore published ``last_usage: null`` — and the
+        # phone reads the pair as its ``$—`` billed signal and its refresh
+        # cadence, so a resumed session silently dropped the spend segment
+        # where the live one read "we spent something we cannot price".
+        #
+        # The pair is re-derivable rather than lost: the transcript replay
+        # already seeds ``Session.restored_usage()``. The same mechanism the
+        # TUI uses (and the same guard shape, for reduced hosts) re-reads it
+        # into the store before this handle serves any frame; nothing later
+        # needs the null.
+        refresh_frontend_usage = getattr(session, "refresh_frontend_usage", None)
+        if callable(refresh_frontend_usage):
+            refresh_frontend_usage()
         self._loop = loop
         # When the owner's saved default is full-auto (``tool_approval_mode:
         # auto``), the phone must not park a card the TUI would never show —

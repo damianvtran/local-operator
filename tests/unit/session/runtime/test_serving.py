@@ -2911,3 +2911,123 @@ def test_a_store_less_session_keeps_the_spend_and_context_defaults() -> None:
     assert p.context_window is None
     assert p.context_is_estimate is None
     assert p.usage == {}
+
+
+@pytest.mark.asyncio
+async def test_a_restored_receipt_pair_is_re_materialized_when_the_host_takes_the_session_up(
+    tmp_path,
+) -> None:
+    """QA round 1, Q1: a durable resume keeps the pair the phone's ``$—`` reads.
+
+    The turn-end checkpoint is written while the turn's final ``AgentEndEvent``
+    is still held (``Session._held_end`` folds at the held-end flush, after
+    ``_run_turn``'s durable write), and that fold is what lands the aggregate
+    receipt in ``last_usage`` — so a session restored from the checkpoint
+    carries the money and the context but ``last_usage: null``. Without a
+    refresher the serving host published ``usage={}``, and the phone dropped
+    its ``$—``: a resumed session silently read "we have not spent" where the
+    live one read "we spent something we cannot price".
+
+    The TUI host re-materializes the pair at its adopt edge
+    (``OperatorApp._adopt_session`` -> ``refresh_frontend_usage``); this pins
+    the serving host doing the same when it takes the session up, from the
+    transcript replay, before any frame is served. Both the store accessor the
+    refresh path uses and the folded projection are asserted, so removing the
+    constructor call fails here on the defect's own shape.
+    """
+    from unittest.mock import patch
+
+    from local_operator.harness.types import Message, ModelSpec, TextContent, Usage
+    from local_operator.model.registry import ModelInfo
+    from local_operator.session.frontend_state import (
+        CostKnowledge,
+        FrontendSessionState,
+        FrontendStateStore,
+    )
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    sid = "restored-receipt"
+    directory = tmp_path / "sessions" / sid
+    directory.mkdir(parents=True)
+
+    # The durable prior conversation: one settled assistant call whose receipt
+    # the turn-end checkpoint could not carry, and the checkpoint itself —
+    # money and context present, `last_usage` absent, exactly the shape QA
+    # read off the resumed wire.
+    writer = Transcript(directory)
+    await writer.append_message(Message.user("what did this cost?"))
+    await writer.append_message(
+        Message(
+            role="assistant",
+            content=[TextContent(text="answer")],
+            stop_reason="stop",
+            usage=Usage(
+                provider="openai",
+                model_id="e2e-oracle",
+                input_tokens=9_000,
+                output_tokens=100,
+                context_tokens=12_400,
+            ),
+        )
+    )
+    checkpoint_store = FrontendStateStore(FrontendSessionState(session_id=sid, epoch="t"))
+    checkpoint_store.mutate(
+        cumulative_parent_cost=None,
+        cost_knowledge=CostKnowledge.UNKNOWN,
+        context_tokens=12_400,
+        context_is_estimate=False,
+    )
+    await checkpoint_store.checkpoint(writer)
+
+    def _no_price(provider: str, model_id: str) -> ModelInfo:
+        # No price row: the call is unpriceable, deterministically (a real
+        # resolve would fire discovery HTTP on a worker thread).
+        return ModelInfo(id=model_id, name=model_id, description="")
+
+    async def _stream(request: Any, signal: Any = None):  # pragma: no cover — never called
+        if False:
+            yield None
+
+    with patch.multiple(
+        "local_operator.model.configure",
+        resolve_model_info=_no_price,
+        resolve_model_info_paint=lambda provider, model_id: (_no_price(provider, model_id), True),
+    ):
+        # The resumed session, replayed from disk exactly as `--resume` builds it.
+        session = Session(
+            model=ModelSpec(provider="openai", model_id="e2e-oracle", context_window=0),
+            stream_fn=_stream,
+            tools=[],
+            transcript=Transcript(directory),
+            session_id=sid,
+            system_blocks_provider=lambda: ["system"],
+        )
+        store = session._frontend_state_store
+
+        # PREMISE, on the defect's own shape: the replay has the receipt; the
+        # durable state the store restored does not.
+        assert session.restored_usage() is not None
+        assert store.spend_context_copy() == ({}, {}), "the restored checkpoint must lack the pair"
+
+        # The fix: taking the session up re-materializes the pair before any
+        # frame is served.
+        handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(directory))
+
+        _child_costs, usage = store.spend_context_copy()
+        assert usage == {"input_tokens": 9_000, "output_tokens": 100}
+        assert store.state.last_usage is not None
+        # The readings the checkpoint DID carry are kept, not invented away.
+        assert store.read_field("context_tokens") == 12_400
+        assert store.read_field("cost_knowledge") == CostKnowledge.UNKNOWN
+
+        # And they reach the phone's projection, which is what reads `usage`
+        # as the `$—` billed signal.
+        handle._refresh_state()
+        assert handle._fold.projection.usage == {"input_tokens": 9_000, "output_tokens": 100}
+
+        # Drain the one fire-and-forget rebuild the adoption starts (a session
+        # with usage rows and no record); its publish is not this test's claim,
+        # and it must not outlive the loop.
+        if session._spend_tasks:
+            await asyncio.gather(*list(session._spend_tasks), return_exceptions=True)
