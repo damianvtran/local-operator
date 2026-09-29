@@ -141,7 +141,7 @@ describe("an ended session (U7)", () => {
 		render(<SessionScreen sessionId="s1" />);
 
 		// The reader is told what happened, in the strip's own words.
-		expect(screen.getByText("this session has ended — its history is kept")).toBeTruthy();
+		expect(screen.getByText("session ended — history kept")).toBeTruthy();
 
 		fireEvent.click(screen.getByRole("button", { name: "resume" }));
 		await waitFor(() => expect(mocks.resumeSession).toHaveBeenCalledWith("s1"));
@@ -210,7 +210,7 @@ describe("an ended session (U7)", () => {
 		/* The ladder container: absolutely positioned under the header, and
 		   pointer-events-none so its dead space passes touches through to the
 		   transcript beneath (scrolling from the strip's own row must work). */
-		const row = screen.getByText("this session has ended — its history is kept");
+		const row = screen.getByText("session ended — history kept");
 		const ladder = row.closest("div.absolute");
 		expect(ladder?.className).toContain("pointer-events-none");
 		expect(ladder?.className).toContain("top-full");
@@ -283,7 +283,7 @@ describe("an ended session (U7)", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 		const status = screen.getByTestId("session-status");
-		const row = screen.getByText("this session has ended — its history is kept");
+		const row = screen.getByText("session ended — history kept");
 		const ladder = row.closest("div.absolute");
 		/* One wrapper holds the header, the glance row and the ladder, so the
 		   ladder's `top-full` anchor is BELOW the glance row by construction:
@@ -346,7 +346,7 @@ describe("a degraded session (U7)", () => {
 		// `ended` and `degraded` are different facts; the degraded strip must
 		// not drag the resume affordance (and its restart offer) in with it.
 		expect(screen.queryByRole("button", { name: "resume" })).toBeNull();
-		expect(screen.queryByText(/this session has ended/)).toBeNull();
+		expect(screen.queryByText(/session ended/)).toBeNull();
 	});
 });
 
@@ -358,7 +358,7 @@ describe("the health ladder renders exactly one rung", () => {
 		};
 		render(<SessionScreen sessionId="s1" />);
 
-		expect(screen.getByText("this session has ended — its history is kept")).toBeTruthy();
+		expect(screen.getByText("session ended — history kept")).toBeTruthy();
 		expect(screen.queryByText("not answering — showing its last synced view")).toBeNull();
 		expect(screen.queryByText("reconnecting — showing the last synced view")).toBeNull();
 	});

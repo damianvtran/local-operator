@@ -319,20 +319,24 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 		<>
 			<div className="flex items-center gap-2 border-b border-hairline bg-elevated px-2 py-1">
 				<div className="min-w-0 flex-1">
+					{/* THE TITLE, ONE TEXT LINE AT EVERY WIDTH (design round 3, D10).
+					    `this session has ended — its history is kept` dropped its last
+					    word onto a second line at 320 and made the strip 63.17px where
+					    one line does the job; the shorter sentence keeps the promise
+					    (`history kept`) in the same register. */}
 					<p role="status" className="text-meta text-ink-muted">
-						this session has ended — its history is kept
+						session ended — history kept
 					</p>
 					{/* WHERE IT REOPENS (UX round 1, U18; the words in round 2, U25 =
 					    D8). The daemon resumes the transcript in the owner's home — the
 					    durable directory does not record a cwd to resume into — so the
 					    strip says so before the tap rather than letting a project session
 					    quietly come back in `~`. The PATH IS SPELLED OUT: a bare `~` is
-					    shell shorthand a phone reader should not have to decode (the
-					    round measured the longer sentence as still fitting beside the
-					    button at 390 and wrapping inside the row at 320, which the row
-					    already does for its title line). Inside the row's text cell: at
-					    390 it costs no height at all beside the 44px button, and the
-					    row's growth at 320 is bounded by the sentence it belongs to. */}
+					    shell shorthand a phone reader should not have to decode
+					    (measured at 390 fitting beside the button, and at 320 on its own
+					    line inside the row). Inside the row's text cell: at 390 it costs
+					    no height at all beside the 44px button, and the row's growth at
+					    320 is bounded by the sentence it belongs to. */}
 					<p className="mt-0.5 text-meta text-ink-dim">
 						resume reopens it in your home folder
 					</p>
