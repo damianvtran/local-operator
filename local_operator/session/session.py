@@ -10894,17 +10894,21 @@ class Session:
                             producer_command_id if message.id == admitted_id else None
                         ),
                     )
+                    # THE AUDIO SIDECAR FORKS ONLY HERE, strictly after the
+                    # append above made the row durable AND only for a row
+                    # THIS loop wrote: a record for a row the transcript does
+                    # not have would dangle, and a prompt that dies before
+                    # admission leaves nothing behind. A row another writer
+                    # persisted (a held delivery) already forked where it was
+                    # written — forking again here would write a twin record
+                    # under the same message id. Fire-and-forget — see
+                    # ``_fork_audio_sidecars`` for why dispose can cancel it
+                    # and why no failure of its own can reach this turn.
+                    self._fork_audio_sidecars(message)
                 if admitted is not None and message.id == admitted_id and not admitted.done():
                     # The append completed under Transcript's fsync boundary;
                     # only now may a producer discard its retained command.
                     admitted.set_result(None)
-                # THE AUDIO SIDECAR FORKS ONLY HERE, strictly after the append
-                # above made the row durable: a record for a row the transcript
-                # does not have would dangle, and a prompt that dies before
-                # admission leaves nothing behind. Fire-and-forget — see
-                # ``_fork_audio_sidecars`` for why dispose can cancel it and
-                # why no failure of its own can reach this turn.
-                self._fork_audio_sidecars(message)
                 # Announce USER turns to every subscriber. The loop only emits
                 # MessageStartEvent for ASSISTANT messages, so without this a
                 # user prompt — from any front end — never reaches the other
@@ -11383,6 +11387,15 @@ class Session:
                         producer_command_id if message.id == admitted_id else None
                     ),
                 )
+                # A THIRD WRITER, SAME FORK CONTRACT: this is the point at
+                # which THIS path makes the row durable, so it is the point
+                # that forks its sidecar (the drain below queues the message
+                # for live context only and skips it precisely because the
+                # transcript already holds it). Today only text-shaped
+                # deliveries reach this path and the fork is a no-op; the call
+                # exists so "every writer of an audio row forks it" holds by
+                # construction rather than by the current call graph.
+                self._fork_audio_sidecars(message)
             if isinstance(message, CustomMessage):
                 self._append_or_park_journal(message)
             else:
@@ -13141,6 +13154,15 @@ class Session:
                 continue
             finally:
                 self._steering_producers.pop(id(message), None)
+            # THE STEER DOOR'S AUDIO FORK, at the same point the prompt door
+            # forks: strictly after THIS drain's own append made the row
+            # durable (see ``_fork_audio_sidecars`` — a record for a row the
+            # transcript does not have would dangle; the failed-append path
+            # above ``continue``d, so nothing forks without a row). The
+            # already-durable branch above skips it on purpose: that row was
+            # written, and forked, by its own writer, and forking again would
+            # write a twin record under the same message id.
+            self._fork_audio_sidecars(message)
             messages.append(message)
         # The drain is the ONLY consumer, so every courtesy message queued
         # before this boundary just left with it; anything queued after is a
