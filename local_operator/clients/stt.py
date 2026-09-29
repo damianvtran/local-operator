@@ -128,10 +128,12 @@ STT_BACKENDS: Mapping[str, SttBackend] = {
     ),
 }
 
-#: The probe's two constants, split out so the freeze cascade is settling is a
-#: ONE-LINE edit here: module + attribute of the cascade executor.
+#: The probe's two constants. The freeze the cascade session was settling is
+#: SETTLED here (agents review convergence, B1): the executor is the cascade's
+#: token-targeted ``transcribe_backend`` — it runs the ONE rung the dispatch
+#: names, over bytes, and raises the rung's own typed failures.
 BYO_EXECUTOR_MODULE = "local_operator.stt.cascade"
-BYO_EXECUTOR_ATTR = "transcribe_audio"
+BYO_EXECUTOR_ATTR = "transcribe_backend"
 
 
 class SttBackendUnavailable(RuntimeError):
@@ -341,10 +343,12 @@ async def _transcribe_radient(
 def _adopt_outcome(raw: Any, path: str) -> SttOutcome:
     """Normalise whatever an executor returned into :class:`SttOutcome`.
 
-    The cascade's ``SttOutcome`` is their type; reading the three fields it
-    carries (plus an optional path of its own) instead of importing the class
-    keeps the freeze in one place — if their shape ever moves, this function is
-    the single edit.
+    The cascade's ``SttOutcome`` is their type; reading the fields it carries
+    (plus an optional path/provider of its own) instead of importing the class
+    keeps this boundary thin — if their shape ever moves, this function is the
+    single edit. Their outcome has no ``provider`` (the rung IS the provider),
+    so an absent one falls back to the dispatched row's provider id rather
+    than answering the phone with an empty string.
     """
     if raw is None:
         raise SttBackendUnavailable("The transcription executor returned no result.", path=path)
@@ -353,9 +357,13 @@ def _adopt_outcome(raw: Any, path: str) -> SttOutcome:
         raise SttBackendUnavailable(
             "The transcription executor returned an unreadable result.", path=path
         )
+    provider = str(getattr(raw, "provider", "") or "")
+    if not provider:
+        row = STT_BACKENDS.get(path)
+        provider = (row.provider if row is not None else "") or ""
     return SttOutcome(
         text=text,
-        provider=str(getattr(raw, "provider", "") or ""),
+        provider=provider,
         model=getattr(raw, "model", None),
         path=str(getattr(raw, "path", "") or path),
     )
@@ -368,21 +376,31 @@ async def _transcribe_via_cascade(
     *,
     language: Optional[str],
     prompt: Optional[str],
-    model: Optional[str],
     config_root: Any,
     store: Any,
 ) -> SttOutcome:
-    """Run one BYO rung through the cascade executor (sync-or-async tolerant).
+    """Run the ONE rung ``token`` names through the cascade executor.
 
-    ``audio_path`` is passed as the token STRING. The frozen signature types it
-    as the cascade's ``AudioPath``; if their final shape wants an enum member
-    instead, the conversion lands here — the same one spot the module/attr
-    constants above point at.
+    THE SETTLED CALL (agents review convergence, B1): token first, then the
+    audio BYTES and their mime — the executor re-checks the rung's availability
+    through the same resolver the surface read and runs exactly that rung, so
+    the phone cannot silently land on a path it never advertised. The phone's
+    ``model`` form field is deliberately NOT forwarded: it is an STT-model
+    hint the Radient adapter honors, and the BYO rungs run the fixed model ids
+    their clients own (see ``stt/clients.py``).
 
     The executor may be a coroutine function or a blocking one. Wrapping the
     call in ``to_thread`` handles the blocking case without parking the loop,
     and a returned awaitable is awaited on the loop (it has not started yet, so
     nothing was lost by running the CALL off-thread).
+
+    A :class:`~local_operator.stt.cascade.SttUnavailable` — the rung cannot
+    serve (no stored key at dispatch time, or a token the cascade does not
+    run) — is RE-RAISED as this surface's typed
+    :class:`SttBackendUnavailable` (the route answers 503), never left to fall
+    into the route's generic ``RuntimeError`` arm and answer 500. Upstream
+    failures keep their own typing (``APIError``) so the shared classifier
+    still maps 402/502.
     """
     executor = byo_executor()
     if executor is None:
@@ -390,22 +408,25 @@ async def _transcribe_via_cascade(
             "Bring-your-own voice providers are not available in this build yet.",
             path=token,
         )
-    from local_operator.env import resolve_radient_api_base_url
     from local_operator.paths import config_dir as default_config_dir
+    from local_operator.stt.cascade import SttUnavailable
 
     root = config_root if config_root is not None else default_config_dir()
-    result = await asyncio.to_thread(
-        executor,
-        token,
-        config_dir=root,
-        base_url=resolve_radient_api_base_url(),
-        store=store,
-        model=model,
-        language=language,
-        prompt=prompt,
-    )
-    if inspect.isawaitable(result):
-        result = await result
+    try:
+        result = await asyncio.to_thread(
+            executor,
+            token,
+            audio,
+            mime,
+            config_dir=root,
+            store=store,
+            language=language,
+            prompt=prompt,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+    except SttUnavailable as exc:
+        raise SttBackendUnavailable(str(exc), path=token, reason=str(exc)) from None
     return _adopt_outcome(result, token)
 
 
@@ -452,7 +473,6 @@ async def transcribe_with_backend(
             mime,
             language=language,
             prompt=prompt,
-            model=model,
             config_root=config_root,
             store=store,
         )

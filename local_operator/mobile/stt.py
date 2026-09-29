@@ -67,9 +67,10 @@ logger = logging.getLogger(__name__)
 #: per repaint, and the design's budget for that read is "once, occasionally".
 STT_AVAILABILITY_TTL_S = 30.0
 
-#: The resolver seam's module + symbol, split out so the freeze being settled by
-#: the cascade session is ONE edit here (and mirrored by ``clients/stt.py``'s
-#: executor constants for the other half of their interface).
+#: The resolver seam's module + symbol. The freeze the cascade session was
+#: settling is SETTLED here (agents review convergence, B1): the module/symbol
+#: below are the cascade's resolver as shipped, and :func:`_read_resolution`
+#: reads its ``AudioPathResolution`` (path-driven; see there).
 RESOLVER_MODULE = "local_operator.stt.cascade"
 RESOLVER_ATTR = "resolve_audio_path"
 
@@ -119,21 +120,42 @@ def _cascade_resolver() -> Optional[Callable[..., Any]]:
 
 
 def _read_resolution(resolution: Any) -> tuple[Optional[str], bool, str]:
-    """Read ``(path, available, reason)`` off the resolver's answer.
+    """Read ``(token, available, reason)`` off the resolver's answer.
 
-    Attribute reads rather than an import of their class, so the freeze stays
-    in one place: if the final shape is different, THIS function is the edit.
-    A shape missing ``available`` RAISES rather than guessing — a resolver that
-    answers a shape this build does not know is a FAILED resolver, which takes
-    the caller's last-known-good path (and never an advertised yes).
+    SETTLED AGAINST THE CASCADE'S ``AudioPathResolution`` (the freeze this
+    module's header reserved for the cascade session; agents review
+    convergence, B1). The resolver owns ``path`` — an ``AudioPath`` member or
+    its token string — and availability is DERIVED from it, never read off a
+    field: ``AudioPath.NONE`` (the token ``"none"``) is the resolver saying
+    "no path"; a token this build maps is available; a path this build cannot
+    map is still a resolver CHOICE, reported available with no token so the
+    caller answers "named a path this build cannot run".
+
+    A shape with NO ``path`` at all is a resolver this build does not know,
+    and it RAISES — a failed resolver takes the caller's last-known-good path
+    and never an advertised yes. Attribute reads rather than an import of
+    their class, so the seam stays readable from one place.
     """
-    available = getattr(resolution, "available", None)
-    if available is None:
+    raw = getattr(resolution, "path", None)
+    if raw is None:
         raise ValueError(f"unrecognised STT resolution shape: {type(resolution).__name__}")
-    path = getattr(resolution, "path", None)
+    if isinstance(raw, str):
+        text: Optional[str] = raw
+    else:
+        # Enum spellings: the StrEnum the cascade ships hits the branch above;
+        # ``value``/``name`` cover a plain Enum or a shape-light double.
+        text = None
+        for attr in ("value", "name"):
+            candidate = getattr(raw, attr, None)
+            if isinstance(candidate, str):
+                text = candidate
+                break
+    if text is None:
+        raise ValueError(f"unrecognised STT resolution shape: {type(resolution).__name__}")
     reason = str(getattr(resolution, "reason", "") or "")
-    token = resolve_backend_key(path) if path is not None else None
-    return token, bool(available), reason
+    if text.strip().lower() == "none":
+        return None, False, reason
+    return resolve_backend_key(raw), True, reason
 
 
 def _stored_byo_credential(provider_id: str, config_root: Any) -> bool:
