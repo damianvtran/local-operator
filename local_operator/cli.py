@@ -359,6 +359,32 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
 
+    # Aida command: the guarded path for the profile notes she records during
+    # onboarding (R23). ONE verb, text-only — never a path argument — because
+    # `aida/profile.py` resolves the file itself; see that module for why.
+    aida_parser = subparsers.add_parser(
+        "aida",
+        help="Aida's profile notes: record what she should remember",
+    )
+    aida_subparsers = aida_parser.add_subparsers(dest="aida_command")
+    aida_note_parser = aida_subparsers.add_parser(
+        "note",
+        help="Append a note under 'About the operator' in system_prompt.md",
+        description="Record a note into <config root>/system_prompt.md, inside the "
+        "marked 'About the operator' section, so every future session and "
+        "subagent sees it. The file is resolved from the config root and is never "
+        "an argument; the note must not contain the section markers. Omit TEXT to "
+        "read the note from STDIN (multi-line notes need no quoting).",
+        parents=[parent_parser],
+    )
+    aida_note_parser.add_argument(
+        "text",
+        nargs="?",
+        type=str,
+        default=None,
+        help="The note to record; omit to read it from STDIN",
+    )
+
     # Agents command
     agents_parser = subparsers.add_parser("agents", help="Manage agents", parents=[parent_parser])
     agents_subparsers = agents_parser.add_subparsers(dest="agents_command")
@@ -2499,6 +2525,52 @@ def config_instructions_command(args: argparse.Namespace) -> int:
     )
     print(paint("╰──────────────────────────────────────────────", SUCCESS))
     return 0
+
+
+def aida_note_command(args: argparse.Namespace) -> int:
+    """``lop aida note [TEXT]`` — record one profile note into the instructions.
+
+    R23's guarded write path, exposed as a command for the one caller that has
+    no Python module to import: Aida herself, who reaches it through her
+    ``bash`` tool during onboarding (her seed documents it). TEXT omitted reads
+    the note from STDIN, so a multi-line note needs no quoting. The FILE is
+    never an argument — ``aida/profile.py`` resolves it from the config root,
+    refuses anything that would leave it, and replaces it atomically — and each
+    refusal's sentence names the remedy, because the reader on the other end is
+    a model that can retry.
+    """
+    from local_operator.aida import profile
+    from local_operator.mcp.verbs import _home_relative
+
+    text: str = args.text if args.text is not None else sys.stdin.read()
+    outcome = profile.record_profile_note(text)
+    if outcome == "recorded":
+        print(f"recorded: {_home_relative(str(profile.instruction_file()))}")
+        return 0
+    if outcome == "duplicate":
+        # Not a failure: the note is already in the section, which is the
+        # end state the caller wanted. The words still say nothing moved, so a
+        # reader cannot mistake it for a second copy having landed.
+        print("already recorded; nothing appended")
+        return 0
+    sentences = {
+        "empty": "nothing to record (the note was blank)",
+        "invalid": "the note contains the section markers and would corrupt the file",
+        "oversize": (
+            f"the file would exceed {profile.MAX_FILE_CHARS:,} chars; "
+            "shorten the note or curate the section"
+        ),
+        "unsafe": "the resolved file would leave the config root (check for a symlink)",
+        "failed": "the write failed; the file was left unchanged (see the logs)",
+    }
+    sentence = sentences.get(outcome, f"unexpected outcome {outcome!r}")
+    from local_operator.cli_style import ERROR, paint
+
+    print(
+        paint(f"aida note not recorded: {sentence}", ERROR, stream=sys.stderr),
+        file=sys.stderr,
+    )
+    return 1
 
 
 #: The extension build that first ACTS on the `role` frame (the standby card and
@@ -10178,6 +10250,11 @@ def main() -> int:
                 return config_instructions_command(args)
             else:
                 parser.error(f"Invalid config command: {args.config_command}")
+        elif args.subcommand == "aida":
+            if args.aida_command == "note":
+                return aida_note_command(args)
+            else:
+                parser.error(f"Invalid aida command: {args.aida_command}")
         elif args.subcommand == "search":
             from local_operator.web_search.cli import search_command
 
@@ -10914,7 +10991,10 @@ def main() -> int:
                     AttachedSession,
                     frontend_attach_refusal,
                 )
-                from local_operator.session_factory import resolve_hosting_model
+                from local_operator.session_factory import (
+                    HostingNotConfiguredError,
+                    resolve_hosting_model,
+                )
 
                 config_directory = config_manager.config_dir
                 # Same expression session_factory uses for a new session's
@@ -10942,8 +11022,22 @@ def main() -> int:
                 try:
                     provider, model_id = await asyncio.to_thread(resolve_birth)
                     initial_model = ModelSpec(provider=provider, model_id=model_id)
+                except HostingNotConfiguredError:
+                    # The recoverable family (nothing configured / unknown
+                    # provider / no model) is NOT swallowed here: the app's
+                    # boot-failure handler turns it into the guided setup
+                    # state, and the setup state is the gate every first-run
+                    # surface hangs off — the splash's `/login` cue, her R28
+                    # view and the R26 routing. Swallowing it built a COLD
+                    # viewer instead, which left all of them unreachable on a
+                    # real fresh install (review round 1, U1/Q1 — the unit
+                    # tests drove a factory that raises, which shipping never
+                    # did).
+                    raise
                 except ValueError:
-                    # Setup mode must still open without a configured model.
+                    # Any OTHER resolution failure keeps the legacy shape: a
+                    # boot must still open without a configured model, and a
+                    # cold viewer reaches `/login` / `/model` from there.
                     pass
 
                 async def take_over():
