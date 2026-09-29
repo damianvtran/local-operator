@@ -1113,9 +1113,16 @@ chip per launch. Two consequences are part of the rule rather than artifacts of
 it:
 
 - **The hand-over exception:** `captureTabs` writes a row `owner: "user"` when
-the tab was under hand-over at the capture (`handedTo !== null`), although the
-registry records `"agent"` for it (§6.3) — the row records who owns the TAB,
-not who held its handle, and without this the skip would lose the user's own tab.
+the tab's owner BEFORE its hand-over was the user's — the owner pinned at the
+first hand-over (`TabRecord.handedFrom`), not `handedTo` — although the registry
+records `"agent"` for such a tab (§6.3). The row records who owns the TAB, not
+who held its handle, and without this the skip would lose the user's own tab.
+The pin is load-bearing rather than incidental: `handOver` also accepts an AGENT
+tab re-handed to a second session (§6.3, the cap does not change), so a predicate
+keyed on `handedTo !== null` would write that tab as the user's and launder agent
+cruft past the sweep (round-1 review of `local-operator-ui` PR #662, m-2), and a
+re-hand must not move the pin. `revokeHandOver` clears it with the capability,
+so the next hand-over pins the owner from whatever the tab is then.
 - **The laundering boundary, stated rather than implied:** the skip catches only
 a row written by a quit that still saw the tab as agent-owned. A restored tab is
 created user-owned (§7.3), so one capture after a restore rewrites the row as
