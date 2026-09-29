@@ -15,9 +15,13 @@ session could not recover from the inside.
 
 from __future__ import annotations
 
+import base64
+import io
+import logging
 import types
 
 import pytest
+from PIL import Image
 
 from local_operator.compaction.api import CompactionSettings
 from local_operator.harness.types import (
@@ -226,6 +230,85 @@ async def test_the_user_is_told_once_that_old_screenshots_were_dropped(tmp_path)
     await asyncio_yield()
 
     assert notices.count(FRAMES_SHED_NOTICE) == 1
+    await session.dispose()
+
+
+#: Deterministic screenshot-shaped frames, memoized per seed: a gradient with
+#: seeded speckle, which is what keeps a frame's PNG in the hundreds of KB the
+#: budget math needs (a flat fill compresses to nothing).
+_REAL_FRAMES: dict[int, str] = {}
+
+
+def _real_frame_b64(seed: int, size: tuple[int, int] = (1280, 800)) -> str:
+    cached = _REAL_FRAMES.get(seed)
+    if cached is not None:
+        return cached
+    import random
+
+    rng = random.Random(seed)
+    image = Image.new("RGB", size)
+    pixels = image.load()
+    for y in range(size[1]):
+        base = (30 + y * 40 // size[1], 40 + y * 30 // size[1], 60 + y * 60 // size[1])
+        for x in range(0, size[0], 2):
+            pixels[x, y] = base
+    for _ in range(size[0] * size[1] // 16):
+        pixels[rng.randrange(size[0]), rng.randrange(size[1])] = (
+            rng.randrange(256),
+            rng.randrange(256),
+            rng.randrange(256),
+        )
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    _REAL_FRAMES[seed] = encoded
+    return encoded
+
+
+@pytest.mark.asyncio
+async def test_older_screenshots_are_downscaled_at_the_seam_not_dropped(tmp_path, caplog):
+    """The image-budget fidelity policy, end to end at the seam: over budget,
+    older frames are re-rendered smaller and KEPT — the newest at full
+    fidelity — nothing is dropped, and the log line says what the ladder did.
+
+    This is the successor to the failure the shed tests above regress: there,
+    every turn dripped one more frame out of the context while the request
+    stayed pinned at the ceiling.
+    """
+    from local_operator.compaction.api import estimate_wire_bytes
+
+    stream = ScriptedOk()
+    frame = _real_frame_b64(seed=41)
+    messages: list[Message] = []
+    for index in range(6):
+        messages.append(
+            Message(
+                role="user",
+                content=[TextContent(text=f"shot {index}"), ImageContent(data=frame)],
+            )
+        )
+        messages.append(Message.assistant(f"ok {index}"))
+    total = estimate_wire_bytes(messages)
+    budget = int(total * 0.75)
+    session = make_session(
+        tmp_path, stream, compaction_settings=CompactionSettings(wire_bytes_budget=budget)
+    )
+    await session.seed_history(messages)
+
+    notices: list[str] = []
+    session.subscribe(lambda e: notices.append(e.text) if isinstance(e, NoticeEvent) else None)
+    caplog.set_level(logging.WARNING, logger="local_operator.session.session")
+
+    await session.prompt("continue")
+
+    request = stream.requests[0]
+    assert _image_blocks(request) == 6, "a frame was dropped although a rung fit"
+    assert _request_bytes(request) <= budget
+    blocks = [b for m in request.messages for b in m.content if isinstance(b, ImageContent)]
+    assert blocks[-1].data == frame, "the newest frame lost fidelity"
+    assert blocks[0].data != frame, "no older frame was re-rendered"
+    assert FRAMES_SHED_NOTICE not in notices, "the user was told frames were dropped"
+    assert "downscaled 5 older screenshot(s)" in caplog.text
     await session.dispose()
 
 
