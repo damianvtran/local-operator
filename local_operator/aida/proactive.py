@@ -641,34 +641,54 @@ def _row_ids(entry: Mapping[str, Any] | None) -> set[str]:
 #: and that one do not form a load-time cycle.
 GREETING_WAKE_ID = "aida-greeting"
 
-#: Display labels for the engine-armed rows on the human receipt surfaces,
-#: keyed by the id the engine writes. Without them the first frame of a fresh
-#: install's first conversation is `wake  aida-greeting (1/1).` — a raw
-#: schedule id where a greeting belongs (design review round 1, D2). Kept
-#: HERE, beside the ids, so a renamed row cannot leave a stale label behind on
-#: a surface that spelled the label itself; `harness/rows.py` reads the map
-#: lazily, the same way it reads `WAKE_SCRATCH_CLAUSE`.
-WAKE_DISPLAY_LABELS: dict[str, str] = {
-    GREETING_WAKE_ID: "Aida's introduction",
-    CADENCE_ID: "Aida's check-in",
+#: Display-label TEMPLATES for the engine-armed rows on the human receipt
+#: surfaces, keyed by the id the engine writes. Without a label the first
+#: frame of a fresh install's first conversation is `wake  aida-greeting
+#: (1/1).` — a raw schedule id where a greeting belongs (design review round
+#: 1, D2). Kept HERE, beside the ids, so a renamed row cannot leave a stale
+#: label behind on a surface that spelled the label itself; `harness/rows.py`
+#: reads the map lazily, the same way it reads `WAKE_SCRATCH_CLAUSE`.
+#:
+#: TEMPLATES, not literals. A frozen literal said "Aida" no matter what the
+#: operator renamed her to: the receipt read "Aida's introduction" above a
+#: body that signs off "Introduce yourself as Sovereign" — one card, two
+#: names (design review round 3, D4). `{name}` is filled at LOOKUP from
+#: `naming.display_name()`, the reader every other surface uses, so the
+#: receipt and the delivered body agree by construction — and a rename is
+#: live on the next paint, with no cached label to invalidate.
+WAKE_DISPLAY_LABEL_TEMPLATES: dict[str, str] = {
+    GREETING_WAKE_ID: "{name}'s introduction",
+    CADENCE_ID: "{name}'s check-in",
 }
 
-#: The label for the bounded escalation one-shots (``aida-extra-<n>``): their
-#: ids carry a counter, so they are matched by prefix.
-EXTRA_DISPLAY_LABEL = "Aida's follow-up"
+#: The label template for the bounded escalation one-shots
+#: (``aida-extra-<n>``): their ids carry a counter, so they are matched by
+#: prefix.
+EXTRA_DISPLAY_LABEL_TEMPLATE = "{name}'s follow-up"
 
 
 def wake_display_label(wake_id: str) -> str:
     """The human label for an engine-armed row; unknown ids name themselves.
 
     Identity for everything else — a user-created wake's own words ARE its
-    identity — so a caller can substitute unconditionally.
+    identity — so a caller can substitute unconditionally. The label is
+    FORMATTED at lookup, never stored: it must read the name she is actually
+    called or the receipt contradicts the greeting it reports (design review
+    round 3, D4). ``display_name`` never raises, so this lookup adds no new
+    failure to the map read it replaces; a pathological failure still lands
+    on the caller's guard, which falls back to the raw id.
     """
-    if wake_id in WAKE_DISPLAY_LABELS:
-        return WAKE_DISPLAY_LABELS[wake_id]
-    if wake_id.startswith(EXTRA_ID_PREFIX):
-        return EXTRA_DISPLAY_LABEL
-    return wake_id
+    if wake_id in WAKE_DISPLAY_LABEL_TEMPLATES:
+        template = WAKE_DISPLAY_LABEL_TEMPLATES[wake_id]
+    elif wake_id.startswith(EXTRA_ID_PREFIX):
+        template = EXTRA_DISPLAY_LABEL_TEMPLATE
+    else:
+        return wake_id
+    # Lazy, like this module's other cross-imports: a label must never be the
+    # reason the engine cannot load.
+    from local_operator.aida import naming
+
+    return template.format(name=naming.display_name())
 
 
 def _clear_greeted(config_dir: Path | str) -> None:
