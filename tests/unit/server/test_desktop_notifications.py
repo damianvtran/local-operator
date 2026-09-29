@@ -330,7 +330,10 @@ async def test_an_interruption_is_not_announced_on_the_desktop(tmp_path: Path) -
 
     assert bridge.kinds == ["attention"]
     assert "interrupted" not in BRIDGE_NOTIFIABLE_KINDS
-    assert BRIDGE_NOTIFIABLE_KINDS == frozenset({"complete", "error"})
+    # The retire-for-build arm JOINS (2026-09-29): a cut for an update IS
+    # announced — work was lost and the user must know — so the frozenset is
+    # pinned with it; the interruption above stays out for its own reason.
+    assert BRIDGE_NOTIFIABLE_KINDS == frozenset({"complete", "error", "retired"})
 
 
 @pytest.mark.asyncio
@@ -359,6 +362,33 @@ async def test_an_error_is_announced_with_the_house_sentence(tmp_path: Path) -> 
     # kinds pin the property from both sides.
     assert payload["dedupe_key"].startswith(f"error:{sid}:")
     assert "412 tests pass" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_a_retired_cut_is_announced_with_its_own_sentence(tmp_path: Path) -> None:
+    """A cut for an update IS notifiable (retire-for-build arm, 2026-09-29).
+
+    The third notifiable kind: unlike an interruption (something the user just
+    did) a bound-expired build drain cut work the user was waiting on, so the
+    desktop gets a card — with the arm's own sentence, warning category, and
+    never the failure words.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="Mid-verification.", title="Update window")
+    bridge = await _baselined(tmp_path, sid)
+
+    _publish(tmp_path, sid, "completion-ret", kind="retired")
+    await bridge.refresh_attention()
+
+    payload = bridge.of("notification")[0]["payload"]
+    assert payload["kind"] == "retired"
+    assert payload["status"] == "Retired"
+    assert payload["body"] == BODIES["retired"]
+    assert payload["body"] == "Retired for an update — a turn was in flight and was cut"
+    assert payload["body_is_snippet"] is False
+    assert payload["dedupe_key"].startswith(f"retired:{sid}:")
+    assert "Mid-verification" not in str(payload)
 
 
 @pytest.mark.asyncio

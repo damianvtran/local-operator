@@ -157,6 +157,40 @@ async def test_a_provider_error_is_also_stated_once(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_retired_outcome_restates_the_live_cut_row_instead_of_doubling_it(
+    tmp_path, monkeypatch
+) -> None:
+    """The ONE adopted row that is RESTATED (retire-for-build arm, 2026-09-29).
+
+    The live row for a cut turn is painted by the error branch — the classified
+    end arrives as ``aborted=False, error=<cut sentence>`` — so a ``retired``
+    outcome adopts THAT row (the kind correspondence is the arm's own) and
+    restates it: leaving the live cut sentence in the error tier would keep
+    exactly the failure framing the arm exists to remove. One cut, one row.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        sentence = "the runtime retired so the next engage would run a newer build"
+        await _start_and_end_turn(app, pilot, aborted=False, error=sentence)
+        assert _notice_texts(app) == [sentence]
+
+        session.publish("retired", cause="runtime-retired")
+        anchor = session.store.state(session.identity)["anchor_id"]
+        assert app._adopt_own_interrupt_notice("retired", anchor) is True
+        await app._poll_completion_attention()
+        await pilot.pause()
+
+        texts = _notice_texts(app)
+        assert texts == [RETIRED_NOTICE_TEXT], texts
+        assert not any("Stopped with an error" in text for text in texts), texts
+        assert all(block._token != "danger" for block in _notice_blocks(app))
+
+
+@pytest.mark.asyncio
 async def test_the_poller_names_the_cause_for_a_cut_off_it_never_painted(
     tmp_path, monkeypatch
 ) -> None:
@@ -439,6 +473,54 @@ def test_the_closed_closure_reads_completed_and_keeps_the_info_tier() -> None:
     )
     assert text == CLOSED_NOTICE_TEXT == "Completed — runtime retired/disposed"
     assert severity == "info", "the closure must never wear the danger tier"
+
+
+def test_the_retired_row_reads_retired_for_an_update_and_keeps_the_warning_tier() -> None:
+    """The retire-for-build arm's copy and tier, at the shared decision point.
+
+    Seed 7e797aaaf6e7 (2026-09-29): the bound-cut row must stay TRUTHFUL (the
+    turn was cut) but DISTINGUISHED FROM A FAILURE — warning ink, its own
+    sentence, never danger, and never the info whisper a closure gets.
+    """
+    from local_operator.harness.rows import RETIRED_NOTICE_TEXT, completion_notice
+
+    text, severity = completion_notice(
+        "retired", "the runtime retired so the next engage would run a newer build"
+    )
+    assert text == RETIRED_NOTICE_TEXT == "Retired for an update — a turn was in flight and was cut"
+    assert severity == "warning", "a cut for an update is warning, never danger"
+
+
+@pytest.mark.asyncio
+async def test_the_poller_paints_a_retired_run_in_warning_and_never_in_danger(
+    tmp_path, monkeypatch
+) -> None:
+    """THE RETIRE-FOR-BUILD ROW on the returning surface.
+
+    Session 7e797aaaf6e7 (2026-09-29): a bound-expired build drain cut a live
+    turn and the returned-to row read "Stopped with an error". The arm
+    publishes ``retired`` now; the poller must paint its sentence in the
+    warning tier — never danger, never the info whisper a closure gets — with
+    the words from the shared row decision (``harness/rows.py``), so the TUI,
+    the phone and the desktop cannot drift. The error and interrupted cells
+    above stay the still-paints-in-their-own-tier controls.
+    """
+    session = OutcomeSession(tmp_path / "attention.db")
+    monkeypatch.setattr("local_operator.tui.attention.terminal_is_foreground", lambda: True)
+    app = OperatorApp(lambda: _factory(session))
+    from local_operator.harness.rows import RETIRED_NOTICE_TEXT
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _start_and_end_turn(app, pilot, aborted=False, error=None)
+        session.publish("retired", cause="runtime-retired")
+        await app._poll_completion_attention()
+        await pilot.pause()
+        texts = _notice_texts(app)
+        assert any(RETIRED_NOTICE_TEXT in text for text in texts), texts
+        assert not any("Stopped with an error" in text for text in texts), texts
+        assert all(
+            block._token != "danger" for block in _notice_blocks(app)
+        ), "a cut for an update must never paint in the danger tier"
 
 
 def test_the_returned_to_turn_notice_carries_an_escalated_stops_attribution() -> None:

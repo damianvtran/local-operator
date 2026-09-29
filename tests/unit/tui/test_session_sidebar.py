@@ -1813,6 +1813,11 @@ async def test_an_unseen_row_pairs_its_completion_mark_with_completion_words():
         ("error", "✗", "Unseen error"),
         # `⊘`, not `✗`: an interruption is unfinished work, not a failure.
         ("interrupted", "⊘", "Unseen interruption"),
+        # The retire-for-build arm normalizes to the interruption treatment on
+        # the sidebar too (2026-09-29): "complete" would claim the cut turn
+        # finished and "error" would wear the failure framing the arm exists
+        # to remove — the rail's ``transcript_index`` makes the same call.
+        ("retired", "⊘", "Unseen interruption"),
     ]
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(120, 30)) as pilot:

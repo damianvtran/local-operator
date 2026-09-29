@@ -49,7 +49,13 @@ import pytest
 from local_operator.incidents import render_cut_off_reason
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime import registry
-from tests.e2e.harness import NO_NOTIFY_ENV
+from tests.e2e.harness import (
+    NO_NOTIFY_ENV,
+    ScriptedStream,
+    _user_row_texts,
+    build_session,
+    text_turn,
+)
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
@@ -360,6 +366,143 @@ async def test_a_serving_disposal_over_a_zero_work_peer_run_closes_neutrally(
     rows = _completion_rows(root / "sess")
     assert [row.get("kind") for row in rows] == ["closed"], rows
     assert rows[-1].get("cause") == "runtime-shutdown", rows[-1]
+    assert not [row for row in rows if row.get("kind") == "error"], rows
+
+
+@pytest.mark.asyncio
+async def test_a_signalled_sweep_bounded_over_a_latched_build_drain_retires_the_turn(
+    headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE RETIRE-FOR-BUILD ARM: cut for an update, distinct from a failure.
+
+    Session 7e797aaaf6e7 (2026-09-29 14:24, and its 33k/37k/40k/41k siblings):
+    a build drain was already latched (``begin_drain("runtime-retired")``)
+    while a turn was mid-work, a SIGTERM sweep arrived, ``_drain_for_signal``
+    waited ``SIGNAL_DRAIN_S`` on that latched drain, the bound expired, and the
+    disposal cut the live turn — recorded as ``error|runtime-retired`` and
+    rendered "Stopped with an error". The operator's update-phase transitions
+    must stay TRUTHFUL (a turn really was cut) but DISTINGUISHED from a
+    failure: kind ``retired``, cause and reason verbatim, warning tier, and the
+    successor still learns its turn was cut.
+    """
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from tests.unit.session.test_session import make_session
+
+    monkeypatch.setattr(child_mod, "SIGNAL_DRAIN_S", 0.05)
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.01)
+    config = headless_tui_env
+    root = config / "retire-for-build"
+    root.mkdir(parents=True, exist_ok=True)
+
+    with bounded(60, "a bound-expired build drain over a live turn"):
+        session = make_session(root, _blocking_stream())
+        handle = ServingSessionHandle(
+            session,
+            asyncio.get_running_loop(),
+            cwd=str(config),
+            install_gates=False,
+            config_dir=config,
+        )
+        task = asyncio.ensure_future(session.prompt("a turn the bound will cut"))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not session._attention_run_request_dispatched:
+            await asyncio.sleep(0.005)
+        assert session._attention_run_request_dispatched, "the turn never spent a round-trip"
+        # The build move already latched the drain; the sweep adds only the bound.
+        assert handle.begin_drain("runtime-retired", " (0.64.4 → 0.64.5)") is True
+        stop = asyncio.Event()
+        await asyncio.wait_for(
+            child_mod._drain_for_signal(handle, _Runtime(), stop, sig_name="SIGTERM"),
+            timeout=30,
+        )
+        assert stop.is_set(), "the bound never expired"
+        await handle.dispose()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    rows = _completion_rows(root / "sess")
+    assert [row.get("kind") for row in rows] == ["retired"], rows
+    assert rows[-1].get("cause") == "runtime-retired", rows[-1]
+    # REASON VERBATIM: the arm changes the KIND and nothing else. The drain's
+    # ``detail`` is documented as log-only on this rung (``begin_drain`` never
+    # stores ``_retiring_detail`` — that is ``begin_retire``'s field), so the
+    # durable sentence carries no parenthetical, the same way the seed row
+    # (7e797aaaf6e7) reads.
+    assert rows[-1].get("reason") == render_cut_off_reason("runtime-retired"), rows[-1].get(
+        "reason"
+    )
+    # HONESTY: the cut is still NARRATED to the next turn — the arm changes the
+    # FRAMING (warning, distinct kind), never the fact that work was lost.
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(root / "sess", successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "[session incident]" in sent, sent[-2000:]
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_retire_door_zero_work_cut_stays_closed_with_the_retire_cause(
+    headless_tui_env: Path,
+) -> None:
+    """ZERO-WORK runs at the retire door follow the v2 rules, not the error arm.
+
+    The dispatch EVIDENCE decides the kind before the cause does: a carried run
+    the drain catches BEFORE its first provider request has no work to lose, so
+    it stays the neutral closure — and the serving rung's more specific
+    ``runtime-retired`` token is PRESERVED on the record for readers that want
+    the why. Only a DISPATCHED run wears ``retired`` (the cell above); without
+    this half, a reviewer could delete the evidence gate and both directions
+    would still pass.
+    """
+    from local_operator.session.runtime.serving import ServingSessionHandle
+    from tests.unit.session.test_session import make_session
+
+    config = headless_tui_env
+    root = config / "retire-door-zero-work"
+    root.mkdir(parents=True, exist_ok=True)
+
+    with bounded(60, "a retire-door cut of a carried, undispatched run"):
+        session = make_session(root, _blocking_stream())
+        parked = asyncio.Event()
+        release = asyncio.Event()
+        original = session._prepare_system_blocks
+
+        async def gated(*args: Any, **kwargs: Any) -> Any:
+            parked.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        session._prepare_system_blocks = gated  # type: ignore[method-assign]
+        handle = ServingSessionHandle(
+            session,
+            asyncio.get_running_loop(),
+            cwd=str(config),
+            install_gates=False,
+            config_dir=config,
+        )
+        task = asyncio.ensure_future(session.prompt("an ask the update will catch"))
+        await asyncio.wait_for(parked.wait(), timeout=10)
+        assert not session._attention_run_request_dispatched, "the run must be pre-dispatch"
+        assert handle.begin_drain("runtime-retired", " (0.64.4 → 0.64.5)") is True
+        dispose_task = asyncio.ensure_future(handle.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=30)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    rows = _completion_rows(root / "sess")
+    assert [row.get("kind") for row in rows] == ["closed"], rows
+    assert rows[-1].get("cause") == "runtime-retired", rows[-1]
     assert not [row for row in rows if row.get("kind") == "error"], rows
 
 

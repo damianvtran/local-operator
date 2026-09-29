@@ -216,9 +216,17 @@ class CatalogEntry:
         if self.row.live_state in {"wedged", "busy"}:
             return self.row.live_state
         if self.shows_completion_mark:
-            return {"error": "error", "interrupted": "interrupted"}.get(
-                self.completion_kind, "complete"
-            )
+            # ``retired`` normalizes to the ``interrupted`` treatment, mirroring
+            # ``transcript_index``'s rail: the sidebar's glyph vocabulary has no
+            # separate warning-cut word, and the two alternatives are both
+            # wrong — "complete" claims a cut turn finished, "error" wears the
+            # failure framing the retire-for-build arm exists to remove
+            # (2026-09-29).
+            return {
+                "error": "error",
+                "interrupted": "interrupted",
+                "retired": "interrupted",
+            }.get(self.completion_kind, "complete")
         if self.row.live_state == "attached":
             return "attached"
         # THE ``delegating`` RUNG, below ``attached`` and above the armed wake,
@@ -250,9 +258,11 @@ class CatalogEntry:
         # A receipt is evidence of an outcome even after viewing; no receipt is
         # not evidence of success. Never turn an old unknown transcript green.
         if self.completion_token:
-            return {"error": "error", "interrupted": "interrupted"}.get(
-                self.completion_kind, "complete"
-            )
+            return {
+                "error": "error",
+                "interrupted": "interrupted",
+                "retired": "interrupted",
+            }.get(self.completion_kind, "complete")
         return "recent"
 
     @property
@@ -365,7 +375,7 @@ class CatalogEntry:
         if self.shows_completion_mark:
             if self.completion_kind == "error":
                 return self._error_label("Unseen error")
-            if self.completion_kind == "interrupted":
+            if self.completion_kind in {"interrupted", "retired"}:
                 return self._stop_label("Unseen interruption")
             return {"interrupted": "Unseen interruption"}.get(
                 self.completion_kind, "Unseen completion"
@@ -428,7 +438,7 @@ class CatalogEntry:
         if self.completion_token:
             if self.completion_kind == "error":
                 return self._error_label("Error")
-            if self.completion_kind == "interrupted":
+            if self.completion_kind in {"interrupted", "retired"}:
                 return self._stop_label("Interrupted")
             return {"interrupted": "Interrupted"}.get(self.completion_kind, "Complete")
         return "Recent"

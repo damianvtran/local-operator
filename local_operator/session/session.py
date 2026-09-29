@@ -9765,6 +9765,16 @@ class Session:
             if (outcome.error or cut_off)
             else "interrupted" if outcome.aborted else "complete"
         )
+        # THE RETIRE-FOR-BUILD ARM (architect addendum, 2026-09-29; seed
+        # 7e797aaaf6e7 and its 33k/37k/40k/41k siblings): a cut caused by a
+        # build drain is TRUTHFUL but must stay DISTINGUISHED FROM A FAILURE.
+        # A sweep-bounded latched drain cut a turn that was mid-work, and
+        # "Stopped with an error" framed a routine update-phase transition as
+        # a failure on every surface. Only the KIND changes here; the cause and
+        # reason below ride along VERBATIM, so every reader still learns the
+        # turn was cut and why. Every other cut keeps ``error``.
+        if kind == "error" and cut_off and self._cut_off_cause == "runtime-retired":
+            kind = "retired"
         # §14.3: the run's ONE notify value, read off the end event the session
         # already stamped (``_emit``) — never re-derived here. A synthesised end
         # (the disposal rung) never passed ``_emit``, and its kinds are
@@ -18748,7 +18758,20 @@ class Session:
                 # more with this one), each rendered as a cut-off of work that
                 # had finished (2026-09-17).
                 if self._attention_run_token is not None and not self._attention_run_settled:
-                    if self._attention_run_request_dispatched:
+                    if self._deliberate_stop_noted:
+                        # A STOP THE USER ASKED FOR OUTRANKS THIS EXIT'S
+                        # DISPOSITION (agent review round 1, BLOCKER-1). The
+                        # stop already cleared the cut-off note
+                        # (``note_cut_off`` refuses once one is recorded), and
+                        # it must outrank the neutral closure too: `/stop` on a
+                        # carried, not-yet-dispatched run published ``closed``
+                        # while the user had ASKED for the stop, and the honest
+                        # record for that is ``interrupted|user-stop`` — which
+                        # the run's own classify path produces once nothing
+                        # here overrides it. Nothing to decide, nothing to
+                        # note: the run's verdict is already recorded.
+                        pass
+                    elif self._attention_run_request_dispatched:
                         # EVIDENCE: work reached the provider, so a cut is a
                         # real cut and keeps the honest verdict.
                         self.note_cut_off("disposed")
