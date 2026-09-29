@@ -146,9 +146,19 @@ class PlacementState:
         reason: str = "",
         owner_device: str = "",
         retry_after_ms: int = 0,
+        owner_retry_after_ms: int = 0,
     ) -> None:
-        """Record an observation, with the TTL that bounds how long it is believed."""
-        self._observations[key] = {
+        """Record an observation, with the TTL that bounds how long it is believed.
+
+        ``retry_after_ms`` BOUNDS THE CACHE; ``owner_retry_after_ms`` IS WHAT THE
+        OWNER SAID, and they are not the same number (review round 2, M2). A
+        refusal whose owner stated no remainder still caches for this device's own
+        default — and a sentence that rendered that default back as "the owner's
+        remainder" was claiming a fact about another device's cap that nobody
+        stated. The owner's number is recorded separately, absent when none was
+        sent, and is the only one a countdown may ever show.
+        """
+        row: dict[str, Any] = {
             "key": key,
             "owner_device": owner_device,
             "status": status,
@@ -158,6 +168,9 @@ class PlacementState:
             "last_grant_id": self._observations.get(key, {}).get("last_grant_id", ""),
             "last_grant_at": self._observations.get(key, {}).get("last_grant_at", 0.0),
         }
+        if owner_retry_after_ms:
+            row["owner_retry_after_ms"] = int(owner_retry_after_ms)
+        self._observations[key] = row
 
     def note_grant(self, key: str, grant_id: str, *, owner_device: str = "") -> None:
         """Record a successful borrow. Clears any refusal standing against ``key``.
