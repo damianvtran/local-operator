@@ -3061,11 +3061,36 @@ class PeerLink:
     def alive(self) -> bool:
         return not self._closed.is_set()
 
+    @property
+    def closing(self) -> bool:
+        """True from the moment :meth:`close` starts, and for the rest of this link.
+
+        THE STATE ``alive`` DOES NOT COVER, and the window it leaves open is a
+        measured one. ``close`` is deliberate and takes up to ``CLOSE_FLUSH_S``
+        before ``_closed`` is set (the flush is for what was already queued), so
+        through that window this link is still in the relay's table, still reports
+        ``alive``, and can no longer answer anything: its peer has gone — that is
+        why the close began — and its reader is the thread running the close. An op
+        that resolves such a link queues its request into a socket nobody is
+        reading, and pays its whole op timeout for the silence. Measured on this
+        fleet (2026-09-28, on the mobility cells): the invite went out over the
+        closing link at +2.708 s, its refusal came at +97.7 s, and an immediate
+        retry dialled fresh and finished in 70 ms.
+        """
+        return self._flushing.is_set() or self._closed.is_set()
+
     def send(
         self, frame: dict[str, Any], *, kind: str = LinkKind.RELIABLE, stream: str = ""
     ) -> bool:
-        """Queue a frame. Returns False when it could not be queued at all."""
-        if self._closed.is_set():
+        """Queue a frame. Returns False when it could not be queued at all.
+
+        A CLOSING LINK TAKES NO NEW FRAME — see :attr:`closing`. The flush a close
+        waits on is for what was ALREADY queued when it began (the rotation and the
+        goodbye a caller queues a line above its own close); a frame accepted after
+        that has no writer left to promise it, so its producer is told "no" here
+        rather than left to wait for an answer that cannot come.
+        """
+        if self.closing:
             return False
         if kind == LinkKind.DROPPABLE:
             with self._droppable_lock:
@@ -3079,7 +3104,7 @@ class PeerLink:
                 self._wake.set()
                 return True
             except queue.Full:
-                if time.monotonic() > deadline or self._closed.is_set():
+                if time.monotonic() > deadline or self.closing:
                     # The producer FAILS the op rather than dropping it: a dropped
                     # ack or rotation is a state divergence, not a stale repaint.
                     return False
@@ -3104,6 +3129,14 @@ class PeerLink:
         written synchronously by then, so "empty" means "on the wire"), and a wedged
         or dead writer cannot hold the close past ``flush_s``. A link whose peer is
         gone blocks in ``sendall`` for at most that same bound.
+
+        FROM THE FIRST LINE OF THIS METHOD THE LINK IS CLOSED TO NEW WORK
+        (:attr:`closing`), because the flush is a promise about what was already
+        queued and about nothing else. The window is not decorative: an op that had
+        resolved this link a moment earlier still holds it, and without that refusal
+        its request was queued into a socket the peer had already left — the invite
+        of a first move after a pairing, measured 2026-09-28, went out at +2.708 s
+        and its refusal came at +97.7 s while a fresh dial answered in 70 ms.
         """
         if self._closed.is_set():
             return
@@ -3269,17 +3302,25 @@ class PeerLink:
             )
         req = frame.get("req")
         waiter = self.server.expect_reply(self.link_id, req) if req is not None else None
-        if not self.send(frame):
-            return None
-        if waiter is None:
-            return None
-        if timeout is None:
-            # A SLOW op's reply arrives up to its OWNER's deadline later, so the
-            # default wait is that deadline plus a margin rather than the 10 s every
-            # other op uses — a requester that gave up first would report a bare
-            # timeout for an op the owner was about to answer with a sentence.
-            timeout = self.server.slow_request_timeout(str(frame.get("op") or ""))
-        return waiter.wait(self.settings.op_wait_s if timeout is None else timeout)
+        try:
+            if not self.send(frame):
+                return None
+            if waiter is None:
+                return None
+            if timeout is None:
+                # A SLOW op's reply arrives up to its OWNER's deadline later, so the
+                # default wait is that deadline plus a margin rather than the 10 s every
+                # other op uses — a requester that gave up first would report a bare
+                # timeout for an op the owner was about to answer with a sentence.
+                timeout = self.server.slow_request_timeout(str(frame.get("op") or ""))
+            # A REPLY THAT NEVER COMES MUST NOT LEAVE ITS SLOT BEHIND, and when the
+            # link dies the slot is resolved by ``fail_replies`` rather than by this
+            # clock — see that method for why the difference is the difference between
+            # a refusal in milliseconds and one 95 s later.
+            return waiter.wait(self.settings.op_wait_s if timeout is None else timeout)
+        finally:
+            if waiter is not None:
+                self.server.forget_reply(self.link_id, req, waiter)
 
 
 # ---------------------------------------------------------------------------
@@ -4756,6 +4797,10 @@ class RelayServer:
     def link_closed(self, link: PeerLink, reason: str) -> None:
         with self._links_lock:
             self.links.pop(link.link_id, None)
+        # BEFORE THE AUDIT ROW, because this is the answer a caller is blocked on: the
+        # link is out of the table and nothing will route a reply to its waiters any
+        # more, so they are resolved here rather than left to time out (``fail_replies``).
+        self.fail_replies(link)
         self.identity_use.released(link.device_id, link.link_id)
         self.audit.record(
             AuditEvent(
@@ -5132,6 +5177,41 @@ class RelayServer:
         with self._links_lock:
             self._reply_waiters[(link_id, req)] = waiter
         return waiter
+
+    def forget_reply(self, link_id: str, req: Any, waiter: "_ReplyWaiter") -> None:
+        """Unregister ``waiter`` — and never a later request that reused its key.
+
+        Every request that stops waiting must leave the table exactly as empty as it
+        found it: an entry that outlives its request grows the table by one per
+        timed-out op for the life of the relay, and the ``(link_id, req)`` key can be
+        reused (a caller that builds its own ``req`` numbers, which the tests do)
+        without the earlier request still being live.
+        """
+        with self._links_lock:
+            if self._reply_waiters.get((link_id, req)) is waiter:
+                del self._reply_waiters[(link_id, req)]
+
+    def fail_replies(self, link: PeerLink) -> int:
+        """Answer every request still waiting on ``link`` — NOW, not on its clock.
+
+        A REQUEST OVER A DEAD LINK HAS BEEN ANSWERED, by that link, with "no". The
+        reader that would have delivered a reply is the thread that is closing the
+        link, replies are routed by ``link.link_id`` and no other link will ever
+        carry this one's id, so leaving the waiter registered buys nothing except
+        the rest of the requester's timeout — and that silence is what the caller
+        reads as a fact about the PEER. It is the second half of the 97.7 s refusal
+        ``PeerLink.closing`` documents: the link was already gone, and the requester
+        spent 95 s discovering it.
+
+        Returns the number of waiters resolved, which is what a caller watching the
+        link's death (the stop path, the tests) can assert on.
+        """
+        with self._links_lock:
+            keys = [key for key in self._reply_waiters if key[0] == link.link_id]
+            waiters = [self._reply_waiters.pop(key) for key in keys]
+        for waiter in waiters:
+            waiter.fail()
+        return len(waiters)
 
     def deliver_reply(self, link: PeerLink, frame: dict[str, Any]) -> bool:
         key = (link.link_id, frame.get("req"))
@@ -7693,16 +7773,24 @@ class RelayServer:
         secret from a device named in ``removed`` — and the queued copy goes through
         ``store.enqueue_frame``, which refuses to persist a secret for a removed
         recipient at all.
+
+        A LINK THAT TOOK NO FRAME IS NOT A DELIVERY. ``send`` refuses a link that has
+        begun closing (:attr:`PeerLink.closing`), and the table alone cannot be asked
+        "did this device get the rotation": reading it that way counted a member
+        online whenever *any* link row existed, so a frame nothing carried would be
+        believed delivered and never queued. Only the sends that were accepted count;
+        everyone else is queued, exactly as a member with no link is.
         """
+        delivered: set[str] = set()
         for link in list(self.links.values()):
             if link.network_id != record.network_id:
                 continue
-            link.send(epoch_frame(record, state, reason=reason, target_device_id=link.device_id))
-        online = {
-            link.device_id for link in self.links.values() if link.network_id == record.network_id
-        }
+            if link.send(
+                epoch_frame(record, state, reason=reason, target_device_id=link.device_id)
+            ):
+                delivered.add(link.device_id)
         for member in record.active_members():
-            if member.device_id in online or member.device_id == record.self_device_id:
+            if member.device_id in delivered or member.device_id == record.self_device_id:
                 continue
             self._queue_epoch_for(member.device_id, record, state, reason=reason)
 
@@ -7754,8 +7842,20 @@ class RelayServer:
                         store.drop_frame(path)
 
     def _link_for(self, device_id: str) -> PeerLink | None:
+        """A link anything NEW may go over — never one that has begun closing.
+
+        ``alive`` IS NOT THE QUESTION ASKED HERE, and asking it was the defect this
+        method's callers paid for: a link inside ``PeerLink.close``'s flush window is
+        still in the table and still ``alive``, while its peer has gone. A caller
+        handed one queues its request into a socket nobody reads, waits its whole op
+        timeout and reports the PEER as unreachable — while the dial this method's
+        ``None`` sends it to (``_ensure_link``) reaches that peer in milliseconds.
+        Measured 2026-09-28: the invite of a first move after a pairing went out over
+        the closing link at +2.708 s and refused at +97.7 s; an immediate retry
+        dialled fresh and finished in 70 ms.
+        """
         for link in self.links.values():
-            if link.device_id == device_id and link.alive:
+            if link.device_id == device_id and link.alive and not link.closing:
                 return link
         return None
 
@@ -9847,6 +9947,17 @@ class _ReplyWaiter:
 
     def set(self, frame: dict[str, Any]) -> None:
         self._frame = frame
+        self._event.set()
+
+    def fail(self) -> None:
+        """The link died with this request unanswered: wake the waiter with ``None``.
+
+        ``None`` is also what :meth:`wait` returns when its own timeout expires, and
+        it is the right answer for both — the request has no reply — but the timing
+        is the point: the requester learns it when the LINK dies rather than when its
+        clock runs out, which for a slow op is 95 s of a caller believing a live peer
+        said nothing (see ``PeerLink.closing``).
+        """
         self._event.set()
 
     def wait(self, timeout: float) -> dict[str, Any] | None:
