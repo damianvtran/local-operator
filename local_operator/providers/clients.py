@@ -2254,6 +2254,17 @@ def _tool_content_openai(message: Message) -> str | list[dict[str, Any]]:
     Flattening via ``.text`` drops image-only results to ``""``; render text
     blocks as text and image blocks as data-URL ``image_url`` parts. An empty
     result is backfilled so providers never receive empty content.
+
+    AN AUDIO BLOCK IS SKIPPED HERE, deliberately (agent review round 1, n1),
+    not silently: the tool-result part shape on this wire carries text and
+    images only, no tool produces audio today, and the alternatives are both
+    wrong at this point in the turn — a typed refusal
+    (``WireCannotCarryAudio``) would strand an already-paid tool batch over a
+    case no producer reaches, while an ``input_audio`` part a strict endpoint
+    may reject invents a wire shape the API does not document for tool
+    content. The message path keeps its refusal because there it protects
+    BEFORE the spend; if a future tool does return audio, that tool's design
+    owes this seam a real part.
     """
     parts: list[dict[str, Any]] = []
     has_image = False
@@ -4372,6 +4383,12 @@ class GoogleClient:
         Same policy as the other two clients: text blocks concatenated,
         image-only results identified, empty results backfilled so the
         provider never receives an empty ``functionResponse``.
+
+        An audio block is skipped here for the same reason as the OpenAI chat
+        sibling (see ``_tool_content_openai``): this part shape carries text
+        and images, no tool produces audio, and the alternative — a typed
+        refusal — would strand an already-paid tool batch over a case no
+        producer reaches.
         """
         texts: list[str] = []
         has_image = False
