@@ -287,7 +287,7 @@ def test_legacy_metadata_mtime_is_not_a_completion(tmp_path: Path) -> None:
         (
             "retired",
             "the runtime retired so the next engage would run a newer build",
-            "Retired for an update — a turn was in flight and was cut",
+            "Retired for an update — a turn was in flight and was cut; its earlier output is kept",
             "warning",
         ),
     ],

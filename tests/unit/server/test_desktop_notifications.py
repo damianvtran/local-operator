@@ -385,7 +385,9 @@ async def test_a_retired_cut_is_announced_with_its_own_sentence(tmp_path: Path) 
     assert payload["kind"] == "retired"
     assert payload["status"] == "Retired"
     assert payload["body"] == BODIES["retired"]
-    assert payload["body"] == "Retired for an update — a turn was in flight and was cut"
+    assert payload["body"] == (
+        "Retired for an update — a turn was in flight and was cut; its earlier output is kept"
+    )
     assert payload["body_is_snippet"] is False
     assert payload["dedupe_key"].startswith(f"retired:{sid}:")
     assert "Mid-verification" not in str(payload)

@@ -697,7 +697,9 @@ def test_a_tear_reported_from_a_record_names_the_pair(monkeypatch) -> None:
 # on observable rather than assumed.
 
 
-async def _dispose_with_unsent_run(directory: Path, *, deliberate: bool, dispatched: bool) -> None:
+async def _dispose_with_unsent_run(
+    directory: Path, *, deliberate: bool, dispatched: bool, carried: bool | None = None
+) -> None:
     """Boot a real session with a turn IN FLIGHT, then dispose it.
 
     ``dispatched`` picks WHICH in-flight state the disposal meets, and the choice
@@ -718,6 +720,11 @@ async def _dispose_with_unsent_run(directory: Path, *, deliberate: bool, dispatc
     *whether this disposal cut anything*: the operator's spurious rows were the
     shape where a session that had gone quiet was reported as an error for work
     that had finished (2026-09-17).
+
+    ``carried`` overrides the run's prompt PROVENANCE while it is parked — the
+    ``False`` value a harness-opened wake/job-delivery run carries — so the
+    third-shape cell pins the disposal's DECISION without racing a real
+    delivery through the park (agent review round 2, MINOR-1).
     """
     directory.mkdir(parents=True, exist_ok=True)
     session = _make_session(directory, stream=_never_yielding_stream())
@@ -741,6 +748,8 @@ async def _dispose_with_unsent_run(directory: Path, *, deliberate: bool, dispatc
         assert session._attention_run_request_dispatched, "the turn never reached the provider"
     else:
         await asyncio.wait_for(parked.wait(), timeout=10)
+    if carried is not None:
+        session._attention_run_carried_prompt = carried
     if deliberate:
         session.note_deliberate_stop()
     dispose_task = asyncio.ensure_future(session.dispose())
@@ -794,6 +803,26 @@ async def test_the_dispose_route_publishes_the_users_own_stop_as_an_interruption
         if entry.payload.get("custom_type") == "session_incident"
     ]
     assert incidents == [], "the user's own stop is not a failure to explain"
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_stop_of_a_non_carried_zero_work_run_is_still_an_interruption(
+    tmp_path: Path,
+) -> None:
+    """The THIRD shape, kept and pinned (manager decision, round 2, MINOR-1).
+
+    A zero-work run that carried NO prompt — the harness-opened shapes (a wake,
+    a job delivery) — stopped deliberately publishes ``interrupted|user-stop``
+    once the deliberate clause leads the disposition chain, where v1 settled it
+    silently. Decided KEEP: the user's act outranks the silence the same way it
+    outranks the closure, and narrowing the clause to the carried shape would
+    reintroduce the asymmetry this round was raised on. This cell is the pin.
+    """
+    directory = tmp_path / "sessions" / "not-carried"
+    await _dispose_with_unsent_run(directory, deliberate=True, dispatched=False, carried=False)
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state["kind"] == "interrupted", state
+    assert state["cause"] == "user-stop", state
 
 
 @pytest.mark.asyncio

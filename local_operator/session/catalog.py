@@ -459,9 +459,18 @@ class CatalogEntry:
         parenthetical stack — and the same tolerance: an empty reason returns
         the spelling BYTE-IDENTICAL to today's, so every pre-taxonomy record and
         every plain stop renders exactly as it always has.
+
+        THE RETIRED ARM (design round 2, D3) suffixes with the cause that
+        actually produced the row, not a stop rung: in this app ``Interrupted``
+        means the OPERATOR stopped the thing (the rung phrases read "killed by
+        /stop"), and a build drain has no operator act behind it — the label
+        must not misattribute agency. Same suffix pattern, same warning ink and
+        status code; only the words gain the cause.
         """
         from local_operator.incidents import stop_rung_phrase
 
+        if self.completion_kind == "retired":
+            return f"{base} — retired for an update"
         phrase = stop_rung_phrase(self.completion_reason or "")
         return f"{base} — {phrase}" if phrase else base
 
