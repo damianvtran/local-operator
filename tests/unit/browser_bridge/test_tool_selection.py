@@ -1807,3 +1807,328 @@ async def test_a_non_cmux_surface_routes_to_its_own_host(monkeypatch) -> None:
     )
     assert result.is_error is False, result.text
     assert seen == [("goto", "ui")]
+
+
+# ---------------------------------------------------------------------------
+# The `backend` hint on `open` (§16.1): the explicit escape hatch beside the
+# availability order.
+#
+# It is consulted ONLY on the fresh, unpinned, non-adopting path: a held
+# surface's handle and an adoption outrank it, and a hint that CONTRADICTS them
+# is a typed refusal rather than a silent ignore — while a hint that AGREES
+# proceeds, because nothing is withheld from it. A named host that cannot serve
+# is likewise typed and never falls through to a different host: the whole
+# point of the hint is that the caller can tell which jar it is in.
+# ---------------------------------------------------------------------------
+
+
+def test_the_backend_hint_rides_the_existing_schema() -> None:
+    """Rung 1 of the footprint ladder: one optional field, no new tool.
+
+    Pinned because the bug (#1723) was the field being ABSENT while the guide
+    promised it: `extra="forbid"` rejected the documented argument outright.
+    """
+    assert builtin.BrowserParams(action="open", backend="extension").backend == "extension"
+    props = builtin.BrowserParams.model_json_schema()["properties"]
+    assert props["backend"]["default"] == ""
+
+
+def test_backend_is_refused_on_every_action_except_open() -> None:
+    for action in ("read", "goto", "screenshot", "close", "scroll", "logs", "tabs", "retain"):
+        problem = builtin._validate_browser_args(
+            action, builtin.BrowserParams(action=action, backend="ui")
+        )
+        assert "only valid for 'open'" in problem, (action, problem)
+
+
+def test_an_unknown_backend_names_the_accepted_set() -> None:
+    problem = builtin._validate_browser_args(
+        "open", builtin.BrowserParams(action="open", backend="bridge")
+    )
+    # The accepted set is the COPY spelling: `bridge` is what `_copy_host`
+    # translates FROM, and accepting both spellings here would let a hint be
+    # compared against the wrong name of the same host.
+    assert "unknown browser backend" in problem
+    assert "'bridge'" in problem
+    assert "ui, extension, cmux" in problem
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [("ui", "ui"), ("extension", "bridge"), ("cmux", "cmux")],
+    ids=["ui", "extension-over-available-ui", "cmux-over-available-ui"],
+)
+async def test_an_explicit_host_overrides_the_availability_order(
+    monkeypatch, backend: str, expected: str
+) -> None:
+    """All three hosts reachable, so the hint does the work in every row the
+    availability order would not already produce: it picks the app's tab for
+    the `extension` and `cmux` rows — exactly §16.1's device-trust case, where
+    the session exists only in the user's real profile."""
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    chosen: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        chosen.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "bridge")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        chosen.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "url": "https://example.com", "backend": backend},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert result.is_error is False, result.text
+    assert chosen == [expected]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_backend_keeps_the_availability_order(monkeypatch) -> None:
+    """`""` is not a hint: the all-hosts-available outcome stays the app's tab."""
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    chosen: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        chosen.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "bridge")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        chosen.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "url": "https://example.com", "backend": ""},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert result.is_error is False, result.text
+    assert chosen == ["ui"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "cmux", "bridge", "ui", "named"),
+    [
+        ("ui", True, True, False, "desktop app"),
+        ("extension", True, False, True, "browser extension"),
+        ("cmux", False, True, True, "cmux"),
+    ],
+    ids=["no-ui", "no-extension", "no-cmux"],
+)
+async def test_a_named_host_that_cannot_serve_is_typed_and_never_falls_through(
+    monkeypatch, backend: str, cmux: bool, bridge: bool, ui: bool, named: str
+) -> None:
+    """The other hosts are available in every row: without the refusal the open
+    would land somewhere real and the caller could not tell which jar it is in,
+    which is the one property the hint exists to give (§16.1)."""
+    _availability(monkeypatch, cmux=cmux, bridge=bridge, ui=ui)
+    chosen: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        chosen.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "bridge")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        chosen.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "url": "https://example.com", "backend": backend},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert chosen == [], "a host was used although the named one could not serve"
+    assert result.is_error
+    assert (result.details or {}).get("error_code") == "backend_unavailable"
+    assert named in result.text, result.text
+    assert "No other host was used" in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "backend"),
+    [
+        ("bridge:9:aaaaaaaabbbbccccddddeeeeffff0000", "ui"),
+        ("bridge:9:aaaaaaaabbbbccccddddeeeeffff0000", "cmux"),
+        ("ui:9:aaaaaaaabbbbccccddddeeeeffff0000", "extension"),
+        ("surface:4", "ui"),
+    ],
+    ids=["held-bridge-vs-ui", "held-bridge-vs-cmux", "held-ui-vs-extension", "held-cmux-vs-ui"],
+)
+async def test_a_conflicting_hint_on_a_held_surface_is_typed(
+    monkeypatch, surface: str, backend: str
+) -> None:
+    """A held handle pins the transport for the surface's whole life; the hint
+    decides only a FRESH surface, so a contradicting one is refused with the
+    conflict named rather than silently ignored — and nothing is dialled."""
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    dialled: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        dialled.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "bridge")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        dialled.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    holder = BrowserSurface()
+    holder.surface_id = surface
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "url": "https://example.com", "backend": backend},
+        None,
+        None,
+        ToolContext(browser=holder),
+    )
+    assert dialled == [], "a host was dialled despite the conflict"
+    assert result.is_error
+    assert (result.details or {}).get("error_code") == "backend_conflict"
+    assert result.text.count("FRESH") == 1
+    assert surface in result.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "backend", "expected"),
+    [
+        ("bridge:9:aaaaaaaabbbbccccddddeeeeffff0000", "extension", "bridge"),
+        ("ui:9:aaaaaaaabbbbccccddddeeeeffff0000", "ui", "ui"),
+        ("surface:4", "cmux", "cmux"),
+    ],
+    ids=["bridge", "ui", "cmux"],
+)
+async def test_a_held_surface_with_an_agreeing_hint_proceeds(
+    monkeypatch, surface: str, backend: str, expected: str
+) -> None:
+    """An agreeing hint withholds nothing from the call, so it is not a
+    conflict: the held handle keeps deciding the routing and the open proceeds
+    on it, unchanged from the pre-hint behaviour."""
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    dialled: list[str] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        dialled.append(builtin._host_of_client(client))
+        return builtin._text("t", "browser", "bridge")
+
+    async def fake_cmux_open(tool_call_id, state, url):
+        dialled.append("cmux")
+        return builtin._text("t", "browser", "cmux")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    monkeypatch.setattr(builtin, "_browser_open", fake_cmux_open)
+    holder = BrowserSurface()
+    holder.surface_id = surface
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "open", "url": "https://example.com", "backend": backend},
+        None,
+        None,
+        ToolContext(browser=holder),
+    )
+    assert result.is_error is False, result.text
+    assert dialled == [expected]
+
+
+@pytest.mark.asyncio
+async def test_an_adoption_with_a_conflicting_hint_is_typed(monkeypatch) -> None:
+    """The adoption handle names the only host that can honour it: a hint that
+    contradicts it is refused naming the conflict, never silently ignored."""
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    dialled: list[tuple[str, str]] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        dialled.append((builtin._host_of_client(client), adopt))
+        return builtin._text("t", "browser", "bridge")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    result = await builtin.execute_browser(
+        "t",
+        {
+            "action": "open",
+            "tab": "bridge:4:aaaaaaaabbbbccccddddeeeeffff0000",
+            "backend": "ui",
+        },
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert dialled == []
+    assert result.is_error
+    assert (result.details or {}).get("error_code") == "backend_conflict"
+    assert "adoption handle" in result.text
+    assert "browser extension" in result.text
+
+
+@pytest.mark.asyncio
+async def test_an_adoption_with_an_agreeing_hint_routes_by_the_handle(monkeypatch) -> None:
+    """The handle still decides the host (and is forwarded unchanged); the
+    agreeing hint changes nothing about the routing."""
+    _availability(monkeypatch, cmux=True, bridge=True, ui=True)
+    dialled: list[tuple[str, str]] = []
+
+    async def fake_bridge_open(tool_call_id, state, url, context=None, *, client=None, adopt=""):
+        dialled.append((builtin._host_of_client(client), adopt))
+        return builtin._text("t", "browser", "bridge")
+
+    monkeypatch.setattr(builtin, "_bridge_open", fake_bridge_open)
+    result = await builtin.execute_browser(
+        "t",
+        {
+            "action": "open",
+            "tab": "bridge:4:aaaaaaaabbbbccccddddeeeeffff0000",
+            "backend": "extension",
+        },
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert result.is_error is False, result.text
+    assert dialled == [("bridge", "bridge:4:aaaaaaaabbbbccccddddeeeeffff0000")]
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_open_result_names_the_host_that_served_it(monkeypatch) -> None:
+    """§16.1: the caller must be able to tell which jar the surface landed in.
+
+    The observability gap this closes: the success line carried no host, so an
+    `open` served by the app read identically to one served by the extension.
+    """
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        host = builtin._host_of_client(client)
+        tab = "ui:33:fresh" if host == builtin.HOST_UI_PREFIX else "bridge:33:fresh"
+        return {"tab": tab, "url": "https://example.com/", "title": "Example"}, None
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+
+    bridge_result = await builtin._bridge_open("t1", BrowserSurface(), "https://example.com")
+    assert bridge_result.is_error is False, bridge_result.text
+    assert "on the browser extension:" in bridge_result.text
+
+    ui_result = await builtin._bridge_open(
+        "t2",
+        BrowserSurface(),
+        "https://example.com",
+        client=builtin._client_for(builtin.HOST_UI_PREFIX),
+    )
+    assert ui_result.is_error is False, ui_result.text
+    assert "on the Local Operator desktop app's browser host:" in ui_result.text
