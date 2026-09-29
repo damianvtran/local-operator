@@ -390,6 +390,33 @@ def is_hidden_tool_row(row: Any) -> bool:
     )
 
 
+def is_hidden_tool_message(message: Any) -> bool:
+    """Whether a rendered ``Message`` is a hidden tool's RESULT or CALL row.
+
+    The replay-side twin of :func:`is_hidden_tool_row`, and deliberately a
+    SEPARATE function rather than a wider one: they read different shapes —
+    that one a stored row wrapping a ``payload``, this one the ``build_llm_
+    history`` output the history window serves — and merging them would make a
+    stored-row caller silently depend on ``Message``'s attributes. Same
+    two-shape rule, because the window builder must subtract exactly what the
+    paint seams would have skipped: a ``role: "tool"`` row by its own
+    ``tool_name``; an assistant row only when it carries no visible text and
+    every call on it is hidden (prose keeps rendering; its hidden call is
+    skipped per-call at the paint sites).
+    """
+    role = str(getattr(message, "role", "") or "")
+    if role == "tool":
+        return is_hidden_tool_name(getattr(message, "tool_name", None))
+    if role != "assistant":
+        return False
+    calls = getattr(message, "tool_calls", None) or ()
+    if not calls:
+        return False
+    if str(getattr(message, "text", "") or "").strip():
+        return False
+    return all(is_hidden_tool_call(call) for call in calls)
+
+
 def is_harness_notice_row(row: Any) -> bool:
     """Whether this row is harness-authored and must not paint as the user's words.
 
