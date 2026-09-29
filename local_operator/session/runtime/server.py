@@ -5654,16 +5654,35 @@ class RuntimeServer:
                         if isinstance(outcome, AckDetail)
                         else (outcome, {})
                     )
-                await self._send_to(
-                    conn,
-                    {
-                        "op": "ack",
-                        "req": req,
-                        "detail": detail,
-                        "duplicate": duplicate,
-                        **extra,
-                    },
-                )
+                ack_frame = {
+                    "op": "ack",
+                    "req": req,
+                    "detail": detail,
+                    "duplicate": duplicate,
+                    **extra,
+                }
+                if op == "complete_aside":
+                    # THE RECEIPT MUST NOT OVERTAKE ITS OWN STREAM. The chunks
+                    # travel the connection FIFO (the sink enqueues them with
+                    # ``call_soon_threadsafe``); a DIRECT write here waits on
+                    # ``send_lock`` and never on that queue, so whenever the
+                    # drain has not reached a queued chunk yet — a task created
+                    # but not started, parked behind an earlier frame, or
+                    # descheduled under load — the receipt goes out first, the
+                    # caller's sink is gone by the time the chunks arrive, and
+                    # the card paints nothing until the settled answer appears
+                    # (CI's aside-stream flake: one settled-text delta where two
+                    # streamed chunks were expected). Enqueuing makes the order
+                    # structural: the sink's callbacks ran before this op could
+                    # return, so its frames are already ahead in the same FIFO.
+                    # ``drop_on_overflow=False``: losing the receipt is the one
+                    # outcome the caller contract forbids, so in the corner
+                    # where even a folded queue cannot take it, the direct
+                    # write is the lesser failure.
+                    if not self._enqueue_client_frame(conn, ack_frame, drop_on_overflow=False):
+                        await self._send_to(conn, ack_frame)
+                else:
+                    await self._send_to(conn, ack_frame)
                 if not duplicate:
                     await self._handle.refresh()
                     await self._push()
@@ -6806,8 +6825,29 @@ class RuntimeServer:
             return
         self._enqueue_client_frame(conn, {"op": "frontend_update", "data": data})
 
-    def _enqueue_client_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
-        """Queue one state/event frame on the connection's sole ordered FIFO."""
+    def _enqueue_client_frame(
+        self, conn: _ClientConn, frame: dict[str, Any], *, drop_on_overflow: bool = True
+    ) -> bool:
+        """Queue one state/event frame on the connection's sole ordered FIFO.
+
+        ORDERING IS THE POINT of routing a frame through here rather than
+        writing it directly: this FIFO feeds one drain task, the connection's
+        single writer, so two frames enqueued in order are written in order no
+        matter how the scheduler interleaves the producers. ``_send_to`` has no
+        such property — it serialises on ``send_lock``, but it cannot order
+        itself against frames still QUEUED — which is why the ``complete_aside``
+        receipt, whose chunks arrive through this FIFO, is enqueued here rather
+        than written (see the ack branch in ``_on_request``).
+
+        Returns whether the frame is now accounted for. ``True``: it is on the
+        FIFO — or the overflow drop removed the connection, which takes the
+        frame with it, so the caller must NOT write it anywhere else either
+        way. ``False`` is reachable only with ``drop_on_overflow=False`` and
+        means the FIFO stayed full even after a lossless fold: the frame was
+        NOT queued and the caller owns delivering it another way. That switch
+        exists for the one receipt that must not be lost — a chunk is cosmetic,
+        a receipt is the answer — and no other caller wants it.
+        """
         # THE chokepoint for both relay frame types: ``frontend_update`` and
         # ``event`` both arrive here, so guarding once covers both and no
         # future relay caller can bypass it by forgetting to check. (The
@@ -6834,13 +6874,16 @@ class RuntimeServer:
                 except asyncio.QueueFull:
                     compacted = False
             if not compacted:
+                if not drop_on_overflow:
+                    return False
                 self._drop_client(conn, reason=f"event queue overflow ({_EVENT_QUEUE_MAX} frames)")
-                return
+                return True
         if conn.event_writer_task is None:
             task = asyncio.create_task(self._drain_event_queue(conn))
             conn.event_writer_task = task
             self._event_sends.add(task)
             task.add_done_callback(self._event_sends.discard)
+        return True
 
     # -- v4 event relay --------------------------------------------------------
 

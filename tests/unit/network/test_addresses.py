@@ -63,6 +63,58 @@ def _table(*rows: tuple[str, int, str], loopback: tuple[str, int, str] | None = 
 # ---------------------------------------------------------------------------
 
 
+def test_interface_for_address_maps_through_the_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The name a readiness row publishes comes from the ONE interface table.
+
+    ``_interface_ipv4s`` has always carried the name and ``local_ipv4_addresses``
+    discarded it; this is the mapping back, and its failure direction is the
+    point: an address the table does not hold (loopback, a table that could not
+    be read) answers ``None`` — "not observable" — never a guess.
+    """
+    monkeypatch.setattr(
+        addresses,
+        "_interface_ipv4s",
+        _table(("utun4", _UP, "203.0.113.7"), ("en0", _UP, "10.0.2.169")),
+    )
+    assert addresses.interface_for_address("203.0.113.7") == "utun4"
+    assert addresses.interface_for_address("10.0.2.169") == "en0"
+    # Loopback is IN the table (every host has one) and maps like any other row:
+    # the filter that keeps it out of ADVERTISED addresses is a different concern.
+    assert addresses.interface_for_address("127.0.0.1") == "lo0"
+    assert addresses.interface_for_address("192.0.2.9") is None
+    monkeypatch.setattr(addresses, "_interface_ipv4s", lambda: None)
+    assert addresses.interface_for_address("203.0.113.7") is None
+
+
+def test_route_observation_publishes_the_kernels_own_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A UDP ``connect`` sends nothing and answers with the real source address.
+
+    Driven against the REAL table for loopback (deterministic anywhere): the
+    kernel picks 127.0.0.1, and the interface is ``None`` because loopback is
+    not in the table — an unobservable name rather than a wrong one.
+    """
+    loopback = addresses.route_observation("127.0.0.1", 1)
+    assert loopback["source_address"] == "127.0.0.1"
+    assert loopback["error"] == ""
+    # Port 0 is not connectable; the route decision is keyed on the ADDRESS, so
+    # it must still answer rather than raise EADDRNOTAVAIL.
+    assert addresses.route_observation("127.0.0.1", 0)["error"] == ""
+
+
+def test_route_observation_reports_what_it_cannot_observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed lookup names its failure; nothing reads as a source address."""
+
+    class _Dead:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise OSError(49, "Can't assign requested address")
+
+    monkeypatch.setattr(addresses.socket, "socket", _Dead)
+    observation = addresses.route_observation("10.0.0.1", 443)
+    assert observation == {"source_address": None, "interface": None, "error": "OSError"}
+
+
 def test_a_hostname_that_does_not_resolve_is_no_longer_the_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

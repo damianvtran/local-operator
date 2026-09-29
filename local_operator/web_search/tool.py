@@ -23,6 +23,7 @@ from local_operator.harness.types import (
 )
 from local_operator.paths import config_dir
 from local_operator.tools.builtin import validation_error_result
+from local_operator.tools.confinement import confinement_of
 from local_operator.web_search.models import (
     SearchProviderId,
     SearchResponse,
@@ -400,6 +401,16 @@ async def execute_web_search(
         # classification must not depend on WHICH tool the model picked, or
         # `validity` acquires a hidden dependence on tool identity.
         return validation_error_result(tool_call_id, "web_search", error)
+
+    # A confined session refuses the search before ANY settings or service are
+    # touched: the providers are reached from this process, so there is no
+    # kernel boundary to hold the call, and the refusal must hold even when
+    # the install has no provider key at all (offline is not "unconfined").
+    # See ``tools.confinement`` -- this is the network completion of the same
+    # decision, and the fidelity trade rides the session-arm write-up.
+    confinement = confinement_of(context)
+    if confinement is not None:
+        return _result(tool_call_id, confinement.network_refusal("web_search"), error=True)
 
     manager = ConfigManager(config_dir())
     settings = load_search_settings(manager)

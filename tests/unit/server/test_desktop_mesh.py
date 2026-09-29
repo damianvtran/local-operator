@@ -293,6 +293,70 @@ async def test_peers_collapse_two_memberships_into_one_row(
 
 
 @pytest.mark.asyncio
+async def test_peer_rows_forward_the_version_line_and_never_invent_it(
+    mesh_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The relay's ``build``/``capabilities`` keys cross this route VERBATIM.
+
+    Both keys are present with both values on every row (the both-values rule
+    ``reachable`` follows, §2.6), and the second half is the half a default
+    would break: an OLD relay's entry carries neither key, and the row must
+    come out ``{}`` / ``[]`` — "not known" — rather than a filled-in default
+    that reads as parity with this build. Where one membership knows and
+    another does not, the known value is the one collapsed.
+    """
+    client, root = mesh_api
+    (root / "network" / "networks").mkdir(parents=True, exist_ok=True)
+    relay = FakeRelay(
+        {
+            "net_peer_ls": [
+                {
+                    # The same device, listed from its second network with the
+                    # version line: a collapse that kept the first row's empty
+                    # build would drop the only stamp either row knew.
+                    "device_id": PEER,
+                    "name": "build-box",
+                    "network_id": NET_TWO,
+                    "reachable": True,
+                    "reason": "",
+                    "last_seen_at": None,
+                    "build": {"version": "0.64.1", "source_ref": "abc123"},
+                    "capabilities": ["mesh-net-v1", "peer-readiness-v1"],
+                },
+                {
+                    "device_id": PEER,
+                    "name": "build-box",
+                    "network_id": NET_ONE,
+                    "reachable": False,
+                    "reason": "connect_failed:ConnectionRefusedError",
+                    "last_seen_at": None,
+                },
+                {
+                    # An OLD RELAY: no build/capabilities keys at all.
+                    "device_id": PEER_TWO,
+                    "name": "old-box",
+                    "network_id": NET_ONE,
+                    "reachable": True,
+                    "reason": "",
+                    "last_seen_at": None,
+                },
+            ]
+        }
+    )
+    _join(monkeypatch, relay)
+    response = await client.get("/v1/desktop/peers")
+    assert response.status_code == 200, response.text
+    by_id = {row["device_id"]: row for row in response.json()["result"]["peers"]}
+    known = by_id[PEER]
+    assert known["build"] == {"version": "0.64.1", "source_ref": "abc123"}
+    assert known["capabilities"] == ["mesh-net-v1", "peer-readiness-v1"]
+    old = by_id[PEER_TWO]
+    assert old["build"] == {}, "an absent stamp must survive as 'not known'"
+    assert old["capabilities"] == [], "an absent list must survive as 'not known'"
+    assert "build" in old and "capabilities" in old
+
+
+@pytest.mark.asyncio
 async def test_a_peer_in_two_networks_counts_its_sessions_once(
     mesh_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
