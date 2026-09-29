@@ -8,6 +8,7 @@
  */
 import { clearPrivateSessionStorage } from "./private-storage";
 import type {
+	Capabilities,
 	CommandOp,
 	CompletionAttention,
 	Directories,
@@ -56,16 +57,25 @@ export function isAuthorityRefusalCode(code: string): boolean {
 	return (AUTHORITY_REFUSAL_CODES as readonly string[]).includes(code);
 }
 
+/** The 401 rule, shared by every transport in this module: the auth cookie is
+    dead and every further call fails the same way, so the page reloads and the
+    server 303s to /login. The multipart upload below is NOT the JSON helper but
+    must not invent a second answer to this. */
+function handleUnauthorized(): void {
+
+	/* A replaced/login-expired browser session must not expose drafts or
+	   retry envelopes to whoever authenticates next on this device. */
+	clearPrivateSessionStorage();
+	location.reload();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(path, {
 		credentials: "same-origin",
 		...init,
 	});
 	if (res.status === 401) {
-		/* A replaced/login-expired browser session must not expose drafts or
-		   retry envelopes to whoever authenticates next on this device. */
-		clearPrivateSessionStorage();
-		location.reload();
+		handleUnauthorized();
 		/* Never reached in practice; satisfies the type when reload is slow. */
 		throw new Error("unauthorized");
 	}
@@ -84,7 +94,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	return (await res.json()) as T;
 }
 
-export function getSessions(): Promise<{ sessions: SessionSummary[] }> {
+export function getSessions(): Promise<{
+	sessions: SessionSummary[];
+	capabilities?: Capabilities;
+}> {
 	return request("/api/sessions");
 }
 
@@ -184,6 +197,67 @@ export function sendCommand(
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(op),
+	});
+}
+
+/** The recorder's media types → a suffix for the uploaded part's filename.
+    The server allowlist is the authority on what is accepted; this only keeps
+    the multipart part named like what it contains (a nameless part makes the
+    upstream's own decoder guesses worse). */
+const RECORDING_FILENAME_SUFFIX: Record<string, string> = {
+	"audio/mp4": "m4a",
+	"audio/x-m4a": "m4a",
+	"audio/webm": "webm",
+	"audio/ogg": "ogg",
+	"audio/mpeg": "mp3",
+	"audio/wav": "wav",
+	"audio/aac": "aac",
+};
+
+function recordingFilename(blob: Blob): string {
+	const bare = blob.type.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+	return `dictation.${RECORDING_FILENAME_SUFFIX[bare] ?? "bin"}`;
+}
+
+/** POST one recorded clip to the daemon; the transcript is the answer.
+
+    Multipart, so this does NOT ride the JSON `request()` helper — but it keeps
+    the same 401 rule (`handleUnauthorized`) and the same error contract: the
+    body's `error` becomes the `HttpError` message (413/422/402/503 carry the
+    daemon's own actionable copy) and `code` its typed category. `path` is the
+    token that ACTUALLY ran — the caller stores it as the send envelope's
+    `input_path` and must not re-derive it from a cached capability. */
+export function transcribeAudio(blob: Blob): Promise<{
+	text: string;
+	provider: string;
+	model: string | null;
+	path: string;
+}> {
+	const form = new FormData();
+	form.append("audio", blob, recordingFilename(blob));
+	return fetch("/api/transcribe", { method: "POST", body: form }).then(async (res) => {
+		if (res.status === 401) {
+			handleUnauthorized();
+			throw new Error("unauthorized");
+		}
+		if (!res.ok) {
+			let detail = `${res.status}`;
+			let code = "";
+			try {
+				const body = (await res.json()) as { error?: string; code?: string };
+				if (body.error) detail = body.error;
+				if (typeof body.code === "string") code = body.code;
+			} catch {
+				/* A non-JSON error body carries no more than the status did. */
+			}
+			throw new HttpError(res.status, detail, code);
+		}
+		return (await res.json()) as {
+			text: string;
+			provider: string;
+			model: string | null;
+			path: string;
+		};
 	});
 }
 

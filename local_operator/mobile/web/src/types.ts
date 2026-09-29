@@ -396,8 +396,40 @@ export interface PromptImage {
 	mime_type: string;
 }
 
+/** How a message was produced (mobile STT, input-mode-v1). Sent explicitly by
+    clients that compute it; ABSENT is the legacy reading — a message whose
+    producer did not know the vocabulary. The three values are pinned by the
+    frozen interface, and a draft that saw both a dictation and a user edit is
+    `mixed`. */
+export type InputMode = "typed" | "dictated" | "mixed";
+
+/** The daemon's voice-input answer on the list payload (`capabilities.stt`).
+    Absent (an older daemon) reads the same as `available: false`: hide the
+    mic. `reason` is diagnostics for the operator, not copy for the screen. */
+export interface SttCapability {
+	available: boolean;
+	path: string | null;
+	reason?: string;
+}
+
+/** Server capabilities carried on `/api/sessions` and the `sessions` frame.
+    Only `stt` is read by this build; `features` is the lifted feature-flag
+    dict and stays `unknown` here so a reader cannot invent its keys. */
+export interface Capabilities {
+	features?: Record<string, unknown>;
+	stt?: SttCapability;
+}
+
 export type CommandOp =
-	| { op: "prompt" | "steer"; command_id: string; text: string; images?: PromptImage[] }
+	| {
+			op: "prompt" | "steer";
+			command_id: string;
+			text: string;
+			images?: PromptImage[];
+			/** The reserved annotation (input-mode-v1), omitted when absent. */
+			input_mode?: InputMode;
+			input_path?: string;
+		}
 	| { op: "abort" }
 	| { op: "set_model"; provider: string; model_id: string }
 	| { op: "set_effort"; effort: string }
