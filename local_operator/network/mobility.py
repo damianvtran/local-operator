@@ -422,14 +422,20 @@ class _Progress:
         with self._lock:
             return list(self._phases.get(session_id, []))
 
+    @staticmethod
+    def _event_key(session_id: str, marker: str) -> str:
+        """One session's slot for ``marker``. The ONE spelling of the key format:
+        ``forget`` clears by this same prefix, and two spellings would drift."""
+        return f"{session_id}:{marker}"
+
     def wait_for(self, session_id: str, marker: str, timeout: float) -> bool:
         with self._lock:
-            event = self._events.setdefault(f"{session_id}:{marker}", threading.Event())
+            event = self._events.setdefault(self._event_key(session_id, marker), threading.Event())
         return event.wait(timeout)
 
     def signal(self, session_id: str, marker: str) -> None:
         with self._lock:
-            event = self._events.setdefault(f"{session_id}:{marker}", threading.Event())
+            event = self._events.setdefault(self._event_key(session_id, marker), threading.Event())
         event.set()
 
     def note_refusal(self, session_id: str, *, code: str, message: str, from_device: str) -> None:
@@ -463,9 +469,25 @@ class _Progress:
         return found[0], found[1]
 
     def forget(self, session_id: str) -> None:
+        """Drop EVERYTHING this relay holds in memory for ``session_id``.
+
+        THE EVENTS MUST GO WITH THE PHASES AND REFUSALS, because their staleness is a
+        LIE rather than a missing sentence: ``signal`` sets a level-triggered
+        ``threading.Event`` that nothing else clears, and ``_await_own_progress``'s
+        very first poll treats it as THIS move's completion. Before this clear
+        existed, a session that had once moved OUT through a relay answered every
+        LATER offload with an instant synthetic ``committed`` while nothing on the
+        wire ran — and the busy refusal the protocol did produce was never consulted
+        (measured live 2026-09-29, relay pid 20929: ~4 µs against the first move's
+        8.7 s, no tombstone, no audit, nothing moved). A completion signal is about
+        ONE move; clearing it here is what scopes it to one.
+        """
         with self._lock:
             self._phases.pop(session_id, None)
             self._refusals.pop(session_id, None)
+            prefix = self._event_key(session_id, "")
+            for key in [item for item in self._events if item.startswith(prefix)]:
+                del self._events[key]
 
 
 _progress_lock = threading.Lock()
@@ -3374,10 +3396,19 @@ def _offload(
     outcome, refusal = _await_own_progress(server, session_id, budget=budget, invited=target_device)
     if outcome == "done":
         phases = _move_phases(server, session_id)
+        # THE HISTORY IS RENDERED, NEVER DRESSED UP (the false-success fix, 2026-09-29).
+        # A done outcome with nothing on disk or in memory is an INCONSISTENT state:
+        # ``_source_done`` notes ``done`` in memory BEFORE it signals, so the record
+        # cannot be empty unless the bookkeeping lost the move. What it must not do is
+        # INVENT the missing steps — the old fallback read an EMPTY list as
+        # ``prepared`` + ``committed`` and reported instant success for a move that
+        # never ran (live 2026-09-29: two stamps 3.8 µs apart under a ``committed``).
+        # ``done`` is the one phase the completion signal itself attests; the steps
+        # before it are not fabricated.
         if not phases:
-            phases = [{"phase": "prepared", "at": time.time()}]
+            phases = [{"phase": "done", "at": time.time()}]
         if str(phases[-1]["phase"]) not in MOVE_OPENABLE_PHASES:
-            phases.append({"phase": "committed", "at": time.time()})
+            phases.append({"phase": "done", "at": time.time()})
         # ``cast`` because the document is assembled field by field and pyright
         # cannot narrow a literal to the contract's TypedDict: the shape is pinned by
         # `test_the_session_move_contract_is_frozen` and parsed by the TUI (slice V).
