@@ -44,7 +44,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterable, Mapping
 
 from local_operator.mobile.resources import session_resource_usage
 
@@ -719,3 +719,264 @@ class Guard:
 #: the name §8's signature block fixes. Both resolve to the same class so an
 #: importer may use either without a second, drifting definition.
 MemoryGuard = Guard
+
+
+# ---------------------------------------------------------------------------
+# The machine budget: the aggregate arm
+# ---------------------------------------------------------------------------
+#
+# WHY THIS ARM EXISTS, in one incident. On 2026-09-28 this machine saturated:
+# the session runtimes, the command trees under them and the desktop around
+# them together held the device (36 GB RAM, only 3 GB swap) until macOS put up
+# the out-of-application-memory dialog and the operator force-quit the app,
+# ending live turns. No guard fired, and none could: every ceiling above is PER
+# GROUP, and this module's own scope note says there is "no machine-wide
+# aggregate budget". This section is that missing arm — ONE reading of the
+# whole fleet, and a decision about the SUM.
+#
+# WHAT IT IS NOT. It guarantees nothing: a fleet can saturate inside one
+# sampling period, and the pass that uses this arithmetic runs on a cadence of
+# its own (see ``wakes.supervisor``). It does not throttle anything. And it
+# ends a fragment only when ONE fragment is big enough to be worth ending — a
+# diffuse overshoot is warned about, never "solved" by killing a scattering of
+# small processes, because that frees nothing and destroys turns.
+
+#: Share of physical RAM the fleet's aggregate footprint may reach before the
+#: pass warns. Deliberately below the act line: the warning is the operator's
+#: chance to act before the guard does.
+MACHINE_WARN_FRACTION = 0.75
+
+#: Share of physical RAM the aggregate may reach before the pass may end a
+#: runaway fragment. Between warn and act, the per-command ceilings still bound
+#: new work but the sum is closing on the device; at or above act, something has
+#: to give.
+MACHINE_ACT_FRACTION = 0.85
+
+#: The smallest fragment worth ending. Ending means killing a process tree and
+#: the work in it; below this floor the kill frees less than the noise it makes,
+#: so a diffuse overshoot only ever warns. 1 GiB is calibrated against the
+#: measured offenders of 2026-09-28 (a test runner at ~10 GB, a type checker at
+#: ~4 GB, several at 1-2 GB): the population this arm exists for is all far
+#: above it, and the processes under it are the ones it must never touch.
+MACHINE_FRAGMENT_MIN_MB = 1024
+
+
+@dataclass(frozen=True)
+class ProcessNode:
+    """One row of the aggregate pass's process table: pid, parent, MB.
+
+    ``mb`` is the process's OWN footprint in MB (never its subtree's); subtree
+    sums are derived by :func:`fragments_ranked` so a reader of one row cannot
+    mistake which number it is holding.
+    """
+
+    pid: int
+    ppid: int
+    mb: int
+    #: The row's process-group id. Carried for ONE consumer: the pass's
+    #: signal-time re-check compares it against a fresh read before a stop goes
+    #: out (a recycled pid that now leads a group would take its whole group).
+    #: ``0`` means "not read" — callers that never re-check leave it at that.
+    pgid: int = 0
+
+
+@dataclass(frozen=True)
+class MachineVerdict:
+    """The aggregate's standing against the machine budget.
+
+    ``state`` is ``ok`` | ``warn`` | ``act`` | ``unknown``. ``unknown`` is the
+    fail-closed state: a host whose memory cannot be measured is not judged (the
+    same degradation the per-command budget makes), so no reading of it can
+    ever kill.
+    """
+
+    state: str
+    fleet_mb: int
+    warn_mb: int
+    act_mb: int
+    total_mb: int | None
+    reason: str
+
+
+def machine_verdict(
+    fleet_mb: int,
+    *,
+    total_mb: int | None = None,
+    unmeasured: int = 0,
+) -> MachineVerdict:
+    """Compare the fleet's aggregate footprint against the machine budget.
+
+    ``total_mb=None`` measures the host through the same stdlib probe the
+    per-command budget uses (``_total_memory_mb``); an explicit ``total_mb`` is
+    the test seam and must not be used to "fix" a host that cannot answer.
+
+    ``unmeasured`` counts the fleet processes neither footprint nor RSS could be
+    read for. They are NOT guessed at (a guess would move the verdict), but the
+    count rides the reason line so a reading that under-counts says so on its
+    own face — the honesty rule the per-command sampler follows for unknowns,
+    applied to the aggregate.
+
+    Boundaries are inclusive — at or above a line is over it — matching the
+    per-command guard's ``over_hard`` (``>= ceiling``): an operator reading
+    "act at 31,457 MB" must see the act fire when the fleet sits exactly there.
+    """
+    measured_total = _total_memory_mb() if total_mb is None else total_mb
+    if measured_total is None or measured_total <= 0:
+        return MachineVerdict(
+            state="unknown",
+            fleet_mb=max(0, int(fleet_mb)),
+            warn_mb=0,
+            act_mb=0,
+            total_mb=None,
+            reason="host memory could not be measured; the fleet's sum is not judged",
+        )
+    fleet_mb = max(0, int(fleet_mb))
+    warn_mb = int(measured_total * MACHINE_WARN_FRACTION)
+    act_mb = int(measured_total * MACHINE_ACT_FRACTION)
+    suffix = (
+        f"; {unmeasured} of the fleet's processes could not be measured" if unmeasured > 0 else ""
+    )
+    if fleet_mb >= act_mb:
+        state = "act"
+    elif fleet_mb >= warn_mb:
+        state = "warn"
+    else:
+        state = "ok"
+    reason = (
+        f"fleet {fleet_mb} MB of {measured_total} MB physical "
+        f"(warn at {warn_mb} MB, act at {act_mb} MB){suffix}"
+    )
+    return MachineVerdict(state, fleet_mb, warn_mb, act_mb, measured_total, reason)
+
+
+def child_links(rows: Iterable[ProcessNode]) -> dict[int, list[int]]:
+    """parent pid -> child pids, for parents that are themselves rows.
+
+    A row whose parent is not in the reading (a runtime's parent may be the
+    launchd it was detached from, or a pid outside the fleet's slice) links to
+    nothing rather than to a phantom — the caller's closure is what decides
+    which parents exist. Self-parents are dropped: a pid cannot be its own
+    ancestor, and keeping the edge would make every walk below rely on its
+    cycle guard instead of its data.
+    """
+    known = {row.pid for row in rows}
+    links: dict[int, list[int]] = {}
+    for row in rows:
+        if row.ppid == row.pid or row.ppid not in known:
+            continue
+        links.setdefault(row.ppid, []).append(row.pid)
+    return links
+
+
+def descendant_closure(roots: Iterable[int], links: Mapping[int, list[int]]) -> set[int]:
+    """``roots`` plus everything reachable from them under ``links``.
+
+    Cycle-safe by a visited set, not by assumption: pids are recycled and a
+    table read mid-recycle can hand back an edge that points up. The closure is
+    the SET the aggregate is summed over, so a walk that terminates is the
+    difference between a reading and a stack trace.
+    """
+    seen: set[int] = set()
+    stack = [pid for pid in roots if pid > 0]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        stack.extend(links.get(pid, ()))
+    return seen
+
+
+@dataclass(frozen=True)
+class Fragment:
+    """One candidate: a process and everything under it, in MB and in pids.
+
+    ``pids`` is the exact set the sum is over, so a reaper can walk what the
+    number counted. It is ROOT-AWARE: a live session runtime found inside the
+    subtree is neither summed into ``mb`` nor listed here nor traversed past —
+    a runtime and everything under it is not the guard's to count or to end,
+    the same judgement the candidate rule makes. ``ppid``/``pgid`` are the
+    root's row, carried for the pre-signal re-check.
+    """
+
+    pid: int
+    mb: int
+    pids: tuple[int, ...] = ()
+    ppid: int = 0
+    pgid: int = 0
+    #: The snapshot row (pid, ppid, pgid) for EVERY pid in ``pids``, in the same
+    #: order — what the pre-signal re-check compares a fresh batched read
+    #: against. The WHOLE walk is carried, not just its root: every pid in it is
+    #: a signal target, and a recycled descendant that leads a group would take
+    #: that group (round 2, R2-1).
+    rows: tuple[tuple[int, int, int], ...] = ()
+
+
+def fragment_closure(start: int, links: Mapping[int, list[int]], roots: Iterable[int]) -> set[int]:
+    """``start`` plus everything under it that is not a session runtime.
+
+    **WHY THE WALK STOPS AT A ROOT.** The guard may count and end a COMMAND
+    tree; a session runtime inside a candidate's subtree — and everything under
+    it — is neither (see :func:`fragments_ranked` for the judgement). Stopping
+    the traversal, rather than only skipping the pid, is what makes the SUM and
+    the STOP agree: a number that included a runtime's workers would credit a
+    kill with memory it can never free.
+
+    Cycle-safe by a visited set, the same contract as
+    :func:`descendant_closure`. A root is never entered, so the returned set
+    contains no root pid and no pid reachable only through one.
+    """
+    root_set = set(roots)
+    seen: set[int] = set()
+    stack = [start] if start > 0 else []
+    while stack:
+        pid = stack.pop()
+        if pid in seen or pid in root_set:
+            continue
+        seen.add(pid)
+        stack.extend(links.get(pid, ()))
+    return seen
+
+
+def fragments_ranked(
+    rows: Iterable[ProcessNode],
+    roots: Iterable[int],
+) -> list[Fragment]:
+    """Every non-root fragment in ``rows``, largest first (pid breaks ties).
+
+    WHY ROOTS ARE NOT CANDIDATES. A root here is a session runtime — a
+    conversation. The runaway this arm exists for is the COMMAND under a
+    runtime, and ending a runtime ends turns; that judgement belongs to the
+    residency policy (idle runtimes) and to the operator, never to a memory
+    pass. A fragment rooted below a runtime is a command tree: fair game, and
+    the same unit the per-command guard already ends at its own ceiling.
+
+    Each fragment's number and pid set come from :func:`fragment_closure`, so
+    both are ROOT-AWARE: a runtime nested inside a candidate's subtree is
+    neither summed nor listed nor walked past — the number and the stop agree
+    on what the guard may touch. The sort is total (``(-mb, pid)``) so two
+    fragments of equal size rank deterministically — a guard whose choice
+    flickers between equal candidates is a guard whose log cannot be read.
+    """
+    row_list = list(rows)
+    links = child_links(row_list)
+    mb_of = {row.pid: max(0, row.mb) for row in row_list}
+    root_set = set(roots)
+    by_pid = {row.pid: row for row in row_list}
+    ranked: list[Fragment] = []
+    for row in row_list:
+        if row.pid in root_set:
+            continue
+        subtree = tuple(sorted(fragment_closure(row.pid, links, root_set)))
+        ranked.append(
+            Fragment(
+                pid=row.pid,
+                mb=sum(mb_of.get(pid, 0) for pid in subtree),
+                pids=subtree,
+                ppid=row.ppid,
+                pgid=row.pgid,
+                rows=tuple((pid, by_pid[pid].ppid, by_pid[pid].pgid) for pid in subtree),
+            )
+        )
+    ranked.sort(key=lambda fragment: (-fragment.mb, fragment.pid))
+    return ranked
