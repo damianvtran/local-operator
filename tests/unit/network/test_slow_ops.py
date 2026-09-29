@@ -493,7 +493,17 @@ def test_the_seams_are_served_by_the_slice_and_refuse_without_a_relay(root: Path
 
 
 def test_the_session_move_contract_is_frozen() -> None:
-    """V and DB build against these names; a change here is a contract change."""
+    """V and DB build against these names; a change here is a contract change.
+
+    ``engagement`` is the ONE member added since the freeze (``engage_on_arrival``,
+    which the desktop never sets), and it is ``NotRequired`` — so the document a
+    reader parses is byte-identical for every move that did not ask for it, and the
+    addition is additive in the strict sense: no existing key changed spelling, type
+    or meaning, and a move that was refused is unaffected. Widening the phase list
+    would NOT have been additive — arriving live is not a phase of the transfer —
+    which is why ``MOVE_RESULT_PHASES`` and ``MOVE_OPENABLE_PHASES`` are asserted
+    unchanged right here.
+    """
     assert mobility.MOVE_RESULT_PHASES == ("prepared", "handing_off", "committed", "done")
     assert mobility.MOVE_OPENABLE_PHASES == {"committed", "done"}
     assert set(mobility.SessionMoveResult.__annotations__) == {
@@ -505,7 +515,18 @@ def test_the_session_move_contract_is_frozen() -> None:
         "to_device",
         "phase",
         "phases",
+        "engagement",
     }
+    # AND IT IS OPTIONAL — asserted on a DOCUMENT rather than through
+    # ``__required_keys__``, which cannot answer this module: PEP 563 stringizes every
+    # annotation here (``from __future__ import annotations``), and the TypedDict
+    # machinery that computes the key sets at class creation therefore cannot see
+    # ``NotRequired`` and reports every key as required. Pyright reads the annotation
+    # as written, and
+    # ``tests/unit/network/test_engage_on_arrival.py::test_a_move_without_the_flag_still_arrives_cold``
+    # is what actually pins the runtime behaviour that matters: a move that did not ask
+    # for the engage carries no ``engagement`` member at all.
+    assert set(mobility.MoveEngagement.__annotations__) == {"engaged", "detail", "session_id"}
     assert set(mobility.SessionMoveRefusal.__annotations__) == {
         "ok",
         "code",
