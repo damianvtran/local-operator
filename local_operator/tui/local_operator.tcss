@@ -2057,6 +2057,43 @@ Screen.settings #input-dock #prompt-chevron {
     height: auto;
 }
 
+/* The detail state (S6d parity P2): the SAME frame as the canvas — title,
+ * rule, body, footer, hints — with the body swapped for a one-axis widget
+ * scroll. The canvas is one pinned Static and the detail is a tree of rows,
+ * so the container scrolls its CHILDREN; the scrollbars are the same 1-cell
+ * `$lo-edge` bars the canvas body uses, and there is deliberately no top
+ * padding: the section ruler's content-relative anchors and the container's
+ * `scroll_offset` must share one coordinate space. */
+.projects-detail {
+    height: 1fr;
+    padding: 0;
+    overflow: auto;
+    scrollbar-size-vertical: 1;
+    scrollbar-background: $lo-bg;
+    scrollbar-color: $lo-edge;
+    scrollbar-color-hover: $lo-dim;
+    scrollbar-color-active: $lo-muted;
+}
+
+.projects-detail-row {
+    width: 1fr;
+    height: auto;
+}
+
+/* One blank line before every section heading, so the page reads as sections
+ * rather than one column of facts (the sketch's spacing, done with layout
+ * rather than a spacer row — a spacer row would be a row the cursor math
+ * would have to know about). */
+.projects-detail-heading {
+    margin: 1 0 0 0;
+}
+
+/* The markdown description is rendered prose: it may be many lines and any
+ * width, and it carries its own block spacing. */
+.projects-detail-prose {
+    margin: 0 0 0 0;
+}
+
 /* The pinned footer: the highlighted project's detail in the list view, the
  * aggregate counts elsewhere. ALWAYS one row plus its quiet lead-in, even when
  * empty: a footer that appeared and disappeared would move the canvas on every
