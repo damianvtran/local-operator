@@ -593,6 +593,86 @@ async def test_a_zero_work_disposal_settles_without_a_verdict(
 
 
 @pytest.mark.asyncio
+async def test_a_noted_serving_cause_still_settles_a_zero_evidence_run(
+    headless_tui_env: Path,
+) -> None:
+    """THE SERVING DOOR: a cause noted before the handover must not dodge the settle.
+
+    ``ServingSessionHandle.dispose()`` notes the retirement cause whenever
+    ``disposal_cuts_a_turn()`` is true — the same condition the disposal's own
+    settle decision uses — so the synthesis arrives holding BOTH a noted cause
+    AND an armed settle intent. Review round 1 (MAJOR-1) measured what that
+    combination did: the synthesis took the publish branch, the armed intent
+    suppressed that publish, and the run ended settled by NOBODY — no verdict,
+    no ``eligible:False`` marker — which the successor reclassified as "the
+    cause could not be determined" about a turn that spent nothing. With the
+    intent forcing the settle branch, the serving door writes the marker and
+    the successor narrates nothing.
+    """
+    config = headless_tui_env
+    directory = config / "serving-note-settles"
+
+    with bounded(120, "a noted serving cause over a zero-evidence run"):
+        stream = _ParkedDeliveryTurn(
+            [text_turn("working"), text_turn("delivery")], hold_delivery=False
+        )
+        session, gate = await _work_turn_with_deferred_children_unlatched(
+            config, directory, stream, gate_flushed_run=True
+        )
+        assert gate is not None, "the cell must park the flushed run"
+        parked, release = gate
+        await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+        delivery_token = session._attention_run_token
+        assert delivery_token is not None
+        assert session._turn_task is not None and not session._turn_task.done()
+
+        # Exactly ``ServingSessionHandle._note_retirement_cut_off()``'s call and
+        # gate (serving.py:1735-1739): note only while a live turn is being cut.
+        assert session.disposal_cuts_a_turn(), "the serving rung notes under this gate"
+        session.note_cut_off("runtime-shutdown")
+
+        dispose_task = asyncio.ensure_future(session.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+
+    assert (
+        session._attention_run_settled is True
+    ), "the run must not be left open for the successor to reclassify"
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == [
+        "complete"
+    ], f"the noted cause must not become a verdict for a zero-evidence run: {rows!r}"
+    markers = [
+        row
+        for row in _rows(directory, "completion_attention")
+        if row.get("token") == delivery_token
+    ]
+    assert len(markers) == 1, f"one settle marker for the delivery run: {markers!r}"
+    assert markers[0].get("eligible") is False, markers[0]
+    from local_operator.session.attention import AttentionStore, conversation_identity
+
+    state = AttentionStore().state(conversation_identity(directory))
+    assert state.get("kind") == "complete", f"the store stays on the completed turn: {state!r}"
+    assert _incident_rows(directory) == []
+
+    # THE SUCCESSOR must narrate nothing: the "cause could not be determined"
+    # reclassification is exactly what the missing marker used to produce.
+    successor_stream = ScriptedStream([text_turn("carrying on")])
+    successor = build_session(directory, successor_stream)
+    await successor.async_init()
+    try:
+        await successor.prompt("continue")
+        sent = "\n".join(
+            text for request in successor_stream.requests for text in _user_row_texts(request)
+        )
+        assert "[session incident]" not in sent, sent[-2000:]
+    finally:
+        await successor.dispose()
+
+
+@pytest.mark.asyncio
 async def test_a_run_cut_after_its_first_request_still_errors(
     headless_tui_env: Path,
 ) -> None:
@@ -662,6 +742,52 @@ async def test_a_typed_prompt_cut_with_zero_round_trips_still_errors(
         task = asyncio.ensure_future(session.prompt("do the thing"))
         await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
         assert session._turn_task is not None and not session._turn_task.done()
+
+        dispose_task = asyncio.ensure_future(session.dispose())
+        while not (session._signal is not None and session._signal.aborted):
+            await asyncio.sleep(0.005)
+        release.set()
+        await asyncio.wait_for(dispose_task, timeout=_STEP_TIMEOUT_S)
+        await asyncio.wait_for(asyncio.shield(task), timeout=_STEP_TIMEOUT_S)
+
+    rows = _completion_rows(directory)
+    assert [row.get("kind") for row in rows] == ["error"], rows
+    assert rows[-1].get("cause") == "disposed", rows[-1]
+    assert stream.exhausted_at is None, "the run must not have consumed a scripted turn"
+
+
+@pytest.mark.asyncio
+async def test_a_peer_prompt_cut_with_zero_round_trips_still_errors(
+    headless_tui_env: Path,
+) -> None:
+    """NEGATIVE CONTROL: the peer arm carries provenance, not just ``prompt()``.
+
+    Both peer arms of ``receive_peer_message`` spawn
+    ``_prompt_messages([message], carried_prompt=True)``, and a peer's ask cut
+    before its first round-trip is owed the same ``error|disposed`` a typed
+    prompt gets ("a person at the other end of ``lop send``"). Review round 1
+    (MAJOR-2) caught the keyword never being forwarded to the pipeline, which
+    sent every peer-opened run down the settle arm; this cell drives the exact
+    spawn the peer arms make and asserts the answer is the error, not silence.
+    """
+    config = headless_tui_env
+    directory = config / "peer-prompt-cut-pre-dispatch"
+    stream = _ParkedWorkTurn([text_turn("working")])
+
+    with bounded(120, "a peer-opened run cut before dispatch"):
+        directory.mkdir(parents=True, exist_ok=True)
+        session = build_session(directory, stream)
+        parked, release = _park_runs_before_dispatch(session, except_token=None)
+        message = session._peer_custom_message(
+            "peer asks a question",
+            {"pid": 999999, "conversation_name": "peer", "model_label": "m"},
+        )
+        task = asyncio.ensure_future(session._prompt_messages([message], carried_prompt=True))
+        await asyncio.wait_for(parked.wait(), _STEP_TIMEOUT_S)
+        assert session._turn_task is not None and not session._turn_task.done()
+        assert (
+            session._attention_run_carried_prompt is True
+        ), "the run must carry the peer's provenance (review round 1, MAJOR-2)"
 
         dispose_task = asyncio.ensure_future(session.dispose())
         while not (session._signal is not None and session._signal.aborted):

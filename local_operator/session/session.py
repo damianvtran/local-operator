@@ -9998,7 +9998,14 @@ class Session:
             # Same flush as prompt(): a wake-delivery turn is still a prompt
             # path, and the catch-up must not be stranded behind it.
             self._handle_missed_wakes()
-            await self._run_turn_pipeline(initial)
+            # THE PROVENANCE THE CALLER PASSED RIDES THIS RUN (review round 1,
+            # MAJOR-2): the peer arms spawn with ``carried_prompt=True``, and
+            # while this call stayed bare the per-run flag was always False —
+            # so a peer's ask cut before its first round-trip settled silently
+            # instead of publishing the ``error|disposed`` its own rationale
+            # promises (repro: peer_carried_prompt.py; the cell is
+            # ``test_a_peer_prompt_cut_with_zero_round_trips_still_errors``).
+            await self._run_turn_pipeline(initial, carried_prompt=carried_prompt)
 
     async def _run_turn_pipeline(
         self,
@@ -17766,47 +17773,6 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
-        # In-process disposal is a cut-off for whatever turn is RUNNING: this
-        # path is reached by a host tearing a session down directly (the
-        # runtime's own handle disposes through ``ServingSessionHandle``, which
-        # notes its more specific cause FIRST, and first-wins keeps that one),
-        # and suppressed outright after a deliberate stop, so a user's own
-        # cancel is never relabelled.
-        #
-        # A TURN MUST ACTUALLY BE RUNNING, and the evidence is the same one the
-        # abort below keys on (``disposal_cuts_a_turn``). The note used to be
-        # written unconditionally on the grounds that it is "consumed only by the
-        # running turn's end event" and therefore harmless when nothing is in
-        # flight — which is exactly what stops being true when a run is left
-        # UNSETTLED: the synthesis further down used to fabricate an end for it,
-        # so an unconditional note branded a run whose turn had already ended.
-        # Measured on the reporting host as durable ``error`` rows against runs
-        # whose last turn row preceded them by minutes (six with the retirement
-        # label, more with this one), each rendered as a cut-off of work that had
-        # finished (2026-09-17).
-        # WHICH VERDICT THIS EXIT OWES, decided BEFORE anything is noted: a
-        # disposal that catches a live run publishes a cut-off only when the
-        # run has evidence behind one (see ``_attention_run_has_evidence``).
-        # Without evidence the run settles silently, and the decision comes
-        # FIRST for two reasons: ``note_cut_off`` is first-writer-wins, so a
-        # note written for a settled run would brand a cause nobody may
-        # publish; and the settle intent must be armed before the abort below,
-        # so the aborted turn's own ``finally`` cannot publish the unsupported
-        # verdict (``_publish_attention_outcome`` refuses it) — that late
-        # ``interrupted``/``disposed`` claim is what put "Stopped with an
-        # error" on session 664a234ec561's conversation whose last real turn
-        # had completed (2026-09-28).
-        live_turn = self._disposal_turn()
-        settles_silently = (
-            live_turn is not None
-            and self._attention_run_token is not None
-            and not self._attention_run_settled
-            and not self._attention_run_has_evidence()
-        )
-        if settles_silently:
-            self._attention_run_settle_intent = True
-        elif self.disposal_cuts_a_turn():
-            self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
@@ -17835,6 +17801,51 @@ class Session:
             # before flushing — its persistence must land on a live transcript.
             turn = self._disposal_turn()
             if turn is not None:
+                # WHICH VERDICT THIS EXIT OWES, decided HERE — in the same
+                # synchronous step as the abort, after the last await above
+                # (review round 1, MINOR-1: the snapshot this replaced was
+                # taken before the steering drain's awaits, so a run that
+                # began dispatching inside that window had its real cut
+                # suppressed by the armed intent and was then settled as
+                # zero-work). A disposal that catches a live run publishes a
+                # cut-off only when the run has evidence behind one (see
+                # ``_attention_run_has_evidence``); without evidence it settles
+                # silently. The decision must still come before the abort for
+                # two reasons: ``note_cut_off`` is first-writer-wins, so a
+                # note written for a settled run would brand a cause nobody
+                # may publish; and the settle intent must be armed before the
+                # abort so the aborted turn's own ``finally`` cannot publish
+                # the unsupported verdict (``_publish_attention_outcome``
+                # refuses it) — that late ``interrupted``/``disposed`` claim is
+                # what put "Stopped with an error" on session 664a234ec561's
+                # conversation whose last real turn had completed (2026-09-28).
+                #
+                # In-process disposal is a cut-off for whatever turn is
+                # RUNNING: this path is reached by a host tearing a session
+                # down directly (the runtime's own handle disposes through
+                # ``ServingSessionHandle``, which notes its more specific
+                # cause FIRST, and first-wins keeps that one), and suppressed
+                # outright after a deliberate stop, so a user's own cancel is
+                # never relabelled. The note used to be written unconditionally
+                # on the grounds that it is "consumed only by the running
+                # turn's end event" and therefore harmless when nothing is in
+                # flight — which is exactly what stops being true when a run
+                # is left UNSETTLED: the synthesis further down used to
+                # fabricate an end for it, so an unconditional note branded a
+                # run whose turn had already ended. Measured on the reporting
+                # host as durable ``error`` rows against runs whose last turn
+                # row preceded them by minutes (six with the retirement label,
+                # more with this one), each rendered as a cut-off of work that
+                # had finished (2026-09-17).
+                settles_silently = (
+                    self._attention_run_token is not None
+                    and not self._attention_run_settled
+                    and not self._attention_run_has_evidence()
+                )
+                if settles_silently:
+                    self._attention_run_settle_intent = True
+                else:
+                    self.note_cut_off("disposed")
                 self.abort("session disposed")
                 try:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
@@ -17871,8 +17882,23 @@ class Session:
                     # why and WITHOUT this exit cutting it — see
                     # ``_settle_run_without_an_outcome`` for why the honest
                     # disposition there is to publish nothing at all.
-                    if self._attention_outcome is None and not (
-                        self._cut_off_cause or self._deliberate_stop_noted
+                    #
+                    # AN ARMED SETTLE INTENT OVERRIDES A NOTED CAUSE (review
+                    # round 1, MAJOR-1): the serving rung notes its more
+                    # specific cause before handing over
+                    # (``ServingSessionHandle._note_retirement_cut_off``,
+                    # gated on the same ``disposal_cuts_a_turn()`` the decision
+                    # above used), so the synthesis arrives holding a cause AND
+                    # an armed intent — and without this clause it took the
+                    # publish branch, which the intent then suppressed, leaving
+                    # the run settled by NOBODY: no verdict and no
+                    # ``eligible:False`` marker, which the successor
+                    # reclassifies as "the cause could not be determined"
+                    # (reproduced: serving_cause_hole.py). The same clause
+                    # covers the ``_deliberate_stop_noted`` variant.
+                    if self._attention_outcome is None and (
+                        self._attention_run_settle_intent
+                        or not (self._cut_off_cause or self._deliberate_stop_noted)
                     ):
                         await self._settle_run_without_an_outcome()
                     else:
