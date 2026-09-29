@@ -12978,6 +12978,14 @@ _SCROLL_DIRECTIONS = frozenset({"top", "bottom", "up", "down", "left", "right"})
 #: Console levels ``logs`` filters on. Mirrors the extension's LEVELS.
 _LOG_LEVELS = frozenset({"error", "warning", "info", "log", "all"})
 
+#: The hosts an explicit ``backend`` hint on `open` may name, beside "" (the
+#: default availability order). Spellings are the COPY spellings: the paired
+#: host is named by what the user sees ("extension"), not by the handle prefix
+#: it mints ("bridge") — `_copy_host` is the one translation between the two,
+#: and the conflict checks compare through it so a hint can never be judged
+#: against the other spelling of the same host.
+_BROWSER_BACKENDS = ("ui", "extension", "cmux")
+
 #: Page text is model input, so it rides the same ceiling as command output
 #: rather than a bespoke one — a single-page app whose body is megabytes would
 #: otherwise spend the whole context window in one tool call.
@@ -13077,6 +13085,16 @@ class BrowserParams(BaseModel):
             "'open' only: ADOPT a tab the USER handed to this session, "
             "named by the FULL handle 'tabs' reported for it. Omit it to create a "
             "new tab; a redacted handle is not yours to drive."
+        ),
+    )
+    backend: str = Field(
+        default="",
+        description=(
+            "'open' only: pick the host for a FRESH surface — '' (default: the "
+            "desktop app's tab first, then the extension, then cmux) | 'ui' | "
+            "'extension' | 'cmux'. 'extension' is the host that carries the "
+            "user's real profile. A held handle or an adoption outranks it; a "
+            "named host that cannot serve refuses instead of falling back."
         ),
     )
     path: str = Field(default="", description="'screenshot' only: the destination file.")
@@ -13483,6 +13501,53 @@ def _validate_adoption_handle(action: str, params: BrowserParams) -> str:
     return ""
 
 
+def _backend_hint(params: BrowserParams) -> str:
+    """The normalized `backend` value: "" (default) or a host name.
+
+    One accessor rather than two raw reads of `params.backend`: the validator
+    and the dispatcher must compare the same normalized value, and — like
+    `direction`/`level` — the hint chooses among fixed host names, so
+    `Extension` is the same request as `extension`.
+    """
+    return params.backend.strip().lower()
+
+
+def _validate_browser_backend(action: str, params: BrowserParams) -> str:
+    """Return a refusal for an unusable `backend` hint, or "".
+
+    Two refusals, the same shape as :func:`_validate_adoption_handle`'s:
+
+    * the hint decides which host serves a FRESH surface, so naming it on any
+      other action is refused rather than silently ignored — every other verb
+      stays on the surface its handle pins, and a model that passed `backend`
+      to one of them would believe it had moved the session;
+    * the value must be one of the hosts this tool can name. The set is the
+      COPY spelling (`extension`, not the handle's `bridge`): the prefix is a
+      private handle grammar, which is why `_copy_host` exists as the one
+      translation.
+
+    The CONFLICT refusals (a hint that contradicts a held handle or an
+    adoption) live in `_execute_browser`'s open block, where the handle and the
+    availability readings are in scope; this function refuses only what the
+    arguments alone cannot be.
+    """
+    backend = _backend_hint(params)
+    if not backend:
+        return ""
+    if action != "open":
+        return (
+            f"'backend' is only valid for 'open' (got it on '{action}'): it picks "
+            "the host a FRESH surface opens on; no other action chooses a host"
+        )
+    if backend not in _BROWSER_BACKENDS:
+        return (
+            f"unknown browser backend: {params.backend!r} "
+            f"(expected one of {', '.join(_BROWSER_BACKENDS)}, or '' for the "
+            "default availability order)"
+        )
+    return ""
+
+
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
     """Refuse an unusable argument, or "" when the call may proceed.
 
@@ -13497,6 +13562,9 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
     adoption = _validate_adoption_handle(action, params)
     if adoption:
         return adoption
+    backend = _validate_browser_backend(action, params)
+    if backend:
+        return backend
     if action == "open" and params.tab.strip():
         # Adoption legitimately carries NO url: taking over a tab the user handed
         # you does not have to navigate it, and the host's `open` adopts without
@@ -13787,7 +13855,8 @@ async def _browser_open(
     return _text(
         tool_call_id,
         "browser",
-        f"Opened browser surface {surface_id}: {_page_line(title, href)}\n"
+        f"Opened browser surface {surface_id} on a cmux browser panel: "
+        f"{_page_line(title, href)}\n"
         f"{_BROWSER_OPEN_CLEANUP_REMINDER}",
         details={"surface_id": surface_id, "url": href, "title": title},
     )
@@ -14820,6 +14889,76 @@ def _ownership_unavailable_result(tool_call_id: str, action: str, *, surface: st
     return problem
 
 
+#: The session-side error code for a `backend` hint whose named host cannot
+#: serve this open. Same wire reasoning as ERROR_CODE_OWNERSHIP_UNAVAILABLE —
+#: no peer emits it (this process refuses before any host is dialled), so it is
+#: not a `protocol.ErrorCode`, and it rides `details["error_code"]` so a caller
+#: branching on that key still sees a typed answer.
+ERROR_CODE_BACKEND_UNAVAILABLE = "backend_unavailable"
+
+#: The session-side error code for a `backend` hint that contradicts a handle
+#: this call must honour (a held surface's prefix, or an adoption handle). Kept
+#: separate from BACKEND_UNAVAILABLE because the remedies differ: this one is
+#: "the call is pinned — drop one of the two", the other is "that host is not
+#: up".
+ERROR_CODE_BACKEND_CONFLICT = "backend_conflict"
+
+
+def _backend_unavailable_result(tool_call_id: str, backend: str) -> ToolResult:
+    """Typed refusal for `backend` naming a host that cannot serve right now.
+
+    Never a fall-through: silently landing the surface on a different host
+    would leave the caller unable to tell which jar it is in, which is the one
+    property the hint exists to give (§16.1) — so the refusal names the
+    requested host, its remedy, and says that no other host was used.
+    """
+    remedy = {
+        "ui": (
+            "the Local Operator desktop app's browser tab is not reachable right now — "
+            "open a browser tab in the desktop app (or restart it), then retry"
+        ),
+        "extension": (
+            "the paired Local Operator browser extension is not reachable right now — "
+            "'lop browser status' shows it, or 'lop browser install' sets it up; then retry"
+        ),
+        "cmux": (
+            "no cmux browser panel is reachable from this session (no cmux CLI was found) — "
+            "run this session inside cmux, or drop 'backend'"
+        ),
+    }[backend]
+    problem = _error(
+        tool_call_id,
+        "browser",
+        f"backend={backend!r}: {remedy}. No other host was used.",
+    )
+    problem.details = {"error_code": ERROR_CODE_BACKEND_UNAVAILABLE}
+    return problem
+
+
+def _backend_conflict_result(
+    tool_call_id: str, backend: str, about: str, remedy: str
+) -> ToolResult:
+    """Typed refusal for a `backend` hint that a handle pin outranks.
+
+    §16.1 scopes the hint to a FRESH surface: a held surface's handle and an
+    adoption each name their host for the surface's whole life, so a hint that
+    CONTRADICTS them is refused with the conflict named, never silently ignored
+    (house philosophy: refuse what you will not honor — the same spirit as
+    `extra="forbid"` on this schema). One builder for the three conflict shapes
+    (held surface, adoption, cmux-held surface) keeps them from drifting into
+    three paraphrases; the caller supplies the conflicting handle and the
+    remedy.
+    """
+    problem = _error(
+        tool_call_id,
+        "browser",
+        f"backend={backend!r} conflicts with {about}; 'backend' chooses the host of "
+        f"a FRESH surface only. {remedy}",
+    )
+    problem.details = {"error_code": ERROR_CODE_BACKEND_CONFLICT}
+    return problem
+
+
 def _bridge_failure_result(
     tool_call_id: str, exc: BaseException, *, action: str, host: str = ""
 ) -> ToolResult:
@@ -14995,7 +15134,12 @@ async def _bridge_open(
     state.surface_id = surface
     href = str(result.get("url", ""))
     title = str(result.get("title", ""))
-    message = f"Opened browser surface {surface}: {_page_line(title, href)}"
+    # Name the host that actually served the open (§16.1): the caller must be
+    # able to tell which jar the surface landed in without knowing the handle
+    # prefixes, and this is the one line every open result carries.
+    message = (
+        f"Opened browser surface {surface} on {_host_label(prefix)}: " f"{_page_line(title, href)}"
+    )
     if created_new:
         message += f"\n{_BROWSER_OPEN_CLEANUP_REMINDER}"
     return _text(
@@ -17210,8 +17354,13 @@ async def _execute_browser(
         # logged in" makes the app's tab the right default rather than a
         # trade-off. The extension remains the right answer for one specific
         # case — device trust, hardware keys and enterprise conditional access,
-        # where the session exists only in the user's real profile — and it is
-        # reachable by the explicit `backend` hint when the operator takes it.
+        # where the session exists only in the user's real profile — and the
+        # explicit `backend` hint (below) is how that case REACHES it: the hint
+        # names `ui` | `extension` | `cmux` for a fresh open, overrides the
+        # availability order for that open, and a named host that cannot serve
+        # refuses with a typed error instead of falling through. It is consulted
+        # ONLY on the fresh, unpinned, non-adopting path (see the conflict
+        # block); "" keeps the order above.
         #
         # Both non-cmux hosts drive a real Chromium profile and — by construction
         # (the extension's nav.ts creates its tab with ``active: false`` and never
@@ -17225,6 +17374,7 @@ async def _execute_browser(
         # so this only decides where a brand-new surface lands.
         pinned = _host_of_surface(state.surface_id)
         adopt = params.tab.strip()
+        backend = _backend_hint(params)
         if adopt and state.surface_id and adopt != state.surface_id:
             # Two different tabs in one call: adopting while already holding
             # another surface would leave the first one's cleanup to a lane that
@@ -17245,6 +17395,48 @@ async def _execute_browser(
                 "browser",
                 "adopting a handed-over tab needs the desktop app's browser tab or "
                 "the browser extension; neither is reachable",
+            )
+        # `backend` picks the host of a FRESH surface and nothing else (§16.1): a
+        # held surface's handle and an adoption both name a host that outranks it,
+        # so a hint that CONTRADICTS them is refused — naming the conflict —
+        # rather than silently ignored (house philosophy: refuse what you will
+        # not honor, the same spirit as `extra="forbid"` on this schema), while
+        # one that AGREES proceeds, because nothing is being withheld from it.
+        # The durable/ownership pin is deliberately NOT consulted here: it
+        # governs the ownership LANE (`_ownership_lane_host`), and a fresh open
+        # has no transport to keep stable (see `pinned_host`), so it must not
+        # decide this call.
+        conflict = ""
+        if adopt:
+            conflict = _copy_host(_host_of_surface(adopt))
+        elif pinned:
+            conflict = _copy_host(pinned)
+        elif state.surface_id.startswith("surface:"):
+            conflict = "cmux"
+        if backend and conflict and conflict != backend:
+            if adopt:
+                return _backend_conflict_result(
+                    tool_call_id,
+                    backend,
+                    f"the adoption handle this call carries ({adopt!r}), which names "
+                    f"{_host_label(_host_of_surface(adopt))}",
+                    "Drop 'backend', or adopt a tab on the host you named.",
+                )
+            if conflict == "cmux":
+                return _backend_conflict_result(
+                    tool_call_id,
+                    backend,
+                    f"this session's cmux surface ({state.surface_id!r}), and an "
+                    "already-open cmux surface stays on cmux",
+                    "Close it first, or call 'open' without 'backend'.",
+                )
+            return _backend_conflict_result(
+                tool_call_id,
+                backend,
+                f"the browser surface this session already drives "
+                f"({state.surface_id!r}) — a held handle pins its host for the "
+                "surface's whole life",
+                "Close it first, or call 'open' without 'backend'.",
             )
         if pinned:
             return await _bridge_open(
@@ -17274,6 +17466,30 @@ async def _execute_browser(
                 adopt=adopt,
             )
         if state.surface_id.startswith("surface:"):
+            return await _browser_open(tool_call_id, state, params.url)
+        if backend == "ui":
+            # The escape hatch (§16.1): an explicitly named host overrides the
+            # availability ORDER below for this fresh open — and a named host
+            # that cannot serve refuses, because falling through to a different
+            # host would leave the caller unable to tell which jar it is in,
+            # which is the one property the hint exists to give.
+            if not ui_available:
+                return _backend_unavailable_result(tool_call_id, backend)
+            return await _bridge_open(
+                tool_call_id,
+                state,
+                params.url,
+                context,
+                client=_client_for(HOST_UI_PREFIX),
+                adopt=adopt,
+            )
+        if backend == "extension":
+            if not bridge_available:
+                return _backend_unavailable_result(tool_call_id, backend)
+            return await _bridge_open(tool_call_id, state, params.url, context, adopt=adopt)
+        if backend == "cmux":
+            if not cmux_available:
+                return _backend_unavailable_result(tool_call_id, backend)
             return await _browser_open(tool_call_id, state, params.url)
         if ui_available:
             return await _bridge_open(
@@ -17519,10 +17735,16 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
 
     Backend precedence (see ``execute_browser``): a fresh open prefers the
     desktop app's browser tab, then the paired Local Operator browser extension,
-    then cmux. Both non-cmux hosts drive a real Chromium profile the user can
-    sign into and never steal focus, so a background agent can browse while the
-    user works elsewhere; cmux is a first-class fallback for hosts without
-    either. The full setup/permissions playbook lives in ``guide://browser``.
+    then cmux — "the right default with an explicit escape hatch", not a
+    trade-off to re-litigate: the app's jar is persistent and shared ("log in
+    once, stay logged in"), while the extension's surviving unique case —
+    device trust, hardware keys, enterprise conditional access, i.e. a session
+    that exists only in the user's real profile — is reached with the
+    ``backend`` hint on a fresh ``open``. Both non-cmux hosts drive a real
+    Chromium profile the user can sign into and never steal focus, so a
+    background agent can browse while the user works elsewhere; cmux is a
+    first-class fallback for hosts without either. The full setup/permissions
+    playbook lives in ``guide://browser``.
     """
     # Gating deliberately uses the WEAKER `advertisable` test, not the
     # backend-selection one: a stale-but-alive host must still put the tool in
@@ -17551,7 +17773,8 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             # "tool-surface footprint ladder"; see the round-4 remediation).
             "Drive the user's REAL browser (the Local Operator desktop app's browser "
             "tab, their paired browser extension, or a cmux browser "
-            "panel): open/goto a URL, read text, snapshot for click refs, click, type, "
+            "panel — a fresh 'open' prefers the app's tab; pass 'backend' to name "
+            "another host): open/goto a URL, read text, snapshot for click refs, click, type, "
             "scroll, logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
             "to, so this reaches authenticated pages a throwaway browser cannot. "
