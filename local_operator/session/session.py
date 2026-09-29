@@ -2140,6 +2140,7 @@ class Session:
         #: whole of its display identity. Reaches tools via
         #: ``_build_tool_context``; display-only, never an authorization input.
         job_label: str = "",
+        agent_type: str = "",
         #: The parent's own :meth:`_display_session_name`, on a subagent only.
         #: A RESOLVER rather than the parent's title holder, for two reasons
         #: that are really one: it re-reads on every call, so a parent named or
@@ -2409,6 +2410,10 @@ class Session:
         #: which keeps serving the same runtime.
         self._leaving_deliveries = False
         self._job_label = job_label
+        #: The role a subagent was launched as (``task(agent=...)``), for the
+        #: ``agent_type`` field forwarded hooks receive. Empty on a top-level
+        #: session and on a role-less child (reported as ``task``).
+        self._agent_type = agent_type
         self._parent_display_name = parent_display_name
         self._subagent_comms = subagent_comms
         self.agent_registry = agent_registry
@@ -10529,6 +10534,10 @@ class Session:
                 # is put_nowait-only and swallows its own errors, so this stays
                 # off the turn's critical path.
                 record_tool_call=self._record_tool_call,
+                # The operator's Claude Code / Codex PostToolUse hooks, forwarded
+                # (``hook_forwarding``). Always wired: the forwarder reads its
+                # on/off keys per call, so ``/settings`` reaches the next tool.
+                post_tool_hooks=self._forward_post_tool_hooks,
                 interrupt_mode="immediate",
                 on_turn_end=self._on_turn_end,
             )
@@ -11022,6 +11031,40 @@ class Session:
         """
         scratchpad = self._scratchpad_dir()
         return None if scratchpad is None else str(Path(scratchpad).parent)
+
+    async def _forward_post_tool_hooks(
+        self, tool_name: str, args: Mapping[str, Any], call_id: str, result: ToolResult
+    ) -> list[str]:
+        """Run forwarded ``PostToolUse`` hooks for one finished tool call.
+
+        A child reports ``agent_id``/``agent_type`` exactly as a Claude Code
+        subagent does, so a hook that skips subagents keeps doing so here.
+        """
+        from local_operator.hook_forwarding import HookIdentity, forward_post_tool
+
+        is_child = self._job_id is not None
+        transcript_path: str | None = None
+        with contextlib.suppress(Exception):
+            directory = self._transcript.directory
+            if directory is not None:
+                candidate = Path(directory) / "transcript.jsonl"
+                transcript_path = str(candidate) if candidate.exists() else None
+        identity = HookIdentity(
+            session_id=self._session_id,
+            cwd=self._cwd,
+            transcript_path=transcript_path,
+            agent_id=self._job_id if is_child else None,
+            agent_type=(self._agent_type or "task") if is_child else None,
+        )
+        return await forward_post_tool(
+            identity,
+            tool_name=tool_name,
+            args=args,
+            tool_use_id=call_id,
+            output=result.text,
+            is_error=result.is_error,
+            duration_s=result.duration_s,
+        )
 
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive

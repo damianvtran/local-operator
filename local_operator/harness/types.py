@@ -2325,6 +2325,18 @@ class LoopConfig(BaseModel):
         default=None, exclude=True
     )
 
+    #: Run the operator's forwarded Claude Code / Codex ``PostToolUse`` hooks
+    #: for one finished call, as ``(tool_name, args, tool_call_id, result)``,
+    #: and return the context notes the hooks produced (empty for none). The
+    #: loop appends the notes to the tool result, which is where Claude Code
+    #: puts ``additionalContext`` for this event. A callback for the reason
+    #: ``record_tool_call`` is one: the harness keeps no config dependency.
+    #: Must not raise for a hook's own failure (``hook_forwarding`` swallows
+    #: those); the loop still guards it.
+    post_tool_hooks: (
+        Callable[[str, Mapping[str, Any], str, ToolResult], Awaitable[list[str]]] | None
+    ) = Field(default=None, exclude=True)
+
     # Steering (CONSUMING) interrupts tool batches; peek (non-consuming) is
     # polled between calls. Asides never interrupt.
     get_steering_messages: Callable[[], Awaitable[list[AgentMessage]]] | None = Field(
