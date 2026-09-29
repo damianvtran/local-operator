@@ -1,0 +1,110 @@
+{
+  "glance-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "viewport": [
+      390,
+      844
+    ],
+    "status": null,
+    "spend": {
+      "box": null,
+      "text": null
+    },
+    "context": {
+      "box": null,
+      "text": null
+    },
+    "transcript": {
+      "top": 41,
+      "bottom": 748,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 707
+    },
+    "composer": {
+      "top": 765,
+      "bottom": 789,
+      "left": 77,
+      "right": 313,
+      "width": 236,
+      "height": 24
+    },
+    "bodyScrollH": 844
+  },
+  "glance-floor-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "viewport": [
+      390,
+      844
+    ],
+    "status": null,
+    "spend": {
+      "box": null,
+      "text": null
+    },
+    "context": {
+      "box": null,
+      "text": null
+    },
+    "transcript": {
+      "top": 41,
+      "bottom": 748,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 707
+    },
+    "composer": {
+      "top": 765,
+      "bottom": 789,
+      "left": 77,
+      "right": 313,
+      "width": 236,
+      "height": 24
+    },
+    "bodyScrollH": 844
+  },
+  "glance-unknown-390x844": {
+    "tap": {
+      "tapped": true,
+      "tag": "BUTTON"
+    },
+    "viewport": [
+      390,
+      844
+    ],
+    "status": null,
+    "spend": {
+      "box": null,
+      "text": null
+    },
+    "context": {
+      "box": null,
+      "text": null
+    },
+    "transcript": {
+      "top": 41,
+      "bottom": 748,
+      "left": 0,
+      "right": 390,
+      "width": 390,
+      "height": 707
+    },
+    "composer": {
+      "top": 765,
+      "bottom": 789,
+      "left": 77,
+      "right": 313,
+      "width": 236,
+      "height": 24
+    },
+    "bodyScrollH": 844
+  }
+}
