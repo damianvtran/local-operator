@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
-from local_operator.harness.rows import is_harness_notice_row
+from local_operator.harness.rows import is_harness_notice_row, is_hidden_tool_message
 from local_operator.harness.types import AgentMessage, Message
 from local_operator.session.page_cache import retained_bytes
 from local_operator.session.transcript import (
@@ -519,6 +519,33 @@ def _capture_audit_window(
         limit=max_messages,
         prunes=prunes,
     )
+    # The audit phase serves stored rows verbatim, so a hidden wake delivery
+    # (a patience fire) survives here as its CustomMessage — subtract it by the
+    # same entry-id set the context phase uses. The context phase's own arm is
+    # above; both phases must agree about which rows a viewer never sees.
+    hidden_ids = _hidden_wake_entry_ids(transcript)
+    if hidden_ids:
+        kept = [
+            (message, index)
+            for message, index in zip(messages, indices)
+            if str(getattr(message, "id", "")) not in hidden_ids
+        ]
+        messages = [message for message, _ in kept]
+        indices = [index for _, index in kept]
+    # A hidden tool's OWN rows — the patience arm's call/result pair — are no
+    # store shapes here but rendered ``Message``s, so the fire's id-set arm
+    # cannot see them: the two-shape rule in ``harness.rows`` does (R2-1).
+    # Owner-side, like the fire: every viewer build, old included, receives
+    # clean rows. The audit row for a tool result carries its ``tool_name``
+    # and the call row its ``tool_calls``, exactly as the context phase sees
+    # them, so both phases ask the one predicate.
+    kept = [
+        (message, index)
+        for message, index in zip(messages, indices)
+        if not is_hidden_tool_message(message)
+    ]
+    messages = [message for message, _ in kept]
+    indices = [index for _, index in kept]
     if hoisted:
         kept = [
             (message, index)
@@ -583,6 +610,33 @@ def _capture_audit_window(
     )
 
 
+def _hidden_wake_entry_ids(transcript: Transcript) -> frozenset[str]:
+    """Entry ids of every hidden wake delivery in this journal.
+
+    ONE scan feeding both display phases, so the context replay and the audit
+    replay cannot come to different answers about which rows a viewer never
+    sees. Keyed on entry ID because that is the identity the render carries
+    through (``convert_to_llm`` passes the custom message's id onto the user
+    message it mints, and the audit phase serves the stored row as-is).
+
+    O(journal) but only over in-memory entries, and only for journals that
+    contain one; the common case is a walk that finds nothing. Cheap enough to
+    run per page, which is what keeps it honest — a cached set would need
+    invalidation on every append.
+    """
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    ids: set[str] = set()
+    for entry in transcript._entries:
+        payload = entry.payload
+        if str(payload.get("custom_type", "")) != WAKE_PROMPT_MESSAGE_TYPE:
+            continue
+        details = payload.get("details")
+        if isinstance(details, dict) and details.get("hidden"):
+            ids.add(entry.id)
+    return frozenset(ids)
+
+
 def _capture_display_window(
     transcript: Transcript,
     *,
@@ -637,6 +691,25 @@ def _capture_display_window(
         history = transcript.build_llm_history(through_id=through_id) if through_id else []
     except ValueError:
         return DisplayHistoryWindow(status="reset", **envelope)
+    # HIDDEN WAKE DELIVERIES ARE SUBTRACTED FROM THE DISPLAY REPLAY, not from
+    # the model's (design §8.2.2 item 4). ``build_llm_history`` is the model's
+    # replay, in which a wake delivery legitimately appears as a user turn —
+    # that is how the fire reaches the agent — but a hidden (patience) fire
+    # must reach ONLY the agent. ``convert_to_llm`` carries the custom
+    # message's id onto the rendered user message, so the ids we collected off
+    # the journal find their renders here, one for one.
+    hidden_ids = _hidden_wake_entry_ids(transcript)
+    if hidden_ids:
+        history = [
+            message for message in history if str(getattr(message, "id", "")) not in hidden_ids
+        ]
+    # The arm's OWN tool rows (the call and its result) are a second shape the
+    # fire's id-set cannot see — rendered ``Message``s, not wake customs — and
+    # they must be subtracted for the same reason (R2-1: without this the
+    # owner→viewer window served ``tool_calls=[patience]`` / ``tool_name=
+    # 'patience'`` rows straight to desktop clients). Display-only: the model's
+    # replay keeps the pair, or the agent cannot see the wait it armed.
+    history = [message for message in history if not is_hidden_tool_message(message)]
     # These identities belong to the SAME durable cut as the page. Derive
     # them before discarding the full replay, including on an oversized page;
     # a subscribing session must not reconstruct history a second time.

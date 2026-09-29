@@ -1030,13 +1030,17 @@ async def test_a_second_inline_command_of_the_same_kind_is_plain_argument_text()
         assert session.prompts == ["improve the /team command"], session.prompts
 
 
-def _agent_registry(tmp: str):
+def _agent_registry(tmp: str, extra_names: tuple[str, ...] = ()):
     """A real registry holding one role, one specialist, one PRIVATE chat row.
 
     The private row is the load-bearing fixture: `/agent` shares the registry
     with ordinary conversational agents, and the scope rule under test is
     that only rows tagged as roles or marked as specialists are listed or
     accepted.
+
+    ``extra_names`` creates plain role rows for the cells that need a name
+    the defaults must not carry (R4-1's ``class``); the default stays empty so
+    the listing cells' row sets remain exactly what they pin.
     """
     from local_operator.agents import AgentEditFields, AgentRegistry
 
@@ -1086,6 +1090,10 @@ def _agent_registry(tmp: str):
         _fields(name="hollow-role", description="Resolves but says nothing", tags=["role"])
     )
     registry.set_agent_system_prompt(hollow.id, "")
+    for extra in extra_names:
+        registry.create_agent(
+            _fields(name=extra, description=f"Extra role {extra!r}", tags=["role"])
+        )
     return registry
 
 
@@ -1171,6 +1179,31 @@ async def test_agent_rejects_unknown_and_private_names() -> None:
     assert session.prompts == []
     assert any("no agent named 'no-such-profile'" in n for n in notices), notices
     assert any("no agent named 'private-chat'" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_the_escape_reaches_a_profile_named_class_on_the_tui_host() -> None:
+    """R4-1: the TUI host's authoritative dispatcher strips the ``=`` escape.
+
+    A follower of a TUI-hosted session goes ``run_slash_authoritative`` →
+    ``_agent_slash_result`` → ``_agent_attach_slash_result``; that last seam
+    was the one runner without the strip, so ``/agent =class`` reached
+    ``no agent named '=class'`` while ``_cmd_agent`` and
+    ``serving.py::_agent_attach_slash`` attached the same name. The local
+    typed form is exercised as the control, so a fix that only moves the
+    failure around cannot pass.
+    """
+    session = FakeSession()
+    session.agent_registry = _agent_registry(tempfile.mkdtemp(), extra_names=("class",))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _boot(pilot, app)
+        outcome = await app.run_slash_authoritative("agent", "=class")
+        await _submit(pilot, app, "/agent =class")  # control: the local seam
+        notices = _notice_texts(app)
+    assert "no agent named" not in outcome["text"], outcome
+    assert session.attached_agents == ["class", "class"], session.attached_agents
+    assert not any("no agent named" in n for n in notices), notices
 
 
 @pytest.mark.asyncio

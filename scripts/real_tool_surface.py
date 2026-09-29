@@ -91,6 +91,12 @@ def build_real_tool_context(cwd: str) -> ToolContext:
         # Each of these is a createIf gate; see the module docstring.
         wake_scheduler=_stub_for(_types.WakeSchedulerProtocol),
         monitor_scheduler=_stub_for(_types.MonitorSchedulerProtocol),
+        # The proactive CLASS is the patience tool's other createIf gate
+        # (design §8.2.5): without it the measured surface is 30 of 31 tools —
+        # the same "measures a surface no user has" defect the project
+        # registry note below records (found by the context-budget job on the
+        # class PR).
+        action_class="proactive",
         subagent_launcher=_stub_for(_types.SubagentLauncher),
         jobs=_stub_for(_types.JobManagerProtocol),
         browser=_stub_for(_types.BrowserSurfaceProtocol, surface_id="stub"),

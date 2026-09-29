@@ -309,6 +309,114 @@ def _row_id(row: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _row_custom_type(row: Any) -> str:
+    value = (
+        row.get("custom_type") if isinstance(row, Mapping) else getattr(row, "custom_type", None)
+    )
+    return value if isinstance(value, str) else ""
+
+
+def _row_details(row: Any) -> Mapping[str, Any]:
+    value = row.get("details") if isinstance(row, Mapping) else getattr(row, "details", None)
+    return value if isinstance(value, Mapping) else {}
+
+
+def is_hidden_wake_delivery(row: Any) -> bool:
+    """Whether this row is a HIDDEN wake delivery (a patience fire).
+
+    Hidden deliveries must be invisible on every human surface while their text
+    stays in the model's context — the requirement is "no wake line, no card, no
+    badge, no timer notification". The marker is ``details.hidden`` on the
+    ``wake_prompt`` custom message (written by the delivery path), and it is
+    read here so the fold, the tail-snap walk, the replay receipt and the
+    desktop window all make ONE decision rather than four.
+    """
+    # Lazy import, the pattern :func:`is_harness_injection` documents: this
+    # module sits on both folds' import path, and the constant's owner
+    # (``harness/wake.py``) drags the scheduler's asyncio import with it.
+    from local_operator.harness.wake import WAKE_PROMPT_MESSAGE_TYPE
+
+    return _row_custom_type(row) == WAKE_PROMPT_MESSAGE_TYPE and bool(
+        _row_details(row).get("hidden")
+    )
+
+
+#: Tool names whose rows must NEVER paint on a human surface.
+#:
+#: ``patience`` arms a hidden internal timer: R30 promises "no wake line, no
+#: timer notification", and the tool's own copy tells the model the wait and
+#: its fire "are invisible to the user" — the tool ledger row (``▸ patience
+#: arm 90s ✓``) contradicted both (UX round 1, U2). The rows STAY in the
+#: model's context, which is what lets it read what it armed; every
+#: presentation skips them the way a hidden wake delivery is skipped.
+HIDDEN_TOOL_NAMES: frozenset[str] = frozenset({"patience"})
+
+
+def is_hidden_tool_name(name: Any) -> bool:
+    """Whether a tool NAME is one whose rows must not render."""
+    return str(name or "") in HIDDEN_TOOL_NAMES
+
+
+def is_hidden_tool_call(call: Any) -> bool:
+    """Whether a ``ToolCall``-shaped object names a hidden tool."""
+    return is_hidden_tool_name(getattr(call, "name", None))
+
+
+def is_hidden_tool_row(row: Any) -> bool:
+    """Whether a stored row is a hidden tool's RESULT or CALL row.
+
+    Two stored shapes carry one call: the ``role: "tool"`` row carries its own
+    ``tool_name``, and the assistant row carries ``tool_calls[].name``. Only a
+    row that carries NOTHING visible is hidden by the calls it also happens to
+    mention — an assistant row with prose keeps rendering (its patience entry
+    is skipped by :func:`is_hidden_tool_call` at the paint sites that mount
+    per-call rows), and a result row is judged by its own ``tool_name`` rather
+    than by remembering a call that may sit on a page this row's does not.
+    """
+    payload = row.get("payload") if isinstance(row, Mapping) else getattr(row, "payload", None)
+    if not isinstance(payload, Mapping):
+        return False
+    if str(payload.get("tool_name") or "") in HIDDEN_TOOL_NAMES:
+        return True
+    calls = payload.get("tool_calls") or ()
+    if not calls:
+        return False
+    if str(payload.get("role") or "") != "assistant" or _row_text(payload).strip():
+        return False
+    return all(
+        str(call.get("name") if isinstance(call, Mapping) else getattr(call, "name", "") or "")
+        in HIDDEN_TOOL_NAMES
+        for call in calls
+    )
+
+
+def is_hidden_tool_message(message: Any) -> bool:
+    """Whether a rendered ``Message`` is a hidden tool's RESULT or CALL row.
+
+    The replay-side twin of :func:`is_hidden_tool_row`, and deliberately a
+    SEPARATE function rather than a wider one: they read different shapes —
+    that one a stored row wrapping a ``payload``, this one the ``build_llm_
+    history`` output the history window serves — and merging them would make a
+    stored-row caller silently depend on ``Message``'s attributes. Same
+    two-shape rule, because the window builder must subtract exactly what the
+    paint seams would have skipped: a ``role: "tool"`` row by its own
+    ``tool_name``; an assistant row only when it carries no visible text and
+    every call on it is hidden (prose keeps rendering; its hidden call is
+    skipped per-call at the paint sites).
+    """
+    role = str(getattr(message, "role", "") or "")
+    if role == "tool":
+        return is_hidden_tool_name(getattr(message, "tool_name", None))
+    if role != "assistant":
+        return False
+    calls = getattr(message, "tool_calls", None) or ()
+    if not calls:
+        return False
+    if str(getattr(message, "text", "") or "").strip():
+        return False
+    return all(is_hidden_tool_call(call) for call in calls)
+
+
 def is_harness_notice_row(row: Any) -> bool:
     """Whether this row is harness-authored and must not paint as the user's words.
 
@@ -317,8 +425,14 @@ def is_harness_notice_row(row: Any) -> bool:
     context replay (where the row may be a stamped render or a copy a compaction
     marker carried) and the audit replay (where it is the stored row itself).
 
-    Two shapes answer True, and they need different evidence:
+    THREE shapes answer True now, and they need different evidence:
 
+    * **a HIDDEN wake delivery** (:func:`is_hidden_wake_delivery`) — a patience
+      fire is harness-internal by requirement; it must not paint as a wake
+      receipt, a user row, or a fold anchor. Checked FIRST because it is the
+      one shape the stamp below cannot recognise on the raw payload (the
+      stamp lands on the rendered user message, while the fold sometimes holds
+      the CustomMessage itself).
     * **the stamp** (:func:`is_harness_injection`) — the renderer minted the row
       from a ``CustomMessage`` in this process. The primary test, and the only
       provenance a live or freshly rendered row carries.
@@ -346,6 +460,8 @@ def is_harness_notice_row(row: Any) -> bool:
     """
     from local_operator.compaction.cutpoint import PRESERVED_TURN_ELISION_ID_PREFIX
 
+    if is_hidden_wake_delivery(row):
+        return True
     if is_harness_injection(row):
         return True
     if _row_id(row).startswith(PRESERVED_TURN_ELISION_ID_PREFIX):

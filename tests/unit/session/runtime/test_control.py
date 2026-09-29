@@ -259,6 +259,50 @@ def test_mark_wakes_dormant_no_entry_is_zero(tmp_path: Path) -> None:
     assert control._mark_wakes_dormant(record, tmp_path) == 0
 
 
+def test_mark_wakes_dormant_counts_scheduled_rows_only(tmp_path: Path) -> None:
+    """The count is a HUMAN-facing number, so hidden patience rows do not ride it.
+
+    The park itself is deliberately unfiltered (a stopped session must not fire
+    hidden timers either — asserted on the entry below), but "N wakes dormant"
+    about rows the user never saw would be a claim about invisible machinery
+    (design §8.2.2 item 5).
+    """
+    from local_operator.wakes import store as wake_store
+
+    wake_store.write_entry(
+        tmp_path,
+        "dormtest",
+        cwd="/tmp/dormtest",
+        schedules=[
+            {"id": "w1", "message": "one", "every_ms": 60000, "next_due_at": 1},
+            {
+                "id": "patience-1",
+                "message": "",
+                "next_due_at": 2,
+                "kind": "patience",
+                "hidden": True,
+                "episode_id": "patience-1",
+                "attempt": 1,
+                "armed_at": 1,
+            },
+        ],
+    )
+    record = SessionRecord(
+        pid=1,
+        kind="tui",
+        session_id="dormtest",
+        conversation_name="x",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+    )
+    assert control._mark_wakes_dormant(record, tmp_path) == 1
+    entry = wake_store.read_entry(tmp_path, "dormtest") or {}
+    assert len(entry.get("schedules") or []) == 2, "every row is parked, hidden ones included"
+    assert entry.get("stopped_at") is not None
+
+
 @pytest.mark.asyncio
 async def test_stop_all_never_targets_the_callers_own_pid(
     monkeypatch: pytest.MonkeyPatch, no_signals

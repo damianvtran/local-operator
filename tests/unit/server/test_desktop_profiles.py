@@ -540,3 +540,34 @@ async def test_sync_route_answers_a_name_that_is_not_installed(api) -> None:
     (entry,) = result.json()["result"]["entries"]
     assert entry["verdict"] == "not-installed"
     assert "op='install'" in entry["detail"]
+
+
+async def test_profile_payloads_carry_the_class_in_its_effective_spelling(api):
+    """The switch's desktop surface must be able to READ what it can WRITE.
+
+    ``PATCH`` accepted ``action_class`` and ``divergent_fields`` could already
+    report ``class``, while neither the detail nor the catalogue carried the
+    value — so a client could not show the control's current state and a
+    payload could name a field no reader could find (QA round 1, Q2). Both
+    payloads ride one projection; this pins both, before and after a flip.
+    """
+    from local_operator.agent_profiles import install_seed
+
+    client, root = api
+    registry = AgentRegistry(root)
+    install_seed("reviewer", registry=registry)
+
+    detail = await client.get("/v1/desktop/profiles/reviewer")
+    assert detail.status_code == 200, detail.text
+    # Absence reads REACTIVE, the effective spelling, not missing.
+    assert detail.json()["result"]["action_class"] == "reactive"
+
+    flipped = await client.patch(
+        "/v1/desktop/profiles/reviewer", json=mutation(action_class="proactive")
+    )
+    assert flipped.status_code == 200, flipped.text
+    assert flipped.json()["result"]["action_class"] == "proactive"
+
+    rows = (await client.get("/v1/desktop/profiles")).json()["result"]["profiles"]
+    row = next(candidate for candidate in rows if candidate["name"] == "reviewer")
+    assert row["action_class"] == "proactive"

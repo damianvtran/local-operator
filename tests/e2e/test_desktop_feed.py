@@ -990,7 +990,7 @@ async def test_an_authored_profile_and_team_ring_the_authoring_doorbell(
 
             # (1) A role authored the way the `agent` tool authors one.
             registry = AgentRegistry(root)
-            name, kind = await asyncio.to_thread(
+            name, kind, _action_class = await asyncio.to_thread(
                 write_profile,
                 registry,
                 AgentParams(

@@ -7523,8 +7523,23 @@ def _todo_state(session_id: str) -> list[TodoPhaseState]:
 
 
 def _wake_state(scheduler: Any) -> list[WakeState]:
+    """The session's VISIBLE wake rows.
+
+    The scheduler owns both kinds; patience waits are hidden internal timers
+    and must never reach a frontend (§8.2.2 item 5). The desktop renders
+    exactly this list — ``canonical.frontend.wakes`` drives the composer wake
+    chip AND the run pane's Wakes section — so filtering here is what keeps
+    "no badge, no listing" true on a routable surface (agent review round 1,
+    R1). One shared filter with every other human surface
+    (``wakes.store.scheduled_rows``).
+    """
     try:
-        return [WakeState.model_validate(schedule.model_dump()) for schedule in scheduler.schedules]
+        from local_operator.wakes.store import scheduled_rows
+
+        return [
+            WakeState.model_validate(schedule.model_dump())
+            for schedule in scheduled_rows(list(getattr(scheduler, "schedules", None) or ()))
+        ]
     except Exception:
         return []
 

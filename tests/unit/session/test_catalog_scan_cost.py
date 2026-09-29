@@ -1795,3 +1795,44 @@ class TestBirthDatesAreMemoizedNotBounded:
         repaired = load_catalog(tmp_path)[0].row.created_at
         assert fallback != 7.0
         assert repaired == session_created_at(sidecar.parent) == 7.0
+
+
+def test_wakes_counts_scheduled_rows_only(tmp_path: Path) -> None:
+    """A patience wait is invisible in the picker's wake count too.
+
+    ``decorate_rows`` sets ``wakes`` from the raw index; that count drives the
+    armed-wake glyph and the "Scheduled" status word, so a session whose only
+    row is a hidden timer must read as having no wakes — and a real wake
+    beside one still counts as one (design §8.2.2 item 5, the index-count
+    consumers).
+    """
+    from local_operator.wakes import store as wake_store
+
+    patience_row = {
+        "id": "patience-1",
+        "message": "",
+        "next_due_at": 2,
+        "kind": "patience",
+        "hidden": True,
+        "episode_id": "patience-1",
+        "attempt": 1,
+        "armed_at": 1,
+    }
+    _session(tmp_path, "aaaabbbbcccc", stamp=1000.0)
+    wake_store.write_entry(
+        tmp_path,
+        "aaaabbbbcccc",
+        cwd=str(tmp_path),
+        schedules=[patience_row],
+    )
+    entry = next(e for e in load_catalog(tmp_path) if e.id == "aaaabbbbcccc")
+    assert entry.row.wakes == 0
+
+    wake_store.write_entry(
+        tmp_path,
+        "aaaabbbbcccc",
+        cwd=str(tmp_path),
+        schedules=[{"id": "w1", "message": "m", "next_due_at": 3}, patience_row],
+    )
+    entry = next(e for e in load_catalog(tmp_path) if e.id == "aaaabbbbcccc")
+    assert entry.row.wakes == 1

@@ -2847,13 +2847,20 @@ class Editor(TextArea):
         name, sep, tail = list_argument.partition(" ")
         if not name or not sep or tail.strip():
             return None
-        # `/team chart ` is NOT a completed name — `chart` is the reserved
-        # subcommand, and the space leads into the second-slot team list that
-        # feeds the chart, not into a switch/send choice. The attach-or-send
-        # semantics this hint names do not apply, so it must not show. (A team
-        # literally named `chart` is talked to with `/team =chart …`, whose
-        # leading `=` makes the first token not equal `chart`.)
-        if self._argument_command in ("team", "teams") and name.lower() == "chart":
+        # A reserved FIRST WORD is not a completed name: `/team chart ` opens
+        # the second-slot list that feeds the chart, and `/agent class ` the
+        # profile list that feeds the class report — neither is the
+        # attach-or-send choice this hint names, so it must not show. (A team
+        # literally named `chart` is talked to with `/team =chart …`, and an
+        # agent named `class` with `/agent =class …`: the leading `=` keeps the
+        # first token from matching either reserved word.)
+        reserved_first_words: dict[str, frozenset[str]] = {
+            "team": frozenset({"chart"}),
+            "teams": frozenset({"chart"}),
+            "agent": frozenset({"class"}),
+            "agents": frozenset({"class"}),
+        }
+        if name.lower() in reserved_first_words.get(self._argument_command or "", frozenset()):
             return None
         return self.NAME_SWITCH_HINT
 
@@ -7944,14 +7951,18 @@ class Editor(TextArea):
                 self._name_choices = frozenset()
                 self._name_choices_family = None
                 self.post_message(ArgumentQueryOpened(command or ""))
-            elif command in ("mcp", "team", "teams", "project"):
-                # `/mcp`, `/team` and `/project` are two-level: `/mcp` reserves
-                # verbs in the first argument slot and offers servers in the
-                # second; `/team` reserves the `chart` subcommand in the first
-                # slot and, once `chart ` is present, re-offers TEAM NAMES in
-                # the second (the [name] the chart wants); `/project` reserves
-                # its six verbs and re-offers PROJECT NAMES once a name-taking
-                # verb's space is typed. ArgumentQueryOpened fires on the
+            elif command in ("mcp", "team", "teams", "project", "agent", "agents"):
+                # `/mcp`, `/team`, `/project` and `/agent` are two-level: `/mcp`
+                # reserves verbs in the first argument slot and offers servers
+                # in the second; `/team` reserves the `chart` subcommand in the
+                # first slot and, once `chart ` is present, re-offers TEAM NAMES
+                # in the second (the [name] the chart wants); `/project`
+                # reserves its six verbs and re-offers PROJECT NAMES once a
+                # name-taking verb's space is typed; `/agent` reserves `class`
+                # and, once `class ` is present, re-offers the profile names as
+                # `class <name>` compounds (UX round 2, U5: unlisted here, the
+                # crossing never posted a refresh and the second slot stayed
+                # unreachable). ArgumentQueryOpened fires on the
                 # command WORD, so without this the first-slot rows would stay
                 # up after the subcommand was completed and the second slot
                 # would have nothing to offer. Tracked rather than refreshed per
@@ -8004,6 +8015,24 @@ class Editor(TextArea):
                     project_key = f"{first_tok.casefold()}{sep}" if list_argument else ""
                     if project_key != (self._argument_subcommand or ""):
                         self._argument_subcommand = project_key
+                        self.post_message(RefreshArgumentChoices(command, cursor))
+                elif command in ("agent", "agents"):
+                    # `/agent`'s reserved verb opens a second slot exactly as
+                    # `chart ` does — the builder flips from the verb rows to
+                    # the `class <name>` compounds precisely on the terminating
+                    # space, so the crossing is tracked as a BOUNDARY, not the
+                    # token (`class`→`class ` leaves the token unchanged; a
+                    # token-keyed tracker would never fire on the space that
+                    # opens slot two — the identical trap the `/mcp` branch
+                    # documents). A name-first token (`/agent security `) is the
+                    # talk path whose choice set never changes and must NOT
+                    # post a refresh: the handler clears the notice, which
+                    # would wipe the switch/send parked hint (D5, #250).
+                    class_second_slot = "class" if (first_tok.casefold() == "class" and sep) else ""
+                    was_class_slot = self._argument_subcommand == "class"
+                    is_class_slot = class_second_slot == "class"
+                    self._argument_subcommand = class_second_slot
+                    if was_class_slot != is_class_slot:
                         self.post_message(RefreshArgumentChoices(command, cursor))
                 else:
                     # `/team` has exactly ONE thing that changes its choice set:

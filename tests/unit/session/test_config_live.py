@@ -194,6 +194,20 @@ def _fetch_settings(watcher: ConfigWatcher):
     return load_fetch_settings(ConfigManager(watcher.config_dir))
 
 
+def _patience_policy() -> Any:
+    """What the arm path resolves when it arms a wait.
+
+    Read through the very function ``Session`` calls at that moment
+    (``local_operator.wakes.patience.policy``), which resolves
+    ``paths.config_dir()`` itself — the probe points that at the watched
+    directory, so a write from another process lands on the next arm.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.wakes import patience as patience_engine
+
+    return patience_engine.policy(config_dir())
+
+
 def _bash_shell(watcher: ConfigWatcher) -> str:
     """What `execute_bash` resolves per call (it reads through `paths.config_dir()`,
     which the probe points at the watcher's directory)."""
@@ -595,6 +609,19 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # leaving. The per-call gate inside the tools is covered separately.
     "web_search.enabled": (False, lambda s, w: _web_tool_offered(s, "web_search")),
     "web_fetch.enabled": (False, lambda s, w: _web_tool_offered(s, "web_fetch")),
+    # -- proactive class: the arm path re-reads every bound --------------------
+    # The patience bounds guard a HIDDEN mechanism, and the reader is exactly
+    # ``patience.policy(config_dir())`` — called at the moment a wait is armed
+    # (and again when a fire classifies itself), which is what makes the
+    # section LIVE: a write from another process lands on the NEXT arm, while an
+    # episode already in flight keeps the numbers it armed with (§8.2.4). The
+    # probes observe through that very function on the watched directory, so
+    # they move exactly when the arm path would.
+    "proactive.patience.default_ms": (421_000, lambda s, w: _patience_policy().default_ms),
+    "proactive.patience.backoff": (5, lambda s, w: _patience_policy().backoff),
+    "proactive.patience.max_attempts": (7, lambda s, w: _patience_policy().max_attempts),
+    "proactive.patience.episode_ttl_ms": (8_888_000, lambda s, w: _patience_policy().ttl_ms),
+    "proactive.patience.max_pending": (2, lambda s, w: _patience_policy().max_pending),
 }
 
 #: LIVE sections whose keys have no session-side apply because a HOST owns

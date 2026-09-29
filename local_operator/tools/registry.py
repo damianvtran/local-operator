@@ -48,6 +48,9 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "web_read": lambda context: build_web_read_tool(context),
     "web_fetch": lambda context: build_web_fetch_tool(context),
     "wake": lambda context: builtin.build_wake_tool(context),
+    # createIf: proactive-class sessions with a scheduler only (rung 3 — a
+    # reactive session pays no schema for a capability it cannot use).
+    "patience": lambda context: builtin.build_patience_tool(context),
     "task": lambda context: builtin.build_task_tool(context),
     "wait": lambda context: builtin.build_wait_tool(context),
     "jobs": lambda context: builtin.build_jobs_tool(context),
@@ -108,6 +111,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "web_read",
     "web_fetch",
     "wake",
+    "patience",
     "task",
     "wait",
     "jobs",

@@ -192,6 +192,7 @@ from local_operator.slash_commands import (
     PROJECT_PAGE_VERBS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
+    agent_subcommand_rows,
     network_subcommand_rows,
     primary_slash_name,
     project_jump_already_text,
@@ -14087,7 +14088,15 @@ class OperatorApp(App[None]):
         # ONCE per pass, mirroring the replay fold's narration read: a display
         # preference cannot change part-way through one repaint.
         hide_cross_session = cross_session_hidden()
+        from local_operator.harness.rows import is_hidden_tool_call
+
         for call in calls:
+            # HIDDEN tools never paint a row on any seam: this one restores the
+            # row for a call already in flight, so skipping it here is what
+            # keeps a resumed ``patience`` call from appearing where the live
+            # path refuses to mount it (UX round 1, U2).
+            if is_hidden_tool_call(call):
+                continue
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
                 continue
@@ -18736,9 +18745,14 @@ class OperatorApp(App[None]):
             editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
             return
         if command in ("agent", "agents"):
-            choices = self._agent_choices()
+            choices = self._agent_argument_choices(editor)
             picker.set_choices(choices)
-            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+            # The NAME-completion vocabulary stays names-only, exactly as
+            # ``/team``'s does: its reserved ``chart`` word is a picker ROW but
+            # never a Tab completion ("Tab must never silently open a chart
+            # when the user meant to message"), and the same rule protects
+            # ``/agent`` — Tab completes profiles, the picker shows the verb.
+            editor.set_name_choices(frozenset(c.name.lower() for c in self._agent_choices()))
 
     def _project_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/project <…>`` list: the reserved verbs, then names.
@@ -19446,6 +19460,9 @@ class OperatorApp(App[None]):
         """
         session = self._session
         registry = getattr(session, "agent_registry", None) if session is not None else None
+        from local_operator.action_class import PROACTIVE, class_from_tags
+        from local_operator.action_class import normalize as normalize_action_class
+
         rows: list[tuple[str, str, str]] = []
         seen: set[str] = set()
         if registry is not None and hasattr(registry, "list_agents"):
@@ -19466,6 +19483,15 @@ class OperatorApp(App[None]):
                     if is_role(agent):
                         profile = profile_from_agent(registry, agent)
                         facts = "role"
+                        # The CLASS leads the optional facts (design round 1,
+                        # D1): the settings pane truncates this line to 27
+                        # cells, and a marker appended after a configured
+                        # role's model/effort was the first thing cut — the
+                        # surface §8.1.3 puts forward as where the class is
+                        # visible could not show it on exactly the agents that
+                        # carry config detail.
+                        if normalize_action_class(profile.action_class) == PROACTIVE:
+                            facts += " · proactive"
                         # Model/effort are facts a user picks a hat by; the
                         # rest of the profile is what the attach applies.
                         if profile.model:
@@ -19477,7 +19503,10 @@ class OperatorApp(App[None]):
                         seen.add(profile.name.lower())
                     elif is_specialist(agent):
                         summary = str(agent.description or "").strip()
-                        specialists.append((str(agent.name), "specialist", summary))
+                        class_fact = (
+                            " · proactive" if class_from_tags(agent.tags) == PROACTIVE else ""
+                        )
+                        specialists.append((str(agent.name), f"specialist{class_fact}", summary))
                         seen.add(str(agent.name).lower())
                 except Exception:
                     continue
@@ -19497,7 +19526,10 @@ class OperatorApp(App[None]):
             if profile is None:
                 continue
             summary = (profile.when_to_use or profile.description or "").strip()
-            seeds.append((profile.name, "role · packaged", summary))
+            seed_facts = "role · packaged"
+            if normalize_action_class(profile.action_class) == PROACTIVE:
+                seed_facts += " · proactive"
+            seeds.append((profile.name, seed_facts, summary))
         rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
         return rows
 
@@ -19506,6 +19538,87 @@ class OperatorApp(App[None]):
         return [
             ArgumentChoice(name, summary or "no description", detail=facts)
             for name, facts, summary in self._agent_profile_rows()
+        ]
+
+    def _agent_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for the ``/agent <…>`` list: agent NAMES first, then the reserved verb.
+
+        The ``/team`` ordering rule, applied to this command's one reserved
+        first token. In the first slot the agent NAMES come first and the
+        reserved ``class`` row is appended AFTER them: ``argument_suggestions``
+        returns rows in list order for an empty query, so a bare ``/agent `` +
+        Tab completes the sole (or first) AGENT — the common action is
+        attaching/messaging — and the verb can never be what Tab silently
+        lands in (UX round 2, U4; the same collision-safety ``/team``'s
+        ``chart`` row documents). The verb stays fully discoverable: the row
+        is visible in the list, and the matcher ranks it up the moment the
+        user types ``c``/``cl``/``class`` — a typed query is scored, not
+        list-ordered.
+
+        An agent literally named ``class`` collides with the reserved word
+        exactly as a team named ``chart`` collides with its subcommand: its
+        row completes to the ``=class `` ESCAPE (the handlers strip one
+        leading ``=``), which its detail names. The same rule covers a name
+        that ITSELF starts with ``=`` (R4-2 — ``=`` is not a reserved
+        character): such a row completes doubled (``==foo``), because the
+        strip removes exactly one and the doubled form resolves the literal
+        name.
+
+        Once ``class `` is in the buffer the second slot re-offers the profile
+        names as ``class <name>`` compounds, which complete to the report
+        form.
+        """
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(
+            editor.text,
+            editor._argument_commands,
+            editor._caret_offset(),
+            editor._command_names,
+        )
+        if argument is None:
+            return []
+        first, space, _rest = argument.partition(" ")
+        names = self._agent_choices()
+        if not space:
+            rows: list[ArgumentChoice] = []
+            for choice in names:
+                if choice.name.casefold() == "class" or choice.name.startswith("="):
+                    # The escape row. Two cases, one shape: completing a bare
+                    # `class` would route to the subcommand, and completing a
+                    # name that already starts with `=` would resolve its
+                    # STRIPPED spelling — the handlers remove exactly ONE `=`,
+                    # so both complete to a row whose leading `=` makes the
+                    # strip a no-op against the name that follows (R4-2).
+                    rows.append(
+                        ArgumentChoice(
+                            f"={choice.name}",
+                            choice.description,
+                            detail=f"attach · {choice.detail}",
+                        )
+                    )
+                else:
+                    rows.append(choice)
+            # The reserved row is offered AFTER the names — discoverable, and
+            # rank-able by a typed query, but never the default Tab completion.
+            rows.extend(
+                ArgumentChoice(word, help_text, detail="subcommand")
+                for word, help_text in agent_subcommand_rows()
+            )
+            return rows
+        if first.casefold() not in {word for word, _help in agent_subcommand_rows()}:
+            return []
+        return [
+            ArgumentChoice(
+                # U7: a name whose OWN spelling starts with `=` completes
+                # DOUBLED (`class ==foo`), because the class resolver strips
+                # exactly one `=` like the attach seams — completing it raw
+                # offered a compound the grammar itself refused.
+                f"{first.casefold()} {'=' if choice.name.startswith('=') else ''}{choice.name}",
+                choice.description,
+                detail=choice.detail,
+            )
+            for choice in names
         ]
 
     def _agent_list_block(self, rows: list[tuple[str, str, str]]) -> RichBlock:
@@ -19575,6 +19688,53 @@ class OperatorApp(App[None]):
             return
         self._status.update(team=str(getattr(self._session, "active_team_name", "") or ""))
 
+    def _cmd_agent_class(self, rest: str, notice: NoticeFn) -> None:
+        """``/agent class <name> [proactive|reactive]`` — the class switch (R36).
+
+        ``/agent class <name>`` REPORTS the current class; the second token
+        flips it. Mirrors ``/team chart``'s grammar, escapes included: a
+        leading ``=`` on the name is the literal-name escape, and
+        ``/agent class class …`` reaches an agent literally named ``class``
+        through the grammar itself.
+
+        Runs in a worker: the flip writes the registry (disk) and the
+        best-effort cleanup that follows touches the session's wake writer —
+        neither may park the event loop. The grammar itself lives in
+        ``action_class.class_switch_receipt``, shared with the two routed
+        handlers (see ``_agent_class_worker``).
+        """
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        registry = getattr(session, "agent_registry", None)
+        if registry is None or not hasattr(registry, "get_agent_by_name"):
+            self._system_notice(
+                "agents are unavailable in this session. Ask the agent to create one.",
+                "warning",
+            )
+            return
+        self.run_worker(self._agent_class_worker(rest, notice), thread=False, group="session")
+
+    async def _agent_class_worker(self, rest: str, notice: NoticeFn) -> None:
+        """Run the SHARED switch grammar and report its receipt as a notice.
+
+        ``class_switch_receipt`` owns the grammar and the wording; this worker
+        only adapts the result to this host's notice plumbing, so the routed
+        and unrouted receipts are the same sentences by construction
+        (review/UX round 1, U1).
+        """
+        from local_operator.action_class import class_switch_receipt
+        from local_operator.session.frontend_state import SlashResult
+
+        session = self._session
+        if session is None:
+            self._system_notice(*self._no_session_notice())
+            return
+        result = await class_switch_receipt(session, rest, SlashResult)
+        severity: NoticeKind = "warning" if getattr(result, "style", "") == "warning" else "info"
+        notice(str(getattr(result, "text", "") or ""), severity)
+
     def _cmd_agent(
         self,
         arg: str,
@@ -19616,9 +19776,34 @@ class OperatorApp(App[None]):
                 return
             self._append_block(self._agent_list_block(rows))
             return
+        # The first argument token is a small RESERVED subcommand namespace,
+        # exactly as `/team` reserves `chart` and `/aida` reserves pause/resume/
+        # status. One reserved word: `class`, the R36 proactive-class switch.
+        # It wins in first position, with the two `/team` escape hatches —
+        # `/agent class class <cls>` switches an agent literally named `class`
+        # (the second token is the name), and a leading `=` on the name
+        # (`/agent =class …`) means "literal name, never a subcommand", and the
+        # strip removes exactly ONE `=` — `=` is NOT a reserved character in
+        # profile names (`create_agent(name="=foo")` succeeds), so a profile
+        # whose name itself starts with `=` is addressed by doubling it
+        # (`/agent ==foo` reaches the profile literally named `=foo`; review
+        # round 4, R4-2: the escape is positional, not a charset restriction).
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
+            self._cmd_agent_class(rest.strip(), notice)
+            return
         name, _, request = arg.partition(" ")
         name = name.strip()
         request = request.strip()
+        # The `=` escape (see the subcommand comment above). The strip runs
+        # BEFORE the clear/none check below, so `/agent =none` DETACHES — it
+        # does not reach a profile literally named `none` (the old comment
+        # claimed otherwise; review round 5, behaviour intended). A name whose
+        # own spelling starts with `=` is reached by DOUBLING the escape
+        # (`/agent ==none` → the profile `=none`), and the bare words
+        # clear/none stay reserved by the detach verb.
+        if name.startswith("="):
+            name = name[1:]
         # ``clear``/``none`` are the DETACH verb, not a name to look up — the
         # mirror of ``/goal`` with no text clearing the objective. A real agent
         # literally named "clear" is a non-concern: profile names are curated,
@@ -45757,7 +45942,7 @@ class OperatorApp(App[None]):
         if command == "team":
             return self._team_slash_result(args, SlashResult)
         if command == "agent":
-            return self._agent_slash_result(args, SlashResult)
+            return await self._agent_slash_result(args, SlashResult)
         if command == "model":
             if not args.strip():
                 # Bare /model opens the invoker's OWN picker — there is nothing
@@ -46456,7 +46641,7 @@ class OperatorApp(App[None]):
         # from the detached runtime.
         return self._team_attach_slash_result(arg, registry, SlashResult)
 
-    def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
         if not arg:
             rows = self._agent_profile_rows()
             if not rows:
@@ -46466,6 +46651,14 @@ class OperatorApp(App[None]):
                     style="info",
                 )
             return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+        # The reserved word, for the same reason the runtime's handler has it:
+        # a session hosted by THIS app answers a follower out of here, and the
+        # switch must be reachable from that seam too (review/UX round 1, U1).
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
+            from local_operator.action_class import class_switch_receipt
+
+            return await class_switch_receipt(self._session, rest.strip(), SlashResult)
         return self._agent_attach_slash_result(arg, SlashResult)
 
     def _team_attach_slash_result(self, arg: str, registry: Any, SlashResult: Any) -> Any:
@@ -46537,6 +46730,15 @@ class OperatorApp(App[None]):
         session = self._session
         name, _, request = arg.partition(" ")
         name = name.strip()
+        # The ``=`` escape, mirroring ``_team_attach_slash_result`` above and
+        # the other two agent seams (``_cmd_agent``, ``serving.py``): the strip
+        # removes exactly ONE ``=`` and the remainder is looked up literally,
+        # so a profile literally named ``class`` — and any name that itself
+        # starts with ``=``, addressed by doubling it — stays reachable from a
+        # follower of THIS app's session (review round 4, R4-1: this builder
+        # was the one seam without it).
+        if name.startswith("="):
+            name = name[1:]
         request = request.strip()
         if name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)
@@ -49426,6 +49628,15 @@ class OperatorApp(App[None]):
         reasonable reading of that frame was that the agent had hung.
         """
         event = message.event
+        # A HIDDEN tool's row never paints (UX round 1, U2): the announcement
+        # is where the row first exists, and suppressing it at the SOURCE —
+        # before the supersede/rekey bookkeeping — is what keeps the later
+        # start/end frames from finding a registry to adopt. The rows stay in
+        # the model's context; only the screen skips them.
+        from local_operator.harness.rows import is_hidden_tool_name
+
+        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
         # The call's real id has just arrived for a row this surface mounted
         # under an index-derived placeholder: REKEY the row rather than letting
         # the lookup below miss and mount a second one. Without this the
@@ -49548,6 +49759,15 @@ class OperatorApp(App[None]):
 
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event
+        # HIDDEN tools paint nothing, at EVERY seam (UX round 1, U2): the
+        # composing gate above suppresses the announcement, and this one stops
+        # a start frame from mounting a fresh card for a call with none — the
+        # belt to that brace, because the two frames race and either can be a
+        # viewer's first sight of the call.
+        from local_operator.harness.rows import is_hidden_tool_name
+
+        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
         # The call's own start instant, stamped by the producer and folded by
         # the session. Preferred over the map because it is the SAME value for
         # the row the live path paints and the row a switch back repaints: a
@@ -50899,7 +51119,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 133
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 134
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

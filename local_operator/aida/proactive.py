@@ -73,6 +73,7 @@ from typing import Any, Mapping, Sequence
 
 from local_operator.aida import state
 from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES, WakeSchedule
+from local_operator.wakes.store import is_patience_row
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,30 @@ def cadence_message(config_dir: Path | str, now_ms: int) -> str:
     return f"{CADENCE_MESSAGE}\n\n{clause}" if clause else CADENCE_MESSAGE
 
 
+def session_class_reactive(config_dir: Path | str, session_id: str) -> bool:
+    """Whether her attached profile is currently OUTSIDE the proactive class.
+
+    Resolved at the moment it is asked (attachment sidecar + registry, else the
+    packaged seed), so a class switch reaches every gate on its next
+    evaluation — the R36 delivery-time rule. FAIL-CLOSED like the class module
+    itself: an unreadable class reads reactive (a stop that keeps messaging is
+    worse than a check-in that misses a day; the cadence simply tries again at
+    the next reconcile). This is the EXTERNAL half (boot/ensure paths); the
+    live session resolves the same question its own way so it pays no registry
+    construction, but both end in ``action_class.session_action_class``.
+    """
+    from local_operator.action_class import PROACTIVE, session_action_class
+
+    root = Path(config_dir)
+    try:
+        from local_operator.agents import AgentRegistry
+
+        registry = AgentRegistry(root)
+    except Exception:  # noqa: BLE001 — seeds-only resolution without one
+        registry = None
+    return session_action_class(root / "sessions" / session_id, registry=registry) != PROACTIVE
+
+
 def cadence_schedule(
     now_ms: int, at: str = DEFAULT_CADENCE_AT, *, config_dir: Path | str
 ) -> WakeSchedule:
@@ -296,35 +321,51 @@ def hold_active(config_dir: Path | str) -> bool:
     return (not pol.enabled) or pol.paused
 
 
-def delivery_allowed(config_dir: Path | str) -> bool:
+def delivery_allowed(config_dir: Path | str, *, class_reactive: bool = False) -> bool:
     """Whether an ``aida-*`` fire may deliver right now (fail-open, see module).
 
     Returns True when the policy cannot be read; see the module docstring for
-    why a transient read failure delivers rather than eats the wake.
+    why a transient read failure delivers rather than eats the wake. The class
+    gate is carried IN by the caller (the live session resolves it from its own
+    registry at delivery time — one resolution per fire, R36), so this module
+    never grows a second attachment reader; ``class_reactive=True`` suppresses
+    exactly as a pause would.
     """
     try:
-        return not hold_active(config_dir)
+        return not (hold_active(config_dir) or class_reactive)
     except Exception:  # noqa: BLE001 — documented fail-open
         logger.warning("aida: could not resolve the hold state; delivering", exc_info=True)
-        return True
+        return not class_reactive
 
 
-def filter_on_load(schedules: Sequence[WakeSchedule], config_dir: Path | str) -> list[WakeSchedule]:
-    """The load-time hold: drop ``aida-*`` rows while held. Never raises.
+def filter_on_load(
+    schedules: Sequence[WakeSchedule],
+    config_dir: Path | str,
+    *,
+    class_reactive: bool = False,
+) -> list[WakeSchedule]:
+    """The load-time hold: drop ``aida-*`` rows while held (or reactive). Never raises.
 
     Called from ``Session._load_wake_schedules`` for her session only (the
     caller gate is :func:`local_operator.aida.state.is_aida_session`, one
     stat). Rows the filter drops are dropped from the in-memory list, so the
     session's next persist writes the cancellation into the transcript — that
     is the "pause cancels ``aida-*`` rows" contract reached through the ONE
-    writer rather than a file edit behind the session's back.
+    writer rather than a file edit behind the session's back. The class is the
+    same lever one size up (R36: reactive = cadence + patience off; the
+    cadence row is dropped, and a later switch back re-arms it at the next
+    reconcile — the same restore-on-active path an un-pause uses).
     """
     if not any(is_aida_row(s.id) for s in schedules):
         return list(schedules)
-    if not hold_active(config_dir):
+    if not hold_active(config_dir) and not class_reactive:
         return list(schedules)
     kept = [s for s in schedules if not is_aida_row(s.id)]
-    logger.info("aida: holding %d cadence row(s) while paused/disabled", len(schedules) - len(kept))
+    if len(kept) != len(schedules):
+        logger.info(
+            "aida: holding %d cadence row(s) while paused/disabled/reactive",
+            len(schedules) - len(kept),
+        )
     return kept
 
 
@@ -429,6 +470,7 @@ def reconcile(
     config_dir: Path | str,
     session_id: str,
     now_ms: int | None = None,
+    class_reactive: bool = False,
 ) -> ReconcileResult:
     """The in-session full-list reconcile. Pure file side effects: the ledger.
 
@@ -437,9 +479,10 @@ def reconcile(
 
     1. Not her session ⇒ untouched (identity is read once, here, so a caller
        cannot forget the gate).
-    2. Disabled or paused ⇒ drop every ``aida-*`` row; nothing is re-armed and
-       the tray is left where it is (a paused assistant must not queue work for
-       her own resume).
+    2. Disabled, paused or class-reactive ⇒ drop every ``aida-*`` row; nothing
+       is re-armed and the tray is left where it is (a paused assistant must
+       not queue work for her own resume). ``class_reactive`` is the general
+       switch (R36): the same drop, without touching the pause bookkeeping.
     3. Active ⇒ keep every row — hers included, so an escalation in flight is
        never silently cancelled — ensure exactly one ``aida-cadence`` row when
        none is present, and consume the escalation tray within
@@ -457,7 +500,7 @@ def reconcile(
 
     pol = policy(config_dir)
     notes: list[str] = []
-    if not pol.enabled or pol.paused:
+    if not pol.enabled or pol.paused or class_reactive:
         kept = [s for s in original if not is_aida_row(s.id)]
         if pol.paused and any(s.id == GREETING_WAKE_ID for s in original):
             # THE ONE-TIME GREETING DIES WITH THE PAUSE (review round 1, m1).
@@ -748,7 +791,11 @@ def _iso_due(due_ms: int) -> str:
 
 
 async def ensure_armed(
-    config_dir: Path | str, session_id: str, *, now_ms: int | None = None
+    config_dir: Path | str,
+    session_id: str,
+    *,
+    now_ms: int | None = None,
+    class_reactive: bool | None = None,
 ) -> str:
     """Arm the cadence for a session with NO live owner. Returns one word.
 
@@ -757,12 +804,20 @@ async def ensure_armed(
     :mod:`local_operator.wakes.arm` — transcript first, index second, install
     hook third, exactly the discipline every external wake writer shares.
 
+    ``class_reactive`` is resolved FROM THE ATTACHMENT when the caller does not
+    know it (the boot paths, which have no registry loaded): a class switch is
+    as hard a hold as a pause here, and the resolution fails CLOSED — an
+    unreadable class reads reactive, because a stop that keeps messaging is the
+    nagging bug the switch exists to end. The live-session path passes its own
+    fresh value instead.
+
     Returns ``"armed"`` (a cadence row was written), ``"present"`` (one was
-    already there), ``"paused"``/``"disabled"`` (nothing armed; any existing
-    Aida rows were best-effort cancelled), ``"owner"`` (a live runtime holds
-    the session — it will reconcile on its own watcher tick), ``"no-session"``
-    (nothing on disk to arm against) or ``"failed"`` (a refusal/logged error).
-    Never raises: the callers are boot paths whose failures must not fail them.
+    already there), ``"paused"``/``"disabled"``/``"reactive"`` (nothing armed;
+    any existing Aida rows were best-effort cancelled), ``"owner"`` (a live
+    runtime holds the session — it will reconcile on its own watcher tick),
+    ``"no-session"`` (nothing on disk to arm against) or ``"failed"`` (a
+    refusal/logged error). Never raises: the callers are boot paths whose
+    failures must not fail them.
     """
     from local_operator.wakes import store as wake_store
     from local_operator.wakes.arm import WakeWriteError, arm_wake
@@ -774,6 +829,8 @@ async def ensure_armed(
         # back to that state): nothing on disk to arm against, and the next
         # ``ensure_session`` arms the cadence itself.
         return "no-session"
+    if class_reactive is None:
+        class_reactive = session_class_reactive(root, session_id)
     try:
         pol = policy(root)
         entry = wake_store.read_entry(root, session_id)
@@ -781,10 +838,12 @@ async def ensure_armed(
             return "no-session"
         ids = _row_ids(entry)
         aida_ids = [i for i in ids if is_aida_row(i)]
-        if not pol.enabled or pol.paused:
+        if not pol.enabled or pol.paused or class_reactive:
             if aida_ids:
                 await _cancel_ids(root, session_id, aida_ids, now_ms=now)
-            return "disabled" if not pol.enabled else "paused"
+            if not pol.enabled:
+                return "disabled"
+            return "paused" if pol.paused else "reactive"
         result = "present"
         if CADENCE_ID not in ids:
             try:
@@ -1037,11 +1096,23 @@ async def pause(
         _set_paused_config(root, True)
     from local_operator.wakes import store as wake_store
 
-    aida_ids = _aida_ids(wake_store.read_entry(root, session_id))
+    entry = wake_store.read_entry(root, session_id)
+    aida_ids = _aida_ids(entry)
+    # PAUSE CANCELS PENDING PATIENCE CYCLES (§8.2.4): a paused assistant must
+    # not keep a hidden timer nagging on her behalf, and a cycle that cannot
+    # re-arm is dead weight. Same best-effort writer as the Aida rows; the
+    # arming side is blocked by the session's proactive hold.
+    patience_ids = [
+        str(row.get("id") or "")
+        for row in (entry or {}).get("schedules") or ()
+        if isinstance(row, Mapping) and is_patience_row(row)
+    ]
     cancelled: list[str] = []
     owner_blocked = False
-    if aida_ids:
-        cancelled, owner_blocked = await _cancel_ids(root, session_id, aida_ids, now_ms=now)
+    if aida_ids or patience_ids:
+        cancelled, owner_blocked = await _cancel_ids(
+            root, session_id, [*aida_ids, *patience_ids], now_ms=now
+        )
     if GREETING_WAKE_ID in cancelled:
         # Cancelled before it could fire: the greeting is OWED again, not
         # delivered, and the resume re-arms it (review round 1, m1).

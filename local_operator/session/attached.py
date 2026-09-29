@@ -1818,6 +1818,8 @@ class AttachedSession:
         checkpoint leaves the synthesised state untouched. Opening a
         conversation must never fail because its last status row did.
         """
+        from local_operator.wakes.store import scheduled_rows
+
         checkpoint = self._cold_checkpoint
         if checkpoint is None:
             return self._seed_cold_usage(self._restore_cold_subagents(state))
@@ -1918,8 +1920,13 @@ class AttachedSession:
                 # a stale copy would re-show a wake that already fired. Only
                 # fall back to the durable rows when the index gave nothing,
                 # which is the corrupt/deleted-index case its own self-healing
-                # rebuild is designed around.
-                "wakes": list(state.wakes) if state.wakes else list(durable.wakes),
+                # rebuild is designed around — and filter the fallback too: a
+                # checkpoint written by a build that predates the patience
+                # filter would otherwise carry hidden rows into the same chip
+                # and Wakes section (agent review round 1, R1).
+                "wakes": (
+                    list(state.wakes) if state.wakes else list(scheduled_rows(durable.wakes))
+                ),
                 **self._restored_model_specs(state, durable),
             }
         )
@@ -2448,19 +2455,23 @@ class AttachedSession:
         }
 
     def _cold_wakes(self) -> list[WakeState]:
-        """The session's scheduled wakes, from the live wake index.
+        """The session's VISIBLE wakes, from the live wake index.
 
         An INPUT to state synthesis rather than something it reads, because the
         index is a derived file a supervisor rewrites without opening the
         session. A session created cold has no index and no rows; an unreadable
-        one is the same absence.
+        one is the same absence. Patience waits are filtered with the one
+        shared filter (``wakes.store.scheduled_rows``): this list feeds the
+        same desktop chip and Wakes section as the live read, and a cold frame
+        that showed a hidden timer would be the same leak one state earlier
+        (agent review round 1, R1).
         """
-        from local_operator.wakes.store import read_entry
+        from local_operator.wakes.store import read_entry, scheduled_rows
 
         wakes: list[WakeState] = []
         try:
             entry = read_entry(self._config_dir, self._session_id)
-            for schedule in (entry or {}).get("schedules", []) or []:
+            for schedule in scheduled_rows((entry or {}).get("schedules", [])):
                 if isinstance(schedule, dict):
                     try:
                         wakes.append(WakeState.model_validate(schedule))
@@ -8584,6 +8595,25 @@ class AttachedSession:
         """Recreate bridges only after the source is the visible input target."""
         self._gates_detached = False
         self._maybe_start_gate()
+
+    async def cleanup_after_class_switch(self, profile_name: str) -> dict[str, Any]:
+        """The viewer's answer to a class switch: nothing to cancel in THIS process.
+
+        ``/agent class`` writes the registry from whichever process the user
+        is looking at, and that write is the whole switch — the class is read
+        live at every arm and every fire (``action_class.session_action_class``,
+        and the delivery-time guard the design turns on). The owner-side
+        cleanup this mirrors (``Session.cleanup_after_class_switch``) cancels
+        the session's pending patience rows immediately, which is an
+        OPTIMISATION over the mechanism rather than the mechanism itself: a
+        fire that finds a reactive class retires silently at that read, and the
+        episode TTL bounds the difference (design §8.2.6). Only the OWNER holds
+        the wake writer, so a viewer cannot do that work without a control op
+        this design does not define — and the empty outcome is the honest
+        answer here: nothing was cancelled, so the caller's receipt renders the
+        switch without the clause rather than claiming work nobody did.
+        """
+        return {"session": self._session_id, "patience_cancelled": [], "cadence_dropped": False}
 
     async def adopt_aside(self, messages: list[Message]) -> None:
         """Promote the aside exchange into the conversation through the owner.

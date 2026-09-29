@@ -1189,6 +1189,16 @@ def decorate_rows(
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
         monitor_entry = monitor_index.get(row.id) or {}
         monitors = (monitor_entry.get("monitors") or ()) if isinstance(monitor_entry, dict) else ()
+        # SCHEDULED rows only: patience waits are hidden internal timers, and
+        # this count drives the picker's armed-wake glyph — a session with one
+        # hidden timer and no user-visible wake must not read as "armed"
+        # (design §8.2.2 item 5). Shared helper so every index-count consumer
+        # makes one call rather than filtering a shape the next reader cannot
+        # see (``wakes.store.scheduled_rows`` is stdlib-only, so it rides this
+        # stdlib-only module's import path for free).
+        from local_operator.wakes.store import scheduled_rows
+
+        schedules = scheduled_rows(schedules)
         age: float | None = None
         if record_state is not None:
             age = registry.classify(record_state[0], check_zombie=False).heartbeat_age_s
