@@ -19,6 +19,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from local_operator.session.store_failures import BUSY_ERRONAMES
+
 #: How long a lock wait on this store's connections may last, in milliseconds.
 #: Matches the attention store's house window rather than the driver's own
 #: ``timeout=10`` above it, and for the same reason: the wait exists for an
@@ -55,8 +57,12 @@ def _adopt_wal(db: sqlite3.Connection) -> None:
                 # is accepted just as quietly as a raise.
                 db.execute("PRAGMA journal_mode=WAL").fetchone()
             except sqlite3.Error as error:
+                # The SHARED busy set, not a restated pair: the retry set and the
+                # classify-as-busy set are one fact or they drift -- the exact
+                # shape of the attention store's review-round-1 MINOR-1 (its
+                # local copy held two of five names).
                 name = str(getattr(error, "sqlite_errorname", ""))
-                if name not in ("SQLITE_BUSY", "SQLITE_LOCKED") or attempt + 1 >= _WAL_ATTEMPTS:
+                if name not in BUSY_ERRONAMES or attempt + 1 >= _WAL_ATTEMPTS:
                     return
                 time.sleep(_WAL_RETRY_BACKOFF_S * (attempt + 1))
                 continue
