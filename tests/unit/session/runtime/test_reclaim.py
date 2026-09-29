@@ -1670,3 +1670,29 @@ def test_a_signal_that_never_lands_withdraws_its_marker(tmp_path: Path) -> None:
     assert report is not None
     assert report.signalled == []
     assert registry.read_stop_marker(conversation) is None
+
+
+def test_a_dry_run_stages_nothing_even_when_it_would_signal(tmp_path: Path) -> None:
+    """THE NEGATIVE ORDERING: no act, no marker.
+
+    The marker exists to attest a signal. A dry run decides without acting, so
+    the one file a reader keys on must not appear — and a candidate whose row
+    changed between the passes never reaches the attestation either (the
+    ``target_changed`` refusal returns one branch above; that path is pinned in
+    ``test_a_signal_is_withheld_when_the_target_is_no_longer_the_one_measured``).
+    """
+    conversation = session_dir(tmp_path, "s1")
+    conversation.mkdir(parents=True, exist_ok=True)
+    sightings = Sightings()
+    for now in (NOW, NOW + CONFIRM_S):
+        reclaim_runtimes(
+            tmp_path,
+            apply=False,
+            sightings=sightings,
+            processes=[proc()],
+            env_of=_session_env(tmp_path),
+            row_of=lambda pid: reread(pid, root=tmp_path),
+            fleet=fleet(tmp_path),
+            now=now,
+        )
+    assert registry.read_stop_marker(conversation) is None
