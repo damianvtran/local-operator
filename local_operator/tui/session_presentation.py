@@ -546,6 +546,7 @@ class ReplayState:
     _replay_bang_pending: bool = False
     _live_peer_receipts: set[str] = field(default_factory=set)
     _live_wake_receipts: set[tuple[str, object]] = field(default_factory=set)
+    _live_monitor_receipts: set[tuple[str, str]] = field(default_factory=set)
     _block_sink: list[Any] | None = None
     _projection_message_id: str = ""
     _projection_part: int = 0
@@ -574,6 +575,7 @@ class ReplayTarget(Protocol):
     _replay_bang_pending: bool
     _live_peer_receipts: set[str]
     _live_wake_receipts: set[tuple[str, object]]
+    _live_monitor_receipts: set[tuple[str, str]]
     _block_sink: list[Any] | None
     _projection_message_id: str
     _projection_part: int
@@ -1012,9 +1014,11 @@ def project_settled_rows(
         user_row_text,
     )
     from local_operator.tui.app import (
+        MONITOR_PROMPT_MESSAGE_TYPE,
         RESUME_OLDER_NOTICE,
         WAKE_PROMPT_MESSAGE_TYPE,
         AssistantBlock,
+        MonitorDeltaBlock,
         PeerMessageBlock,
         UserBlock,
         WakeBlock,
@@ -1163,6 +1167,25 @@ def project_settled_rows(
                             )
                         )
                         appended = True
+                continue
+            # A monitor delta rides the same shape: a CustomMessage with no
+            # ``role``, so without this branch a resumed session would show the
+            # work the delta triggered but never the delta itself. The dedup
+            # key is the delivered TEXT — the live event carries no occurrence
+            # counter (the wake branch's key), and the formatted text is the
+            # one identity both the live event and this persisted row carry
+            # verbatim.
+            if getattr(message, "custom_type", None) == MONITOR_PROMPT_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                key = (str(details.get("monitor_id", "")), str(details.get("text", "")))
+                if key not in self._live_monitor_receipts:
+                    self._append_block(
+                        MonitorDeltaBlock(
+                            str(details.get("text", "")),
+                            fold_width=fold_width,
+                        )
+                    )
+                    appended = True
                 continue
             # A peer message (`lop send` from another session) is also a
             # CustomMessage with no ``role`` and would otherwise fall

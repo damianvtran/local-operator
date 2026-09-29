@@ -45,26 +45,46 @@ def test_tcss_pins_card_and_band_heights_rather_than_leaving_them_auto() -> None
     input panel share one fill, a padded row is indistinguishable from a gap.
 
     Exactly one selector may opt out: an EXPANDED card, whose whole purpose is
-    to be taller than one row.
+    to be taller than one row. The opt-out is ONE shared rule: every ledger row
+    that can expand names its class in the same combined selector, in the
+    default spelling and the ``.comfortable-rows`` override alike, so a new row
+    type cannot be left on ``auto`` in one of them.
     """
     text = TCSS.read_text()
-    # ToolCard, WakeBlock and PeerMessageBlock share the pin: a wake receipt
-    # and an inbound peer receipt are both ledger rows, and leaving either on
-    # `auto` would be the same first-measurement-sticks-at-two-rows failure the
-    # ToolCard pin exists to stop. Combined selectors so the three cannot
-    # drift.
+    # ToolCard, WakeBlock, PeerMessageBlock and MonitorDeltaBlock share the
+    # pin: a wake receipt and an inbound peer receipt are both ledger rows, and
+    # leaving either on `auto` would be the same first-measurement-sticks-at-
+    # two-rows failure the ToolCard pin exists to stop. MonitorDeltaBlock is
+    # WakeBlock's subclass, so the COLLAPSED pin reaches it through Textual's
+    # type matching — but its expanded class is `monitor-expanded`, not
+    # `wake-expanded`, so the combined selector below is the only thing that
+    # keeps an expanded monitor receipt out of `auto`. Combined selectors so
+    # the four cannot drift.
     tool_block = re.search(
         r"^ToolCard,\s*WakeBlock,\s*PeerMessageBlock\s*\{([^}]*)\}", text, re.MULTILINE
     )
     expanded = re.search(
         r"^ToolCard\.tool-expanded,\s*WakeBlock\.wake-expanded,\s*"
-        r"PeerMessageBlock\.peer-expanded\s*\{([^}]*)\}",
+        r"PeerMessageBlock\.peer-expanded,\s*"
+        r"MonitorDeltaBlock\.monitor-expanded\s*\{([^}]*)\}",
+        text,
+        re.MULTILINE,
+    )
+    # The `.comfortable-rows` override restates the same four names; pinned in
+    # the same breath so the denser mode cannot fall out of step with the
+    # default one.
+    comfortable = re.search(
+        r"^\.comfortable-rows ToolCard\.tool-expanded,\s*\.comfortable-rows "
+        r"WakeBlock\.wake-expanded,\s*"
+        r"\.comfortable-rows PeerMessageBlock\.peer-expanded,\s*"
+        r"\.comfortable-rows MonitorDeltaBlock\.monitor-expanded\s*\{([^}]*)\}",
         text,
         re.MULTILINE,
     )
     band_block = re.search(r"^#status-band\s*\{([^}]*)\}", text, re.MULTILINE)
     assert tool_block is not None and "height: 1;" in tool_block.group(1)
     assert expanded is not None and "height: auto;" in expanded.group(1)
+    assert comfortable is not None and "height: auto;" in comfortable.group(1)
     assert band_block is not None and "height: 2;" in band_block.group(1)
     # One row of that height is the gap; the band itself still renders one row.
     assert "padding: 1 1 0 0;" in band_block.group(1)

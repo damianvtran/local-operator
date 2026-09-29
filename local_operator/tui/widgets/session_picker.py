@@ -3018,6 +3018,15 @@ class SessionPickerScreen(ModalScreen[str | None]):
         "leaving",
         "wakes",
         "wakes_dormant",
+        # The monitors pair rides the wakes argument (design §12): a watch can
+        # be armed or cancelled while the list is open — the session rewrites
+        # the index and the catalogue re-reads it — so the row this screen
+        # holds changes under it. The BANDING the rank value adds lands on the
+        # SIDEBAR; this picker orders by recency, so no position here moves
+        # (design review round 1, D3 corrected the first wording of this note,
+        # which claimed an order change this screen does not make).
+        "monitors",
+        "monitors_dormant",
         "kind",
         # The two subagent counts. In the signature because they ARRIVE WHILE THE
         # LIST IS OPEN — a child starting or a parked child picking up a slot is

@@ -134,6 +134,7 @@ from local_operator.model.effort import (
     next_effort,
     resolve_effort_in,
 )
+from local_operator.monitors.spec import MONITOR_PROMPT_MESSAGE_TYPE
 
 # NOT imported here: `providers.catalogue` (the model picker's shared ranking)
 # and `references` (the `@path` resolver). Both are reached only after the user
@@ -223,6 +224,7 @@ from local_operator.tui.events import (
     EffectiveModelChanged,
     EventController,
     HistoryRowsSettled,
+    MonitorDelta,
     NoticePosted,
     PeerMessageDelivered,
     ReasoningDelta,
@@ -446,6 +448,7 @@ from local_operator.tui.widgets.transcript import (
     BOOT_COLUMN_CLASS,
     DEFAULT_ACTIVITY,
     GAP_CLASS,
+    MonitorDeltaBlock,
     NoticeBlock,
     NoticeKind,
     PeerMessageBlock,
@@ -2060,7 +2063,15 @@ def _resume_tail_start(history: list[Any], bound: int) -> int:
             # real turn out of it, which is the same short-frame failure this
             # backward walk exists to fix.
             continue
-        if role == "user" or custom in (WAKE_PROMPT_MESSAGE_TYPE, PEER_MESSAGE_MESSAGE_TYPE):
+        # Monitor prompts join the wake/peer anchors below: a delta delivery is
+        # user-attributed exactly like a wake prompt, and a bounded resume must
+        # not cut a visible anchor out of its window (design §12's replay
+        # parity).
+        if role == "user" or custom in (
+            WAKE_PROMPT_MESSAGE_TYPE,
+            PEER_MESSAGE_MESSAGE_TYPE,
+            MONITOR_PROMPT_MESSAGE_TYPE,
+        ):
             return index
     return naive
 
@@ -5152,6 +5163,13 @@ class OperatorApp(App[None]):
         #: (``/resume`` into the same conversation) is not painted twice — the
         #: exact double-paint guard ``_live_wake_receipts`` provides for wakes.
         self._live_peer_receipts: set[str] = set()
+        #: Monitor deltas painted LIVE this session, keyed by
+        #: ``(monitor_id, text)``. ``on_monitor_delta`` records each; the
+        #: history replay skips a persisted ``monitor_prompt`` whose key is
+        #: already here — the same double-paint guard, keyed on the delivered
+        #: text because the delta event carries no occurrence counter the way a
+        #: wake's does.
+        self._live_monitor_receipts: set[tuple[str, str]] = set()
         #: A bang-mode user row (`! <command>`) seen by the history replay but
         #: not yet paired with its bash card. The persisted shape is
         #: user/assistant/tool, so the assistant message immediately after a
@@ -7172,6 +7190,7 @@ class OperatorApp(App[None]):
             _replay_bang_pending=self._replay_bang_pending,
             _live_peer_receipts=self._live_peer_receipts,
             _live_wake_receipts=self._live_wake_receipts,
+            _live_monitor_receipts=self._live_monitor_receipts,
         )
         return SessionPresentation(
             replay=replay,
@@ -7210,6 +7229,7 @@ class OperatorApp(App[None]):
         self._replay_bang_pending = replay._replay_bang_pending
         self._live_peer_receipts = replay._live_peer_receipts
         self._live_wake_receipts = replay._live_wake_receipts
+        self._live_monitor_receipts = replay._live_monitor_receipts
         self._streaming_block = presentation.streaming_block
         self._tool_cards = presentation.tool_cards
         self._composing_cards = presentation.composing_cards
@@ -49379,6 +49399,18 @@ class OperatorApp(App[None]):
         """
         self._live_wake_receipts.add((message.wake_id, message.occurrence))
         self._append_block(WakeBlock(message.text, catchup=message.catchup))
+
+    def on_monitor_delta(self, message: MonitorDelta) -> None:
+        """Paint the expandable monitor receipt for the delta just delivered.
+
+        The MonitorDeltaEvent carries the full formatted text, so the collapsed
+        line can name the monitor and the expansion can show the envelope plus
+        the bounded delta the model was handed. The ``(monitor_id, text)`` key
+        is recorded so a history replay does not mount a second copy of the
+        same delivery (see ``_live_monitor_receipts``).
+        """
+        self._live_monitor_receipts.add((message.monitor_id, message.text))
+        self._append_block(MonitorDeltaBlock(message.text))
 
     def on_peer_message_delivered(self, message: PeerMessageDelivered) -> None:
         """Paint the cross-session indicator for a `lop send` delivery.

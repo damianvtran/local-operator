@@ -255,6 +255,10 @@ EXCLUDED_ENTRIES: dict[str, str] = {
     # A lock file for the wake write path. Copying a lock is copying a claim that
     # some process holds it; the destination's own writes would then look blocked.
     ".wake-write.lock": "a per-device lock file, meaningful only where it was taken",
+    # The monitors family's twin (``monitors.arm.MONITOR_LOCK_NAME``), for the
+    # same reason: a lock copied to the destination is a claim some process
+    # holds it there, and the destination's own writes would look blocked.
+    ".monitor-write.lock": "a per-device lock file, meaningful only where it was taken",
     # The browser bridge's ownership record: it names a bridge GENERATION and an
     # allocation id minted by THIS device's bridge, so on the destination it is a
     # claim about browsers that do not exist there.

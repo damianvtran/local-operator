@@ -2337,6 +2337,12 @@ class SessionRow(NamedTuple):
     #: session was deliberately stopped.
     wakes: int = 0
     wakes_dormant: bool = False
+    #: How many monitors are armed, and whether they are dormant because the
+    #: session was deliberately stopped. The ``wakes`` pair's twin: one fact
+    #: per family, so the rank key and every badge can tell armed from dormant
+    #: without re-reading two indexes.
+    monitors: int = 0
+    monitors_dormant: bool = False
     #: The live record's ``kind`` — ``"tui"``, ``"exec"``, ``"daemon"`` — or
     #: ``""`` for a cold session with no record.
     #:

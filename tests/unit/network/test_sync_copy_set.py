@@ -59,6 +59,7 @@ def _entry_owners() -> dict[str, str]:
     """
     from local_operator.browser_bridge.resources import RESOURCE_NAME
     from local_operator.fork import FORK_BOUNDARY_NAME
+    from local_operator.monitors.arm import MONITOR_LOCK_NAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
         ORIGIN_CACHE_NAME,
@@ -102,6 +103,7 @@ def _entry_owners() -> dict[str, str]:
         MIRROR_NAME: "session_lease",
         RECOVERY_LOCK_NAME: "session_lease",
         WAKE_LOCK_NAME: "wakes.lock",
+        MONITOR_LOCK_NAME: "monitors.arm",
         RESOURCE_NAME: "browser_bridge.resources",
         # The eval kernel's restart marker (``tools.eval``): carried so a moved
         # session's first cell still learns its namespace was left behind.

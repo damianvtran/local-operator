@@ -1295,6 +1295,40 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="fire whatever is due right now, then exit",
     )
 
+    # Standing monitors — the wake family's read-only sibling. Top-level beside
+    # `wake` for the same reason (a question about this machine, not one
+    # session), with deliberately NO install/uninstall subcommands: monitors
+    # have no supervisor to install (design §10.4/§12), and their absence is a
+    # design statement rather than an omission.
+    monitor_parser = subparsers.add_parser(
+        "monitor",
+        help="Inspect standing monitors and cancel one on a closed session",
+        parents=[parent_parser],
+    )
+    # DEFAULTS ON THE PARENT, the `wake_parser` discipline: `monitor_command`
+    # falls back to "status" when no subcommand is given, and the status branch
+    # reads `json` — so bare `lop monitor` must carry it rather than die on
+    # `args.json`.
+    monitor_parser.set_defaults(json=False)
+    monitor_sub = monitor_parser.add_subparsers(dest="monitor_command")
+    monitor_status = monitor_sub.add_parser(
+        "status",
+        help="every monitor on this machine, soonest first",
+        parents=[parent_parser],
+    )
+    monitor_status.add_argument("--json", action="store_true", help="machine-readable output")
+    monitor_cancel = monitor_sub.add_parser(
+        "cancel",
+        help=(
+            "cancel a monitor on a session with no runtime open (a live session changes "
+            "its own monitors from inside)"
+        ),
+        parents=[parent_parser],
+    )
+    monitor_cancel.add_argument("session", help="session id the monitor belongs to")
+    monitor_cancel.add_argument("monitor_id", metavar="id", help="monitor id (m1, m2, …)")
+    monitor_cancel.add_argument("--json", action="store_true", help="machine-readable output")
+
     # Exec command for single execution mode
     # PyPI upgrade. Not ``lop-update`` (hyphen), which archives local git
     # ``main`` into the uv-tool env — opposite audience, never invoked here.
@@ -6362,6 +6396,226 @@ def wake_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _monitor_rows() -> "list[dict[str, Any]]":
+    """Every armed monitor on this machine, soonest first.
+
+    Reads the derived index rather than each transcript: the index exists
+    exactly so this question can be answered without opening every session,
+    and it is rewritten on every persist and every open, so a stale row
+    self-heals rather than needing a repair path here (the ``_wake_rows``
+    rule). Health rides the row: ``disabled``/``disabled_reason`` and the
+    failure count are written by the same sync that rewrites the index, so a
+    disabled monitor cannot be invisible on this surface (§11.3).
+    """
+    import time as _time
+
+    from local_operator.monitors.store import is_held, read_index
+    from local_operator.paths import config_dir
+
+    root = config_dir()
+    now_ms = int(_time.time() * 1000)
+    rows: list[dict[str, Any]] = []
+    for session_id, entry in read_index(root).items():
+        if not isinstance(entry, dict):
+            continue
+        # ``stopped_at`` is the one park marker monitors carry — there is no
+        # Aida engine for them — and ``is_held`` is the store's own spelling
+        # for it, so this listing and the cleanup guards cannot disagree.
+        dormant = is_held(entry)
+        for raw in entry.get("monitors") or ():
+            if not isinstance(raw, dict):
+                continue
+            due = raw.get("next_due_at")
+            due = due if isinstance(due, int) and not isinstance(due, bool) else None
+            last = raw.get("last_check_at")
+            last = last if isinstance(last, int) and not isinstance(last, bool) else 0
+            rows.append(
+                {
+                    "session_id": session_id,
+                    "cwd": entry.get("cwd") or "",
+                    "monitor_id": raw.get("id") or "",
+                    "name": raw.get("name") or "",
+                    "tool": raw.get("tool") or "",
+                    "every_ms": raw.get("every_ms"),
+                    "until_at": raw.get("until_at"),
+                    "next_due_at": due,
+                    "last_check_at": last,
+                    "checks": raw.get("checks") or 0,
+                    "deliveries": raw.get("deliveries") or 0,
+                    "consecutive_failures": raw.get("consecutive_failures") or 0,
+                    "disabled": bool(raw.get("disabled")),
+                    "disabled_reason": raw.get("disabled_reason") or "",
+                    "dormant": dormant,
+                    "due_in_s": None if due is None else (due - now_ms) / 1000.0,
+                    "last_check_age_s": None if not last else max((now_ms - last) / 1000.0, 0.0),
+                }
+            )
+    # Soonest first; a monitor with no due time (disabled, or waiting on its
+    # first tick) trails in session/id order rather than jumping the queue.
+    rows.sort(
+        key=lambda row: (
+            row["due_in_s"] is None,
+            row["due_in_s"] or 0.0,
+            row["session_id"],
+            row["monitor_id"],
+        )
+    )
+    return rows
+
+
+def _monitor_state_word(row: "dict[str, Any]") -> str:
+    """The DUE column's word for a monitor that is not simply due.
+
+    Dormancy wins over disabled (the wake list's rule, for the same reason): a
+    dormant monitor is one nothing is SUPPOSED to run, so a failure word would
+    point the reader at the wrong remedy — reopening the session re-arms it.
+    Disabled wins over the due time: a disabled monitor does not tick at all.
+    """
+    if row["dormant"]:
+        return "dormant"
+    if row["disabled"]:
+        return "disabled"
+    if row["due_in_s"] is None:
+        return "waiting"
+    return _format_due(row["due_in_s"])
+
+
+def _monitor_detail(row: "dict[str, Any]") -> str:
+    """The monitor row's tail: interval, checks, last check, health, reason."""
+    from local_operator.harness.wake import format_duration
+    from local_operator.wakes.display import format_age
+
+    parts: list[str] = []
+    if row.get("every_ms"):
+        parts.append(f"every {format_duration(int(row['every_ms']))}")
+    else:
+        parts.append("once")
+    if row.get("checks"):
+        parts.append(f"{int(row['checks'])} checks")
+    age = row.get("last_check_age_s")
+    if age is not None:
+        parts.append(f"last check {format_age(age)} ago")
+    failures = int(row.get("consecutive_failures") or 0)
+    if failures:
+        parts.append(f"{failures} failed")
+    if row.get("disabled") and row.get("disabled_reason"):
+        parts.append(str(row["disabled_reason"]))
+    return " · ".join(parts)
+
+
+def monitor_command(args: argparse.Namespace) -> int:
+    """``lop monitor status|cancel`` — standing watches and their state.
+
+    ``status`` answers "what is watching what, and is it healthy" without
+    opening a session; ``cancel`` is the external writer for a session nobody
+    has open (a live session changes its own monitors from inside, via its
+    agent's ``monitor`` tool). Deliberately NO install/uninstall subcommands:
+    monitors have no supervisor to install (design §10.4/§12).
+    """
+    command = getattr(args, "monitor_command", None) or "status"
+    if command == "cancel":
+        return _monitor_cancel(args)
+
+    rows = _monitor_rows()
+    if getattr(args, "json", False):
+        print(_json_dumps(rows))
+        return 0
+    if not rows:
+        print("no monitors")
+        return 0
+
+    import shutil
+
+    # A fixed-width table, matching `lop wake list` right next door rather
+    # than inventing a second listing convention. The monitor label is what
+    # gets clamped (the reader recognises a name from its opening words);
+    # the state word and the tail are never cut silently.
+    term_width = shutil.get_terminal_size((80, 24)).columns
+    state_w = max(11, max(len(_monitor_state_word(row)) for row in rows))
+    id_w = 13
+    detail_w = max(24, term_width - state_w - id_w - 2)
+    print(f"{'DUE':>{state_w}} {'SESSION':<{id_w}} MONITOR")
+    for row in rows:
+        state = _monitor_state_word(row)
+        label = f"{row['monitor_id']} {row['name']}".strip()
+        tail = _monitor_detail(row)
+        detail = f"{label} · {tail}" if tail else label
+        if len(detail) > detail_w:
+            detail = detail[: max(detail_w - 1, 1)] + "…"
+        line = f"{state:>{state_w}} {_elide_id(row['session_id'], id_w):<{id_w}} {detail}"
+        print(line.rstrip())
+
+    # One legend under the table rather than the same sentence on every row,
+    # and only for the states actually present (the wake list's rule).
+    legend: list[tuple[str, str]] = []
+    if any(row["dormant"] for row in rows):
+        legend.append(("dormant", "the session was stopped; reopening it re-arms its monitors"))
+    if any(row["disabled"] for row in rows):
+        legend.append(
+            (
+                "disabled",
+                "checks kept failing, so it stopped ticking; cancel it and create the "
+                "same watch again to reactivate",
+            )
+        )
+    if legend:
+        import textwrap
+
+        legend_w = max(len(word) for word, _ in legend) + 1
+        for word, text in legend:
+            print()
+            for line in textwrap.wrap(
+                f"{word:<{legend_w}}{text}",
+                width=term_width,
+                subsequent_indent=" " * legend_w,
+            ):
+                print(line)
+    return 0
+
+
+def _monitor_cancel(args: argparse.Namespace) -> int:
+    """``lop monitor cancel <session> <id>`` — the external-writer path.
+
+    Mirrors ``lop wake create``'s one-writer discipline: the refusal sentence
+    comes from ``monitors.arm``, so the CLI and any future route say the same
+    thing about the same mistake; a success prints what was cancelled and what
+    remains.
+    """
+    import asyncio as _asyncio
+
+    from local_operator.monitors.arm import MonitorWriteError, cancel_monitor
+    from local_operator.paths import config_dir
+
+    session_id = str(args.session)
+    monitor_id = str(args.monitor_id)
+    try:
+        outcome = _asyncio.run(cancel_monitor(config_dir(), session_id, monitor_id))
+    except MonitorWriteError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(
+            _json_dumps(
+                {
+                    "session_id": outcome.session_id,
+                    "monitor_id": outcome.monitor_id,
+                    "name": outcome.name,
+                    "remaining": outcome.remaining,
+                    "entry": outcome.index_path,
+                }
+            )
+        )
+        return 0
+    remaining = (
+        "no monitors left on that conversation"
+        if outcome.remaining == 0
+        else f"{outcome.remaining} monitor{'s' if outcome.remaining != 1 else ''} left"
+    )
+    print(f"cancelled {outcome.monitor_id} {outcome.name!r} on {outcome.session_id} ({remaining})")
+    return 0
+
+
 def _elide_id(session_id: str, width: int) -> str:
     """A session id that fits, and that SAYS SO when it does not.
 
@@ -10165,6 +10419,8 @@ def main() -> int:
             return 1
         elif args.subcommand == "wake":
             return wake_command(args)
+        elif args.subcommand == "monitor":
+            return monitor_command(args)
         elif args.subcommand == "login":
             return login_command(args)
         elif args.subcommand == "logout":

@@ -30,6 +30,7 @@ from local_operator.harness.types import ModelSpec
 from local_operator.session.frontend_state import (
     FrontendModelSpec,
     FrontendSessionState,
+    MonitorState,
     WakeState,
 )
 from local_operator.session.model_selection import (
@@ -447,15 +448,16 @@ async def synthesise_cold_state(
     birth_model: ModelSpec | None = None,
     model_selection_override: bool = False,
     wakes: Iterable[WakeState] = (),
+    monitors: Iterable[MonitorState] = (),
     selection_sink: Callable[[StoredModelSelection | None], None] | None = None,
 ) -> FrontendSessionState:
     """Canonical state for a session with no runtime to ask.
 
-    Off the loop: it reads the config file. ``wakes`` is an INPUT rather than
-    something read here, because the wake index is a live derived file whose
-    reader belongs to the caller that owns the session
-    (``AttachedSession._cold_wakes``) — and because a draft has no session to
-    look up, so the preview passes nothing.
+    Off the loop: it reads the config file. ``wakes`` and ``monitors`` are
+    INPUTs rather than something read here, because both indexes are live
+    derived files whose reader belongs to the caller that owns the session
+    (``AttachedSession._cold_wakes`` / ``_cold_monitors``) — and because a
+    draft has no session to look up, so the preview passes nothing.
 
     ``session_id`` may be empty, which is the draft case: there is then no
     session directory to read a saved selection from, and the resolution falls
@@ -481,6 +483,7 @@ async def synthesise_cold_state(
             selected_model=model,
             effective_model=model,
             wakes=list(wakes),
+            monitors=list(monitors),
         )
 
     return await asyncio.to_thread(_build)
