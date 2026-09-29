@@ -1034,6 +1034,17 @@ class Prompt(Input):
     # The recording door: at most one block in v1 (a send is one recording —
     # the sidecar forks once per block, and the wire budgets in `stt/audio.py`
     # are sized for a single capture inside the 900 kB body cap).
+    #
+    # RETRY CONTRACT: the receipt journal fingerprints the WHOLE request body
+    # (``server/utils/desktop_receipts.py``), so a retry under the same
+    # ``request_id`` must repeat these bytes BYTE-FOR-BYTE — a re-encoded or
+    # re-recorded capture under the same id reads as a changed body and is
+    # answered 409 ("Request ID was already used with different input").
+    # That is the correct at-most-once behaviour and a client bug if
+    # provoked: a NEW recording needs a NEW ``request_id``.  Restated for this
+    # field because it rides the same body as #1733's (``text``/``images``/
+    # ``input_mode``/``input_path``) and the consequence is the same for all
+    # of them.
     audio: list[Audio] = Field(default_factory=list, max_length=1)
     mode: Literal["prompt", "steer"] = "prompt"
     # SILENT INPUT METADATA (see ``harness.types.Message.input_mode``): how the
