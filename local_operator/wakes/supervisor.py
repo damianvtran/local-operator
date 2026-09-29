@@ -163,6 +163,34 @@ STALE_AFTER_S = 7 * 24 * 3600.0
 #: that for a class of process measured in hours.
 RESIDENCY_SWEEP_INTERVAL_S = 300.0
 
+#: How often the machine memory pass runs (see :class:`_MachineMemorySweep`).
+#:
+#: WHY NOT THE RESIDENCY CADENCE (300 s): that pass forks two external tools and
+#: decides over a window of minutes; this one reads one process table and a
+#: handful of per-pid probes (~50 ms measured on a quiet host) and exists for a
+#: failure measured in MINUTES — the saturation of 2026-09-28 went from
+#: unremarkable to out-of-memory-dialog inside half an hour, with the largest
+#: single movers growing GBs per ten minutes. A minute keeps the pass cheap
+#: beside a busy fleet and short enough to see a runaway before the operator
+#: does (measured 95 ms - 2.3 s across ten live passes: a handful of reads,
+#: with the batched ``top`` fallback dominating the passes where the direct
+#: reader cannot answer some pid). WHY NOT FASTER: each pass is
+#: one ``ps`` plus one memory read per fleet pid, and the pass's kill path is
+#: rate-limited anyway. A single command is already bounded by the per-command
+#: guard at its own ceiling; this pass exists for the SUM, which moves in
+#: minutes.
+MACHINE_MEMORY_INTERVAL_S = 60.0
+
+#: After this pass ends one fragment, how long before it may end another.
+#:
+#: The case this bounds: a fragment that regrows (a supervisor respawn) would be
+#: ended on every pass, and a minute apart the log would read as a war against
+#: one pid rather than a guard. Ten minutes is two orders above the pass's own
+#: cost and well inside the hour-scale harm window; while the cooldown holds, the
+#: pass still warns and still NAMES the fragment it would have ended, so the
+#: operator is never left guessing why nothing happened.
+MACHINE_MEMORY_KILL_COOLDOWN_S = 600.0
+
 #: How long a WAKE engage may take before the supervisor gives up on it.
 #:
 #: Deliberately not ``launch.DEFAULT_DEADLINE_S`` (30 s), which stays exactly
@@ -1111,6 +1139,138 @@ class _ResidencySweep:
         return reclaim_runtimes(self.config_dir, apply=apply, sightings=self._sightings)
 
 
+class _MachineMemorySweep:
+    """The machine memory pass's seat in this loop: the cadence, and the rungs.
+
+    The pass itself lives in
+    :mod:`local_operator.session.runtime.machine_memory`; this class is only its
+    seat — when it runs and what it remembers between passes. It sits here, and
+    not per-session, because the reading it takes is a property of the MACHINE:
+    the supervisor is the one process already alive beside every runtime, and a
+    sum taken inside one session could not see the others (the same reason the
+    residency sweep is seated here).
+
+    **IT REMEMBERS ONE THING: WHEN IT LAST ENDED SOMETHING.**
+    :data:`MACHINE_MEMORY_KILL_COOLDOWN_S` is the whole memory; losing it to a
+    restart costs at most one extra kill inside the window and never a wrong
+    decision — the pass re-derives everything else from the fleet on every read.
+
+    **THE PASS NEVER BLOCKS THE LOOP.** It forks ``ps`` and samples the fleet, so
+    it runs on a worker thread like the residency pass; a pass already in flight
+    is left alone, and the next one is armed from here rather than from its
+    completion, so a slow pass cannot make the loop spin.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: ``None`` until the first pass, so the first pass is always due: a
+        #: supervisor START is the moment the fleet most needs looking at.
+        self.next_at: float | None = None
+        #: When this seat last ended a fragment (monotonic seconds), gating
+        #: :data:`MACHINE_MEMORY_KILL_COOLDOWN_S`.
+        self.last_kill_at: float | None = None
+        #: The last pass's STRUCTURAL key — ``(state, killed pid or None)`` —
+        #: so the seat can tell a CHANGE (worth INFO: a warn rung crossed, a
+        #: kill, an unmeasurable host appearing) from the same reading again
+        #: (DEBUG). Structural rather than the rendered summary on purpose:
+        #: ``fleet_mb`` moves on a healthy machine (23300 → 23306 MB between two
+        #: live passes), so comparing the text logged INFO nearly every pass
+        #: (round 2, R2-2). The residency seat's predicate is structural for the
+        #: same reason.
+        self.last_key: tuple[str, int | None] | None = None
+        self._task: "asyncio.Task[Any] | None" = None
+
+    def seconds_until(self, now: float | None = None) -> float:
+        """How long the loop may sleep before this pass is due again."""
+        moment = time.monotonic() if now is None else now
+        if self.next_at is None:
+            return 0.0
+        return max(0.0, self.next_at - moment)
+
+    def due(self, now: float | None = None) -> bool:
+        return self.seconds_until(now) <= 0.0
+
+    def kick(self) -> None:
+        """Start a pass if one is due, WITHOUT holding this loop for it.
+
+        Detached for the residency pass's reason: a ``ps`` read and the fleet's
+        footprint samples do not belong inside the iteration that fires wakes,
+        and nothing about the pass is urgent — it decides over a window of
+        minutes. A pass already in flight is left alone, and the next one is
+        armed from here rather than from its completion; an overdue pass
+        re-clamps the loop's sleep to ``MIN_SLEEP_S`` until it completes — the
+        same bounded shape the residency seat has, not a spin.
+        """
+        if self._task is not None and not self._task.done():
+            return
+        if not self.due():
+            return
+        self.next_at = time.monotonic() + MACHINE_MEMORY_INTERVAL_S
+        self._task = asyncio.ensure_future(asyncio.to_thread(self.sweep))
+        self._task.add_done_callback(self._finished)
+
+    def _finished(self, task: "asyncio.Task[Any]") -> None:
+        """Log a finished pass. Never raises out of a done-callback.
+
+        A FAILING PASS IS A WARNING, not an exception: the supervisor's other
+        work (wakes, engages) must not acquire a new crash path from a guard,
+        and a guard that fails silently would be worse than one that fails
+        loudly — so the failure gets the same channel every other pass failure
+        uses.
+
+        THE REPORT IS LOGGED, not dropped (the residency seat's shape): the
+        summary goes out at INFO when the STRUCTURAL key changes — the
+        transitions worth a line: ``ok`` → ``warn``, a kill, an unmeasurable
+        host appearing — and at DEBUG otherwise, so a healthy fleet does not
+        rewrite the log every minute while a silent ``unknown`` still leaves a
+        trace. The key is structural rather than the rendered text because the
+        text carries volatile numbers (round 2, R2-2).
+        """
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning(
+                "the machine memory pass failed; the fleet's sum is unchecked",
+                exc_info=error,
+            )
+            return
+        report = task.result()
+        summary = report.summary()
+        key = (report.state, report.killed.pid if report.killed is not None else None)
+        changed = key != self.last_key
+        self.last_key = key
+        (logger.info if changed else logger.debug)("%s", summary)
+
+    async def shutdown(self) -> None:
+        """Drop an in-flight pass on the way out (the residency pass's shape).
+
+        Cancelling stops the LOOP waiting on it; the worker thread's own ``ps``
+        finishes on its own and its decision is harmless — the pass re-reads the
+        fleet every time and remembers nothing but its last kill.
+        """
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+
+    def sweep(self, *, apply: bool = True) -> Any:
+        """Run one pass. Blocking; callers hand it to a worker thread.
+
+        The import is deferred for the same reason the residency sweep's is: this
+        module is the LaunchAgent's ``python -m`` target and starts without
+        dragging the runtime stack in until a pass needs it.
+        """
+        from local_operator.session.runtime.machine_memory import machine_memory_pass
+
+        now = time.monotonic()
+        kill_allowed = (
+            self.last_kill_at is None or (now - self.last_kill_at) >= MACHINE_MEMORY_KILL_COOLDOWN_S
+        )
+        report = machine_memory_pass(self.config_dir, apply=apply, kill_allowed=kill_allowed)
+        if getattr(report, "killed", None) is not None:
+            self.last_kill_at = now
+        return report
+
+
 class _Sweeper:
     """Owns the in-flight engagements so the serve loop never waits on one.
 
@@ -1555,6 +1715,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     """
     sweeper = _Sweeper()
     residency = _ResidencySweep(config_dir)
+    memory_sweep = _MachineMemorySweep(config_dir)
     try:
         while True:
             index, deliveries, spooled = await asyncio.to_thread(
@@ -1654,13 +1815,24 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
             # must not be the one that ends processes. ``lop sessions reclaim`` is the
             # operator's door to the same pass.
             residency.kick()
+            # THE MACHINE MEMORY PASS RIDES THE SAME POSITION, for its own
+            # reason: it reads the fleet's SUM, which no single session can see
+            # (see :class:`_MachineMemorySweep`), and nothing it decides is
+            # urgent inside one iteration. Unlike the residency pass it can END
+            # a runaway fragment — the one stop this loop may take without an
+            # operator — so it is rate-limited by its own cooldown and silent
+            # while the machine is healthy.
+            memory_sweep.kick()
             # THE SWEEP BOUNDS THE SLEEP. Without this the loop's own cadence is set
             # purely by the next wake, which on a store holding one wake three hours
             # out means three hours between passes — and a residency pass that only
             # runs when a wake happens to be imminent is a sweep with a random period.
             # The floor is ``MIN_SLEEP_S`` so a pass that has just run cannot turn this
             # into a spin.
-            delay = max(MIN_SLEEP_S, min(delay, residency.seconds_until()))
+            delay = max(
+                MIN_SLEEP_S,
+                min(delay, residency.seconds_until(), memory_sweep.seconds_until()),
+            )
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)
             await _sleep_in_slices(config_dir, delay, upcoming)
     finally:
@@ -1670,6 +1842,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
         # residency pass is the same shape of background work and is dropped the
         # same way.
         await residency.shutdown()
+        await memory_sweep.shutdown()
         await sweeper.shutdown()
 
 
