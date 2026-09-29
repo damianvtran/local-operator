@@ -326,31 +326,48 @@ def _digest_hash(digest: str) -> str:
     return hashlib.sha256(digest.encode("utf-8")).hexdigest()
 
 
+def _failure_cooling(item: Any, *, now: float | None = None) -> bool:
+    """Whether ``item``'s last failed attempt is still inside its cooldown.
+
+    ONE definition for both readers of that window: :func:`naming_state`
+    (which reports ``unavailable`` for a turn that never got a name) and
+    warm's stale-name arm (which must not re-spend on a NAMED item whose
+    regeneration just failed — the last good pair keeps being served, and the
+    retry waits out the window exactly as a fresh name's does).
+    """
+    if not isinstance(item, dict):
+        return False
+    failed = item.get("failed_ts")
+    if not isinstance(failed, (int, float)) or isinstance(failed, bool):
+        return False
+    moment = time.time() if now is None else now
+    return moment - float(failed) < NAMING_UNAVAILABLE_COOLDOWN_S
+
+
 def naming_state(item: Any, *, now: float | None = None) -> str:
     """The manifest's naming state for one ``naming.items`` entry.
 
-    One of ``"ready" | "pending" | "unavailable"`` — the enum the desktop
+    One of ``"ready" | "pending" | ``"unavailable"`` — the enum the desktop
     models ship (``CheckpointNamingState``). This is the single source of
     truth for BOTH readers of that state: the manifest builder
     (``transcript_index``) and warm's own skip decision, so a turn cannot
     read "unavailable" on the card while the next warm happily re-spends on
     it, or vice versa.
 
-    ``"ready"`` = a name is present; the digest hash is NOT consulted here.
-    The manifest shows the name it has, and staleness is warm's business (it
-    compares the hash, regenerates, and overwrites). ``"unavailable"`` = the
-    last attempt failed inside :data:`NAMING_UNAVAILABLE_COOLDOWN_S`; once
+    ``"ready"`` = a name is present; the digest hash is NOT consulted here,
+    and neither is ``failed_ts`` — a NAMED item whose regeneration failed
+    keeps showing its last good pair (the failure rides there only as warm's
+    retry gate; see :func:`_failure_cooling`). The manifest shows the name it
+    has, and staleness is warm's business (it compares the hash, regenerates,
+    and overwrites). ``"unavailable"`` = the last attempt failed inside
+    :data:`NAMING_UNAVAILABLE_COOLDOWN_S` and NO name was ever bought; once
     the window passes, the same item reads "pending" again and a warm may
     retry it. Everything else is ``"pending"``.
     """
     if isinstance(item, dict) and item.get("name"):
         return "ready"
-    if isinstance(item, dict):
-        failed = item.get("failed_ts")
-        if isinstance(failed, (int, float)) and not isinstance(failed, bool):
-            moment = time.time() if now is None else now
-            if moment - float(failed) < NAMING_UNAVAILABLE_COOLDOWN_S:
-                return "unavailable"
+    if _failure_cooling(item, now=now):
+        return "unavailable"
     return "pending"
 
 
@@ -471,10 +488,13 @@ def _targets_default(
     Newest first, because the rail's recent ticks are the ones a user is
     looking at and the ones whose names will be read; a live ``open`` tail is
     skipped — its text is still moving, so a name bought now would be
-    regenerated on the next warm anyway. Turns already named are skipped;
-    turns inside their failure cooldown are still SELECTED (they show up as
-    accepted but never pending, so the rail can render their unavailable
-    state without waiting through a poll).
+    regenerated on the next warm anyway. Turns already named are skipped —
+    even when their text moved: this batch buys names for turns that have
+    NONE, and refreshing a stale name is the explicit hover's job (D2's
+    "missing names" wording; agent review round 1, NIT-1). Turns inside their
+    failure cooldown are still SELECTED (they show up as accepted but never
+    pending, so the rail can render their unavailable state without waiting
+    through a poll).
     """
     bound = DEFAULT_WARM_LIMIT if limit is None else max(1, min(int(limit), MAX_WARM_IDS))
     items = _naming_items(index)
@@ -538,7 +558,9 @@ async def _run_one(
                 session_id,
                 target.turn_key,
             )
-            item: dict[str, Any] = _unavailable_item(target)
+            item: dict[str, Any] = await _failure_item(
+                target, config_dir=config_dir, session_id=session_id
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — any provider failure means "no name"
@@ -557,14 +579,14 @@ async def _run_one(
                 type(exc).__name__,
                 message,
             )
-            item = _unavailable_item(target)
+            item = await _failure_item(target, config_dir=config_dir, session_id=session_id)
         else:
             parsed = parse_checkpoint(str(raw or ""))
             if parsed is None:
                 # A decline or an unparseable reply: no name will come from a
                 # second identical spend, so it takes the unavailable state
                 # (and its cooldown) exactly like a failure.
-                item = _unavailable_item(target)
+                item = await _failure_item(target, config_dir=config_dir, session_id=session_id)
             else:
                 item = {
                     "name": parsed.name,
@@ -585,13 +607,42 @@ def _unavailable_item(target: _TurnTarget) -> dict[str, Any]:
     """The persisted failure marker (see :func:`naming_state` for its window).
 
     ``text_hash`` rides along for the same reason it rides on a success: it is
-    the record of WHICH content the attempt was made against.
+    the record of WHICH content the attempt was made against. This shape is
+    for turns that NEVER had a name; a turn that already carries one keeps it
+    through :func:`_failure_item` instead.
     """
     return {
         "state": "unavailable",
         "text_hash": _digest_hash(target.digest),
         "failed_ts": time.time(),
     }
+
+
+async def _failure_item(
+    target: _TurnTarget, *, config_dir: str | Path, session_id: str
+) -> dict[str, Any]:
+    """The persisted item for a failed or declined attempt.
+
+    A turn that ALREADY carries a name KEEPS it: the attempt failed, but the
+    previous name+summary is still the best answer the rail has, and replacing
+    it with the marker would make a refresh visibly degrade what it was
+    refreshing (agent review round 1, MINOR-1). The failure rides beside the
+    pair as ``failed_ts``, which warm reads as the regeneration cooldown
+    (:func:`_failure_cooling`) and the manifest ignores while a name is
+    present. ``text_hash`` stays the OLD hash on purpose: it describes the
+    content the kept name was generated for, so the item keeps reading as
+    stale — and, once the cooldown passes, a later warm regenerates it.
+
+    The read is an extra cache parse, but this path is a provider FAILURE:
+    rare, off the loop, and already about to rewrite the same document.
+    """
+    index = await asyncio.to_thread(transcript_index.read_index, config_dir, session_id)
+    existing = _naming_items(index).get(target.turn_key) if index is not None else None
+    if isinstance(existing, dict) and existing.get("name"):
+        kept = dict(existing)
+        kept["failed_ts"] = time.time()
+        return kept
+    return _unavailable_item(target)
 
 
 def _schedule(
@@ -670,6 +721,12 @@ async def warm_checkpoints(
         if current == "ready":
             if isinstance(item, dict) and item.get("text_hash") == _digest_hash(target.digest):
                 # Cached and current: the idempotent no-op arm.
+                continue
+            if _failure_cooling(item):
+                # A stale name whose regeneration just failed: keep serving the
+                # LAST GOOD pair and let the cooldown gate the next attempt —
+                # without this every warm would re-spend on a turn that keeps
+                # failing to regenerate.
                 continue
             # Stale name (the turn grew since it was named): fall through and
             # regenerate over it — D2's "regenerate only when the hash

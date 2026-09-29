@@ -1185,6 +1185,29 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             if attempt:
                 raise
             continue
+        # A naming write can land WHILE this scan runs, and that pairing is by
+        # design rather than by accident: the daemon refreshes a stale cache
+        # for the manifest route while the session's owner writes a freshly
+        # bought name through ``patch_naming`` — a DIFFERENT process, so no
+        # process-local lock can span them. The scan carried its section from
+        # the document read before it ran, and the whole-document write below
+        # would silently drop anything that landed since: the rail then reads
+        # pending, the spend is gone, and nothing retries (agent review round
+        # 1, MAJOR-1, reproduced exactly here). Merging the on-disk section one
+        # last time — the same read-merge-write ``patch_naming`` performs, from
+        # the other side — shrinks that window from the scan's whole duration
+        # to this copy. Per-key the disk wins: an item there is the newer write
+        # for its turn key, while keys only the scan carries (version-bump
+        # preservation) stay put.
+        fresh_section = preserved_naming(
+            _read_raw(config_dir, session_id),
+            {c.id for c in index.checkpoints if c.kind == KIND_USER},
+        )
+        if fresh_section["items"]:
+            carried = index.naming.get("items") if isinstance(index.naming, dict) else None
+            merged = dict(carried) if isinstance(carried, dict) else {}
+            merged.update(fresh_section["items"])
+            index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": merged}
         write_index(config_dir, session_id, index)
         return index
     return None

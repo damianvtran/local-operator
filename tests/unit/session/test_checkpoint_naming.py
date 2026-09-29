@@ -210,6 +210,13 @@ async def test_parse_strips_thinking_envelopes() -> None:
     assert cn.parse_checkpoint("Thinking process:\nFix the parser") is None
 
 
+async def test_parse_unwraps_a_fenced_json_reply() -> None:
+    """The fenced arm is separate from plain JSON (agent review round 1, NIT-2)."""
+    parsed = cn.parse_checkpoint('```json\n{"name": "Fix flaky registration test"}\n```')
+    assert parsed is not None
+    assert parsed.name == "Fix flaky registration test"
+
+
 async def test_parse_unwraps_json_name() -> None:
     parsed = cn.parse_checkpoint('{"name": "JSON name here", "summary": "ignored"}')
     assert parsed is not None and parsed.name == "JSON name here"
@@ -458,6 +465,57 @@ async def test_warm_regenerates_when_the_turn_moved(tmp_path: Path) -> None:
     assert len(rec.calls) == 2
 
 
+async def test_a_failed_regeneration_keeps_the_last_good_name(tmp_path: Path) -> None:
+    """A refresh's failure must not degrade what it was refreshing (MINOR-1).
+
+    The kept pair is served by the manifest and guarded from re-spend by the
+    same cooldown a never-named turn gets; once the window passes, the stale
+    name is regenerated over — the same stale arm as ever, just not erasing
+    the pair while it waits.
+    """
+    cfg = tmp_path / "cfg"
+    _seed(cfg, "s1", [("One", "A1", "complete")])
+    rec = _Recorder(_ok("Old name", "Old summary"))
+    await cn.warm_checkpoints(cfg, "s1", ids=["a1"], complete_fn=rec)
+    await _settle(cfg, "s1")
+    before = _items(cfg, "s1")["u1"]
+
+    # The turn grew, and the regeneration attempt FAILS.
+    _seed(cfg, "s1", [("One", "A1 extended with the follow-up.", "complete")], items={"u1": before})
+    failing = _Recorder(RuntimeError("provider exploded"))
+    accepted = await cn.warm_checkpoints(cfg, "s1", ids=["a1"], complete_fn=failing)
+    assert accepted == {"accepted": ["a1"], "pending": ["a1"]}
+    await _settle(cfg, "s1")
+    kept = _items(cfg, "s1")["u1"]
+    assert kept["name"] == "Old name" and kept["summary"] == "Old summary"
+    assert isinstance(kept["failed_ts"], float)
+    assert kept["text_hash"] == before["text_hash"], "the pair still describes the old content"
+
+    # The manifest keeps serving the pair: a present name reads ready.
+    index = ti.read_index(cfg, "s1")
+    assert index is not None
+    view = ti._manifest_state("s1", "ready", index, None)
+    ready = next(e for e in view["checkpoints"] if e["id"] == "a1")
+    assert ready["naming"] == {"state": "ready", "name": "Old name", "summary": "Old summary"}
+
+    # Inside the cooldown: accepted, never pending, not one more call.
+    again = await cn.warm_checkpoints(cfg, "s1", ids=["a1"], complete_fn=failing)
+    assert again == {"accepted": ["a1"], "pending": []}
+    await _settle(cfg, "s1")
+    assert len(failing.calls) == 1
+
+    # Expired: the stale name is regenerated and the success replaces the pair.
+    kept = _items(cfg, "s1")["u1"]
+    kept["failed_ts"] = time.time() - cn.NAMING_UNAVAILABLE_COOLDOWN_S - 5
+    ti.patch_naming(cfg, "s1", {"u1": kept})
+    recovering = _Recorder(_ok("New name", "New summary"))
+    third = await cn.warm_checkpoints(cfg, "s1", ids=["a1"], complete_fn=recovering)
+    assert third == {"accepted": ["a1"], "pending": ["a1"]}
+    await _settle(cfg, "s1")
+    final = _items(cfg, "s1")["u1"]
+    assert final["name"] == "New name" and "failed_ts" not in final
+
+
 async def test_warm_failure_persists_unavailable_and_cooldown_skips(tmp_path: Path) -> None:
     cfg = tmp_path / "cfg"
     _seed(cfg, "s1", [("One", "A1", "complete")])
@@ -484,6 +542,30 @@ async def test_warm_failure_persists_unavailable_and_cooldown_skips(tmp_path: Pa
     assert third == {"accepted": ["a1"], "pending": ["a1"]}
     await _settle(cfg, "s1")
     assert _items(cfg, "s1")["u1"]["name"] == "Recovered name"
+
+
+async def test_warm_timeout_writes_the_marker(tmp_path: Path, monkeypatch) -> None:
+    """The ``wait_for`` bound itself is exercised, not just the failure shape.
+
+    The marker is shared with the provider-error arm, so the risk this pins is
+    the wiring: the timeout must still land a persisted item (agent review
+    round 1, MINOR-2).
+    """
+    cfg = tmp_path / "cfg"
+    _seed(cfg, "s1", [("One", "A1", "complete")])
+    monkeypatch.setattr(cn, "CHECKPOINT_NAME_TIMEOUT_S", 0.05)
+
+    async def hanging(system: str, prompt: str) -> str:
+        await asyncio.sleep(30)
+        return _ok("Never arrives")
+
+    accepted = await cn.warm_checkpoints(cfg, "s1", ids=["a1"], complete_fn=hanging)
+    assert accepted == {"accepted": ["a1"], "pending": ["a1"]}
+    await _settle(cfg, "s1")
+    marker = _items(cfg, "s1")["u1"]
+    assert marker["state"] == "unavailable"
+    assert isinstance(marker["failed_ts"], float)
+    assert "name" not in marker
 
 
 async def test_warm_decline_takes_the_same_unavailable_state(tmp_path: Path) -> None:
