@@ -2881,6 +2881,35 @@ async def test_consumed_and_foreign_jobs_do_not_auto_deliver(tmp_path):
     await session.dispose()
 
 
+def test_set_output_contract_refuses_mid_turn_and_clears_after(tmp_path) -> None:
+    """Review R-3: the setter's mid-turn refusal, on the seam the guard reads.
+
+    The contract is read once per run, at the moment the run's final response
+    is finalized, so an install or a clear that lands mid-stream would either
+    apply to a response already in flight or be silently dropped — the setter
+    refuses while the session is streaming (``_is_streaming``, the flag the
+    refusing branch reads; set directly here, as the neighbouring streaming
+    tests do) and takes ``None`` once the stream is over.
+    """
+    from local_operator.output_contract import OutputContract
+
+    session = make_session(tmp_path, ScriptedStream([]))
+    contract = OutputContract(format="json")
+
+    session.set_output_contract(contract)
+    assert session._output_contract is contract
+
+    session._is_streaming = True
+    try:
+        with pytest.raises(RuntimeError, match="cannot change the output contract"):
+            session.set_output_contract(None)
+    finally:
+        session._is_streaming = False
+
+    session.set_output_contract(None)
+    assert session._output_contract is None
+
+
 def test_context_breakdown_counts_wire_schemas_and_messages(tmp_path):
     """The `/context` source measures what the provider actually receives:
     four system blocks, wire tool schemas (not just names), rendered messages,

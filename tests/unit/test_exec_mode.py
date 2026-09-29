@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelSpec,
     NoticeEvent,
+    OutputValidationEvent,
     ReasoningDeltaEvent,
     TextContent,
     ToolExecutionEndEvent,
@@ -650,6 +651,54 @@ def test_an_error_notice_is_marked_by_a_glyph_not_only_by_colour() -> None:
     assert lines[0] == "✗ Tool not found: reed_file"
     assert lines[1] == "! running low on context"
     assert lines[2] == "compacted"
+
+
+def test_error_wrapping_is_scoped_to_the_contract_exhaustion_sentence() -> None:
+    """Review R-1. ``soft_wrap`` is scoped to the contract-exhaustion line.
+
+    rich reflows a long line at the console width (80 when stderr is not a
+    terminal), and the exhausted-contract sentence is a PINNED one-line
+    contract (the spec's cell 7 asserts it as one phrase) — so that line
+    prints with ``soft_wrap``. Every other error keeps the historical reflow,
+    because an unenforced run's stderr must stay byte-identical to the pre-PR
+    behaviour. The two buffers below differ only in the events fed (same
+    sentence): the generic run reflows (no line exceeds the width), the
+    contract run does not. The scoping is keyed on the exhausted
+    ``OutputValidationEvent`` the renderer already tracks, not on the text.
+    """
+    sentence = (
+        "final response did not satisfy the output contract (json) after 3 "
+        "attempts: not valid JSON: Expecting value: line 1 column 1 (char 0)"
+    )
+
+    generic_buffer = io.StringIO()
+    generic = PrintRenderer(
+        json_mode=False,
+        console=Console(file=generic_buffer, no_color=True, highlight=False, width=80),
+    )
+    generic.handle(AgentEndEvent(messages=[], aborted=False, error=sentence, generation=1))
+    generic_lines = generic_buffer.getvalue().splitlines()
+    assert generic_lines, "the generic error still renders"
+    assert max(len(line) for line in generic_lines) <= 80
+
+    contract_buffer = io.StringIO()
+    contract = PrintRenderer(
+        json_mode=False,
+        console=Console(file=contract_buffer, no_color=True, highlight=False, width=80),
+    )
+    contract.handle(
+        OutputValidationEvent(
+            format="json",
+            attempt=3,
+            max_attempts=3,
+            ok=False,
+            exhausted=True,
+            error="not valid JSON: Expecting value: line 1 column 1 (char 0)",
+        )
+    )
+    contract.handle(AgentEndEvent(messages=[], aborted=False, error=sentence, generation=1))
+    contract_lines = contract_buffer.getvalue().splitlines()
+    assert any("after 3 attempts: not valid JSON" in line for line in contract_lines)
 
 
 def test_a_notice_cannot_smuggle_control_sequences_to_the_terminal() -> None:

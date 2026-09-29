@@ -941,7 +941,13 @@ def test_main_exec_output_flags_land_in_exec_args(
     """The exec parser hands the three output-contract flags to ExecArgs, with the
     schema path made ABSOLUTE here — the ``--background`` worker re-derives its
     own cwd, so a relative path would resolve against the wrong tree on the
-    other side of the spawn boundary (same rule as the spec's §3.1 note)."""
+    other side of the spawn boundary (same rule as the spec's §3.1 note).
+
+    The schema is named RELATIVELY from a cwd that is not its directory, which
+    is what makes the absolutisation the thing under test: with an
+    already-absolute ``tmp_path`` value the assertion held even if the
+    construction stopped absolutising altogether (review R-2).
+    """
     captured: dict[str, Any] = {}
 
     def fake_run_exec(command: str, exec_args) -> int:
@@ -952,6 +958,7 @@ def test_main_exec_output_flags_land_in_exec_args(
     monkeypatch.setattr(
         "local_operator.exec_mode.resolve_hosting_model_dry", lambda args: ("test", "m")
     )
+    monkeypatch.chdir(tmp_path)
     schema = tmp_path / "output-schema.json"
     schema.write_text("{}")
     monkeypatch.setattr(
@@ -968,7 +975,7 @@ def test_main_exec_output_flags_land_in_exec_args(
             "--output-format",
             "json",
             "--output-schema",
-            str(schema),
+            "output-schema.json",
             "--output-retries",
             "1",
         ],
@@ -976,7 +983,8 @@ def test_main_exec_output_flags_land_in_exec_args(
     assert main() == 0
     exec_args = captured["args"]
     assert exec_args.output_format == "json"
-    assert exec_args.output_schema == str(schema.resolve())
+    assert Path(exec_args.output_schema).is_absolute()
+    assert exec_args.output_schema == str(tmp_path / "output-schema.json")
     assert exec_args.output_retries == 1
     assert exec_args.agent_name is None
     assert exec_args.train is False

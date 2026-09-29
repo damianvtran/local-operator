@@ -241,30 +241,16 @@ class OutputContract:
     def instructions(self) -> str:
         """The per-format instruction sentence used by the retry message.
 
-        Per-format and pinned: the parenthetical names the fence tolerance
-        the DECODER actually has, so the instruction and the check cannot
-        drift apart.
+        Composed from ``_payload_shape()`` — the same clause the system block
+        shows — and the shared sections clause: ONE spelling of each, so the
+        retry message, the announcement and the decoder cannot drift apart
+        (review R-5).
         """
         if self.format == "markdown":
             sentence = "Reply with the corrected markdown document only."
-            if self._required_sections:
-                sentence += f" Required sections, in order: {', '.join(self._required_sections)}."
-            return sentence
-        clause = {
-            "json": (
-                "exactly one JSON value and nothing else "
-                "(a fenced ```json block is also accepted)"
-            ),
-            "yaml": (
-                "exactly one YAML mapping or sequence and nothing else "
-                "(a fenced ```yaml block is also accepted)"
-            ),
-            "toml": (
-                "exactly one TOML document and nothing else "
-                "(a fenced ```toml block is also accepted)"
-            ),
-        }[self.format]
-        return f"Reply with {clause}."
+            clause = self._sections_clause()
+            return f"{sentence} {clause}" if clause else sentence
+        return f"Reply with {self._payload_shape()}."
 
     def system_block(self) -> str:
         """The one-shot announcement of this contract, built at construction.
@@ -388,8 +374,16 @@ class OutputContract:
             matched = name
         return ""
 
+    def _sections_clause(self) -> str:
+        """``Required sections, in order: …`` — one spelling for the retry
+        message and the system block (review R-5)."""
+        if not self._required_sections:
+            return ""
+        return f"Required sections, in order: {', '.join(self._required_sections)}."
+
     def _payload_shape(self) -> str:
-        """The format's payload sentence, used by the system block and retries."""
+        """The format's payload clause, shared by the system block and the
+        retry instruction (review R-5)."""
         if self.format == "json":
             return (
                 "exactly one JSON value and nothing else; a fenced ```json "
@@ -414,10 +408,9 @@ class OutputContract:
                 "Output contract: the final response for this session is enforced.",
                 "- Format: markdown. The final response must be a whole markdown document.",
             ]
-            if self._required_sections:
-                lines.append(
-                    f"- Required sections, in order: {', '.join(self._required_sections)}."
-                )
+            clause = self._sections_clause()
+            if clause:
+                lines.append(f"- {clause}")
             return "\n".join(lines)
         lines = [
             "Output contract: the final response for this session is enforced.",

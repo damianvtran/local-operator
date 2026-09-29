@@ -529,6 +529,17 @@ def test_apply_startup_installs_no_contract_without_the_flag():
         (ExecArgs(output_schema="x.json"), "--output-schema requires --output-format"),
         (ExecArgs(output_retries=1), "--output-retries requires --output-format"),
         (ExecArgs(output_format="json", output_retries=9), "between 0 and 5"),
+        # An empty schema is refused, never read as "no schema": silently
+        # dropping it would run the format ENFORCED with the schema missing,
+        # which is the opposite of what the operator asked for (review R-4).
+        (
+            ExecArgs(output_format="json", output_schema=""),
+            "--output-schema must name a schema file",
+        ),
+        (
+            ExecArgs(output_format="json", output_schema="   "),
+            "--output-schema must name a schema file",
+        ),
     ],
 )
 def test_output_contract_preflight_refusals(args, message):
