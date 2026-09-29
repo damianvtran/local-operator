@@ -3082,7 +3082,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Native hooks",
         kind=Kind.BOOL,
         default=False,
-        help="Run hooks from hooks.json in the lop config directory after each tool call.",
+        help="Run hooks from hooks.json in the lop config dir after each tool call.",
     ),
     Setting(
         key="hooks.forward_claude",

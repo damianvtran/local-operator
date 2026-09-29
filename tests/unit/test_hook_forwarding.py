@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import time
@@ -180,6 +181,17 @@ def test_native_absent_or_malformed_file_is_a_noop(config_root: Path) -> None:
     assert hf.load_native_commands() == []
     (config_root / "hooks.json").write_text("{not json")
     assert hf.load_native_commands() == []
+
+
+def test_native_hookless_file_warns_instead_of_silently_loading_nothing(
+    config_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A valid file without the top-level ``hooks`` key is the hand-written
+    mistake the docs promise is logged, not a silent no-op."""
+    (config_root / "hooks.json").write_text(json.dumps({"PostToolUse": []}))
+    with caplog.at_level(logging.WARNING):
+        assert hf.load_native_commands() == []
+    assert "has no top-level 'hooks' mapping" in caplog.text
 
 
 def test_native_loader_reads_timeout_defaults_and_matchers(config_root: Path) -> None:

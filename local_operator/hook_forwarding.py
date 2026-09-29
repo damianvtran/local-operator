@@ -155,7 +155,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
-        logger.warning("hook forwarding: could not read %s", path, exc_info=True)
+        logger.warning("hooks: could not read %s", path, exc_info=True)
         return None
     return data if isinstance(data, dict) else None
 
@@ -294,13 +294,21 @@ def load_native_commands() -> list[HookCommand]:
     """Every ``type: command`` hook in ``config_dir()/hooks.json`` (Claude schema).
 
     Read at CALL time like the forwarded sources, so an edit lands on the next
-    tool call; an absent or unreadable file is a logged no-op, never an error
-    for the turn. ``disableAllHooks: true`` in the file disables its hooks.
+    tool call; an absent or unreadable file is a no-op, never an error for the
+    turn, and a file with no ``hooks`` mapping warns. ``disableAllHooks: true``
+    in the file disables its hooks.
     """
     from local_operator.paths import config_dir
 
-    data = _read_json(config_dir() / "hooks.json")
+    path = config_dir() / "hooks.json"
+    data = _read_json(path)
     if not data or data.get("disableAllHooks") is True:
+        return []
+    if not isinstance(data.get("hooks"), Mapping):
+        # A file that parses but declares no ``hooks`` mapping is the natural
+        # hand-written mistake (``{"PostToolUse": [...]}`` at the top level):
+        # say so rather than loading nothing in silence.
+        logger.warning("hooks: %s has no top-level 'hooks' mapping; nothing will run", path)
         return []
     return _commands_from(data, "native")
 
@@ -320,7 +328,7 @@ def matcher_matches(matcher: str | None, value: str) -> bool:
     try:
         return re.search(matcher, value) is not None
     except re.error:
-        logger.warning("hook forwarding: invalid matcher %r", matcher)
+        logger.warning("hooks: invalid matcher %r", matcher)
         return False
 
 
@@ -512,7 +520,7 @@ def interpret(run: HookRun, event: str) -> list[str]:
         try:
             candidate = json.loads(stdout)
         except ValueError:
-            logger.warning("hook forwarding: %s hook printed unparseable JSON", event)
+            logger.warning("hooks: %s hook printed unparseable JSON", event)
         else:
             parsed = candidate if isinstance(candidate, dict) else None
     if parsed is not None:
@@ -577,7 +585,7 @@ async def run_post_tool_hooks(
             duration_s=duration_s,
         )
     except Exception:
-        logger.warning("hook forwarding: could not prepare %s hooks", event, exc_info=True)
+        logger.warning("hooks: could not prepare %s hooks", event, exc_info=True)
         return []
 
     async def one(hook: HookCommand) -> list[str]:
@@ -587,17 +595,17 @@ async def run_post_tool_hooks(
             raise
         except Exception:
             logger.warning(
-                "hook forwarding: %s hook failed: %s",
+                "hooks: %s hook failed: %s",
                 event,
                 hook.command,
                 exc_info=True,
             )
             return []
         if run.timed_out:
-            logger.warning("hook forwarding: %s hook timed out: %s", event, hook.command)
+            logger.warning("hooks: %s hook timed out: %s", event, hook.command)
         elif run.exit_code not in (0, 2):
             logger.warning(
-                "hook forwarding: %s hook exited %s: %s",
+                "hooks: %s hook exited %s: %s",
                 event,
                 run.exit_code,
                 run.stderr.strip(),
