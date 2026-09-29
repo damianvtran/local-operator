@@ -254,6 +254,46 @@ async def test_a_background_session_completing_is_announced(
 
 
 @pytest.mark.asyncio
+async def test_a_quiet_completion_is_never_announced(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """§14: a wake/monitor completion that did not ask to be announced.
+
+    Both arms in one cell and one scan: the quiet session's completion produces
+    no banner while the loud control's does — a test of only the quiet arm
+    would pass on an observer that never announces anything.
+    """
+    _make_session(store_root, "current", "Current conversation")
+    quiet = _make_session(store_root, "q00000000001", "Quiet monitor check")
+    loud = _make_session(store_root, "r00000000001", "Loudness control")
+    store = AttentionStore(store_root / "attention.db")
+    # An ESTABLISHED store: prior, read completions so the baseline is
+    # installed and the next publish is news rather than history.
+    for directory in (quiet, loud):
+        identity = conversation_identity(directory)
+        seed = str(uuid.uuid4())
+        store.publish(identity, seed, "old", "complete")
+        store.acknowledge(identity, seed)
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        spawned.clear()
+
+        store.publish(
+            conversation_identity(quiet), str(uuid.uuid4()), "quiet", "complete", notify=False
+        )
+        store.publish(conversation_identity(loud), str(uuid.uuid4()), "loud", "complete")
+        await _settle(app, pilot, rounds=10)
+
+        assert len(spawned) == 1, spawned
+        argv = " ".join(spawned[0])
+        assert "Loudness control" in argv
+        assert "Quiet monitor check" not in argv
+
+
+@pytest.mark.asyncio
 async def test_a_test_hosted_session_is_never_announced(
     store_root: Path, spawned: list[list[str]]
 ) -> None:

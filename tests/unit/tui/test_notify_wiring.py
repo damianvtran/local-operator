@@ -244,6 +244,43 @@ async def test_a_failed_turn_notifies_the_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_quiet_delivery_turn_notifies_nothing() -> None:
+    """§14: the session's ONE computed value (`TurnEnded.notify`) gates the funnel.
+
+    Both arms in one cell over the same app and the same handler, flipped on
+    the message alone: the quiet turn — a wake/monitor delivery that did not
+    ask to be announced — fires no toast, and the loud control right beside it
+    still does, so the assertion cannot pass on the wiring being absent.
+    """
+    session = JobsSession()
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        _end_turn(app, TurnEnded(aborted=False, error=None, notify=False))
+        await pilot.pause()
+        assert notifier.kinds == []
+        _end_turn(app, TurnEnded(aborted=False, error=None))
+        await pilot.pause()
+    assert notifier.kinds == ["complete"]
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_turn_is_not_deferred_for_its_children() -> None:
+    """A completion that must never be announced has no announcement to hand
+    over, so no deferral is armed for it — nothing later surfaces it either."""
+    session = JobsSession(running_tasks=2)
+    app, notifier = await _app_with_notifier(session)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _boot(pilot, app)
+        app._notifier = notifier  # type: ignore[assignment]
+        _end_turn(app, TurnEnded(aborted=False, error=None, notify=False))
+        await pilot.pause()
+        assert app._completion_deferred is False
+    assert notifier.kinds == []
+
+
+@pytest.mark.asyncio
 async def test_an_unanswered_approval_notifies_exactly_once() -> None:
     """The edge latch, which is the whole reason `_waiting_on_user` exists.
 

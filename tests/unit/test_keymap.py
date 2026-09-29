@@ -452,30 +452,156 @@ def test_validate_key_dispatches_by_scope() -> None:
 def test_the_desktop_grammar_mapping_is_what_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
     """The per-ACTION grammar seam, pinned.
 
-    `keymap.push_to_talk`'s planned bare-modifier hold is not expressible as
-    an Electron accelerator, so validation and normalization dispatch through
-    `_DESKTOP_GRAMMARS` keyed by action id rather than on scope alone; a fake
-    grammar registered in-test is what proves the mapping is consulted instead
-    of the accelerator rules being a scope-wide hardcode.
+    The bare-modifier hold is not expressible as an Electron accelerator, so
+    validation and normalization dispatch through `_DESKTOP_GRAMMARS` keyed by
+    action id rather than on scope alone; a fake grammar registered in-test
+    under a synthetic id is what proves the mapping is consulted instead of
+    the accelerator rules being a scope-wide hardcode. (The synthetic id keeps
+    this true independently of which real rows have registered grammars —
+    `keymap.push_to_talk` did, and its own coverage lives below.)
     """
     fake = keymap._DesktopGrammar(
         normalize=lambda text: f"fake:{text}",
         validate=lambda value: "the fake grammar refuses everything",
     )
-    monkeypatch.setitem(keymap._DESKTOP_GRAMMARS, "keymap.push_to_talk", fake)
+    monkeypatch.setitem(keymap._DESKTOP_GRAMMARS, "keymap.fake_row", fake)
     assert (
-        keymap.validate_desktop_key("alt-right-hold", action_id="keymap.push_to_talk")
+        keymap.validate_desktop_key("alt-right-hold", action_id="keymap.fake_row")
         == "the fake grammar refuses everything"
     )
-    assert keymap.normalize_desktop_key("alt-right-hold", action_id="keymap.push_to_talk") == (
+    assert keymap.normalize_desktop_key("alt-right-hold", action_id="keymap.fake_row") == (
         "fake:alt-right-hold"
     )
     assert (
-        keymap.validate_key("alt-right-hold", scope="desktop", action_id="keymap.push_to_talk")
+        keymap.validate_key("alt-right-hold", scope="desktop", action_id="keymap.fake_row")
         == "the fake grammar refuses everything"
     )
     # No registered grammar still means the accelerator rules for a desktop row.
     assert keymap.validate_desktop_key("primary+alt+space", action_id="keymap.quick_send") is None
+
+
+def test_push_to_talk_ships_the_frozen_hold_row() -> None:
+    """The registry row the STT stream consumes, exactly as frozen.
+
+    Id, scope, default and help are the freeze (the id is persisted user
+    data); `action=""` keeps it out of Textual's binding table, and `tip=""`
+    keeps a gesture no terminal can press off the splash.
+    """
+    action = keymap.BY_ID["keymap.push_to_talk"]
+    assert action.scope == "desktop"
+    assert action.action == ""
+    assert action.default == "alt-right-hold"
+    assert action.help == "Hold to dictate (desktop); release to stop."
+    assert action.tip == ""
+    assert keymap.scope_of("keymap.push_to_talk") == "desktop"
+
+
+def test_the_hold_grammar_accepts_exactly_the_six_family_tokens() -> None:
+    """Membership is the rule: six bare-modifier holds, nothing else.
+
+    Case-insensitive input, lowercase canonical on the way in, and every
+    refusal names the family — including the accelerators a user is most
+    likely to paste in (that direction of the mutual-refusal contract is
+    pinned in its own test below).
+    """
+    for token in (
+        "alt-right-hold",
+        "alt-left-hold",
+        "meta-right-hold",
+        "meta-left-hold",
+        "ctrl-right-hold",
+        "ctrl-left-hold",
+    ):
+        assert keymap.validate_desktop_key(token, action_id="keymap.push_to_talk") is None, token
+        assert (
+            keymap.validate_key(token, scope="desktop", action_id="keymap.push_to_talk") is None
+        ), token
+
+    assert keymap.normalize_desktop_key("ALT-Right-HOLD", action_id="keymap.push_to_talk") == (
+        "alt-right-hold"
+    )
+    assert keymap.normalize_desktop_key(" meta-left-hold ", action_id="keymap.push_to_talk") == (
+        "meta-left-hold"
+    )
+
+    for bad in (
+        "primary+alt+space",  # an accelerator, not a hold
+        "ctrl+n",  # a chord
+        "alt-right",  # missing the -hold suffix
+        "alt-right-hold-extra",  # extra tokens
+        "shift-right-hold",  # a modifier outside the family
+        "alt-hold",  # no side
+        "f5",  # a bare function key is not a hold
+        "space",
+        "banana",
+        "",
+    ):
+        problem = keymap.validate_desktop_key(bad, action_id="keymap.push_to_talk")
+        assert problem and "hold" in problem, bad
+
+
+def test_the_accelerator_and_hold_grammars_mutually_refuse() -> None:
+    """Neither value space may leak into the other.
+
+    Hold tokens are refused everywhere the accelerator grammar runs — an
+    unattributed desktop value and the quick_send row — and accelerator values
+    are refused on the hold row, the shipped default included. Each direction
+    is the other's regression test.
+    """
+    for token in ("alt-right-hold", "ctrl-left-hold"):
+        assert keymap.validate_desktop_key(token) is not None, token
+        assert keymap.validate_desktop_key(token, action_id="keymap.quick_send") is not None, token
+    for accelerator in ("primary+alt+space", "ctrl+g", "n"):
+        assert (
+            keymap.validate_desktop_key(accelerator, action_id="keymap.push_to_talk") is not None
+        ), accelerator
+
+
+def test_hold_display_is_platform_resolved() -> None:
+    """`<Side>-<ModifierLabel> (hold)`, platform-resolved.
+
+    The default's two strings are the STT freeze verbatim (`Right-Option
+    (hold)` on macOS, `Right-Command (hold)` elsewhere); the other tokens
+    follow the documented label scheme — macOS key names, and `win`/`super`
+    for `meta` elsewhere, matching `display_key`'s own convention.
+    """
+    assert keymap.display_key("alt-right-hold", scope="desktop", platform="darwin") == (
+        "Right-Option (hold)"
+    )
+    assert keymap.display_key("alt-right-hold", scope="desktop", platform="win32") == (
+        "Right-Command (hold)"
+    )
+    assert keymap.display_key("alt-right-hold", scope="desktop", platform="linux") == (
+        "Right-Command (hold)"
+    )
+    assert keymap.display_key("meta-right-hold", scope="desktop", platform="darwin") == (
+        "Right-Command (hold)"
+    )
+    assert keymap.display_key("meta-left-hold", scope="desktop", platform="win32") == (
+        "Left-Win (hold)"
+    )
+    assert keymap.display_key("meta-left-hold", scope="desktop", platform="linux") == (
+        "Left-Super (hold)"
+    )
+    assert keymap.display_key("ctrl-left-hold", scope="desktop", platform="darwin") == (
+        "Left-Control (hold)"
+    )
+    # The spelling a hand-editor might have typed displays the same way.
+    assert keymap.display_key("ALT-Right-HOLD", scope="desktop", platform="darwin") == (
+        "Right-Option (hold)"
+    )
+
+
+def test_capture_availability_comes_from_the_grammar() -> None:
+    """App rows and accelerator rows are terminal-capturable; the hold row is
+    not — terminal input cannot report a bare held modifier, so /settings must
+    refuse to ARM for it rather than paint a frame whose every completion the
+    validator refuses."""
+    assert keymap.capturable_in_terminal("keymap.new_session") is True
+    assert keymap.capturable_in_terminal("keymap.quick_send") is True
+    assert keymap.capturable_in_terminal("keymap.push_to_talk") is False
+    # An unknown id falls back to the app scope, which is capturable.
+    assert keymap.capturable_in_terminal("keymap.not_a_row") is True
 
 
 def test_resolved_keymap_applies_the_desktop_grammar() -> None:
