@@ -384,6 +384,7 @@ from local_operator.tui.widgets.projects_view import (
     ProjectsView,
     ProjectsViewDismissed,
     ProjectsViewJumpRequested,
+    ProjectsViewMilestoneToggled,
     ProjectsViewRefreshRequested,
 )
 from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
@@ -19161,12 +19162,20 @@ class OperatorApp(App[None]):
             return None
         open_count = 0
         total = 0
+        next_items: list[str] = []
         for phase in todos:
             for item in getattr(phase, "items", None) or ():
                 total += 1
                 if getattr(item, "status", "") == "pending":
                     open_count += 1
-        return {session_id: {"todos": {"open": open_count, "total": total}}}
+                    text = str(getattr(item, "text", "") or "")
+                    # The detail page's `— next: …` clause: the first three
+                    # PENDING items in phase order, from this process's own
+                    # state — fresher than the persisted snapshot the counts
+                    # would otherwise come from (P2, spec §7.2 row 5).
+                    if text and len(next_items) < 3:
+                        next_items.append(text)
+        return {session_id: {"todos": {"open": open_count, "total": total, "next": next_items}}}
 
     def _cmd_team(
         self,
@@ -32219,6 +32228,7 @@ class OperatorApp(App[None]):
                     view=view,
                     associated=associated if associated is not None else frozenset(),
                     updated_at=_time.time(),
+                    own_session=self._own_session_id(),
                 )
             elif highlight:
                 self._projects_view.focus_project(highlight)
@@ -32249,6 +32259,7 @@ class OperatorApp(App[None]):
             view=view,
             associated=associated if associated is not None else frozenset(),
             updated_at=_time.time(),
+            own_session=self._own_session_id(),
         )
 
     def _close_projects_view(self) -> bool:
@@ -32337,7 +32348,58 @@ class OperatorApp(App[None]):
             return
         import time as _time
 
-        view.load(views=self._projects_payload(), updated_at=_time.time())
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+
+    def on_projects_view_milestone_toggled(self, message: ProjectsViewMilestoneToggled) -> None:
+        """`↵` on a milestone row: flip completion through the store, re-show.
+
+        The SAME core the tool and the API use (``registry.set_milestone``),
+        so the page adds no second write path (spec §10.5). The recomposition
+        that follows is what makes the row, the header count and the footer
+        rollup agree — every derived fact comes from the store, never from an
+        optimistic guess in the widget. A refusal is a notice carrying the
+        store's own words, never a silent no-op.
+        """
+        message.stop()
+        view = self._projects_view
+        registry = self._project_registry()
+        if view is None or registry is None:
+            return
+        from local_operator.projects import MilestoneEdit, store_error_text
+
+        try:
+            registry.set_milestone(
+                message.project_id,
+                MilestoneEdit(name=message.name, completed=message.completed),
+            )
+        except Exception as exc:  # noqa: BLE001 — a keystroke never crashes the app
+            self._system_notice(
+                f"could not update the milestone: {store_error_text(exc)}", "warning"
+            )
+            return
+        import time as _time
+
+        view.load(
+            views=self._projects_payload(),
+            updated_at=_time.time(),
+            own_session=self._own_session_id(),
+        )
+
+    def _own_session_id(self) -> str | None:
+        """THIS process's session id, or ``None`` — the detail page's anchor.
+
+        The `◆` marker and `own session` label on the detail page follow this
+        id, and only when it is actually linked to the project shown.
+        """
+        session = self._session
+        if session is None:
+            return None
+        session_id = str(getattr(session, "session_id", "") or "")
+        return session_id or None
 
     def on_settings_capture(self, message: SettingsCapture) -> None:
         """Arm or disarm the binding gate a hotkey row needs to listen.

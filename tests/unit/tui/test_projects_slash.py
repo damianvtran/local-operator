@@ -910,11 +910,20 @@ def test_no_live_notice_spells_the_single_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_open_hint_joins_the_ladder_and_sheds_at_60(tmp_path: Path) -> None:
-    """Design r1 D1: `↵ open` is visible at 100 columns and sheds at 60."""
+async def test_the_open_hint_sheds_at_100_for_the_detail_hint(tmp_path: Path) -> None:
+    """S6d P2: `d detail` outranks `↵ open` under width pressure.
+
+    Measured rung widths on this harness: the full canvas row is 101 cells
+    (`↵ open` and `d detail` both present) and 91 without `open`; at 100
+    columns the available row is 98 cells, so `↵ open` sheds there and the
+    slice's headline action keeps its slot (the designer round may re-rank —
+    it is one rung swap). At 150 the row is whole; at 60 the shipped
+    `1 list · 2 board · 3 timeline · v next · esc back` snapshot returns
+    unchanged.
+    """
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path, "alpha")
-    for size, expected in (((100, 30), True), ((60, 20), False)):
+    for size, expected in (((150, 40), True), ((100, 30), False), ((60, 20), False)):
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=size) as pilot:
             await _boot(pilot, app)
@@ -924,6 +933,7 @@ async def test_the_open_hint_joins_the_ladder_and_sheds_at_60(tmp_path: Path) ->
             view = app._projects_view
             assert view is not None
             assert view._open_hint.display is expected, size
+            assert view._detail_hint.display is (size[0] >= 80), size
 
 
 @pytest.mark.asyncio
@@ -959,7 +969,7 @@ async def test_the_open_hint_paints_its_word_once(tmp_path: Path) -> None:
     session = _ProjectSession()
     session.project_registry = _registry(tmp_path, "alpha")
     app = OperatorApp(lambda: _factory(session))
-    async with app.run_test(size=(100, 30)) as pilot:
+    async with app.run_test(size=(150, 40)) as pilot:
         await _boot(pilot, app)
         app._run_slash_command("/project board")
         await pilot.pause()
