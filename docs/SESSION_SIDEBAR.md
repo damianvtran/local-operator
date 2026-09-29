@@ -15,9 +15,16 @@ that ends above the input dock and closes after any valid selection.
 
 The list is drawn in up to four sections, in this order: **★ Pinned**, **Active
 Sessions**, **Previous Sessions**, **⌥ Subagent Runs**. An empty section costs
-no heading. Sectioning is display-only — `rank_entries` still decides the
-ranking, and pins never reorder it — which is what keeps the terminal and the
-mobile relay agreeing on the same active/previous partition.
+no heading. `rank_entries` still decides the ranking — every row's tier, and
+pins never reorder it — which is what keeps the terminal and the mobile relay
+agreeing on the same active/previous partition. The sections are also the
+scroll order: each peer's rows form one contiguous block after **Previous
+Sessions** and before **⌥ Subagent Runs**, so the window the list scrolls by
+and the frame it paints are one order, and rows enter and leave at the frame's
+edges. Page keys move that window a page at a time: the next page starts where
+the previous ended (overlap is allowed, a gap never), and a press whose
+landing reaches the tail settles bottom-aligned, on the same window the wheel
+clamp and `End` land on, rather than on a remainder stub.
 
 The phone draws the same partition and the same ★ Pinned section, and it does
 so off the SAME key: the mobile daemon ranks through `session.catalog.entry_for`
@@ -54,11 +61,12 @@ cursor persists invisibly when the list is unfocused. A pinned row leaves
 whatever section it ranked into and appears under ★ Pinned with a `★` in place
 of its state mark.
 
-Pinned rows are not lifted into view: the list shows one page of its own
-ranking, so a pinned session that ranks below that page is not on screen. When
-that happens the `★ Pinned` section ends with a `+N more pinned` line, so the
-heading never claims to be showing the whole pinned set. That line is chrome —
-clicking it does nothing.
+Pinned rows are not lifted into view: a pin is a display lift, and the list
+still scrolls over the slot the row would occupy in its own section, so a
+pinned session whose slot is below the page is not on screen. When that
+happens the `★ Pinned` section ends with a `+N more pinned` line (at the top of
+the page when no pinned row is on it), so the heading never claims to be
+showing the whole pinned set. That line is chrome — clicking it does nothing.
 
 Pins live in `sidebar-pins.json` in the configuration directory
 (`~/.local-operator` unless `LOCAL_OPERATOR_CONFIG_DIR` says otherwise), newest

@@ -3742,6 +3742,384 @@ async def test_the_pinned_header_never_overclaims(height):
         assert all(cell_len(line) <= sidebar.size.width for line in lines)
 
 
+# -- scrolling: the window's edges are the frame's edges ----------------------
+#
+# The operator report these pin (2026-09-29): remote sessions "disappear when
+# scrolling down ... among previous sessions", and pinned rows "don't handle
+# very cleanly" while scrolling. Both were the window and the frame sliding
+# over two different orders, plus a page move that trusted the page size to be
+# constant; these four cells hold the three fixes at the seam.
+
+
+def _aged(sid: str, *, active: bool = False, age: float = 0.0) -> CatalogEntry:
+    """A row with a real birth, so rank order and age order cannot tie."""
+    born = time.time() - age
+    return CatalogEntry(
+        SessionRow(
+            sid,
+            born,
+            f"Session {sid}",
+            live_state="busy" if active else "",
+            created_at=born,
+        )
+    )
+
+
+def _remote_entry(sid: str, *, age: float = 0.0, device: str = "pixel-8") -> CatalogEntry:
+    """A peer's session as the catalogue lists it: remote and reachable."""
+    born = time.time() - age
+    return CatalogEntry(
+        SessionRow(
+            sid,
+            born,
+            f"Session {sid}",
+            created_at=born,
+            locality="remote",
+            owner_device=f"d_{device}",
+            owner_device_name=device,
+            reachable=True,
+        )
+    )
+
+
+def _scroll_catalog() -> list[CatalogEntry]:
+    """The operator-shaped list the report was against: remote rows interleaved
+    among `previous` by birth (the rank order), cold rows below them, and one
+    subagent row — so the rank order and the presented order genuinely differ."""
+    rows: list[CatalogEntry] = [_aged(f"act{i}", active=True, age=60.0 * (i + 1)) for i in range(4)]
+    age = 1000.0
+    for i in range(18):
+        if i % 3 == 2:
+            rows.append(_remote_entry(f"peer{i}", age=age))
+        else:
+            rows.append(_aged(f"old{i}", age=age))
+        age += 45.0
+    rows += [_aged(f"cold{i}", age=3000.0 + i * 60) for i in range(6)]
+    rows += [_sub("run1", label="section the sidebar", agent="coder")]
+    return rows
+
+
+def _wheel(widget: Any, *, down: bool = True) -> Any:
+    """One notch of wheel, as the driver delivers it (the peer file's shape)."""
+    from textual import events
+
+    kind = events.MouseScrollDown if down else events.MouseScrollUp
+    return kind(
+        widget=widget,
+        x=1,
+        y=1,
+        delta_x=0,
+        delta_y=1 if down else -1,
+        button=0,
+        shift=False,
+        meta=False,
+        ctrl=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_page_walk_shows_every_row():
+    """Paging down must SHOW every row — the operator report's skip, pinned.
+
+    A pagedown sweep from the top used to paint its frames but skip rows:
+    `action_page` moved the cursor by one page and `_reveal` then walked the
+    offset past rows the move never showed whenever the page size shrank across
+    the move — and it shrinks exactly when a window takes in another peer
+    section's chrome. Measured pre-fix: a sweep never painted four remote rows
+    (a fixture of this shape) and, with a deep pinned row, never painted the
+    pinned row. The frame jumped over them, which is what "remote sessions
+    disappear when scrolling down" was.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        entries = _scroll_catalog()
+        sidebar = await _sidebar_with(pilot, app, entries, pins=("act1", "old16"))
+        await _focus_settled(pilot, sidebar)
+        covered: set[str] = set()
+        windows: list[tuple[int, int]] = []
+        for _ in range(len(entries) + 2):
+            covered.update(entry.id for entry in sidebar.visible_entries)
+            windows.append((sidebar._offset, sidebar._offset + len(sidebar.visible_entries) - 1))
+            before = (sidebar._offset, sidebar.cursor_id)
+            await pilot.press("pagedown")
+            await pilot.pause()
+            if (sidebar._offset, sidebar.cursor_id) == before:
+                break
+        all_ids = {entry.id for entry in entries}
+        assert covered == all_ids, f"rows never painted: {sorted(all_ids - covered)}"
+        # No gap between consecutive windows: a page starts on the row after
+        # the previous page's end, or earlier (overlap is allowed).
+        for (lo, hi), (lo_next, _hi_next) in zip(windows, windows[1:]):
+            assert lo_next <= hi + 1, f"a page gap: {lo}..{hi} then {lo_next}.."
+        assert "old16" in covered, "premise: the deep pinned row must be on some page"
+
+
+@pytest.mark.asyncio
+async def test_a_page_move_advances_the_viewport_the_wheel_left():
+    """A page key moves the PAGE; it must not snap back to the parked cursor.
+
+    The wheel moves the viewport and deliberately leaves the cursor behind
+    (`_reveal`'s contract: keys that ACT on the cursor show it first). Paging
+    by moving the CURSOR made the first page key teleport the viewport back to
+    that parked cursor — one press dropped every remote row the user was
+    looking at. A page key starts from the viewport instead.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, _scroll_catalog())
+        for _ in range(4):
+            sidebar.post_message(_wheel(sidebar))
+            await pilot.pause()
+        scrolled = sidebar._offset
+        assert scrolled > 0, "premise: the wheel must have moved the viewport"
+        await _focus_settled(pilot, sidebar)
+        page = sidebar.page_size
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert (
+            scrolled < sidebar._offset <= scrolled + page
+        ), f"pagedown did not advance the viewport: {scrolled} -> {sidebar._offset}"
+        assert sidebar.cursor_id in {entry.id for entry in sidebar.visible_entries}
+        page = sidebar.page_size
+        here = sidebar._offset
+        await pilot.press("pageup")
+        await pilot.pause()
+        assert (
+            here - page <= sidebar._offset < here
+        ), f"pageup jumped: {here} -> {sidebar._offset} (page {page})"
+        assert sidebar.cursor_id in {entry.id for entry in sidebar.visible_entries}
+
+
+def _landing_catalog() -> list[CatalogEntry]:
+    """The UX round-1 (U1) fixture shape: 58 rows whose sweep ends on a REMAINDER.
+
+    4 active, 40 remote rows interleaved among `previous` by birth across two
+    devices (`peer26` among them, pinned), a 12-row cold tail, 2 subagent runs.
+    The pagedown sweep's last window used to be the 2-row stub (56..57) at
+    100x30 — a full-height list painting two rows and ~22 blanks beneath, at
+    the exact moment the user pages to the end.
+    """
+    rows: list[CatalogEntry] = [_aged(f"act{i}", active=True, age=60.0 * (i + 1)) for i in range(4)]
+    age = 1000.0
+    for i in range(40):
+        if i == 26:
+            rows.append(_remote_entry("peer26", age=age, device="macbook"))
+        elif i % 5 == 2:
+            rows.append(_remote_entry(f"peer{i}", age=age))
+        elif i % 10 == 6:
+            rows.append(_remote_entry(f"peer{i}", age=age, device="macbook"))
+        else:
+            rows.append(_aged(f"old{i:02d}", age=age))
+        age += 45.0
+    rows += [_aged(f"cold{i:02d}", age=3000.0 + i * 60) for i in range(12)]
+    rows += [
+        _sub("run1", label="section the sidebar", agent="coder"),
+        _sub("run2", label="audit the poll cost", agent="reviewer"),
+    ]
+    return rows
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [(100, 30), (100, 20)])
+async def test_a_page_walk_to_the_end_settles_on_the_bottom_window(size):
+    """UX round 1 (U1): the sweep's last landing is the BOTTOM window, not a stub.
+
+    A landing that reaches the tail settled on the remainder below it — 2 of
+    58 rows at 100x30, painted into a full-height list with everything below
+    blank. It settles bottom-aligned now, on the window the wheel clamp comes
+    to rest on, and a further press is a no-op. The equality with the wheel is
+    the discriminator: the old stub was also "bottom-aligned" against its own
+    two-row page, so only another path's landing tells the windows apart.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        entries = _landing_catalog()
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("act1", "peer26"), show_subagents=True, total=2
+        )
+        await _focus_settled(pilot, sidebar)
+        all_ids = {entry.id for entry in entries}
+        covered: set[str] = set()
+        windows: list[tuple[int, int]] = []
+        for _ in range(len(entries) + 2):
+            covered.update(entry.id for entry in sidebar.visible_entries)
+            windows.append((sidebar._offset, sidebar._offset + len(sidebar.visible_entries) - 1))
+            before = (sidebar._offset, sidebar.cursor_id)
+            await pilot.press("pagedown")
+            await pilot.pause()
+            if (sidebar._offset, sidebar.cursor_id) == before:
+                break
+        settled = sidebar._offset
+        assert covered == all_ids, f"rows never painted: {sorted(all_ids - covered)}"
+        for (lo, hi), (lo_next, _hi_next) in zip(windows, windows[1:]):
+            assert lo_next <= hi + 1, f"a page gap: {lo}..{hi} then {lo_next}.."
+        assert settled + sidebar.page_size == len(entries), (
+            f"the sweep settled at {settled} with page {sidebar.page_size}, not"
+            f" bottom-aligned on {len(entries)} rows"
+        )
+        # ... and it is the window the wheel clamp settles on — the reference
+        # the UX round named. `End` is its own mechanism (the smallest offset
+        # at or after its guess that shows the last row, which can be a
+        # narrower window than the earliest carrying one): it must land
+        # carrying the tail too, but not necessarily on the same row.
+        sidebar._offset = 0
+        sidebar.refresh()
+        await pilot.pause()
+        await pilot.press("end")
+        await pilot.pause()
+        assert sidebar._offset + sidebar.page_size >= len(
+            entries
+        ), f"End left the tail off the page: {sidebar._offset} + {sidebar.page_size}"
+        sidebar._offset = 0
+        sidebar.refresh()
+        await pilot.pause()
+        for _ in range(len(entries) + 4):
+            sidebar.post_message(_wheel(sidebar))
+            await pilot.pause()
+        assert (
+            sidebar._offset == settled
+        ), f"the wheel clamp lands at {sidebar._offset}; the page sweep at {settled}"
+        assert sidebar.cursor_id in {entry.id for entry in sidebar.visible_entries}
+
+
+@pytest.mark.asyncio
+async def test_the_pageup_walk_from_the_bottom_window_stays_gapless():
+    """The mirror of U1 (UX round 1): stepping up off the bottom window.
+
+    The up-walk holds the same doctrine as down — overlap allowed, a gap never:
+    every window reaches at least the row above the previous window's start,
+    every row is painted somewhere on the way, and the walk tops out on row 0
+    with the cursor riding the page after every press.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = _landing_catalog()
+        sidebar = await _sidebar_with(
+            pilot, app, entries, pins=("act1", "peer26"), show_subagents=True, total=2
+        )
+        await _focus_settled(pilot, sidebar)
+        # Land the bottom the way the sweep does.
+        for _ in range(len(entries) + 2):
+            before = (sidebar._offset, sidebar.cursor_id)
+            await pilot.press("pagedown")
+            await pilot.pause()
+            if (sidebar._offset, sidebar.cursor_id) == before:
+                break
+        all_ids = {entry.id for entry in entries}
+        covered: set[str] = set()
+        windows: list[tuple[int, int]] = []
+        for _ in range(len(entries) + 2):
+            covered.update(entry.id for entry in sidebar.visible_entries)
+            windows.append((sidebar._offset, sidebar._offset + len(sidebar.visible_entries) - 1))
+            before = (sidebar._offset, sidebar.cursor_id)
+            await pilot.press("pageup")
+            await pilot.pause()
+            if (sidebar._offset, sidebar.cursor_id) == before:
+                break
+            assert sidebar.cursor_id in {
+                entry.id for entry in sidebar.visible_entries
+            }, f"the cursor left the page on the way up at {sidebar._offset}"
+        assert sidebar._offset == 0, f"the walk topped out at {sidebar._offset}, not row 0"
+        assert covered == all_ids, f"rows never painted on the way up: {sorted(all_ids - covered)}"
+        for (lo, hi), (lo_next, hi_next) in zip(windows, windows[1:]):
+            assert lo_next <= hi + 1, f"a page gap on the way up: {lo}..{hi} then {lo_next}.."
+            assert (
+                hi_next >= lo - 1
+            ), f"a window that stepped over the row above it: {lo}..{hi} then {lo_next}..{hi_next}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("height", [30, 20])
+async def test_no_scrolled_frame_overruns_the_lists_height(height):
+    """The `+N more pinned` note's charge must follow its paint, at every offset.
+
+    A window past the pinned block paints the note but used to be charged for
+    it only when it also carried a pinned row: `page_size` reserved one line
+    too few, the frame painted height + 1 lines, and the compositor cropped the
+    bottom line — the footer. Asserted over EVERY offset, because the defect
+    lived in exactly the frames a single capture misses.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, height)) as pilot:
+        await pilot.pause()
+        entries = _scroll_catalog()
+        sidebar = await _sidebar_with(pilot, app, entries, pins=("act1", "old16"))
+        for offset in range(len(entries)):
+            sidebar._offset = offset
+            sidebar.refresh()
+            lines = sidebar.render().plain.splitlines()
+            assert len(lines) <= sidebar.size.height, (
+                f"offset {offset}: {len(lines)} lines for a " f"{sidebar.size.height}-row list"
+            )
+        # Charge/paint parity on the exact state the overrun came from: pinned
+        # rows exist, none of them is on this page, and the note IS painted.
+        sidebar._offset = 2
+        sidebar.refresh()
+        window = sidebar.visible_entries
+        rows = sidebar._display_rows()
+        shown = {entry for _kind, entry in rows if entry is not None}
+        missing = [pid for pid in sidebar._pins if pid not in shown]
+        note = [kind for kind, _e in rows if kind == "note:pinned-overflow"]
+        assert bool(missing) == bool(note), (missing, note)
+        chrome_painted = sum(1 for kind, _e in rows if kind != "entry")
+        assert chrome_painted == sidebar._chrome_for(window), (
+            f"the frame spends {chrome_painted} chrome rows on a window charged "
+            f"{sidebar._chrome_for(window)}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_remote_rows_scroll_out_of_the_top_not_the_middle():
+    """Remote rows must scroll in place — the operator report's second half.
+
+    "they disappear when scrolling down ... make sure that remote sessions are
+    properly handled in the scrolling among previous sessions". The window used
+    to slide over the RANK order while the frame painted the PRESENTED order,
+    so a remote row left the frame from the MIDDLE of its section while the
+    rows below it stayed (measured pre-fix: five mid-frame disappearances in a
+    ten-notch wheel walk; none under the presented axis). A row may now leave
+    only from an edge of the frame.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 20)) as pilot:
+        await pilot.pause()
+        entries = _scroll_catalog()
+        sidebar = await _sidebar_with(pilot, app, entries)
+        ranks = [sidebar._axis_key(entry)[0] for entry in sidebar.entries]
+        assert ranks == sorted(ranks), f"the scroll axis is not grouped: {ranks}"
+        peer_at = [i for i, rank in enumerate(ranks) if rank == 3]
+        previous_at = [i for i, rank in enumerate(ranks) if rank == 2]
+        subagent_at = [i for i, rank in enumerate(ranks) if rank == 4]
+        assert max(previous_at) < min(peer_at), "peers must scroll after previous"
+        assert max(peer_at) < min(subagent_at), "peers must scroll before subagents"
+
+        previous_display = [
+            entry.id for _kind, entry in sidebar._display_rows() if entry is not None
+        ]
+        for _ in range(len(entries) + 2):
+            sidebar.post_message(_wheel(sidebar))
+            await pilot.pause()
+            display = [entry.id for _kind, entry in sidebar._display_rows() if entry is not None]
+            if display == previous_display:
+                break
+            gone = [(i, eid) for i, eid in enumerate(previous_display) if eid not in display]
+            kept = [i for i, eid in enumerate(previous_display) if eid in display]
+            if not kept:
+                break
+            for position, eid in gone:
+                above = [i for i in kept if i < position]
+                below = [i for i in kept if i > position]
+                assert not (above and below), (
+                    f"{eid!r} left the frame from the middle (row {position}): "
+                    f"{len(above)} rows above it and {len(below)} below stayed"
+                )
+            previous_display = display
+
+
 @pytest.mark.asyncio
 async def test_a_cursor_never_dangles_after_a_layer_drop():
     """QA D3: `set_entries` adopted `current_id` without checking membership.
