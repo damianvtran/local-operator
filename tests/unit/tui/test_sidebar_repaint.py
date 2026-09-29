@@ -13,6 +13,7 @@ from textual.geometry import Region
 from local_operator.resume import SessionRow
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_catalog import CatalogEntry
+from local_operator.tui.widgets.session_sidebar import _ROW_MARK_COLUMN
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
 
@@ -135,12 +136,16 @@ async def test_spinner_repaints_only_visible_animated_cells_and_age_boundary():
                 patch.object(sidebar, "render", wraps=sidebar.render) as render,
             ):
                 sidebar._advance_spinner()
-                refresh.assert_called_once_with(Region(2, busy_y, 1, 1))
+                refresh.assert_called_once_with(Region(_ROW_MARK_COLUMN, busy_y, 1, 1))
                 await pilot.pause()
                 render.assert_not_called()
             after = sidebar._painted_lines[busy_y].text
             assert before != after
-            assert before[:2] == after[:2] and before[3:] == after[3:]
+            # Only the mark cell (column `_ROW_MARK_COLUMN`) changed.
+            assert (
+                before[:_ROW_MARK_COLUMN] == after[:_ROW_MARK_COLUMN]
+                and before[_ROW_MARK_COLUMN + 1 :] == after[_ROW_MARK_COLUMN + 1 :]
+            )
             assert "Working" in after
             clock.return_value = 1060
             with patch.object(sidebar, "refresh", wraps=sidebar.refresh) as refresh:

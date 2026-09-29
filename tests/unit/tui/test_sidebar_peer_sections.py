@@ -3,11 +3,13 @@
 R6's TUI half (``docs/design/mesh-ui.md`` §1.3) is one list with a local/remote
 annotation, and the design makes two claims this file holds:
 
-1. **The mark lives in the CURSOR-PREFIX slot (columns 0-1)**, never in column 2 —
-   that column belongs to ``row_state_mark``'s urgency ladder, and locality is a
-   durable property of the same kind the pin is. So the pin's own docstring's rule
-   ("a durable property must not displace the ladder") applies here too, and the
-   mark costs zero new cells: the title still starts at column 4 in every case.
+1. **The mark lives in the cursor slot's locality cell**, never in the mark
+   column — that column belongs to ``row_state_mark``'s urgency ladder, and
+   locality is a durable property of the same kind the pin is. So the pin's own
+   docstring's rule ("a durable property must not displace the ladder") applies
+   here too, and the mark costs the title nothing: a remote row and a local row
+   start their titles at the same column (ahead of both, the pin cell's own two
+   columns sit since issue #1357 slice 2a).
 2. **A device with no peers paints byte-identically to before.** The rows are
    local, they carry no mark, no peer heading exists, and the four tier headings
    are the same four strings. That is the *before* frame of the visual pair, and
@@ -106,7 +108,7 @@ def _line_with(lines: list[str], needle: str) -> str:
 
 @pytest.mark.asyncio
 async def test_a_remote_row_carries_the_mark_and_the_title_does_not_move() -> None:
-    """Claim 1: `⇄` occupies columns 0-1, and column 4 is still the title."""
+    """Claim 1: `⇄` sits in the locality cell, and both titles start together."""
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
         await pilot.pause()
@@ -115,16 +117,18 @@ async def test_a_remote_row_carries_the_mark_and_the_title_does_not_move() -> No
         lines = sidebar.render().plain.splitlines()
         remote = _line_with(lines, "Remote work")
         local = _line_with(lines, "Session mine")
-        # The remote row: the locality mark in cell 1 of the reserved slot, with
-        # cell 0 blank (this row is neither the cursor nor pinned). Design round
-        # 1, D4: the mark keeps cell 1 at EVERY state of cell 0, so the row the
-        # user is about to act on is not the one row that stops saying it is
-        # remote — and because cell 0 was already reserved, no title moves.
-        assert remote[:2] == " ⇄"
-        assert local[:2] == "  "
+        # The remote row: the locality mark in the slot's second cell — after
+        # the pin cell's two columns and the caret's — with the first three
+        # blank (this row is neither the cursor nor pinned). Design round 1,
+        # D4: the mark keeps its own cell at EVERY state, so the row the user
+        # is about to act on is not the one row that stops saying it is remote.
+        assert remote[:4] == "   ⇄"
+        assert local[:4] == "    "
         # Same column for the title on both rows: the mark is not paid for by
-        # narrowing the title, which is what "zero new cells" means.
-        assert remote.index("Remote work") == local.index("Session mine") == 4
+        # narrowing the title relative to a local row, which is what the
+        # "costs zero new cells" claim means (the pin cell ahead of both is
+        # issue #1357 slice 2a's own two columns, priced once for every row).
+        assert remote.index("Remote work") == local.index("Session mine") == 6
 
 
 @pytest.mark.asyncio
@@ -153,23 +157,24 @@ async def test_a_local_row_gains_no_mark() -> None:
         assert "⇄" not in "\n".join(lines)
         first = _line_with(lines, "Session mine")
         second = _line_with(lines, "Session stated")
-        # Columns 0-1 blank on BOTH rows — the mark's absence is the whole
-        # claim, and the state mark in column 2 is the ladder's business (a busy
-        # row spins, so it is not asserted to a literal here).
-        assert first[:2] == second[:2] == "  "
+        # The pin cell and the caret cell are blank on BOTH rows — the mark's
+        # absence is the whole claim — and the state mark in the next column is
+        # the ladder's business (a busy row spins, so it is not asserted to a
+        # literal here).
+        assert first[:4] == second[:4] == "    "
         assert first.index("Session mine") == second.index("Session stated")
 
 
 @pytest.mark.asyncio
-async def test_the_caret_and_the_pin_take_cell_zero_and_never_the_mark() -> None:
-    """Cell 0 is the caret's or the pin's; cell 1 is ALWAYS the locality mark.
+async def test_the_pin_and_the_caret_ride_their_own_cells_and_never_the_mark() -> None:
+    """The pin has its own cell pair; the caret keeps the slot beside it.
 
-    Design round 1, D4. The first cut gave the caret and the pin the WHOLE
-    two-cell slot, so a remote row under the cursor — the one row a user is
-    deciding about — painted no mark, and the peer heading that carries the same
-    fact independently sat two lines above it on a screen being scrolled. Both
-    facts now ride the slot that was already reserved, and the title still starts
-    at column 4 in every one of the four states.
+    Issue #1357 slice 2a moved the durable star out of the cursor-prefix slot's
+    cell 0, which it shared with the caret — so a pinned row under the cursor
+    could draw only one of the two, and neither column was a stable pointer
+    target. The locality mark keeps its cell in EVERY state (design round 1,
+    D4: the one row a user is deciding about may not be the one row that stops
+    saying it is remote), and the mark column stays the urgency ladder's alone.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -191,10 +196,16 @@ async def test_the_caret_and_the_pin_take_cell_zero_and_never_the_mark() -> None
         lines = sidebar.render().plain.splitlines()
         pinned = _line_with(lines, "Pinned remote")
         plain = _line_with(lines, "Plain remote")
-        assert pinned[:2] == "★⇄", repr(pinned)
-        assert plain[:2] == "›⇄", repr(plain)
-        # Nothing moved: the title is at column 4 on both, exactly as a local row.
-        assert pinned.index("Pinned remote") == plain.index("Plain remote") == 4
+        assert pinned[:4] == "★  ⇄", repr(pinned)
+        assert plain[:4] == "  ›⇄", repr(plain)
+        # THE STATE THE OLD SHARED CELL COULD NOT DRAW: pinned AND the cursor.
+        sidebar.cursor_id = "pinned-remote"
+        await pilot.pause()
+        both = _line_with(sidebar.render().plain.splitlines(), "Pinned remote")
+        assert both[:4] == "★ ›⇄", repr(both)
+        # Nothing moved: the title starts at the same column on every state —
+        # the pin cell's two columns, then the caret and locality cells.
+        assert plain.index("Plain remote") == both.index("Pinned remote") == 6
 
 
 # ---------------------------------------------------------------------------
@@ -245,12 +256,13 @@ async def test_each_peer_forms_one_section_after_previous_and_before_subagent() 
 async def test_the_peer_heading_stacks_in_the_rows_own_mark_column() -> None:
     """Design round 2, D18: one mark column for a heading and the rows under it.
 
-    Rows paint the locality glyph in cell 1 — cell 0 is the caret-or-pin slot —
-    and the heading painted it in cell 0, so the one glyph that says "everything
-    under this line is another device" started at a different x from every mark
-    it governed and the column did not stack. The heading has no caret and no
-    pin, so its cell 0 is empty by definition: indent it, and the tier headings
-    above (which do own cell 0) stay exactly where they were.
+    Rows paint the locality glyph in the slot's locality cell — after the pin
+    cell and the caret — and the heading once painted it at the start of the
+    line, so the one glyph that says "everything under this line is another
+    device" started at a different x from every mark it governed and the column
+    did not stack. The heading has neither a caret nor a pin, so those columns
+    are empty on it by definition: indent it (`_peer_heading_text`), and the
+    tier headings above (which DO own the pin column's star) stay where they are.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
@@ -260,7 +272,7 @@ async def test_the_peer_heading_stacks_in_the_rows_own_mark_column() -> None:
         lines = sidebar.render().plain.splitlines()
         heading = _line_with(lines, "⇄ damian-mbp")
         row = _line_with(lines, "Peer A one")
-        assert heading.index("⇄") == row.index("⇄") == 1, (heading, row)
+        assert heading.index("⇄") == row.index("⇄") == 3, (heading, row)
 
 
 @pytest.mark.asyncio
@@ -361,9 +373,9 @@ async def test_a_device_with_no_peers_paints_exactly_as_before() -> None:
     """Claim 2, the R9/R16 invariant: no peer, no mark, no peer heading.
 
     Asserted on the headless four-tier fixture: the headings are the four tier
-    names, the rows' first four columns are the caret/mark pair, and no ``⇄``
-    appears anywhere. This is the same frame the *before* capture must be
-    byte-identical to (§4.1).
+    names, the rows carry only the pin/caret/mark columns, and no ``⇄`` appears
+    anywhere. This is the same frame the *before* capture must be byte-identical
+    to (§4.1).
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 40)) as pilot:
@@ -432,10 +444,10 @@ async def test_the_poll_adopts_what_the_producer_returns(monkeypatch) -> None:
         joined = "\n".join(lines)
         assert "⇄ radiant-m4" in joined, joined
         row = next(line for line in lines if "Federated catalogue" in line)
-        # The mark rides cell 1 of the reserved prefix slot: the caret/pin owns
-        # cell 0, and the title still starts at column 4.
-        assert row[1] == "⇄", repr(row)
-        assert row[4] == "F", repr(row)
+        # The mark rides the locality cell — after the pin cell's two columns
+        # and the caret's — and the title starts after the mark column.
+        assert row[3] == "⇄", repr(row)
+        assert row[6] == "F", repr(row)
 
 
 @pytest.mark.asyncio
@@ -494,14 +506,14 @@ async def test_a_silent_peer_keeps_the_peer_rank_on_both_sides_of_answering() ->
         sidebar.set_silent_peers([("radiant-m4", "connect_failed:ConnectionRefusedError")])
         await pilot.pause()
         silent = _section_headings(sidebar)
-        silent_at = silent.index("peer: ⇄ radiant-m4 (unreachable)")
+        silent_at = silent.index("peer:   ⇄ radiant-m4 (unreachable)")
         assert silent_at < silent.index("subagent"), silent
 
         sidebar.set_silent_peers([])
         sidebar.set_entries([*entries, _remote("p1", label="radiant-m4", reachable=False)])
         await pilot.pause()
         answering = _section_headings(sidebar)
-        answering_at = answering.index("peer: ⇄ radiant-m4 (unreachable)")
+        answering_at = answering.index("peer:   ⇄ radiant-m4 (unreachable)")
         assert answering_at < answering.index("subagent"), answering
 
         # AND THE TWO DEVICES STAY IN ONE ORDER. A second peer's section is
@@ -517,8 +529,8 @@ async def test_a_silent_peer_keeps_the_peer_rank_on_both_sides_of_answering() ->
         )
         await pilot.pause()
         both = _section_headings(sidebar)
-        assert both.index("peer: ⇄ pixel-8 (unreachable)") < both.index(
-            "peer: ⇄ radiant-m4 (unreachable)"
+        assert both.index("peer:   ⇄ pixel-8 (unreachable)") < both.index(
+            "peer:   ⇄ radiant-m4 (unreachable)"
         ), both
 
 
@@ -555,8 +567,8 @@ async def test_two_row_less_sections_are_separated_by_one_blank() -> None:
             if first == second == "blank"
         ]
         assert doubled == [], f"two blank rows in a row at {doubled}: {kinds}"
-        first = kinds.index("header:peer: ⇄ pixel-8 (unreachable)")
-        second = kinds.index("header:peer: ⇄ radiant-m4 (unreachable)")
+        first = kinds.index("header:peer:   ⇄ pixel-8 (unreachable)")
+        second = kinds.index("header:peer:   ⇄ radiant-m4 (unreachable)")
         assert second - first == 2, kinds[first : second + 1]
         assert kinds[first + 1] == "blank", kinds[first : second + 1]
         # The headers are chrome the frame still fits: the page size is computed

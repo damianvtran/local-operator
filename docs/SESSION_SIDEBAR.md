@@ -58,8 +58,16 @@ on screen.
 and the list focused, it acts on the cursor row. Hover wins over the cursor
 because the pointer resting on a row says which session is meant, while the
 cursor persists invisibly when the list is unfocused. A pinned row leaves
-whatever section it ranked into and appears under ★ Pinned with a `★` in place
-of its state mark.
+whatever section it ranked into and appears under ★ Pinned wearing `★` in its
+own leading cell.
+
+The pin is also a direct pointer action (issue #1357): every row opens with a
+two-cell pin cell ahead of the caret. A pinned row shows `★` there on every
+frame — the caret keeps its own cell beside it, so a pinned row that is also
+the cursor shows both facts — and an unpinned row shows `☆` while the pointer
+rests on it. That cell is what a click toggles; clicking anywhere else on the
+row keeps the behaviour it always had (open/select), and a click meant for the
+star never opens or selects the row.
 
 Pinned rows are not lifted into view: a pin is a display lift, and the list
 still scrolls over the slot the row would occupy in its own section, so a
@@ -112,6 +120,25 @@ counter may never be the reason the only named exit disappears (main's D4 rule).
 The `⌥N` chip never yields either: the position is recoverable by scrolling (the
 cursor row is painted), but the hidden population is recoverable from nowhere
 else on the frame. `/help` still lists `ctrl+b`.
+
+When the list holds the keyboard the ladder re-ranks: `f10 pin` rides it from
+27 cells of list width up (the pin cell's `☆` is invisible until hovered, so
+the footer is its one standing teacher; between 17 and 26 the chip outranks it,
+and a 30-column terminal lands there), and `ctrl+a ⌥` renders exactly where the
+position form does not fit — on an unpaged list at 38 cells or more, and on a
+paged one in the band from 38 up to one cell under `{position} · esc return ·
+f10 pin · ⌥N`. That band is empty for a position string of 8 cells or fewer
+(`1–18/21`, whose form is 38 and wins at 38) and opens for longer ones: a
+152-entry list on a deep page (`128–152/152`, its form 41) shows
+`esc return · f10 pin · ctrl+a ⌥ · ⌥N` at content 38–40 and the position form
+returns from 41. Every width here moves with the position string and the chip,
+so the code's fit test is the authority, not a quoted figure (design round 1
+D1, corrected by review round 2). The position yields BEFORE the pin —
+recoverable by scrolling, while `f10 pin` is not taught anywhere else on the
+frame — so the focused rungs are `esc return · f10 pin [· ctrl+a ⌥]{ · ⌥N}`
+above the floor fallbacks. `ctrl+o` has no spelling that fits a real content
+width beside the chip and the pin, so it stays a documented chord rather than
+an invisible candidate.
 
 The layer is capped at 40 rows and does not page. A sub row is labelled by what
 it was delegated to do (`label · role`, degrading to whichever half exists),

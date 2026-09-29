@@ -130,6 +130,34 @@ SessionSidebar {
     background: $lo-surface;
 }
 
+/* Keyboard focus, told in the app's EXISTING focus language: `tint-select`
+ * is what `ToolCard:focus`, `ApprovalBlock:focus` and the wake/notice blocks
+ * wear, and "two focusable transcript blocks must not spell focus two
+ * different ways" — the sidebar is the same kind of surface, so F9 (or
+ * `/sidebar focus`) paints it the same way (issue 1357, slice 2a).
+ *
+ * Not a brightness step, and that is measured, not taste: between the grounds
+ * this rule replaces, `bg`→`surface` is 1.088:1 and `surface`→`tint-select`
+ * 1.053:1, which is the size the app has already found imperceptible
+ * (`theme.py:50-55`). `tint-select` is the app's answer for exactly that
+ * dead end — a cool green cast kept at near-iso-luminance with the ground it
+ * replaces (1.146:1 against `bg`, dark; 1.127:1 against `paper`, light), so
+ * nothing reflows, the cue survives colour-vision deficiency as a cast, and
+ * it cannot be confused with the accent (which means "a turn is live" and
+ * nothing else).
+ *
+ * The cursor row steps UP to `tint-select-hi` while the panel wears
+ * `tint-select` (`session_sidebar.render`): a focused panel and the row under
+ * the cursor must remain separable, and on an untinted list the pair reads
+ * `tint-select` vs `overlay` — one step of the same ladder.
+ *
+ * One rule covers all three placements (docked left, docked right, overlay)
+ * because it paints the widget's own background, which each placement sets
+ * independently ($lo-bg docked, $lo-surface overlay); focus overrides both. */
+SessionSidebar:focus {
+    background: $lo-tint-select;
+}
+
 Screen {
     background: $lo-bg;
     color: $lo-fg;
