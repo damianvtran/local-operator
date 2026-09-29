@@ -7356,6 +7356,7 @@ class Session:
         input_mode: str | None = None,
         input_path: str | None = None,
         audio: Sequence[AudioContent] | None = None,
+        harness_injected: bool = False,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -7386,6 +7387,15 @@ class Session:
         that also states ``supports_responses_api``, whose body choice is a
         process setting this layer does not read — not the mechanism this
         door relies on.
+
+        ``harness_injected`` says the row this steer queues was NOT typed by a
+        person — the same structural marker ``prompt`` stamps, carried because
+        one delivery of a spooled OWNER prompt is a STEER rather than a prompt:
+        ``_run_spooled_owner_prompt`` (the first-turn drain) and
+        ``process._run_owner_prompt``'s mid-turn fallback both reach this method
+        while the turn lock is held, and without the carriage the replayed
+        continuation would mint an UNSTAMPED user row that the marker-only
+        surfaces paint. Defaults ``False`` so no existing caller changes.
         """
         extra: dict[str, Any] = {}
         if message_id:
@@ -7399,6 +7409,13 @@ class Session:
         elif input_path is not None:
             extra["input_path"] = input_path
         message = Message.user(text, images, audio=audio, **extra)
+        if harness_injected:
+            # The stamp goes on the row THIS call mints, at the one place the
+            # row is born — the same contract ``prompt`` documents one method
+            # up, and the reason both wires need no new field: ``provider_payload``
+            # rides the live ``MessageStartEvent`` and the durable journal row
+            # alike.
+            message.provider_payload = {RENDERED_INJECTION_KEY: True}
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
@@ -7778,7 +7795,12 @@ class Session:
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
             return
-        self.steer(line.text, [], message_id=command_id or None)
+        self.steer(
+            line.text,
+            [],
+            message_id=command_id or None,
+            harness_injected=bool(getattr(line, "harness_injected", False)),
+        )
         # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
         # the batch's repeat is the retry the at-least-once contract promises,
         # and it is only redundant once the first row landed (agent review round

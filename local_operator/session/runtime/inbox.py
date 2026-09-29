@@ -177,6 +177,16 @@ class InboxLine:
     (``transcript.has_admitted_command``) then answers a retried or
     twice-spooled row without appending it twice, and the viewer that painted a
     row for that id has its announcement matched rather than duplicated.
+
+    ``harness_injected`` is the STRUCTURAL provenance stamp, carried across the
+    spool for the same reason ``wake`` is: it is what the producer knew and the
+    successor cannot re-derive. The owner prompt that arrived during an update
+    window may have been harness chrome — the goal judge's continuation is the
+    producer — and the successor replays the row through the ordinary
+    admission, so a lost stamp would mint an UNSTAMPED user row that the
+    marker-only surfaces paint as the operator's own words (measured on a live
+    session: 10 such rows). Absent in rows written before this field existed,
+    which reads as False: the old behaviour, a plain message.
     """
 
     text: str
@@ -186,6 +196,7 @@ class InboxLine:
     wake: bool = False
     source: str = SOURCE_PEER
     command_id: str = ""
+    harness_injected: bool = False
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
@@ -209,6 +220,7 @@ class InboxLine:
             # not a shape this change creates, and the next drain consumes it.)
             source=_known_source(payload.get("source")),
             command_id=str(payload.get("command_id", "") or ""),
+            harness_injected=bool(payload.get("harness_injected", False)),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -220,6 +232,7 @@ class InboxLine:
             "wake": self.wake,
             "source": self.source,
             "command_id": self.command_id,
+            "harness_injected": self.harness_injected,
         }
 
 
