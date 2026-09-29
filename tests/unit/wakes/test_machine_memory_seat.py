@@ -107,7 +107,9 @@ def test_the_seat_logs_the_summary_when_it_changes(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     class _Report:
-        def __init__(self, summary: str) -> None:
+        def __init__(self, state: str, summary: str) -> None:
+            self.state = state
+            self.killed = None
             self._summary = summary
 
         def summary(self) -> str:
@@ -116,19 +118,21 @@ def test_the_seat_logs_the_summary_when_it_changes(
     async def scenario() -> None:
         seat = sup._MachineMemorySweep(tmp_path)
 
-        async def completed(text: str) -> "asyncio.Task[object]":
+        async def completed(state: str, text: str) -> "asyncio.Task[object]":
             async def inner() -> object:
-                return _Report(text)
+                return _Report(state, text)
 
             task = asyncio.ensure_future(inner())
             await task
             return task
 
-        first = await completed("machine memory: ok")
+        first = await completed("ok", "machine memory: ok")
         seat._finished(first)
-        again = await completed("machine memory: ok")
+        # Same STATE, different volatile numbers: the key must NOT move (R2-2 —
+        # a text comparison logged INFO nearly every healthy pass).
+        again = await completed("ok", "machine memory: ok fleet 23306 MB")
         seat._finished(again)
-        warn = await completed("machine memory: warn - fleet 90% of physical")
+        warn = await completed("warn", "machine memory: warn - fleet 90% of physical")
         seat._finished(warn)
 
     caplog.set_level(logging.DEBUG, logger="local_operator.wakes.supervisor")
