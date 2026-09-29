@@ -2962,21 +2962,36 @@ class AttachedSession:
             self._read_cold_reason = "owner-silent"
 
     async def admit_prompt(
-        self, text: str, *, command_id: str, images: list[dict[str, str]], steer: bool = False
+        self,
+        text: str,
+        *,
+        command_id: str,
+        images: list[dict[str, str]],
+        steer: bool = False,
+        input_mode: str | None = None,
+        input_path: str | None = None,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
         Retrying the caller's stable ID crosses the existing durable reservation
         boundary. Unlike submit_response this does not wait for model completion,
         so an HTTP disconnect cannot cancel work the owner already accepted.
+
+        ``input_mode``/``input_path`` are the silent input metadata (see
+        ``Message.input_mode``). Each key is OMITTED from the frame when
+        ``None``, so a legacy send stays byte-identical on the wire and an owner
+        runtime from before the carriage never sees a key it does not read.
         """
         await self._ensure_bound()
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
-        return await client.request_ack_with_duplicate(
-            "steer" if steer else "prompt", text=text, images=images, command_id=command_id
-        )
+        fields: dict[str, Any] = {"text": text, "images": images, "command_id": command_id}
+        if input_mode is not None:
+            fields["input_mode"] = input_mode
+        if input_path is not None:
+            fields["input_path"] = input_path
+        return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
     async def bind_runtime(self) -> None:
         """Bind a viewer before an explicitly requested owner control operation."""

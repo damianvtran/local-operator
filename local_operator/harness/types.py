@@ -384,6 +384,26 @@ class Message(BaseModel):
     is_error: bool = False
     stop_reason: str | None = None  # stop | length | toolUse | refusal | error | aborted
     usage: "Usage | None" = None
+    # HOW THE USER PRODUCED THIS ROW'S TEXT, user rows only: "typed", "dictated"
+    # or "mixed" (history-based per send — a keystroke AND a dictation both fed
+    # the draft since the composer's last accepted send — NOT per-span
+    # attribution, which no producer can claim today; do not "fix" this into
+    # range tracking). SILENT carriage by design: never rendered, never in
+    # copy/export, never read by a provider (every serializer builds its wire
+    # row from role/content/tool_calls rather than dumping this model). It is
+    # stored on the durable user row so provenance survives a resume, and
+    # ``None`` = legacy or unknown — it MUST stay the default, because
+    # ``model_dump(exclude_defaults=True)`` is what keeps every pre-existing
+    # row byte-identical (``transcript.encode_message_payload``).
+    input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # WHICH ROUTE PRODUCED A DICTATION — the extension slot beside
+    # ``input_mode``, reserved for the STT cascade: absent/None = the classic
+    # path (the server-side transcription hop the desktop has today). An OPEN
+    # string on purpose — the resolver that produces the value owns its
+    # vocabulary, and the carriage must never fork that behind an enum. Same
+    # silence and same byte-identical defaulting rule as ``input_mode``; the
+    # two travel as ONE contract revision (``input-mode-v1``).
+    input_path: str | None = None
     # Provider-native replay payload (opaque to the harness). NOTE: the loop
     # stores harness bookkeeping under ``provider_payload["details"]`` (tool
     # result metadata for compaction) — wire clients MUST NOT replay that key

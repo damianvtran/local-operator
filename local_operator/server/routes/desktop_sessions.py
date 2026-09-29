@@ -34,6 +34,8 @@ from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
     ArchiveState,
     AttentionState,
+    CheckpointManifest,
+    CheckpointWarmReceipt,
     ChildTrajectoryRelease,
     ChildTrajectoryWindow,
     ChildTranscriptPage,
@@ -94,6 +96,7 @@ from local_operator.session.catalog import (
     SCOPE_NAME_MAX_LENGTH,
     CatalogueScope,
 )
+from local_operator.session.checkpoint_naming import MAX_WARM_IDS
 from local_operator.session.cold_model import synthesise_cold_state
 from local_operator.session.errors import (
     MoveIndeterminate,
@@ -991,6 +994,17 @@ class Prompt(Input):
     text: str = Field(max_length=200_000)
     images: list[Image] = Field(default_factory=list, max_length=8)
     mode: Literal["prompt", "steer"] = "prompt"
+    # SILENT INPUT METADATA (see ``harness.types.Message.input_mode``): how the
+    # user produced this send, and the route slot beside it. The enum is
+    # enforced HERE, at the wire, so a client outside the vocabulary gets a 422
+    # before anything is admitted — the ``Message`` validator is the second
+    # place the same rule lives, and a message the READER refuses is a dropped
+    # row, not a refused request, so the refusal belongs at the door.
+    input_mode: Literal["typed", "dictated", "mixed"] | None = None
+    # An OPEN string on purpose (see ``Message.input_path``): the STT cascade
+    # owns this vocabulary and the carriage must not fork it behind an enum.
+    # Absent/null = the classic server-transcription path.
+    input_path: str | None = None
 
     @model_validator(mode="after")
     def nonempty(self):
@@ -1085,6 +1099,25 @@ class Warm(Input):
     applies: a client that invents an option gets a 422 naming it, instead of
     having it silently ignored and believing it took effect.
     """
+
+
+class CheckpointsWarm(Input):
+    """Which checkpoints to buy names for (``sessions.checkpoints.warm``, D9).
+
+    Both fields are optional: ``ids`` names specific ticks (a hover) and
+    ``limit`` bounds the rail-open default selection — "the most recent <= 8
+    checkpoints missing names" when neither is sent. Sending neither is the
+    common case, not an omission to correct, which is what makes the op
+    usable from a rail before the client has classified anything.
+
+    ``ids`` entries are journal entry ids (a tick's own id, D1); the cap is
+    the module's own :data:`~local_operator.session.checkpoint_naming.MAX_WARM_IDS`
+    so an over-cap request is a 422 naming the field rather than a silently
+    truncated batch.
+    """
+
+    ids: list[str] | None = Field(default=None, max_length=MAX_WARM_IDS)
+    limit: int | None = Field(default=None, ge=1, le=MAX_WARM_IDS)
 
 
 class Interrupt(Input):
@@ -2418,16 +2451,101 @@ async def history(
     session_id: str,
     request: Request,
     before_id: str | None = Query(default=None, max_length=128),
+    around_id: str | None = Query(default=None, max_length=128),
+    before: int | None = Query(default=None, ge=0, le=500),
+    after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
     # returns one for a directory that does not exist), not a 404.
+    #
+    # ``around_id``/``before``/``after`` are the anchored mode (design §D4): one
+    # page centred on an entry id, for the renderer's far jump. The reader's own
+    # validator rejects the combinations that describe no window (an anchor
+    # named with a cursor, counts with no anchor) through ``errors()``, so the
+    # request fails the same way whichever door it came through; the numeric
+    # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
     async with (
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.history(before_id=before_id, limit=limit))
+        return reply(
+            await bridge.history(
+                before_id=before_id,
+                around_id=around_id,
+                before=before,
+                after=after,
+                limit=limit,
+            )
+        )
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/checkpoints",
+    response_model=CRUDResponse[CheckpointManifest],
+)
+async def checkpoints(session_id: str, request: Request):
+    """The checkpoint rail's manifest: user ticks, completion ticks, outcomes.
+
+    A READ like ``history`` beside it — and on a draft the empty manifest is
+    the correct answer rather than a 404: there is no journal to derive from,
+    which is exactly why the rail renders nothing.
+
+    The manifest is derived and cached by ``session/transcript_index.py``. A
+    cold or stale cache answers ``building`` while a background scan runs, so
+    the rail's first paint is immediate even on a 272 MB journal; the renderer
+    polls until ``ready`` (design D2's poll discipline). For a peer
+    conversation the answer is ``state: "unsupported"`` (D4) — v1 derives
+    checkpoints from this device's journal only.
+
+    ``naming`` on each completion rides the same manifest; its ``state`` is
+    what tells the rail to keep polling while a name is being generated
+    (``sessions.checkpoints.warm`` is BE-2's op and is not part of this
+    route).
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        return reply(await bridge.checkpoints())
+
+
+@router.post(
+    "/v1/desktop/sessions/{session_id}/checkpoints/warm",
+    response_model=CRUDResponse[CheckpointWarmReceipt],
+)
+async def checkpoints_warm(session_id: str, body: CheckpointsWarm, request: Request):
+    """Buy names for this conversation's checkpoint ticks (D2/D9), lazily.
+
+    The rail calls this when it opens (no ids: the backend selects the most
+    recent names still missing, bounded) and on hover of one tick
+    (``ids: [id]``). The call only ADMITS work: the owner schedules the
+    generation as background tasks and answers at once, so this route never
+    waits on a provider — a name arrives on a later manifest poll.
+
+    A WRITE only in that it spends a model call per accepted checkpoint. The
+    conversation, its runtime and its transcript are untouched, so this rides
+    the READ envelope — the bounded attach whose failure is a cold answer
+    rather than a refusal, the same reading ``/watch`` takes — and a draft
+    answers the empty receipt exactly as the manifest beside it answers
+    empty.
+
+    The work runs on the OWNER (provider credentials and the errand tier are
+    session state; see ``Bridge.checkpoints_warm``): a cold conversation's
+    empty acceptance is the honest answer, and the rail's fallback text
+    stands until a warm lands on a live runtime.
+
+    Declared beside the manifest it feeds. A nested fixed suffix, so the
+    route-order rule (``search`` before ``{session_id}``) is untouched: no
+    earlier route can shadow ``.../checkpoints/warm``, and this cannot shadow
+    a later one.
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        return reply(await bridge.checkpoints_warm(ids=body.ids, limit=body.limit))
 
 
 @router.get(
@@ -2737,6 +2855,12 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                         command_id=body.request_id,
                         images=images,
                         steer=body.mode == "steer",
+                        # Silent input metadata, omitted from the attach frame
+                        # when absent (``admit_prompt`` drops the None keys), so
+                        # a legacy-sender frame stays byte-identical and an
+                        # owner from before the carriage never sees the keys.
+                        input_mode=body.input_mode,
+                        input_path=body.input_path,
                     )
                     admitted = True
                     # Admission can bind a cold viewer while an event

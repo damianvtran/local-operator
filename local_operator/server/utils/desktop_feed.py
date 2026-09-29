@@ -1219,7 +1219,15 @@ class DesktopFeed:
         Without it, that store's conversations banner the operator with "Hello
         from the mock provider!" on the machine-wide channel.
 
-        A THIRD FILTER IS §14, and it is not a test-hosting gate: the session
+        AND A THIRD, WHICH IS NOT ABOUT THE MOCK: the identity test
+        (``desktop_belongs_to_this_process``) refuses the OFFER from a backend
+        that is not the user's own run. The banner this composes is raised by
+        another process — the desktop app attached here — under ITS bundle
+        identity, so withholding the frame is the only place this repository can
+        decline it, and a backend under a redirected ``HOME`` is a rig or a
+        sandbox by the same reasoning the TUI's own OS legs use.
+
+        A FOURTH FILTER IS §14, and it is not a test-hosting gate: the session
         computed one ``notify`` value per completion and the delta read carries
         it PER ROW (``row["notify"]``), so a quiet wake/monitor completion is
         filtered here without the feed re-deriving anything from the row's kind
@@ -1230,9 +1238,14 @@ class DesktopFeed:
         loud one). ``.get``'s default True keeps rows from older builds exactly
         as loud as they were.
         """
-        from local_operator.tui.notify import notifications_enabled
+        from local_operator.tui.notify import (
+            desktop_belongs_to_this_process,
+            notifications_enabled,
+        )
 
         if not notifications_enabled():
+            return
+        if not desktop_belongs_to_this_process():
             return
         bridged = set(self._bridged())
         candidates: list[tuple[str, str, str, str, int]] = []
