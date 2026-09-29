@@ -6859,7 +6859,24 @@ class AttachedSession:
         so: this is a notice for OTHER surfaces, and nothing about painting this
         viewer's own verdict may wait on a transcript read or fail because the
         attention store is locked.
+
+        ONLY A CONVERSATION THIS DEVICE HOLDS IS JOURNALLED HERE (measured
+        2026-09-29, the recall strand). The construction below is NOT read-only:
+        ``Transcript`` MATERIALISES the directory it is pointed at (its own
+        constructor note on ``defer_materialise``), so a REMOTE viewer's
+        owner-lost verdict — a session whose conversation and whose every
+        reading surface live on the owner's machine — created
+        ``sessions/<id>/created_at.json`` on the VIEWING device for a session it
+        does not own. That corpse then sat at the recall's promote target and
+        refused the only complete copy of the conversation a place to land
+        (see ``network/mobility.py``'s ``_bare_remnant``, which now clears the
+        shape and documents the collision). Nothing local reads a remote id's
+        outcome from here — the outcome that matters is written where the
+        conversation is, by the owner's own runtime — so there is nothing to
+        journal; the verdict itself is still painted by the caller either way.
         """
+        if self.runtime_locality == "another-machine":
+            return
         try:
             from local_operator.session.attention import AttentionStore
             from local_operator.session.transcript import Transcript

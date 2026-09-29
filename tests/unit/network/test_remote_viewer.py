@@ -739,3 +739,106 @@ async def test_the_remote_client_mirrors_the_input_mode_carriage_gate(
             await stripped_viewer.dispose()
     finally:
         await asyncio.to_thread(created.stop)
+
+
+@pytest.mark.asyncio
+async def test_an_owner_lost_verdict_leaves_no_session_directory_on_the_viewing_device(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PINNED AT ITS SOURCE: the writer of the 2026-09-29 recall strand.
+
+    A viewer on THIS device, watching a session that lives on the peer, runs its
+    owner-lost verdict when the owner's runtime goes away — and the verdict's
+    journalling constructed a local ``Transcript`` for the peer's id. That
+    construction is not read-only: ``Transcript`` MATERIALISES the directory it
+    is pointed at, so the verdict left ``sessions/<id>/created_at.json`` on the
+    VIEWING device — the bare remnant a later recall of that id stranded on
+    (``test_mobility_recall_recovery`` carries the recall half; mobility's
+    ``_bare_remnant`` the collision). A conversation that is not on this machine
+    is not journalled here: the outcome that matters is written where the
+    conversation is, by the owner's own runtime.
+
+    THE PRECONDITION IS ESTABLISHED EXPLICITLY, AND EVENT-DRIVEN. The
+    operator's viewer held a turn in flight when the runtime died (their
+    session was parked mid-turn), and the verdict only fires for a live turn,
+    so ``_streaming`` — the facade's own statement that a turn is live — is set
+    directly. The owner is then torn down TO COMPLETION (``aclose`` on its own
+    loop, not the bounded ``close``), the drop is delivered by invoking the
+    callback the transport itself calls (``_on_disconnected``), and the
+    recovery loop is AWAITED AS ITS OWN TASK — the wait ends exactly when the
+    loop does, with no clock in it. The first shape of this cell waited on the
+    EOF to travel two relays under a 20 s bound; it filled red on CI shard 0
+    ("the owner-lost verdict never ran") while passing on every local run,
+    for the reviewer and for QA. Everything under test is the shipped path
+    from the drop's own callback on: the recovery deadline, the go-cold
+    verdict, and the journalling guard itself.
+    """
+    from local_operator.session import attached as attached_mod
+
+    monkeypatch.setattr(attached_mod, "COLD_FALLBACK_S", 0.5)
+    journalled: list[str] = []
+    real_journal = attached_mod.AttachedSession._journal_witnessed_cut_off  # noqa: SLF001
+
+    def recording(self: Any, *, cause: str) -> None:
+        # Recorded BEFORE the real method runs, so the assertion below proves
+        # the verdict path was exercised whichever way the guard decides.
+        journalled.append(cause)
+        return real_journal(self, cause=cause)
+
+    monkeypatch.setattr(attached_mod.AttachedSession, "_journal_witnessed_cut_off", recording)
+
+    created = await asyncio.to_thread(
+        _create_named_session_on_a_real_peer,
+        peer_pair,
+        monkeypatch,
+        name="owner-lost-verdict",
+        prompt="",
+    )
+    try:
+        viewer = await _open(created, monkeypatch)
+        try:
+            await viewer.bind_runtime()
+            assert not viewer.is_cold, viewer.cold_reason
+            assert (
+                viewer.runtime_locality == "another-machine"
+            ), "this cell is about a viewer whose session lives on a peer"
+            viewer._streaming = True  # noqa: SLF001 — see the docstring
+
+            # THE OWNER DIES — to COMPLETION, awaited. `close()` is bounded
+            # (a 2 s wait on teardown) and may return while the runtime is
+            # still winding down; under CI contention the recovery loop
+            # then found a still-dialable owner and chased it instead of
+            # reaching the verdict. `aclose` runs on the owner's own loop
+            # (the rig's `on_session_loop`) and joins the SAME cleanup
+            # task, so this returns only once the owner is really gone —
+            # record withdrawn, sockets closed. No `stopping` announcement
+            # rides it (a signal rung, a crash — not a /stop).
+            await asyncio.to_thread(created.owner.on_session_loop, created.owner.runtime.aclose())
+
+            # THE DROP, DELIVERED ONCE — invoked, not raced.
+            # `_on_disconnected` is the exact callback the attach client
+            # invokes on an owner exit; waiting for the EOF to travel two
+            # relays is the other half of the same CI race and is not what
+            # this cell is about. It is genuinely once-only whichever order
+            # the real EOF callback arrives in: the second arrival returns
+            # on the `_recovering` guard. The recovery loop is then AWAITED
+            # AS ITS OWN TASK — it ends exactly when the loop does.
+            viewer._on_disconnected("owner exited")  # noqa: SLF001 — the drop's own callback
+            task = viewer._recovery_task
+            assert task is not None, "the drop must start the recovery loop"
+            await task
+
+            assert (
+                "owner-lost" in journalled
+            ), "the owner-lost verdict never ran, so this cell would prove nothing"
+
+            local = created.server_a.root / "sessions" / created.session_id
+            assert not local.exists(), (
+                "the viewer's verdict created "
+                f"{sorted(p.name for p in local.iterdir())} on the viewing device "
+                "for a session it does not own"
+            )
+        finally:
+            await viewer.dispose()
+    finally:
+        await asyncio.to_thread(created.stop)
