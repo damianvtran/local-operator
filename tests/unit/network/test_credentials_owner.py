@@ -280,6 +280,7 @@ def _grant_frame(
     force: bool = False,
     key: str = STUB_PROVIDER,
     provider: str = "",
+    model_id: str = "stub-model",
 ) -> dict[str, Any]:
     return {
         "op": PEER_BROKER_OP,
@@ -290,7 +291,7 @@ def _grant_frame(
         "from_device": device,
         "from_device_name": device[-4:],
         "for_session": session,
-        "model_id": "stub-model",
+        "model_id": model_id,
         "force_refresh": force,
     }
 
@@ -1749,3 +1750,188 @@ def test_the_remote_block_ceiling_is_the_owners_own_shortest_backoff() -> None:
 
     assert REMOTE_QUOTA_BLOCK_MAX_MS == DEFAULT_BLOCK_MS
     assert REMOTE_QUOTA_BLOCK_MAX_MS < MAX_CREDENTIAL_BLOCK_MS
+
+
+# ---------------------------------------------------------------------------
+# Report targeting: the lent row, not the first row (audit Q5 #4)
+# ---------------------------------------------------------------------------
+
+
+def _second_row(owner: Any) -> Any:
+    """A second, servable row for the same provider on the SAME owner store.
+
+    A distinct email is a distinct ``identity_key``, so this is a real second row —
+    which is what makes "which row did the report land on" a question a test can ask.
+    """
+    return owner.auth.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "type": "oauth",
+            "access": "access-two",
+            "expires": int(time.time() * 1000) + 3_600_000,
+            "refresh": "",
+            "email": "second@example.test",
+        },
+    )
+
+
+def _lent_row(owner: Any) -> int:
+    """Lend the credential and return the row id the GRANT says was served.
+
+    Row order puts ``owner.row`` first; it is demoted so the lend must land on the
+    second row — the shape that used to mis-target a later report without the grant
+    ever saying so.
+    """
+    owner.auth.deprioritize_credential(STUB_PROVIDER, owner.row.id)
+    detail = _ask_grant(owner, BORROWER_DEVICE, session="sess-lent")
+    assert detail["kind"] == "grant", detail
+    return int(detail["credential_ref"]["credential_id"])
+
+
+def _block_rows_with_ids(owner: Any) -> list[tuple[int, str, int]]:
+    return list(
+        owner.auth._conn.execute(
+            "SELECT credential_id, block_scope, blocked_until_ms FROM auth_credential_blocks"
+        ).fetchall()
+    )
+
+
+def test_a_quota_report_lands_on_the_lent_row_not_the_first(owner: Any, idp: RotatingIdP) -> None:
+    """audit Q5 #4: the block must hit the row the grant named.
+
+    Two rows, the first demoted so the LEND lands on the second; the report echoes
+    the lent row's ``credential_ref.credential_id``. Before this change the arm
+    resolved the target as ``list_credentials(provider)[0]`` — the never-lent row —
+    so a borrower's 429 could rate-limit a login it had never touched.
+    """
+    row_two = _second_row(owner)
+    lent = _lent_row(owner)
+    assert lent == row_two.id
+
+    reply = _report(owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5", credential_id=lent)
+    assert reply["action"] == "blocked", reply
+    rows = _block_rows_with_ids(owner)
+    assert [(row[0], row[1]) for row in rows] == [(row_two.id, "model:fable")], rows
+
+
+def test_a_refresh_report_targets_the_lent_row(owner: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The refresh arm reads the same id: the provoked refresh hits the lent row.
+
+    ``ensure_oauth_fresh`` is replaced with a recorder so the test asserts WHICH row
+    the arm reached, not that a refresh happened — the arm's own reply cannot tell
+    the two rows apart, and that was the defect.
+    """
+    row_two = _second_row(owner)
+    lent = _lent_row(owner)
+    assert lent == row_two.id
+
+    calls: list[int] = []
+
+    async def _record(credential_id: int) -> None:
+        calls.append(credential_id)
+
+    monkeypatch.setattr(owner.auth, "ensure_oauth_fresh", _record)
+    reply = _report(owner, BORROWER_DEVICE, "invalid", credential_id=lent)
+    assert reply["action"] == "refreshed", reply
+    assert calls == [row_two.id], calls
+
+
+def test_a_report_naming_a_row_this_device_cannot_match_is_noted(owner: Any) -> None:
+    """The id is a CLAIM: a name outside the owner's own id space acts on nothing.
+
+    Falling back to the first row for a name the owner cannot match would block or
+    refresh a row the borrower never mentioned — the same defect through the other
+    door — so the arm answers ``noted`` and changes nothing. An ABSENT id still
+    takes the old first-row path, which the older-peer report tests in this file
+    exercise.
+    """
+    reply = _report(
+        owner, BORROWER_DEVICE, "quota", model_id="claude-fable-5", credential_id=999_999
+    )
+    assert reply["action"] == "noted", reply
+    assert _block_rows(owner) == []
+
+
+# ---------------------------------------------------------------------------
+# The two XS producers: MCP ``refreshed``, and ``quota_blocked`` (Q5 #8/#9)
+# ---------------------------------------------------------------------------
+
+
+def test_an_mcp_grant_reports_the_refresh_it_observed(
+    owner: Any, monkeypatch: pytest.MonkeyPatch, no_mcp_refresh: list[str]
+) -> None:
+    """audit Q5 #8: ``refreshed`` on an MCP grant is observed, not hard-coded False.
+
+    Arm one: an owner-side refresh that writes nothing (the ``no_mcp_refresh`` stub)
+    reports ``False``. Arm two: a refresh that persists rotated tokens — the write a
+    real ``ensure_mcp_oauth_fresh`` ends in — reports ``True``. Before this change
+    both arms said ``False``, whatever had just happened.
+    """
+    _declare_mcp(owner)
+    frame = {
+        "op": PEER_BROKER_OP,
+        "req": 1,
+        "kind": "grant",
+        "key": MCP_KEY,
+        "provider": MCP_KEY,
+        "from_device": BORROWER_DEVICE,
+        "for_session": "sess-norefresh",
+        "model_id": "",
+    }
+    detail = _detail(owner.broker.on_broker(_Link(BORROWER_DEVICE), frame))
+    assert detail["kind"] == "grant" and detail["refreshed"] is False, detail
+
+    async def _writes(url: str, cfg: Any, store: Any = None) -> None:
+        # A real refresh ends in ``upsert_credential``, which stamps a fresh
+        # ``updated_at``; that stamp has millisecond resolution, so leave the clock
+        # a tick of room before writing or the observation can read as "no move".
+        time.sleep(0.01)
+        payload = {
+            "type": "oauth",
+            "project_id": MCP_URL,
+            "tokens": {
+                "access_token": "-".join(("rotated", "mcp")),
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            },
+        }
+        (store or owner.auth).upsert_credential("mcp-oauth", payload)
+
+    import local_operator.mcp.auth as mcp_auth
+
+    monkeypatch.setattr(mcp_auth, "ensure_mcp_oauth_fresh", _writes)
+    frame["for_session"] = "sess-refresh"
+    detail = _detail(owner.broker.on_broker(_Link(BORROWER_DEVICE), frame))
+    assert detail["kind"] == "grant" and detail["refreshed"] is True, detail
+
+
+def test_a_grant_for_a_quota_blocked_family_says_quota_blocked(
+    owner: Any, idp: RotatingIdP
+) -> None:
+    """audit Q5 #9: ``quota_blocked`` now has a producer, with the real remainder.
+
+    With every row for the provider blocked for the requested model, an empty
+    cascade means a rate limit — not a missing login, which is the sentence that
+    used to reach the borrower (cached 300 s, with a re-login remedy). A family
+    that is NOT blocked keeps serving, and a provider with no rows at all keeps
+    ``no_local_credential``: the empty answer is split by its cause, nothing else.
+    """
+    owner.auth.block_credential(
+        owner.row.id, STUB_PROVIDER, block_scope="model:fable", block_ms=45_000
+    )
+    blocked = _ask_grant(owner, BORROWER_DEVICE, model_id="claude-fable-5")
+    assert blocked["code"] == "quota_blocked", blocked
+    assert 0 < int(blocked["retry_after_ms"]) <= 45_000, blocked
+
+    served = _ask_grant(owner, BORROWER_DEVICE, model_id="claude-opus-5", session="sess-2")
+    assert served["kind"] == "grant", served
+
+    with placement_mod.mutate("n_owner", owner.root, self_device=OWNER_DEVICE) as document:
+        document.declare(
+            "mesh-empty", owner_device=OWNER_DEVICE, provider="mesh-empty", by=OWNER_DEVICE
+        )
+        document.grant("mesh-empty", BORROWER_DEVICE, scope="session", by=OWNER_DEVICE)
+    empty = _ask_grant(
+        owner, BORROWER_DEVICE, key="mesh-empty", provider="mesh-empty", session="sess-3"
+    )
+    assert empty["code"] == "no_local_credential", empty
