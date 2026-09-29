@@ -334,6 +334,52 @@ def test_a_stored_speech_only_selection_is_not_handed_out(tmp_path: Path) -> Non
     assert read_model_selection(directory) is None, "the reader must not hand it out"
 
 
+def test_a_stored_speech_only_selection_is_named_by_the_refusal_reader(
+    tmp_path: Path,
+) -> None:
+    """The refusal is not silent: the resolver names the provider it refused.
+
+    The counterpart of the test above. The shared reader refuses the row, and
+    the second reader — the probe the resolver runs before it can fall back to
+    the configured hosting — must name it for BOTH flag classes the validator
+    can refuse, or a speech-only row resumes silently onto a model its own
+    journal never named (agent review round 1, R1-3).
+    """
+    import asyncio
+
+    from local_operator.session.model_selection import (
+        read_model_selection,
+        refused_decision_only_selection,
+    )
+    from local_operator.session.transcript import Transcript
+
+    directory = tmp_path / "sessions" / "speech-only"
+    transcript = Transcript(directory)
+    asyncio.run(
+        transcript.append_custom(
+            "selected_model", {"version": 2, "selector": "elevenlabs/scribe_v2"}
+        )
+    )
+
+    assert read_model_selection(directory) is None, "the reader must not hand it out"
+    assert refused_decision_only_selection(directory) == "elevenlabs"
+
+    # A perfectly good chat hosting in the config does not change the answer:
+    # the conversation's own stored identity is the thing that cannot chat, and
+    # falling through to the config would hide it.
+    manager = ConfigManager(tmp_path)
+    manager.update_config({"hosting": "openai", "model_name": "gpt-4o"}, write=False)
+
+    with pytest.raises(HostingNotChatError) as caught:
+        resolve_hosting_model_with_source(
+            None, _args(resume="speech-only", hosting=None, model=None), manager
+        )
+
+    assert caught.value.hosting == "elevenlabs"
+    assert caught.value.source == "resume"
+    assert "speech-to-text, not chat completions" in str(caught.value)
+
+
 # ---------------------------------------------------------------------------
 # The last door: a live switch builds a spec, or it refuses
 # ---------------------------------------------------------------------------

@@ -24,7 +24,11 @@ from local_operator.mobile.attach_client import (
     dialable_record_exists,
     find_runtime_record,
 )
-from local_operator.mobile.types import SessionProjection, TranscriptEntry
+from local_operator.mobile.types import (
+    SessionProjection,
+    SessionRecord,
+    TranscriptEntry,
+)
 from local_operator.providers.clients import STREAM_READ_TIMEOUT_S
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime import registry
@@ -1363,5 +1367,133 @@ async def test_a_capable_owner_gets_the_annotation_on_prompt_steer_and_send_comm
         assert sent[-1][1]["input_mode"] == "dictated"
         assert sent[-1][1]["input_path"] == "provider_stt_radient"
         await client.detach()
+    finally:
+        r.close()
+
+
+class _WireTee:
+    """A writer proxy recording every JSON frame a client writes to the socket.
+
+    Delegates everything else (``close``, ``is_closing``, ``wait_closed`` …)
+    to the real ``StreamWriter`` through ``__getattr__``, so the teardown paths
+    run unchanged and the tap stays transparent.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.frames: list[dict[str, Any]] = []
+
+    def write(self, data: bytes) -> None:
+        self.frames.append(json.loads(data.decode()))
+        self._inner.write(data)
+
+    async def drain(self) -> None:
+        await self._inner.drain()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _TeeingAttach(AttachClient):
+    """The real attach client with its post-handshake writes recorded.
+
+    ``launch._deliver`` builds its own client, so a test cannot reach the
+    instance it dialed — it can replace the CLASS instead (launch.py imports
+    it lazily on every call) with this subclass, whose ``connect`` installs
+    the tee once the welcome handshake is done. Frames then land in
+    ``wires[-1].frames`` exactly as ``writer.write`` saw them.
+    """
+
+    wires: list[_WireTee] = []
+
+    async def connect(self, record: SessionRecord, session_id: str) -> None:
+        await super().connect(record, session_id)
+        tee = _WireTee(self._writer)
+        self._writer = cast(asyncio.StreamWriter, tee)
+        _TeeingAttach.wires.append(tee)
+
+
+@pytest.mark.asyncio
+async def test_the_wake_path_sends_no_annotation_to_a_non_advertising_owner(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``launch._deliver`` against an old owner: the WIRE frame is byte-identical.
+
+    The wake path calls ``request_ack_with_duplicate`` rather than
+    ``prompt``/``steer``, so it never passes ``_annotation_fields`` — the strip
+    must therefore live where the frame is written (agent review round 1,
+    R1-1). This drives the REAL client against a REAL runtime over the real
+    socket and reads the frames off the writer, which is the one vantage the
+    client-fake tests cannot see.
+    """
+    from local_operator.session.runtime import launch
+    from local_operator.session.runtime.launch import PromptErrand
+
+    _TeeingAttach.wires = []
+    monkeypatch.setattr(attach_client, "AttachClient", _TeeingAttach)
+    handle = FakeHandle("sess-wake")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        assert (
+            not attach_client.INPUT_MODE_CAPABILITY
+            or attach_client.INPUT_MODE_CAPABILITY not in record.capabilities
+        ), "this test needs a non-advertising owner"
+
+        await launch._deliver(
+            record,
+            "sess-wake",
+            PromptErrand(
+                text="hi",
+                command_id="12345678-1234-4678-9234-567812345678",
+                input_mode="dictated",
+                input_path="provider_stt_radient",
+            ),
+        )
+
+        frames = [f for f in _TeeingAttach.wires[-1].frames if f.get("op") == "prompt"]
+        assert frames, "the wake path wrote no prompt frame"
+        assert frames[-1]["text"] == "hi"
+        assert "input_mode" not in frames[-1]
+        assert "input_path" not in frames[-1]
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_the_wake_path_carries_the_annotation_to_a_capable_owner(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other direction: a carriage owner still receives the pair, wake path included."""
+    token = _annotation_token()
+    monkeypatch.setattr(attach_client, "INPUT_MODE_CAPABILITY", token)
+
+    from local_operator.session.runtime import launch
+    from local_operator.session.runtime.launch import PromptErrand
+
+    _TeeingAttach.wires = []
+    monkeypatch.setattr(attach_client, "AttachClient", _TeeingAttach)
+    handle = FakeHandle("sess-wake2")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        record.capabilities = [*record.capabilities, token]
+
+        await launch._deliver(
+            record,
+            "sess-wake2",
+            PromptErrand(
+                text="more",
+                command_id="22345678-1234-4678-9234-567812345678",
+                input_mode="mixed",
+                input_path="provider_stt_elevenlabs",
+            ),
+        )
+
+        frame = [f for f in _TeeingAttach.wires[-1].frames if f.get("op") == "prompt"][-1]
+        assert frame["input_mode"] == "mixed"
+        assert frame["input_path"] == "provider_stt_elevenlabs"
     finally:
         r.close()

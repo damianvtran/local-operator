@@ -114,7 +114,7 @@ class ContinuationCommand:
     Process discovery and request ids are transport details. This identity is
     the conversation-level receipt that survives reconnects and host changes.
 
-    ``input_mode``/``input_path`` are the reserved [redacted] annotation
+    ``input_mode``/``input_path`` are the reserved SILENT annotation
     (mobile STT, input-mode-v1): how the user produced the text, and which
     voice path produced the dictated part. Absence ("") is the legacy reading;
     see ``_input_annotation`` for the validation rule. They ride the same

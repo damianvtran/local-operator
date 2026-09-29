@@ -59,6 +59,7 @@ from local_operator.mobile.attach_client import (
     DESKTOP_WATCH_CAPABILITY,
     EVENT_MUTE_CAPABILITY,
     EXCLUSIVE_MOVE_CAPABILITY,
+    INPUT_MODE_CAPABILITY,
     OVERSIZED_FRAME_REASON,
     AttachClient,
     _projection_from_json,
@@ -1129,6 +1130,19 @@ class RemoteSessionClient(AttachClient):
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in capabilities
+        # MAY THIS OWNER STORE THE INPUT ANNOTATION — the same per-dial gate
+        # AttachClient.connect applies (its comment carries the rule), spelled
+        # here because this connect MIRRORS that one rather than delegating to
+        # it: the gate is about the OWNER's build, whichever door dialed, and
+        # a peer that did not advertise input-mode-v1 must receive frames
+        # byte-identical to the pre-feature ones. The omission of this line
+        # was what CI's shard caught while the wake-path fix was under review
+        # (agent review round 1, R1-1 remediation): without it the inherited
+        # builders fall back to "no capability" and silently strip the pair
+        # for remote sessions even when the owner IS carriage-capable.
+        self._input_mode_supported = bool(INPUT_MODE_CAPABILITY) and (
+            INPUT_MODE_CAPABILITY in capabilities
+        )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in capabilities
         try:
             reader, writer = await asyncio.open_connection(

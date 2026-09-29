@@ -41,7 +41,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 if TYPE_CHECKING:
     from local_operator.mobile.attach_client import AttachClient
@@ -1485,7 +1485,20 @@ def _feature_flags() -> dict[str, Any]:
     return dict(_FEATURE_FLAGS_MEMO)
 
 
-def _strip_unsupported_annotation(record: SessionRecord, frame: dict[str, Any]) -> None:
+class _CapabilityCarrier(Protocol):
+    """The one member the strip-gate reads off a record: its advertised list.
+
+    A Protocol rather than ``SessionRecord`` so the gate's own tests can drive
+    it with a two-line double — the same construction-free courtesy
+    ``AttachClient``'s members extend to theirs — while the real call site
+    (``entry.record``, always a ``SessionRecord``) still checks structurally.
+    The function reads nothing else off the record, and this type says so.
+    """
+
+    capabilities: list[str]
+
+
+def _strip_unsupported_annotation(record: _CapabilityCarrier, frame: dict[str, Any]) -> None:
     """Drop the input-mode annotation for an owner that cannot store it.
 
     THE RELAY'S HALF OF THE CARRIAGE GATE (mobile STT): the web always sends its
