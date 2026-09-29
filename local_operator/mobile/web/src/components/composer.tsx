@@ -92,6 +92,16 @@ function slashQuery(text: string): string | null {
 	return (space === -1 ? text.slice(1) : text.slice(1, space)).toLowerCase();
 }
 
+/** True while the draft is still just the command TOKEN — no arguments yet.
+
+    U5 (mobile UX batch): the sheet opens on the token and yields the composer
+    the moment a space arrives — `/delete x` is the user composing arguments,
+    not a sheet query, and re-opening the sheet over that keystroke stole focus
+    (and the keyboard) mid-typing. */
+function slashTokenOnly(text: string): boolean {
+	return slashQuery(text) !== null && !text.includes(" ");
+}
+
 /** The voice state machine's four resting points (error surfaces as `idle` + copy). */
 type DictationState = "idle" | "recording" | "transcribing";
 
@@ -149,6 +159,12 @@ function SlashSheet({
 	const [commands, setCommands] = useState<SlashCommand[]>([]);
 	const [filter, setFilter] = useState(query);
 	const [loaded, setLoaded] = useState(false);
+	/* U8: focus lands on the FILTER, not the ✕. The sheet is opened by typing
+	   `/…` on a phone; focusing the ✕ moved the caret out of every text field,
+	   which closes the software keyboard, and the characters typed after `/`
+	   reached nothing. The filter is already seeded with the token typed so far
+	   — continuing to type filters, exactly what the seed implies. */
+	const filterRef = useRef<HTMLInputElement>(null);
 
 	useEffect(() => {
 		if (!open) return;
@@ -177,16 +193,17 @@ function SlashSheet({
 	}, [commands, filter]);
 
 	return (
-		<Sheet open={open} onClose={onClose} title="commands">
+		<Sheet open={open} onClose={onClose} title="commands" initialFocusRef={filterRef}>
 			<div className="flex flex-col gap-1 p-2">
 				<input
+					ref={filterRef}
 					value={filter}
 					onChange={(e) => setFilter(e.target.value)}
 					placeholder="filter commands"
 					spellCheck={false}
 					autoCapitalize="off"
 					autoCorrect="off"
-					className="mb-1 min-h-9 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
+					className="mb-1 min-h-11 rounded-sm border border-control bg-surface px-3 text-body text-ink outline-none placeholder:text-ink-dim"
 				/>
 				{filtered.map((c) => (
 					<button
@@ -202,7 +219,7 @@ function SlashSheet({
 							}
 							onClose();
 						}}
-						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span className="shrink-0 font-mono text-mono-sm text-ink">
 							/{c.name}
@@ -256,7 +273,7 @@ function EffortSheet({
 						key={rung}
 						type="button"
 						onClick={() => set(rung)}
-						className="flex min-h-8 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
+						className="flex min-h-11 items-center gap-2 rounded-sm px-2 text-left active:bg-surface"
 					>
 						<span
 							className={cn(
@@ -345,7 +362,13 @@ export function Composer({
 	onCloseEffort: () => void;
 }) {
 	const [text, setText] = useDraft(pid);
-	const [slashOpen, setSlashOpen] = useState(false);
+	/* U5/U8 (mobile UX batch 1): the sheet follows the draft only while the draft
+	   is still the command TOKEN (see `slashTokenOnly`), and once the user has
+	   closed it for this draft it stays closed until the draft is no longer a
+	   slash draft at all — so typing arguments is never fought by a re-opening
+	   sheet, while a fresh `/x` still opens it. */
+	const [slashDismissed, setSlashDismissed] = useState(false);
+	const slashOpen = slashTokenOnly(text) && !slashDismissed;
 	const [sending, setSending] = useState(false);
 	const [retryEnvelope, setRetryEnvelope] = useState(() => getPendingContinuation(pid));
 	const retryPending = retryEnvelope !== null;
@@ -865,23 +888,28 @@ export function Composer({
 	const onChange = (value: string) => {
 		applyUserEdit(value);
 		setText(value);
-		setSlashOpen(slashQuery(value) !== null);
 		/* Typing is the next action: a lingering dictation outcome line is done
 		   being useful. */
 		setDictationNotice("");
 	};
 
-	/* The sheet ALSO watches the value: the driver/IME paths that set it
-	   without an onChange still open the sheet a frame later. The onChange
-	   call above is the zero-latency path for real typing. */
+	/* The sheet ALSO watches the value, because driver/IME paths set it without
+	   an onChange. The only piece of retained state is the DISMISSAL: a draft
+	   that stops being a slash draft at all (emptied, or the slash deleted)
+	   clears it, so the next fresh `/` opens — while within one slash draft,
+	   closing the sheet (Escape, scrim, ✕, a pick) keeps it closed (U5). */
 	useEffect(() => {
-		setSlashOpen(slashQuery(text) !== null);
+		if (slashQuery(text) === null) setSlashDismissed(false);
 	}, [text]);
 
 
 	const onSlashPick = (fill: string, submit: boolean) => {
 		applyUserEdit(fill);
 		setText(fill);
+		/* The pick CLOSES the sheet for this draft: an argument-taking command
+		   lands mid-edit ("/rename ") and the sheet must not come back while the
+		   arguments are typed (U5). */
+		setSlashDismissed(true);
 		if (submit) {
 			void send(fill);
 		} else {
@@ -1146,18 +1174,24 @@ export function Composer({
 					</span>
 				) : null}
 				<span className="flex-1" />
+				{/* D5 (mobile UX batch): the model chip is ONE line with an ellipsis —
+				    under a long model label it used to wrap to two full-width lines
+				    and push the row's second chip off-screen. The chip shrinks under
+				    its content down to the 44px floor, and the truncating span
+				    supplies the ellipsis (the row itself stays on one line — flex
+				    rows never wrap). */}
 				<button
 					type="button"
 					onClick={onOpenModels}
-					className="flex min-h-8 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+					className="flex min-h-11 min-w-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 				>
-					{projection.model_label || "model"}
+					<span className="truncate">{projection.model_label || "model"}</span>
 				</button>
 				{projection.effort_ladder.length > 0 ? (
 					<button
 						type="button"
 						onClick={onOpenEffort}
-						className="flex min-h-8 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
+						className="flex min-h-11 min-w-11 items-center font-mono text-mono-sm text-ink-dim active:text-ink-muted"
 					>
 						{projection.effort || "effort"}
 					</button>
@@ -1166,7 +1200,7 @@ export function Composer({
 
 			<SlashSheet
 				open={slashOpen && !disabled}
-				onClose={() => setSlashOpen(false)}
+				onClose={() => setSlashDismissed(true)}
 				onPick={onSlashPick}
 				query={slashQuery(text) ?? ""}
 			/>
