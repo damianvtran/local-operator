@@ -866,6 +866,9 @@ async def test_opening_her_conversation_with_a_framework_toast_up_survives(
         app._reset_band_for_swap()
         assert app.is_running
         assert list(app.query(FrameworkToast)), "the foreign toast was not touched"
+
+
+@pytest.mark.asyncio
 async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeypatch) -> None:
     """R28: in the setup state, `/aida` renders HER view at the provider cue.
 
@@ -915,7 +918,15 @@ async def test_aida_with_no_provider_opens_her_view_at_the_cue(tmp_path, monkeyp
             else:
                 await _settle(pilot, 3.0)
 
-        await send("/aida", lambda: "no provider configured" in _transcript_text(app))
+        # The predicate must be a fact ONLY her view can satisfy. The splash
+        # block above already put "no provider configured" in the transcript,
+        # so waiting on the cue returned on its first pause — while
+        # `_aida_open_without_provider` still had `ensure_session()` to run —
+        # and the `"Aida" in body` assertion below raced the render. Waiting
+        # on her own words restores the self-synchronising shape this block
+        # used to have (review round 3, R3-F1: 3 failed / 4 runs at load
+        # 150-270 with the cue as the predicate, mechanism in this diff).
+        await send("/aida", lambda: "chief of staff" in _transcript_text(app))
         assert app._aida_setup_view is True
         assert "/login openai" in (app._splash_notice or "")
         body = _transcript_text(app)
