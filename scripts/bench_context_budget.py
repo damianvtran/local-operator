@@ -645,7 +645,30 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise lands at head + 55 — the band this file keeps, and together with
 #: the known CI-vs-local offset (~25 billed) it clears CI rather than this
 #: machine alone — and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 34_789
+#:
+#: RAISED 34,789 -> 34,961 for the `backend` hint on `BrowserParams` (issue
+#: #1723: the guide and the source comment shipped the promise while the field
+#: was absent — `extra="forbid"` rejected the documented argument — and design
+#: §16.1's escape hatch is what lets a device-trust / hardware-key /
+#: conditional-access task reach the user's real profile while the app runs).
+#: Re-measured on the REBASED tree (the base moved twice under this branch:
+#: f76d2b368 -> 7d781ccbd -> d497e91e1); the baseline is this same tree with
+#: the added field and clause removed — byte-identical to the base schema,
+#: because the JSON is deterministic:
+#:
+#:   baseline (origin/main d497e91e1)       96,573 chars = ~34,738 billed
+#:                                           (PASS, 51 billed of headroom)
+#:   head (this branch)                     97,039 chars = ~34,906 billed
+#:     = +466 chars = +168 billed: one optional field on the ONE `browser`
+#:       tool — rung 1, "extend an existing tool", so no new schema — plus the
+#:       one clause in its description that names the escape hatch. Anything
+#:       leaner is a `backend` with no model-facing semantics, which is the
+#:       bug this change fixes.
+#:
+#: The raise lands at head + 55 — the band this file keeps, and together with
+#: the known CI-vs-local offset (~25 billed) it clears CI rather than this
+#: machine alone — and the tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 34_961
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
