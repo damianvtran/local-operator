@@ -209,7 +209,7 @@ def test_an_idle_network_writes_no_rows_for_a_member_that_cannot_hold_the_op(
     the property, not the wall clock: an hour of ticks writes NOTHING, because the
     answer to "may I write definitions there" does not change between them.
 
-    TEETH: neutralise the tier check (``definitions._unholdable_capability`` returning
+    TEETH: neutralise the tier check (``definitions.unholdable_capability`` returning
     ``""``, i.e. the unfixed cadence) and this cell fails — the peer's log grows by one
     refused op per tick, which is the 240-an-hour the QA measured.
     """

@@ -22,7 +22,7 @@ import json
 import os
 import re
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -215,12 +215,31 @@ _TYPE_MODELS: dict[str, type[MCPServerConfig]] = {
 }
 
 
+def infer_transport(raw: Mapping[str, Any]) -> str:
+    """The transport one raw server entry spells: the ONE inference rule.
+
+    Explicit ``type`` wins; otherwise ``command`` implies stdio and ``url``
+    implies http; anything else is stdio (the model's own default). Public
+    because the mesh's MCP definition sync (``network/mcpdefs.py``) must read
+    the same answer this module validates and writes by — a second copy of the
+    rule is exactly how two surfaces come to disagree about what a server is.
+    """
+    declared = raw.get("type")
+    if declared in ("stdio", "http", "sse"):
+        return str(declared)
+    if raw.get("command"):
+        return "stdio"
+    if raw.get("url"):
+        return "http"
+    return "stdio"
+
+
 def _coerce_server_config(raw: JsonValue) -> MCPServerConfig | None:
     """Parse one raw server entry into a typed config.
 
-    Transport inference: explicit ``type`` wins; otherwise
-    ``command`` implies stdio, ``url`` implies http. Malformed entries return
-    ``None`` (validation reports them separately via
+    Transport inference via :func:`infer_transport` (explicit ``type`` wins;
+    otherwise ``command`` implies stdio, ``url`` implies http). Malformed
+    entries return ``None`` (validation reports them separately via
     :func:`validate_server_config`).
 
     A Codex-imported server keeps its configured per-tool-call budget. Codex
@@ -259,14 +278,7 @@ def _coerce_server_config(raw: JsonValue) -> MCPServerConfig | None:
         # quiet typo.
         if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds > 0:
             data["timeout"] = float(seconds) * 1000.0
-    transport = data.get("type")
-    if transport not in ("stdio", "http", "sse"):
-        if data.get("command"):
-            transport = "stdio"
-        elif data.get("url"):
-            transport = "http"
-        else:
-            transport = "stdio"
+    transport = infer_transport(data)
     model = _TYPE_MODELS[transport]
     try:
         return model.model_validate(data)
@@ -627,6 +639,18 @@ def list_effective_servers(cwd: str | os.PathLike[str]) -> dict[str, dict[str, A
     """Merged, enable/disable-resolved configs as plain dicts (for ``mcp list``)."""
     configs, _sources = load_all_mcp_configs(cwd)
     return {name: cfg.model_dump(exclude_none=True) for name, cfg in configs.items()}
+
+
+def write_scope_document(path: Path, doc: dict[str, Any]) -> None:
+    """Publish one scope file atomically, at this module's ONE write discipline.
+
+    Public seam for a caller that mutates a scope document as a WHOLE (the
+    mesh's sync re-writes the merged servers map in one pass): it must go
+    through the same staging discipline every CLI writer uses, and a second
+    ``tempfile``+``os.replace`` implementation beside this one would be a
+    second write path to keep correct.
+    """
+    _write_json_atomic(path, doc)
 
 
 def _scope_path(cwd: str | os.PathLike[str] | None, scope: str) -> Path:
