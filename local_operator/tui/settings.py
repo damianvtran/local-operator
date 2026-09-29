@@ -192,6 +192,29 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # roster and on a live edit (applied only if the user has not cycled it
     # this session). Unknown strings read as full.
     "display.dock": "full",
+    # Cross-session traffic — `lop send`'s own traces (tool rows named `send`)
+    # and the inbound peer receipts — hidden from transcript views when ON.
+    # Read through `local_operator.cross_session.cross_session_hidden()` by the
+    # TUI gates AND by the phone fold, so the surfaces cannot disagree about
+    # what is hidden; OFF is today's rendering.
+    #
+    # A mid-session flip applies FORWARD ONLY, the same contract
+    # `display.narration` documents above and for the same reason
+    # (re-projecting mounted blocks in one synchronous pass paints a blank
+    # frame, and a display toggle must never risk that). Rows already on screen
+    # are left exactly as they are; a live receipt suppressed while hidden is
+    # also NOT recorded in the de-dup set, because nothing was painted (see
+    # `app.on_peer_message_delivered`). The restore path is therefore a
+    # re-projection under the current value — `/resume` for the transcript, a
+    # reconnect for the phone — which re-reads the history with the flag as it
+    # stands then.
+    #
+    # A VIEW filter for the human reader, not a privacy boundary and not a data
+    # change: the model still receives the peer message (`harness/render.py`
+    # keeps it in the injected-user-message allow-list), the transcript files
+    # keep every row, and the raw-journal surfaces (`jobs`, `hub op='peek'`,
+    # the picker's verbose preview) still show them.
+    "display.hide_cross_session": False,
     # --- the composer widget-visibility family (operator request, 2026-09-27) ---
     #
     # One BOOL per composable piece of the composer, all default True because
