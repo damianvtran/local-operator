@@ -250,6 +250,13 @@ def resolve_output_contract(args: Any) -> Any:
         return None
     if retries is not None and not (isinstance(retries, int) and 0 <= retries <= 5):
         raise ValueError("--output-retries must be between 0 and 5")
+    if isinstance(output_schema, str) and not output_schema.strip():
+        # An empty value is REFUSED rather than read as "no schema": the run
+        # would otherwise enforce the format while silently dropping the
+        # schema the operator asked for, and the SDK refuses the same value
+        # through ``OutputContract`` — the two paths must agree (review R-4).
+        # Whitespace is included: no file path is only whitespace.
+        raise ValueError("--output-schema must name a schema file (an empty value is refused)")
     from local_operator.output_contract import OutputContract, OutputContractError
 
     schema = _load_output_schema(output_format, output_schema) if output_schema else None

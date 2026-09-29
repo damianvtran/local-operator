@@ -10325,6 +10325,18 @@ def main() -> int:
             if refusal is not None:
                 print(f"exec failed: {refusal}", file=sys.stderr)
                 return 1
+            # ``--output-schema`` is absolutised HERE, before the optional
+            # ``--background`` process boundary, because the detached worker
+            # resolves it from its own cwd and a relative path would silently
+            # name a different file there. An EMPTY value passes through
+            # UNCHANGED rather than being dropped: dropping it would silently
+            # run without the schema the operator asked for, and
+            # ``resolve_output_contract`` refuses it loudly instead (review
+            # R-4). ``abspath('')`` would be the cwd, which is why the two
+            # cases cannot share one expression.
+            output_schema_arg = getattr(args, "output_schema", None)
+            if output_schema_arg and output_schema_arg.strip():
+                output_schema_arg = os.path.abspath(output_schema_arg)
             exec_args = ExecArgs(
                 background=args.background,
                 json_mode=args.json_mode,
@@ -10376,16 +10388,9 @@ def main() -> int:
                 # worker is told the same thing.
                 workstream=bool(getattr(args, "workstream", False)),
                 # The output-contract flags, getattr'd like the additive flags
-                # above; ``output_schema`` is absolutised HERE, before the
-                # optional ``--background`` process boundary, because the
-                # detached worker resolves it from its own cwd and a relative
-                # path would silently name a different file there.
+                # above; the schema value is already absolutised above.
                 output_format=getattr(args, "output_format", None),
-                output_schema=(
-                    os.path.abspath(args.output_schema)
-                    if getattr(args, "output_schema", None)
-                    else None
-                ),
+                output_schema=output_schema_arg,
                 output_retries=getattr(args, "output_retries", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/

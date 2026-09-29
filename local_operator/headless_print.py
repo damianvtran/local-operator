@@ -454,19 +454,23 @@ class PrintRenderer:
                 # on this path may raise.
                 sentence = append_auth_recovery(event.error, provider or None)
                 sentence = append_usage_limit_recovery(sentence, provider or None)
-                # ``soft_wrap``: rich otherwise reflows this line at the console
-                # width (80 when stderr is not a terminal), which broke a
-                # pinned contract sentence mid-phrase — measured on the
-                # exhausted-contract path, where stderr must carry
-                # "… after 3 attempts: …" as ONE line for the operators and
-                # scripts that read it. An error line is data, not prose; a
-                # terminal is free to wrap it visually.
+                # ``soft_wrap`` ONLY for the contract-exhaustion end, and the
+                # flag says which end this is without a string test: an
+                # exhausted ``OutputValidationEvent`` sets it (see
+                # ``_track_outcome``) and the loop emits that event and this
+                # error together, by construction. It is needed there because
+                # rich otherwise reflows the pinned "… after N attempts: …"
+                # sentence at the console width (80 when stderr is not a
+                # terminal), splitting it mid-phrase — measured. Every OTHER
+                # error keeps its historical wrapping: review R-1 measured
+                # that scoping this to all errors changed unenforced-run stderr,
+                # and an unenforced run must stay byte-identical.
                 self.console.print(
                     f"Error: {sentence}",
                     style="red",
                     highlight=False,
                     markup=False,
-                    soft_wrap=True,
+                    soft_wrap=self.output_contract_failed,
                 )
             elif event.aborted:
                 self.console.print("[red]aborted[/red]", highlight=False)

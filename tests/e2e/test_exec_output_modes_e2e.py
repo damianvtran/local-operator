@@ -460,15 +460,22 @@ async def test_sdk_pydantic_schema_and_retry_round_trip(exec_server, tmp_path):
     assert len(_cells(requests, "CELL9")) == 2
 
 
-def test_background_reports_failed_status_and_log(exec_server):
+def test_background_reports_failed_status_and_log(exec_server, tmp_path):
     """Cell 10. `--background` on an always-invalid cell: the durable record
-    reaches ``failed`` and its log carries the contract error."""
+    reaches ``failed`` and its log carries the contract error. The schema file
+    is named RELATIVELY from the child's cwd: the CLI absolutises it for the
+    detached worker, which re-reads it on its own side — a "cannot read
+    --output-schema" in the log would mean the path stopped crossing the
+    boundary (review R-2)."""
     run, requests, root = exec_server
+    (tmp_path / "report.schema.json").write_text('{"type": "object", "required": ["cell"]}')
     launched = run(
         "exec",
         "CELL10 background",
         "--output-format",
         "json",
+        "--output-schema",
+        "report.schema.json",
         "--background",
         stdin="",
     )
@@ -478,6 +485,7 @@ def test_background_reports_failed_status_and_log(exec_server):
     state = _await_terminal(job_id)
     assert state["status"] == "failed"
     log_text = Path(state["log"]).read_text(errors="replace")
+    assert "cannot read --output-schema" not in log_text
     assert "final response did not satisfy the output contract (json) after 3 attempts" in log_text
     assert "exec failed:" in log_text
 
