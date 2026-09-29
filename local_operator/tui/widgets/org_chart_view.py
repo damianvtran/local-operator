@@ -117,9 +117,9 @@ class OrgChartView(Vertical):
         Binding("minus,underscore", "zoom_out", "Zoom out", show=False),
         Binding("f", "fit", "Fit to width", show=False),
         Binding("e,space,enter", "toggle_expand", "Expand/collapse all", show=False),
-        # `?` reveals a one-line glyph legend (U5) and the `(declared)` gloss
-        # (U6) — the vocabulary (◆ ↩ ? ⋯ ·N ×N) is otherwise learnable only
-        # from source. Toggled, not always-on, so it costs no row until asked.
+        # `?` reveals a one-line glyph legend (U5) — the vocabulary
+        # (◆ ↩ ? ⋯ ·N ×N) is otherwise learnable only from source. Toggled,
+        # not always-on, so it costs no row until asked.
         Binding("question_mark,question", "toggle_legend", "Legend", show=False),
         Binding("up", "scroll_up", "Scroll up", show=False),
         Binding("down", "scroll_down", "Scroll down", show=False),
@@ -287,27 +287,26 @@ class OrgChartView(Vertical):
         title.append(f" · zoom: {_TIER_NAME[self._tier]}", style=dim)
         if self._expand_all:
             title.append(" · expanded", style=dim)
-        # A team-boundary tag: the chart renders the DECLARED org; the runtime
-        # that makes a nested team executable is a follow-up, so the page says
-        # so rather than implying a capability that is not live.
-        if self._root is not None and any(c.kind == "team" for c in self._root.children):
-            title.append(" · (declared)", style=dim)
+        # No team-boundary tag. This page used to append " · (declared)" and
+        # gloss it as "shown org, not yet an executable delegation", because a
+        # nested team was not runnable. It is: ``task(agent="team:<name>")``
+        # launches the sub-team's manager (BEN-7-D2), so the tag now names a
+        # capability that IS live and reads as a disclaimer that is not true.
         self._title_text = title
         self._title.update(title)
         width = max(self.size.width - 2, 1)
         self._rule_text = Text("─" * width, style=dim)
         self._rule.update(self._rule_text)
-        # Legend line (U5/U6): the glyph vocabulary + the `(declared)` gloss,
-        # shown only while toggled on. Painted here so a theme switch or resize
-        # repaints it in the current palette. It is display:none when closed, so
-        # the resting layout is unchanged.
+        # Legend line (U5): the glyph vocabulary, shown only while toggled on.
+        # Painted here so a theme switch or resize repaints it in the current
+        # palette. It is display:none when closed, so the resting layout is
+        # unchanged.
         self._legend.display = self._legend_open
         if self._legend_open:
-            # TWO rows (D7): the glyph vocabulary is 70 cells and the (declared)
-            # gloss is 56 — on one line they total 129 and the gloss, the very
-            # thing U6 added to explain the tag, was the part ellipsis-clipped at
-            # ≤~128 cols. Splitting them keeps each row well under a standard
-            # 100-col terminal, so nothing essential is ever truncated.
+            # ONE row again. The second row existed only to carry the
+            # `(declared)` gloss without ellipsis-clipping it at ≤~128 cols
+            # (D7); the gloss is gone with the tag it explained, and the glyph
+            # vocabulary alone is 70 cells — under a standard 100-col terminal.
             legend = Text(no_wrap=True, overflow="ellipsis")
             legend.append("◆ manager", style=Style(color=theme_mod.semantic_color("accent")))
             for glyph, meaning in (
@@ -322,12 +321,6 @@ class OrgChartView(Vertical):
                     Style(color=theme_mod.semantic_color("warning")) if meaning == "marker" else dim
                 )
                 legend.append(glyph, style=style)
-            # (declared) gloss (U6) on its OWN row so it always reads in full.
-            legend.append("\n", style=dim)
-            legend.append(
-                "(declared) = shown org, not yet an executable delegation",
-                style=dim,
-            )
             self._legend.update(legend)
         self._paint_hints()
 

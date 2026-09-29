@@ -105,8 +105,19 @@ def _write_tiers(config_dir, **tiers: str) -> None:
 
 
 def _completed(session: Session, job_id: str) -> bool:
-    row = session.jobs.get(job_id)
-    return row is not None and row.status == "completed"
+    return _row(session, job_id) is not None and _row(session, job_id).status == "completed"
+
+
+def _row(session: Session, job_id: str):
+    """A child's job row, wherever it lives.
+
+    Through the comms registry rather than ``session.jobs``: a resumed NESTED
+    child is registered in its REAL parent's manager (BEN-7-D5), so a worker's
+    row is in its manager's ledger and the root's ``get`` never sees it. The
+    registry walks every live session's manager, root first, so this is the
+    same answer for a direct child and the only correct one for a grandchild.
+    """
+    return session.subagent_comms.job(job_id)
 
 
 async def _hub_resume(parent: Session, job_id: str) -> str:
@@ -127,7 +138,11 @@ def _resumed_id(parent: Session, text: str) -> str:
     marker = "resumed as job "
     assert marker in text, text
     new_id = text.split(marker, 1)[1].split()[0]
-    assert parent.jobs.get(new_id) is not None
+    # Through the registry, not ``parent.jobs``: a resumed NESTED child is
+    # registered in its REAL parent's manager (BEN-7-D5), which for a worker is
+    # its manager's ledger rather than the root's. ``comms.job`` walks every
+    # live session's manager, so this still asserts the row really exists.
+    assert parent.subagent_comms.job(new_id) is not None
     return new_id
 
 
@@ -323,7 +338,7 @@ async def test_a_managers_worker_resumes_on_the_managers_live_model(tmp_path, mo
         new_id = _resumed_id(root, text)
         await wait_for(lambda: _completed(root, new_id))
         assert stream.selectors_for(RESUME_PROMPT) == [FLASH]
-        row = root.jobs.get(new_id)
+        row = _row(root, new_id)
         assert row is not None and row.model_label == FLASH
         # Inherited, not pinned: the attribution the launch line reads.
         assert row.owns_model is False

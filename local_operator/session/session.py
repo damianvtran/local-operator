@@ -122,6 +122,7 @@ from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     read_effort_tier_selectors,
+    resolve_launch_target,
     run_subagent,
 )
 from local_operator.harness.types import (
@@ -2595,6 +2596,12 @@ class Session:
         #: collaboration and project briefs without the manager restating them.
         #: ``None`` on an ordinary session.
         self.active_team: Any | None = None
+        #: Team ids from the top down, stamped on a CHILD by
+        #: ``harness.subagent._build_child_session``; ``None`` on a top session,
+        #: whose lineage is derived from ``active_team`` (BEN-7-D1).
+        self._team_lineage: tuple[str, ...] | None = None
+        #: Hops below the top session: 0 here, stamped on every child.
+        self._delegation_depth: int = 0
         #: User-facing copy explaining why a stored attachment did NOT come
         #: back ("" when it did, or when there was none). Set by
         #: :meth:`_restore_attachment` for a team or profile that failed to
@@ -11989,13 +11996,19 @@ class Session:
         child still means "inherit the parent", which is the ordinary case
         and must keep working with no config at all.
         """
-        model_spec = self._resolve_subagent_model(agent, effort, strict=True)
+        # The target first: a ``team:pod`` launch runs as pod's MANAGER, so the
+        # tier is the manager role's, and a launch that cannot run (unknown
+        # team, cycle, depth cap) raises here before any model is priced or
+        # job registered (BEN-7-D1/D2/D3).
+        target = resolve_launch_target(agent, self)
+        model_spec = self._resolve_subagent_model(target.role, effort, strict=True)
         return run_subagent(
             label=label,
             prompt=prompt,
             parent_session=self,
             jobs_manager=self.jobs,
             model_spec=model_spec,
+            target=target,
             agent=agent,
             # Recorded on the job for the title/band to name the tier. The spec
             # above already carries the resolved MODEL; this carries the LEVEL,
