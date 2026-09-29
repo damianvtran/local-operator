@@ -293,8 +293,9 @@ class Team(BaseModel):
         # delegation mechanics — because it states the manager's standing
         # duties before the roster says who does the work.
         parts.append(
-            "Track this team's workstream with the `project` tool and keep its "
-            "progress current; keep the todo list updated the same way."
+            "Track this team's workstream with the `project` tool: create it with "
+            "a short human-readable `title` and a markdown `description`, and keep "
+            "its progress current; keep the todo list updated the same way."
         )
         parts.append(
             "Delegate with task(agent='<role>') using the roster below. "

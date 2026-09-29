@@ -84,7 +84,12 @@ class ProjectParams(BaseModel):
     )
     name: str | None = Field(default=None, description="Project name (all ops but list).")
     description: str | None = Field(
-        default=None, description="create/update: one line on the workstream."
+        default=None,
+        description=(
+            "create/update: markdown prose describing the workstream — multiple "
+            "paragraphs, headings, lists and code; rendered, not dumped "
+            "(<= 240 chars)."
+        ),
     )
     owner: str | None = Field(
         default=None, description="create/update: who owns the stream; '' clears it."
@@ -94,7 +99,10 @@ class ProjectParams(BaseModel):
     )
     title: str | None = Field(
         default=None,
-        description="create/update: display name (falls back to the key ``name``); '' clears it.",
+        description=(
+            "create/update: short human-readable name shown first on lists and "
+            "headers; ``name`` stays the addressing key; '' clears it."
+        ),
     )
     status: ProjectStatus | None = Field(
         default=None,
@@ -107,8 +115,9 @@ class ProjectParams(BaseModel):
     progress: str | None = Field(
         default=None,
         description=(
-            "update: one dated line, not a transcript. The same line on a stale "
-            "record re-stamps its freshness."
+            "update: one dated line (markdown text), not a transcript; every NEW "
+            "line is appended to the history. The same line on a stale record "
+            "re-stamps its freshness."
         ),
     )
     tags: list[str] | None = Field(
@@ -170,9 +179,8 @@ class ProjectParams(BaseModel):
     attach: list[str] | None = Field(
         default=None,
         description=(
-            "update: local file paths copied into the update's history entry "
-            "(screenshots/evidence). <= 10 files, <= 5 MB each; needs a NEW "
-            "progress line."
+            "update: local file paths (screenshots/evidence) stored on the history "
+            "entry the NEW progress line appends; <= 10 files, <= 5 MB each."
         ),
     )
     history: int | None = Field(
@@ -374,8 +382,9 @@ async def _op_list(context: ToolContext | None, tool_call_id: str) -> ToolResult
     if not projects:
         body = (
             "no projects yet. Create one with op='create' (it links this "
-            "session automatically) once the workstream is worth tracking. "
-            "Read guide://projects first."
+            "session automatically) once the workstream is worth tracking — with "
+            "a short `title` and a markdown `description`. Read "
+            "guide://projects first."
         )
         return _text(tool_call_id, "project", body)
     body = "projects:\n" + "\n".join(_row(project) for project in projects)
