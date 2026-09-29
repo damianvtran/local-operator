@@ -568,7 +568,13 @@ def test_mcp_credential_rows_walk_the_verdict_chain(tmp_path: Path) -> None:
 
 def test_shareable_lines_render_every_login_state_once() -> None:
     """One renderer for the CLI and the agent digest (design §2), so the two cannot
-    drift the way the readiness rows once did."""
+    drift the way the readiness rows once did.
+
+    Both row kinds render (Radient org projection): MCP-server rows keep their
+    three-valued login state, and a PROVIDER-LOGIN row — which only exists when the
+    login is held — renders the held sentence plus the identity it was read from —
+    and, for Radient only, its person-scope caution line (design review round 1,
+    D1)."""
     rows = [
         {
             "server": "slack",
@@ -585,6 +591,13 @@ def test_shareable_lines_render_every_login_state_once() -> None:
             "shared_with": [],
         },
         {"server": "odd", "transport": "http", "login_here": None, "remedy": "", "shared_with": []},
+        {
+            "provider": "radient",
+            "kind": "oauth-rotating",
+            "identity_label": "owner@example.test",
+            "remedy": "lop network credential share radient --with <device>",
+            "shared_with": [{"device": "d_2", "name": "cloud-node-1", "scope": "session"}],
+        },
     ]
     assert readiness.shareable_lines(rows) == [
         "shareable here:",
@@ -593,6 +606,46 @@ def test_shareable_lines_render_every_login_state_once() -> None:
         "      shared with cloud-node-1 (session)",
         "  notion  sse  no login here yet — run '/mcp login https://n.example/mcp' here first",
         "  odd  http  login state not known — this device's credential store could not be read",
+        "  radient  oauth-rotating  login held — share: lop network credential share radient"
+        " --with <device>",
+        "      organization account — share only to your own devices",
+        "      signed in as owner@example.test",
+        "      shared with cloud-node-1 (session)",
+    ]
+    # A provider row without a label renders the single line; the identity line is
+    # optional, not a placeholder that prints as empty.
+    assert readiness.shareable_lines(
+        [
+            {
+                "provider": "openai",
+                "kind": "api-key-static",
+                "identity_label": "",
+                "remedy": "lop network credential share openai --with <device>",
+                "shared_with": [],
+            }
+        ]
+    ) == [
+        "shareable here:",
+        "  openai  api-key-static  login held — share: lop network credential share openai"
+        " --with <device>",
+    ]
+    # The Radient caution is not an identity line: it renders with the label
+    # absent too. The openai cell above pins that no other provider carries it.
+    assert readiness.shareable_lines(
+        [
+            {
+                "provider": "radient",
+                "kind": "oauth-rotating",
+                "identity_label": "",
+                "remedy": "lop network credential share radient --with <device>",
+                "shared_with": [],
+            }
+        ]
+    ) == [
+        "shareable here:",
+        "  radient  oauth-rotating  login held — share: lop network credential share radient"
+        " --with <device>",
+        "      organization account — share only to your own devices",
     ]
     assert readiness.shareable_lines([]) == []
 

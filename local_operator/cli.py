@@ -8171,6 +8171,35 @@ def _hub_cause(exc: BaseException) -> str:
     return f"{exc} [{code}]"
 
 
+def _holder_share_clause(base_dir: Path) -> str:
+    """The "ask the device that holds it" clause for the org missing-login remedy.
+
+    DESIGN REVIEW ROUND 1, D3: on a peer the bare re-login sentence contradicts
+    the GUIDE ("never run a login on a peer"), and this resolver is what makes a
+    peer reach it. Rendered only when there is a peer to ask — this device holds
+    an identity AND is a member of a network that names another device.
+
+    Whether that device HOLDS the org login is not readable from here before a
+    share exists (the placement document is only written when the owner shares),
+    so the clause names the ask rather than asserting a holder; the shared
+    remedy's first sentence stays this device's own path. A device in no network
+    keeps the single sentence unchanged.
+    """
+    from local_operator.network import identity as identity_mod
+    from local_operator.network import store as store_mod
+
+    identity = identity_mod.load(base_dir)
+    if identity is None:
+        return ""
+    for record in store_mod.list_networks(base_dir):
+        if any(member.device_id != identity.device_id for member in record.members):
+            return (
+                " Or ask the device that holds it to run "
+                "`lop network credential share radient --with <this device>`."
+            )
+    return ""
+
+
 def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
     """A Radient client acting as the signed-in PERSON, or None after the remedy.
 
@@ -8213,7 +8242,15 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
                 + "\033[0m"
             )
         else:
-            print(f"\n\033[1;31mError: {ORG_LOGIN_REMEDY}\033[0m")
+            # D3 (design review round 1): a mesh member that could ask a holding
+            # peer gets the ask-the-holder clause appended; a device in no
+            # network prints the one shared sentence alone.
+            print(
+                "\n\033[1;31mError: "
+                + ORG_LOGIN_REMEDY
+                + _holder_share_clause(config_manager.config_dir)
+                + "\033[0m"
+            )
         return None
     return RadientClient(api_key=SecretStr(access.access_token), base_url=base_url)
 
