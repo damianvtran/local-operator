@@ -91,9 +91,16 @@ def exclusive(ctx: "HubSyncContext", wait_s: float | None = None) -> Iterator[No
     lease = st.RunnerLease(ctx.config_dir)
     # Resolved at call time so a test (or an operator override) can shorten it.
     if not lease.acquire(LEASE_WAIT_S if wait_s is None else wait_s):
+        # A live holder heartbeats, so the honest bound is the lease's own expiry:
+        # it is only reached if that process died without releasing.
+        left = lease.remaining_s()
+        hint = (
+            f"; if it is gone, its lease expires in about {int(left) + 1}s and this works again"
+            if left is not None
+            else "; try again shortly"
+        )
         raise HubBusy(
-            "another hub update is running (the update runner or a second `lop` process); "
-            "try again in a moment"
+            "another hub update is running (the update runner or a second `lop` process)" + hint
         )
     try:
         yield

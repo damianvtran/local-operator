@@ -16,7 +16,7 @@ would look configured while never following the setting.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from local_operator.config import ConfigManager
@@ -60,14 +60,34 @@ class HubSyncSettings:
     merge_model: str = ""
 
     @staticmethod
-    def from_config(cm: "ConfigManager") -> "HubSyncSettings":
-        merge_model = cm.get_nested_value(MERGE_MODEL_PATH, "")
+    def _derive(get: Callable[..., Any]) -> "HubSyncSettings":
+        """The one place that says how the four keys are typed, defaulted and clamped."""
+
+        merge_model = get(MERGE_MODEL_PATH, "")
         return HubSyncSettings(
-            auto_agents=_bool(cm.get_nested_value(AUTO_AGENTS_PATH), DEFAULT_AUTO_UPDATE_AGENTS),
-            auto_teams=_bool(cm.get_nested_value(AUTO_TEAMS_PATH), DEFAULT_AUTO_UPDATE_TEAMS),
-            interval_min=_interval(cm.get_nested_value(INTERVAL_PATH)),
+            auto_agents=_bool(get(AUTO_AGENTS_PATH), DEFAULT_AUTO_UPDATE_AGENTS),
+            auto_teams=_bool(get(AUTO_TEAMS_PATH), DEFAULT_AUTO_UPDATE_TEAMS),
+            interval_min=_interval(get(INTERVAL_PATH)),
             merge_model=merge_model.strip() if isinstance(merge_model, str) else "",
         )
+
+    @staticmethod
+    def from_config(cm: "ConfigManager") -> "HubSyncSettings":
+        return HubSyncSettings._derive(cm.get_nested_value)
+
+    @staticmethod
+    def from_values(values: Mapping[str, Any]) -> "HubSyncSettings":
+        """Same derivation over a bare ``values`` mapping (see ``read_config_values``)."""
+
+        def get(path: tuple[str, ...], default: Any = None) -> Any:
+            current: Any = values
+            for part in path:
+                if not isinstance(current, Mapping) or part not in current:
+                    return default
+                current = current[part]
+            return current
+
+        return HubSyncSettings._derive(get)
 
     @staticmethod
     def read_fresh(cm: "ConfigManager") -> "HubSyncSettings":
@@ -76,16 +96,24 @@ class HubSyncSettings:
         The section is LIVE (``settings_io``): an edit from the TUI, the CLI or
         another daemon must land within one tick. A long-lived ``ConfigManager``
         (the server's) holds the config it read at boot, so a write made by a
-        different process would never reach it. Falls back to the given manager
-        when the directory cannot be re-read.
+        different process would never reach it. Reads the file directly
+        (``read_config_values``) instead of constructing a second manager: this
+        runs from a timer and from every context, and construction can move an
+        unparseable ``config.yml`` aside. Falls back to the given manager when the
+        file cannot be read right now (a torn write) or the manager has no directory.
         """
 
-        try:
-            from local_operator.config import ConfigManager as _CM
+        config_dir = getattr(cm, "config_dir", None)
+        if config_dir is not None:
+            try:
+                from local_operator.config import read_config_values
 
-            return HubSyncSettings.from_config(_CM(cm.config_dir))
-        except Exception:  # noqa: BLE001 - never lose the tick over a settings read
-            return HubSyncSettings.from_config(cm)
+                values = read_config_values(config_dir)
+            except Exception:  # noqa: BLE001 - never lose the tick over a settings read
+                values = None
+            if values is not None:
+                return HubSyncSettings.from_values(values)
+        return HubSyncSettings.from_config(cm)
 
     def auto_for(self, kind: str) -> bool:
         return self.auto_teams if kind == "team" else self.auto_agents

@@ -152,7 +152,9 @@ def resolve_merge_model(config_manager: Any) -> MergeModel:
 
     from local_operator.hub_sync.settings import HubSyncSettings
 
-    override = HubSyncSettings.from_config(config_manager).merge_model
+    # read_fresh, not from_config: ``hub.merge_model`` is a LIVE key and the daemon's
+    # manager is the one it loaded at boot, so an edit from the TUI/CLI would go unseen.
+    override = HubSyncSettings.read_fresh(config_manager).merge_model
     if override:
         provider, _, model_id = override.partition("/")
         if not provider.strip() or not model_id.strip():

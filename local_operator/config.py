@@ -201,6 +201,38 @@ def _parse_config_stream(path: Path, stream: Any) -> Any:
     return loaded
 
 
+def read_config_values(config_dir: Path) -> "Dict[str, Any] | None":
+    """The ``values`` mapping of ``config_dir``'s ``config.yml`` as it is on disk NOW.
+
+    WHY THIS EXISTS beside :class:`ConfigManager`. A periodic background reader (the
+    hub update runner re-reads its ``hub.*`` keys every tick) needs the file's current
+    contents, and building a whole manager for that is the wrong tool: construction
+    moves a config it cannot parse aside to ``config.yml.bad.<stamp>`` and prints to
+    stderr, which is right at startup and wrong from a timer that can catch a
+    non-atomic editor save mid-write. This reads through the same parse memo
+    (:func:`_parse_config_stream`, so an unchanged file costs a ``fstat``) and
+    NEVER writes, moves or reports anything.
+
+    ``{}`` when there is no file or no ``values`` (nothing is set); ``None`` when the
+    file cannot be read or parsed right now — the caller keeps what it had rather
+    than treating a torn read as "everything unset".
+    """
+    path = Path(config_dir) / CONFIG_FILE_NAME
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            parsed = _parse_config_stream(path, stream)
+    except (OSError, yaml.YAMLError):
+        return None
+    if parsed is None:
+        return {}
+    if not isinstance(parsed, dict):
+        return None
+    values = parsed.get("values", {})
+    return values if isinstance(values, dict) else {}
+
+
 def _unmodelled_top_level(path: Path) -> Dict[str, Any]:
     """Top-level keys of the config file that this store has no field for.
 
