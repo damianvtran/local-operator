@@ -85,8 +85,8 @@ def parse_process_table(output: str) -> list[tuple[int, int, int]]:
     sink the reading (the per-command parser's rule, kept). Rows with a
     non-positive pid are dropped at the source; a reading that cannot name a
     process cannot judge one either. ``pgid`` rides along for ONE consumer —
-    the pre-signal re-check that compares the candidate's row against the
-    snapshot before a stop goes out.
+    the pre-signal re-check that compares the fragment's rows (the whole walk,
+    batched) against the snapshot before a stop goes out.
     """
     rows: list[tuple[int, int, int]] = []
     for line in output.splitlines():
