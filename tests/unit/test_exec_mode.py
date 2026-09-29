@@ -2067,3 +2067,16 @@ def test_the_foreground_factory_carries_workstream_to_the_stamp(
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_mode._make_default_session_factory(ExecArgs(workstream=True))()
     assert seen["workstream"] is True
+
+
+def test_the_auto_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A launch-time check must not create a config root (review R1-2).
+
+    Constructing ``ConfigManager`` can mkdir a fresh root (and move a
+    malformed config aside); the probe must answer "no saved mode" from the
+    ABSENCE of the file, without constructing anything.
+    """
+    root = _redirect_logs_dir(monkeypatch, tmp_path).parent
+    assert not root.exists()
+    assert exec_mode._saved_auto_approval() is False
+    assert not root.exists(), "the probe created the config root it read"

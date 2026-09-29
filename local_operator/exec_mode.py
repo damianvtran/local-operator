@@ -842,17 +842,28 @@ def _declared_by_profile(name: str | None) -> bool:
 def _saved_auto_approval() -> bool:
     """Whether ``tool_approval_mode: auto`` is saved in this run's config root.
 
-    Best-effort and read-only: any failure — a missing config, an unreadable
-    one, an old tree — degrades to ``False``, which keeps the deny-trap
-    advisory ON. That is the safe direction for a launch-time warning: a wrong
-    ``True`` would silence advice for a run that then spent its life denied.
+    Best-effort: any failure — an odd tree, an unreadable config — degrades to
+    ``False``, which keeps the deny-trap advisory ON. That is the safe
+    direction for a launch-time warning: a wrong ``True`` would silence advice
+    for a run that then spent its life denied.
+
+    THE FRESH-ROOT CASE IS GUARDED, not documented away (review R1-2):
+    constructing ``ConfigManager`` can CREATE a config directory, and a
+    launch-path check has no business writing. No config file means no saved
+    mode — answered without constructing anything. A MALFORMED file may still
+    be moved aside by the manager, exactly as it will be, moments later, by
+    the launch path's own preflight; that residual is stated, not hidden.
     """
     try:
-        from local_operator.config import ConfigManager
         from local_operator.paths import config_dir
+
+        root = config_dir()
+        if not (root / "config.yml").is_file():
+            return False
+        from local_operator.config import ConfigManager
         from local_operator.session_factory import _approval_mode_is_auto
 
-        return _approval_mode_is_auto(ConfigManager(config_dir()))
+        return _approval_mode_is_auto(ConfigManager(root))
     except Exception:  # noqa: BLE001 — keep the advisory ON when unsure
         return False
 

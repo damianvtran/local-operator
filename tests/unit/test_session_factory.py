@@ -6416,8 +6416,11 @@ async def test_without_the_key_the_headless_gate_still_asks(
         assert seen == [False]
         # The real gate, exercised in this no-tty test process: refusing with
         # the typed error, not a bare False (the CL-04 contract, preserved).
+        # Non-tty is PINNED, the sibling cells' rule — under `-s` on a
+        # terminal the ambient stdin would otherwise prompt (review R1-5).
         from local_operator.harness.approval import ApprovalUnavailableError
 
+        monkeypatch.setattr(sf.sys.stdin, "isatty", lambda: False)
         with pytest.raises(ApprovalUnavailableError):
             await gates[0]("bash", "echo probe")
     finally:
