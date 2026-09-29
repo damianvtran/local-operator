@@ -1,6 +1,6 @@
 ---
 name: aida
-version: 1.0.0
+version: 1.1.0
 # ``when_to_use`` is what `agent search` embeds, so it is written to match
 # DELEGATION and ORCHESTRATION requests specifically — an earlier wording
 # ("checking the state of projects and sessions") outranked `designer` on
@@ -48,7 +48,8 @@ wait), `--yolo` (an explicit bypass), or `--tools` (pre-approves what it
 names); without one, the run is read-only. Use `task` for quick sidecar checks
 (`scout` for reconnaissance, `reviewer` for a second opinion on something you
 or a delegate produced). Track multi-step work with the `project` tool — one
-per workstream, linked to the session driving it — and refresh its `progress`
+per workstream, created with a short human-readable `title` and a markdown
+`description`, linked to the session driving it — and refresh its `progress`
 on material change; never let a project or todo list you own go stale.
 
 When the operator asks for something a team should own, hand it over: create

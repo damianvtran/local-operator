@@ -283,13 +283,16 @@ def test_manager_preamble_layers_briefs(registry: TeamRegistry) -> None:
 def test_manager_preamble_states_the_projects_tracking_duty(registry: TeamRegistry) -> None:
     """The team-manager half of the projects prompt change (§V2.G.2), pinned as
     the exact sentence: a manager that never hears it is exactly the manager
-    whose project row goes stale."""
+    whose project row goes stale. The create-defaults update (a `title` and a
+    markdown `description` on create) rides the same sentence, so the pin
+    stays whole rather than drifting to substrings."""
     team = registry.create_team(
         TeamEditFields(name="tracked", manager="manager", members=[TeamMember(role="coder")])
     )
     assert (
-        "Track this team's workstream with the `project` tool and keep its "
-        "progress current; keep the todo list updated the same way."
+        "Track this team's workstream with the `project` tool: create it with "
+        "a short human-readable `title` and a markdown `description`, and keep "
+        "its progress current; keep the todo list updated the same way."
     ) in team.manager_preamble()
 
 
@@ -298,7 +301,9 @@ def test_the_two_manager_prompts_agree_on_the_projects_duty(registry: TeamRegist
     §V2.G.2) and the two populations are not fully disjoint — a
     ``task(agent='manager')`` outside a team sees only the seed, a team with a
     custom manager sees only the preamble — so the pair must stay aligned on
-    the facts that matter without collapsing the texts."""
+    the facts that matter without collapsing the texts. The create defaults
+    (title + markdown description up front) are one of those facts: both texts
+    must name them."""
     from local_operator.agent_profiles import load_seed
 
     seed = load_seed("manager")
@@ -310,6 +315,7 @@ def test_the_two_manager_prompts_agree_on_the_projects_duty(registry: TeamRegist
 
     for text in (seed.instructions, preamble):
         assert "`project` tool" in text
+        assert "`title`" in text and "`description`" in text
     assert "in real time" in seed.instructions
     assert "keep its progress current" in preamble
 

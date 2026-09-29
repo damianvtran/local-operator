@@ -597,7 +597,28 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: The raise lands at head + 55 — the band this file keeps, and together with
 #: the known CI-vs-local offset (~25 billed) it clears CI rather than this
 #: machine alone — and the tighten band below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 34_587
+#:
+#: RAISED 34,587 -> 34,676 for the PROJECTS CREATE-DEFAULTS wording slice: the
+#: ``project`` tool's ``description`` / ``title`` / ``progress`` / ``attach``
+#: field text now says what those fields already do (a markdown description
+#: that is rendered, a short display title, every NEW progress line appended
+#: to the history, attachments stored on that entry), and the empty-listing
+#: receipt teaches the same create default. Measured same-host, one tree after
+#: the other:
+#:
+#:   baseline (origin/main 28b46dcb5)      96,044 chars = ~34,548 billed
+#:   head (this branch)                    96,247 chars = ~34,621 billed
+#:     = +203 chars = +73 billed: four field descriptions and one listing
+#:       sentence on ONE tool. The schema is the only text an agent reads
+#:       before its first create, and the alternative was a refusal (an
+#:       over-long description) or a misread of "one line on the workstream"
+#:       that the guide then has to undo; the rationale stays in the guide and
+#:       the seeds, which cost nothing until read.
+#:
+#: The raise lands at head + 55 — the band this file keeps, and together with
+#: the known CI-vs-local offset (~25 billed) it clears CI rather than this
+#: machine alone — and the tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 34_676
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
