@@ -1,0 +1,488 @@
+"""The cascade resolver and executor.
+
+**Resolver** (:func:`resolve_audio_path`) — the frozen decision order, first
+match wins (manager decisions, 2026-09-28):
+
+1. ``provider_stt_radient`` — Radient credentials resolve non-empty, through
+   the same :func:`resolve_radient_credential` the daemon's legacy route uses,
+   so the resolver and the executor cannot disagree about what "signed in"
+   means.
+2. ``provider_stt_elevenlabs`` — a stored ElevenLabs key exists.
+3. ``provider_stt_openai`` — a stored OpenAI key exists.
+4. ``provider_stt_superwhisper`` — reserved; ALWAYS unavailable, and no code
+   path returns it (unit-pinned).
+5. ``model_audio_sidecar`` — the selected model accepts audio input.
+6. ``none`` — no path; the reason enumerates what is missing.
+
+The credential probes are ``read_only=True`` everywhere: a probe must not
+rotate account stickiness (or decide routing) for what is only a question.
+
+**Availability caveat, deliberately loud:** rungs 1-3 answer "a credential
+exists", NOT "the call will succeed". A refused key, an empty balance or a
+model the account cannot reach all surface at call time — that is what the
+executor's fall-forward is for.
+
+**Executor** (:func:`transcribe_audio`) — walks the available STT rungs
+(1→3) in order over one read of the audio, records an :class:`~local_operator.stt.SttAttempt`
+per rung, and falls forward on every failure. When every available rung fails
+it raises :class:`SttUnavailable` carrying the resolution, the attempts, and
+the classified failure the route should report. When NO rung was available it
+raises the same exception with no attempts — the route maps that case to the
+structured 409 the surface reads to offer the audio door.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from pathlib import Path
+from typing import Optional
+
+from local_operator.clients._http import APIError
+from local_operator.clients.radient import RadientClient
+from local_operator.env import resolve_radient_api_base_url
+from local_operator.providers.auth_store import AuthStore
+from local_operator.providers.radient_credentials import resolve_radient_credential
+from local_operator.stt import (
+    AudioPath,
+    AudioPathResolution,
+    RungAvailability,
+    SttAttempt,
+    SttOutcome,
+)
+from local_operator.stt import audio as stt_audio
+from local_operator.stt.clients import (
+    DEFAULT_TRANSCRIBE_TIMEOUT_S,
+    ElevenLabsSttClient,
+    OpenAiSttClient,
+)
+from local_operator.stt.errors import failure_status_and_detail
+
+logger = logging.getLogger(__name__)
+
+#: One STT rung's wire-call bound. The executor passes ``min`` of this and the
+#: overall budget remaining, so a late rung never outlives the deadline.
+STT_ATTEMPT_TIMEOUT_S = DEFAULT_TRANSCRIBE_TIMEOUT_S
+
+#: The whole cascade's bound (three attempts, worst case). Rungs the deadline
+#: can no longer fund are recorded as ``skipped`` rather than attempted.
+STT_OVERALL_TIMEOUT_S = 120.0
+
+#: The STT rungs, in cascade order. Deliberately NOT including SuperWhisper
+#: (never emitted) or the model-audio rung (not an STT call).
+STT_RUNG_PATHS = (
+    AudioPath.PROVIDER_STT_RADIENT,
+    AudioPath.PROVIDER_STT_ELEVENLABS,
+    AudioPath.PROVIDER_STT_OPENAI,
+)
+
+#: Why the reserved rung reads unavailable. Kept as a constant because it is
+#: surfaced verbatim and a test pins it.
+SUPERWHISPER_REASON = (
+    "SuperWhisper is reserved but unavailable: it has no non-interactive "
+    "transcription interface."
+)
+
+
+class SttUnavailable(RuntimeError):
+    """The cascade could not produce text.
+
+    Carries everything each caller class needs:
+
+    * ``resolution`` — the full rung report. ``attempts`` being empty means no
+      STT rung was available at all, which is the route's 409 case; the surface
+      then reads ``resolution.model_audio_capable`` to offer the audio door.
+    * ``attempts`` — one entry per rung the walk actually spent (plus any the
+      budget skipped).
+    * ``error`` / ``status_code`` / ``detail`` — the chosen failure among the
+      attempts, already classified by the shared mapper. ``None`` when no rung
+      was attempted.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resolution: AudioPathResolution,
+        attempts: tuple[SttAttempt, ...] = (),
+        error: Optional[APIError] = None,
+        status_code: int | None = None,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.resolution = resolution
+        self.attempts = attempts
+        self.error = error
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _ensure_store(config_dir: Path | None, store: AuthStore | None) -> tuple[AuthStore, bool]:
+    """The caller's store, or one this call owns (and must close).
+
+    Mirrors ``resolve_radient_credential``'s ownership rule: a store created
+    here is closed here. The db path mirrors it too (``config_dir/auth.db``).
+    """
+    if store is not None:
+        return store, False
+    db_path = (config_dir / "auth.db") if config_dir is not None else None
+    return AuthStore(db_path, config_dir=config_dir), True
+
+
+async def _probe_key(store: AuthStore, provider: str, session_id: str | None) -> bool:
+    """Whether ``provider`` has a key, without letting a probe take the mic down.
+
+    ``read_only=True`` so the probe decides nothing (see module docstring). A
+    store failure (a refresh it cannot confirm, a locked db) means this rung
+    cannot be used right now, which is exactly what "unavailable" says; the
+    exception is logged and the answer is ``False``.
+    """
+    try:
+        value = await store.get_api_key(provider, session_id, read_only=True)
+    except Exception:
+        logger.warning("stt probe for %s failed; reporting the rung unavailable", provider)
+        return False
+    return bool(value)
+
+
+def _model_capable(model: object | None) -> bool:
+    """Whether the selected model accepts audio input.
+
+    ``getattr`` on purpose: ``supports_audio_input`` lands on ``ModelSpec`` in
+    phase 1 of this feature, and a resolver imported before that must read a
+    missing attribute as "cannot take audio" (the safe direction), never crash
+    a mic.
+    """
+    return model is not None and bool(getattr(model, "supports_audio_input", False))
+
+
+async def resolve_audio_path(
+    *,
+    config_dir: Path | None,
+    base_url: str | None = None,
+    model: object | None = None,
+    session_id: str | None = None,
+    store: AuthStore | None = None,
+) -> AudioPathResolution:
+    """Decide which speech path a submission would take. See module docstring."""
+    radient_base = resolve_radient_api_base_url(base_url)
+    store, owned = _ensure_store(config_dir, store)
+    try:
+        try:
+            credential = await resolve_radient_credential(config_dir, radient_base, store=store)
+            radient_available = bool(credential.get_secret_value())
+        except Exception:
+            logger.warning("stt probe for radient failed; reporting the rung unavailable")
+            radient_available = False
+        elevenlabs_available = await _probe_key(store, "elevenlabs", session_id)
+        openai_available = await _probe_key(store, "openai", session_id)
+    finally:
+        if owned:
+            store.close()
+
+    model_capable = _model_capable(model)
+    rungs = (
+        RungAvailability(
+            AudioPath.PROVIDER_STT_RADIENT,
+            radient_available,
+            "Signed in to Radient." if radient_available else "Not signed in to Radient.",
+        ),
+        RungAvailability(
+            AudioPath.PROVIDER_STT_ELEVENLABS,
+            elevenlabs_available,
+            (
+                "An ElevenLabs API key is stored."
+                if elevenlabs_available
+                else "No ElevenLabs API key is stored."
+            ),
+        ),
+        RungAvailability(
+            AudioPath.PROVIDER_STT_OPENAI,
+            openai_available,
+            "An OpenAI API key is stored." if openai_available else "No OpenAI API key is stored.",
+        ),
+        RungAvailability(AudioPath.PROVIDER_STT_SUPERWHISPER, False, SUPERWHISPER_REASON),
+        RungAvailability(
+            AudioPath.MODEL_AUDIO_SIDECAR,
+            model_capable,
+            (
+                "The selected model accepts audio input."
+                if model_capable
+                else "The selected model does not accept audio input."
+            ),
+        ),
+    )
+    available = next((rung for rung in rungs if rung.available), None)
+    if available is not None:
+        return AudioPathResolution(
+            path=available.path,
+            reason=available.reason,
+            rungs=rungs,
+            model_audio_capable=model_capable,
+        )
+    if model is None:
+        reason = (
+            "No transcription provider is available and no model is selected " "for the audio path."
+        )
+    else:
+        reason = (
+            "No transcription provider is available and the selected model does "
+            "not accept audio."
+        )
+    return AudioPathResolution(
+        path=AudioPath.NONE, reason=reason, rungs=rungs, model_audio_capable=model_capable
+    )
+
+
+def _rung_label(path: AudioPath) -> str:
+    return {
+        AudioPath.PROVIDER_STT_RADIENT: "Radient",
+        AudioPath.PROVIDER_STT_ELEVENLABS: "ElevenLabs",
+        AudioPath.PROVIDER_STT_OPENAI: "OpenAI",
+    }.get(path, str(path))
+
+
+async def _run_radient_rung(
+    audio_path: Path,
+    *,
+    config_dir: Path | None,
+    base_url: str,
+    store: AuthStore,
+    language: str | None,
+    prompt: str | None,
+) -> str:
+    """Rung 1: the existing Radient route path, off the event loop.
+
+    Wrapped in ``asyncio.to_thread`` because ``RadientClient`` is sync
+    ``requests``; the legacy route calls it from an async handler directly,
+    which is existing behaviour — new code does not block the loop. The
+    executor's own ``wait_for`` bounds this call (a thread cannot be
+    cancelled, but the cascade stops waiting on it either way).
+    """
+    credential = await resolve_radient_credential(config_dir, base_url, store=store)
+    client = RadientClient(api_key=credential, base_url=base_url)
+    result = await asyncio.to_thread(
+        client.create_transcription,
+        file_path=str(audio_path),
+        model=None,  # Radient's own configured default governs (legacy rule)
+        prompt=prompt,
+        response_format="json",
+        temperature=0.0,
+        language=language,
+        provider=None,
+    )
+    return result.text or ""
+
+
+async def _run_elevenlabs_rung(
+    audio: bytes,
+    *,
+    mime: str,
+    store: AuthStore,
+    session_id: str | None,
+    language: str | None,
+    prompt: str | None,
+    timeout_s: float,
+) -> str:
+    """Rung 2: the user's own ElevenLabs key."""
+    key = await store.get_api_key("elevenlabs", session_id, read_only=True)
+    if not key:
+        raise APIError("No ElevenLabs API key is stored.", status_code=None)
+    client = ElevenLabsSttClient(key)
+    result = await client.transcribe(
+        audio, mime=mime, language=language, prompt=prompt, timeout_s=timeout_s
+    )
+    return result.text
+
+
+async def _run_openai_rung(
+    audio: bytes,
+    *,
+    mime: str,
+    store: AuthStore,
+    session_id: str | None,
+    language: str | None,
+    prompt: str | None,
+    timeout_s: float,
+) -> str:
+    """Rung 3: the user's own OpenAI key."""
+    key = await store.get_api_key("openai", session_id, read_only=True)
+    if not key:
+        raise APIError("No OpenAI API key is stored.", status_code=None)
+    client = OpenAiSttClient(key)
+    result = await client.transcribe(
+        audio, mime=mime, language=language, prompt=prompt, timeout_s=timeout_s
+    )
+    return result.text
+
+
+def _failed_attempt(path: AudioPath, exc: BaseException) -> SttAttempt:
+    """One failed rung, with the shared mapper's sentence as the detail."""
+    if isinstance(exc, APIError):
+        _status, detail = failure_status_and_detail(exc, "upstream", rung=path)
+    else:
+        detail = str(exc) or exc.__class__.__name__
+    return SttAttempt(path=path, outcome="failed", detail=detail)
+
+
+def _choose_final_failure(
+    failures: list[tuple[AudioPath, Optional[APIError]]],
+) -> Optional[tuple[AudioPath, APIError]]:
+    """Which rung's failure the all-failed report should carry.
+
+    A payment refusal (402-class) wins over everything: it is the one failure
+    whose remedy is rung-independent — the user tops up once and the whole
+    cascade heals — so surfacing a per-rung key problem instead would send them
+    to fix the wrong thing. With no payment refusal, the LAST failure is
+    reported: the freshest rung is the one closest to "what happened when we
+    tried". The rung travels with the error because the classification
+    vocabulary is per-rung (Radient relay vs direct BYO).
+    """
+    for path, error in failures:
+        if error is None:
+            continue
+        status, _detail = failure_status_and_detail(error, "upstream", rung=path)
+        if status == 402:
+            return path, error
+    for path, error in reversed(failures):
+        if error is not None:
+            return path, error
+    return None
+
+
+async def transcribe_audio(
+    audio_path: Path,
+    *,
+    config_dir: Path | None,
+    base_url: str | None = None,
+    session_id: str | None = None,
+    store: AuthStore | None = None,
+    model: object | None = None,
+    language: str | None = None,
+    prompt: str | None = None,
+) -> SttOutcome:
+    """Run the STT cascade over one audio file. See module docstring."""
+    radient_base = resolve_radient_api_base_url(base_url)
+    store, owned = _ensure_store(config_dir, store)
+    try:
+        resolution = await resolve_audio_path(
+            config_dir=config_dir,
+            base_url=radient_base,
+            model=model,
+            session_id=session_id,
+            store=store,
+        )
+        candidates = [
+            rung.path for rung in resolution.rungs if rung.available and rung.path in STT_RUNG_PATHS
+        ]
+        if not candidates:
+            raise SttUnavailable(str(resolution.reason), resolution=resolution)
+
+        deadline = time.monotonic() + STT_OVERALL_TIMEOUT_S
+        attempts: list[SttAttempt] = []
+        failures: list[tuple[AudioPath, Optional[APIError]]] = []
+        audio: bytes | None = None
+        mime = ""
+
+        for path in candidates:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                attempts.append(
+                    SttAttempt(
+                        path=path,
+                        outcome="skipped",
+                        detail=(
+                            "The overall transcription budget was spent before this "
+                            "provider was reached."
+                        ),
+                    )
+                )
+                continue
+            attempt_timeout = min(STT_ATTEMPT_TIMEOUT_S, remaining)
+            try:
+                if path == AudioPath.PROVIDER_STT_RADIENT:
+                    attempt = _run_radient_rung(
+                        audio_path,
+                        config_dir=config_dir,
+                        base_url=radient_base,
+                        store=store,
+                        language=language,
+                        prompt=prompt,
+                    )
+                else:
+                    if audio is None:
+                        audio = audio_path.read_bytes()
+                        # CONTENT over extension (``media.py``'s own rule): the
+                        # header is the stronger evidence of what the bytes
+                        # are, and the suffix is only the fallback for a header
+                        # the sniffer could not name — this upload is
+                        # first-party, unlike an admission-gate block.
+                        sniffed = stt_audio.sniff_audio(audio)
+                        mime = (
+                            sniffed.mime_type
+                            if sniffed is not None
+                            else stt_audio.mime_for_path(audio_path)
+                        )
+                    if path == AudioPath.PROVIDER_STT_ELEVENLABS:
+                        attempt = _run_elevenlabs_rung(
+                            audio,
+                            mime=mime,
+                            store=store,
+                            session_id=session_id,
+                            language=language,
+                            prompt=prompt,
+                            timeout_s=attempt_timeout,
+                        )
+                    else:
+                        attempt = _run_openai_rung(
+                            audio,
+                            mime=mime,
+                            store=store,
+                            session_id=session_id,
+                            language=language,
+                            prompt=prompt,
+                            timeout_s=attempt_timeout,
+                        )
+                # ONE bound for every rung, whatever the rung does with its own
+                # timeouts: the deadline is the executor's promise, and a
+                # client that outlived its own timeout must not be able to
+                # extend the cascade.
+                text = await asyncio.wait_for(attempt, timeout=attempt_timeout)
+            except asyncio.TimeoutError:
+                # A timeout never reached an upstream status; it behaves like a
+                # transport failure (502, text passed through).
+                exc: BaseException = APIError(
+                    f"{_rung_label(path)} did not respond within {attempt_timeout:.0f} s.",
+                    status_code=None,
+                )
+                attempts.append(_failed_attempt(path, exc))
+                failures.append((path, exc))
+                continue
+            except Exception as exc:
+                attempts.append(_failed_attempt(path, exc))
+                failures.append((path, exc if isinstance(exc, APIError) else None))
+                continue
+            attempts.append(SttAttempt(path=path, outcome="ok"))
+            return SttOutcome(text=text, path=path, attempts=tuple(attempts))
+
+        chosen = _choose_final_failure(failures)
+        status_code: int | None = None
+        detail: str | None = None
+        chosen_error: Optional[APIError] = None
+        if chosen is not None:
+            chosen_path, chosen_error = chosen
+            status_code, detail = failure_status_and_detail(
+                chosen_error, "upstream", rung=chosen_path
+            )
+        raise SttUnavailable(
+            "The speech cascade could not produce a transcription.",
+            resolution=resolution,
+            attempts=tuple(attempts),
+            error=chosen_error,
+            status_code=status_code,
+            detail=detail,
+        )
+    finally:
+        if owned:
+            store.close()

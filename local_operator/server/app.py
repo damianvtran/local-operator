@@ -63,6 +63,7 @@ from local_operator.server.routes import (
     speech,
     sse,
     static,
+    stt,
     transcription,
 )
 from local_operator.server.utils.event_broker import EventBroker
@@ -505,6 +506,8 @@ _LEGACY_CONTROL_PATHS = frozenset(
         "/v1/credentials",
         "/v1/memberships",
         "/v1/models",
+        "/v1/stt/paths",
+        "/v1/stt/transcriptions",
         "/v1/tools/speech",
         "/v1/transcriptions",
     }
@@ -855,6 +858,12 @@ app.include_router(
 # /v1/transcriptions
 app.include_router(
     transcription.router,
+)
+
+# /v1/stt — the cascade surface beside the legacy Radient-only route it
+# extends; both paths are gated in managed mode above.
+app.include_router(
+    stt.router,
 )
 
 # /v1/speech
