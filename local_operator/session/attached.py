@@ -621,13 +621,16 @@ def _inline_attachment_references(value: Any, store: AttachmentStore) -> tuple[A
         ):
             resolved = store.get(digest)
             block = {key: item for key, item in value.items() if key != ATTACHMENT_KEY}
-            # ``type`` is set rather than carried: the reference replaces an
-            # image block, and the block may have been encoded with
-            # ``exclude_defaults``, which drops ``type`` because it IS the
+            # ``type`` is set when the block does not carry one: the reference
+            # replaces a media block, and an IMAGE block may have been encoded
+            # with ``exclude_defaults``, which drops ``type`` because it IS the
             # model's default. Without it the union in ``Message.content``
-            # cannot pick ``ImageContent``. Setting it is lossless — this only
-            # ever rewrites a block that stands in for an image.
-            block["type"] = "image"
+            # cannot pick ``ImageContent``. An AUDIO block DOES carry its
+            # discriminant — the durable encoder stamps it back (see
+            # ``transcript._stamp_audio_discriminants``) — and preserving it is
+            # what keeps a recording a recording: forcing "image" here would
+            # hand every viewer audio bytes typed as an image.
+            block.setdefault("type", "image")
             if resolved is None:
                 # An unresolvable digest is ORDINARY (interrupted write, a
                 # hand-pruned store) and must not raise: the block degrades to
@@ -2998,6 +3001,7 @@ class AttachedSession:
         steer: bool = False,
         input_mode: str | None = None,
         input_path: str | None = None,
+        audio: list[dict[str, str]] | None = None,
     ) -> tuple[str, bool]:
         """Return the owner's admission receipt, not a fictitious completed turn.
 
@@ -3009,6 +3013,12 @@ class AttachedSession:
         ``Message.input_mode``). Each key is OMITTED from the frame when
         ``None``, so a legacy send stays byte-identical on the wire and an owner
         runtime from before the carriage never sees a key it does not read.
+
+        ``audio`` rides the same rule — omitted when absent (``None`` OR an
+        empty list: a sender that always passes its list must not add a key
+        nobody reads) — and it is the one attachment the inbox spool cannot
+        carry (see ``ServingSessionHandle.steer``'s update-window arm), so it
+        travels the ordinary frame or not at all.
         """
         await self._ensure_bound()
         client = self._client
@@ -3019,6 +3029,8 @@ class AttachedSession:
             fields["input_mode"] = input_mode
         if input_path is not None:
             fields["input_path"] = input_path
+        if audio:
+            fields["audio"] = audio
         return await client.request_ack_with_duplicate("steer" if steer else "prompt", **fields)
 
     async def bind_runtime(self) -> None:

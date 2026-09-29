@@ -134,6 +134,7 @@ from local_operator.harness.types import (
     Aside,
     AsideResult,
     AskUserFn,
+    AudioContent,
     BrowserSurface,
     ChatRequest,
     CompactionEndEvent,
@@ -246,6 +247,7 @@ from local_operator.session.spend import recall as recall_spend
 from local_operator.session.spend import serving_identity, writer_stamp
 from local_operator.session.transcript import ENTRY_CUSTOM, ENTRY_MESSAGE, Transcript
 from local_operator.session.usage_seed import seed_reported_usage
+from local_operator.stt import AudioPath
 from local_operator.tools.builtin import (
     open_todos,
     restore_todos,
@@ -6794,6 +6796,81 @@ class Session:
         )
 
     # -- driving turns --------------------------------------------------------
+
+    async def _refuse_audio_admission(self, audio: Sequence[AudioContent]) -> None:
+        """Refuse a recording the selected model cannot take (the rung-6 error).
+
+        Called from ``prompt``'s pre-work band. The check itself is the same
+        fact the resolver reports (``stt.cascade._model_capable``): the active
+        spec's ``supports_audio_input``, read with ``getattr`` and a ``False``
+        default so a reduced or older spec keeps the safe direction. Only when
+        the door is shut does the resolver run, and only to make the refusal
+        honest: its report names whether a transcription path IS available
+        (rungs 1-3), which is the remedy the caller can act on.
+
+        Who reaches this, stated for reviewers: a client that gates its mic on
+        the resolver's ``model_audio_capable`` never does — this is the
+        backstop for a surface that sends audio anyway, and the point at which
+        such a send stops being a request and becomes a typed refusal.
+        """
+        model = self._model
+        if bool(getattr(model, "supports_audio_input", False)):
+            return
+        # Lazy imports like the neighbours': neither module is needed on any
+        # other prompt path, and this helper runs only for a recording that is
+        # about to be refused.
+        from local_operator.paths import config_dir
+        from local_operator.session.errors import AudioInputUnsupported
+        from local_operator.stt.cascade import resolve_audio_path
+
+        resolution = await resolve_audio_path(
+            config_dir=config_dir(),
+            model=model,
+            session_id=self.session_id,
+        )
+        raise AudioInputUnsupported(
+            model=f"{model.provider}/{model.model_id}",
+            report=resolution.reason,
+        )
+
+    def _fork_audio_sidecars(self, message: AgentMessage) -> None:
+        """Fork the transcription sidecar(s) for an audio-carrying durable row.
+
+        Called ONLY from the append loop in ``_run_turn``, immediately after
+        the row is durable — never before, because a record that references a
+        message id the transcript does not have is a dangling row no reader
+        can resolve; and not later either, because the sidecar's one job is to
+        extract the recording best-effort while the turn that carried it is
+        still young. The work is fire-and-forget by construction:
+        ``fork_audio_sidecar`` registers through this session's own
+        tracked-spawn seam (``_spawn_background``), so ``dispose`` cancels it
+        and every failure is a status on the record instead of a raise into
+        the turn.
+
+        One fork per block (v1 ships at most one per message); each record is
+        self-contained and keyed by the same ``message_id``, so a future
+        multi-block send degrades from "one recording described" to "each
+        recording described", never to "one record for two recordings".
+        """
+        if not isinstance(message, Message) or message.role != "user":
+            return
+        blocks = [block for block in message.content if isinstance(block, AudioContent)]
+        if not blocks:
+            return
+        # Lazy like every other stt import here: the sidecar drags httpx and
+        # the auth store, and no non-audio turn should pay for them.
+        from local_operator.paths import config_dir
+        from local_operator.stt.sidecar import fork_audio_sidecar
+
+        for block in blocks:
+            fork_audio_sidecar(
+                self,
+                message_id=message.id,
+                audio=block,
+                config_dir=config_dir(),
+                store=None,
+            )
+
     async def prompt(
         self,
         text: str,
@@ -6805,6 +6882,7 @@ class Session:
         harness_injected: bool = False,
         input_mode: str | None = None,
         input_path: str | None = None,
+        audio: Sequence[AudioContent] | None = None,
     ) -> None:
         """Run one user turn to completion (awaitable) or raise.
 
@@ -6813,6 +6891,14 @@ class Session:
         dictation send and carried straight onto the durable user row. Both
         default to ``None``, and a ``None`` adds no key to the row at all, so
         every pre-existing caller writes byte-identical rows.
+
+        ``audio`` is the recording door (see ``Message.user``): decoded
+        ``AudioContent`` blocks the model itself receives, which only an
+        audio-capable model may be given — the admission gate below refuses a
+        send the current spec cannot take BEFORE any paid work, and the row it
+        eventually writes is stamped ``model_audio_sidecar`` (the value is
+        daemon-derived; the ``provider_stt_*`` spellings are surface-asserted
+        for text-from-speech sends and never appear here).
 
         ``producer_command_id`` and ``admitted`` form the continuation
         admission seam: the caller receives a receipt only after the explicitly
@@ -6874,6 +6960,17 @@ class Session:
                 if self._compacting
                 else TURN_IN_FLIGHT
             )
+        # THE AUDIO DOOR'S CAPABILITY GATE, in the same "before any work" band
+        # as the lock probe above: a prompt carrying a recording for a model
+        # that cannot take one is refused here — before the expansion reads a
+        # referenced file or parks an approval card, and long before the turn
+        # spends a request the model would reject mid-stream. The refusal names
+        # the model and carries the resolver's report (see
+        # ``AudioInputUnsupported``); it is the audio door's rung-6 honest
+        # error. It is cheap for every OTHER prompt: the check is one truthiness
+        # test when ``audio`` is empty, which is every send but the recording.
+        if audio:
+            await self._refuse_audio_admission(audio)
         # `@path` expansion, and it runs HERE — after the probe, before the
         # lock, not inside it. An approval can park on a human indefinitely, and
         # in the TUI the app awaiting this prompt is the same one that would
@@ -6971,9 +7068,16 @@ class Session:
             # default to None on ``Message``).
             if input_mode is not None:
                 extra["input_mode"] = input_mode
-            if input_path is not None:
+            if audio:
+                # The audio door is DAEMON-DERIVED, never client-asserted (the
+                # vocabulary's own rule): the blocks are on the message this
+                # call is building, so the route slot records them whether or
+                # not a surface asserted anything, and a client assertion
+                # cannot overwrite a fact the daemon is holding in its hand.
+                extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
+            elif input_path is not None:
                 extra["input_path"] = input_path
-            user = Message.user(text, images, **extra)
+            user = Message.user(text, images, audio=audio, **extra)
             if harness_injected:
                 # The stamp goes on the row THIS call mints, at the one place
                 # the row is born, so no caller can mint a chrome row without
@@ -7035,6 +7139,7 @@ class Session:
         producer_command_id: str | None = None,
         input_mode: str | None = None,
         input_path: str | None = None,
+        audio: Sequence[AudioContent] | None = None,
     ) -> None:
         """Inject an identified steering message into the running turn.
 
@@ -7045,15 +7150,30 @@ class Session:
         ``input_mode``/``input_path`` ride it for the same reason (a mid-turn
         dictation keeps its provenance when the queue drains), default to
         ``None``, and add no key to the row when absent.
+
+        ``audio`` rides it too — a mid-turn recording lands its blocks on the
+        queued row instead of being lost at a hop that cannot take them — with
+        ONE deliberate difference from ``prompt``: there is NO capability gate
+        here. ``steer`` is synchronous (it only queues; the drain at the next
+        boundary persists the row) while the gate's resolver is async, and
+        refusing AFTER the surfaces have acked a queued steer would be a
+        retraction, not an admission decision. An audio steer to a model that
+        cannot render it is refused by the WIRE renderer (``WireCannotCarryAudio``)
+        at the boundary the row joins — loud, named, and at the one point where
+        the model that will run is the one being asked.
         """
         extra: dict[str, Any] = {}
         if message_id:
             extra["id"] = message_id
         if input_mode is not None:
             extra["input_mode"] = input_mode
-        if input_path is not None:
+        if audio:
+            # Same daemon-derived rule as ``prompt``: an audio row's route
+            # slot records the audio door, whatever a surface asserted.
+            extra["input_path"] = str(AudioPath.MODEL_AUDIO_SIDECAR)
+        elif input_path is not None:
             extra["input_path"] = input_path
-        message = Message.user(text, images, **extra)
+        message = Message.user(text, images, audio=audio, **extra)
         self._steering_queue.put_nowait(message)
         if producer_command_id is not None:
             self._steering_producers[id(message)] = producer_command_id
@@ -10639,6 +10759,13 @@ class Session:
                     # The append completed under Transcript's fsync boundary;
                     # only now may a producer discard its retained command.
                     admitted.set_result(None)
+                # THE AUDIO SIDECAR FORKS ONLY HERE, strictly after the append
+                # above made the row durable: a record for a row the transcript
+                # does not have would dangle, and a prompt that dies before
+                # admission leaves nothing behind. Fire-and-forget — see
+                # ``_fork_audio_sidecars`` for why dispose can cancel it and
+                # why no failure of its own can reach this turn.
+                self._fork_audio_sidecars(message)
                 # Announce USER turns to every subscriber. The loop only emits
                 # MessageStartEvent for ASSISTANT messages, so without this a
                 # user prompt — from any front end — never reaches the other
