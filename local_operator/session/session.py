@@ -16621,8 +16621,9 @@ class Session:
         # a delivery). Within-TTL overdue rows are deliberately NOT touched:
         # load() re-armed them to now + grace and they fire hidden there.
         from local_operator.wakes import patience as patience_engine
+        from local_operator.wakes.store import is_patience_row
 
-        if any(getattr(row, "kind", "scheduled") == "patience" for row in schedules):
+        if any(is_patience_row(row) for row in schedules):
             from local_operator.paths import config_dir as _config_dir
 
             pol = patience_engine.policy(_config_dir())
@@ -16984,11 +16985,9 @@ class Session:
         # catch-up prompt would render it. Their rows stay re-armed by load()
         # to now + LOAD_GRACE_MS, so within TTL they follow the normal hidden
         # grace path, and a stale one is retired by the delivery checks.
-        missed = [
-            entry
-            for entry in missed
-            if str(getattr(entry["schedule"], "kind", "scheduled")) != "patience"
-        ]
+        from local_operator.wakes.store import is_patience_row
+
+        missed = [entry for entry in missed if not is_patience_row(entry["schedule"])]
         if not missed:
             return
         now = int(time.time() * 1000)
@@ -17980,7 +17979,9 @@ class Session:
         this one's schedule list; the load-time filter and the supervisor skip
         cover the other two paths.
         """
-        if due.schedule.kind == "patience":
+        from local_operator.wakes.store import is_patience_row
+
+        if is_patience_row(due.schedule):
             # A patience fire is a DIFFERENT delivery: hidden, watermark-checked,
             # and never announced. See :meth:`_deliver_patience_wake`.
             await self._deliver_patience_wake(due)
@@ -18172,6 +18173,7 @@ class Session:
             self._peer_arrival.mark(MONITOR_PROMPT_MESSAGE_TYPE)
             return
         self._spawn_background(self._prompt_messages([message]))
+
     async def _deliver_patience_wake(self, due: DueWake) -> None:
         """Deliver one fired patience wait: hidden, watermark-checked, bounded.
 

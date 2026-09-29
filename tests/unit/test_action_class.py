@@ -171,6 +171,27 @@ class TestSetRegisteredActionClass:
         with pytest.raises(ValueError, match="no agent named"):
             set_registered_action_class(registry, "nobody", PROACTIVE)
 
+    def test_a_case_variant_spelling_reaches_the_row(self, tmp_path) -> None:
+        """``/agent class Aida`` must not refuse the agent the report form names.
+
+        The sibling resolvers fold case (``resolve_profile``,
+        ``install_seed``), so the switch is the one storage path that must too:
+        refusing the natural spelling made the two halves of one command
+        disagree — the report form resolved ``Aida`` while the flip insisted
+        on ``aida`` (agent review round 1, R2).
+        """
+        from local_operator.agent_profiles import install_seed
+
+        registry = AgentRegistry(tmp_path)
+        install_seed("aida", registry=registry)
+        assert set_registered_action_class(registry, "Aida", PROACTIVE) == "aida"
+        row = registry.get_agent_by_name("aida")
+        assert row is not None and class_from_tags(row.tags) == PROACTIVE
+        # The OTHER spelling flips the SAME row: one row, one flip, no
+        # second copy materialized under the typed casing.
+        assert set_registered_action_class(registry, "AIDA", REACTIVE) == "aida"
+        assert len([a for a in registry.list_agents() if a.name.lower() == "aida"]) == 1
+
     def test_a_specialist_can_be_switched(self, tmp_path) -> None:
         registry = AgentRegistry(tmp_path)
         registry.create_agent(
@@ -180,3 +201,25 @@ class TestSetRegisteredActionClass:
         assert resolved == "laner"
         row = registry.get_agent_by_name("laner")
         assert row is not None and class_from_tags(row.tags) == PROACTIVE
+
+
+class TestClassSwitchClause:
+    def test_the_clause_uses_the_users_word_for_the_rhythm(self) -> None:
+        """One clause, one wording, for all three switch handlers.
+
+        ``cadence`` is the code's word; every user-facing surface says
+        "check-in", so the receipt must too — and an outcome that did nothing
+        reads as NO clause, because a dangling separator is worse than
+        silence (design round 1, D2).
+        """
+        from local_operator.action_class import class_switch_clause
+
+        assert class_switch_clause({"patience_cancelled": ["p1"], "cadence_dropped": True}) == (
+            "; 1 pending wait(s) cancelled, her check-ins stopped"
+        )
+        assert class_switch_clause({"patience_cancelled": ["p1"]}) == (
+            "; 1 pending wait(s) cancelled"
+        )
+        assert class_switch_clause({"patience_cancelled": []}) == ""
+        assert class_switch_clause(None) == ""
+        assert "cadence" not in class_switch_clause({"cadence_dropped": True})

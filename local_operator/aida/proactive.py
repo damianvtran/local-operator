@@ -73,6 +73,7 @@ from typing import Any, Mapping, Sequence
 
 from local_operator.aida import state
 from local_operator.harness.wake_types import MAX_WAKE_SCHEDULES, WakeSchedule
+from local_operator.wakes.store import is_patience_row
 
 logger = logging.getLogger(__name__)
 
@@ -1105,7 +1106,7 @@ async def pause(
     patience_ids = [
         str(row.get("id") or "")
         for row in (entry or {}).get("schedules") or ()
-        if isinstance(row, Mapping) and str(row.get("kind") or "") == "patience"
+        if isinstance(row, Mapping) and is_patience_row(row)
     ]
     cancelled: list[str] = []
     owner_blocked = False

@@ -259,6 +259,24 @@ def project_subcommand_rows() -> tuple[tuple[str, str], ...]:
     return tuple((word, PROJECT_SUBCOMMAND_HELP[word]) for word in PROJECT_SUBCOMMANDS)
 
 
+AGENT_SUBCOMMANDS: tuple[str, ...] = ("class",)
+
+AGENT_SUBCOMMAND_HELP: dict[str, str] = {
+    "class": "Show or switch an agent's class (proactive|reactive)",
+}
+
+
+def agent_subcommand_rows() -> tuple[tuple[str, str], ...]:
+    """``(word, help)`` for every ``AGENT_SUBCOMMANDS`` entry, in that order.
+
+    The same contract :func:`project_subcommand_rows` states: the picker's
+    words come from the vocabulary the handler accepts, so the row a user
+    picks is the word the handler runs, and a missing help line raises
+    ``KeyError`` at import rather than painting a blank row (UX round 1, U3).
+    """
+    return tuple((word, AGENT_SUBCOMMAND_HELP[word]) for word in AGENT_SUBCOMMANDS)
+
+
 def project_unavailable_text() -> str:
     """The ONE sentence both ``/project`` handlers answer a registry-less host with.
 

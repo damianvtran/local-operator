@@ -3846,7 +3846,7 @@ SETTINGS: tuple[Setting, ...] = (
         default=3,
         minimum=1,
         maximum=10,
-        help=("How many outbound waits one cycle may hold before it must end (R35)."),
+        help=("How many outbound waits one cycle may hold before it must end."),
     ),
     Setting(
         key="proactive.patience.episode_ttl_ms",

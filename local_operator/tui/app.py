@@ -192,6 +192,7 @@ from local_operator.slash_commands import (
     PROJECT_PAGE_VERBS,
     SESSION_COPY_FLAG,
     SLASH_COMMANDS,
+    agent_subcommand_rows,
     network_subcommand_rows,
     primary_slash_name,
     project_jump_already_text,
@@ -14087,7 +14088,15 @@ class OperatorApp(App[None]):
         # ONCE per pass, mirroring the replay fold's narration read: a display
         # preference cannot change part-way through one repaint.
         hide_cross_session = cross_session_hidden()
+        from local_operator.harness.rows import is_hidden_tool_call
+
         for call in calls:
+            # HIDDEN tools never paint a row on any seam: this one restores the
+            # row for a call already in flight, so skipping it here is what
+            # keeps a resumed ``patience`` call from appearing where the live
+            # path refuses to mount it (UX round 1, U2).
+            if is_hidden_tool_call(call):
+                continue
             call_id = getattr(call, "id", "") or ""
             if not call_id or call_id in live_cards:
                 continue
@@ -18736,7 +18745,7 @@ class OperatorApp(App[None]):
             editor.set_name_choices(frozenset(c.name.lower() for c in self._team_choices()))
             return
         if command in ("agent", "agents"):
-            choices = self._agent_choices()
+            choices = self._agent_argument_choices(editor)
             picker.set_choices(choices)
             editor.set_name_choices(frozenset(c.name.lower() for c in choices))
 
@@ -19469,17 +19478,21 @@ class OperatorApp(App[None]):
                     if is_role(agent):
                         profile = profile_from_agent(registry, agent)
                         facts = "role"
+                        # The CLASS leads the optional facts (design round 1,
+                        # D1): the settings pane truncates this line to 27
+                        # cells, and a marker appended after a configured
+                        # role's model/effort was the first thing cut — the
+                        # surface §8.1.3 puts forward as where the class is
+                        # visible could not show it on exactly the agents that
+                        # carry config detail.
+                        if normalize_action_class(profile.action_class) == PROACTIVE:
+                            facts += " · proactive"
                         # Model/effort are facts a user picks a hat by; the
                         # rest of the profile is what the attach applies.
-                        # The CLASS is a fact too (R36): the browse surface
-                        # must be honest about which agents may message the
-                        # user unprompted.
                         if profile.model:
                             facts += f" · {profile.model}"
                         if profile.effort:
                             facts += f" · effort {profile.effort}"
-                        if normalize_action_class(profile.action_class) == PROACTIVE:
-                            facts += " · proactive"
                         summary = (profile.when_to_use or profile.description or "").strip()
                         roles.append((profile.name, facts, summary))
                         seen.add(profile.name.lower())
@@ -19520,6 +19533,43 @@ class OperatorApp(App[None]):
         return [
             ArgumentChoice(name, summary or "no description", detail=facts)
             for name, facts, summary in self._agent_profile_rows()
+        ]
+
+    def _agent_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for the ``/agent <…>`` list: the reserved verb, then names.
+
+        The ``/project`` grammar, applied to this command's one reserved first
+        token: before the first space the argument IS the verb slot — ``class``
+        is offered from ``agent_subcommand_rows()``, the same table the
+        handler reads, so the row a user picks is the word the handler runs
+        (UX round 1, U3: the switch was previously findable only by guessing
+        it) — and once a space is there the argument is a NAME slot.
+        ``/agent class `` offers the profile names as ``class <name>``
+        compounds, which complete to the report form.
+        """
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(
+            editor.text,
+            editor._argument_commands,
+            editor._caret_offset(),
+            editor._command_names,
+        )
+        if argument is None:
+            return []
+        first, space, _rest = argument.partition(" ")
+        names = self._agent_choices()
+        if not space:
+            return [
+                ArgumentChoice(word, help_text) for word, help_text in agent_subcommand_rows()
+            ] + names
+        if first.casefold() not in {word for word, _help in agent_subcommand_rows()}:
+            return []
+        return [
+            ArgumentChoice(
+                f"{first.casefold()} {choice.name}", choice.description, detail=choice.detail
+            )
+            for choice in names
         ]
 
     def _agent_list_block(self, rows: list[tuple[str, str, str]]) -> RichBlock:
@@ -19593,15 +19643,16 @@ class OperatorApp(App[None]):
         """``/agent class <name> [proactive|reactive]`` — the class switch (R36).
 
         ``/agent class <name>`` REPORTS the current class; the second token
-        flips it. Mirrors ``/team chart``'s grammar, escapes included (see
-        ``_cmd_agent``'s subcommand comment): a leading ``=`` on the name is
-        the literal-name escape, and ``/agent class class …`` reaches an agent
-        literally named ``class`` through the grammar itself.
+        flips it. Mirrors ``/team chart``'s grammar, escapes included: a
+        leading ``=`` on the name is the literal-name escape, and
+        ``/agent class class …`` reaches an agent literally named ``class``
+        through the grammar itself.
 
-        Runs in a worker: the flip writes the registry (disk), and the
-        best-effort cleanup that follows (pending patience rows, Aida's
-        cadence) touches the session's wake writer — neither may park the
-        event loop.
+        Runs in a worker: the flip writes the registry (disk) and the
+        best-effort cleanup that follows touches the session's wake writer —
+        neither may park the event loop. The grammar itself lives in
+        ``action_class.class_switch_receipt``, shared with the two routed
+        handlers (see ``_agent_class_worker``).
         """
         session = self._session
         if session is None:
@@ -19617,79 +19668,23 @@ class OperatorApp(App[None]):
         self.run_worker(self._agent_class_worker(rest, notice), thread=False, group="session")
 
     async def _agent_class_worker(self, rest: str, notice: NoticeFn) -> None:
-        from local_operator.action_class import PROACTIVE, VALID_CLASSES
-        from local_operator.action_class import normalize as normalize_action_class
-        from local_operator.agent_profiles import resolve_profile
+        """Run the SHARED switch grammar and report its receipt as a notice.
+
+        ``class_switch_receipt`` owns the grammar and the wording; this worker
+        only adapts the result to this host's notice plumbing, so the routed
+        and unrouted receipts are the same sentences by construction
+        (review/UX round 1, U1).
+        """
+        from local_operator.action_class import class_switch_receipt
+        from local_operator.session.frontend_state import SlashResult
 
         session = self._session
         if session is None:
             self._system_notice(*self._no_session_notice())
             return
-        tokens = rest.split()
-        if not tokens or len(tokens) > 2:
-            notice("usage: /agent class <name> [proactive|reactive] — " "omit the class to show it")
-            return
-        name = tokens[0].lstrip("=").strip()
-        target = tokens[1].strip().casefold() if len(tokens) > 1 else ""
-        if target and target not in VALID_CLASSES:
-            notice(f"class must be one of {' or '.join(VALID_CLASSES)}; got {target!r}.")
-            return
-        registry = getattr(session, "agent_registry", None)
-        try:
-            profile = resolve_profile(name, registry=registry)
-        except Exception:  # noqa: BLE001 — resolution failure reads as "not found"
-            profile = None
-        if profile is None:
-            self._system_notice(
-                f"no agent named {name!r}. Run /agent to list agents, "
-                "or ask the agent to create one.",
-                "warning",
-            )
-            return
-        current = normalize_action_class(profile.action_class)
-        if not target:
-            notice(
-                f"{profile.name}: class {current} "
-                f"(set with /agent class {profile.name} proactive|reactive)"
-            )
-            return
-        if target == current:
-            notice(f"{profile.name} is already {target}; nothing changed.")
-            return
-        from local_operator.action_class import set_registered_action_class
-
-        try:
-            resolved = await asyncio.to_thread(set_registered_action_class, registry, name, target)
-        except ValueError as error:
-            self._system_notice(str(error), "warning")
-            return
-        except Exception as error:  # noqa: BLE001 — a worker must not raise
-            logger.warning("agent class switch failed", exc_info=True)
-            self._system_notice(f"could not switch class: {error}", "warning")
-            return
-        # Best-effort immediate cleanup (R36): this session's pending patience
-        # rows now, and — for Aida — the cadence reconciled against the new
-        # class. Other sessions self-correct at their next delivery-time read.
-        clause = ""
-        cleanup = getattr(session, "cleanup_after_class_switch", None)
-        if cleanup is not None:
-            try:
-                outcome = await cleanup(resolved)
-                bits: list[str] = []
-                cancelled = outcome.get("patience_cancelled") or []
-                if cancelled:
-                    bits.append(f"{len(cancelled)} pending wait(s) cancelled")
-                if outcome.get("cadence_dropped"):
-                    bits.append("cadence disarmed")
-                clause = ("; " + ", ".join(bits)) if bits else ""
-            except Exception:  # noqa: BLE001 — best-effort by contract
-                logger.debug("agent class cleanup failed", exc_info=True)
-        if target == PROACTIVE:
-            notice(
-                f"agent {resolved} is now proactive — it may send proactive messages" f"{clause}."
-            )
-        else:
-            notice(f"agent {resolved} is now reactive — proactive behaviour stopped{clause}.")
+        result = await class_switch_receipt(session, rest, SlashResult)
+        severity: NoticeKind = "warning" if getattr(result, "style", "") == "warning" else "info"
+        notice(str(getattr(result, "text", "") or ""), severity)
 
     def _cmd_agent(
         self,
@@ -19742,7 +19737,7 @@ class OperatorApp(App[None]):
         # not a legal name character, so the escape cannot collide with a real
         # profile.
         first, _, rest = arg.partition(" ")
-        if first.strip().casefold() == "class":
+        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
             self._cmd_agent_class(rest.strip(), notice)
             return
         name, _, request = arg.partition(" ")
@@ -45855,7 +45850,7 @@ class OperatorApp(App[None]):
         if command == "team":
             return self._team_slash_result(args, SlashResult)
         if command == "agent":
-            return self._agent_slash_result(args, SlashResult)
+            return await self._agent_slash_result(args, SlashResult)
         if command == "model":
             if not args.strip():
                 # Bare /model opens the invoker's OWN picker — there is nothing
@@ -46554,7 +46549,7 @@ class OperatorApp(App[None]):
         # from the detached runtime.
         return self._team_attach_slash_result(arg, registry, SlashResult)
 
-    def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    async def _agent_slash_result(self, arg: str, SlashResult: Any) -> Any:
         if not arg:
             rows = self._agent_profile_rows()
             if not rows:
@@ -46564,6 +46559,14 @@ class OperatorApp(App[None]):
                     style="info",
                 )
             return SlashResult(kind="block", data={"type": "agent_list", "items": rows})
+        # The reserved word, for the same reason the runtime's handler has it:
+        # a session hosted by THIS app answers a follower out of here, and the
+        # switch must be reachable from that seam too (review/UX round 1, U1).
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
+            from local_operator.action_class import class_switch_receipt
+
+            return await class_switch_receipt(self._session, rest.strip(), SlashResult)
         return self._agent_attach_slash_result(arg, SlashResult)
 
     def _team_attach_slash_result(self, arg: str, registry: Any, SlashResult: Any) -> Any:
@@ -49499,6 +49502,15 @@ class OperatorApp(App[None]):
         reasonable reading of that frame was that the agent had hung.
         """
         event = message.event
+        # A HIDDEN tool's row never paints (UX round 1, U2): the announcement
+        # is where the row first exists, and suppressing it at the SOURCE —
+        # before the supersede/rekey bookkeeping — is what keeps the later
+        # start/end frames from finding a registry to adopt. The rows stay in
+        # the model's context; only the screen skips them.
+        from local_operator.harness.rows import is_hidden_tool_name
+
+        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
         # The call's real id has just arrived for a row this surface mounted
         # under an index-derived placeholder: REKEY the row rather than letting
         # the lookup below miss and mount a second one. Without this the
@@ -49621,6 +49633,15 @@ class OperatorApp(App[None]):
 
     def on_tool_started(self, message: ToolStarted) -> None:
         event = message.event
+        # HIDDEN tools paint nothing, at EVERY seam (UX round 1, U2): the
+        # composing gate above suppresses the announcement, and this one stops
+        # a start frame from mounting a fresh card for a call with none — the
+        # belt to that brace, because the two frames race and either can be a
+        # viewer's first sight of the call.
+        from local_operator.harness.rows import is_hidden_tool_name
+
+        if is_hidden_tool_name(getattr(event, "tool_name", None)):
+            return
         # The call's own start instant, stamped by the producer and folded by
         # the session. Preferred over the map because it is the SAME value for
         # the row the live path paints and the row a switch back repaints: a

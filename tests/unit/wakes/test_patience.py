@@ -596,3 +596,39 @@ class TestFireHelpers:
         assert details["episode_id"] == "patience-1"
         assert details["attempt"] == 2
         assert details["episode_started_at"] == NOW
+
+
+def test_the_patience_predicates_are_one_implementation() -> None:
+    """The predicate collapse review round 1 asked for (R3), pinned.
+
+    Four call sites used to compare the ``kind`` literal themselves and two
+    modules each owned a filter; both now route through ``wakes.store`` (with
+    ``wakes.patience`` re-exporting it for its internal callers). This asserts
+    the two spellings answer IDENTICALLY in both row shapes, so a future edit
+    to one of them fails here rather than in whichever surface counts wakes.
+    """
+    from local_operator.wakes import store
+
+    model_scheduled = WakeSchedule(id="w1", message="m", next_due_at=1)
+    model_wait = WakeSchedule(id="p1", message="m", next_due_at=1, kind="patience", hidden=True)
+    dict_scheduled = {"id": "w1", "kind": "scheduled"}
+    dict_wait = {"id": "p1", "kind": "patience"}
+
+    for row, expected in [
+        (model_scheduled, False),
+        (model_wait, True),
+        (dict_scheduled, False),
+        (dict_wait, True),
+    ]:
+        assert store.is_patience_row(row) is expected, row
+        assert P.is_patience_row(row) is expected, row
+
+    rows = [model_scheduled, model_wait, dict_scheduled, dict_wait]
+    assert (
+        P.scheduled_rows(rows)
+        == store.scheduled_rows(rows)
+        == [
+            model_scheduled,
+            dict_scheduled,
+        ]
+    )

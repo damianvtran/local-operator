@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from local_operator.action_class import normalize as normalize_action_class
 from local_operator.agent_profiles import (
     is_role,
     is_specialist,
@@ -55,6 +56,13 @@ def profile_detail(
         "tools": list(metadata.tools) if metadata.tools is not None else None,
         "effort": metadata.effort,
         "delegate": metadata.may_delegate,
+        # The class, in the EFFECTIVE spelling (absence reads reactive): the
+        # route accepts ``action_class`` on write and ``divergent_fields`` can
+        # already report ``class``, so a response that carried neither was a
+        # payload a client could not read the control's current value from
+        # (QA round 1, Q2). Rides the catalogue too — that path builds from
+        # THIS projection with ``detail=False``.
+        "action_class": normalize_action_class(metadata.action_class),
         "seed_origin": origin,
         "divergent_fields": [],
     }

@@ -1011,6 +1011,7 @@ def project_settled_rows(
         held_delivery_notice,
         is_harness_chrome,
         is_harness_notice_row,
+        is_hidden_tool_call,
         turn_cut_tool_call,
         user_row_text,
     )
@@ -1515,6 +1516,13 @@ def project_settled_rows(
                 self._append_block(block)
                 appended = True
             for call in tool_calls:
+                # A HIDDEN tool's row never paints (UX round 1, U2): the
+                # ``patience`` arm is an internal timer, and the replay is
+                # where its row came back on every reopen. The call STAYS in
+                # the context (the model reads what it armed) and its result
+                # is still paired; only the settled row is skipped.
+                if is_hidden_tool_call(call):
+                    continue
                 # Only the FIRST call of a bang assistant message is the
                 # command's own card; the shape record_shell writes has
                 # exactly one, so consuming here is exact in practice and

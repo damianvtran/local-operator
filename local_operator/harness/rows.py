@@ -341,6 +341,55 @@ def is_hidden_wake_delivery(row: Any) -> bool:
     )
 
 
+#: Tool names whose rows must NEVER paint on a human surface.
+#:
+#: ``patience`` arms a hidden internal timer: R30 promises "no wake line, no
+#: timer notification", and the tool's own copy tells the model the wait and
+#: its fire "are invisible to the user" — the tool ledger row (``▸ patience
+#: arm 90s ✓``) contradicted both (UX round 1, U2). The rows STAY in the
+#: model's context, which is what lets it read what it armed; every
+#: presentation skips them the way a hidden wake delivery is skipped.
+HIDDEN_TOOL_NAMES: frozenset[str] = frozenset({"patience"})
+
+
+def is_hidden_tool_name(name: Any) -> bool:
+    """Whether a tool NAME is one whose rows must not render."""
+    return str(name or "") in HIDDEN_TOOL_NAMES
+
+
+def is_hidden_tool_call(call: Any) -> bool:
+    """Whether a ``ToolCall``-shaped object names a hidden tool."""
+    return is_hidden_tool_name(getattr(call, "name", None))
+
+
+def is_hidden_tool_row(row: Any) -> bool:
+    """Whether a stored row is a hidden tool's RESULT or CALL row.
+
+    Two stored shapes carry one call: the ``role: "tool"`` row carries its own
+    ``tool_name``, and the assistant row carries ``tool_calls[].name``. Only a
+    row that carries NOTHING visible is hidden by the calls it also happens to
+    mention — an assistant row with prose keeps rendering (its patience entry
+    is skipped by :func:`is_hidden_tool_call` at the paint sites that mount
+    per-call rows), and a result row is judged by its own ``tool_name`` rather
+    than by remembering a call that may sit on a page this row's does not.
+    """
+    payload = row.get("payload") if isinstance(row, Mapping) else getattr(row, "payload", None)
+    if not isinstance(payload, Mapping):
+        return False
+    if str(payload.get("tool_name") or "") in HIDDEN_TOOL_NAMES:
+        return True
+    calls = payload.get("tool_calls") or ()
+    if not calls:
+        return False
+    if str(payload.get("role") or "") != "assistant" or _row_text(payload).strip():
+        return False
+    return all(
+        str(call.get("name") if isinstance(call, Mapping) else getattr(call, "name", "") or "")
+        in HIDDEN_TOOL_NAMES
+        for call in calls
+    )
+
+
 def is_harness_notice_row(row: Any) -> bool:
     """Whether this row is harness-authored and must not paint as the user's words.
 

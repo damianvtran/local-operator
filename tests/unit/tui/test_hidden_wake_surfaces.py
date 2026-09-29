@@ -163,3 +163,82 @@ async def test_the_wake_panel_lists_scheduled_rows_and_never_patience_ones() -> 
         ]
     )
     assert visible is False
+
+
+def tool_pair(call_id: str, name: str):
+    """One assistant call row + its result row, the shape the journal holds."""
+    from local_operator.harness.types import Message, TextContent, ToolCall, ToolResult
+
+    return [
+        Message.assistant("", tool_calls=[ToolCall(id=call_id, name=name, arguments={})]),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id=call_id,
+                tool_name=name,
+                content=[TextContent(text=f"{name} output")],
+            )
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_replay_paints_no_ledger_row_for_a_hidden_tool_call() -> None:
+    """The ``patience`` arm is an internal timer — it never renders (U2).
+
+    The tool's own result copy promises the model the wait "is invisible to
+    the user", and R30 promises no timer artifact; the ledger row
+    (``▸ patience arm 90s ✓``) contradicted both on live AND replay (UX round
+    1, U2). The ordinary call beside it is the control: an over-broad filter
+    would take that row too.
+    """
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    session._history = [simple_user("ask"), *tool_pair("p1", "patience"), *tool_pair("r1", "read")]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+        cards = [card for card in app.query(ToolCard)]
+
+    assert "read" in shown, "the visible control must keep its ledger row"
+    assert "patience" not in shown
+    assert [card.tool_call_id for card in cards] == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_the_live_seams_mount_no_card_for_a_hidden_tool_call() -> None:
+    """BOTH live frames are gated, not just one: they race, either first (U2).
+
+    ``tool_call_compose`` announces the row before the call exists and
+    ``tool_execution_start`` would mount one for a call with none; suppressing
+    only one seam leaves the other free to paint the row a moment later.
+    """
+    from local_operator.harness.types import (
+        ToolCallComposeEvent,
+        ToolExecutionStartEvent,
+    )
+    from local_operator.tui.events import ToolComposing, ToolStarted
+    from local_operator.tui.widgets.tool_card import ToolCard
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app.on_tool_composing(
+            ToolComposing(event=ToolCallComposeEvent(tool_call_id="p1", tool_name="patience"))
+        )
+        app.on_tool_started(
+            ToolStarted(event=ToolExecutionStartEvent(tool_call_id="p1", tool_name="patience"))
+        )
+        await pilot.pause()
+        assert list(app.query(ToolCard)) == []
+
+        # The control: an ordinary tool frames normally.
+        app.on_tool_composing(
+            ToolComposing(event=ToolCallComposeEvent(tool_call_id="r1", tool_name="read"))
+        )
+        await pilot.pause()
+        assert [card.tool_call_id for card in app.query(ToolCard)] == ["r1"]

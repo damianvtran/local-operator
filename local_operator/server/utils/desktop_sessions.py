@@ -1118,6 +1118,32 @@ class DesktopSubscription:
     dwell_until: float = 0.0
 
 
+def visible_transcript_rows(rows: list[Any]) -> list[Any]:
+    """Drop the rows a human transcript must never serve.
+
+    TWO classes, one predicate each, shared with the TUI's folds: a hidden wake
+    delivery (a patience fire — §8.2.2 item 4) and a hidden tool row (the
+    ``patience`` arm's ledger pair — UX round 1, U2). Filtering SERVER-side is
+    the point: the client reducer has no filter of its own, so an older build
+    would paint exactly what a current one hides (agent review round 1, R1 /
+    QA round 1, Q1). Rows arrive here in their serialized shape
+    (``{type, payload}``), which is what the predicates duck-type.
+    """
+    from collections.abc import Mapping as _Mapping
+
+    from local_operator.harness.rows import is_hidden_tool_row, is_hidden_wake_delivery
+
+    out: list[Any] = []
+    for row in rows:
+        payload = row.get("payload") if isinstance(row, _Mapping) else None
+        if isinstance(payload, _Mapping) and is_hidden_wake_delivery(payload):
+            continue
+        if is_hidden_tool_row(row):
+            continue
+        out.append(row)
+    return out
+
+
 class DesktopSessionBridge:
     def __init__(
         self,
@@ -3255,7 +3281,7 @@ class DesktopSessionBridge:
                 "cursor_missing": bool(before_id or through_id or around_id),
             }
         return {
-            "entries": [json.loads(row.to_json()) for row in page.entries],
+            "entries": visible_transcript_rows([json.loads(row.to_json()) for row in page.entries]),
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
             "has_newer": page.has_newer,

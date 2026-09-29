@@ -62,6 +62,13 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from local_operator.harness.wake_types import MAX_WAKE_MESSAGE_CHARS, MAX_WAKE_SCHEDULES
 
+#: The ONE patience predicate and the ONE human-surface filter, imported from
+#: the store (which stays stdlib-only so every index reader can carry them).
+#: Re-exported through this module's public names for its internal callers;
+#: there is no second implementation to drift (agent review round 1, R3).
+from local_operator.wakes.store import is_patience_row as _store_is_patience_row
+from local_operator.wakes.store import scheduled_rows as _store_scheduled_rows
+
 logger = logging.getLogger(__name__)
 
 #: The id prefix of every patience row. ``patience-<n>`` with the lowest free
@@ -161,15 +168,15 @@ def policy(config_dir: Path | str) -> PatiencePolicy:
 def is_patience_row(row: Any) -> bool:
     """Whether a schedule (model or dumped dict) is a patience wait.
 
-    Duck-typed on both shapes on purpose: the session holds models, the index
-    and supervisor hold dicts, and BOTH must be filtered by the same predicate
-    — the design's "count scheduled rows only" rule reaches the CLI, the TUI
-    panel, the desktop feed and the dormant receipt, and a second spelling of
-    this check is how one of them starts counting patience rows.
+    ONE callable, re-exported from :mod:`local_operator.wakes.store` (which
+    stays stdlib-only so the index readers can carry it): the session holds
+    models, the index and supervisor hold dicts, and BOTH must be filtered by
+    the same predicate — the design's "count scheduled rows only" rule reaches
+    the CLI, the TUI panel, the desktop feed and the dormant receipt, and a
+    second spelling of this check is how one of them starts counting patience
+    rows (agent review round 1, R3).
     """
-    if isinstance(row, Mapping):
-        return str(row.get("kind", "scheduled")) == KIND
-    return str(getattr(row, "kind", "scheduled")) == KIND
+    return _store_is_patience_row(row)
 
 
 def patience_rows(rows: Iterable[Any]) -> list[Any]:
@@ -177,8 +184,8 @@ def patience_rows(rows: Iterable[Any]) -> list[Any]:
 
 
 def scheduled_rows(rows: Iterable[Any]) -> list[Any]:
-    """The complement of :func:`patience_rows`, for every listing/count site."""
-    return [row for row in rows if not is_patience_row(row)]
+    """The rows a human surface may show: the store's ONE filter (R3)."""
+    return _store_scheduled_rows(list(rows))
 
 
 def pending_rows(rows: Sequence[Any]) -> list[Any]:

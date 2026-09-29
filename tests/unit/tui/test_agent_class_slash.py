@@ -151,6 +151,10 @@ async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) 
             name="steadier",
             description="Reaches out when something needs the operator.",
             tags=["role", "class:proactive"],
+            # A CONFIGURED role: model pinned, so the facts string is longer
+            # than the settings pane's 27-cell line and the class only
+            # survives if it leads the optional facts (design round 1, D1).
+            model="claude-opus-5",
         )
     )
     session = FakeSession()
@@ -165,6 +169,12 @@ async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) 
 
     facts = {name: kind for name, kind, _summary in rows}
     assert "proactive" in facts.get("steadier", ""), facts
+    # The CLASS leads the optional facts, so the pane's 27-cell truncation
+    # cannot cut it — and it must still be there after that truncation.
+    from local_operator.tui.widgets.settings_view import truncate_cells
+
+    assert facts["steadier"].startswith("role · proactive"), facts["steadier"]
+    assert "proactive" in truncate_cells(facts["steadier"], 27)
     # The control: absence of the tag must NOT invent a marker.
     registry.create_agent(
         _fields(
@@ -183,3 +193,67 @@ async def test_the_settings_pane_rows_state_each_profiles_class(tmp_path: Path) 
     facts2 = {name: kind for name, kind, _summary in rows2}
     assert "plainrole" in facts2, facts2
     assert "proactive" not in facts2["plainrole"], facts2
+
+
+def test_the_pane_paints_the_class_marker_one_rung_brighter() -> None:
+    """D1's ink half: the marker is `muted`, the rest of the line `faint`.
+
+    The pane's single facts line used to paint wholly `faint`, which measures
+    1.97:1 against the pane — so even a marker that survived truncation was
+    effectively erased on the surface §8.1.3 puts forward as where the class
+    is visible (design round 1, D1). The unmarked case must be BYTE-identical
+    to the old line, so this is a marker change and not a repaint.
+    """
+    from rich.style import Style
+
+    from local_operator.tui.widgets.settings_view import _paint_facts
+
+    muted = Style(color="red")
+    faint = Style(color="blue")
+    line = _paint_facts("role · proactive · claude-opus-5", 27, muted=muted, faint=faint)
+    assert ("proactive", muted) in line
+    assert all(style is faint for text, style in line if text.strip(" ·") != "proactive"), line
+    plain = _paint_facts("role · claude-opus-5", 27, muted=muted, faint=faint)
+    assert plain == [("    role · claude-opus-5", faint)]
+
+
+class _PickerEditor:
+    """The slice ``slash_argument`` and the argument builder read."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._argument_commands = ("agent", "agents")
+        self._command_names = frozenset({"agent", "agents"})
+
+    def _caret_offset(self) -> int:
+        return len(self.text)
+
+
+@pytest.mark.asyncio
+async def test_the_agent_picker_offers_the_class_verb(tmp_path: Path) -> None:
+    """Discoverability: the reserved word is a picker row (UX round 1, U3).
+
+    The word the picker offers comes from ``agent_subcommand_rows()`` — the
+    same table the handler reads — so the row a user picks cannot drift from
+    the word the handler accepts. Before this the switch was findable only by
+    guessing the word or being told it.
+    """
+    registry = AgentRegistry(tmp_path)
+    registry.create_agent(_fields(name="auditor", description="Audit changes", tags=["role"]))
+    session = FakeSession()
+    session.agent_registry = registry
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(120, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause()
+            if app._session is not None:
+                break
+        rows = app._agent_argument_choices(_PickerEditor("/agent "))
+        compounds = app._agent_argument_choices(_PickerEditor("/agent class "))
+
+    assert rows[0].name == "class"
+    assert "proactive" in rows[0].description
+    assert any(row.name == "auditor" for row in rows), rows
+    # After the verb the names are offered as ``class <name>`` compounds, which
+    # complete to the report form.
+    assert compounds and all(row.name.startswith("class ") for row in compounds), compounds

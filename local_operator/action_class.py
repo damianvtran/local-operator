@@ -39,9 +39,10 @@ degrade, not crash.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,11 @@ REACTIVE = "reactive"
 #: The class that unlocks patience waits and engine-armed proactive deliveries.
 PROACTIVE = "proactive"
 
-VALID_CLASSES: tuple[str, ...] = (REACTIVE, PROACTIVE)
+VALID_CLASSES: tuple[str, ...] = (PROACTIVE, REACTIVE)
+#: The order above is the canonical DISPLAY order, not a hierarchy: every
+#: user-facing list (the usage line, both refusal sentences) spells it
+#: ``proactive`` first so one order cannot contradict another (design round 1,
+#: D4). Membership — the only thing the code reads it for — is order-blind.
 
 #: The tag key that carries the class on an installed registry row. The
 #: ``key:value`` shape is shared with ``tools:``/``effort:``/``delegate:``.
@@ -166,16 +171,40 @@ def set_registered_action_class(registry: Any, name: str, action_class: object) 
 
     resolved = str(action_class or "").strip().lower()
     if resolved not in VALID_CLASSES:
-        raise ValueError(f"class must be one of {', '.join(VALID_CLASSES)}; got {action_class!r}.")
+        # One sentence, one order, shared with the TUI's pre-check (D4): the
+        # two layers report the same refusal in the same words.
+        raise ValueError(
+            f"class must be one of {' or '.join(VALID_CLASSES)}; got {action_class!r}."
+        )
     key = (name or "").strip()
     if not key:
         raise ValueError("name an agent to switch; /agent lists them.")
 
     def _row() -> Any:
         try:
-            return registry.get_agent_by_name(key)
+            agent = registry.get_agent_by_name(key)
         except Exception:  # noqa: BLE001 — a registry read failure is "not found"
-            return None
+            agent = None
+        if agent is None:
+            # The same casefold fallback ``install_seed`` uses: every other
+            # resolver folds case (``resolve_profile``, the report form), so
+            # ``/agent class Aida`` must reach the row ``aida`` addresses —
+            # refusing it would make the switch disagree with the surface that
+            # named the agent (agent review round 1, R2).
+            folded = key.casefold()
+            try:
+                agent = next(
+                    (
+                        candidate
+                        for candidate in registry.list_agents()
+                        if str(getattr(candidate, "name", "") or "").strip().casefold() == folded
+                        and (is_role(candidate) or is_specialist(candidate))
+                    ),
+                    None,
+                )
+            except Exception:  # noqa: BLE001 — same "not found" reading
+                agent = None
+        return agent
 
     agent = _row()
     if agent is None or not (is_role(agent) or is_specialist(agent)):
@@ -220,3 +249,127 @@ def set_registered_action_class(registry: Any, name: str, action_class: object) 
         ),
     )
     return str(agent.name)
+
+
+def class_switch_clause(outcome: Mapping[str, Any] | None) -> str:
+    """The receipt clause a class switch earns: what the cleanup did, or "".
+
+    ONE spelling for the two switch handlers — the TUI's and the runtime's —
+    so a routed flip and an unrouted one cannot report differently. The
+    wording follows the user's own vocabulary, not the code's: ``check-in`` is
+    the word every Aida surface already uses (``/aida pause``, ``/aida
+    status``, settings), and "cadence" is the internal name (design round 1,
+    D2). ``cadence_dropped`` only ever comes from Aida's reconcile path, so
+    the possessive is exact rather than generic.
+    """
+    if not isinstance(outcome, Mapping):
+        return ""
+    bits: list[str] = []
+    cancelled = outcome.get("patience_cancelled") or []
+    if cancelled:
+        bits.append(f"{len(cancelled)} pending wait(s) cancelled")
+    if outcome.get("cadence_dropped"):
+        bits.append("her check-ins stopped")
+    return ("; " + ", ".join(bits)) if bits else ""
+
+
+async def class_switch_receipt(session: Any, rest: str, SlashResult: Any) -> Any:
+    """The ONE ``/agent class <name> [proactive|reactive]`` grammar.
+
+    Every surface that can run the switch calls this — the TUI's local
+    handler, the TUI's authoritative handler for a follower, and the detached
+    runtime's routed handler — so the grammar, the refusal sentences and the
+    receipts exist once (review/UX round 1, U1: the switch was reachable from
+    only the TUI-local seam, which is the one a live session does not use).
+    Returns a ``SlashResult``; callers that report through notices read
+    ``.text``/``.style`` off it.
+
+    The report form writes NOTHING. A flip writes the tag through
+    ``set_registered_action_class`` (the one storage authority) on a worker
+    thread, then runs the session's best-effort cleanup (pending patience
+    rows now; Aida's cadence reconciled against the new class — other
+    sessions self-correct at their next delivery-time read) and folds its
+    clause in through ``class_switch_clause``.
+    """
+    from local_operator.agent_profiles import resolve_profile
+
+    registry = getattr(session, "agent_registry", None)
+    if registry is None or not hasattr(registry, "get_agent_by_name"):
+        return SlashResult(
+            kind="notice",
+            text="agents are unavailable in this session. Ask the agent to create one.",
+            style="warning",
+        )
+    tokens = rest.split()
+    if not tokens or len(tokens) > 2:
+        return SlashResult(
+            kind="notice",
+            text="usage: /agent class <name> [proactive|reactive] — omit the class to show it",
+            style="info",
+        )
+    # A leading ``=`` on the name is the literal-name escape (see
+    # ``tui/app.py::_cmd_agent``'s subcommand comment): ``=` is not a legal
+    # name character, so ``/agent =class …`` reaches an agent literally named
+    # ``class`` through the grammar itself.
+    name = tokens[0].lstrip("=").strip()
+    target = tokens[1].strip().casefold() if len(tokens) > 1 else ""
+    if target and target not in VALID_CLASSES:
+        return SlashResult(
+            kind="notice",
+            text=f"class must be one of {' or '.join(VALID_CLASSES)}; got {target!r}.",
+            style="warning",
+        )
+    try:
+        profile = resolve_profile(name, registry=registry)
+    except Exception:  # noqa: BLE001 — resolution failure reads as "not found"
+        profile = None
+    if profile is None:
+        return SlashResult(
+            kind="notice",
+            text=(
+                f"no agent named {name!r}. Run /agent to list agents, "
+                "or ask the agent to create one."
+            ),
+            style="warning",
+        )
+    current = normalize(profile.action_class)
+    if not target:
+        return SlashResult(
+            kind="notice",
+            text=(
+                f"{profile.name}: class {current} "
+                f"(set with /agent class {profile.name} proactive|reactive)"
+            ),
+            style="info",
+        )
+    if target == current:
+        return SlashResult(
+            kind="notice",
+            text=f"{profile.name} is already {target}; nothing changed.",
+            style="info",
+        )
+    try:
+        resolved = await asyncio.to_thread(set_registered_action_class, registry, name, target)
+    except ValueError as error:
+        return SlashResult(kind="notice", text=str(error), style="warning")
+    except Exception as error:  # noqa: BLE001 — a failed switch must not kill the turn
+        logger.warning("agent class switch failed", exc_info=True)
+        return SlashResult(kind="notice", text=f"could not switch class: {error}", style="warning")
+    clause = ""
+    cleanup = getattr(session, "cleanup_after_class_switch", None)
+    if cleanup is not None:
+        try:
+            outcome = await cleanup(resolved)
+            clause = class_switch_clause(outcome)
+        except Exception:  # noqa: BLE001 — best-effort by contract
+            logger.debug("agent class cleanup failed", exc_info=True)
+    if target == PROACTIVE:
+        text = f"agent {resolved} is now proactive — it may send proactive messages{clause}."
+    else:
+        text = f"agent {resolved} is now reactive — proactive behaviour stopped{clause}."
+    return SlashResult(
+        kind="notice",
+        text=text,
+        style="info",
+        data={"type": "agent_class", "agent": resolved, "class": target},
+    )

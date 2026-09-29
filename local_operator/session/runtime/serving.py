@@ -5901,7 +5901,7 @@ class ServingSessionHandle(SessionHandle):
         if command == "team":
             return self._team_slash(session, args, SlashResult)
         if command == "agent":
-            return self._agent_slash(session, args, SlashResult)
+            return await self._agent_slash(session, args, SlashResult)
         if command == "project":
             # Every reserved verb runs (slice 3), through the same runner the
             # TUI's own `_cmd_project` calls. A command advertised as
@@ -6739,8 +6739,8 @@ class ServingSessionHandle(SessionHandle):
             },
         )
 
-    def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
-        """The routed ``/agent``: list in the invoker, ATTACH here.
+    async def _agent_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/agent``: list in the invoker, ATTACH and CLASS here.
 
         The listing stays ``noop`` on purpose: its rows carry role/specialist
         facts assembled by the frontend's own profile resolver, and a second
@@ -6750,9 +6750,19 @@ class ServingSessionHandle(SessionHandle):
         ``_team_slash``: attaching a profile mutates session state (the
         instructions ride the volatile tail) and nothing consumed the
         ``agent_mutate`` receipt, so `/agent <name>` on a viewer was silent.
+
+        ``class`` is a RESERVED first token here for the same reason it is one
+        in ``tui/app.py::_cmd_agent``: ``/agent`` is authoritative-session, so
+        a live (attached) terminal's command lands in THIS method — the
+        TUI-local branch only runs where nothing routes. The two implement one
+        grammar (review/UX round 1, U1: the switch was unreachable live because
+        only the local half existed).
         """
         if not arg:
             return SlashResult(kind="noop", data={"type": "agent_list", "args": arg})
+        first, _, rest = arg.partition(" ")
+        if first.strip().casefold() == "class":
+            return await self._agent_class_slash(session, rest.strip(), SlashResult)
         name, _, request = arg.partition(" ")
         name = name.strip()
         request = request.strip()
@@ -6795,6 +6805,22 @@ class ServingSessionHandle(SessionHandle):
             style="info",
             data={"type": "agent_attached", "agent": resolved, "request": request},
         )
+
+    async def _agent_class_slash(self, session: Any, rest: str, SlashResult: Any) -> Any:
+        """``/agent class …`` on the OWNER: the shared grammar, run here.
+
+        This method exists for its LOCATION, not its logic: ``/agent`` is
+        authoritative-session, so a live terminal's command lands in this
+        process — the one that owns the registry the tag lands in, the session
+        whose pending patience rows the cleanup cancels, and the package whose
+        cadence the flip reconciles (R36). The grammar and the receipts
+        themselves live ONCE, in ``action_class.class_switch_receipt``
+        (review/UX round 1, U1: only the TUI-local half existed, so the switch
+        was unreachable from the seam every attached terminal actually uses).
+        """
+        from local_operator.action_class import class_switch_receipt
+
+        return await class_switch_receipt(session, rest, SlashResult)
 
     async def _mcp_slash(
         self,
