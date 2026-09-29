@@ -37,7 +37,9 @@ from .cutpoint import find_cut_point
 from .marker import (
     COMPACTION_MARKER_TYPE,
     build_compaction_marker,
+    marker_details,
     render_compaction_marker,
+    split_leading_marker,
 )
 from .pruning import prune_stale_frames, prune_tool_outputs, shed_frames_to_wire_budget
 from .thresholds import (
@@ -234,14 +236,18 @@ async def run_compaction_pass(
                 tokens=tokens_before,
             )
         try:
-            # The system half of the call (``SUMMARIZATION_SYSTEM_PROMPT``) is
-            # the host's to send; the pass hands over only the rendered
-            # prompt. A prior marker inside ``to_summarize`` is lifted so it
-            # serializes as a labelled previous summary rather than as a user
-            # turn, which is what the session's summarizer also sees.
+            # The prior summary — a leading rendered marker is the pass
+            # after the first — rides the FOLD slot and never the
+            # conversation: split it off and hand its text to
+            # ``previous_summary``. Left in ``to_summarize`` it serializes
+            # as an ordinary user turn, so the summarizer re-derives the
+            # whole summary from a conversation that already CONTAINS it
+            # (lift XOR keep; see ``marker.split_leading_marker``).
+            previous_summary, span = split_leading_marker(to_summarize)
             summary = await summarize_messages(
-                _lift_markers(to_summarize),
+                span,
                 lambda _system, prompt: summarize(prompt),
+                previous_summary=previous_summary,
             )
         except Exception:
             logger.warning("compaction summarizer failed", exc_info=True)
@@ -254,14 +260,13 @@ async def run_compaction_pass(
             )
 
     # (6) Rebuild. The marker is rendered the way the session renders it on
-    # every request, and it is tagged on ``provider_payload`` (harness
-    # bookkeeping the wire builders never ship) so the next pass can lift it
-    # back into the ``CustomMessage`` the cut-point walker understands.
+    # every request, and ``render_compaction_marker`` stamps its details on
+    # ``provider_payload`` (harness bookkeeping the wire builders never
+    # ship) so the next pass can lift it back into the ``CustomMessage`` the
+    # cut-point walker understands and fold its summary through
+    # ``previous_summary``.
     marker = build_compaction_marker(summary, preserve_data)
     rendered = render_compaction_marker(marker, entry_id=marker.id)
-    rendered.provider_payload = {
-        COMPACTION_MARKER_TYPE: {"summary": summary, "preserve_data": preserve_data}
-    }
     rebuilt: list[Message] = [rendered, *kept]
     tokens_after = estimate_messages_tokens(rebuilt)
     return CompactionPassResult(
@@ -301,14 +306,6 @@ def _refused(
     )
 
 
-def _marker_details(message: Message) -> dict[str, Any] | None:
-    payload = message.provider_payload
-    if not isinstance(payload, dict):
-        return None
-    details = payload.get(COMPACTION_MARKER_TYPE)
-    return details if isinstance(details, dict) else None
-
-
 def _lift_markers(messages: Sequence[Message]) -> list[AgentMessage]:
     """The same positions, with rendered markers lifted back to ``CustomMessage``.
 
@@ -318,7 +315,7 @@ def _lift_markers(messages: Sequence[Message]) -> list[AgentMessage]:
     """
     lifted: list[AgentMessage] = []
     for message in messages:
-        details = _marker_details(message)
+        details = marker_details(message)
         if details is None:
             lifted.append(message)
             continue
@@ -345,7 +342,7 @@ def _previous_archive_text(to_summarize: Sequence[Message]) -> str | None:
     accumulated history instead of carrying old PNGs forward (mirrors
     ``Session._previous_archive_text``)."""
     for message in reversed(to_summarize):
-        details = _marker_details(message)
+        details = marker_details(message)
         if details is None:
             continue
         preserve = details.get("preserve_data") or {}
