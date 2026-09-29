@@ -49,21 +49,32 @@ class TurnInFlight(RuntimeError):
 
 
 class AudioInputUnsupported(ValueError):
-    """The message carried a recording and the selected model cannot take one.
+    """The message carried a recording the selected model cannot be sent on
+    the audio door.
 
-    Raised by ``Session.prompt``'s admission gate BEFORE any paid work: the
-    audio door exists only for models whose capability chain says they accept
-    audio input, and a send that bypasses that check would spend a turn on a
-    request the model refuses mid-stream. The refusal is the honest error the
-    cascade resolves to when no rung can carry the recording.
+    TWO SHAPES, ONE CODE, both raised at admission BEFORE any paid work:
 
-    THE DETAILED FORM names the model and carries the resolver's report
-    (``resolve_audio_path``'s ``reason``), because the caller can act on both:
-    the model is a choice the user can change, and the report names whether a
-    transcription path IS available instead. THE BARE FORM (no arguments) is
-    what ``admission_error`` rebuilds from the code on the far side of an
-    attach socket, where no prose may cross: it says the same thing without
-    the model or the report, and adds the remedy.
+    * CAPABILITY — the selected model does not accept audio input at all
+      (``supports_audio_input`` is not stated). ``report`` is the resolver's
+      report (``resolve_audio_path``'s ``reason``), which names whether a
+      transcription path IS available instead — the remedy the caller can act
+      on. A send that bypassed this check would spend a turn on a request the
+      model refuses mid-stream.
+    * WIRE FORMAT — the model accepts audio, but its wire cannot carry this
+      capture's container (OQ-3: v1 does not transcode), refused at admission
+      so the row never becomes the every-later-request wedge agent review
+      round 1 (M2) measured. ``report`` is the wire's constraint clause,
+      composed beside the renderers
+      (``providers.clients.audio_format_refusal``).
+
+    THE DETAILED FORM names the model and carries the report. THE FACTS RIDE
+    THE ATTACH FRAME AS THEIR OWN BOUNDED FIELDS (``error_model``,
+    ``error_report``, ``error_format``), not as prose around the code: the far
+    side rebuilds this same object from them, sanitised and length-capped in
+    ``admission_error``, so a peer cannot push arbitrary text into a sentence
+    this side composes. THE BARE FORM (no arguments) is what that decoder
+    rebuilds from a frame WITHOUT the facts — an older runtime's frame, which
+    never raised the format shape at all — and adds the remedy.
 
     A ``ValueError`` so it lands in the desktop control plane's
     named-condition arm (``(ReceiptConflict, ValueError)``) rather than the
@@ -73,8 +84,22 @@ class AudioInputUnsupported(ValueError):
 
     code = "audio_input_unsupported"
 
-    def __init__(self, *, model: str = "", report: str = "") -> None:
-        if model:
+    def __init__(
+        self, *, model: str = "", report: str = "", format_unsupported: bool = False
+    ) -> None:
+        self.model = model
+        self.report = report
+        self.format_unsupported = format_unsupported
+        if model and format_unsupported:
+            sentence = (
+                f"The selected model ({model}) accepts audio input, but its wire "
+                f"cannot carry this recording: {report}."
+            )
+            sentence += (
+                " No transcoding happens in v1 — capture a supported format, or "
+                "transcribe the recording first."
+            )
+        elif model:
             sentence = (
                 f"The selected model ({model}) does not accept audio input, so "
                 f"the recording cannot be sent to it."

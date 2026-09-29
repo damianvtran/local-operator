@@ -49,6 +49,34 @@ MODEL_AUDIO_WIRE_FORMATS = {
     "audio/mpeg": "mp3",
 }
 
+#: Mimes Gemini's inline audio part documents for audio input, fetched
+#: 2026-09-29 from https://ai.google.dev/gemini-api/docs/audio ("Supported
+#: audio formats", page updated 2026-09-23) — the design §4b list was wider in
+#: the live page than in the draft, which is why the review round that added
+#: the admission gate asked for the list to be re-verified against the vendor.
+#: The entries are the vendor's OWN spellings, kept verbatim: the admission
+#: gate mirrors the documented page rather than guessing family aliases, so
+#: ``audio/mp4`` — our sniffer's report for the M4A container, which the page
+#: spells only ``audio/m4a`` — stays refused on this wire while the STT rung
+#: carries it happily (v1 renames no declarations and transcodes nothing).
+GOOGLE_MODEL_AUDIO_MIME_TYPES = frozenset(
+    {
+        "audio/wav",
+        "audio/mp3",
+        "audio/aiff",
+        "audio/aac",
+        "audio/ogg",
+        "audio/flac",
+        "audio/mpeg",
+        "audio/m4a",
+        "audio/l16",
+        "audio/opus",
+        "audio/alaw",
+        "audio/mulaw",
+        "audio/webm",
+    }
+)
+
 #: Suffix → mime, for the temp file the route writes from an upload. Covers the
 #: allowlist plus the common container spellings for each, plus the two formats
 #: ``media.sniff_audio`` can report beyond the allowlist (flac, aiff): they are
