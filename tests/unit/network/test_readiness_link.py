@@ -140,6 +140,10 @@ def test_ready_reads_a_stopped_relay_as_refused_and_a_black_hole_as_silent(
     # The joining half prints its own receipt JSON; a cell that parsed a
     # later capture must not find two documents in it.
     capsys.readouterr()
+    # The join's client link on this (accepting) side is reaped asynchronously;
+    # a report composed inside that window takes the link path and renders
+    # `unknown` instead of `not asked` (Q-O1). Wait for the reap first.
+    _await_link_reaped(server_a, server_b.identity.device_id)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
     _set_peer_endpoints(server_a, record, server_b.identity.device_id, ["127.0.0.1:1"])
 
@@ -320,12 +324,36 @@ def _await_membership_pull(link: relay.PeerLink, *, settle_s: float = 0.2) -> No
     persist trails its ``member_pulled_at`` stamp (stamped BEFORE the merge).
     An edit landing in that window is silently dropped — measured as 7 false
     reds in 31 runs (review round 3, R3-1). So: wait for the pull's stamp (both
-    writers run before it), then settle past the bounded save.
+    writers run before it), then settle past the bounded save. The deadline
+    spans the pull's OWN timeout (``MEMBERSHIP_PULL_TIMEOUT_S``) plus margin: a
+    narrower deadline would let a slow-but-successful pull land after the
+    helper returned and re-open the window (review round 4, R4-1).
     """
-    deadline = time.monotonic() + 2.0
+    deadline = time.monotonic() + relay.MEMBERSHIP_PULL_TIMEOUT_S + 1.0
     while not link.member_pulled_at and time.monotonic() < deadline:
         time.sleep(0.01)
     time.sleep(settle_s)
+
+
+def _await_link_reaped(
+    server: relay.RelayServer, device_id: str, *, deadline_s: float = 5.0
+) -> None:
+    """Wait out a finally-completed join's async link teardown.
+
+    Admitting the join leaves a client link on the accepting side that is torn
+    down asynchronously — still registered 10-18 ms after ``_pair`` returns in
+    40/60 probed runs. A report composed inside that window takes the link
+    path and renders ``unknown`` capability rows instead of the expected
+    ``not_asked`` (observed once in 101 file-level runs; QA round 4, Q-O1).
+    The loop is bounded so a torn fixture cannot hang the suite; the poll
+    reads ``_link_for``, which reports only ALIVE links.
+    """
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        link = server._link_for(device_id)  # noqa: SLF001 — the one link seam
+        if link is None:
+            return
+        time.sleep(0.01)
 
 
 def test_a_link_that_cannot_be_pinned_never_names_its_source_socket(
