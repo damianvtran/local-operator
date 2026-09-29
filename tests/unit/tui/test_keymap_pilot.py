@@ -901,3 +901,50 @@ async def test_capture_repaints_selected_strip_without_flushing_the_list() -> No
         await pilot.pause()
         assert "f5" in painted_value() and "?" not in painted_value()
         assert not app._keymap_capture
+
+
+@pytest.mark.asyncio
+async def test_a_hold_row_displays_and_refuses_to_arm_capture() -> None:
+    """The push-to-talk row: displayed with its platform-resolved hold value,
+    and `enter` refuses the capture gesture instead of arming it.
+
+    A hold has no terminal representation at all, so an armed frame could
+    never resolve — every completion the validator refuses. The press must
+    state the constraint ("set it in the desktop app") on the SAME surface a
+    refused write uses, and that surface clears once the cursor moves on.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        app._open_settings_view()
+        view = app.query_one(SettingsView)
+        await pilot.pause()
+        _select(view, "keymap.push_to_talk")
+        # The pilot `_select` deliberately does not scroll; the row is deep in
+        # the list, so bring it on screen before reading painted strips.
+        view._scroll_to_selection(immediate=True)
+        await pilot.pause()
+
+        # The row PAINTS with the platform-resolved hold display.
+        expected = keymap.display_key("alt-right-hold", scope="desktop")
+        assert expected.endswith("(hold)")
+        painted = next(
+            strip.text
+            for strip in app.screen._compositor.render_strips()
+            if "Push to talk" in strip.text
+        )
+        assert expected in painted, painted
+
+        # `enter` must NOT arm — and it says why, on the detail row.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not app._keymap_capture, "a hold row must never arm capture"
+        assert view._capture is None
+        detail = painted_row(app, view._detail)
+        assert "desktop app" in detail, detail
+        assert "cannot capture" in detail, detail
+
+        # The refusal has `_error`'s lifetime: moving on clears it.
+        await pilot.press("down")
+        await pilot.pause()
+        assert "cannot capture" not in painted_row(app, view._detail)
