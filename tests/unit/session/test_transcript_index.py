@@ -506,6 +506,41 @@ def test_version_bump_discards_scans_and_preserves_naming(tmp_path, monkeypatch)
     assert set(again.naming["items"]) == {"u1"}
 
 
+def test_a_name_landing_during_a_scan_survives_the_refresh_write(tmp_path, monkeypatch):
+    """The refresh's whole-document write must not drop a mid-scan naming write.
+
+    The two writers run in different processes by design — this scan in the
+    daemon, the naming errand on the session's owner — and the scan carries
+    its naming section from the document it read BEFORE it ran. The
+    interleaving below is the deterministic shape of that race: a
+    ``patch_naming`` lands while the refresh sits between the read and its
+    write. Pre-fix the refresh's write dropped the item (agent review round
+    1, MAJOR-1, reproduced the loss exactly here); the fix merges the on-disk
+    section one last time before writing.
+    """
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 2.0)])
+    refreshed(tmp_path)
+    # A compact-style rewrite replaces the journal file (new inode), so the next
+    # refresh takes the full-scan path this test intercepts. Unlike a version
+    # bump, the cache stays readable under the live build, so the racing
+    # ``patch_naming`` below really writes.
+    journal_path(tmp_path).unlink()
+    write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 2.0)])
+    real_scan = ti._scan_full
+
+    def racing_scan(path, raw):
+        index = real_scan(path, raw)
+        ti.patch_naming(tmp_path, SID, {"u1": {"name": "Landed mid-scan", "summary": "S."}})
+        return index
+
+    monkeypatch.setattr(ti, "_scan_full", racing_scan)
+    rebuilt = refreshed(tmp_path)
+    assert rebuilt.naming["items"]["u1"]["name"] == "Landed mid-scan"
+    on_disk = ti.read_index(tmp_path, SID)
+    assert on_disk is not None
+    assert on_disk.naming["items"]["u1"]["name"] == "Landed mid-scan"
+
+
 def test_corrupt_cache_is_rebuilt_and_missing_journal_is_none(tmp_path):
     assert ti.refresh_index(tmp_path, SID) is None  # no journal
     write_rows(tmp_path, [user("u1", 1.0), assistant("a1", 1.1)])
