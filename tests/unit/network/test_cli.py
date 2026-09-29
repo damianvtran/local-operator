@@ -1628,3 +1628,28 @@ def test_credentials_shareable_read_creates_nothing(
     capsys.readouterr()
     after = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
     assert after == before, f"the listing created files: {sorted(set(after) - set(before))}"
+
+
+def test_a_refused_share_does_not_create_a_store(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The share path's reads are GATED ON THE STORE'S EXISTENCE (review round 1,
+    MINOR; QA round 1, Q1): on a device that never signed in, a refused share
+    must not be the reason an ``auth.db`` appears. Red on base — the ambient
+    ``AuthStore`` / ``McpTokenStorage`` constructions wrote one before the
+    refusal; the same class ``readiness._mcp_row_exists`` closed for the ledger.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    assert not (root / "auth.db").exists()
+    # (1) The shape read the share verb runs first.
+    shape = net_cli._credential_shape(f"mcp:{NOTION_URL}")  # noqa: SLF001
+    assert shape == ("mcp-rotating", "mcp-oauth", "")
+    assert not (root / "auth.db").exists(), "the shape read wrote a store"
+    # (2) The refusal itself.
+    with pytest.raises(types.MeshRefusal) as refusal:
+        net_cli._require_local_credential(f"mcp:{NOTION_URL}", "mcp-oauth")  # noqa: SLF001
+    assert "no MCP login" in refusal.value.sentence
+    assert not (root / "auth.db").exists(), "the refusal wrote a store"
+    # (3) The provider read both halves of the verb share.
+    assert net_cli._provider_rows("openai", root) == []  # noqa: SLF001
+    assert not (root / "auth.db").exists(), "the provider read wrote a store"
