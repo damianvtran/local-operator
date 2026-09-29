@@ -6406,7 +6406,20 @@ class FrontendStateStore:
         return self.mutate(**changes)
 
     def accrue_usage(self, session: Any, usage: Usage) -> FrontendUpdate | None:
-        """Accrue a provider call outside the ordinary agent event stream."""
+        """Accrue a provider call outside the ordinary agent event stream.
+
+        The session's OWN reading advances with the store's here — the two are
+        compared against each other by the reconciliation refreshes
+        (``restored_usage()`` vs ``state.last_usage``), and a session left
+        holding an older receipt hands the next replay a reading it then
+        installs (agent review round 1, R1-1: an aside's accrual was the one
+        writer that could still resurrect a pre-compaction count). Guarded like
+        the store's other session reads, so a test double without the method
+        still accrues.
+        """
+        adopt = getattr(session, "_adopt_off_record_usage", None)
+        if callable(adopt):
+            adopt(usage)
         state = self._state
         cost = turn_cost(_label(getattr(session, "effective_model", None)), usage)
         changes: dict[str, Any] = {
@@ -7596,8 +7609,9 @@ def _replayed_context_change(
       over the settled post-pass one (148.0k), and how every message boundary
       reverted the fresh receipt the event fold had just painted to the older
       one the session held. The session's ``_last_usage`` advances in step
-      with the folded receipts now (see ``Session._emit``), so a DIFFERENT
-      receipt here genuinely is newer.
+      with the folded receipts (see ``Session._emit``) and with off-record
+      accruals (``Session._adopt_off_record_usage``), so a DIFFERENT receipt
+      here genuinely is newer.
     * A receipt with no context number says nothing about occupancy (a wire
       that reported only input/output), so it may not blank or move the
       reading.

@@ -8559,6 +8559,11 @@ class Session:
         ADVANCES on a reported count — a wire that omits ``context_tokens``
         keeps the previous figure rather than blanking it and sending a large
         context out at the 5m TTL by the byte estimate.
+
+        Off-record calls that never produce a message (an aside) adopt through
+        :meth:`_adopt_off_record_usage`, the same pair of assignments from the
+        store's accrual entry point — see it for why that door cannot go
+        through this one.
         """
         for message in reversed(messages):
             if isinstance(message, Message) and message.usage is not None:
@@ -8566,6 +8571,33 @@ class Session:
                 if message.usage.context_tokens:
                     self._context_tokens_hint = int(message.usage.context_tokens)
                 return
+
+    def _adopt_off_record_usage(self, usage: Usage) -> None:
+        """Adopt a provider reading from a call that never joins the event stream.
+
+        An ASIDE (and the goal-loop judge that rides the same primitive) reads
+        the live conversation off the record, so its reported context size IS
+        this conversation's current size — and the canonical store learns it
+        through the host's ``on_usage`` (``FrontendStateStore.accrue_usage``),
+        which advances the store's occupancy and ``last_usage`` together. The
+        session's own reading must advance with it, for the same reason the
+        message-end note in ``_emit`` exists: the store's reconciliation
+        refreshes compare ``restored_usage()`` against the receipt they last
+        folded, and a session left holding the pre-pass count hands the next
+        replay an older receipt it then installs — measured (agent review round
+        1, R1-1): a settled post-compaction reading of 148.0k repainted to the
+        pre-compaction 404.9k by the first refresh after an aside, on BOTH
+        replay sites.
+
+        Only the off-record calls that READ the conversation come through here.
+        One-shot errands whose reported prefix is not this conversation
+        (auto-naming, the compaction summariser, the advisor) must not: their
+        figures describe a different, write-once request and would poison both
+        the trigger and the cache-TTL hint.
+        """
+        self._last_usage = usage
+        if usage.context_tokens:
+            self._context_tokens_hint = int(usage.context_tokens)
 
     def restored_usage(self) -> Usage | None:
         """The provider's own last reading for THIS conversation, or ``None``.
@@ -10379,7 +10411,9 @@ class Session:
         # regression at every boundary after it. Noting here keeps
         # ``restored_usage()`` honest at the only moment it is compared ("the
         # provider's own last reading for THIS conversation" -- its own
-        # docstring), so a differing receipt genuinely means NEWER.
+        # docstring), so a differing receipt genuinely means NEWER. Off-record
+        # calls never pass through here -- an aside advances the same pair from
+        # the store's accrual entry point (see ``_adopt_off_record_usage``).
         #
         # The TTL hint rides ``_note_usage`` deliberately in lockstep with
         # ``_last_usage`` (see ``_context_tokens_hint``), so this must move
