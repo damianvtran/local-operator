@@ -1439,6 +1439,16 @@ IMAGE_DROPPED_NOTICE = "[image omitted: the provider rejected it and it has been
 #: images, and the notice must not claim they are gone for good.
 IMAGE_OMITTED_TEXT_ONLY_NOTICE = "[image omitted: the current model does not accept images]"
 
+#: Stands in for a recording the ACTIVE model cannot be sent: its spec states
+#: no audio capability, or its wire cannot carry this capture's container (the
+#: format half of OQ-3 — v1 does not transcode). ONE notice for both halves,
+#: unlike the image pair above: both are read from the CURRENT spec on every
+#: render, so both lapse the moment a model that can take the recording is
+#: selected — the distinction the two image notices exist to draw (sticky
+#: provider refusal vs model condition) has no audio analogue until something
+#: records a provider-side audio rejection.
+AUDIO_OMITTED_NOTICE = "[recording omitted: the current model cannot receive it]"
+
 #: Stands in for an image whose PAYLOAD is no longer anywhere to be found — the
 #: attachment store lost the bytes under a transcript that still references
 #: them. Distinct from both notices above, and the distinction is not cosmetic:
@@ -1861,6 +1871,83 @@ def _without_images(messages: list[Message], *, model_incapable: bool = False) -
             else:
                 content.append(block)
         out.append(message.model_copy(update={"content": content}))
+    return out
+
+
+def _audio_refusal_for_model(model: ModelSpec, mime: str) -> str | None:
+    """Why this model cannot be sent a recording in ``mime``, or ``None``.
+
+    The two questions the admission gate asks, in the same order and from the
+    same sources, so the strip and the gate cannot disagree about whether a
+    block can go: capability first (``supports_audio_input``, read with
+    ``getattr`` and the safe ``False`` default), then the wire's own answer
+    (``providers.clients.audio_format_refusal``, which lives beside the
+    renderers it mirrors). In-process only — the message here is never shown
+    to a user; the strip's user-visible half is the notice it leaves.
+    """
+    if not bool(getattr(model, "supports_audio_input", False)):
+        return "the selected model does not accept audio input"
+    # Lazy like every other clients import in this module: only a history that
+    # CARRIES recordings pays it, and only on renders whose model refused one.
+    from local_operator.providers.clients import audio_format_refusal
+
+    return audio_format_refusal(model, mime)
+
+
+def _without_uncarryable_audio(messages: list[Message], model: ModelSpec) -> list[Message]:
+    """Every message with its audio blocks replaced by a one-line notice when
+    the ACTIVE model cannot be sent them.
+
+    The audio sibling of the ``supports_images`` strip (:func:`_without_images`),
+    here for the two cases a model SWITCH creates:
+
+    * the active spec states no audio capability — the session was switched
+      onto a model that takes none while the history still carries recordings;
+    * the active MODEL'S WIRE cannot carry this capture's container, and v1
+      does not transcode (OQ-3) — a recording made for one wire can be
+      uncarryable on another.
+
+    Without this pass either case leaves the block in every request render and
+    the wire renderer's typed refusal fires on the first request and EVERY
+    request after it — the sticky wedge agent review round 1 (M2) measured,
+    now reachable only through a switch because admission refuses uncarryable
+    captures at the door. Applied to the RENDERED history, never the
+    transcript: the archive keeps the recording, ``/export`` still has it, and
+    switching back to a model that can take it restores it on the next render
+    (acceptance reads the CURRENT spec, so nothing is sticky).
+
+    Consecutive recordings collapse to ONE notice, like the image passes — a
+    session replayed with a hundred recordings should not carry a hundred
+    identical apology lines.
+    """
+    if not any(
+        isinstance(block, AudioContent) for message in messages for block in message.content
+    ):
+        # The overwhelmingly common case (no recordings at all) pays one scan
+        # and no repair copies.
+        return messages
+    out: list[Message] = []
+    refusals: dict[str, str | None] = {}
+    for message in messages:
+        if not any(isinstance(block, AudioContent) for block in message.content):
+            out.append(message)
+            continue
+        content: list[Content] = []
+        changed = False
+        for block in message.content:
+            if not isinstance(block, AudioContent):
+                content.append(block)
+                continue
+            if block.mime_type not in refusals:
+                refusals[block.mime_type] = _audio_refusal_for_model(model, block.mime_type)
+            if refusals[block.mime_type] is None:
+                content.append(block)
+                continue
+            changed = True
+            if content and getattr(content[-1], "text", None) == AUDIO_OMITTED_NOTICE:
+                continue
+            content.append(TextContent(text=AUDIO_OMITTED_NOTICE))
+        out.append(message.model_copy(update={"content": content}) if changed else message)
     return out
 
 
@@ -3511,6 +3598,13 @@ class Session:
           this strip; it does NOT suspend the payload-less pass above, which has
           nothing to restore.
 
+          RECORDINGS GET THE SAME TREATMENT through
+          :func:`_without_uncarryable_audio`, applied in the same band for the
+          same two reasons (a model switched onto one that takes no audio, or a
+          wire that cannot carry the recorded container — OQ-3), and suspended
+          by ``keep_images`` the same way. It runs ABOVE the image early returns
+          because every return below feeds a request the recording would wedge.
+
         A FOURTH degrade runs LAST, and it is not about images being
         unacceptable either: the aggregate request can outgrow the provider's
         size cap even when every block in it is individually fine
@@ -3563,6 +3657,18 @@ class Session:
         rendered, missing_media = _without_unresolvable_frames(rendered)
         if missing_media:
             self._announce_missing_media_once(missing_media)
+        # THE AUDIO STRIP, ABOVE THE IMAGE EARLY RETURNS for the same reason
+        # the payload-less pass is: the branches below RETURN, and every one of
+        # them feeds a request that would wedge the same way, so a strip that
+        # ran after them would leave the original refusal live on those paths
+        # (agent review round 1, M2b). Suspended under ``keep_images`` — the
+        # live-context rebuild after a compaction — exactly like the image
+        # capability strip and for the same reason: the rebuilt window must
+        # not bake THIS model's omission into ``_context.messages``, because
+        # the next request re-renders (this method, ``keep_images=False``) and
+        # strips then.
+        if not keep_images:
+            rendered = _without_uncarryable_audio(rendered, self._model)
         if self._images_rejected:
             # Nothing to rebound once images are being dropped outright, and
             # dropping first saves decoding a block that is about to become a
