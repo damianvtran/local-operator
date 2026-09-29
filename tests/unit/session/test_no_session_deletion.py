@@ -2142,6 +2142,20 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Removes this call's own mkdtemp under the system temp root; no session path",
     ),
+    # -- stt: the media-upload spool (cascade phase 0) -----------------------
+    # Both calls remove the SAME ``tempfile.mkdtemp()`` spool this endpoint
+    # created for one uploaded recording — the write-failure path and the
+    # ``finally`` arm. The path is minted by ``tempfile`` under the OS temp
+    # root and never derived from a session id, a config dir or any caller
+    # input (the uploaded filename is reduced to ``os.path.basename`` before it
+    # is joined to that path), so no call here can name a directory under
+    # ``sessions/``.
+    (
+        "local_operator/server/routes/stt.py::create_stt_transcription_endpoint",
+        "shutil.rmtree",
+        "Removes this request's tempfile.mkdtemp() upload spool; never session-derived",
+        2,
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
