@@ -267,16 +267,18 @@ The sidebar is the surface R6 has to fit into. Its geometry, read from
 * width `SIDEBAR_WIDTH = 30`, cap `SIDEBAR_MAX_WIDTH = 44` (`:34`, `:51`), plus
   `SIDEBAR_GUTTER = 3` cells that are **added**, never taken from the content
   (`:117`);
-* every row is composed of exactly: **columns 0-1** the cursor prefix
-  (`› `, `» `, `★ ` or two spaces, `:113-118`), **column 2** the state mark
-  (`row_state_mark`, `session_picker.py:920`; `_special_mark`'s `⌥` for subagent
-  rows, `:410`), then a space, then the title, then the right-aligned age
-  (`:119-169`);
+* every row is composed of exactly: **columns 0-1** the pin cell (issue #1357
+  slice 2a — `★ ` pinned, `☆ ` while the pointer rests on an unpinned row, two
+  blanks otherwise, and the cell a click toggles), **column 2** the caret
+  (`› `, `» ` or blank), **column 3** the locality mark (`⇄` or blank),
+  **column 4** the state mark (`row_state_mark`, `session_picker.py:920`;
+  `_special_mark`'s `⌥` for subagent rows, `:410`), then a space, then the
+  title, then the right-aligned age;
 * sections are **contiguous render rows that are never entries**
   (`_display_rows`, `:466`), named by `_SECTION_NAMES` (`:197`): `pinned`,
   `active`, `previous`, `subagent`, each with a blank above and below, and an
   empty section contributes no header;
-* the title's width is `width - 4 - (len(age) + 1)` (`:152`).
+* the title's width is `width - 6 - (len(age) + 1)`.
 
 **Decision 1 — peer grouping is a new section axis; the existing tiers stay.**
 `_SECTION_NAMES`'s four keys become a *(rank, peer key)* pair, so a peer's rows
@@ -305,15 +307,20 @@ Why this shape and not the alternatives:
   this design a lone device paints byte-identically to the base revision, which
   is a testable invariant and the *before* frame of the visual pair (§4.1).
 
-**Decision 2 — the locality mark goes in the CURSOR-PREFIX slot (columns 0-1),
-not the mark column.** The slot holds **two facts**: cell 0 is the caret or the
-pin, cell 1 is ALWAYS the locality mark. So:
+**Decision 2 — the locality mark goes in the cursor slot, not the mark
+column.** The slot holds **two facts**: the caret and the locality mark, and the
+locality cell is ALWAYS the mark. (The pin no longer shares the slot — issue
+#1357 slice 2a gave it its own two-cell column *ahead* of it, so a pinned row
+under the cursor can show `★ ›⇄` where the old shared cell could show `★` or
+`›` but never both, and the cell is a pointer target that can never be the
+caret, which keeps "click the star" and "click the row to open it" distinct
+columns.) So:
 
 ```
-›⇄ ⬤ Fix the sidebar reflow…        2m      ← remote, cursor here
- ⇄ ● Review the mesh brief          1h      ← remote, idle
-★⇄ ● Draft the RFC                  3d      ← remote, pinned
-    ● Article-search-svc sweep       5m      ← local
+  ›⇄  Fix the sidebar reflow…      2m      ← remote, cursor here
+   ⇄  Review the mesh brief        1h      ← remote, idle
+★ ›⇄  Draft the RFC                3d      ← remote, pinned AND the cursor
+      Article-search-svc sweep…     5m      ← local
 ```
 
 **Why both cells, and not the precedence this section first drew** (design
@@ -324,9 +331,11 @@ caret says "here"/"opening", the pin says "kept", and both outrank a durable
 property — and wrong about the cost: the `⇄` then vanished on the **one row the
 user is deciding about**, and the peer heading that carries the same fact
 independently sat two lines above it on a list being scrolled. The precedence is
-kept for CELL 0; cell 1 is the mark's unconditionally. Nothing grows: the slot
-was reserved and its second cell was blank on these rows anyway, so the title
-starts at column 4 in every one of the four states above. This also replaces the
+kept for the caret cell; the locality cell is the mark's unconditionally.
+Nothing moves for the mark: the slot was reserved and its second cell was blank
+on these rows anyway, so the title starts at the same column on every one of the
+states above — the pin cell ahead of it (issue #1357 slice 2a) is the one thing
+that grew the row, priced once for every row. This also replaces the
 `› ⇄ ⬤ …` example this section carried — four lead cells that a 2-cell slot
 cannot hold, and which the review correctly called unrenderable.
 
@@ -1343,9 +1352,9 @@ each frame must pass, from the repo's own list:
   the thing it would eat;
 * the sidebar's own `size.width` is identical before/after at the same terminal
   size (the row must not grow: that is the whole point of decision 2 in §1.3);
-* in the peer frame, the `⇄` mark is in the prefix slot (cell 1) and the title's
-  first cell is column 4 — i.e. `render_lines_for_test()`-style string
-  assertions plus the frame.
+* in the peer frame, the `⇄` mark is in the locality column (cell 3, after the
+  pin cell's pair and the caret) and the title's first cell is column 6 — i.e.
+  `render_lines_for_test()`-style string assertions plus the frame.
 
 And the four tests a reviewer should expect on the PR, because the pixels cannot
 assert them:
@@ -1402,7 +1411,7 @@ isolated config dir), never the stills.
 | D3 | `/network*` is `FRONTEND_LOCAL` | routing lifecycle to the session's owner |
 | D4 | `NetworkScreen` modelled on `InfoScreen`, two-phase | a notice listing; a `ReportView` |
 | D5 | Peer = a new section axis (rank 3), existing tiers intact | nesting tiers inside peers; per-row marks only; every row under a device |
-| D6 | Locality mark in the **cursor-prefix slot** (columns 0-1) | the spine's suggested status-glyph column (owned by the urgency ladder); a reserved leading cell |
+| D6 | Locality mark in the **cursor slot's locality cell** (column 3; the pin cell's own pair sits ahead of it since #1357 slice 2a) | the spine's suggested status-glyph column (owned by the urgency ladder); a reserved leading cell |
 | D7 | Mobility keeps the spine's spelling — `/move <id> --to <peer\|local>` in the TUI, `lop sessions move … --to` in the CLI — with `--to` as the discriminant and an explicit ambiguity refusal | a separate `/handoff`: cleaner grammar, but the spine names `/move` and mobility §4.2 landed it, so a third spelling would be the divergence |
 | D8 | Panel `d`/`shift+P`, selection-scoped, with typed confirmation for panic | a global chord; a bare `p`; yes/no for panic |
 | D9 | Desktop: remote mark **only on remote rows**, peer sections, collapsed `Peers` group | a reserved second leading icon; the trailing statement slot; a second list |

@@ -10508,6 +10508,19 @@ class OperatorApp(App[None]):
         target = sidebar.hovered_id or (sidebar.cursor_id if sidebar.has_focus else "")
         if not target:
             return
+        self._toggle_pin(target)
+
+    def _toggle_pin(self, target: str) -> None:
+        """Flip `target`'s pin in the store, then repaint the list's pins.
+
+        ONE write path, shared by the `f10` chord (which resolves its target
+        from the pointer, else the focused cursor) and the pin cell's click
+        (`PinToggled`), so the two cannot drift into two behaviours. The click
+        path already guarantees its row is stable: the widget freezes the
+        order from press to click, so the id delivered here is the row the
+        user aimed at.
+        """
+        sidebar = self._session_sidebar
 
         async def pin() -> None:
             try:
@@ -10521,8 +10534,15 @@ class OperatorApp(App[None]):
                 await asyncio.to_thread(toggle_pin, root, target)
                 pins = await asyncio.to_thread(read_pins, root)
                 sidebar.set_pins(pins)
-            except Exception:
+            except Exception as error:  # noqa: BLE001 — reported, not swallowed
+                # A refused write used to vanish into a debug log, which read
+                # as a missed click once pinning became a pointer action: the
+                # row repaints unchanged and nothing says why (UX round 1,
+                # U1). The same notice lane the navigation refusals use; the
+                # sidebar's own `Refresh failed` line stays reserved for its
+                # catalogue loads.
                 logger.debug("sidebar pin toggle failed", exc_info=True)
+                self._system_notice(f"Could not save the pin: {error}", "warning")
 
         self.run_worker(pin(), group="sidebar-pin")
 
@@ -10860,6 +10880,17 @@ class OperatorApp(App[None]):
         """
         message.stop()
         self._refresh_sidebar()
+
+    def on_session_sidebar_pin_toggled(self, message: SessionSidebar.PinToggled) -> None:
+        """A pointer press on a row's pin cell (issue #1357 slice 2a).
+
+        The list owns the hit-testing (the cell's column belongs to its own
+        geometry) and hands the row here; the write itself stays on the one
+        worker `f10` already uses. Nothing else happens: no cursor move, no
+        `Selected` — a click meant for the star must not open the row.
+        """
+        message.stop()
+        self._toggle_pin(message.session_id)
 
     # -- composition --------------------------------------------------------
     def get_default_screen(self) -> Screen[None]:
