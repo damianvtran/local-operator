@@ -1,0 +1,458 @@
+{
+  "login": {
+    "bundle": "./assets/index--wxUjN5P.js",
+    "list_title": "(1) local operator"
+  },
+  "u21_title": {
+    "title": "untitled \u2014 local operator",
+    "header": "\u2039\nuntitled\n\u2606\napprovals\nno name yet\n\u2191\nsonnet-4.5",
+    "header_name": "untitled"
+  },
+  "u15_dual_resume": {
+    "resume_buttons": [
+      {
+        "text": "resume",
+        "disabled": false,
+        "y": 57,
+        "w": 71,
+        "h": 44,
+        "cls": "pointer-events-auto min-h-11 shrink-0 rounded-sm border border-control px-3 text-body-sm active:bg-surface disabled:opacity-50"
+      }
+    ],
+    "composer_cutoff_present": false,
+    "strip": {
+      "strip": {
+        "text": "this session has ended \u2014 its history is kept",
+        "top": 61,
+        "bottom": 78,
+        "h": 17
+      },
+      "status": [
+        {
+          "text": "this session has ended \u2014 its history is kept",
+          "top": 61,
+          "h": 17
+        }
+      ],
+      "y": {
+        "transcript_top": 53,
+        "transcript_h": 683,
+        "scrollTop": 0,
+        "scrollH": 683,
+        "clientH": 683,
+        "first_row_top": 78,
+        "header_h": 53
+      }
+    }
+  },
+  "u20_ended_send": {
+    "alert": "This session has ended \u2014 tap resume to continue.",
+    "view": "\u2039\nCut off by the harness\n\u2606\napprovals\n\nthis session has ended \u2014 its history is kept\n\nresume reopens it in ~\n\nresume\nRun the long sweep before the audit.\n\n\u2717\nStopped with an error \u2014 the process was cut off while this turn was running\n\nThis session has ended \u2014 tap resume to continue.\n\n\u2191\nsonnet-4.5"
+  },
+  "u16_busy_reset": {
+    "buttons_after": [
+      {
+        "text": "resume",
+        "disabled": false,
+        "y": 57,
+        "w": 71,
+        "h": 44,
+        "cls": "pointer-events-auto min-h-11 shrink-0 rounded-sm border border-control px-3 text-body-sm active:bg-surface disabled:opacity-50"
+      }
+    ],
+    "view": "\u2039\nEnded conversation\n\u2606\napprovals\n\nthis session has ended \u2014 its history is kept\n\nresume reopens it in ~\n\nresume\nWrap up and leave the history resumable.\n\nThe process is gone; the conversation is on disk.\n\n\u2191\nsonnet-4.5"
+  },
+  "d5_refusal": {
+    "refusal": "Could not resume: observer daemon cannot start sessions",
+    "strip_copy": "this session has ended \u2014 its history is kept"
+  },
+  "u17_pin_clear": {
+    "refused": "Could not save the pin: no saved messages yet \u2014 pin it after you send one",
+    "alert_after_send": null,
+    "view": "\u2039\nFresh session\n\u2606\napprovals\nfirst message\n\u28ef\nresponding\n1s\n\u25a0\n\u2191\nsonnet-4.5"
+  },
+  "d2_d6_hints": {
+    "390": {
+      "tasks": {
+        "row": {
+          "w": 358,
+          "h": 44
+        },
+        "label_text": "tasks 1/2",
+        "label_w": 57,
+        "label_display": "block",
+        "hint_w": 73,
+        "hint_display": "block",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      },
+      "subagents": {
+        "row": {
+          "w": 366,
+          "h": 44
+        },
+        "label_text": "subagents",
+        "label_w": 35,
+        "label_display": "block",
+        "hint_w": 73,
+        "hint_display": "block",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      }
+    },
+    "384": {
+      "tasks": {
+        "row": {
+          "w": 352,
+          "h": 44
+        },
+        "label_text": "tasks 1/2",
+        "label_w": 57,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      },
+      "subagents": {
+        "row": {
+          "w": 360,
+          "h": 44
+        },
+        "label_text": "subagents",
+        "label_w": 63,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      }
+    },
+    "383": {
+      "tasks": {
+        "row": {
+          "w": 351,
+          "h": 44
+        },
+        "label_text": "tasks 1/2",
+        "label_w": 57,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      },
+      "subagents": {
+        "row": {
+          "w": 359,
+          "h": 44
+        },
+        "label_text": "subagents",
+        "label_w": 63,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      }
+    },
+    "360": {
+      "tasks": {
+        "row": {
+          "w": 328,
+          "h": 44
+        },
+        "label_text": "tasks 1/2",
+        "label_w": 57,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      },
+      "subagents": {
+        "row": {
+          "w": 336,
+          "h": 44
+        },
+        "label_text": "subagents",
+        "label_w": 63,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      }
+    },
+    "320": {
+      "tasks": {
+        "row": {
+          "w": 288,
+          "h": 44
+        },
+        "label_text": "tasks 1/2",
+        "label_w": 57,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      },
+      "subagents": {
+        "row": {
+          "w": 296,
+          "h": 44
+        },
+        "label_text": "subagents",
+        "label_w": 41,
+        "label_display": "block",
+        "hint_w": 0,
+        "hint_display": "none",
+        "hint_cls": "shrink-0 text-meta text-ink-dim max-[385px]:hidden"
+      }
+    }
+  },
+  "u19_y_stability": {
+    "390": {
+      "base": {
+        "strip": null,
+        "status": [],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 683,
+          "scrollTop": 456,
+          "scrollH": 1139,
+          "clientH": 683,
+          "first_row_top": -378,
+          "header_h": 53
+        }
+      },
+      "degraded": {
+        "strip": {
+          "text": "not answering \u2014 showing its last synced view",
+          "top": 53,
+          "bottom": 79,
+          "h": 26
+        },
+        "status": [
+          {
+            "text": "not answering \u2014 showing its last synced view",
+            "top": 53,
+            "h": 26
+          }
+        ],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 683,
+          "scrollTop": 456,
+          "scrollH": 1139,
+          "clientH": 683,
+          "first_row_top": -378,
+          "header_h": 53
+        }
+      },
+      "cleared": {
+        "strip": null,
+        "status": [],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 683,
+          "scrollTop": 456,
+          "scrollH": 1139,
+          "clientH": 683,
+          "first_row_top": -378,
+          "header_h": 53
+        }
+      },
+      "ended": {
+        "strip": {
+          "text": "this session has ended \u2014 its history is kept",
+          "top": 61,
+          "bottom": 78,
+          "h": 17
+        },
+        "status": [
+          {
+            "text": "this session has ended \u2014 its history is kept",
+            "top": 61,
+            "h": 17
+          }
+        ],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 683,
+          "scrollTop": 456,
+          "scrollH": 1139,
+          "clientH": 683,
+          "first_row_top": -378,
+          "header_h": 53
+        }
+      },
+      "restored": {
+        "strip": null,
+        "status": [],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 683,
+          "scrollTop": 456,
+          "scrollH": 1139,
+          "clientH": 683,
+          "first_row_top": -378,
+          "header_h": 53
+        }
+      }
+    },
+    "320": {
+      "base": {
+        "strip": null,
+        "status": [],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 407,
+          "scrollTop": 984,
+          "scrollH": 1391,
+          "clientH": 407,
+          "first_row_top": -906,
+          "header_h": 53
+        }
+      },
+      "degraded": {
+        "strip": {
+          "text": "not answering \u2014 showing its last synced view",
+          "top": 53,
+          "bottom": 79,
+          "h": 26
+        },
+        "status": [
+          {
+            "text": "not answering \u2014 showing its last synced view",
+            "top": 53,
+            "h": 26
+          }
+        ],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 407,
+          "scrollTop": 984,
+          "scrollH": 1391,
+          "clientH": 407,
+          "first_row_top": -906,
+          "header_h": 53
+        }
+      },
+      "cleared": {
+        "strip": null,
+        "status": [],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 407,
+          "scrollTop": 984,
+          "scrollH": 1391,
+          "clientH": 407,
+          "first_row_top": -906,
+          "header_h": 53
+        }
+      },
+      "ended": {
+        "strip": {
+          "text": "this session has ended \u2014 its history is kept",
+          "top": 57,
+          "bottom": 92,
+          "h": 35
+        },
+        "status": [
+          {
+            "text": "this session has ended \u2014 its history is kept",
+            "top": 57,
+            "h": 35
+          }
+        ],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 407,
+          "scrollTop": 984,
+          "scrollH": 1391,
+          "clientH": 407,
+          "first_row_top": -906,
+          "header_h": 53
+        }
+      },
+      "restored": {
+        "strip": null,
+        "status": [],
+        "y": {
+          "transcript_top": 53,
+          "transcript_h": 407,
+          "scrollTop": 984,
+          "scrollH": 1391,
+          "clientH": 407,
+          "first_row_top": -906,
+          "header_h": 53
+        }
+      }
+    }
+  },
+  "overlay_scroll": {
+    "scrollTop_before": 456,
+    "scrollTop_after": 0,
+    "moved": true,
+    "strip_at": {
+      "x": 195,
+      "y": 66
+    }
+  },
+  "reconnect": {
+    "base": {
+      "strip": null,
+      "status": [],
+      "y": {
+        "transcript_top": 53,
+        "transcript_h": 683,
+        "scrollTop": 0,
+        "scrollH": 1122,
+        "clientH": 683,
+        "first_row_top": 61,
+        "header_h": 53
+      }
+    },
+    "down_390": {
+      "strip": {
+        "text": "reconnecting \u2014 showing the last synced view",
+        "top": 53,
+        "bottom": 79,
+        "h": 26
+      },
+      "status": [
+        {
+          "text": "reconnecting \u2014 showing the last synced view",
+          "top": 53,
+          "h": 26
+        }
+      ],
+      "y": {
+        "transcript_top": 53,
+        "transcript_h": 683,
+        "scrollTop": 0,
+        "scrollH": 1122,
+        "clientH": 683,
+        "first_row_top": 61,
+        "header_h": 53
+      }
+    },
+    "down_320": {
+      "strip": {
+        "text": "reconnecting \u2014 showing the last synced view",
+        "top": 53,
+        "bottom": 79,
+        "h": 26
+      },
+      "status": [
+        {
+          "text": "reconnecting \u2014 showing the last synced view",
+          "top": 53,
+          "h": 26
+        }
+      ],
+      "y": {
+        "transcript_top": 53,
+        "transcript_h": 407,
+        "scrollTop": 0,
+        "scrollH": 1374,
+        "clientH": 407,
+        "first_row_top": 61,
+        "header_h": 53
+      }
+    }
+  }
+}
