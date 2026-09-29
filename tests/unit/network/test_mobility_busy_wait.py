@@ -94,6 +94,15 @@ def test_a_reason_token_becomes_the_sentence_a_person_needs(
     sentence = str(outcome["sentence"])
     assert sentence != "busy", "the reason token reached the user as the whole message"
     assert " " in sentence and "--wait" in sentence, sentence
+    # AND THE REMEDY NAMES ITS SURFACE (the /move papercut, 2026-09-29): ``--wait``
+    # is the CLI verb's flag, and the composers that echo this sentence refuse it —
+    # a bare offer sent a TUI reader into a second refusal about an unknown flag.
+    # Pinned as the WHOLE sentence: these words are the product, and the one thing
+    # that must not drift is where the remedy tells its reader to run it.
+    assert sentence == (
+        "this session is working right now, so nothing was moved; try again when the "
+        "turn finishes; from a shell, pass --wait <seconds> to re-check"
+    ), sentence
     # AND A RUNTIME THAT EXPLAINS ITSELF IN PROSE IS NEVER REWRITTEN: the contract is
     # "the owner's idle reason, verbatim" (MOVE_REFUSAL_CODES).
     theirs = "a background job is still running in this session"
