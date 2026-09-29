@@ -258,6 +258,12 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "channel, never a file in a session",
     ),
     "local_operator/harness/reply_channel.py": (1, "the structured-reply TOOL's name"),
+    "local_operator/cross_session.py": (
+        1,
+        "``SEND_TOOL_NAME``: the ``send`` TOOL's name — an identifier resolved through "
+        "the tool registry, never a file in a session directory (the reply-channel/"
+        "action-tool precedent)",
+    ),
     "local_operator/evaluation/runner/action_tool.py": (1, "the action tool's name"),
     "local_operator/evaluation/action_server.py": (
         1,
