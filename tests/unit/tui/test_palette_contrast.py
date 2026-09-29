@@ -213,3 +213,25 @@ def test_default_theme_is_operator_dark() -> None:
     """The product default stays the island night, whatever gets registered."""
     assert theme.DEFAULT_THEME == "dark"
     assert theme.available_themes()[0] == "dark"
+
+
+def test_warning_ink_clears_aa_on_the_card_ground() -> None:
+    """The modal card's warning rows ride ``overlay`` — AA there, measured, not assumed.
+
+    Design review round 1 of the mesh repair notice (D2): the light ramp's
+    ``warning`` measured 3.97:1 on ``overlay``, under the 4.5:1 floor for normal
+    text, while the state hues' own floor above (4.0) is checked against
+    ``bg``/``surface`` only — and the card's warning rows (the repair notice, the
+    first-run teaching rows) sit on neither. The light ink is solved for this
+    ground too; this pins the pair with its number. The BRAND ramps only: the
+    registered-palette gate is the calibrated one above, and re-flooring every
+    palette for one pair is not this pin's job.
+    """
+    for name in ("light", "dark"):
+        ink = theme.semantic_color("warning", name)
+        ground = theme.semantic_color("overlay", name)
+        ratio = contrast(ink, ground)
+        assert ratio >= 4.5, (
+            f"{name}: warning ink reads {ratio:.2f}:1 ({ink} on {ground}) — "
+            "the card's warning rows fall under AA on their own ground"
+        )

@@ -476,7 +476,7 @@ An MCP login that has died on the owner is refused `interactive_required`, and
 the fix is an interactive sign-in THERE — the one repair a borrower cannot run
 for the owner. The owner's own surfaces carry the notice: `lop network doctor
 --json` (and the `/network` panel) shows a `credential_repair` row naming the
-login to run, and it clears by itself once that login has been made.
+login to run; it clears by itself once the next borrow succeeds.
 
 Revocation is not instant, and an incident response must not assume it is.
 `credential revoke` refuses new borrows at once; a grant already lent is dropped

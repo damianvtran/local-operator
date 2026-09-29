@@ -887,6 +887,11 @@ def _busy_sentence(answer: str) -> str:
         # reader could not use where they read it. The shell clause is what makes the
         # offer runnable; ``tui/session_move.py`` refuses the flag itself by the same
         # route, so the two sentences cannot disagree about where the wait lives.
+        #
+        # REVISIT IF THE TUI EVER GAINS ``--wait``, and move all three together: that
+        # parse would then accept the flag, this sentence's shell clause would be
+        # wrong for that surface, and ``tests/unit/network/test_mobility_busy_wait.py``
+        # pins these exact words (review round 1, NIT-1).
         return (
             "this session is working right now, so nothing was moved; try again when the "
             "turn finishes; from a shell, pass --wait <seconds> to re-check"

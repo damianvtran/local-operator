@@ -54,7 +54,7 @@ def test_light_tokens_exact_hexes() -> None:
         "accent": "#177b45",
         "string": "#1e7b4e",
         "success": "#1e7b4e",
-        "warning": "#8a5800",
+        "warning": "#7a4d00",
         "danger": "#b23a31",
         "signal": "#2b6ea8",
         "label": "#7c5a9e",
@@ -111,7 +111,7 @@ def test_semantic_resolution() -> None:
     assert theme.semantic_color("bg", "light") == "#f7f4ee"
     # D22: light danger/warning are REAL semantics, never the accent green.
     assert theme.semantic_color("danger", "light") == "#b23a31"
-    assert theme.semantic_color("warning", "light") == "#8a5800"
+    assert theme.semantic_color("warning", "light") == "#7a4d00"
     assert theme.semantic_color("success", "light") == "#1e7b4e"
     assert theme.semantic_color("success", "light") != theme.semantic_color("accent", "light")
     assert theme.semantic_color("danger", "light") != theme.semantic_color("accent", "light")

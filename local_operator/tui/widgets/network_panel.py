@@ -48,7 +48,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
+from local_operator.resume import UNNAMED_DEVICE, doctor_detail_words, peer_reason_words
 from local_operator.tui.network_cli import LISTING_TIMEOUT_S, NetworkRun, run_network
 from local_operator.tui.widgets.aside_panel import ASIDE_COPY_KEY
 
@@ -257,7 +257,7 @@ def _cut_to_cells(text: str, budget: int) -> str:
     return text
 
 
-def _hanging_row(lead: str, value: str, width: int) -> str:
+def _hanging_row(lead: str, value: str, width: int, cont: str | None = None) -> str:
     """A prose row whose WRAP keeps the row's own indent (UX round 1, U5).
 
     The body is ONE ``Text`` and the wrap happens in Rich at the widget's edge,
@@ -284,7 +284,15 @@ def _hanging_row(lead: str, value: str, width: int) -> str:
     body 38 at 50x18, measured). A row that stops exactly at ``width`` is then
     re-wrapped by Rich at the edge — the defect this helper exists to remove, at
     the one size where it would come back.
+
+    ``cont`` IS THE CONTINUATION'S LEAD, defaulting to ``lead``. It exists for
+    LABELLED rows: ``lead`` is usually an indent (``"  "``), and repeating it IS
+    the indent — but a label lead like ``"  repair: "`` repeated turns one wrapped
+    notice into two rows of the same kind, a sentence fragment behind a second
+    label (design round 1, D1). Pass the label's own cell count of spaces; the
+    wrap width stays ``lead``'s, so keep the two equal.
     """
+    indent = lead if cont is None else cont
     available = max(1, width - cell_len(lead) - _SCROLLBAR_RESERVE_CELLS)
     lines: list[str] = []
     current = ""
@@ -296,7 +304,7 @@ def _hanging_row(lead: str, value: str, width: int) -> str:
         lines.append(current)
         current = word
     lines.append(current)
-    return "\n".join(lead + line for line in lines)
+    return "\n".join((lead if index == 0 else indent) + line for index, line in enumerate(lines))
 
 
 def _indented_value(prefix: str, value: str, width: int) -> str:
@@ -1029,11 +1037,14 @@ class NetworkScreen(ModalScreen[None]):
         """The open credential-repair notices, in the doctor's own words.
 
         Read from the ``doctor`` receipt the worker fetched — its
-        ``credential_repair`` checks — so the panel renders the producer's sentence
-        rather than composing one, and this surface cannot drift from the CLI.
-        Prose wraps through ``_hanging_row`` because the sentence outruns the
-        narrow cards; an absent receipt, or one carrying no such check, paints
-        nothing.
+        ``credential_repair`` checks — and rendered through
+        :func:`doctor_detail_words`, the SAME gloss the CLI's doctor rows and the
+        agent digest pass that field through: prose comes back unchanged, a machine
+        token would render as words rather than leak raw, and the panel cannot
+        drift from the CLI. The sentence wraps through ``_hanging_row`` with an
+        indent-only continuation (``cont`` = the lead's own cell count): repeating
+        ``repair: `` on the wrap made one notice read as two rows (design round 1,
+        D1). An absent receipt, or one carrying no such check, paints nothing.
         """
         payload = self.doctor_run.payload() if self.doctor_run is not None else None
         if not isinstance(payload, dict):
@@ -1041,9 +1052,16 @@ class NetworkScreen(ModalScreen[None]):
         rows: list[str] = []
         for check in payload.get("checks") or []:
             if isinstance(check, dict) and check.get("check") == "credential_repair":
-                detail = str(check.get("detail") or "")
+                detail = doctor_detail_words(str(check.get("detail") or "")).rstrip()
                 if detail:
-                    rows.append(_hanging_row("  repair: ", detail, width))
+                    rows.append(
+                        _hanging_row(
+                            "  repair: ",
+                            detail,
+                            width,
+                            cont=" " * cell_len("  repair: "),
+                        )
+                    )
         return rows
 
     @staticmethod

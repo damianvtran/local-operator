@@ -28,6 +28,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 for _key in tuple(os.environ):
     if _key.startswith("CMUX_"):
@@ -73,7 +74,7 @@ async def main() -> None:
 
     app_mod.run_session_move = fake_move  # type: ignore[assignment]
 
-    def _no_resume(_id: str | None = None) -> object:
+    def _no_resume(_id: str | None = None) -> Any:
         return _factory(FakeSession())
 
     app = OperatorApp(lambda: _factory(FakeSession()), resume_factory=_no_resume)
