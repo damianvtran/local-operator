@@ -44,7 +44,10 @@ def _consumer_defaults() -> dict[str, object]:
     """
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
-    from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
+    from local_operator.harness.subagent import (
+        DEFAULT_MODEL_CHOICE,
+        DEFAULT_SLIM_CHILD_KNOWLEDGE,
+    )
     from local_operator.hook_forwarding import (
         FORWARD_CLAUDE_DEFAULT,
         FORWARD_CODEX_DEFAULT,
@@ -185,6 +188,10 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
+        # Read at every child build by ``subagent.read_slim_child_knowledge``;
+        # the constant sits beside that reader, not here, so the registry
+        # default and the code default cannot drift.
+        "subagents.slim_child_knowledge": DEFAULT_SLIM_CHILD_KNOWLEDGE,
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
