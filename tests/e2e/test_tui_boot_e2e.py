@@ -215,8 +215,9 @@ class _Terminal:
                 # loaded runner hands this pump the next free fd, which can
                 # sit above that ceiling — where the wait raised
                 # ``ValueError: filedescriptor out of range in select()``
-                # instead of reading the wire (the same class as the
-                # death-witness drains; job 109273492099, run 36523315488).
+                # instead of reading the wire (class identified by the
+                # death-witness reds: job 109273492099, run 36523315488; this
+                # pump's own evidence is the fd-1081 probe).
                 # ``selectors.DefaultSelector`` is epoll on Linux and kqueue on
                 # macOS, neither of which has the limit, and it watches the
                 # same bytes on the same pty.
