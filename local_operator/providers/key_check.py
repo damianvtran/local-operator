@@ -95,6 +95,14 @@ def _request(definition: ProviderDefinition, key: str) -> tuple[str, dict[str, s
         # (measured), so it cannot tell a good key from a bad one. /key is the
         # authenticated read of the key's own metadata.
         return f"{base}/key", {"Authorization": f"Bearer {key}"}
+    if definition.id == "elevenlabs":
+        # The models list is the cheapest authenticated read: measured 2026-09-28,
+        # it is authentication-gated (a bogus key answers 401 "Invalid API key";
+        # no key at all 404s), so a 401 here is a verdict on the key. The key
+        # rides ElevenLabs' own header -- xi-api-key, never Authorization -- and
+        # `/v1/user` exists as an alternative read but drags account metadata
+        # into a check that only needs a yes/no.
+        return f"{base}/models", {"xi-api-key": key}
     return f"{base}/models", {"Authorization": f"Bearer {key}"}
 
 

@@ -166,6 +166,17 @@ class ProviderDefinition:
     #: (``session_factory.resolve_hosting_model_with_source``) and the failover
     #: chain (``providers.failover.expand_fallback_targets``).
     decision_only: bool = False
+    #: This provider serves SPEECH-TO-TEXT, never chat completions.
+    #:
+    #: ElevenLabs is the case this exists for: the row is login-capable ON
+    #: PURPOSE (a bring-your-own key has to be storable for the mobile voice
+    #: path, ``clients/stt.py``) while its wire answers speech-to-text only, so
+    #: a session could never run a turn on it. Same shape as ``decision_only``
+    #: above and enforced at the same doors — every surface that offers or
+    #: resolves a CHAT model asks :func:`is_speech_only` beside
+    #: :func:`is_decision_only`, kept in step by
+    #: ``tests/unit/providers/test_speech_only.py``.
+    speech_only: bool = False
 
     def __post_init__(self) -> None:
         """Adopt the login callable's own paste requirement.
@@ -561,6 +572,23 @@ PROVIDER_REGISTRY: list[ProviderDefinition] = [
         base_url="https://openrouter.ai/api/v1",
     ),
     ProviderDefinition(
+        id="elevenlabs",
+        search_aliases=("eleven",),
+        name="ElevenLabs",
+        env_keys="ELEVENLABS_API_KEY",
+        login=create_api_key_login(
+            "ElevenLabs",
+            "https://elevenlabs.io/app/settings/api-keys",
+            "Paste the API key from your ElevenLabs account settings.",
+        ),
+        base_url="https://api.elevenlabs.io/v1",
+        # SPEECH-ONLY (mobile STT, 2026-09-28). The key is storable so the
+        # phone's voice path can run ``provider_stt_elevenlabs``; the provider
+        # is deliberately absent from every surface that offers or resolves a
+        # CHAT model (`speech_only` above documents the enforcement sites).
+        speech_only=True,
+    ),
+    ProviderDefinition(
         id="radient",
         search_aliases=("radient-oauth",),
         name="Radient",
@@ -790,6 +818,41 @@ def decision_only_message(provider_id: str) -> str:
     """
     return (
         f"Hosting '{provider_id}' serves decision-model calls, not chat completions, "
+        "so no session can run on it."
+    )
+
+
+def is_speech_only(provider_id: str | None) -> bool:
+    """Whether ``provider_id`` serves speech-to-text and never chat completions.
+
+    The sibling of :func:`is_decision_only`, with the same contract: ONE
+    exported predicate (alias-aware, case/padding-normalised, tolerant of
+    ``None``, ``False`` for unknown ids), so every door that skips a
+    decision-only provider skips a speech-only one the same way. The two flags
+    answer the same question for two provider classes, and a site that asks
+    only one of them is how a provider whose wire cannot answer a turn becomes
+    selectable again.
+    """
+    if not provider_id:
+        return False
+    canonical = str(provider_id).strip().lower()
+    definition = get_provider_definition(canonical)
+    return bool(definition is not None and definition.speech_only)
+
+
+def speech_only_message(provider_id: str) -> str:
+    """The ONE sentence for a speech-only provider, refused as a chat hosting.
+
+    Shared by every door that refuses one, for the same reason
+    :func:`decision_only_message` is: the fact must have one spelling, and the
+    sentence stops at the fact so each caller can append the remedy its own
+    surface can offer. Named apart from ``decision_only_message`` because the
+    two providers ARE different things to a reader — one is a classification
+    backend, this one is a voice provider — and collapsing them into one
+    sentence would tell the reader something false about whichever it is not.
+    """
+    return (
+        f"Hosting '{provider_id}' serves speech-to-text, not chat completions, "
         "so no session can run on it."
     )
 

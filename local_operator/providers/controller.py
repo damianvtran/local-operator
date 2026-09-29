@@ -51,6 +51,7 @@ from local_operator.providers.registry import (
     credential_provider_id,
     get_provider_definition,
     is_decision_only,
+    is_speech_only,
     list_login_providers,
     resolve_env_key,
     stored_provider_env_keys,
@@ -275,17 +276,20 @@ class ControllerAuthStore(Protocol):
 def _chat_providers() -> list[ProviderDefinition]:
     """The registry rows that may contribute CHAT models to a catalogue.
 
-    Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev) are
-    dropped HERE, at the one place every catalogue is assembled, rather than
-    inside the three builders below or in each consumer of them. A provider whose
-    wire rejects ``chat/completions`` on every host must not appear as a model
-    the user can pick: selecting one produced a session that could not answer a
-    single turn, which is a dead end the picker cannot explain (see
-    ``ProviderDefinition.decision_only``).
+    Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev) and
+    speech-only ones (``registry.is_speech_only`` — ElevenLabs, whose wire serves
+    speech-to-text and no chat route at all) are dropped HERE, at the one place
+    every catalogue is assembled, rather than inside the three builders below or
+    in each consumer of them. A provider whose wire rejects ``chat/completions``
+    on every host must not appear as a model the user can pick: selecting one
+    produced a session that could not answer a single turn, which is a dead end
+    the picker cannot explain (see ``ProviderDefinition.decision_only`` and
+    ``ProviderDefinition.speech_only``).
 
     It also keeps the LIVE fetch honest: :func:`available_models` would otherwise
-    be asked to list a decision endpoint's models and offer them as chat models,
-    spending a network round trip to build a list that must not be shown.
+    be asked to list a decision endpoint's models — or to list a speech
+    provider's voice models as chat choices — spending a network round trip to
+    build a list that must not be shown.
 
     LOGIN FLAVOURS ARE DROPPED HERE TOO, and this is the ONE place that rule
     lives: a flavour declares ``store_credentials_as`` naming the provider it
@@ -353,7 +357,11 @@ def _chat_providers() -> list[ProviderDefinition]:
     under it": the base and the flavour resolve to ONE credential and therefore ONE
     listing, so the base row already carries every model the flavour row would.
     """
-    chat = [definition for definition in PROVIDER_REGISTRY if not is_decision_only(definition.id)]
+    chat = [
+        definition
+        for definition in PROVIDER_REGISTRY
+        if not is_decision_only(definition.id) and not is_speech_only(definition.id)
+    ]
     ids = {definition.id for definition in chat}
     return [
         definition

@@ -837,6 +837,8 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         decision_only_message,
         get_provider_definition,
         is_decision_only,
+        is_speech_only,
+        speech_only_message,
     )
 
     # NORMALISED before anything looks it up, and that is the guard's other half
@@ -847,7 +849,7 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
     # ``config.yml`` is just as easy. Stripping too, because " deepseek" is the same
     # provider as "deepseek" to a human and was a lookup miss to the harness.
     canonical = "test" if hosting.strip().lower() == "noop" else hosting.strip().lower()
-    if is_decision_only(canonical):
+    if is_decision_only(canonical) or is_speech_only(canonical):
         # THE LAST DOOR, and the one a running session reaches: this function is the
         # single chokepoint every surface that can put a model on a LIVE session
         # builds its spec through — the TUI's ``/model`` (``_cmd_model``), the
@@ -856,16 +858,22 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # spec IS what the next request carries. Refusing here rather than three
         # times over is the same argument the catalogue, the ranking, the resolver
         # and the failover chain already follow: one predicate, at the boundary the
-        # value crosses.
+        # value crosses. Both non-chat classes land here — a decision model like
+        # TypeSafe's Jev and a speech-only provider like ElevenLabs — and the
+        # sentence is picked from the registry so the fact has one wording.
         #
         # Not a picker concern, which is why the catalogue's own filter cannot stand
         # in for it: ``/model <provider>/<id>`` is the documented escape hatch PAST
         # the pickers, and ``ProviderController.provider('typesafe')`` answers with
         # the real definition (it is a shipped provider with a shipped login), so
         # the TUI's unknown-provider gate waves it through.
+        fact = (
+            speech_only_message(canonical)
+            if is_speech_only(canonical)
+            else decision_only_message(canonical)
+        )
         raise ValueError(
-            f"{decision_only_message(canonical)} Pick a chat model instead — the "
-            "session stays on the one it is running."
+            f"{fact} Pick a chat model instead — the " "session stays on the one it is running."
         )
     from local_operator.providers.local import LOCAL_PROVIDER_IDS, local_model_spec
 
@@ -1278,8 +1286,10 @@ def validate_model_selection(
 
     * the provider is known (``get_provider_definition``, which resolves the
       registry's legacy aliases);
-    * it is not decision-only — such a provider 400s every chat completion, and
-      ``offered_model_ids`` cannot catch it (it answers ``None`` for it);
+    * it can serve a chat turn at all: not decision-only (such a provider 400s
+      every chat completion, and ``offered_model_ids`` cannot catch it — it
+      answers ``None`` for it) and not speech-only (ElevenLabs serves
+      speech-to-text and no chat route);
     * the catalogue offers the model — ``None`` means "cannot enumerate offline"
       (an aggregator, a local endpoint) and is ACCEPTED, because "we have not
       looked" is not "it does not exist";
@@ -1298,6 +1308,7 @@ def validate_model_selection(
     from local_operator.providers.registry import (
         get_provider_definition,
         is_decision_only,
+        is_speech_only,
     )
 
     if get_provider_definition(provider) is None:
@@ -1307,6 +1318,14 @@ def validate_model_selection(
             "provider_decision_only",
             (
                 f"'{provider}' serves decision-model calls, not chat completions, "
+                "so no session can run on it."
+            ),
+        )
+    if is_speech_only(provider):
+        raise ModelSelectionRefused(
+            "provider_speech_only",
+            (
+                f"'{provider}' serves speech-to-text, not chat completions, "
                 "so no session can run on it."
             ),
         )
