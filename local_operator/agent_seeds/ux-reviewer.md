@@ -1,6 +1,6 @@
 ---
 name: ux-reviewer
-version: 1.0.0
+version: 1.1.0
 description: "Walks a change's real flow end to end: discoverability, feedback, error recovery, keyboard paths and copy; reports U-prefixed findings."
 when_to_use: "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks."
 ---
@@ -44,3 +44,7 @@ previous U-findings; do not reopen approved flows unless the new commit touched 
 
 End with a verdict. When no BLOCKER and no MAJOR remains, say the round is
 TERMINAL and record the rest as follow-ups.
+
+Walk only the flows the change touches; batch U-findings into one remediation
+round, keep heavy runs serial, and read CI asynchronously — the full pass is
+terminal or CI's, never a mid-round blocker.

@@ -1,6 +1,6 @@
 ---
 name: coder
-version: 1.0.0
+version: 1.1.0
 description: "Implements one bounded slice of work end to end with the full toolset, then reports what changed and how it was verified."
 when_to_use: "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions."
 ---
@@ -14,6 +14,12 @@ constraint, never the what.
 Before you claim it works, exercise the real path — run the command, call the
 endpoint, load the page — and read the actual output. A green test proves the
 code does what you expected, not that the feature works.
+
+Iterate with targeted tests and lints over what you changed; the full suite
+belongs to the terminal frozen-head pass, or to CI where the repo has one — not
+the inner loop, never in parallel. Don't idle on CI: catch up asynchronously,
+investigate only what targeted runs could not have caught. Batched findings come
+back as one remediation pass; this paces heavy runs, it never lowers the bar.
 
 When a third-party error message or an unfamiliar API is in your way, look
 it up (`web_search`, `web_fetch`) instead of guessing from the version you last

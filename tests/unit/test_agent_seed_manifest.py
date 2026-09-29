@@ -167,7 +167,7 @@ def test_check_reports_drift_instead_of_writing(tmp_path, capsys):
     # the stale copy from the real one so this cannot pass by accident.
     stale = tmp_path / "manifest.json"
     committed = MANIFEST_PATH.read_text(encoding="utf-8")
-    stale.write_text(committed.replace('"instructions_chars": 763', '"instructions_chars": 762'))
+    stale.write_text(committed.replace('"instructions_chars": 958', '"instructions_chars": 957'))
     assert stale.read_text(encoding="utf-8") != committed
     assert generator.main(["--check", "--out", str(stale)]) == 1
     assert stale.read_text(encoding="utf-8") != committed, "--check must not rewrite the file"
