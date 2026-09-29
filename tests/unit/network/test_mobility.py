@@ -608,7 +608,7 @@ def test_a_mid_turn_second_offload_refuses_instead_of_faking_success(
 
     sentence = (
         "this session is working right now, so nothing was moved; try again when the "
-        "turn finishes, or pass --wait <seconds> to re-check"
+        "turn finishes; from a shell, pass --wait <seconds> to re-check"
     )
     monkeypatch.setattr(
         mobility,
