@@ -795,6 +795,32 @@ def _fullscreen_app_owns_terminal() -> bool:
     return active_app.get(None) is not None
 
 
+def _approval_mode_is_auto(config_manager: Any) -> bool:
+    """Whether the operator's saved default approves unattended runs.
+
+    ``tool_approval_mode: auto`` is the standing instruction that a run with
+    nobody to ask must not park or deny on an approval prompt — the same
+    semantic ``--yolo`` carries for a single run. The key is already read by
+    ``spawn_owned_session`` and ``exec_control.start_exec_control`` to seed the
+    gates of the runs THEY supervise ("same key, same default, same
+    degrade-to-ask"); the gate built HERE — the one a headless ``lop exec`` run
+    decides on when no front end has installed an approval handler — never read
+    it, so an operator whose config said auto still had every write/exec call
+    refused with "run with --yolo to auto-approve" (the 2026-09-28 incident's
+    addendum). Reading it at this ONE seam keeps the gate and every posture
+    readout equal by construction: there is no separate handle to report a
+    value the deciding gate ignores.
+
+    Degrades to ``ask`` — never a crash, and never an implicit approval: a
+    missing or odd config must fail toward asking, not toward approving.
+    """
+    try:
+        stored = config_manager.get_config_value("tool_approval_mode", "ask")
+    except Exception:  # noqa: BLE001 — a missing/odd config means "ask", never a crash
+        return False
+    return str(stored).strip().lower() == "auto"
+
+
 def _make_request_approval(yolo: bool) -> Callable[[str, str], Awaitable[bool]]:
     """Build the tool-approval gate.
 
@@ -3891,7 +3917,16 @@ async def _prepare(
     for warning in knowledge_warnings:
         print(f"\033[1;33mWarning: {warning}\033[0m", file=sys.stderr)
 
-    request_approval = _make_request_approval(yolo)
+    # THE HEADLESS GATE HONOURS THE OPERATOR'S SAVED DEFAULT. ``--yolo`` still
+    # wins for one run (and pins, downstream); without it,
+    # ``tool_approval_mode: auto`` — the key whose default comment has always
+    # described exactly this gate ("a ``lop exec`` running in CI") — now
+    # reaches the gate this run decides on. Built from the flag ALONE before
+    # this, a config that said auto still refused every write/exec call of an
+    # exec-launched headless session (the 2026-09-28 incident's addendum), and
+    # the posture surfaces had to carve an exception around a gate that ignored
+    # the file they report against.
+    request_approval = _make_request_approval(yolo or _approval_mode_is_auto(config_manager))
     # The variables surface behind list_variables/read_variable: config
     # overrides ride above the project file and process environment, and
     # values stay out of the system prompt (read on demand, not baked).
