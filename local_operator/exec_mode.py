@@ -855,13 +855,13 @@ def _saved_auto_approval() -> bool:
     the launch path's own preflight; that residual is stated, not hidden.
     """
     try:
+        from local_operator.config import CONFIG_FILE_NAME, ConfigManager
         from local_operator.paths import config_dir
+        from local_operator.session_factory import _approval_mode_is_auto
 
         root = config_dir()
-        if not (root / "config.yml").is_file():
+        if not (root / CONFIG_FILE_NAME).is_file():
             return False
-        from local_operator.config import ConfigManager
-        from local_operator.session_factory import _approval_mode_is_auto
 
         return _approval_mode_is_auto(ConfigManager(root))
     except Exception:  # noqa: BLE001 — keep the advisory ON when unsure

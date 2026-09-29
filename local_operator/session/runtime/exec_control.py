@@ -233,8 +233,10 @@ async def start_exec_control(
 
     loop = asyncio.get_running_loop()
     config_directory = config_dir()
-    # THE GATE'S BOOT VALUE, read at t0 rather than left to the watcher — and
-    # read only when this handle owns gates (``supervised``).
+    # THE GATE'S BOOT VALUE, read at t0 rather than left to the watcher — read
+    # for BOTH seats since the 2026-09-28 addendum: a supervised run (whose
+    # gates then keep following the file) and an unsupervised run (whose
+    # decisions come from the same key at the original gate's construction).
     #
     # ``attach_gate_config_watch`` (below) subscribes the handle to FUTURE
     # ``tool_approval_mode`` changes only — ``ConfigWatcher._prime`` does not
@@ -255,8 +257,7 @@ async def start_exec_control(
     # now reads the key at its own construction
     # (``session_factory._approval_mode_is_auto``), so the identical hazard
     # exists in the OPPOSITE direction if this handle keeps the flag's value —
-    # the report would say ask while the decisions auto-approve. One read,
-    # mirrored at both seats, keeps gate and posture equal by construction.
+    # the report would say ask while the decisions auto-approve.
     # Unsupervised still differs where it always did: no gates installed, no
     # config watcher, so its value is a one-shot read rather than a follower.
     # One read, mirrored at both seats, keeps gate and posture equal — except
@@ -286,9 +287,9 @@ async def start_exec_control(
         # ``--yolo`` wins both ways: it approves inline (``auto_approve``) and,
         # being an explicit flag on this run rather than a file value, it pins
         # (``approval_pinned``) — so a later config edit cannot re-arm a gate
-        # the flag disabled. Without it a SUPERVISED run's boot value comes
-        # from the file and keeps following it; an unsupervised run's value is
-        # the flag's own (see above).
+        # the flag disabled. Without it both seats take the same file read:
+        # a SUPERVISED run keeps following the file through the watcher; an
+        # unsupervised run's value is that one-shot read (see above).
         auto_approve=auto_approve,
         approval_pinned=yolo,
         install_gates=supervised,
