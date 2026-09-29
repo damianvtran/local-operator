@@ -1,14 +1,42 @@
-# Forwarded Claude Code / Codex hooks
+# Hooks
 
-lop can run the hooks you already configured for Claude Code and Codex. It
-does not have a hook format of its own. It reads the same files, sends the same
-stdin payload, and honours the same output contract, so a script written for
-either tool behaves the same in a lop session.
+lop can run hooks from two kinds of source: its own file, and the hooks you
+already configured for Claude Code and Codex. They share one contract — the
+same stdin payload, the same output handling, and the same execution rules — so
+a script written for either tool behaves the same when lop runs it.
 
-## Turning it on
+## Native hooks
 
-Both sources are off by default. Enable them in `/settings` → "Forwarded
-hooks", or in `config.yml`:
+lop's own hooks live in `hooks.json` inside its config directory
+(`~/.local-operator/hooks.json`, or `$LOCAL_OPERATOR_CONFIG_DIR/hooks.json` when
+that is set) and use Claude's schema:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "~/.local/bin/my-hook", "timeout": 30}]
+      }
+    ]
+  }
+}
+```
+
+Native hooks are off by default. Turn them on in `/settings` → "Hooks" →
+"Native hooks", or with `hooks.native: true` in `config.yml` (`lop config edit
+hooks.native true`). The switch is read on every tool call, so a change applies
+from the next call. An absent file runs nothing, a malformed one is logged and
+runs nothing, and `disableAllHooks: true` in the file switches its hooks off.
+
+## Forwarded hooks (Claude Code and Codex)
+
+The hooks you already configured for either tool run under lop unchanged:
+Claude Code's `~/.claude/settings.json`, a project's
+`.claude/settings{,.local}.json` and the enabled plugins' `hooks/hooks.json`,
+and Codex's `~/.codex/hooks.json`. They are off by default — enable them in
+`/settings` → "Hooks", or in `config.yml`:
 
 ```yaml
 hooks:
@@ -19,7 +47,17 @@ hooks:
 Both keys are read on every tool call, so a change applies from the next call.
 `disableAllHooks: true` in a Claude settings file is honoured too.
 
-## What is supported
+### Codex scope
+
+Only `~/.codex/hooks.json` is read. Codex also accepts hooks inline as a
+`[hooks]` table in `~/.codex/config.toml` and in project `.codex/` files, and
+it requires review/trust of each non-managed hook before running it — neither
+is implemented here, and an enabled hook runs with no trust gate. Codex has no
+`PostToolUseFailure` event (its `PostToolUse` fires on failures too), so lop
+routes a failed call to `PostToolUseFailure`, and a Codex hook written to see
+failures on `PostToolUse` will not be given them.
+
+## Shared rules
 
 - **Events:** `PostToolUse` (the tool succeeded) and `PostToolUseFailure` (the
   tool returned an error).
@@ -53,22 +91,16 @@ Both keys are read on every tool call, so a change applies from the next call.
 - **Failures never break a turn:** an unreadable file, a crash, a timeout or
   garbage output is logged, and the tool result goes back unchanged.
 
-### Codex scope
-
-Only `~/.codex/hooks.json` is read. Codex also accepts hooks inline as a
-`[hooks]` table in `~/.codex/config.toml` and in project `.codex/` files, and
-it requires review/trust of each non-managed hook before running it — neither
-is implemented here, and an enabled hook runs with no trust gate. Codex has no
-`PostToolUseFailure` event (its `PostToolUse` fires on failures too), so lop
-routes a failed call to `PostToolUseFailure`, and a Codex hook written to see
-failures on `PostToolUse` will not be given them.
+Native and forwarded sources run independently — there is no cross-source
+dedupe, so a command listed in both `hooks.json` and a forwarded settings file
+runs once per source.
 
 ## Not supported yet
 
 `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Stop`,
-`SubagentStart`/`SubagentStop` and the remaining events. The same applies to
-`http`, `prompt`, `agent` and `mcp_tool` hook types, `updatedToolOutput`, and
-`async` hooks.
+`SubagentStart`/`SubagentStop` and the remaining events — for native and
+forwarded hooks alike. The same applies to `http`, `prompt`, `agent` and
+`mcp_tool` hook types, `updatedToolOutput`, and `async` hooks.
 
 ## Known caveat
 

@@ -1,15 +1,17 @@
-"""Forwarded Claude Code / Codex PostToolUse hooks (``local_operator.hook_forwarding``).
+"""lop's hooks — native and forwarded (``local_operator.hook_forwarding``).
 
 The claim is "a hook written for Claude Code behaves the same under lop", so the
 end-to-end cases run a copy of a real operator hook (``fixtures/hooks/
 pr-opened-fix-reviews.sh``) through the REAL ``AgentLoop`` and assert on what
-the NEXT model request carries.
+the NEXT model request carries — once through the ``hooks.json`` source and
+once through ``~/.claude``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import time
@@ -39,12 +41,21 @@ MODEL = ModelSpec(provider="test", model_id="m")
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """An isolated home with both sources switched on."""
+    """An isolated home with both forwarded sources switched on."""
     monkeypatch.setattr(hf, "forwarding_enabled", lambda: (True, True))
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".codex").mkdir(parents=True)
     return home
+
+
+@pytest.fixture
+def config_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An isolated config directory for the native ``hooks.json``."""
+    root = tmp_path / "config"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    return root
 
 
 def _settings(path: Path, hooks: dict[str, Any], **extra: Any) -> None:
@@ -60,6 +71,13 @@ def _cmd(command: str, matcher: str | None = None, timeout: float | None = None)
     if matcher is not None:
         group["matcher"] = matcher
     return group
+
+
+def _native_switch(root: Path, on: bool) -> None:
+    """Write ``hooks.native`` through the app's own store (settings live under ``values:``)."""
+    from local_operator.config import ConfigManager
+
+    ConfigManager(root).set_config_value("hooks", {"native": on})
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +173,86 @@ def test_a_settings_file_reached_twice_is_loaded_once(home: Path, tmp_path: Path
 
 
 # ---------------------------------------------------------------------------
+# Native source (config_dir()/hooks.json)
+# ---------------------------------------------------------------------------
+
+
+def test_native_absent_or_malformed_file_is_a_noop(config_root: Path) -> None:
+    assert hf.load_native_commands() == []
+    (config_root / "hooks.json").write_text("{not json")
+    assert hf.load_native_commands() == []
+
+
+def test_native_hookless_file_warns_instead_of_silently_loading_nothing(
+    config_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Every present-but-unusable shape warns — including the empty and
+    non-object forms (``[]``, ``{}``, a scalar) QA round 2 found silent."""
+    for raw in ("[]", "{}", '"x"', '{"hooks": []}', '{"PostToolUse": []}'):
+        (config_root / "hooks.json").write_text(raw)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert hf.load_native_commands() == []
+        assert "has no top-level 'hooks' mapping" in caplog.text, raw
+
+
+def test_native_usable_disabled_or_absent_shapes_stay_silent(
+    config_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A usable file, an explicitly disabled one, and a missing file make no noise."""
+    _settings(config_root / "hooks.json", {"PostToolUse": [_cmd("x")]})
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert [h.command for h in hf.load_native_commands()] == ["x"]
+    assert caplog.text == ""
+
+    (config_root / "hooks.json").write_text('{"disableAllHooks": true}')
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert hf.load_native_commands() == []
+    assert caplog.text == ""
+
+    (config_root / "hooks.json").unlink()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert hf.load_native_commands() == []
+    assert caplog.text == ""
+
+
+def test_native_loader_reads_timeout_defaults_and_matchers(config_root: Path) -> None:
+    _settings(
+        config_root / "hooks.json",
+        {"PostToolUse": [_cmd("a"), _cmd("b", matcher="Bash", timeout=7)]},
+    )
+    hooks = hf.load_native_commands()
+    assert [(h.source, h.command, h.matcher, h.timeout_s) for h in hooks] == [
+        ("native", "a", None, 600.0),
+        ("native", "b", "Bash", 7.0),
+    ]
+
+
+def test_native_disable_all_hooks_switches_the_file_off(config_root: Path) -> None:
+    _settings(config_root / "hooks.json", {"PostToolUse": [_cmd("x")]}, disableAllHooks=True)
+    assert hf.load_native_commands() == []
+
+
+def test_native_and_claude_loaders_parse_the_same_document(
+    config_root: Path, home: Path, tmp_path: Path
+) -> None:
+    """Schema parity: the native file IS Claude's schema — one parser, two loaders."""
+    doc = {"PostToolUse": [_cmd("same", "Bash", timeout=3)]}
+    _settings(config_root / "hooks.json", doc)
+    _settings(home / ".claude" / "settings.json", doc)
+    native = hf.load_native_commands()
+    forwarded = hf.load_hook_commands(str(tmp_path), claude=True, codex=False, home=home)
+
+    def fields(cs: list[hf.HookCommand]) -> list[tuple[str, str | None, str, float]]:
+        return [(h.event, h.matcher, h.command, h.timeout_s) for h in cs]
+
+    assert fields(native) == fields(forwarded) and len(native) == 1
+
+
+# ---------------------------------------------------------------------------
 # Matchers and tool-name mapping
 # ---------------------------------------------------------------------------
 
@@ -245,7 +343,7 @@ async def test_alias_matchers_fire_for_the_same_call(
 
     async def call(tool: str, args: dict[str, Any]) -> None:
         seen.clear()
-        await hf.forward_post_tool(
+        await hf.run_post_tool_hooks(
             identity,
             tool_name=tool,
             args=args,
@@ -273,6 +371,36 @@ async def test_alias_matchers_fire_for_the_same_call(
     assert sorted(seen) == ["ap", "editmatcher"]
     await call("task", {"description": "d", "prompt": "p"})
     assert seen == ["taskold"]
+
+
+@pytest.mark.asyncio
+async def test_native_and_forwarded_notes_merge_with_native_first(
+    config_root: Path, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both sources on: native entries are requested before forwarded ones."""
+    monkeypatch.setattr(hf, "forwarding_enabled", lambda: (True, False))
+    monkeypatch.setattr(hf, "native_hooks_enabled", lambda: True)
+    _settings(config_root / "hooks.json", {"PostToolUse": [_cmd("native-cmd")]})
+    _settings(home / ".claude" / "settings.json", {"PostToolUse": [_cmd("claude-cmd")]})
+    seen: list[str] = []
+
+    async def fake_run(hook: hf.HookCommand, payload: Any, cwd: str) -> hf.HookRun:
+        seen.append(hook.command)
+        return hf.HookRun(exit_code=0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf, "run_hook", fake_run)
+    notes = await hf.run_post_tool_hooks(
+        hf.HookIdentity(session_id="s", cwd=str(tmp_path)),
+        tool_name="bash",
+        args={"command": "x"},
+        tool_use_id="c",
+        output="",
+        is_error=False,
+        duration_s=None,
+        home=home,
+    )
+    assert seen == ["native-cmd", "claude-cmd"]
+    assert notes == []
 
 
 def test_payload_carries_agent_fields_only_for_subagents(tmp_path: Path) -> None:
@@ -407,7 +535,7 @@ async def _turn(home: Path, cwd: Path, command: str, identity: hf.HookIdentity) 
     """Run one bash call through AgentLoop; return the tool result the NEXT request carried."""
 
     async def post_tool_hooks(name, args, call_id, result):
-        return await hf.forward_post_tool(
+        return await hf.run_post_tool_hooks(
             identity,
             tool_name=name,
             args=args,
@@ -474,16 +602,50 @@ async def test_real_pr_hook_reaches_the_next_model_request(home: Path, tmp_path:
     assert needle not in await _turn(home, tmp_path, "git status", main)
 
 
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the operator's hook needs jq")
 @pytest.mark.asyncio
-async def test_forwarding_off_runs_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(hf, "forwarding_enabled", lambda: (False, False))
+async def test_native_hook_reaches_the_next_model_request(
+    config_root: Path, tmp_path: Path
+) -> None:
+    """The native twin: hooks.json entry, real config read, real AgentLoop."""
+    _native_switch(config_root, True)
+    _settings(config_root / "hooks.json", {"PostToolUse": [_cmd(str(FIXTURE), "Bash")]})
+    main = hf.HookIdentity(session_id="s", cwd=str(tmp_path))
+    needle = "Invoke the fix-pr-reviews skill"
+
+    opened = await _turn(tmp_path / "home", tmp_path, "gh pr create --title t --body b", main)
+    assert needle in opened and "hook-context" in opened
+    # Same script, same filter: an unrelated command yields no note.
+    assert needle not in await _turn(tmp_path / "home", tmp_path, "git status", main)
+
+
+@pytest.mark.asyncio
+async def test_native_switch_off_runs_nothing_through_the_loop(
+    config_root: Path, tmp_path: Path
+) -> None:
+    """Double opt-in: the file present but ``hooks.native`` off must run nothing."""
+    _native_switch(config_root, False)
     marker = tmp_path / "ran"
+    _settings(config_root / "hooks.json", {"PostToolUse": [_cmd(f"echo ran > {marker}")]})
+    main = hf.HookIdentity(session_id="s", cwd=str(tmp_path))
+
+    await _turn(tmp_path / "home", tmp_path, "git status", main)
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_all_sources_off_runs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hf, "forwarding_enabled", lambda: (False, False))
+    monkeypatch.setattr(hf, "native_hooks_enabled", lambda: False)
 
     def boom(*_a: Any, **_k: Any) -> Any:
         raise AssertionError("loaded config while off")
 
     monkeypatch.setattr(hf, "load_hook_commands", boom)
-    notes = await hf.forward_post_tool(
+    monkeypatch.setattr(hf, "load_native_commands", boom)
+    notes = await hf.run_post_tool_hooks(
         hf.HookIdentity(session_id="s", cwd=str(tmp_path)),
         tool_name="bash",
         args={"command": "x"},
@@ -492,7 +654,7 @@ async def test_forwarding_off_runs_nothing(tmp_path: Path, monkeypatch: pytest.M
         is_error=False,
         duration_s=None,
     )
-    assert notes == [] and not marker.exists()
+    assert notes == []
 
 
 @pytest.mark.asyncio
