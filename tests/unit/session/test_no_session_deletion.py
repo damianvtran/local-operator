@@ -2089,6 +2089,33 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.rmdir",
         "the <config>/monitors/state/<session_id> dir AFTER its own files",
     ),
+    # -- evaluation record sink (the session-arm record's durability layer) --
+    # Every path in these FOUR is built from the record root the caller hands
+    # ``RecordSink``: ``<record root>/events.jsonl``, ``<record root>/seal.reserve``
+    # (the pre-allocated seal margin), and the same-directory ``.tmp`` of a seal
+    # artifact under that root. No session id, no config dir, no enumeration:
+    # none of them can name a path under ``sessions/``. The one ``os.unlink``
+    # is the syscall SEAM itself, not a second removal site.
+    (
+        "local_operator/evaluation/record_sink.py::_SinkCalls.unlink",
+        "os.unlink",
+        "The syscall seam for the reserve unlink; path is <record root>/seal.reserve",
+    ),
+    (
+        "local_operator/evaluation/record_sink.py::RecordSink._write_artifact",
+        "<path>.replace",
+        "Atomic replace of a seal artifact under the record root; both paths record-root-derived",
+    ),
+    (
+        "local_operator/evaluation/record_sink.py::RecordSink._write_artifact",
+        "<path>.unlink",
+        "Clears this call's own same-directory .tmp, on the error path only",
+    ),
+    (
+        "local_operator/evaluation/record_sink.py::RecordSink.__init__",
+        "<path>.unlink",
+        "Clears a half-written seal.reserve under the record root before refusing",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
