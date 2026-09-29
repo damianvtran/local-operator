@@ -1889,6 +1889,206 @@ async def _build_child_session(
     return child
 
 
+# ---------------------------------------------------------------------------
+# Child knowledge tail: the config gate and the slimmer
+# ---------------------------------------------------------------------------
+#
+# A child inherits a bounded copy of the parent's selected knowledge (the
+# parent's ``frozen_block``). On this fleet children carry the large majority
+# of context tokens, and the inherited copy ships notable furniture twice
+# over: a ``<mcps>`` catalogue of its own next to the parent's, and any
+# ``<resource_recommendations>`` block that was delivered for the PARENT's
+# message. The reductions below cut that furniture while keeping every
+# guide/skill NAME: the discoverability contract is that a child which sees a
+# name can ``read`` its full text, and a name it never sees is one it cannot
+# ask for.
+
+#: Whether a child's inherited knowledge tail is slimmed before it rides the
+#: child's system prompt (``subagents.slim_child_knowledge``). ON by default:
+#: what the slimmer removes is either the parent's business (its
+#: recommendations), a duplicate of something the child renders itself (its
+#: catalogue), or available on demand (full descriptions).
+DEFAULT_SLIM_CHILD_KNOWLEDGE = True
+
+#: The parent's knowledge block, as ``session_factory._select_knowledge_block``
+#: composes it, is a ``"\n\n"``-joined stack of sections: the skills render
+#: (``<guides>``/``<skills>`` line listings), the query-situational ``<mcps>``
+#: catalogue, then a ``<resource_recommendations>`` block per classification
+#: answer. These markers are that composition's furniture; the slimmer only
+#: ever strips exactly-marked sections, and a test pins the markers against
+#: the producer so a rename cannot silently turn a strip into a no-op.
+_RECOMMENDATIONS_OPEN = "<resource_recommendations>"
+_RECOMMENDATIONS_CLOSE = "</resource_recommendations>"
+_MCP_CATALOGUE_OPEN = "<mcps>"
+_MCP_CATALOGUE_CLOSE = "</mcps>"
+
+#: Marker pairs whose ``- name: description`` bullet lines are capped for a
+#: child (see :func:`_cap_listing_descriptions`). Only these sections are
+#: touched: the imperative paragraphs above the listings carry the
+#: read-before-acting rule and must survive byte-identical.
+_LISTING_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("<guides>", "</guides>"),
+    ("<skills>", "</skills>"),
+)
+
+#: Hard bound on the inherited block, unchanged from before the slimmer: the
+#: child tail is re-sent on every call, so a huge parent directory must not
+#: grow the child's prompt without limit. Applied AFTER the slimming, so the
+#: budget is spent on NAMES rather than on the furniture already removed.
+_CHILD_KNOWLEDGE_MAX_CHARS = 12_000
+
+#: Per-line description cap for the guides/skills listings. Descriptions exist
+#: to help a model recognise which resource it wants; past this the line is
+#: clipped, and the full text (plus every reference file) stays one
+#: ``skill://``/``guide://`` read away.
+_CHILD_KNOWLEDGE_MAX_DESCRIPTION_CHARS = 160
+
+
+def read_slim_child_knowledge() -> bool:
+    """``subagents.slim_child_knowledge``: slim the inherited tail?
+
+    Read at every child BUILD rather than once per process, like
+    ``subagents.models``: a running child's tail is frozen at construction, so
+    the next delegation is the first moment an operator's edit can take effect
+    — and it should.
+
+    Never raises, and every unrecognised shape (absent, blank, a typo, or a
+    string YAML never coerced) resolves to :data:`DEFAULT_SLIM_CHILD_KNOWLEDGE`:
+    a corrupt ``config.yml`` must not cost a child its prompt, and the default
+    is the behaviour this key ships as.
+    """
+    from local_operator.config import ConfigManager
+
+    try:
+        raw = ConfigManager(config_dir()).get_config_value("subagents", None)
+    except Exception:  # noqa: BLE001 — a child build must never fail on a config read
+        return DEFAULT_SLIM_CHILD_KNOWLEDGE
+    stored = raw.get("slim_child_knowledge") if isinstance(raw, dict) else None
+    if stored is None:
+        return DEFAULT_SLIM_CHILD_KNOWLEDGE
+    return _strict_bool(stored, DEFAULT_SLIM_CHILD_KNOWLEDGE)
+
+
+def _strict_bool(value: object, default: bool) -> bool:
+    """A REAL boolean or ``default`` — never ``bool(value)``.
+
+    Deliberately the same reading as ``settings_io.strict_bool``, which the
+    settings page reads through and every other consumer imports: a
+    hand-edited ``"false"`` is a non-empty string, and ``bool("false")`` is
+    ``True`` — the page would paint ``off`` for a child that still slims.
+
+    The spelling table is duplicated here ON PURPOSE: this module lives in one
+    of the agent-facing trees ``tests/unit/test_approval_source_boundary.py``
+    pins against reaching ``settings_io`` at all (a function-local import is
+    still a reach — the pin is on the IMPORT), because an agent-reachable
+    module holding the facade could attribute its own write as ``"local"``.
+    ``test_subagent_child_knowledge.py`` walks the two tables against each
+    other, so a change to either spelling set fails a test instead of
+    silently moving these readers apart (the ``resume.py`` title-type shape).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "yes", "on", "1"):
+            return True
+        if lowered in ("false", "no", "off", "0"):
+            return False
+    return default
+
+
+def _slim_child_knowledge(knowledge: str, *, drop_catalogue: bool) -> str:
+    """Slim a parent knowledge block for a child's system prompt.
+
+    Each reduction is safe alone, and all three share one contract — what
+    leaves is content the child does not lose access to:
+
+    (a) The ``<resource_recommendations>`` block was advisory for the PARENT's
+        message and deduped against the parent's own context; it was never
+        selected for the child's task.
+    (b) A ``<mcps>`` catalogue is inherited whenever MCP is configured, and
+        the child composes its own against its task prompt; keeping both told
+        the model the same protocol twice. Stripped only when
+        ``drop_catalogue`` — i.e. when the child HAS a catalogue to stand in
+        its place; with none, the inherited copy is the child's only MCP hint.
+    (c) Listing descriptions past the cap are clipped per line; names are
+        never touched.
+    """
+    text = _strip_marked_sections(knowledge, _RECOMMENDATIONS_OPEN, _RECOMMENDATIONS_CLOSE)
+    if drop_catalogue:
+        text = _strip_marked_sections(text, _MCP_CATALOGUE_OPEN, _MCP_CATALOGUE_CLOSE)
+    return _cap_listing_descriptions(text)
+
+
+def _strip_marked_sections(text: str, open_marker: str, close_marker: str) -> str:
+    """Remove every ``open … close`` section, collapsing the seam.
+
+    Sections are joined with ``"\n\n"`` by the producer, so dropping one must
+    leave exactly one separator where two sections now meet and no dangling
+    blank line at either end — otherwise every strip would grow the block it
+    was meant to shrink. A marker whose close cannot be found is left alone:
+    deleting from an unbounded marker would eat the rest of the block.
+    """
+    search_from = 0
+    while True:
+        start = text.find(open_marker, search_from)
+        if start == -1:
+            return text
+        close = text.find(close_marker, start + len(open_marker))
+        if close == -1:
+            return text
+        head = text[:start].rstrip("\n")
+        tail = text[close + len(close_marker) :].lstrip("\n")
+        text = f"{head}\n\n{tail}" if head and tail else head + tail
+        search_from = len(head)
+
+
+def _cap_listing_descriptions(text: str) -> str:
+    """Clip ``- name: description`` bullets inside the guides/skills listings.
+
+    Only the bullet lines INSIDE ``<guides>``/``</guides>`` and
+    ``<skills>``/``</skills>`` are touched; the section imperatives, the
+    ``<mcps>`` catalogue and any other prose pass through byte-identical, and
+    the NAME (everything before the first ``": "``) is never shortened
+    because it is the key a follow-up ``read`` needs.
+    """
+    for open_marker, close_marker in _LISTING_SECTIONS:
+        search_from = 0
+        while True:
+            start = text.find(open_marker, search_from)
+            if start == -1:
+                break
+            close = text.find(close_marker, start + len(open_marker))
+            if close == -1:
+                break
+            inner_start = start + len(open_marker)
+            capped = "\n".join(
+                _cap_listing_line(line) for line in text[inner_start:close].split("\n")
+            )
+            text = f"{text[:inner_start]}{capped}{text[close:]}"
+            search_from = inner_start + len(capped)
+    return text
+
+
+def _cap_listing_line(line: str) -> str:
+    """One listing bullet, with its description clipped at the cap.
+
+    Non-bullet lines and bullets without a ``": "`` separator are returned
+    verbatim: the shapes here come from ``skills/index.render_block``, and a
+    line this function cannot classify must not be edited into something the
+    child reads differently.
+    """
+    if not line.startswith("- "):
+        return line
+    name, sep, description = line[2:].partition(": ")
+    if not sep or len(description) <= _CHILD_KNOWLEDGE_MAX_DESCRIPTION_CHARS:
+        return line
+    clipped = description[: _CHILD_KNOWLEDGE_MAX_DESCRIPTION_CHARS - 1].rstrip()
+    return f"- {name}: {clipped}…"
+
+
 async def _construct_child_session(
     *,
     label: str,
@@ -2155,8 +2355,14 @@ async def _construct_child_session(
         # better than an empty one. Same bound as before, applied to the block we
         # actually ship.
         knowledge = getattr(parent_hooks, "superseded_block", "") or ""
-    if len(knowledge) > 12000:
-        knowledge = knowledge[:12000].rsplit("\n", 1)[0]
+    # Slim BEFORE the size bound below, so the bound's budget is spent on names
+    # rather than on furniture already removed. The gate exists for the accuracy
+    # case: an operator can hand children the parent's block verbatim when a
+    # task genuinely needs the full descriptions (``subagents.slim_child_knowledge``).
+    if read_slim_child_knowledge():
+        knowledge = _slim_child_knowledge(knowledge, drop_catalogue=mcp is not None)
+    if len(knowledge) > _CHILD_KNOWLEDGE_MAX_CHARS:
+        knowledge = knowledge[:_CHILD_KNOWLEDGE_MAX_CHARS].rsplit("\n", 1)[0]
 
     # Same construction-time freeze as the session provider's: this child's block 0
     # also starts a persisted prefix epoch when it changes, and this host probe
