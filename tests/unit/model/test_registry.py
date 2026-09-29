@@ -443,6 +443,7 @@ def test_sonnet_5_5_ships_the_window_the_overview_table_reports() -> None:
     row = anthropic_models["claude-sonnet-5-5"]
     assert (row.context_window, row.max_tokens) == (1_000_000, 128_000)
     assert row.supports_images is True
+    assert row.supports_prompt_cache is True
 
 
 @pytest.mark.parametrize(
