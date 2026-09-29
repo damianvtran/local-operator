@@ -304,6 +304,50 @@ async def test_the_daemon_stamp_wins_and_plain_sends_keep_the_client_value(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_both_doors_fork_the_sidecar_once_per_recording(tmp_path, monkeypatch):
+    """The M1 fix, pinned on both doors: prompt AND the steer drain fork.
+
+    The steer door's row becomes durable inside ``_drain_steering``, and that
+    is where its fork must fire — before the fix the drain was the one writer
+    with no fork, so a steered recording (the mid-turn case this feature
+    exists for) never got an ``stt_transcript_v1`` record (QA round 1, Q1:
+    prompt control 1 record, steer 0). The second drain proves the
+    already-durable branch does not fork a twin record for the same row.
+    """
+    seen: list[dict[str, Any]] = []
+
+    def spy(session, *, message_id, audio, config_dir, store):
+        seen.append(
+            {
+                "durable": session.transcript.has_entry(message_id),
+                "message_id": message_id,
+            }
+        )
+
+    monkeypatch.setattr("local_operator.stt.sidecar.fork_audio_sidecar", spy)
+    stream = ScriptedStream([[StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream, model=AUDIO_MODEL)
+
+    await session.prompt("prompt with a recording", audio=_audio(), message_id="p1")
+    await _wait_for(lambda: not session.is_streaming)
+    session.steer("steer with a recording", audio=_audio(), message_id="s1")
+    snapshot = session.queued_steering()
+    await session._drain_steering()
+
+    by_id = {entry["message_id"]: entry for entry in seen}
+    assert set(by_id) == {"p1", "s1"}, f"both doors must fork, got {seen}"
+    assert by_id["p1"]["durable"] is True
+    assert by_id["s1"]["durable"] is True, "the steer fork ran before its row landed"
+
+    # A message the transcript already holds is not forked again: requeue the
+    # SAME object (the drop path's shape) and drain once more.
+    session._steering_queue.put_nowait(snapshot[0])
+    await session._drain_steering()
+    assert len(seen) == 2, "the already-durable branch must not write a twin record"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_the_sidecar_forks_only_after_the_row_is_durable(tmp_path, monkeypatch):
     """The ordering proof: at fork time, the row is already on disk.
 
