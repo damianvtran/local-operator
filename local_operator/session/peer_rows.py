@@ -33,6 +33,7 @@ result is the honest answer and the caller has no error path to forget.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import NamedTuple
 
@@ -170,6 +171,107 @@ def peer_session_row(session_id: str, root: Path | None = None) -> SessionRow | 
         if row.id == session_id:
             return row
     return None
+
+
+class RemotePark(NamedTuple):
+    """One LIVE parked request on a peer device, as the origin sees it.
+
+    The origin cannot answer a remote ALLOW (``operator_challenge`` is
+    deliberately absent from the mesh transport's capability set), so what a
+    park is worth at the origin is the FACT that a person is needed on
+    ``device``: this is the tuple every origin surface composes from — the
+    toast, the OS banner, and the card hint's device name.
+
+    ``device_name`` can be empty (a peer that never reported a name), so a
+    reader falls back to ``device_id`` exactly as the lifecycle router does
+    (``app._remote_owner_facts``' label). ``name`` is the conversation title,
+    which is what the banner's TITLE should say while its body says the state.
+    """
+
+    session_id: str
+    device_id: str
+    device_name: str
+    kind: str
+    name: str
+
+
+def park_edges(
+    previous: Mapping[tuple[str, str], str],
+    rows: Iterable[SessionRow],
+    *,
+    unanswered: Iterable[str] = (),
+) -> tuple[tuple[RemotePark, ...], dict[tuple[str, str], str]]:
+    """New park EPISODES among ``rows``, and the map to pass back next read.
+
+    Pure: no writes, no dials, no cache. Edges are read off the SAME peer rows
+    the sidebar already polls (``_TTL_S``-cached, one relay call per TTL), so a
+    park announces itself on the origin with no wire change and no new timer —
+    the freshness budget is the caller's poll plus that row cache.
+
+    ONE EPISODE PER (device, session, kind), and the key carries the DEVICE as
+    well as the id because the two are not interchangeable: a session id is
+    meant to be unique across the mesh (``relay._op_session_create`` keeps two
+    devices from minting one id), but if one ever appears twice the two rows
+    are two conversations — a map keyed on the id alone would let the first
+    device's park swallow the second's notice, the same cross-device collapse
+    ``_read`` refuses to make.
+
+    * appear — a key or a kind the previous read did not carry: fire once.
+    * kind change (ask -> approval) — a new episode, because it is a new
+      remedy (the approval needs a presence gesture; an ask does not).
+    * clear — the key leaves the returned map; the caller owns the card that
+      said otherwise (the notice is withdrawn, never left to contradict the
+      answer that ended the park).
+    * re-park after a clear — the key is absent from ``previous``, so it fires
+      again: one notice per episode, and a second park IS a second episode.
+    * SILENCE — ``unanswered`` names the devices that did not answer this read
+      (``peer_rows.unanswered_peers``), and a key belonging to one of them is
+      CARRIED into the returned map rather than cleared: a refused or
+      timed-out read is not the answer landing, and treating it as one would
+      withdraw the card and then re-announce the same live park the moment the
+      peer recovered (agent review round 1, MINOR-1). When the device answers
+      again, an absent key is a real clear and a present one with the same kind
+      is no edge — so the episode survives the outage without a second notice.
+      A WHOLE-RELAY failure is the RESIDUAL, stated rather than hidden:
+      ``_read``'s empty answer delivers neither rows nor names, so an outage and
+      an all-clear are indistinguishable at this seam and this helper READS IT
+      AS A CLEAR — the caller withdraws the card, and the same park fires again
+      as a second episode once the relay answers. Distinguishing the two needs
+      an answered/not-answered signal out of ``_read`` itself; that is recorded
+      as the follow-up (round-2 review NIT-1, PR body), not claimed as handled.
+
+    THE STORED-HALF CAVEAT, and it is the discriminator rather than a filter
+    here: a park counts only when ``pending`` is present AND ``live_state`` is
+    non-empty. The catalogue's STORED half translates an unread completion
+    into ``pending:"ask"`` (``relay.py``; the row's state reads ``stored``),
+    and ``_live_state`` maps that word to ``""`` because no runtime is behind
+    the row — treating it as a park would announce a turn that finished on the
+    peer hours ago and needs nobody. A LIVE parked row always carries a state
+    word from the four ``_live_state`` passes through, so the discriminator
+    cannot drop a real park; the helper's tests pin both fixture shapes.
+    """
+    current: dict[tuple[str, str], str] = {}
+    fresh: dict[tuple[str, str], RemotePark] = {}
+    for row in rows:
+        kind = str(row.pending or "")
+        if not kind or not row.live_state:
+            continue
+        key = (str(row.owner_device or ""), row.id)
+        current[key] = kind
+        fresh[key] = RemotePark(
+            session_id=row.id,
+            device_id=str(row.owner_device or ""),
+            device_name=str(row.owner_device_name or ""),
+            kind=kind,
+            name=str(row.name or ""),
+        )
+    state = dict(current)
+    silent = {str(device_id) for device_id in unanswered}
+    for key, kind in previous.items():
+        if key not in state and key[0] in silent:
+            state[key] = kind
+    edges = tuple(fresh[key] for key, kind in current.items() if previous.get(key) != kind)
+    return edges, state
 
 
 def _read_all(
