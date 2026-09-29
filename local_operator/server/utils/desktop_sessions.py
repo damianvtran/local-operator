@@ -108,6 +108,7 @@ from local_operator.session.transcript import (
     TRANSCRIPT_FILENAME,
     read_latest_custom,
     read_latest_custom_entry,
+    validate_page_request,
 )
 
 # The move shares the TUI's own `/move` machinery rather than a second resolver:
@@ -3138,7 +3139,14 @@ class DesktopSessionBridge:
         }
 
     async def history(
-        self, *, before_id: str | None = None, through_id: str | None = None, limit: int = 100
+        self,
+        *,
+        before_id: str | None = None,
+        through_id: str | None = None,
+        around_id: str | None = None,
+        before: int | None = None,
+        after: int | None = None,
+        limit: int = 100,
     ) -> dict[str, Any]:
         """One page of the durable journal.
 
@@ -3152,6 +3160,14 @@ class DesktopSessionBridge:
         ``read_transcript_page`` cannot report them missing. ``before_id``
         backward paging and this cut's direct use by
         ``read_transcript_page``'s own tests are what keep the parameter alive.
+
+        ``around_id`` is the anchored mode (design §D4): one page centred on an
+        entry id, ``before`` rows older and ``after`` newer, for the renderer's
+        far jump. It is the READER's mode, not a second implementation here —
+        the same page cache, the same single-flight, the same reconciliation
+        rules — and the response gains ``has_newer`` with it, because the
+        anchored page is the only read whose contract bounds its newer edge
+        (see ``HistoryPage``).
 
         Through ``load_transcript_page`` rather than a bare ``to_thread`` around
         the reader: the SSE open frame asks for THIS read seconds after this
@@ -3167,8 +3183,37 @@ class DesktopSessionBridge:
         journal here, the wire there. The contract above -- ``entries``,
         ``has_more``, ``cursor_missing``, a backward ``before_id`` -- is the same
         on both, so no caller changes.
+
+        THE PRECONDITIONS ARE CHECKED BEFORE EITHER READER IS CHOSEN (remediation
+        round 1, R1-1): the remote reader validates nothing itself, so without
+        this a malformed combination (before/after with no anchor, an anchor
+        named with a cursor) would answer 409 on a local session and 200 on a
+        peer — the same request failing two ways depending only on where the
+        conversation happens to live. The local path validates again inside
+        ``load_transcript_page``; that duplicate is deliberate, because the
+        façade is a door other callers reach directly and its own contract must
+        not depend on this method having run first.
         """
+        validate_page_request(before_id, through_id, around_id, before, after, limit)
         if self.remote_row is not None:
+            if around_id is not None:
+                # V1 CANNOT ANCHOR A PEER'S WINDOW (design §D4; the exact remote
+                # behaviour is pinned by spike S2). The wire carries messages,
+                # not journal rows, so there is no row to locate by id and no
+                # forward half to read — and the empty page is the contract's
+                # existing word for "this request cannot be satisfied here" (the
+                # same answer ``_remote_history`` gives a ``before_id`` the
+                # window no longer holds). Serving some OTHER window instead is
+                # the one thing forbidden. ``cursor_missing`` is True rather than
+                # the remote reader's usual False so an empty page cannot be
+                # misread as "the conversation is empty"; ``has_newer`` stays
+                # None — the question was never answered.
+                return {
+                    "entries": [],
+                    "has_more": False,
+                    "cursor_missing": True,
+                    "has_newer": None,
+                }
             return await self._remote_history(
                 before_id=before_id, through_id=through_id, limit=limit
             )
@@ -3177,18 +3222,22 @@ class DesktopSessionBridge:
                 self.root / "sessions" / self.session_id,
                 before_id=before_id,
                 through_id=through_id,
+                around_id=around_id,
+                before=before,
+                after=after,
                 limit=limit,
             )
         except FileNotFoundError:
             return {
                 "entries": [],
                 "has_more": False,
-                "cursor_missing": bool(before_id or through_id),
+                "cursor_missing": bool(before_id or through_id or around_id),
             }
         return {
             "entries": [json.loads(row.to_json()) for row in page.entries],
             "has_more": page.has_more,
             "cursor_missing": page.reconciled,
+            "has_newer": page.has_newer,
         }
 
     async def _remote_history(
@@ -3232,7 +3281,12 @@ class DesktopSessionBridge:
         """
         remote = self.remote
         if remote is None:
-            return {"entries": [], "has_more": False, "cursor_missing": False}
+            return {
+                "entries": [],
+                "has_more": False,
+                "cursor_missing": False,
+                "has_newer": None,
+            }
         if remote.is_cold:
             with contextlib.suppress(ConnectionError, OSError, TimeoutError):
                 await remote.attach_existing(budget=READ_ATTACH_BUDGET_S)
@@ -3266,6 +3320,7 @@ class DesktopSessionBridge:
             ],
             "has_more": has_more,
             "cursor_missing": False,
+            "has_newer": None,
         }
 
     def _remote_rows(
