@@ -256,21 +256,34 @@ def render_success(provider: str, owner_name: str, *, cached: bool = False) -> s
     )
 
 
-#: The WIRE DIAGNOSTIC an owner sends with an ``interactive_required`` refusal.
+#: The interactive login that clears an ``interactive_required`` repair — the ONE
+#: spelling of the command, shared by the wire diagnostic below, the owner-side
+#: repair notice (``credentials/repair.py``) and its doctor row's remedy: three
+#: surfaces tell a reader to run the same thing, so the thing is spelled once.
+def repair_command(key: str) -> str:
+    is_mcp = key.startswith("mcp:")
+    return f"/mcp login {key[4:]}" if is_mcp else f"/login {key}"
+
+
+#: The WIRE DIAGNOSTIC an owner sends with an ``interactive_required`` refusal —
+#: and the wording the owner-side repair notice reuses (``credentials/repair.py``),
+#: so the wire and the owner's own surfaces say one thing.
 #:
 #: WHAT IT IS NOT: the sentence the borrower's operator reads. Since review round 1
 #: (audit round 2, F1) the requester renders EVERY code from this module, so an
 #: owner's own words reach a person only through :func:`_generic`'s parenthetical,
-#: where they are the detail of a code this build cannot classify. This string's
-#: reader is therefore a human reading a wire capture or the owner's logs, not a
-#: session's operator.
+#: where they are the detail of a code this build cannot classify. On the wire, this
+#: string's reader is a human reading a wire capture or the owner's logs.
 #:
 #: The "owner-side toast" a first draft of this docstring described does not exist:
-#: the design's §4.7 row asks for a ``credential_repair`` op that raises a durable
-#: notice on the owning device, and NO SUCH OP IS BUILT (grep ``credential_repair``:
-#: nothing outside that design row). What the owner has today is the
-#: ``credential.report`` audit record written beside this refusal, and what the
-#: borrower has is the ``interactive_required`` sentence in
+#: the design's §4.7 row asked for a ``credential_repair`` op that raises a durable
+#: notice on the owning device, and NO SUCH OP IS BUILT. What ships instead is
+#: DERIVED from the ``credential.report`` audit record written beside this refusal:
+#: ``credentials/repair.py`` turns an open report into a ``credential_repair`` check
+#: row that ``lop network doctor`` (relay path and local fallback) and the
+#: ``/network`` panel show on the OWNER — which is the sense in which this wording
+#: now reaches an operator, recomposed on their own surface rather than sent to
+#: them. What the borrower has is the ``interactive_required`` sentence in
 #: :func:`render_broker_error` — which names the owner and the command to run there,
 #: and is the reason the composed MCP failure line can be truthful without a repair
 #: op.
@@ -278,6 +291,7 @@ def render_success(provider: str, owner_name: str, *, cached: bool = False) -> s
 #: ``key`` is the placement key (``mcp:<url>`` or a provider name); the quoting is
 #: deliberate, because the operator pastes the command.
 def render_repair_notice(peer_name: str, key: str) -> str:
-    is_mcp = key.startswith("mcp:")
-    verb = f"/mcp login {key[4:]}" if is_mcp else f"/login {key}"
-    return f"{peer_name} needs '{verb}' here — its borrowed credential cannot be refreshed"
+    return (
+        f"{peer_name} needs '{repair_command(key)}' here — "
+        "its borrowed credential cannot be refreshed"
+    )

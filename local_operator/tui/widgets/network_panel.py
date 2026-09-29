@@ -420,6 +420,11 @@ class NetworkScreen(ModalScreen[None]):
         self.relay: NetworkRun | None = None
         self.peers_run: NetworkRun | None = None
         self.status_run: NetworkRun | None = None
+        #: The ``doctor`` receipt the same worker fetches, for the owner-side repair
+        #: notice it may carry (``credentials/repair.py``): a separate slot because
+        #: the body reads exactly one thing from it, and a refusal here must leave
+        #: the other three answers untouched.
+        self.doctor_run: NetworkRun | None = None
         #: The selected network's member table, filled by a second worker after
         #: ``enter``. Keyed by network id so a late answer for a network the user
         #: has moved off cannot be painted under the wrong header.
@@ -481,11 +486,25 @@ class NetworkScreen(ModalScreen[None]):
         if self.presentation_cancelled and self.is_mounted and self.app.screen is self:
             self.dismiss(None)
 
-    def set_relay(self, run: NetworkRun, peers: NetworkRun, status: NetworkRun) -> None:
-        """Publish the worker's answer, while this presentation is still owned."""
+    def set_relay(
+        self,
+        run: NetworkRun,
+        peers: NetworkRun,
+        status: NetworkRun,
+        *,
+        doctor: NetworkRun | None = None,
+    ) -> None:
+        """Publish the worker's answer, while this presentation is still owned.
+
+        ``doctor`` is optional so a manual republish (a test, or a caller holding
+        only the three) leaves any earlier doctor receipt in place rather than
+        clearing it — a state with no new answer must not erase the notice it was.
+        """
         if self.presentation_cancelled:
             return
         self.relay, self.peers_run, self.status_run = run, peers, status
+        if doctor is not None:
+            self.doctor_run = doctor
         self._repaint()
 
     def set_detail(self, network_id: str, payload: dict[str, Any] | None) -> None:
@@ -498,13 +517,16 @@ class NetworkScreen(ModalScreen[None]):
     # -- workers ------------------------------------------------------------
 
     async def _fill(self) -> None:
-        """Ask the relay for its own view: three calls, each in its own thread.
+        """Ask the relay for its own view: four calls, each in its own thread.
 
         Sequential rather than gathered: the relay serialises its own control
-        socket, and three concurrent listings would each pay the peer probe
+        socket, and four concurrent listings would each pay the peer probe
         budget while queueing behind one another. The timeout is the CLI's own
         listing budget plus slack, stated in ``network_cli`` rather than invented
-        here.
+        here. ``doctor`` rides that same listing budget rather than the quick
+        one: like the other three it dials every endpoint, and it is what carries
+        the owner-side ``credential_repair`` rows this panel paints — answered
+        from this device's own records even when no relay does.
         """
         # Explicit keywords rather than a ``dict(**listing)`` splat: the splat
         # widened every value to one union and pyright caught the timeout being
@@ -519,7 +541,10 @@ class NetworkScreen(ModalScreen[None]):
         status = await asyncio.to_thread(
             run_network, ["status"], timeout=LISTING_TIMEOUT_S, json_output=True
         )
-        self.set_relay(run, peers, status)
+        doctor = await asyncio.to_thread(
+            run_network, ["doctor"], timeout=LISTING_TIMEOUT_S, json_output=True
+        )
+        self.set_relay(run, peers, status, doctor=doctor)
 
     async def _fill_detail(self, network_id: str) -> None:
         run = await asyncio.to_thread(
@@ -536,6 +561,7 @@ class NetworkScreen(ModalScreen[None]):
         if self.presentation_cancelled or self not in self.app.screen_stack:
             return
         self.relay = self.peers_run = self.status_run = None
+        self.doctor_run = None
         self._repaint()
         self.run_worker(self._fill(), thread=False, group="network", exit_on_error=False)
 
@@ -973,6 +999,14 @@ class NetworkScreen(ModalScreen[None]):
             if self.local.device_id:
                 body.append(f"  {short_id(self.local.device_id)}", style="dim")
             body.append("\n")
+        # THE OWNER-SIDE REPAIR NOTICE (decision memo item D), and ONLY when one is
+        # open: this row is the difference between "a peer's session silently fails
+        # to borrow" and "run /mcp login here", and the frame without it is
+        # byte-identical to the one before this change — a state with no news does
+        # not pay a row for it (the rule the audit row's move to the title block was
+        # built around, design round 4 D46).
+        for repair in self._repair_lines(width):
+            body.append(repair + "\n", style="yellow")
         # THE RELAY'S STANDING HAS ONE VOICE, and once the worker has answered it
         # is the Relay section's: that half read the live process, this half read
         # a record on disk, and printing both put "relay: not running" five lines
@@ -990,6 +1024,27 @@ class NetworkScreen(ModalScreen[None]):
         # So the pending sentence here is the SAME pending sentence there, and the
         # verdict is said once, by the section that measured it.
         body.append("  relay: checking…\n", style="dim")
+
+    def _repair_lines(self, width: int) -> list[str]:
+        """The open credential-repair notices, in the doctor's own words.
+
+        Read from the ``doctor`` receipt the worker fetched — its
+        ``credential_repair`` checks — so the panel renders the producer's sentence
+        rather than composing one, and this surface cannot drift from the CLI.
+        Prose wraps through ``_hanging_row`` because the sentence outruns the
+        narrow cards; an absent receipt, or one carrying no such check, paints
+        nothing.
+        """
+        payload = self.doctor_run.payload() if self.doctor_run is not None else None
+        if not isinstance(payload, dict):
+            return []
+        rows: list[str] = []
+        for check in payload.get("checks") or []:
+            if isinstance(check, dict) and check.get("check") == "credential_repair":
+                detail = str(check.get("detail") or "")
+                if detail:
+                    rows.append(_hanging_row("  repair: ", detail, width))
+        return rows
 
     @staticmethod
     def _short(network_id: str) -> str:
