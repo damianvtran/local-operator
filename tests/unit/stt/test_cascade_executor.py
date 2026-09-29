@@ -11,7 +11,7 @@ from pydantic import SecretStr
 from local_operator.clients._http import APIError
 from local_operator.clients.radient import RadientTranscriptionResponseData
 from local_operator.providers.auth_store import AuthStore
-from local_operator.stt import AudioPath, cascade
+from local_operator.stt import AudioPath, SttAttempt, cascade
 
 #: A file whose header verifies as wav AND whose suffix says wav, so the
 #: sniff-first mime derivation and the suffix fallback agree by default.
@@ -310,3 +310,94 @@ async def test_an_unrecognised_header_falls_back_to_the_suffix(rig) -> None:
     )
     assert outcome.path == AudioPath.PROVIDER_STT_ELEVENLABS
     assert rig.client("elevenlabs").calls[0]["mime"] == "audio/mpeg"
+
+
+# ---------------------------------------------------------------------------
+# The token executor (``transcribe_backend`` — the mobile bridge's dispatch)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_token_executor_runs_only_the_named_rung(rig) -> None:
+    """The surface named ONE token; exactly that rung runs (no walk, no
+    fall-forward). The other BYO key is stored and still stays cold, which is
+    the whole point of a token-targeted executor — a call can never land on a
+    path the phone did not advertise."""
+    store = FakeStore({"elevenlabs": "el-key", "openai": "oa-key"})
+
+    outcome = await cascade.transcribe_backend(
+        "provider_stt_elevenlabs",
+        _WAV_BYTES,
+        "audio/wav",
+        config_dir=rig.audio_path.parent,
+        store=cast("AuthStore", store),
+        language="en",
+        prompt="hint",
+    )
+
+    assert outcome.text == "elevenlabs text"
+    assert outcome.path == AudioPath.PROVIDER_STT_ELEVENLABS
+    assert outcome.attempts == (SttAttempt(path=AudioPath.PROVIDER_STT_ELEVENLABS, outcome="ok"),)
+    call = rig.client("elevenlabs").calls[0]
+    assert call["audio"] == _WAV_BYTES
+    assert call["mime"] == "audio/wav"
+    assert call["language"] == "en"
+    assert call["prompt"] == "hint"
+    assert not any(getattr(client, "kind", "") == "openai" for client in rig.clients)
+
+
+@pytest.mark.asyncio
+async def test_the_token_executor_refuses_a_rung_without_a_credential(rig) -> None:
+    """Availability is re-checked through the resolver the surface read: a
+    missing key is :class:`SttUnavailable` (the bridge's 503 class) with the
+    rung's own sentence and the report attached — not a provider 401."""
+    with pytest.raises(cascade.SttUnavailable) as caught:
+        await cascade.transcribe_backend(
+            "provider_stt_elevenlabs",
+            _WAV_BYTES,
+            "audio/wav",
+            config_dir=rig.audio_path.parent,
+            store=cast("AuthStore", FakeStore({})),
+        )
+    assert "No ElevenLabs API key is stored" in str(caught.value)
+    assert caught.value.resolution is not None
+    assert rig.clients == [], "the refusal must not spend a provider call"
+
+
+@pytest.mark.asyncio
+async def test_the_token_executor_refuses_a_token_it_cannot_run(rig) -> None:
+    """A token outside the byte-runners (the Radient leg belongs to the
+    bridge's own adapter) or outside the vocabulary at all is refused with
+    the report attached — never silently run as something else."""
+    for backend in ("provider_stt_radient", "provider_stt_deepgram"):
+        with pytest.raises(cascade.SttUnavailable) as caught:
+            await cascade.transcribe_backend(
+                backend,
+                _WAV_BYTES,
+                "audio/wav",
+                config_dir=rig.audio_path.parent,
+                store=cast("AuthStore", FakeStore({"elevenlabs": "el-key"})),
+            )
+        assert "cannot run" in str(caught.value)
+        assert caught.value.resolution is not None
+
+
+@pytest.mark.asyncio
+async def test_the_token_executor_bounds_a_hung_rung_as_a_transport_failure(
+    rig, monkeypatch
+) -> None:
+    """The walk's timeout convention: no upstream status was reached, so the
+    failure reads as transport (the phone classifier's 502), never a 401."""
+    monkeypatch.setattr(cascade, "STT_ATTEMPT_TIMEOUT_S", 0.05)
+    rig.behaviors["openai"] = {"delay": 5}
+
+    with pytest.raises(APIError) as caught:
+        await cascade.transcribe_backend(
+            "provider_stt_openai",
+            _WAV_BYTES,
+            "audio/wav",
+            config_dir=rig.audio_path.parent,
+            store=cast("AuthStore", FakeStore({"openai": "oa-key"})),
+        )
+    assert caught.value.status_code is None
+    assert "did not respond within" in str(caught.value)
