@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 from starlette.requests import Request
@@ -86,7 +87,7 @@ def test_a_death_push_carries_the_ended_receipt(tmp_path, monkeypatch) -> None:
 
     daemon = MobileDaemon(port=0, password=PASSWORD, dial_registrants=False)
     daemon.table.entries[101] = SessionEntry(_record("dead-session", 101))
-    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=8)
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=8)
     daemon.table.session_subscribers["dead-session"] = {queue}
 
     monkeypatch.setattr(registry, "scan", lambda: [(_record("dead-session", 101), "stale")])
@@ -98,7 +99,7 @@ def test_a_death_push_carries_the_ended_receipt(tmp_path, monkeypatch) -> None:
     assert frame["degraded"] is False
 
 
-async def _seed_payload(app, session_id: str) -> dict:
+async def _seed_payload(app, session_id: str) -> dict[str, Any]:
     """The first SSE frame an opening session stream serves."""
     endpoint = next(
         route.endpoint
