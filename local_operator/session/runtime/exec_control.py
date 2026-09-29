@@ -202,12 +202,13 @@ async def start_exec_control(
     does not notify subscribers), so before this seed a ``tool_approval_mode:
     auto`` run parked its first write/exec call until the pending-request
     timeout denied it — the "User denied approval for 'bash'." incident on a
-    run whose owner had set full-auto. An UNSUPERVISED run reads no mode at
-    all, because it owns no gates: its decisions are made by the session's
-    ORIGINAL headless gate, which is built from ``--yolo`` alone. Seeding
-    this handle from the file for such a run changed no decision while making
-    ``/approvals`` report "(--yolo is active)" for a run with no ``--yolo``
-    and a gate that still denies non-TTY requests (review round 1, M1).
+    run whose owner had set full-auto. An UNSUPERVISED run now reads the same
+    mode for the SAME reason (2026-09-28 addendum): its decisions are made by
+    the session's ORIGINAL headless gate, which reads ``tool_approval_mode``
+    itself (``session_factory._approval_mode_is_auto``), so a handle seeded
+    from anything else would report a posture the decisions do not have — the
+    M1 hazard reversed. The value is a one-shot read (no gates, no watcher):
+    the launch-time mode governs, exactly as a ``--yolo`` flag does.
     Without ``--yolo`` or ``auto`` a supervised run's gates park for an
     attached supervisor — the behavioural difference this module's header
     calls out.
@@ -232,8 +233,10 @@ async def start_exec_control(
 
     loop = asyncio.get_running_loop()
     config_directory = config_dir()
-    # THE GATE'S BOOT VALUE, read at t0 rather than left to the watcher — and
-    # read only when this handle owns gates (``supervised``).
+    # THE GATE'S BOOT VALUE, read at t0 rather than left to the watcher — read
+    # for BOTH seats since the 2026-09-28 addendum: a supervised run (whose
+    # gates then keep following the file) and an unsupervised run (whose
+    # decisions come from the same key at the original gate's construction).
     #
     # ``attach_gate_config_watch`` (below) subscribes the handle to FUTURE
     # ``tool_approval_mode`` changes only — ``ConfigWatcher._prime`` does not
@@ -246,15 +249,23 @@ async def start_exec_control(
     # degrade-to-ask) for the runs whose decisions this handle's gates make,
     # and those runs keep FOLLOWING the file afterwards.
     #
-    # An UNSUPERVISED run keeps the value the flag alone gives it. Its
-    # decisions are made by the session's ORIGINAL headless gate, which is
-    # built from ``--yolo`` and never reads the file, so seeding this handle
-    # from a mode the deciding gate ignores changed no decision while making
-    # ``/approvals`` report "(--yolo is active)" for a run with no ``--yolo``
-    # and a gate that still denies non-TTY requests — a false posture on the
-    # one surface the operator consults to check it (review round 1, M1).
+    # An UNSUPERVISED run seeds from the same read, REVERSING the earlier M1
+    # reasoning on purpose (2026-09-28 addendum). That note held while the
+    # session's ORIGINAL headless gate was built from ``--yolo`` alone and never
+    # read the file: seeding this handle then changed no decision while making
+    # ``/approvals`` report a posture the deciding gate did not have. The gate
+    # now reads the key at its own construction
+    # (``session_factory._approval_mode_is_auto``), so the identical hazard
+    # exists in the OPPOSITE direction if this handle keeps the flag's value —
+    # the report would say ask while the decisions auto-approve.
+    # Unsupervised still differs where it always did: no gates installed, no
+    # config watcher, so its value is a one-shot read rather than a follower.
+    # One read, mirrored at both seats, keeps gate and posture equal — except
+    # for a config edit landing BETWEEN the two reads (session build, then
+    # control start, seconds apart), which can disagree briefly; named rather
+    # than overstated (review R1-4).
     auto_approve = yolo
-    if supervised and not yolo:
+    if not yolo:
         try:
             approval_mode = (
                 str(
@@ -276,9 +287,9 @@ async def start_exec_control(
         # ``--yolo`` wins both ways: it approves inline (``auto_approve``) and,
         # being an explicit flag on this run rather than a file value, it pins
         # (``approval_pinned``) — so a later config edit cannot re-arm a gate
-        # the flag disabled. Without it a SUPERVISED run's boot value comes
-        # from the file and keeps following it; an unsupervised run's value is
-        # the flag's own (see above).
+        # the flag disabled. Without it both seats take the same file read:
+        # a SUPERVISED run keeps following the file through the watcher; an
+        # unsupervised run's value is that one-shot read (see above).
         auto_approve=auto_approve,
         approval_pinned=yolo,
         install_gates=supervised,

@@ -1156,6 +1156,31 @@ def test_a_profile_declared_run_is_not_advertised_as_deny_trapped(
     assert not (root / "agents").exists()
 
 
+def test_a_config_auto_run_is_not_advertised_as_deny_trapped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """The saved ``auto`` answers the gate, so the warning would be false.
+
+    The headless gate reads ``tool_approval_mode`` (2026-09-28 addendum), so a
+    run under a config that says auto approves its calls inline — warning "any
+    tool call ... will be denied" over it is the M2 hazard wearing its other
+    face. The advisory must consult the same source of truth as the gate.
+    """
+    logs_dir = _redirect_logs_dir(monkeypatch, tmp_path)
+    logs_dir.parent.mkdir(parents=True, exist_ok=True)
+    (logs_dir.parent / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  tool_approval_mode: auto\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 4321
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
+
+    assert exec_mode.run_exec("task", ExecArgs(background=True)) == 0
+    assert "cannot ask for approval" not in capsys.readouterr().err
+
+
 def test_the_profile_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """The advisory's role probe must not create directories.
 
@@ -2042,3 +2067,16 @@ def test_the_foreground_factory_carries_workstream_to_the_stamp(
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_mode._make_default_session_factory(ExecArgs(workstream=True))()
     assert seen["workstream"] is True
+
+
+def test_the_auto_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A launch-time check must not create a config root (review R1-2).
+
+    Constructing ``ConfigManager`` can mkdir a fresh root (and move a
+    malformed config aside); the probe must answer "no saved mode" from the
+    ABSENCE of the file, without constructing anything.
+    """
+    root = _redirect_logs_dir(monkeypatch, tmp_path).parent
+    assert not root.exists()
+    assert exec_mode._saved_auto_approval() is False
+    assert not root.exists(), "the probe created the config root it read"

@@ -7298,11 +7298,26 @@ class ServingSessionHandle(SessionHandle):
             # Publishing an exec owner did not replace its original gate, so
             # mutating this handle's flag would lie about what tools consult.
             # Gate routing is a launch decision, never a side effect of attach.
+            #
+            # THE SUFFIX NAMES THE REAL SOURCE (2026-09-28 addendum). The
+            # original headless gate now reads ``tool_approval_mode``
+            # (session_factory._approval_mode_is_auto), so "auto" here has two
+            # possible sources and they must be told apart: the flag, which
+            # pinned this run against the file, or the file itself, which the
+            # gate consulted. Reporting "--yolo is active" for a run with no
+            # ``--yolo`` is the M1 false posture in a new costume, so the
+            # config-seeded case gets its own sentence.
+            if self._auto_approve and self._approval_pinned:
+                gate_state = " (--yolo is active)"
+            elif self._auto_approve:
+                gate_state = " (tool_approval_mode: auto is in effect)"
+            else:
+                gate_state = " (non-TTY requests deny)"
             return SlashResult(
                 kind="notice",
                 text=(
                     "exec uses its original headless approval gate"
-                    + (" (--yolo is active)" if self._auto_approve else " (non-TTY requests deny)")
+                    + gate_state
                     + "; launch with --control for supervisor approval controls"
                 ),
                 style="warning" if argument else "info",

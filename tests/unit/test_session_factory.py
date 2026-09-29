@@ -6291,3 +6291,130 @@ async def test_the_projects_registry_reaches_the_session_and_its_tools(
         assert {"project", "project_delete"} <= {tool.name for tool in built._tools}
     finally:
         await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The headless gate and ``tool_approval_mode``
+# ---------------------------------------------------------------------------
+
+
+def test_approval_mode_is_auto_reads_the_key_and_degrades_to_ask() -> None:
+    """The one reader behind the headless gate's config arm.
+
+    ``auto`` (any case/whitespace) approves; ``ask``, a missing key and an
+    unreadable config all fall back to asking — the failure direction matters:
+    a broken config must never approve by accident.
+    """
+    from local_operator.session_factory import _approval_mode_is_auto
+
+    class _Cfg:
+        def __init__(self, value: object) -> None:
+            self.value = value
+
+        def get_config_value(self, key: str, default: object = None) -> object:
+            return default if self.value is None else self.value
+
+    assert _approval_mode_is_auto(_Cfg("auto")) is True
+    assert _approval_mode_is_auto(_Cfg(" Auto ")) is True
+    assert _approval_mode_is_auto(_Cfg("ask")) is False
+    assert _approval_mode_is_auto(_Cfg(None)) is False, "missing key means ask"
+
+    class _Boom:
+        def get_config_value(self, key: str, default: object = None) -> object:
+            raise RuntimeError("config unreadable")
+
+    assert _approval_mode_is_auto(_Boom()) is False, "an unreadable config must not approve"
+
+
+@pytest.mark.asyncio
+async def test_config_auto_reaches_the_headless_gate(tmp_config_dir: Path, monkeypatch) -> None:
+    """``tool_approval_mode: auto`` must build the APPROVING gate.
+
+    The 2026-09-28 incident's addendum: an operator whose config said auto had
+    every write/exec call of an exec-launched headless session refused with
+    "run with --yolo to auto-approve". The gate that decides those calls is the
+    one ``create_session`` builds when no front end has installed an approval
+    handler; this pins that it reads the key — with ``yolo=False`` on the args,
+    exactly the failing launch's shape.
+    """
+    import local_operator.session_factory as sf
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n"
+        "values:\n"
+        "  hosting: test\n"
+        "  model_name: test\n"
+        "  tool_approval_mode: auto\n"
+    )
+    seen: list[bool] = []
+    gates: list[Callable[[str, str], Awaitable[bool]]] = []
+    real = sf._make_request_approval
+
+    def spy(auto: bool):
+        seen.append(auto)
+        gate = real(auto)
+        gates.append(gate)
+        return gate
+
+    monkeypatch.setattr(sf, "_make_request_approval", spy)
+    session = await create_session(
+        _args(hosting="test", model="test"),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert seen == [True], "config auto must reach the gate with yolo=False"
+        # The real gate, exercised in this no-tty test process: approving.
+        assert await gates[0]("bash", "echo probe") is True
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_without_the_key_the_headless_gate_still_asks(
+    tmp_config_dir: Path, monkeypatch
+) -> None:
+    """The default preserves tonight's failure mode ON PURPOSE, loud and typed.
+
+    No key (or ``ask``) keeps the gate denying non-tty callers with the CL-04
+    notice and the typed refusal — the semantics every existing headless user
+    has, and the reason the fix above is an OR rather than a new default.
+    """
+    import local_operator.session_factory as sf
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+
+    (tmp_config_dir / "config.yml").write_text(
+        "version: 0.0.0\n" "values:\n" "  hosting: test\n" "  model_name: test\n"
+    )
+    seen: list[bool] = []
+    gates: list[Callable[[str, str], Awaitable[bool]]] = []
+    real = sf._make_request_approval
+
+    def spy(auto: bool):
+        seen.append(auto)
+        gate = real(auto)
+        gates.append(gate)
+        return gate
+
+    monkeypatch.setattr(sf, "_make_request_approval", spy)
+    session = await create_session(
+        _args(hosting="test", model="test"),
+        ConfigManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert seen == [False]
+        # The real gate, exercised in this no-tty test process: refusing with
+        # the typed error, not a bare False (the CL-04 contract, preserved).
+        # Non-tty is PINNED, the sibling cells' rule — under `-s` on a
+        # terminal the ambient stdin would otherwise prompt (review R1-5).
+        from local_operator.harness.approval import ApprovalUnavailableError
+
+        monkeypatch.setattr(sf.sys.stdin, "isatty", lambda: False)
+        with pytest.raises(ApprovalUnavailableError):
+            await gates[0]("bash", "echo probe")
+    finally:
+        await session.dispose()
