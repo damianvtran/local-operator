@@ -23,7 +23,8 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from local_operator.config import ConfigManager
-from local_operator.harness.types import Message
+from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.types import CustomMessage, Message
 from local_operator.server.routes import desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session import transcript_find, transcript_index
@@ -53,7 +54,33 @@ def _clean_module_state():
     transcript_find._reset_for_tests()
 
 
-async def _seed(root: Path, session_id: str, messages: list[Message]) -> None:
+@pytest.fixture()
+def hide_cross_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """``display.hide_cross_session``, written through the real reader path.
+
+    A dedicated config dir, the same shape the mobile fold suite's fixture
+    uses: the write goes through ``settings_io``, so the flat-dotted key the
+    reader actually looks up is the one exercised, and no test inherits a
+    flip another made.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    from local_operator import settings_io
+    from local_operator.tui.settings import settings_reload
+
+    settings_reload()
+
+    def set_hidden(on: bool) -> None:
+        settings_io.write_setting(
+            ConfigManager(config_dir), settings_io.BY_KEY["display.hide_cross_session"], on
+        )
+
+    yield set_hidden
+    settings_reload()
+
+
+async def _seed(root: Path, session_id: str, messages: list[Message | CustomMessage]) -> None:
     """Write ``messages`` through the real journal writer, as a live session does."""
     directory = root / "sessions" / session_id
     directory.mkdir(parents=True, exist_ok=True)
@@ -245,3 +272,49 @@ async def test_find_response_model_matches_the_d9_shape(harness: _Harness) -> No
     result = response.json()["result"]
     assert set(result) == {"query", "state", "partial", "hits", "truncated"}
     assert set(result["hits"][0]) == {"id", "role", "ts", "snippet", "ranges", "tier"}
+
+
+@pytest.mark.asyncio
+async def test_hidden_cross_session_hides_peer_rows_from_the_route(
+    harness: _Harness, hide_cross_session: Any
+) -> None:
+    """``display.hide_cross_session`` on: a peer row is not a find result.
+
+    The route contract (design §5.3): with the flag on no surface paints a
+    peer row, and the overlay reveals a hit by jumping to its id — so a
+    returned peer hit would be a content leak AND a jump to a row that is not
+    there. OFF is the byte-identical default and keeps the row findable; the
+    pair is the pin. Seeded through the REAL writer, peer-shaped the way the
+    relay persists one (`details.body` — the shape the find suite's fixtures
+    pin).
+    """
+    session_id = await harness.create_session()
+    await _seed(
+        harness.root,
+        session_id,
+        [
+            Message.user("deploy the staging target", id="u1"),
+            CustomMessage(
+                id="p1",
+                custom_type=PEER_MESSAGE_MESSAGE_TYPE,
+                attribution="user",
+                details={"body": "peer says the deploy is green", "sender": {"pid": 999}},
+            ),
+        ],
+    )
+
+    response = await _find(harness, session_id, q="deploy")
+    assert response.status_code == 200, response.text
+    assert [hit["id"] for hit in response.json()["result"]["hits"]] == ["u1", "p1"]
+
+    hide_cross_session(True)
+    result = (await _find(harness, session_id, q="deploy")).json()["result"]
+    assert [hit["id"] for hit in result["hits"]] == ["u1"]
+    # Peer-only text: nothing under any tier, and the envelope stays the D9
+    # ready shape rather than an error.
+    result = (await _find(harness, session_id, q="green")).json()["result"]
+    assert result["hits"] == [] and result["state"] == "ready"
+
+    hide_cross_session(False)
+    result = (await _find(harness, session_id, q="green")).json()["result"]
+    assert [hit["id"] for hit in result["hits"]] == ["p1"]

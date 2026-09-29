@@ -492,11 +492,11 @@ def test_the_hidden_set_is_decided_in_one_place() -> None:
     ``display.hide_cross_session`` may appear as a string literal in exactly
     three files: the predicate module that reads it, the settings registry
     that declares it, and the display-flag notes that document it. Every gate
-    — TUI and phone — imports ``cross_session_hidden`` / ``SEND_TOOL_NAME``
-    instead, from the five files listed. A new spelling, a new gate site, or a
-    gate that re-reads the key itself fails here rather than silently growing
-    a second decision point; mirrors the repo's "exactly one caller"
-    AST-guard style.
+    — TUI, phone, and the in-thread find pipeline — imports
+    ``cross_session_hidden`` / ``SEND_TOOL_NAME`` instead, from the six files
+    listed. A new spelling, a new gate site, or a gate that re-reads the key
+    itself fails here rather than silently growing a second decision point;
+    mirrors the repo's "exactly one caller" AST-guard style.
     """
     import ast
 
@@ -528,6 +528,7 @@ def test_the_hidden_set_is_decided_in_one_place() -> None:
     assert predicate_users == {
         "local_operator/cross_session.py",
         "local_operator/mobile/projection.py",
+        "local_operator/session/transcript_find.py",
         "local_operator/tui/app.py",
         "local_operator/tui/session_presentation.py",
         "local_operator/tui/widgets/subagent_view.py",

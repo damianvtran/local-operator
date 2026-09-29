@@ -490,17 +490,27 @@ def test_version_bump_discards_scans_and_preserves_naming(tmp_path, monkeypatch)
     refreshed(tmp_path)
     # Put a naming item under the live turn key, then bump the cache version.
     ti.patch_naming(tmp_path, SID, {"u1": {"name": "Do the thing", "summary": "It was done."}})
-    monkeypatch.setattr(ti, "TRANSCRIPT_INDEX_VERSION", 2)
+    bumped = ti.TRANSCRIPT_INDEX_VERSION + 1
+    monkeypatch.setattr(ti, "TRANSCRIPT_INDEX_VERSION", bumped)
     rebuilt = refreshed(tmp_path)
     assert [c.id for c in rebuilt.checkpoints] == ["u1", "a1"]
     assert rebuilt.naming["items"]["u1"]["name"] == "Do the thing"
     # The stale-version cache was RESCANNED and rewritten under the new
     # version — not served as-is.
-    assert json.loads(ti.index_path(tmp_path, SID).read_text())["version"] == 2
+    assert json.loads(ti.index_path(tmp_path, SID).read_text())["version"] == bumped
     monkeypatch.undo()
+    # The disk still carries the bumped version while the live build is back
+    # at its own; bring the cache home FIRST, because ``patch_naming`` refuses
+    # a version-mismatched document (that mismatch is the refresh's to settle)
+    # and the tail would otherwise be absorbed by the version gate instead of
+    # exercising the preservation filter.
+    refreshed(tmp_path)
+    assert json.loads(ti.index_path(tmp_path, SID).read_text())["version"] == (
+        ti.TRANSCRIPT_INDEX_VERSION
+    )
     # And an item whose turn key no longer exists is dropped at the next
     # RESCAN (a fresh cache is served as-is; the filter belongs to preservation).
-    ti.patch_naming(tmp_path, SID, {"gone": {"name": "Stale"}})
+    assert ti.patch_naming(tmp_path, SID, {"gone": {"name": "Stale"}}) is True
     write_rows(tmp_path, [assistant("a2", 1.2)])  # grown journal forces a rescan
     again = refreshed(tmp_path)
     assert set(again.naming["items"]) == {"u1"}
@@ -783,6 +793,42 @@ def test_injected_rows_extract_text_beyond_the_text_key(tmp_path):
         "i3": "",
         "i4": "plain text key",
     }
+
+
+def test_message_docs_carry_their_custom_type_and_round_trip(tmp_path):
+    """``MessageDoc.custom_type``: the find filter's discriminator (design §5.3).
+
+    Set from the inject row — the same payload field the injection rule
+    already reads, so this is a field copy, not new scanning — kept through
+    the cache round trip, and omitted from a genuine row's payload. A
+    pre-bump payload without the key loads as ``None`` rather than dropping
+    the doc: the VERSION GATE, not the reader, is what guarantees old peer
+    docs are re-derived with the field populated (a v1 cache with
+    ``custom_type=None`` peers would slip past the find filter — the leak the
+    bump exists to close).
+    """
+    write_rows(
+        tmp_path,
+        [
+            user("u1", 1.0, "go"),
+            inject("i1", 1.1, custom_type="peer_message", text="peer body here"),
+        ],
+    )
+    index = refreshed(tmp_path)
+    docs = {m.id: m for m in index.messages}
+    assert docs["u1"].custom_type is None
+    assert docs["i1"].custom_type == "peer_message"
+
+    payload = docs["i1"].to_payload()
+    assert payload["custom_type"] == "peer_message"
+    assert "custom_type" not in docs["u1"].to_payload()
+    assert ti.MessageDoc.from_payload(payload) == docs["i1"]
+
+    # A version-1 style payload (no key) loads as None rather than being
+    # dropped; the version gate above, not the reader, keeps such docs out.
+    legacy = {key: value for key, value in payload.items() if key != "custom_type"}
+    restored = ti.MessageDoc.from_payload(legacy)
+    assert restored is not None and restored.custom_type is None
 
 
 @pytest.mark.asyncio
