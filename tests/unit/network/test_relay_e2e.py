@@ -1206,6 +1206,48 @@ def test_a_link_that_has_begun_closing_is_never_handed_out(
     assert answered is not None and answered["op"] == "ack", answered
 
 
+def test_a_frame_queued_before_its_link_closed_is_still_written(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The close FLUSHES what was already queued — the half ``closing`` must not break.
+
+    ``PeerLink.close`` asks its writer to finish before the socket goes, and that is
+    load-bearing: the two frames queued a line above a close are the ``net_epoch``
+    rotation that revokes a device's authority and the ``net_bye`` that announces the
+    close, and losing either was a measured defect of its own (see ``close``'s
+    docstring). This cell is the guard on the OTHER side of ``closing``: a frame
+    accepted BEFORE the close began is still written, so a future tightening of the
+    refusal cannot quietly swallow the flush it exists for.
+
+    ``frames_out`` IS THE WRITER'S OWN COUNT, incremented as each frame leaves, which
+    is why the assertion can be an equality rather than a bound: nothing else is due
+    to be written in this window (keepalives are seconds away and this mesh's pulls are
+    on a 15 s cadence), and the frame is the only thing queued between the two reads.
+    """
+    server_a, server_b, host, port = devices
+    record, _host, _port = _pair_settled(devices, monkeypatch)
+    link_b, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=record.epoch)
+    assert link_b is not None, reason
+    link_a = server_a.links.get(link_b.link_id)  # noqa: SLF001 — the table under test
+    assert link_a is not None, "the peer's dial did not install a link on this side"
+
+    before = link_a.frames_out
+    assert (
+        link_a.send({"op": "ping", "req": 9300, "locality": "remote"}) is True
+    ), "a frame was refused before its link had begun closing"
+    link_a.close("test")
+
+    assert link_a.frames_out == before + 1, (
+        f"the close discarded a frame queued before it: {link_a.frames_out} written,"
+        f" {before + 1} expected"
+    )
+    # AND THE OTHER HALF IS STILL REFUSED, which is what makes the equality above a
+    # flush and not a hole: a frame offered once the close has begun is not written.
+    assert link_a.send({"op": "ping", "req": 9301, "locality": "remote"}) is False
+    assert link_a.frames_out == before + 1
+
+
 def test_a_link_that_dies_answers_the_requests_it_was_carrying(
     devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
     monkeypatch: pytest.MonkeyPatch,
