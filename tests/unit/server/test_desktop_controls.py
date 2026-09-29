@@ -701,6 +701,50 @@ async def test_settings_projection_serves_the_registry_authored_annotations(desk
     assert any(row["gated_by"] for row in values), "no registered key is gated"
 
 
+async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
+    """`hotkey_scope` is DERIVED from the registry, never authored twice.
+
+    Additive on the wire (a client that ignores it sees the previous response),
+    and asserted the same way the registry-authored annotations are: every row
+    carries the key, the values are the registry's own, and the desktop row is
+    actually present so the assertion cannot pass on all-empties.
+    """
+    client, _app = desktop
+    rows = {
+        row["key"]: row for row in (await client.get("/v1/settings")).json()["result"]["settings"]
+    }
+    for setting in settings_io.SETTINGS:
+        assert rows[setting.key]["hotkey_scope"] == setting.hotkey_scope, setting.key
+    scopes = {key: row["hotkey_scope"] for key, row in rows.items() if key.startswith("keymap.")}
+    assert scopes == {
+        "keymap.new_session": "app",
+        "keymap.resume": "app",
+        "keymap.quick_send": "desktop",
+    }
+    assert not any(
+        row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
+    ), "a non-hotkey row carries a scope"
+
+
+async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):
+    """The write path proves the dispatch, not just the projection: the same
+    payloads are refused with the desktop reasons and a valid one stores its
+    canonical form (so the desktop app's rebind round trip reads back what it
+    wrote, whatever spelling it sent)."""
+    client, _app = desktop
+    bad_combo = await client.patch("/v1/settings/keymap.quick_send", json={"value": "meta+space"})
+    assert bad_combo.status_code == 422
+    assert "Spotlight" in bad_combo.text
+    bad_alternates = await client.patch(
+        "/v1/settings/keymap.quick_send", json={"value": "ctrl+n,f5"}
+    )
+    assert bad_alternates.status_code == 422
+    assert "one chord" in bad_alternates.text
+    response = await client.patch("/v1/settings/keymap.quick_send", json={"value": "CMD+SHIFT+N"})
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["value"] == "meta+shift+n"
+
+
 async def test_settings_cascade_preserves_concurrent_siblings(desktop):
     client, app = desktop
     manager = app.state.config_manager

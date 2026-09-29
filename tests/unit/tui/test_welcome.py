@@ -1817,6 +1817,25 @@ def test_the_threshold_is_the_width_the_pool_actually_needs() -> None:
     assert not _tip_rows(_lines(_info(), TIP_MIN_WIDTH - 1, 99))
 
 
+def test_a_tip_less_action_stays_out_of_the_keyed_pool() -> None:
+    """``tip == ""`` means "no splash tip", and the pool must SKIP the entry.
+
+    The first tip-less action is the desktop-scope "Quick send": its key is an
+    Electron accelerator, not something this screen can press, so a splash row
+    promoting it would be a lie. Skipping — rather than rendering an empty
+    template — also keeps the pool's row contract: every entry must draw
+    exactly one row at every size, and an empty `{key}` template would still
+    occupy a rotation slot and a width budget.
+    """
+    from local_operator import keymap as keymap_mod
+
+    tip_less = {action.id for action in keymap_mod.KEY_ACTIONS if not action.tip}
+    assert tip_less, "no tip-less action exists to guard"
+    keyed_ids = {binding_id for _, binding_id in KEYED_TIPS if binding_id is not None}
+    assert not (keyed_ids & tip_less), "a tip-less action entered the keyed pool"
+    assert all(template for template, _ in KEYED_TIPS), "an empty template rode the pool"
+
+
 @pytest.mark.asyncio
 async def test_a_24_row_terminal_still_gets_a_tip() -> None:
     """D16. 80x24 is the classic default and a common split pane, and it saw no
