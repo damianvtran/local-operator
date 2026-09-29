@@ -242,9 +242,13 @@ is what used to sit there. The cause stays available as data — `cloud.reason`.
 ```
 
 `connector.state` is one of `parked`, `connected`, `connecting`, `not serving`,
-`stopped`; `login.state` is one of `ok`, `login_required`, `unknown` — and
-`unknown` means the check itself could not run (a refresh could not reach
-Radient), never "your login is dead". `remedy` is an OBJECT
+`stopped`; `login.state` is one of `ok`, `login_required`, `deferred`,
+`unknown`, `owner_missing` — `unknown` means the check itself could not run (a
+refresh could not reach Radient), never "your login is dead"; `deferred` is a
+refresh the store is waiting out (it clears by itself); and `owner_missing`
+means the configuration names a login this device no longer has, so no sign-in
+can clear it and the remedy is the re-point command `lop tunnel configure`,
+never `lop login radient`. `remedy` is an OBJECT
 (`{"command": str, "url": str}`), not a bare command string, and `connector`
 carries the same shape for a park. `connector.detail` is the park's own sentence:
 it names NO command, because it is read by a shell, by the TUI and by the desktop
@@ -269,6 +273,31 @@ which is the same treatment the MCP alarm gets (a toast AND a segment) and the
 only thing still saying it to an operator who was not at the machine when it
 parked. Both read the same local state file, and neither appears for a machine
 with no tunnel or one the operator stopped.
+
+## A login that is gone from this device
+
+The connector is bound to one Radient login, and that binding lives in
+`tunnel/config.json` as a credential row id. Logging out (or removing the
+account) deletes the row; signing in again stores a NEW row and re-points
+nothing, so the configuration keeps naming a login this device no longer has.
+That is its own verdict — `owner_missing` in `--json`, "this tunnel's saved
+login is gone from this device" on the `Login:` line — and it is deliberately
+NOT the `login_required` a refused grant gets: signing in again cannot clear
+it, and the surfaces say so by offering `lop tunnel configure` instead. When a
+connector is also parked for that login, the park's own sign-in command cannot
+clear it either, so the machine-readable remedy is the re-point there too.
+
+That command re-points the device: with no `--credential-id`, a dead pinned id
+is dropped and the current Radient login is selected (it still fails usefully
+when there is none, or several to choose from), the tunnel's record is read
+under that login, and the new binding is saved. If the selected login is not
+the account that owns the tunnel, the 404 is translated rather than printed
+raw: `configure` and `connect` compare the login's own account (a live
+`GET /v1/me`) against the owner the stored record names
+(`record.owner_account_id`) and either name the account mismatch outright or —
+when no comparison is possible — name both causes (a different Radient
+account, or a revoked tunnel) and link the console. Neither sentence echoes
+anything Radient's body said.
 
 ## Trust boundaries and transport
 
