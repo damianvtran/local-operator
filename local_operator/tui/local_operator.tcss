@@ -134,7 +134,7 @@ SessionSidebar {
  * is what `ToolCard:focus`, `ApprovalBlock:focus` and the wake/notice blocks
  * wear, and "two focusable transcript blocks must not spell focus two
  * different ways" — the sidebar is the same kind of surface, so F9 (or
- * `/sidebar focus`) paints it the same way (issue #1357 slice 2a).
+ * `/sidebar focus`) paints it the same way (issue 1357, slice 2a).
  *
  * Not a brightness step, and that is measured, not taste: between the grounds
  * this rule replaces, `bg`→`surface` is 1.088:1 and `surface`→`tint-select`

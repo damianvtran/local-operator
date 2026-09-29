@@ -2127,26 +2127,33 @@ class SessionSidebar(Widget, can_focus=True):
         tail = f" · {chip}" if chip else ""
         # THE FOCUSED LADDER (issue #1357 slice 2a). When the list holds the
         # keyboard its footer teaches the action set the keyboard now owns:
-        # `f10 pin` rides every rung — pinning was documentation-only before
-        # this slice, and this is its one in-product teacher (the pin cell's
-        # `☆` only appears under the pointer) — and `ctrl+a ⌥` rides the rungs
-        # wide enough for it. That chord is the layer toggle and has NO other
-        # in-product teacher: `/help` deliberately excludes the two
-        # sidebar-scoped chords (they would be lies outside f9 mode). It is a
-        # candidate, never an append, and drops whole: it needs the chip's
-        # rung, since the count it flips is what it acts on (`⌥N`; nothing
-        # hidden, nothing said — same rule the chip itself follows).
+        # `f10 pin` from 27 cells of list width up — pinning was
+        # documentation-only before this slice, and this is its one in-product
+        # teacher (the pin cell's `☆` only appears under the pointer) — and
+        # `ctrl+a ⌥`, the layer toggle, which has NO other in-product teacher:
+        # `/help` deliberately excludes the two sidebar-scoped chords (they
+        # would be lies outside f9 mode). Both are candidates, never appends,
+        # and drop whole: ctrl+a needs the chip's rung, since the count it
+        # flips is what it acts on (`⌥N`; nothing hidden, nothing said — same
+        # rule the chip itself follows).
         #
-        # The drop order within the focused ladder is: ctrl+a ⌥, then the
-        # position, then the chip and the lead (never). ctrl+a yields before
-        # the position because the position is recoverable by scrolling while
-        # ctrl+a is not recoverable anywhere else on the frame; the position
-        # yields before the lead/chip exactly as it does unfocused (D4/U1).
-        # `ctrl+o` is deliberately absent: no spelling of it fits a real
-        # content width beside the chip and the pin (`ctrl+a ⌥ … ⌥N` is 36 of
-        # the 43-cell ceiling with a 1k+ count), and a bare chord would break
-        # this footer's key-and-what-it-does contract — recorded on the PR
-        # rather than smuggled in as an append.
+        # THE MEASURED FLOORS, because "rides every rung" was an overstatement
+        # (review round 1, MINOR 2). Reading down the widths, what yields is:
+        # `ctrl+a ⌥` first, then the position, then the pin, then the chip,
+        # never the lead (main's D4/U1). With a chip, the pin rung
+        # (`esc return · f10 pin · ⌥1k+`) is 27 cells and renders at >= 27;
+        # between 17 and 26 the chip outranks it (`esc return · ⌥1k+` — a
+        # 30-column terminal lands exactly here, and NO pin is taught); below
+        # 17 only the lead remains. `ctrl+a ⌥` needs the chip and 38 cells:
+        # `esc return · f10 pin · ctrl+a ⌥ · ⌥1k+` renders on an UNPAGED list
+        # at >= 38; the paged four-fact form is 49 against the 43-cell
+        # ceiling, and `{position} · esc return · f10 pin · ⌥1k+` (38) is
+        # tried first and fits, so a paged list never shows the layer rung
+        # (design round 1, D1: the docs say so rather than a reorder that
+        # trades the position away). `ctrl+o` is deliberately absent: no
+        # spelling of it fits a real content width beside the chip and the
+        # pin, and a bare chord would break this footer's key-and-what-it-does
+        # contract — recorded on the PR rather than smuggled in as an append.
         if self.has_focus:
             pin = f"{lead} · f10 pin"
             layer = " · ctrl+a ⌥" if chip else ""

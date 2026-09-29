@@ -13610,6 +13610,45 @@ async def test_a_click_on_the_row_body_still_opens_the_session(tmp_path, monkeyp
         assert sidebar.cursor_id == "beta"
 
 
+@pytest.mark.asyncio
+async def test_a_refused_pin_write_reports_instead_of_no_opping(tmp_path, monkeypatch) -> None:
+    """A failed pin write says so (UX round 1, U1).
+
+    The store call used to raise into a debug log, which read as a missed
+    click: the row repaints unchanged and nothing says why. The write now
+    reports through the same notice lane the navigation refusals use, and
+    this asserts BOTH halves — no pin lands, and the frame names the failure.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    _seed_session_dirs(tmp_path)
+    from local_operator.tui import sidebar_pins
+    from local_operator.tui.sidebar_pins import read_pins
+    from local_operator.tui.widgets.transcript import NoticeBlock
+
+    def _refuse(config_dir, session_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sidebar_pins, "toggle_pin", _refuse)
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        sidebar = await _open_quiesced_sidebar(pilot, app)
+        y = next(
+            i
+            for i, line in enumerate(sidebar.render().plain.splitlines())
+            if "Session beta" in line
+        )
+        await pilot.click("#session-sidebar", offset=(1, y))
+        for _ in range(40):
+            await pilot.pause()
+            if any("Could not save the pin" in (b.text() or "") for b in app.query(NoticeBlock)):
+                break
+        assert read_pins(tmp_path) == [], "a refused write must not record a pin"
+        notices = [b.text() for b in app.query(NoticeBlock)]
+        assert any("Could not save the pin" in (t or "") for t in notices), notices
+
+
 # -- the cross-surface round trip: one config root, two front ends ----------------
 #
 # THE PROOF THE FEATURE EXISTS FOR, in both directions and against ONE config root.

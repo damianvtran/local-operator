@@ -17,6 +17,7 @@ from rich.cells import cell_len
 from textual.widgets import Tooltip
 
 from local_operator.resume import SessionRow
+from local_operator.tui import theme as theme_mod
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.session_catalog import (
     CatalogEntry,
@@ -203,6 +204,24 @@ async def _focus_settled(pilot, sidebar) -> None:
         if sidebar.has_focus:
             return
     raise AssertionError("sidebar never took focus")
+
+
+def _row_ground(sidebar, needle: str) -> str:
+    """The painted ground of the row carrying ``needle``, read from its STRIP.
+
+    ``render().split("\\n")`` loses the row's base style (``append_text``
+    carries spans, not the base), so a test that read there would assert
+    nothing about the frame; ``render_line`` is what the compositor paints.
+    Returns the row's first backgrounded cell as a lower-case hex.
+    """
+    for y in range(sidebar.size.height):
+        strip = sidebar.render_line(y)
+        if needle in strip.text:
+            for segment in strip:
+                bg = segment.style.bgcolor if segment.style else None
+                if bg is not None:
+                    return bg.triplet.hex.lower()
+    raise AssertionError(f"no painted strip carries {needle!r}")
 
 
 def _hover_entries(ids: tuple[str, ...] = ("alpha", "sess", "gamma")) -> list[CatalogEntry]:
@@ -4319,16 +4338,96 @@ async def test_the_footer_ladder_keeps_an_exact_fit_at_the_29_cell_floor():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [((30, 30), "esc return · ⌥1k+"), ((34, 30), "esc return · f10 pin · ⌥1k+")],
+)
+async def test_the_focused_pin_rung_has_a_floor_and_the_chip_outranks_it_below(
+    size, expected
+) -> None:
+    """The pin rung is 27 cells and yields to the chip under it (review MINOR 2).
+
+    Review round 1 measured what the comment denied: at 30 columns of
+    terminal (24 of list width) the focused ladder is `esc return · ⌥1k+` —
+    no pin — and the pin returns at 28 (34 columns). The order it states is:
+    `ctrl+a ⌥` first, then the position, then the pin, then the chip, never
+    the lead. The chip outranks the pin below 27 because the chip counts a
+    population nothing else on the frame can see.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=size) as pilot:
+        await pilot.pause()
+        sidebar = await _sidebar_with(pilot, app, [_plain("a", active=True)], total=1520)
+        await _focus_settled(pilot, sidebar)
+        assert sidebar.has_focus, "premise: the list holds the keyboard"
+        footer = sidebar.render().plain.splitlines()[-1].strip()
+        assert footer == expected, f"{size}: {footer!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_focus_class_tints_the_panel_and_steps_the_cursor_row_up() -> None:
+    """The `:focus` cue, asserted where the user reads it — on the frame.
+
+    Review round 1's MAJOR: the PR body claimed "focus-class toggling
+    (unfocused -> focused -> unfocused, incl. the cursor-row step-up)" and no
+    test in the tree read either half. Two facts, three reads, one toggle:
+    the widget's resolved background comes from `SessionSidebar:focus` in the
+    stylesheet, and the cursor row's own strip proves the step-up is painted,
+    not merely declared. Off focus the cursor paints no tint at all (it has
+    always been focused-only, and the cursor persists invisibly) — the row
+    tint was the ONLY cue before this slice, so the pair this asserts is:
+    focused panel+tint-select-hi against unfocused panel bg with an
+    untinted row.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        entries = [_plain("mine", name="Session mine"), _plain("other", name="Session other")]
+        sidebar = await _sidebar_with(pilot, app, entries)
+        sidebar.cursor_id = "mine"
+        await pilot.pause()
+
+        def panel() -> str:
+            background = sidebar.styles.background
+            assert background is not None, "the widget resolved no background"
+            return background.hex.lower()
+
+        assert not sidebar.has_focus, "premise: the list does not hold the keyboard"
+        assert panel() == theme_mod.semantic_color("bg"), f"unfocused panel {panel()}"
+        assert _row_ground(sidebar, "Session mine") == theme_mod.semantic_color(
+            "bg"
+        ), "the cursor row paints a tint while the list is unfocused"
+
+        await _focus_settled(pilot, sidebar)
+        assert panel() == theme_mod.semantic_color("tint-select"), f"focused panel {panel()}"
+        assert _row_ground(sidebar, "Session mine") == theme_mod.semantic_color(
+            "tint-select-hi"
+        ), "the cursor row did not step up under the focused panel"
+
+        app.query_one(Editor).focus()
+        for _ in range(20):
+            await pilot.pause()
+            if not sidebar.has_focus:
+                break
+        assert not sidebar.has_focus, "premise: focus left the list"
+        assert panel() == theme_mod.semantic_color("bg"), f"panel did not revert: {panel()}"
+        assert _row_ground(sidebar, "Session mine") == theme_mod.semantic_color(
+            "bg"
+        ), "the cursor row did not fall back with the panel"
+
+
+@pytest.mark.asyncio
 async def test_a_deep_page_yields_the_position_and_never_the_lead_or_chip():
-    """The position yields; the lead, the pin and the chip never yield.
+    """The position yields here; below it the pin yields at 27 and the chip at 17.
 
     On the last page of 152 entries the position is 11 cells, so every
     position-carrying candidate is over 29 and the ladder must fall to
-    `{lead} · f10 pin · {chip}` (27 cells). What it must NOT do is crop: a fact
-    drops whole or not at all (design round 4, §R4.3; the pin rung was added by
-    issue #1357 slice 2a, which re-ranked the focused ladder so the position
-    yields BEFORE the pin — recoverable by scrolling, while `f10 pin` is taught
-    nowhere else on the frame).
+    `{lead} · f10 pin · {chip}` (27 cells): the position yields BEFORE the pin —
+    recoverable by scrolling, while `f10 pin` is taught nowhere else on the
+    frame. What it must NOT do is crop: a fact drops whole or not at all
+    (design round 4, §R4.3; the pin rung was added by issue #1357 slice 2a, and
+    the floors below it are asserted by the width-parametrised test above —
+    review round 1, MINOR 2).
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:
