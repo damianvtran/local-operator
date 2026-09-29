@@ -156,7 +156,7 @@ def _schedule_aida_boot_ensure(app: Any) -> "asyncio.Task[None]":
 
     On an install that has never run her this creates her session, pins it and
     arms the cadence (installing the wake supervisor in the same breath), so
-    the supervisor can start her at 09:00 whether or not any terminal is open
+    the supervisor can start her at 08:30 whether or not any terminal is open
     then. NONE OF THAT BELONGS ON THE FIRST PAINT: the first run builds a
     session and shells out to install the supervisor, and awaiting it held the
     UI behind all of it — CI's ubuntu e2e legs read the same class of delay on

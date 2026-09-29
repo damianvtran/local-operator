@@ -6177,6 +6177,14 @@ class Session:
             # (``_store_title``, ``_cmd_rename``), which cannot await, and tab
             # chrome must never delay or fail a rename.
             self._push_browser_title()
+            # HER NAME IS CONFIG. A user-set rename of HER conversation is a
+            # rename of her (``aida.name``; see local_operator.aida.naming),
+            # and this method is the ONE writer every rename gesture funnels
+            # through — the TUI's /title, the runtime's /rename, the desktop,
+            # the phone — so the sync lives here rather than in four callers.
+            # Generated titles (``user_set=False``) never sync: the auto-namer
+            # is not the operator naming her.
+            self._sync_aida_display_name(stored, user_set=user_set)
         self.refresh_frontend_state()
         return stored
 
@@ -15749,6 +15757,28 @@ class Session:
             logger.debug("aida: could not resolve her session identity", exc_info=True)
             return False
 
+    def _sync_aida_display_name(self, title: str, *, user_set: bool) -> None:
+        """Keep ``aida.name`` in step when HER conversation is renamed.
+
+        Only a USER-SET rename counts: the auto-namer's generated titles
+        (``user_set=False``) are not the operator naming her, and adopting one
+        would let a fresh install's first turn silently rewrite a configured
+        name. Best-effort by contract, like every other side effect its caller
+        runs: a config write must never cost the rename. The write is
+        synchronous on purpose (the ``_set_paused_config`` precedent) — the
+        receipt the user sees must be true, and the write is a few
+        milliseconds against a file the same gesture is already journalling.
+        """
+        if not user_set or not self._aida_duty:
+            return
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.paths import config_dir
+
+            aida_naming.sync_config_name_from_title(config_dir(), title)
+        except Exception:  # noqa: BLE001 — a decoration never fails a rename
+            logger.debug("aida: could not sync the display name to config", exc_info=True)
+
     def _aida_filter_rows(self, schedules: list[WakeSchedule]) -> list[WakeSchedule]:
         """Drop her ``aida-*`` rows when she is paused or disabled."""
         try:
@@ -15792,6 +15822,22 @@ class Session:
                 await self.set_wake_schedules(updated)
         except Exception:  # noqa: BLE001 — best-effort by contract
             logger.warning("aida: live reconcile failed", exc_info=True)
+        # HER DISPLAY NAME rides the same live-config seam: ``aida.name`` is
+        # canonical (see local_operator.aida.naming), so a rename issued
+        # anywhere — a /settings edit, /aida rename in another terminal, the
+        # desktop — re-titles THIS session in place. The band, the picker and
+        # the sidebar all read what this writes. Equal values do nothing,
+        # which is what keeps :meth:`_sync_aida_display_name` (which a rename
+        # rings) from ringing the watcher straight back.
+        try:
+            from local_operator.aida import naming as aida_naming
+            from local_operator.paths import config_dir
+
+            wanted = aida_naming.display_name(config_dir())
+            if wanted and wanted != self._conversation_name.text:
+                self.set_conversation_name(wanted, user_set=True)
+        except Exception:  # noqa: BLE001 — an instrument never fails a turn
+            logger.warning("aida: could not apply the configured name", exc_info=True)
 
     async def _aida_after_turn(self) -> None:
         """Turn-end drain of her escalation tray. One stat when idle.

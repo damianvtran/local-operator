@@ -95,6 +95,22 @@ def test_cadence_at_parses_or_falls_back() -> None:
     )
 
 
+def test_the_default_check_in_is_0830_local() -> None:
+    """The packaged default, pinned by LITERAL: 08:30 local, so her update
+    lands at the start of the work day.
+
+    Only the default moves — an install with ``aida.cadence.at`` set keeps its
+    configured time (``test_policy_reads_the_config_and_the_env_switch``
+    covers that side). Pinned literally here because every other test reaches
+    the constant symbolically and a silent drift would pass them all.
+    """
+    day = datetime(2026, 9, 28, 0, 0, 0)
+    at_0800 = int((day + timedelta(hours=8)).timestamp() * 1000)
+    at_0830 = int((day + timedelta(hours=8, minutes=30)).timestamp() * 1000)
+    assert proactive.DEFAULT_CADENCE_AT == "08:30"
+    assert proactive.next_cadence_ms(at_0800, proactive.DEFAULT_CADENCE_AT) == at_0830
+
+
 # -- policy ------------------------------------------------------------------
 
 

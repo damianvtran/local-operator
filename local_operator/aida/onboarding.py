@@ -34,7 +34,7 @@ import logging
 import time
 from pathlib import Path
 
-from local_operator.aida import state
+from local_operator.aida import naming, state
 
 logger = logging.getLogger(__name__)
 
@@ -47,16 +47,26 @@ GREETING_WAKE_ID = "aida-greeting"
 #: consumer cannot drift.
 DEFAULT_NUDGE_DAYS = 14
 
-#: The greeting wake's self-prompt. Short: the persona and the detail live in
-#: the packaged seed (``agent_seeds/aida.md``), which is loaded as her
-#: instructions; this message only says what THIS turn is for.
-GREETING_MESSAGE = (
-    "First-run greeting. The operator has just finished setting up Local Operator and "
-    "this is your first conversation with them. Introduce yourself as Aida, their chief "
-    "of staff, describe briefly what you can do for them, and ask the few details about "
-    "them that would help you be useful (their name, what they do, and how they would "
-    "like to be addressed). Keep it warm and brief — a short message, not a manual."
-)
+
+def greeting_message(config_dir: Path | str) -> str:
+    """The greeting wake's self-prompt, addressed by the CONFIGURED name.
+
+    A function, not a constant: the greeting is a first-run turn that can fire
+    long after the operator renamed her (``aida.name``), and the instruction
+    the user watches her follow must say the name she is actually called —
+    "Introduce yourself as Aida" after a rename to "Sovereign" is exactly the
+    stale reference this feature removes. Short: the persona and the detail
+    live in the packaged seed (``agent_seeds/aida.md``), which is loaded as
+    her instructions; this message only says what THIS turn is for.
+    """
+    return (
+        "First-run greeting. The operator has just finished setting up Local Operator and "
+        "this is your first conversation with them. Introduce yourself as "
+        f"{naming.display_name(config_dir)}, their chief of staff, describe briefly what "
+        "you can do for them, and ask the few details about them that would help you be "
+        "useful (their name, what they do, and how they would like to be addressed). "
+        "Keep it warm and brief — a short message, not a manual."
+    )
 
 
 def greeted_at(config_dir: Path | str) -> int | None:
@@ -166,7 +176,7 @@ async def greet(config_dir: Path | str, session_id: str, *, now_ms: int | None =
             await arm_wake(
                 root,
                 session_id,
-                {"message": GREETING_MESSAGE, "in": "1s"},
+                {"message": greeting_message(root), "in": "1s"},
                 wake_id=GREETING_WAKE_ID,
                 now_ms=now,
             )
