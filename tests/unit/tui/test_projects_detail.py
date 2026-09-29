@@ -29,6 +29,7 @@ from local_operator.tui.projects_render import (
     detail_todo_lines,
     format_short_date,
 )
+from local_operator.tui.widgets.transcript import GAP_CLASS
 from tests.unit.tui.test_projects_view import (
     SESSION_ID,
     _boot,
@@ -456,6 +457,40 @@ async def test_the_detail_ruler_tracks_scrolling_with_a_tall_page(
         view._paint_rule()
         await pilot.pause()
         assert view.rendered_rows()[1].startswith("── milestones (0/14) ")
+
+
+async def test_detail_heading_gap_rides_the_sanctioned_class(
+    tmp_path: Path,
+) -> None:
+    """Review r2, R2-1: the sheet declares no vertical margin for this page.
+
+    The heading gap is the sheet's single sanctioned spacing class
+    (``.gap-above``), applied by the page; the FIRST row deliberately does not
+    carry it, so the heading that opens the page keeps its place (and with it
+    every section anchor).
+    """
+    session = _ProjectSession()
+    session.project_registry = _rich_registry(tmp_path)
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        view = await _open(pilot, app, "parity-spec")
+        await pilot.press("d")
+        await pilot.pause()
+        await pilot.pause()
+        page = view._detail_page
+        headings = [row for row in page.children if getattr(row, "section", None)]
+        assert [row.section[0] for row in headings] == [
+            "overview",
+            "description",
+            "milestones",
+            "todos",
+            "sessions",
+        ]
+        assert not headings[0].has_class(GAP_CLASS)
+        assert headings[0].styles.margin.top == 0
+        assert all(row.has_class(GAP_CLASS) for row in headings[1:])
+        assert all(row.styles.margin.top == 1 for row in headings[1:])
 
 
 async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(

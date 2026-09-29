@@ -2080,19 +2080,13 @@ Screen.settings #input-dock #prompt-chevron {
     height: auto;
 }
 
-/* One blank line before every section heading, so the page reads as sections
- * rather than one column of facts (the sketch's spacing, done with layout
- * rather than a spacer row — a spacer row would be a row the cursor math
- * would have to know about). */
-.projects-detail-heading {
-    margin: 1 0 0 0;
-}
-
-/* The markdown description is rendered prose: it may be many lines and any
- * width, and it carries its own block spacing. */
-.projects-detail-prose {
-    margin: 0 0 0 0;
-}
+/* One blank line before every section heading rides the sheet's single
+ * sanctioned spacing declaration (`.gap-above`), applied by the page — a
+ * margin here would be a second source the minimalism guard reads as a
+ * violation, and it could silently double with the class. The page withholds
+ * the class from its first row, so the heading opening the page is not
+ * pushed down a row. The markdown description declares nothing either: its
+ * rhythm comes from the markdown blocks' own fills, not the sheet. */
 
 /* The pinned footer: the highlighted project's detail in the list view, the
  * aggregate counts elsewhere. ALWAYS one row plus its quiet lead-in, even when
