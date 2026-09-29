@@ -409,3 +409,72 @@ async def test_team_pull_masks_reflected_credentials_before_storing(
     assert stored is not None
     assert _REFLECTED not in stored.instructions
     assert "[redacted]" in stored.instructions
+
+
+# --- model suggestions (§4.2 consume, §4.3 payload) -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_team_pull_stores_an_available_model_suggestion(
+    test_app_client, temp_dir, fake_org_credential, monkeypatch
+) -> None:
+    """Available ⇒ the row stores the pair; the payload's notice key is null."""
+
+    monkeypatch.setattr(
+        "local_operator.model.discovery.offered_model_ids",
+        lambda provider_id, *, cache_dir=None: None,
+    )
+    document = {
+        "id": "team-9",
+        "tenant_id": "org-1",
+        "name": "suggestion-crew",
+        "members": [],
+        "instructions": "You ship.",
+        "version": "1.0.0",
+        # The mock provider needs no credential, so the app's own store
+        # resolves this pair as runnable here.
+        "model_suggestion": {"hosting": "test", "model": "mock-1"},
+    }
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.get_team.return_value = document
+        response = await test_app_client.get("/v1/teams/pull/team-9")
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["model_notice"] is None
+    stored = TeamRegistry(temp_dir).get_team_by_name("suggestion-crew")
+    assert stored is not None
+    assert stored.model_suggestion is not None
+    assert (stored.model_suggestion.hosting, stored.model_suggestion.model) == ("test", "mock-1")
+
+
+@pytest.mark.asyncio
+async def test_team_pull_reports_a_skipped_model_suggestion(
+    test_app_client, temp_dir, fake_org_credential
+) -> None:
+    """Unavailable ⇒ omitted from the row, named non-blockingly on the payload."""
+
+    document = {
+        "id": "team-9",
+        "tenant_id": "org-1",
+        "name": "skipping-crew",
+        "members": [],
+        "instructions": "You ship.",
+        "version": "1.0.0",
+        "model_suggestion": {"hosting": "no-such-provider", "model": "m"},
+    }
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        mock_client.return_value.get_team.return_value = document
+        response = await test_app_client.get("/v1/teams/pull/team-9")
+
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["model_notice"] == {
+        "reason": "unknown_provider",
+        "requested": {"hosting": "no-such-provider", "model": "m"},
+    }
+    stored = TeamRegistry(temp_dir).get_team_by_name("skipping-crew")
+    assert stored is not None
+    assert stored.model_suggestion is None

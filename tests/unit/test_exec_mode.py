@@ -17,6 +17,7 @@ import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -1901,6 +1902,57 @@ def test_preflight_resolves_agents_and_config_from_the_override(
     ), "preflight read the agent registry at the home root instead of the override"
 
 
+def test_preflight_resolves_the_team_suggestion_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """QA round 1, Q1: `exec --team`'s dry preflight resolves the team rung.
+
+    The worker's ladder is agent > flag > team > config, and the dry preflight
+    feeds the KEY CHECK that runs before launch -- so a dry path that skipped
+    the team rung validated the config default's provider while the run would
+    launch on the team's stored suggestion: it refused a runnable suggestion
+    when the config default was unkeyed, and let an unkeyed suggestion die
+    mid-boot on the mirror. Both directions reduce to one assertion at this
+    seam: the dry pair is the pair the run resolves, never the config default.
+    """
+
+    from local_operator.config import ConfigManager
+    from local_operator.teams import ModelSuggestion, TeamEditFields, TeamRegistry
+
+    override = tmp_path / "override-config"
+    ConfigManager(override).update_config({"hosting": "anthropic", "model_name": "config-model"})
+    TeamRegistry(override).create_team(
+        TeamEditFields(
+            name="qa-team",
+            manager="manager",
+            instructions="say hi",
+            model_suggestion=ModelSuggestion(hosting="openrouter", model="team-model"),
+        )
+    )
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(override))
+
+    # The team suggestion outranks the config default, exactly as it does in
+    # the session ladder -- so the key check names openrouter, not anthropic.
+    assert exec_mode.resolve_hosting_model_dry(ExecArgs(team="qa-team")) == (
+        "openrouter",
+        "team-model",
+    )
+
+    # And a deliberate flag still outranks the suggestion, same as the ladder.
+    assert exec_mode.resolve_hosting_model_dry(
+        ExecArgs(team="qa-team", hosting="openai", model="flag-model")
+    ) == ("openai", "flag-model")
+
+    # A team with no suggestion leaves the answer to the config default.
+    TeamRegistry(override).create_team(
+        TeamEditFields(name="plain-team", manager="manager", instructions="i")
+    )
+    assert exec_mode.resolve_hosting_model_dry(ExecArgs(team="plain-team")) == (
+        "anthropic",
+        "config-model",
+    )
+
+
 def test_background_logs_and_ledger_follow_the_config_dir_override(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2067,6 +2119,37 @@ def test_the_foreground_factory_carries_workstream_to_the_stamp(
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_mode._make_default_session_factory(ExecArgs(workstream=True))()
     assert seen["workstream"] is True
+
+
+def test_the_foreground_factory_carries_the_team_suggestion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The team's stored suggestion reaches the session args (§4.4).
+
+    Carried as its OWN attribute -- never synthesized --hosting/--model flags,
+    which resume would read as deliberate overrides -- and ``None`` for every
+    run without a team, which is what keeps the parity with the SDK's published
+    namespace keyed on the one exec-only field.
+    """
+    from local_operator.teams import ModelSuggestion
+
+    seen: dict[str, Any] = {}
+
+    def fake_create_session(session_args, *managers, **kwargs):
+        seen["suggestion"] = getattr(session_args, "team_model_suggestion", "<field missing>")
+        return None
+
+    monkeypatch.setattr("local_operator.config.ConfigManager", lambda *a: object())
+    monkeypatch.setattr("local_operator.agents.AgentRegistry", lambda *a: object())
+    monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
+    suggestion = ModelSuggestion(hosting="openrouter", model="vendor/model")
+    team = SimpleNamespace(model_suggestion=suggestion)
+
+    exec_mode._make_default_session_factory(ExecArgs(), team)()
+    assert seen["suggestion"] is suggestion
+
+    exec_mode._make_default_session_factory(ExecArgs())()
+    assert seen["suggestion"] is None
 
 
 def test_the_auto_probe_writes_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
