@@ -740,9 +740,7 @@ async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(deskt
     )
     assert bad_alternates.status_code == 422
     assert "one chord" in bad_alternates.text
-    response = await client.patch(
-        "/v1/settings/keymap.quick_send", json={"value": "CMD+SHIFT+N"}
-    )
+    response = await client.patch("/v1/settings/keymap.quick_send", json={"value": "CMD+SHIFT+N"})
     assert response.status_code == 200, response.text
     assert response.json()["result"]["value"] == "meta+shift+n"
 

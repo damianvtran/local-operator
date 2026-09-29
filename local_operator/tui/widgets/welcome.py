@@ -410,7 +410,9 @@ KEYED_TIPS: tuple[tuple[str, str | None], ...] = tuple(
     # a chord this screen cannot press. It must not ride the rotation either:
     # an empty template would still be budgeted here and could move the tip
     # row's count on narrow terminals, which `_tip_lines` forbids.
-    (action.tip, action.id) for action in keymap_mod.KEY_ACTIONS if action.tip
+    (action.tip, action.id)
+    for action in keymap_mod.KEY_ACTIONS
+    if action.tip
 ) + (("/settings → Hotkeys remaps these keys", None),)
 
 #: The ``ctrl+v`` paste sentence. Defined before :data:`TIPS` so the pool can
