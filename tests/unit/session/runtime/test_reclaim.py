@@ -1183,6 +1183,50 @@ class _EnvChild:
             pass
 
 
+#: How long a real child may take to become observable in ``/proc``.
+#:
+#: ``/proc/<pid>/environ`` is empty until the child's ``execve`` has populated
+#: the new mm (and empty again the moment it exits), so a single read taken the
+#: instant ``Popen`` returns is a race. Measured on CI: run 36404034159 read
+#: ``''`` (`assert 'LO_RECLAIM_ENV_PROBE=probe-4f0c9a' in ''`) 0.017 s in — the
+#: read landed inside the child's exec window, and an empty read cannot say
+#: which of the two empty states it was. The reads here therefore wait on the
+#: event — the probe variable APPEARING is the signal that this platform's
+#: reader can see the exec'd child. 10 s is ~200x the slowest healthy sample
+#: (44 CI samples: 0.013-0.049 s end to end). What it stops catching: a child
+#: whose environment never becomes observable now fails after 10 s naming the
+#: child's return code, instead of failing the assertion with an empty read; a
+#: child that died still fails immediately.
+_ENV_WAIT_S = 10.0
+
+
+def _await_child_environ(child: _EnvChild, *, timeout: float = _ENV_WAIT_S) -> str:
+    """``/proc/<pid>/environ``, once the kernel has the child's exec'd snapshot.
+
+    The wait is on the event rather than a sleep, because the two reads that
+    answer ``''`` are indistinguishable at the call site: a child still inside
+    ``execve`` and a child that has already exited both read empty. A child that
+    exited first is named with its return code rather than waited out; the
+    healthy case returns on the first read.
+    """
+    deadline = time.monotonic() + timeout
+    text = ""
+    while time.monotonic() < deadline:
+        text = reclaim.proc_environ_text(child.pid)
+        if _ENV_PROBE_NAME in text:
+            return text
+        if child.process.poll() is not None:
+            raise AssertionError(
+                f"the probe child exited (rc={child.process.returncode}) before its "
+                f"environment became observable; last read {text!r}"
+            )
+        time.sleep(0.02)
+    raise AssertionError(
+        f"no {_ENV_PROBE_NAME} in /proc/<pid>/environ for pid {child.pid} within "
+        f"{timeout}s; last read {text!r}"
+    )
+
+
 @pytest.fixture
 def env_child(tmp_path: Path) -> Iterator[_EnvChild]:
     child = _EnvChild(tmp_path / "probe-root")
@@ -1216,6 +1260,10 @@ def test_a_real_childs_environment_is_read_by_the_real_reader(env_child: _EnvChi
     invalid option, ``_run_command`` answered ``""``, and both readers below
     returned nothing while every injected test in this file stayed green.
     """
+    # Same exec race as the Linux-only /proc cell below: on Linux this reader AND the
+    # ``process_envs()`` batch below are that same /proc file, and on macOS a ``ps``
+    # fork per poll would be the wait. Deferred rather than widened here: no CI run
+    # has failed these reads (R1-F3).
     env = reclaim.process_env(env_child.pid)
     assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in env
     assert config_root_of(env) == str(env_child.root)
@@ -1234,6 +1282,10 @@ def test_the_signal_time_row_reader_reads_a_real_child_and_its_root(
     row itself came back ``None``, so no candidate could pass the re-read and the
     sweep could never signal anything at all.
     """
+    # Pre-exec, this read sees python's argument list without the markers, so the
+    # exec race the Linux-only /proc cell below waits out exists here too.
+    # Deferred rather than overlooked: a cross-platform wait costs a ``ps`` fork
+    # per poll on macOS, and no CI run has failed this read.
     row = process_row(env_child.pid)
     assert row is not None, "the real reader did not recognise a real child's argv"
     assert row.pid == env_child.pid
@@ -1353,7 +1405,7 @@ def test_on_linux_proc_holds_the_environment_and_ps_rejects_the_bsd_flag(
     in case".
     """
     # (1) the kernel's own snapshot, for a process that is not this one.
-    own = reclaim.proc_environ_text(env_child.pid)
+    own = _await_child_environ(env_child)
     assert f"{_ENV_PROBE_NAME}={_ENV_PROBE_VALUE}" in own
     assert config_root_of(own) == str(env_child.root)
 

@@ -181,12 +181,49 @@ def _await_log(config_dir: Path, needle: str, child: Any, *, timeout: float = _W
         time.sleep(0.1)
 
 
-def _wait_for_record(config_dir: Path, *, timeout: float = _WAIT_S) -> Any:
+#: How long a spawned runtime may take to publish its registry record.
+#:
+#: CI DATA, not taste — a bound carries the dataset that calibrated it
+#: (AGENTS.md, "Timing, flakes"): on the shards where it is healthy,
+#: ``test_a_real_runtime_child_fires_the_progress_leg`` — the cell that first
+#: hit this — measures 157.8-179.4 s end to end across 41 healthy CI samples
+#: (median 161.6), and its fixed parts are the 90 s negative sleep and a 45 s
+#: progress bound, leaving <= ~45 s for the two registrations it performs
+#: together. One CI run then exceeded 30 s on the FIRST registration alone (run
+#: 36466096472, job ``test (3.13, 0)``: ``no record for sighupdetach01 within
+#: 30.0s``, the cell failing at 30.04 s). 90 s covers that failure with 3x
+#: headroom and stays 2x the whole healthy registration budget.
+#:
+#: What it stops catching: a runtime that never registers surfaces at 90 s
+#: instead of 30 s — the right trade because the wait is event-driven (the
+#: record itself is the signal, polled at 20 Hz) and the failure that landed
+#: was a loaded runner, not a never. A runtime that EXITS without registering
+#: fails immediately instead, via the ``child=`` arm, and names its rc.
+_REGISTER_WAIT_S = 90.0
+
+
+def _wait_for_record(
+    config_dir: Path, *, child: Any = None, timeout: float = _REGISTER_WAIT_S
+) -> Any:
+    """The session's registry record, once the spawned runtime publishes it.
+
+    Event-driven: ``registry.scan`` is polled and returns the moment the record
+    exists; the bound only decides how long "never" is waited out (see
+    ``_REGISTER_WAIT_S`` for the CI dataset). ``child`` is optional — pass the
+    ``Popen`` you spawned and a runtime that EXITED fails at once with its
+    return code and the tail of its own log: nothing can register after exit,
+    and waiting the full bound would report a death as a slow registration.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for record, _state in registry.scan(config_dir):
             if getattr(record, "session_id", "") == _SESSION_ID:
                 return record
+        if child is not None and child.poll() is not None:
+            raise AssertionError(
+                f"the runtime exited (rc={child.returncode}) before publishing its "
+                f"record, so no wait can succeed:\n{_log_text(config_dir)[-1200:]}"
+            )
         time.sleep(0.05)
     raise AssertionError(f"no record for {_SESSION_ID} within {timeout}s")
 
@@ -284,7 +321,7 @@ def test_a_detached_runtime_survives_a_terminal_hangup(
             os.kill(pid, signal.SIGUSR1)
             time.sleep(0.2)
 
-        record = _wait_for_record(config_dir)
+        record = _wait_for_record(config_dir, child=child)
         assert int(record.pid) == pid, (record.pid, pid)
 
         # (b) THE HANGUP, for real. On the tree before the handler existed this
