@@ -90,8 +90,22 @@ class ModelNotice:
         }
 
     def describe(self) -> str:
-        """The one-line CLI rendering (wording shape; the copy round polishes)."""
+        """The one-line CLI rendering (copy round 1, C2/C3/C7: landed wording)."""
 
+        if self.reason == REASON_INVALID:
+            # Never render the empty quote pairs a malformed payload leaves
+            # (``''``): name back only the half that was readable, so the one
+            # message whose job is to stay calm about a hand-edited file does
+            # not read as a bug (copy round 1, C2).
+            named = []
+            if self.requested_hosting:
+                named.append(f"hosting '{self.requested_hosting}'")
+            if self.requested_model:
+                named.append(f"model '{self.requested_model}'")
+            subject = "The model suggestion" + (f" ({', '.join(named)})" if named else "")
+            return (
+                f"{subject} was malformed and was not applied. " "Using your default model instead."
+            )
         where = {
             REASON_UNKNOWN_PROVIDER: (
                 f"this machine does not know the provider '{self.requested_hosting}'"
@@ -100,11 +114,18 @@ class ModelNotice:
             REASON_LOCAL_NOT_CONFIGURED: (
                 f"no local server is configured for '{self.requested_hosting}'"
             ),
-            REASON_UNKNOWN_MODEL: (f"the model is not offered by '{self.requested_hosting}' here"),
-            REASON_INVALID: "the suggestion was malformed",
+            # "on this machine", not the dangling "here": the check is this
+            # machine's cached catalogue, and the unknown-provider arm above
+            # names the same subject, so the family stays parallel (copy
+            # round 1, C3).
+            REASON_UNKNOWN_MODEL: (
+                f"the model is not offered by '{self.requested_hosting}' on this machine"
+            ),
         }.get(self.reason, f"the suggestion could not be applied ({self.reason})")
         return (
-            f"Suggested model '{self.requested_model}' (hosting "
+            # "Model suggestion", the field's own name on every other surface
+            # (copy round 1, C7): one concept, one name.
+            f"Model suggestion '{self.requested_model}' (hosting "
             f"'{self.requested_hosting}') was not applied: {where}. "
             "Using your default model instead."
         )

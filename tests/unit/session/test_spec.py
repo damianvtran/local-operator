@@ -103,12 +103,13 @@ _EXEC_ONLY_ARG = "team_model_suggestion"
 
 
 def _exec_only_fields(seen: dict[str, object]) -> dict[str, object]:
-    """``seen`` without exec's internal field, asserting that field is inert.
+    """``seen`` without exec's internal field, asserting that field is present and inert.
 
     The fixture builds runs without a ``--team``, so the value must be ``None``;
     anything else means an exec default changed under the tests that trust it.
     """
     shared = dict(seen)
+    assert _EXEC_ONLY_ARG in seen, "exec stopped carrying its internal field at all"
     assert shared.pop(_EXEC_ONLY_ARG, None) is None
     return shared
 

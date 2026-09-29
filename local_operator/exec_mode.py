@@ -474,9 +474,9 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     """Preflight hosting/model resolution WITHOUT spawning (CL-09).
 
     Uses the exact same precedence path the worker will use (agent > flag >
-    config) via the composition root's ``resolve_agent``/``resolve_hosting_model``
-    plus the registry's agent-id lookup, raising ``ValueError`` with the
-    legacy message shapes when unconfigured.
+    team > config) via the composition root's ``resolve_agent``/
+    ``resolve_hosting_model`` plus the registry's agent-id lookup, raising
+    ``ValueError`` with the legacy message shapes when unconfigured.
     """
     from local_operator.agents import AgentRegistry, agents_store_present
     from local_operator.config import ConfigManager
@@ -503,16 +503,33 @@ def resolve_hosting_model_dry(exec_args: ExecArgs) -> tuple[str, str]:
     # registry is load-bearing there — and a store that EXISTS is still
     # constructed (migrations included) even without one, preserving prior
     # behaviour byte for byte.
+    agent_registry: AgentRegistry | None = (
+        AgentRegistry(base_dir)
+        if (exec_args.agent_name or exec_args.agent_id) or agents_store_present(base_dir)
+        else None
+    )
+    # THE TEAM RUNG (§4.4) for `exec --team` (QA round 1, Q1): the worker's
+    # ladder falls back to the resolved team's stored model suggestion below
+    # agent/flag and above config, so the dry preflight must carry the same
+    # value or its key check validates a provider the run will not use --
+    # refusing a runnable suggestion where the config default is unkeyed, and
+    # letting an unkeyed suggestion die mid-boot on the mirror. Resolved by
+    # name from the same registry ``exec_startup.resolve_startup`` reads, and
+    # carried as the SAME ``team_model_suggestion`` attribute the session args
+    # carry, so ``session_factory._team_suggestion_pair`` stays the pair's one
+    # reader (a half pair degrades to None there, never a torn value here).
+    team_suggestion = None
+    if exec_args.team:
+        from local_operator.teams import TeamRegistry
+
+        team = TeamRegistry(base_dir).get_team_by_name(exec_args.team)
+        team_suggestion = team.model_suggestion if team is not None else None
     selector_args = argparse.Namespace(
         hosting=exec_args.hosting,
         model=exec_args.model,
         agent_name=exec_args.agent_name,
         agent_id=exec_args.agent_id,
-    )
-    agent_registry: AgentRegistry | None = (
-        AgentRegistry(base_dir)
-        if (exec_args.agent_name or exec_args.agent_id) or agents_store_present(base_dir)
-        else None
+        team_model_suggestion=team_suggestion,
     )
     # ``agent_registry`` is None only when no selector is present (the guard
     # above) — which is exactly the case ``resolve_agent`` answers with

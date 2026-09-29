@@ -816,7 +816,7 @@ def test_agents_pull_org_prints_the_model_suggestion_notice(
 
     out = capsys.readouterr().out
     assert "Successfully pulled agent 'Carrier'" in out
-    assert "Suggested model 'm' (hosting 'nope') was not applied" in out
+    assert "Model suggestion 'm' (hosting 'nope') was not applied" in out
     assert "Using your default model instead." in out
 
 

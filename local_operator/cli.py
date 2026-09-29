@@ -8525,8 +8525,9 @@ def teams_pull_command(args: argparse.Namespace, team_registry: Any, base_dir: P
         print(
             f"\033[1;33m  Model suggestion stored: 'lop exec --team {team.name}' "
             f"will launch on '{team.model_suggestion.model}' (hosting "
-            f"'{team.model_suggestion.hosting}') unless a launch flag or a resumed "
-            f"session's own selection overrides it.\033[0m"
+            f"'{team.model_suggestion.hosting}') unless a --hosting/--model flag, "
+            f"the selected agent's own model, or a resumed session's saved model "
+            f"overrides it.\033[0m"
         )
     return 0
 

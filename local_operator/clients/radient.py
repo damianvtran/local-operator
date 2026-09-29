@@ -2124,21 +2124,29 @@ def build_instruction_set_document(
         raw_model = model_suggestion.get("model")
         suggestion_hosting = raw_hosting.strip() if isinstance(raw_hosting, str) else ""
         suggestion_model = raw_model.strip() if isinstance(raw_model, str) else ""
-        if not suggestion_hosting:
-            raise InstructionSetError("model_suggestion", "must hold a non-empty hosting")
-        if len(suggestion_hosting) > INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS:
+        # The hub's sentence for a suggestion half is ONE count-free rule over
+        # both the empty and the over-cap arm -- "must carry a hosting of 1 to
+        # 64 characters" in agent-server's ``instruction_set.go`` -- and
+        # ``InstructionSetError`` promises a locally refused document renders
+        # like a hub-refused one, so both arms raise that sentence, merged
+        # rather than split per arm (agent review + copy round 1, M1/C1).
+        if (
+            not suggestion_hosting
+            or len(suggestion_hosting) > INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS
+        ):
             raise InstructionSetError(
                 "model_suggestion",
-                "must hold a hosting of at most "
-                f"{INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS} characters",
+                f"must carry a hosting of 1 to {INSTRUCTION_SET_SUGGESTION_HOSTING_MAX_CHARS}"
+                " characters",
             )
-        if not suggestion_model:
-            raise InstructionSetError("model_suggestion", "must hold a non-empty model")
-        if len(suggestion_model) > INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS:
+        if (
+            not suggestion_model
+            or len(suggestion_model) > INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS
+        ):
             raise InstructionSetError(
                 "model_suggestion",
-                "must hold a model of at most "
-                f"{INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS} characters",
+                f"must carry a model of 1 to {INSTRUCTION_SET_SUGGESTION_MODEL_MAX_CHARS}"
+                " characters",
             )
         suggestion_pair = {"hosting": suggestion_hosting, "model": suggestion_model}
 

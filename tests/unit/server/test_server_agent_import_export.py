@@ -308,14 +308,10 @@ def _suggestion_zip(suggestion: dict[str, str]) -> io.BytesIO:
 
 
 async def _post_suggestion_zip(test_app_client, zip_buffer: io.BytesIO):
-    upload_file = UploadFile(filename="agent.zip", file=zip_buffer)
-    with patch.object(upload_file, "read", return_value=zip_buffer.getvalue()):
-        pass
-    with patch("fastapi.File", return_value=upload_file):
-        return await test_app_client.post(
-            "/v1/agents/import",
-            files={"file": ("agent.zip", zip_buffer, "application/zip")},
-        )
+    return await test_app_client.post(
+        "/v1/agents/import",
+        files={"file": ("agent.zip", zip_buffer, "application/zip")},
+    )
 
 
 @pytest.mark.asyncio
