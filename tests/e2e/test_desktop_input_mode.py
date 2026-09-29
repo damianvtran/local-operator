@@ -72,6 +72,26 @@ def _row(root: Path, sid: str, entry_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _rows_carrying(root: Path, sid: str, text: str) -> list[dict[str, Any]]:
+    """Message rows whose OWN content carries ``text`` — a row-level count.
+
+    The delivery metric below counts first-appearances across provider
+    requests, and a DOUBLE-PERSISTED steer would still pass it: both copies
+    ride the same drained payload into every later call. The durable row is
+    where duplication is the bug (review round 1, M2), so this counts rows.
+    """
+    matches: list[dict[str, Any]] = []
+    for row in _rows(root, sid):
+        if row.get("type") != "message":
+            continue
+        content = row.get("payload", {}).get("content")
+        if not isinstance(content, list):
+            continue
+        if any(isinstance(block, dict) and block.get("text") == text for block in content):
+            matches.append(row)
+    return matches
+
+
 def _introduced_in(stream: ScriptedStream, text: str) -> list[int]:
     """The call indexes where ``text`` FIRST appears — i.e. was delivered.
 
@@ -321,6 +341,15 @@ async def test_a_mid_turn_dictation_rides_the_steer_onto_the_row(
         assert row["payload"]["input_mode"] == "dictated", row["payload"]
         assert "input_path" not in row["payload"], row["payload"]
 
+        # ROW-LEVEL duplication check BEFORE the delivery metric: a double
+        # persist cannot be seen in provider-request transitions (both copies
+        # drain together), so the count that can fail is over durable rows.
+        rows_with_text = _rows_carrying(root, sid, "Mid-turn dictation")
+        assert len(rows_with_text) == 1, (
+            "exactly ONE durable row may carry the steered text — a duplicated"
+            f" persist must fail here: found {len(rows_with_text)}"
+        )
+
         delivered = _introduced_in(stream, "Mid-turn dictation")
         assert len(delivered) == 1, (
             "the steered text must reach the provider exactly once, never twice:"
@@ -334,6 +363,7 @@ async def test_a_mid_turn_dictation_rides_the_steer_onto_the_row(
         print(
             "input carriage e2e (steer): mid-turn dictation answered"
             f" {admission['status']}/{admission['detail']!r} while the turn was held;"
-            " the drained row carries input_mode='dictated'; the steer text reached"
+            f" the drained row carries input_mode='dictated' ({len(rows_with_text)} durable"
+            " row carries the text); the steer text reached"
             f" the provider exactly once, in call {delivered[0]}"
         )
