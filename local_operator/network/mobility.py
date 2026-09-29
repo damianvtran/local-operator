@@ -305,6 +305,11 @@ MOVE_REFUSAL_CODES: frozenset[str] = frozenset(
         # protocol one: the source holds an entry the copy set does not carry, so
         # moving it would delete that entry with nothing to copy it from (B-M2).
         "unlisted_content",
+        # PR #1756 round 1 (design finding D1), and it exists for the SENTENCE
+        # discipline rather than the wire: split off ``unreachable`` so a consumer
+        # can tell "a peer stopped answering" (its remedy is time) from "no row
+        # at all" (its remedy is looking where the id was last staged, HERE).
+        "no_holder",
     }
 )
 
@@ -542,20 +547,69 @@ def _move_refusal(
     }
 
 
+#: ``created_at.json`` is the ONLY entry a bare remnant may hold: it is the birth
+#: sidecar a ``Transcript`` construction publishes, so it is the one file a READER
+#: that never writes leaves behind (see :func:`_bare_remnant`).
+_REMNANT_ALLOWED_NAMES = frozenset({"created_at.json"})
+
+
+def _bare_remnant(directory: Path) -> bool:
+    """A directory holding NO conversation: a corpse, not a session.
+
+    THE SHAPE, MEASURED 2026-09-29 (the recall strand): constructing a
+    ``Transcript`` MATERIALISES the directory it is pointed at and publishes
+    ``created_at.json`` (``session/transcript.py``'s constructor), so a READER
+    that never writes leaves exactly this remnant. The live writer found that
+    night was a viewer on the device that does NOT own the id, running its
+    owner-lost verdict (``session/attached.py``'s cut-off journalling); its
+    corpse sat at the recall's promote target and made the promote refuse.
+
+    STRICT ON PURPOSE, and this predicate is the only license the promote has to
+    clear one: an EMPTY directory qualifies, and otherwise every entry must be
+    the birth sidecar or an atomic write's killed temp (``*.tmp``, ``tmp*``). A
+    transcript, a stamp, a lease/pid claim — or ANY other entry — means somebody
+    could own or be writing this directory, and callers must treat it exactly as
+    they always have.
+    """
+    try:
+        children = list(directory.iterdir())
+    except OSError:
+        # A file, a vanished directory, an unreadable one: never a remnant.
+        return False
+    for child in children:
+        if child.is_dir():
+            return False
+        name = child.name
+        if name in _REMNANT_ALLOWED_NAMES or name.endswith(".tmp") or name.startswith("tmp"):
+            continue
+        return False
+    return True
+
+
 def _owned_here(server: "RelayServer", session_id: str) -> bool:
     """Is ``session_id`` this device's own? The stamp, not the directory.
 
     A directory whose ``mesh.json`` names another device is the leftover a crash
     leaves in a handoff window (§6.5), and answering "mine" for it here is how a
     moved-away session gets a runtime on the device it left.
+
+    AND A BARE REMNANT IS NOBODY'S (measured 2026-09-29): with no stamp at all
+    the answer used to be "mine" for any directory, so the empty corpse a
+    viewer's cut-off verdict left (see :func:`_bare_remnant`) made every recall
+    of that id answer ``already_local`` — a dead end, because the only complete
+    copy was the one staged for the very move being refused. A transcript or
+    anything else a session can hold still answers "mine"; a corpse does not.
     """
     from local_operator.session.placement import read_stamp
 
-    if not (Path(server.root) / "sessions" / session_id).is_dir():
+    directory = Path(server.root) / "sessions" / session_id
+    if not directory.is_dir():
         return False
     stamp = read_stamp(server.root, session_id)
-    home = stamp.home_device if stamp is not None else ""
-    return not home or home == server.identity.device_id
+    if stamp is not None:
+        home = stamp.home_device
+        return not home or home == server.identity.device_id
+    return not _bare_remnant(directory)
 
 
 def _tombstone(root: Path, session_id: str) -> dict[str, Any]:
@@ -1602,6 +1656,14 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
     directory, its stamp and its lineage marker appear in a single step. A scanner
     that listed the store one syscall earlier sees nothing, not half a session.
 
+    A TARGET IN THE WAY REFUSES — EXCEPT A BARE REMNANT. An id that already has a
+    directory here is the one thing a promote must never write over, so a real
+    session (or anything that could be one) returns False and the caller words
+    the refusal. The single exception is the corpse ``_bare_remnant`` describes:
+    a reader's leftover holding no conversation, whose strict-predicate match is
+    the ONLY license this function has to clear it (measured 2026-09-29; the
+    recall stranded on exactly that remnant).
+
     WHAT IS DELIBERATELY NOT HERE, because the design's step 17 says to do it and
     the code says otherwise: ``claim_session``. It writes ``.session.pid`` naming
     ``os.getpid()`` — which for a relay is a live process that holds no transcript
@@ -1614,7 +1676,47 @@ def _promote(server: "RelayServer", staging: Path, target_id: str) -> bool:
     """
     target = Path(server.root) / "sessions" / target_id
     if target.exists():
-        return False
+        # A BARE REMNANT IS NOT AN OWNER (measured 2026-09-29 — see
+        # ``_bare_remnant`` for the shape). A corpse holds nothing a session
+        # could lose: it is the leftover of a READER (a viewer's cut-off verdict
+        # on the device that does not own the id), and the recall arriving with
+        # the verified copy — which is then the ONLY complete copy anywhere — is
+        # exactly the moment it must not be refused. Anything else in the way
+        # refuses exactly as before; nothing is ever cleared without the strict
+        # predicate in ``_bare_remnant`` agreeing, and the removal goes through
+        # ``cleanup.remove_session_dir`` — the ONE rmtree of a session directory
+        # in this codebase (``tests/unit/session/test_no_session_deletion.py``
+        # fails the build on any other), whose guards refuse an unmarked store.
+        # The store is marked first, the same authority ``_remove_handed_away``
+        # exercises for the hand-back this device decided: a promote's target
+        # store is one this device is adopting INTO, which is the same claim
+        # ``session_factory`` makes when it marks a store it created.
+        if not _bare_remnant(target):
+            return False
+        from local_operator.session.cleanup import (
+            MESH_REMNANT_POLICY,
+            mark_store,
+            remove_session_dir,
+        )
+
+        mark_store(target.parent)
+        if not remove_session_dir(
+            target,
+            config_dir=server.root,
+            policy=MESH_REMNANT_POLICY,
+            reason="mesh-recall: cleared a bare remnant so the verified copy could land",
+            actor="mesh:promote",
+        ):
+            # The guard refused (or the target moved under us): the remnant is
+            # still in the way, and a promote must never write over what it
+            # could not clear — refuse exactly as before.
+            return False
+        logger.info(
+            "mobility: cleared a bare remnant (no session content) at %s so the "
+            "verified copy of %s could land",
+            target,
+            target_id,
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.replace(str(staging), str(target))
@@ -2594,8 +2696,14 @@ def resolve_remote_owner(server: "RelayServer", session_id: str) -> tuple[str, s
                 + "; nothing was changed",
             )
         return device_id, str(peer.get("name") or "")
+    # Its OWN code, distinct from the per-peer ``unreachable`` above (design
+    # review round 1, D1): the two sentences have DIFFERENT remedies — a device
+    # that stopped answering may recover on its own, while "no row at all" is
+    # answered by looking at THIS device's own staging area — and the sync
+    # clause that names a staged copy must compose onto the latter only, where
+    # the named verb can actually complete.
     raise Moved(
-        "unreachable",
+        "no_holder",
         f"no device in this network holds {session_id}, so nothing was moved",
     )
 
@@ -2621,6 +2729,32 @@ def _tombstone_recovery_clause(server: "RelayServer", session_id: str) -> str:
         f". This device handed {session_id} to {name or device_id}; if it is not there "
         f"yet, its verified copy is in that device's `network/staging/{session_id}`, and "
         f"`lop sessions move {session_id} --to local` THERE adopts it"
+    )
+
+
+def staged_copy_clause(server: "RelayServer", session_id: str) -> str:
+    """What to add to a "no device holds this id" refusal when a VERIFIED copy
+    is sitting in this device's own staging area (§6.5's last row).
+
+    THE FACT THE REFUSAL USED TO HIDE (measured 2026-09-29, the recall strand):
+    after a recall whose promote was refused, the staged copy was the only
+    complete copy in existence — and `lop sessions sync <id>` answered "no device
+    in this network holds <id>, so nothing was moved", denying bytes this device
+    was holding. The clause names the directory and the one verb that adopts it.
+
+    Added ONLY when ``ready.json`` is present (a copy verified against the
+    owner's cut), so it can never point at an empty or unverified staging
+    directory. Public rather than private because the sync plane's refusal is
+    the caller the operator's report is about.
+    """
+    from local_operator.network import sync as sync_mod
+
+    staging = sync_mod.staging_dir(Path(server.root), session_id)
+    if not (staging / "ready.json").is_file():
+        return ""
+    return (
+        f". This device holds a verified copy of it in `network/staging/{session_id}`; "
+        f"`lop sessions move {session_id} --to local` here adopts it"
     )
 
 
