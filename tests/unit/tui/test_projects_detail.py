@@ -479,7 +479,9 @@ async def test_detail_heading_gap_rides_the_sanctioned_class(
         await pilot.pause()
         await pilot.pause()
         page = view._detail_page
-        headings = [row for row in page.children if getattr(row, "section", None)]
+        # DOM-truth rows read through the same duck-typed lens as
+        # `_dom_top_section` above; pyright holds the guard for `Widget`.
+        headings: list[Any] = [row for row in page.children if getattr(row, "section", None)]
         assert [row.section[0] for row in headings] == [
             "overview",
             "description",
