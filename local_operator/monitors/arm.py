@@ -1,8 +1,10 @@
-"""Cancel a session's monitors from OUTSIDE the session (contract §12, CLI row).
+"""Arm and cancel a session's monitors from OUTSIDE the session (contract §12).
 
-The monitors family's external writer, modeled on
-:mod:`local_operator.wakes.arm` — the same three-part invariant and the same
-write order, because the failure modes are identical in kind:
+The monitors family's external writers: :func:`arm_monitor` (the desktop arm
+route) and :func:`cancel_monitor` (``lop monitor cancel`` and the desktop
+cancel route), modeled on :mod:`local_operator.wakes.arm` — the same
+three-part invariant and the same write order, because the failure modes are
+identical in kind:
 
 - **The base is the TRANSCRIPT, never the index.** An append REPLACES the
   session's monitor list (the ``monitor_schedules`` custom entry), so a stale
@@ -21,13 +23,14 @@ write order, because the failure modes are identical in kind:
   one retry from the new base and then a conflict refusal rather than a
   success report that lost the user's cancel.
 
-``lop monitor cancel`` is the caller that exists today; the desktop command
-routes (the UI slice) can reuse this writer when they arrive. There is
-deliberately NO request-id settling or rollback-journal machinery here — the
-wake module carries those for a retry contract (the desktop route's
-``request_id``) that monitor cancels do not yet have; a retried cancel is a
-fresh request whose worst case is an honest ``no monitor with id`` refusal
-about a watch that is already gone, which is the state the user asked for.
+``lop monitor cancel`` and the desktop monitor routes are the callers. There
+is deliberately NO request-id settling or rollback-journal machinery here —
+the wake module carries those for a retry contract (the desktop route's
+``request_id``) that monitor writes answer structurally instead: a retried
+cancel's worst case is an honest ``no monitor with id`` refusal about a watch
+that is already gone, which is the state the user asked for, and a retried
+ARM is idempotent by the dedupe identity itself (an identical spec is
+answered with the existing row, never a second write).
 
 The owner guard mirrors ``wakes.arm._refuse_if_owned``: a write behind a live
 owner is undone by that owner's next persist — its in-memory list was loaded
@@ -41,9 +44,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from local_operator.monitors.spec import MONITOR_SCHEDULES_CUSTOM_TYPE, MonitorSpec
 from local_operator.session.transcript import read_latest_custom_entry
@@ -65,6 +70,11 @@ MONITOR_LOCK_NAME = ".monitor-write.lock"
 STATUS_SESSION_NOT_FOUND = 404
 STATUS_MONITOR_NOT_FOUND = 404
 STATUS_CONFLICT = 409
+#: A malformed request (a bad duration, a bad regex) reads as a 422; everything
+#: well-formed but unsupportable (the interval floor, a past ``until``, a
+#: target that is not read-only) is a 409 conflict with what can be watched —
+#: the wake writer's split, verbatim.
+STATUS_INVALID = 422
 #: 503 for the owner states and a contended lock: every one means "nothing was
 #: written, and retrying is what fixes it".
 STATUS_WRITE_BUSY = 503
@@ -76,6 +86,18 @@ NOTHING_WRITTEN = "Nothing was written."
 #: shared by the two places that can meet the state (the wake twin's rule).
 WEDGED_MESSAGE = (
     "This conversation's runtime is not responding. Retry in a moment, or stop that conversation."
+)
+
+#: The refusal for an owner that is ALIVE and ANSWERING. One sentence for both
+#: places that can meet the state — the desktop route resolves the owner before
+#: the lock, the writer's own guard re-meets it under it — because a refusal
+#: rendered two different ways depending on which check caught it is the split
+#: the wake twin was already bitten by. "Change them", not "cancel them": the
+#: desktop route arms through this writer too.
+OWNER_ANSWERED_MESSAGE = (
+    "This conversation is open in a running session, which owns its monitors. "
+    + NOTHING_WRITTEN
+    + " Retry in a moment, or change them from that session."
 )
 
 
@@ -94,7 +116,7 @@ class MonitorWriteError(Exception):
 
 @dataclass(frozen=True)
 class MonitorWriteOutcome:
-    """What a successful cancel did, for the caller's receipt.
+    """What a successful write did, for the caller's receipt.
 
     ``index_written`` is "the derived index now reflects this change, as far as
     this process can tell": false only when the index write itself failed — an
@@ -110,6 +132,16 @@ class MonitorWriteOutcome:
     remaining: int
     index_written: bool = False
     index_path: str = ""
+    #: Arm only: the first check's instant (§5.4's fresh-counters rule), or
+    #: ``None`` on a cancel.
+    next_due_at: int | None = None
+    #: Arm only: an identical spec was ALREADY armed, so the row was left
+    #: alone (nothing was appended) and ``monitor_id`` names the existing row.
+    already_armed: bool = False
+    #: Arm only: the identical spec existed DISABLED; this arm reset its
+    #: counters (its id and snapshot baseline survive), which is §11.3's
+    #: "re-arm to reactivate".
+    reactivated: bool = False
 
 
 async def cancel_monitor(
@@ -188,6 +220,95 @@ async def cancel_monitor(
     )
 
 
+async def arm_monitor(
+    config_dir: Path,
+    session_id: str,
+    request: Mapping[str, Any],
+    *,
+    cwd: str | None = None,
+    now_ms: int | None = None,
+) -> MonitorWriteOutcome:
+    """Add one monitor to ``session_id``'s standing watches. ``request`` is the
+    same create mapping the agent's ``monitor`` tool takes, validated by the
+    same function (``build_monitor_spec``), so a watch armed from the desktop
+    and one armed by the model are validated and allocated identically.
+
+    Refuses a session that does not exist rather than inventing one (the wake
+    writer's rule), and refuses to write behind a live owner
+    (:func:`_refuse_if_owned`): there is deliberately no routed command ladder
+    for monitors, so a live conversation's own ``monitor`` tool is the only
+    writer that may touch its list while it runs — an append from here would be
+    deleted by that session's next persist while this writer had reported 200,
+    and until then nothing would tick the watch either.
+    """
+    session_dir = Path(config_dir) / "sessions" / session_id
+    if not await asyncio.to_thread(session_dir.is_dir):
+        raise MonitorWriteError(
+            f"no session {session_id!r}", status=STATUS_SESSION_NOT_FOUND, code="session_not_found"
+        )
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+
+    # One writer at a time, per session, per family — the cancel twin's lock,
+    # held across the read, the guards, the append, the verification and the
+    # index write, because the append REPLACES the whole list and two writers
+    # that interleave their reads lose or duplicate a row.
+    lock = WakeWriteLock(session_dir, name=MONITOR_LOCK_NAME)
+    try:
+        await asyncio.to_thread(lock.acquire)
+    except WakeLockBusy as busy:
+        raise MonitorWriteError(
+            str(busy), status=STATUS_WRITE_BUSY, code="monitor_write_busy"
+        ) from None
+    except WakeLockUnavailable as unusable:
+        raise MonitorWriteError(
+            f"Cannot arm a monitor for this conversation: {unusable}. "
+            "Restore write permission on its directory, or reopen the conversation "
+            "from a writable location, and retry.",
+            status=STATUS_CONFLICT,
+            code="monitor_write_unavailable",
+        ) from None
+    try:
+        # The index is read for the TWO things this write needs and nothing
+        # else: the cwd the checks run in (``_resolved_cwd`` — the transcript
+        # carries no such answer) and the unknown keys the rewrite must
+        # preserve (``stopped_at``). It is still NOT the base for the list:
+        # that is ``_read_rows``' job, for the reasons its docstring gives.
+        previous = await asyncio.to_thread(_read_index_entry, config_dir, session_id)
+        resolved_cwd = cwd or _resolved_cwd(session_dir, previous)
+        result = await _arm_locked(
+            config_dir, session_dir, session_id, request, cwd=resolved_cwd, now=now
+        )
+        index_written = False
+        index_path = ""
+        try:
+            index_rows = await asyncio.to_thread(
+                _compose_index_rows, config_dir, session_id, result.rows
+            )
+            written = await asyncio.to_thread(
+                _write_index, config_dir, session_id, resolved_cwd, index_rows, previous
+            )
+            index_written = True
+            index_path = str(written) if written is not None else ""
+        except Exception:  # noqa: BLE001 — the transcript already has it (store.py's contract)
+            logger.warning(
+                "could not update the monitor index entry for %s", session_id, exc_info=True
+            )
+    finally:
+        await asyncio.to_thread(lock.release)
+
+    return MonitorWriteOutcome(
+        session_id=session_id,
+        monitor_id=result.monitor_id,
+        name=result.name,
+        remaining=len(result.rows),
+        index_written=index_written,
+        index_path=index_path,
+        next_due_at=result.next_due_at,
+        already_armed=result.already_armed,
+        reactivated=result.reactivated,
+    )
+
+
 async def _cancel_locked(
     config_dir: Path,
     session_dir: Path,
@@ -260,6 +381,157 @@ async def _cancel_locked(
     )
 
 
+@dataclass(frozen=True)
+class _ArmResult:
+    """What one arm produced, before the index write: the receipt's facts and
+    the list the index should carry (the read list for a no-op arm, the
+    appended one for a create)."""
+
+    rows: list[MonitorSpec]
+    monitor_id: str
+    name: str
+    next_due_at: int | None
+    already_armed: bool = False
+    reactivated: bool = False
+
+
+async def _arm_locked(
+    config_dir: Path,
+    session_dir: Path,
+    session_id: str,
+    request: Mapping[str, Any],
+    *,
+    cwd: str,
+    now: int,
+) -> _ArmResult:
+    """read -> validate -> dedupe -> cap -> guard -> append -> verify -> guard.
+
+    The same order as ``MonitorScheduler.create`` (shape first, so a bad
+    request is a sentence and never a half-armed row; dedupe second, because an
+    identical spec is an answer rather than an error; then the cap; then the
+    storm guard), and the same append discipline as ``_cancel_locked`` — the
+    loop runs at most twice; a mismatch with a non-party writer rebases once
+    and then refuses.
+
+    TWO settles differ from cancel's, both because this is an ADD: a rebase
+    that finds the request's own spec already in the base reports SUCCESS (the
+    dedupe identity is also the retry's idempotency key — that request's write,
+    or a peer's identical one, is in force), and a base whose matching spec is
+    DISABLED is reactivated (counters reset) exactly as the in-session flow
+    does, rather than duplicated beside.
+    """
+    from local_operator.monitors.readonly import external_monitor_verdict
+    from local_operator.monitors.settings import read_monitor_settings
+    from local_operator.monitors.spec import (
+        allocate_monitor_id,
+        build_monitor_spec,
+        spec_identity,
+    )
+
+    settings = read_monitor_settings()
+    for attempt in (0, 1):
+        rows, stored_next_seq = await asyncio.to_thread(_read_rows, session_dir)
+        monitor_id, bumped_next_seq = allocate_monitor_id(
+            [spec.id for spec in rows], high_water=stored_next_seq
+        )
+        outcome = build_monitor_spec(
+            dict(request),
+            monitor_id=monitor_id,
+            now_ms=now,
+            settings=settings,
+            cwd=cwd,
+            validate=external_monitor_verdict,
+        )
+        if "error" in outcome:
+            raise _refusal(outcome)
+        spec = outcome["spec"]
+        identity = spec_identity(spec.tool, spec.arguments)
+        match = next(
+            (row for row in rows if spec_identity(row.tool, row.arguments) == identity), None
+        )
+        if match is not None:
+            counters = (
+                await asyncio.to_thread(_read_counters, config_dir, session_id, match.id) or {}
+            )
+            if counters.get("disabled"):
+                # RE-ARM TO REACTIVATE (§11.3): reset the failures and keep the
+                # id and the snapshot baseline. The transcript is NOT re-appended
+                # because the list did not move — the counters file and the index
+                # are what did.
+                fresh = _fresh_first_counters(match.id, now)
+                await asyncio.to_thread(_write_counters, config_dir, session_id, match.id, fresh)
+                return _ArmResult(
+                    rows=rows,
+                    monitor_id=match.id,
+                    name=match.name,
+                    next_due_at=_due_of(fresh),
+                    reactivated=True,
+                )
+            # THE DUPLICATE ANSWER: the arm the caller asked for is already in
+            # force. Nothing is appended — a second row polling one call is the
+            # duplication the identity exists to settle (§11.4).
+            return _ArmResult(
+                rows=rows,
+                monitor_id=match.id,
+                name=match.name,
+                next_due_at=_due_of(counters),
+                already_armed=True,
+            )
+        if len(rows) >= settings.max_monitors:
+            raise MonitorWriteError(
+                f"monitor limit reached ({settings.max_monitors} per session) — "
+                "cancel one first (monitor list).",
+                status=STATUS_CONFLICT,
+                code="monitor_refused",
+            )
+        same_name = sum(1 for row in rows if row.name == spec.name)
+        if same_name >= 2:
+            raise MonitorWriteError(
+                f"three monitors named '{spec.name}' is a storm — cancel one or "
+                "use a distinct name.",
+                status=STATUS_CONFLICT,
+                code="monitor_refused",
+            )
+        await _refuse_if_owned(config_dir, session_id)
+        entry_id = await _append(session_dir, [*rows, spec], bumped_next_seq)
+        try:
+            # THE POST-APPEND GUARD (the cancel twin's), for the same wound: a
+            # runtime can claim the session inside the append and republish its
+            # stale list on its next persist, deleting this arm from the
+            # transcript AND the index. Asking again makes that a refusal
+            # instead of a silent loss, and the append is undone first so the
+            # retry it asks for is honest.
+            await _refuse_if_owned(config_dir, session_id)
+        except MonitorWriteError:
+            await _append(session_dir, rows, stored_next_seq)
+            raise
+        if await asyncio.to_thread(_latest_entry_id, session_dir) == entry_id:
+            fresh = _fresh_first_counters(spec.id, now)
+            await asyncio.to_thread(_write_counters, config_dir, session_id, spec.id, fresh)
+            return _ArmResult(
+                rows=[*rows, spec],
+                monitor_id=spec.id,
+                name=spec.name,
+                next_due_at=_due_of(fresh),
+            )
+        if attempt:
+            # A writer that does not take the lock landed on top of both
+            # attempts; reconciling beats reporting an arm that may not be in
+            # effect. (The rebase above catches the ordinary case — the spec is
+            # in the base — so this is the genuinely unsettled one.)
+            raise MonitorWriteError(
+                "The conversation changed while your change was being applied. "
+                "Reconcile its monitor list before retrying.",
+                status=STATUS_CONFLICT,
+                code="monitor_write_conflict",
+            )
+    raise MonitorWriteError(  # pragma: no cover - the loop always returns or raises
+        "The monitor list could not be settled.",
+        status=STATUS_CONFLICT,
+        code="monitor_write_conflict",
+    )
+
+
 async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
     """Refuse to append to a transcript a runtime process owns.
 
@@ -300,11 +572,7 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
         )
     if dialable:
         raise MonitorWriteError(
-            "This conversation is open in a running session, which owns its monitors. "
-            + NOTHING_WRITTEN
-            + " Retry in a moment, or cancel them from that session.",
-            status=STATUS_OWNER_BUSY,
-            code="monitor_owner_present",
+            OWNER_ANSWERED_MESSAGE, status=STATUS_OWNER_BUSY, code="monitor_owner_present"
         )
     raise MonitorWriteError(
         "This conversation's monitor file is claimed by process "
@@ -312,7 +580,7 @@ async def _refuse_if_owned(config_dir: Path, session_id: str) -> None:
         "in an older build, or a stale owner marker left by a pid the system has "
         "since reused. " + NOTHING_WRITTEN + " If nothing has this conversation open, "
         f"the marker at {Path(config_dir) / 'sessions' / session_id / '.session.pid'} is stale "
-        "and can be removed; otherwise cancel its monitors from that session.",
+        "and can be removed; otherwise change its monitors from that session.",
         status=STATUS_OWNER_BUSY,
         code="monitor_owner_present",
     )
@@ -415,7 +683,7 @@ def _write_index(
     config_dir: Path,
     session_id: str,
     cwd: str,
-    rows: list[MonitorSpec],
+    rows: Sequence[Any],
     preserve: Mapping[str, Any],
 ):
     from local_operator.monitors.store import write_entry
@@ -424,7 +692,10 @@ def _write_index(
     # (a stopped session's monitors stay parked through this write; dropping it
     # would un-park the whole session as a side effect of cancelling one
     # watch). An empty remainder REMOVES the entry, which is also what releases
-    # the cleanup reap guard (§11.5).
+    # the cleanup reap guard (§11.5). ``rows`` may be specs (cancel: the
+    # remainder is the list) or dicts (arm: the spec plus its counters/health —
+    # ``_compose_index_rows`` — because the arm receipt and the listing must
+    # show the new row's due instant); ``write_entry`` accepts either.
     return write_entry(
         Path(config_dir),
         session_id,
@@ -432,6 +703,95 @@ def _write_index(
         monitors=rows,
         preserve=preserve,
     )
+
+
+def _refusal(outcome: Mapping[str, Any]) -> MonitorWriteError:
+    """A ``build_monitor_spec`` error as a refusal. Malformed (an unparseable
+    duration, a bad regex) is the caller's input to fix and reads as a 422;
+    everything else — the interval floor, a past time, a target that is not
+    read-only — is a conflict with what can be watched and reads as a 409."""
+    malformed = bool(outcome.get("malformed"))
+    return MonitorWriteError(
+        str(outcome.get("error") or "the monitor could not be armed"),
+        status=STATUS_INVALID if malformed else STATUS_CONFLICT,
+        code="monitor_invalid" if malformed else "monitor_refused",
+    )
+
+
+def _fresh_first_counters(monitor_id: str, now: int) -> dict[str, Any]:
+    """A new (or reactivated) monitor's counters, its first check scheduled in
+    the scheduler's own window (§5.4), so an externally armed watch starts on
+    the same clock one armed from inside would."""
+    from local_operator.monitors.scheduler import (
+        FIRST_CHECK_MAX_MS,
+        FIRST_CHECK_MIN_MS,
+        fresh_counters,
+    )
+
+    due = now + int(random.uniform(float(FIRST_CHECK_MIN_MS), float(FIRST_CHECK_MAX_MS)))
+    return fresh_counters(monitor_id, due)
+
+
+def _due_of(counters: Mapping[str, Any]) -> int | None:
+    """A tolerant ``next_due_at`` read — the counters file is another
+    process's output, so a junk value reads as absent rather than travelling
+    onto the receipt as a number nobody reported."""
+    due = counters.get("next_due_at")
+    if isinstance(due, bool) or not isinstance(due, int):
+        return None
+    return due
+
+
+def _read_counters(config_dir: Path, session_id: str, monitor_id: str) -> dict[str, Any] | None:
+    from local_operator.monitors import state as monitor_state
+
+    try:
+        return monitor_state.read_counters(Path(config_dir), session_id, monitor_id)
+    except Exception:  # noqa: BLE001 — absent and unreadable are the same state here
+        logger.debug("could not read monitor counters for %s", monitor_id, exc_info=True)
+        return None
+
+
+def _write_counters(
+    config_dir: Path, session_id: str, monitor_id: str, counters: Mapping[str, Any]
+) -> None:
+    """Best-effort counters write (the scheduler's own ``_write_counters``
+    swallows and warns for the same reason: the row is already armed, and a
+    failed derived write must not fail the arm)."""
+    try:
+        from local_operator.monitors import state as monitor_state
+
+        monitor_state.write_counters(Path(config_dir), session_id, monitor_id, counters)
+    except Exception:  # noqa: BLE001 — derived state; the first tick rewrites it
+        logger.warning("monitor counters write failed for %s", monitor_id, exc_info=True)
+
+
+def _compose_index_rows(
+    config_dir: Path, session_id: str, specs: Sequence[MonitorSpec]
+) -> list[dict[str, Any]]:
+    """The index rows for a list: the spec plus its counters/health — the exact
+    key set ``MonitorScheduler.index_rows`` composes from memory, rebuilt here
+    from the counters files so an external arm does not drop the new row's due
+    instant (the receipt's own field) or a sibling's health out of the derived
+    index. Absent counters read as the fresh defaults the next session open
+    would rebuild anyway; the index is best-effort between change events (§10.2).
+    """
+    rows: list[dict[str, Any]] = []
+    for spec in specs:
+        counters = _read_counters(config_dir, session_id, spec.id) or {}
+        rows.append(
+            {
+                **spec.model_dump(),
+                "next_due_at": _due_of(counters),
+                "last_check_at": counters.get("last_check_at", 0),
+                "checks": counters.get("checks", 0),
+                "deliveries": counters.get("deliveries", 0),
+                "consecutive_failures": counters.get("consecutive_failures", 0),
+                "disabled": bool(counters.get("disabled")),
+                "disabled_reason": counters.get("disabled_reason", ""),
+            }
+        )
+    return rows
 
 
 def _resolved_cwd(session_dir: Path, previous: Mapping[str, Any]) -> str:

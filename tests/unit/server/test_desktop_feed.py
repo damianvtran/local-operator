@@ -1309,6 +1309,31 @@ def _statuses(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [frame for frame in frames if frame["type"] == "session_status"]
 
 
+def _monitor(root: Path, session_id: str, *, dormant: bool = False) -> Path | None:
+    """Arm (or arm-and-dormant) one session's monitor entry, through the real
+    writer — ``_wake``'s twin. ``stopped_at`` is the monitor index's park
+    marker (there is no Aida ``held_at`` for this family)."""
+    from local_operator.monitors.store import write_entry as write_monitor_entry
+
+    preserve = {"stopped_at": int(time.time() * 1000)} if dormant else None
+    return write_monitor_entry(
+        root,
+        session_id,
+        cwd=str(Path.cwd()),
+        monitors=[
+            {
+                "id": "m1",
+                "name": "watch",
+                "tool": "bash",
+                "arguments": {"command": "ls"},
+                "every_ms": 60_000,
+                "next_due_at": int(time.time() * 1000) + 60_000,
+            }
+        ],
+        preserve=preserve,
+    )
+
+
 @contextlib.contextmanager
 def _io_watch(registry_dir: Path, *, reads_under: Path | None = None) -> Iterator[dict[str, Any]]:
     """Count the filesystem calls one block makes, and which files it read.
@@ -1720,6 +1745,75 @@ def test_the_wake_index_is_watched_both_ways(tmp_path):
     disarmed = _statuses(_queued(subscription))
     assert [frame["payload"]["code"] for frame in disarmed] == ["recent"]
     assert disarmed[0]["payload"]["revision"] > armed[0]["payload"]["revision"]
+    asyncio.run(feed.close())
+
+
+def test_the_monitor_index_is_watched_both_ways(tmp_path):
+    """Arming AND disarming a monitor — the wake test's twin, with the
+    difference that matters here: a monitor-only row's STATUS pair does not
+    move (the words are the wake band's, `catalog.status_of`), so what the
+    client must be told is the CATALOGUE invalidation — the row's order key
+    (armed monitors lead the cold group) moved, and only a list refetch can
+    paint that. The disarm direction is the same candidate-set lesson the wake
+    test pins: the entry is gone, so a set built from the current index could
+    never announce the way back."""
+    from local_operator.monitors.store import remove_entry as remove_monitor_entry
+
+    root = tmp_path
+    sid = "f1" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _monitor(root, sid)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+    armed = _queued(subscription)
+    assert [frame["type"] for frame in armed] == ["catalogue"], armed
+    row = feed._row_for(sid)
+    assert row is not None
+    assert row.monitors == 1
+    assert row.monitors_dormant is False
+    # A monitor NEVER moves the status pair — the surface's words belong to
+    # the wake band — but the ROW's order key does, which is why the
+    # invalidation above is the correct (and only) announcement here.
+    assert not _statuses(armed)
+
+    # The disarm direction: the entry is REMOVED from the index.
+    remove_monitor_entry(root, sid)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+    disarmed = _queued(subscription)
+    assert [frame["type"] for frame in disarmed] == ["catalogue"], disarmed
+    row = feed._row_for(sid)
+    assert row is not None and row.monitors == 0
+    asyncio.run(feed.close())
+
+
+def test_a_parked_sessions_monitors_read_dormant_on_the_row(tmp_path):
+    """``stopped_at`` is the park marker the catalogue bands dormant monitors
+    by, and the feed's row must carry the same answer — both readers derive it
+    from the same index entry, so a frame and a list cannot disagree."""
+    from local_operator.session.catalog import load_catalog
+
+    root = tmp_path
+    sid = "f2" * 6
+    _listable_session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+
+    _monitor(root, sid, dormant=True)
+    feed._status_probed_at = 0.0
+    _tick(feed)
+
+    row = feed._row_for(sid)
+    assert row is not None
+    assert row.monitors == 1
+    assert row.monitors_dormant is True
+    listed = {entry.id: entry.row for entry in load_catalog(root)}
+    assert listed[sid].monitors == row.monitors
+    assert listed[sid].monitors_dormant == row.monitors_dormant
     asyncio.run(feed.close())
 
 
