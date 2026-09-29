@@ -8,6 +8,19 @@ what CI exercises. `providers/aws.py` is the production backend: it launches
 the guest on EC2 with boto3, leases it with an EventBridge TTL schedule, and
 hands the instance to upstream's `DesktopEnv`.
 
+**This wheel drives no model and opens no sessions.** It is the environment
+side of an episode — VM/guest plumbing, the providers, observation capture,
+scoring — while the model side is `scripts/run_episode.py`, whose two
+engagement arms (the reply-channel loop, and the SDK session arm,
+`--engagement session`) are documented in `docs/benchmarks/osworld_2/README.md`
+under "Engagement arms: reply and session". The harness surface this package
+imports is the evaluation protocol boundary
+(`local_operator.evaluation.adapters.api` and its siblings, `evaluation.protocol`,
+`evaluation.evidence.models`, `evaluation.action_surface`, `evaluation.lifecycle`)
+plus `local_operator.computer_input` and `local_operator.helpers` — by design:
+session construction belongs to the driver process, never to the isolated
+adapter worker.
+
 ## Why it is its own distribution
 
 The adapter imports `local_operator.evaluation.adapters.api`, so it is coupled

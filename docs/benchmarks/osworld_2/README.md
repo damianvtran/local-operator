@@ -1004,6 +1004,43 @@ evidence of an attempt, not a result.
 
 ## 7. Run parameters and cost
 
+### Engagement arms: reply and session
+
+Two engagement modes exist, chosen per run; **a number is readable only
+beside the arm that produced it**, and the two are not comparable until their
+record formats converge.
+
+- **`reply` (default)** — the reply-channel loop whose mechanics this section
+describes below: the runner calls the model through its own client with
+`tool_choice="none"`, and the model answers with one strict JSON action
+batch. It reuses the central model/provider request path and the compaction
+engine, but it *deliberately* has no host shell/file tools and shares neither
+the TUI prompts, the skills, the guides, nor the tool registry —
+MODEL_PILOT.md states the distinction as a standing rule ("The evaluated
+control loop is not the full interactive session"). Its record is the sealed
+evidence bundle (§6).
+
+- **`session`** — the episode's PILOT arm: it runs as ONE `sdk.open_session`
+turn through `local_operator.sdk` — the same session object the TUI,
+`lop exec`, the desktop server and the mobile relay drive — so the session
+scaffolding (compaction, guides, skills discovery, the full tool registry
+including delegation) arrives by construction rather than by coincidence, and
+the episode's computer-use actions arrive as calls to a per-session MCP
+server (`local_operator/evaluation/action_server.py`). The launchd scratch
+environment is required and REFUSED when missing, never defaulted (`HOME`,
+`LOCAL_OPERATOR_CONFIG_DIR`, `LOP_RUN_SCRATCH_ROOT`), and the episode session
+is confined to the run's scratch before any tool call can run
+(`Session.set_tool_confinement`; the residual list lives in
+`local_operator/tools/confinement.py`). Its record is the pilot format —
+`local_operator/evaluation/session_arm.py`'s `events.jsonl`, `outcome.json`
+and `score.json` under an `ep-<id>-session` directory — NOT the sealed
+bundle, and it is not comparable to reply-arm results. Design and current
+status of record: `docs/design/sdk-engagement.md` §6 and §9.
+
+Session-arm flags: `--session-route <provider>/<model>` (default: the episode
+route) and `--session-wall-s` (bounds the session's turn; past it the driver
+calls `abort()`, so the episode ends through the normal stop path).
+
 ### Parameters
 
 Flags on `scripts/run_episode.py`, with their defaults:
@@ -1011,6 +1048,9 @@ Flags on `scripts/run_episode.py`, with their defaults:
 | Parameter | Default | Notes |
 | --- | --- | --- |
 | `--route` | required | `<provider>/<model>`; the paid episode used `openrouter/deepseek/deepseek-v4-flash-vision-exp` |
+| `--engagement` | `reply` | which loop drives the model — see "Engagement arms" above. `session` runs one `sdk.open_session` turn and writes a pilot record |
+| `--session-route` | none | session arm only: `<provider>/<model>` for the session (default: the episode route) |
+| `--session-wall-s` | none | session arm only: wall bound on the session's turn; past it `abort()` ends the episode through the normal stop path |
 | `--max-steps` | 25 | bounds the step loop; `EpisodeConfig.max_steps` itself defaults to 50. Stating it also takes the cost-rate ratio out of the picture for that episode: the step budget is the authority about how long the run lasts, so cycle prices are not judged as a rate (see `--max-cycle-usd`) |
 | `--max-usd` | 0.50 | hard provider spend cap; reaching it is a scored truncation (`budget-cap`), and it is the only COST authority a step-budgeted episode has. The figure is stated against a MODEL's prices — see `--max-usd-at` to scale it to the run's route |
 | `--max-usd-at` | none | the route whose prices the `--max-usd` figure is stated at (`<provider>/<model>`); the enforced cap is scaled to the run route's own prices by their ratio, never downward (the stated figure stays the floor), so a step budget sized on a cheap route is not cut short on an expensive one. Prices come from the provider's live public listing; an unpriceable basis refuses at preflight. The derivation is sealed into the manifest metadata (`usd_cap_configured_micros`, `usd_cap_effective_micros`, `usd_cap_price_factor_micros`, `usd_cap_at`), so a reader can tell which bound applied. Default: use the figure as stated |
