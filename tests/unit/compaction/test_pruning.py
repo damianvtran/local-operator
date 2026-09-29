@@ -4,13 +4,15 @@ from typing import Any
 
 from local_operator.compaction.pruning import (
     MIN_PRUNE_TOKENS,
+    STALE_FRAME_NOTICE,
     SUPERSEDED_NOTICE,
     USELESS_NOTICE,
     compute_suffix_tokens,
+    prune_stale_frames_in_place,
     prune_tool_outputs,
 )
 from local_operator.compaction.tokens import estimate_tokens
-from local_operator.harness.types import Message, TextContent
+from local_operator.harness.types import ImageContent, Message, TextContent
 
 NOW = 10_000_000
 ACTIVE = NOW  # not idle
@@ -362,3 +364,126 @@ def test_a_declared_key_never_blanks_a_different_result() -> None:
     before_bare = _text_len(bare)
     pruned_bare, _ = prune_tool_outputs(bare, now_ms=0, last_activity_ms=0)
     assert _text_len(pruned_bare) == before_bare
+
+
+# ---------------------------------------------------------------------------
+# The session-side stale-frame sweep: retention window, narrowings, guards
+# ---------------------------------------------------------------------------
+
+
+def _frame(path: str, call_id: str | None = None) -> Message:
+    """A tool-role message shaped like the loop converts a read image result."""
+    message = Message(role="tool", tool_call_id=call_id or f"call-{path}", tool_name="read")
+    message.content = [
+        TextContent(text=f"Image {path} (640x480 png, 12 KB)"),
+        ImageContent(data="aGVsbG8=", mime_type="image/png"),
+    ]
+    message.provider_payload = {"details": {"path": path, "mime_type": "image/png"}}
+    return message
+
+
+def test_a_stale_frame_is_blanked_and_its_caption_kept():
+    """The sweep drops pixels, never the row: caption and pairing survive."""
+    oldest, middle, newest = [_frame(f"/shots/{i}.png") for i in range(3)]
+    messages = [Message.user("look"), oldest, middle, newest]
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
+
+    assert dropped == 1
+    assert not any(isinstance(block, ImageContent) for block in oldest.content)
+    assert STALE_FRAME_NOTICE in oldest.text
+    assert "Image /shots/0.png (640x480 png, 12 KB)" in oldest.text
+    assert oldest.provider_payload is not None
+    assert oldest.provider_payload["pruned"] is True
+    assert oldest.provider_payload["details"]["path"] == "/shots/0.png"
+    assert oldest.tool_call_id == "call-/shots/0.png"
+
+
+def test_keep_newest_frames_survive_the_sweep():
+    """The retention window is the module's own rule: newest two frames kept."""
+    frames = [_frame(f"/shots/{i}.png") for i in range(5)]
+    dropped = prune_stale_frames_in_place(frames, now_ms=NOW, last_activity_ms=ACTIVE)
+
+    assert dropped == 3
+    for victim in frames[:3]:
+        assert not any(isinstance(block, ImageContent) for block in victim.content)
+    for survivor in frames[3:]:
+        assert any(isinstance(block, ImageContent) for block in survivor.content)
+        assert STALE_FRAME_NOTICE not in survivor.text
+
+
+def test_the_retention_window_is_the_callers_choice():
+    """``keep_recent_frames`` is honored when a caller pins it wider."""
+    frames = [_frame(f"/shots/{i}.png") for i in range(4)]
+    dropped = prune_stale_frames_in_place(
+        frames, now_ms=NOW, last_activity_ms=ACTIVE, keep_recent_frames=3
+    )
+
+    assert dropped == 1
+    for survivor in frames[1:]:
+        assert any(isinstance(block, ImageContent) for block in survivor.content)
+
+
+def test_warm_suffix_defers_frames_until_idle():
+    """A stale frame inside the warm cache prefix waits for the idle flush."""
+    oldest, middle, newest = [_frame(f"/shots/{i}.png") for i in range(3)]
+    messages = [oldest, _assistant_big(), middle, newest]
+    suffix = compute_suffix_tokens(messages)
+    assert suffix[0] > 8000  # the victim sits in the warm prefix
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
+    assert dropped == 0
+    assert any(isinstance(block, ImageContent) for block in oldest.content)
+
+    # Same state, idle past the flush window: the cache is provably cold and
+    # everything flushes.
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=NOW - IDLE_AGO)
+    assert dropped == 1
+    assert not any(isinstance(block, ImageContent) for block in oldest.content)
+
+
+def test_user_frames_are_never_swept():
+    """A paste is not a view of a surface the session drove.
+
+    Never a candidate, even when it sits outside the newest window — and it
+    still consumes a slot, exactly as it does in the module's own walk, so a
+    newer paste shifts the window the way the module defines it.
+    """
+    read_a, read_b = [_frame(f"/shots/{i}.png") for i in range(2)]
+    paste = Message.user("see this", images=[ImageContent(data="aGVsbG8=", mime_type="image/png")])
+
+    # Newest frame is the user paste: one read falls out of the window and
+    # folds; the paste and the other read survive.
+    dropped = prune_stale_frames_in_place(
+        [read_a, read_b, paste], now_ms=NOW, last_activity_ms=ACTIVE
+    )
+    assert dropped == 1
+    assert not any(isinstance(block, ImageContent) for block in read_a.content)
+    assert any(isinstance(block, ImageContent) for block in read_b.content)
+    assert any(isinstance(block, ImageContent) for block in paste.content)
+
+    # An OLDER paste is a victim by the retention rule, skipped by the role
+    # filter: its pixels stay.
+    older_paste = Message.user(
+        "older", images=[ImageContent(data="aGVsbG8=", mime_type="image/png")]
+    )
+    read_c, read_d = [_frame(f"/other/{i}.png") for i in range(2)]
+    dropped = prune_stale_frames_in_place(
+        [older_paste, read_c, read_d], now_ms=NOW, last_activity_ms=ACTIVE
+    )
+    assert dropped == 0
+    assert any(isinstance(block, ImageContent) for block in older_paste.content)
+    assert any(isinstance(block, ImageContent) for block in read_c.content)
+
+
+def test_error_frames_are_never_swept():
+    """Errors are signal: the sweep takes the same never-errors guard
+    ``prune_tool_outputs`` takes."""
+    failed = _frame("/shots/failed.png")
+    failed.is_error = True
+    messages = [failed, _frame("/shots/1.png"), _frame("/shots/2.png")]
+
+    dropped = prune_stale_frames_in_place(messages, now_ms=NOW, last_activity_ms=ACTIVE)
+
+    assert dropped == 0
+    assert any(isinstance(block, ImageContent) for block in failed.content)

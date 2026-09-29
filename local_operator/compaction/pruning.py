@@ -44,6 +44,7 @@ from .tokens import estimate_tokens, estimate_wire_bytes, invalidate_message_cac
 
 __all__ = [
     "MIN_PRUNE_TOKENS",
+    "SESSION_KEEP_RECENT_FRAMES",
     "STALE_FRAME_NOTICE",
     "SUPERSEDED_NOTICE",
     "USELESS_NOTICE",
@@ -51,6 +52,7 @@ __all__ = [
     "count_frame_messages",
     "count_stale_observations",
     "prune_stale_frames",
+    "prune_stale_frames_in_place",
     "prune_tool_outputs",
     "shed_frames_to_wire_budget",
     "shed_stale_frames",
@@ -70,6 +72,15 @@ USELESS_NOTICE = "[Uneventful result elided]"
 #: Exact placeholder written over a screenshot that a newer view of the same
 #: surface has superseded (see :func:`prune_stale_frames`).
 STALE_FRAME_NOTICE = "[screenshot omitted: superseded by a more recent view of the same surface]"
+
+#: How many of the newest frame-bearing messages the session-side stale-frame
+#: sweep always keeps (see :func:`prune_stale_frames_in_place`). Two, not one:
+#: a before/after capture pair — the flow the sweep must not break — is exactly
+#: "the newest two frames" while the comparison is in flight, and a newest-2
+#: window still leaves the measured majority droppable on this fleet (83.9%
+#: of resident frames sat outside it, 91.7% outside newest-1). The evaluation
+#: runner keeps more (3) because a screen-driving loop re-frames every step.
+SESSION_KEEP_RECENT_FRAMES = 2
 
 
 def count_frame_messages(messages: Sequence[Message]) -> int:
@@ -502,6 +513,105 @@ def prune_tool_outputs(
             changed = True
 
     return list(messages), changed
+
+
+def _blank_frames(message: Message) -> int:
+    """Fold ``message``'s image blocks into :data:`STALE_FRAME_NOTICE`.
+
+    In place, like :func:`prune_tool_outputs` blanks tool outputs — the session
+    owns its messages, and its prune journal persists the blanking by the
+    ``pruned`` marker afterwards. Text survives (a frame's caption names the
+    file it came from, so the model can re-read pixels that are gone), and
+    images fold to ONE notice: a message that carried three views of a surface
+    reads as "a screenshot was here", not as three lines of the same
+    boilerplate. The whole content collapses to a single text block because
+    the journal replays ``message.text`` as one block (``append_prune`` →
+    ``_pruned_entry``); keeping the original text blocks and appending a notice
+    would make a resumed context differ in block structure from the live one.
+    Returns the number of image blocks replaced.
+    """
+    dropped = sum(1 for block in message.content if isinstance(block, ImageContent))
+    text = "".join(
+        block.text for block in message.content if isinstance(block, TextContent)
+    ).strip()
+    folded = f"{text}\n{STALE_FRAME_NOTICE}" if text else STALE_FRAME_NOTICE
+    message.content = [TextContent(text=folded)]
+    message.provider_payload = {**_payload_of(message), "pruned": True}
+    invalidate_message_cache(message)
+    return dropped
+
+
+def prune_stale_frames_in_place(
+    messages: Sequence[Message],
+    *,
+    now_ms: int,
+    last_activity_ms: int,
+    keep_recent_frames: int = SESSION_KEEP_RECENT_FRAMES,
+    cache_warm_suffix_tokens: int = 8000,
+    idle_flush_ms: int = 5400000,
+) -> int:
+    """Blank stale frames in place — the session-side sibling of
+    :func:`prune_stale_frames`.
+
+    Reuses that function's retention rule — everything outside the newest
+    ``keep_recent_frames`` frame-bearing messages is superseded by a newer
+    view — and applies the same caller guards :func:`prune_tool_outputs`
+    applies, so the session's two in-place sweeps behave alike:
+
+    - never errors and never skill reads (:func:`_is_prunable`), never an
+      already-pruned result, and never below :data:`MIN_PRUNE_TOKENS`;
+    - never a candidate whose suffix lies inside the warm prompt cache
+      (``cache_warm_suffix_tokens``) — mutating there re-writes everything
+      after it at cacheWrite price — *unless* the idle flush
+      (``idle_flush_ms`` since the last provider request) proves the cache
+      cold.
+
+    Two deliberate narrowings vs the runner's primitive, each the reason this
+    sibling exists. Only TOOL-result frames are candidates: the runner's
+    history has no user-authored frames, while a session does, and blanking a
+    frame a human pasted would be a visible loss of the user's own message —
+    markers are not candidates either (user-role by construction; their
+    frames ARE a snapcompact archive, and mutating one would corrupt the
+    replay it exists to carry). And the blanking is in place with a
+    ``pruned`` marker, exactly like :func:`prune_tool_outputs`, because the
+    session owns its messages and journals the blanking; the runner instead
+    relies on :func:`prune_stale_frames`' copy/identity contract.
+
+    ``now_ms`` and ``last_activity_ms`` are MILLISECONDS epoch values,
+    matching :func:`prune_tool_outputs` (passing seconds silently disables
+    the idle flush). Returns the number of image blocks replaced.
+    """
+    if not messages:
+        return 0
+    # Victim selection IS the module's retention rule, read off the primitive
+    # so "recent" has one definition: the copy walk returns victims as the
+    # entries whose identity changed.
+    after, _ = prune_stale_frames(messages, keep_recent_frames=keep_recent_frames)
+    victims = [index for index in range(len(messages)) if after[index] is not messages[index]]
+    if not victims:
+        return 0
+    idle = (now_ms - last_activity_ms) >= idle_flush_ms
+    suffix_tokens = compute_suffix_tokens(messages)
+    dropped = 0
+    for index in victims:
+        message = messages[index]
+        # User frames and markers are never candidates (see the docstring);
+        # the marker check is belt-and-braces — markers are user-role by
+        # construction — and is what keeps a future renderer that moves them
+        # out of that class from letting an archive be corrupted here.
+        if message.role != "tool" or marker_exists([message]):
+            continue
+        if not _is_prunable(message) or _is_pruned(message):
+            continue
+        if estimate_tokens(message) < MIN_PRUNE_TOKENS:
+            continue
+        if not idle and suffix_tokens[index] > cache_warm_suffix_tokens:
+            # Inside the warm cache prefix: re-writing it costs the
+            # cacheWrite premium on everything after it. Leave the frame for
+            # the idle flush, or for compaction, which cuts it away.
+            continue
+        dropped += _blank_frames(message)
+    return dropped
 
 
 def _is_stale_observation(message: Message) -> bool:

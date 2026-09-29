@@ -23,6 +23,8 @@ Ported semantics:
 - Compaction is checked after each turn via a LAZY import of
   ``local_operator.compaction.api`` — a missing module degrades to
   no-compaction. Binding wiring: prune tool outputs BEFORE the trigger math,
+  and in sessions that have captured browser views sweep stale frames beside
+  that prune,
   trigger on ``compaction_context_tokens`` against the single resolved
   threshold ``min(threshold_percent * window, threshold_tokens)`` (defaults
   80% and 600k, resolved only by ``compaction.thresholds``), strategy
@@ -1653,6 +1655,41 @@ _WIRE_BUDGET_RATCHET = 0.75
 #: the floor the ladder hands over to the sticky image degrade instead, which
 #: at least says plainly that images are gone.
 _WIRE_BUDGET_FLOOR = 4_000_000
+
+
+def _history_captured_browser_views(messages: Sequence[Message]) -> bool:
+    """Whether this rendered history shows the session capturing browser views.
+
+    The gate for the stale-frame sweep, and deliberately narrow: a browser
+    result counts only when it WROTE a screenshot — ``details`` carries both
+    the file path and the byte count, the shape both browser hosts return
+    from a capture. The sweep's claim ("an older frame is superseded by a
+    newer view of the same surface") only holds for a session that captured
+    surfaces; a session that never did is left byte-identical, and a session
+    that merely browsed without capturing keeps its frames too — whatever
+    images it holds are neither browser views nor superseded by one.
+
+    Read off the history rather than a session flag because the property IS
+    historical: a session that starts driving a browser mid-conversation
+    (measured on this fleet: an ordinary chat for hundreds of turns, then a
+    screen) becomes sweep-eligible on the turn the first capture lands, with
+    no config change — the same reason the runner's byte-backed variant keys
+    on observed pressure rather than a static kind.
+    """
+    for message in messages:
+        if not isinstance(message, Message) or message.is_error:
+            continue
+        if message.tool_name != "browser":
+            continue
+        payload = message.provider_payload
+        details = payload.get("details") if isinstance(payload, dict) else None
+        if (
+            isinstance(details, dict)
+            and isinstance(details.get("bytes"), int)
+            and bool(details.get("path"))
+        ):
+            return True
+    return False
 
 
 def _shed_frames_to_budget(messages: list[Message], *, budget: int) -> tuple[list[Message], int]:
@@ -13191,7 +13228,9 @@ class Session:
         decisions):
 
         1. ``prune_tool_outputs`` over the LLM history (in-place blanking of
-           superseded/useless tool outputs) BEFORE the trigger math.
+           superseded/useless tool outputs) BEFORE the trigger math;
+           sessions that have captured browser views also sweep stale
+           frames here (see ``_history_captured_browser_views``).
         2. Trigger on ``compaction_context_tokens`` (max of provider-reported
            context size and the local estimate).
         3. Threshold: whatever ``compaction.thresholds.resolve_threshold_tokens``
@@ -13514,6 +13553,21 @@ class Session:
             compaction_api.prune_tool_outputs(llm_history, now_ms, self._last_provider_request_ms)
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
+        # (1b) Stale frames ride the same boundary, behind a session gate:
+        # only a session that has CAPTURED browser views can own frames a
+        # newer view of a surface supersedes, so every other session type is
+        # left byte-identical (the gate's own comment draws the line). The
+        # frame blank writes bytes the prompt cache may still hold, so the
+        # sweep takes the same warm-suffix/idle-flush guards (1) takes.
+        if _history_captured_browser_views(llm_history):
+            try:
+                compaction_api.prune_stale_frames_in_place(
+                    llm_history,
+                    now_ms=now_ms,
+                    last_activity_ms=self._last_provider_request_ms,
+                )
+            except (ImportError, AttributeError):
+                pass  # optional frame sweep absent; degrade to no sweep
         await self._journal_prunes(llm_history, pruned_before)
 
         # (2) Trigger math: prefer the provider's ground-truth context size.

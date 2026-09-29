@@ -63,6 +63,7 @@ from .pruning import (
     USELESS_NOTICE,
     _is_useless,
     compute_suffix_tokens,
+    prune_stale_frames_in_place,
     prune_tool_outputs,
     shed_frames_to_wire_budget,
 )
@@ -151,6 +152,7 @@ __all__ = [
     "messages_tokens_upper_bound",
     "parse_hint",
     "prepare_partitions",
+    "prune_stale_frames_in_place",
     "prune_tool_outputs",
     "shed_frames_to_wire_budget",
     "register_invalidator",
