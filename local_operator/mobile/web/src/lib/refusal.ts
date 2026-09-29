@@ -25,6 +25,10 @@
  * rather than pretending the message ended there.
  */
 
+/* The API's refusal type, imported for the one mapping in
+   `resumeRefusalText`. */
+import { HttpError } from "../api";
+
 export const REFUSAL_REASON_MAX = 240;
 
 export function clampRefusalReason(reason: string): string {
@@ -45,7 +49,18 @@ export function refusalText(lead: string, error: unknown): string {
 }
 
 /** The resume refusal — the session strip and the past-sessions list both paint
-    it, so the lead lives here rather than at either call site. */
+    it, so the lead lives here rather than at either call site.
+
+    THE DAEMON'S 404 SENTENCE CANNOT BE SHOWN (UX round 2, U26). `no such past
+    session: <id>` ends in the session's raw id, which reads as a second clause
+    of machine notation — and the id is already on screen in the row this
+    sentence sits under. The one thing the reader needs is that the transcript
+    folder is gone, so the 404 gets one sentence in the reader's words instead
+    of the daemon's. Every other status passes through untouched, as the shared
+    hygiene says: the daemon writes those for this reader. */
 export function resumeRefusalText(error: unknown): string {
+	if (error instanceof HttpError && error.status === 404) {
+		return "Could not resume: this session is no longer saved";
+	}
 	return refusalText("Could not resume", error);
 }

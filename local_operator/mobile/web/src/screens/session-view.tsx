@@ -22,7 +22,7 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { resumeSession, setSessionPin } from "../api";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
@@ -261,13 +261,35 @@ function Header({
     resumes the transcript) — and the router takes the phone to it. Local state
     so the button can say `resuming…` and a refusal renders its sentence instead
     of a dead control. */
+
+/* THE ACCEPTANCE LINE'S TWO SPELLINGS (UX round 2, U24). The first is what a
+   cold child start honestly looks like; the second is the same fact once "a
+   few seconds" has stopped describing it — the session still has not come
+   back, which is what the reader needs to decide to wait or retry. 20s is
+   generous for the ordinary respawn (the live leg's own real child took ~2s)
+   and short enough that a stuck one is not dressed up as a normal start. */
+const REOPENING = "reopening — this can take a few seconds";
+const STILL_REOPENING = "still reopening — it has not come up yet";
+const REOPEN_REPORT_MS = 20_000;
+
 function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
+	/* THE ACCEPTANCE LINE (UX round 2, U24). A resume whose POST succeeds but
+	   whose session does not come back live ends the same way it started
+	   otherwise — one click, no word — and the reader cannot tell accepted
+	   from failed from still-coming-up. The line says which; the strip
+	   unmounting (a live frame flips `ended`, which is what removes this
+	   component and its notice) is what ends it. It is also capped: "a few
+	   seconds" stops being true long before the strip does, and a stale
+	   acceptance reads like a promise the daemon is not keeping — past the
+	   cap the sentence says what is actually true instead. */
+	const [notice, setNotice] = useState("");
 	const resume = async () => {
 		if (busy) return;
 		setBusy(true);
 		setError("");
+		setNotice("");
 		try {
 			const r = await resumeSession(sessionId);
 			/* THE SAME-ROUTE NO-OP (UX round 1, U16 / agent-review MINOR 1). The
@@ -279,6 +301,7 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 			   coalesces concurrent resumes onto one constructor and a later attempt
 			   reattaches the same owner. */
 			setBusy(false);
+			setNotice(REOPENING);
 			navigate(`/s/${encodeURIComponent(r.session_id)}`);
 		} catch (e) {
 			/* One refusal voice (design round 1, D5): prefixed like the pin's,
@@ -287,6 +310,11 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 			setBusy(false);
 		}
 	};
+	useEffect(() => {
+		if (notice !== REOPENING) return;
+		const t = setTimeout(() => setNotice(STILL_REOPENING), REOPEN_REPORT_MS);
+		return () => clearTimeout(t);
+	}, [notice]);
 	return (
 		<>
 			<div className="flex items-center gap-2 border-b border-hairline bg-elevated px-2 py-1">
@@ -294,14 +322,20 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 					<p role="status" className="text-meta text-ink-muted">
 						this session has ended — its history is kept
 					</p>
-					{/* WHERE IT REOPENS (UX round 1, U18). The daemon resumes the
-					    transcript in the owner's home — the durable directory does not
-					    record a cwd to resume into — so the strip says so before the
-					    tap rather than letting a project session quietly come back in
-					    `~`. Inside the row's text cell: at 390 it costs no height at
-					    all beside the 44px button, and the row's growth at 320 is
-					    bounded by the sentence it belongs to. */}
-					<p className="mt-0.5 text-meta text-ink-dim">resume reopens it in ~</p>
+					{/* WHERE IT REOPENS (UX round 1, U18; the words in round 2, U25 =
+					    D8). The daemon resumes the transcript in the owner's home — the
+					    durable directory does not record a cwd to resume into — so the
+					    strip says so before the tap rather than letting a project session
+					    quietly come back in `~`. The PATH IS SPELLED OUT: a bare `~` is
+					    shell shorthand a phone reader should not have to decode (the
+					    round measured the longer sentence as still fitting beside the
+					    button at 390 and wrapping inside the row at 320, which the row
+					    already does for its title line). Inside the row's text cell: at
+					    390 it costs no height at all beside the 44px button, and the
+					    row's growth at 320 is bounded by the sentence it belongs to. */}
+					<p className="mt-0.5 text-meta text-ink-dim">
+						resume reopens it in your home folder
+					</p>
 				</div>
 				{/* A real 44px target inside a `pointer-events-none` overlay: the
 				    row's dead space passes touches through to the transcript, and
@@ -315,6 +349,14 @@ function EndedSessionStrip({ sessionId }: { sessionId: string }) {
 					{busy ? "resuming…" : "resume"}
 				</button>
 			</div>
+			{notice ? (
+				<p
+					role="status"
+					className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-dim"
+				>
+					{notice}
+				</p>
+			) : null}
 			{error ? (
 				<p
 					role="alert"
@@ -359,6 +401,32 @@ export function SessionScreen({
 	const [modelsOpen, setModelsOpen] = useState(false);
 	const [effortOpen, setEffortOpen] = useState(false);
 	const rootRef = useRef<HTMLDivElement>(null);
+	/* THE RUNG'S HEIGHT, MEASURED BECAUSE IT IS THE OVERLAY'S (round 2,
+	   U23 = D7). The ladder is an overlay (round 1, U19/D4) so the column's
+	   geometry never moves when a rune appears — but an overlay that nothing
+	   compensates for is a strip painted OVER the transcript, and on a
+	   transcript that does not scroll (a short ended session: `scrollHeight ==
+	   clientHeight`) no gesture can reveal what it covers: measured 28 of the
+	   first row's 35px at 390 and 38 of 56px at 320, under a strip whose own
+	   sentence says "its history is kept". The rune's height is handed to the
+	   transcript, which reserves the same amount INSIDE its scroller (see
+	   `topInset` there), so the first row sits under the strip and the strip
+	   alone moves nothing. A callback ref rather than an effect on mount,
+	   because the ladder only exists once a projection does — `[ladderEl]`
+	   attaches the observer exactly when the node arrives. Measured instead
+	   of pinned to a constant: the ended strip wraps (52px at 390, 63px at
+	   320) and its refusal/acceptance lines have heights of their own. */
+	const [ladderEl, setLadderEl] = useState<HTMLDivElement | null>(null);
+	const [ladderInset, setLadderInset] = useState(0);
+	useLayoutEffect(() => {
+		if (!ladderEl) return;
+		const measure = () => setLadderInset(ladderEl.getBoundingClientRect().height);
+		measure();
+		if (typeof ResizeObserver === "undefined") return;
+		const ro = new ResizeObserver(measure);
+		ro.observe(ladderEl);
+		return () => ro.disconnect();
+	}, [ladderEl]);
 
 	useEffect(() => retainProjectionStream(sessionId), [sessionId]);
 	/* THE LIST STREAM TOO, so the header's ☆/★ reflects the shared pin
@@ -460,23 +528,30 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			{/* THE HEADER AND THE STATE LADDER SHARE ONE RELATIVE WRAPPER, because the
-			    ladder is an OVERLAY that rides UNDER the header (UX round 1, U19 =
-			    design round 1, D4). Every rung used to be an in-flow row, so each
-			    appearance/clear pushed the whole column down and back — measured
-			    before this change: the transcript's top edge moved +26px when the
+			{/* THE HEADER, THE GLANCE ROW AND THE STATE LADDER SHARE ONE RELATIVE
+			    WRAPPER, because the ladder is an OVERLAY that rides UNDER both (UX
+			    round 1, U19 = design round 1, D4; anchor moved in round 2, D9).
+			    Every rung used to be an in-flow row, so each appearance/clear pushed
+			    the whole column down and back — before the overlay: +26px when the
 			    degraded/reconnect strip appeared and +53px for the ended strip, on
 			    every flap of a flaky link. Reserved space would have paid the same
 			    pixels permanently (52px on a 320-wide phone, for a strip most
 			    sessions never show); the overlay keeps the column's geometry fixed
-			    for all three rungs, at the cost of painting over the transcript's
-			    top rows while a rung is up. `pointer-events-none` hands touches
-			    back to the transcript underneath — scrolling from the strip's own
-			    row must keep working — and the rung's interactive part (the ended
-			    strip's resume) opts back in with `pointer-events-auto`. Sheets are
-			    `fixed z-50`; this overlay sits at `z-10`, under them. */}
+			    for all three rungs. Round 2 D9 moved the anchor from the header to
+			    the WRAPPER'S bottom: at the header it painted over the spend/context
+			    glance (6.2%/200k · $1.25 — the numbers a reader most wants when a
+			    session is struggling) — and round 2 U23 = D7 pays for the rest of
+			    the cover: the transcript reserves the rung's height inside its own
+			    scroller, so nothing under a rung is unreachable. `pointer-events-none`
+			    hands touches back to the transcript underneath — scrolling from the
+			    strip's own row must keep working — and the rung's interactive part
+			    (the ended strip's resume) opts back in with `pointer-events-auto`.
+			    Sheets are `fixed z-50`; this overlay sits at `z-10`, under them. */}
 			<div className="relative">
 				<Header projection={projection} sessionId={sessionId} />
+				{/* The spend + context glance (phase 1), read-only and self-hiding:
+				    it renders nothing until either reading has something to state. */}
+				<SessionStatus projection={projection} />
 				{/* SESSION HEALTH, AS ONE LADDER (mobile UX batch 2, U7 + U11). Each
 				    rung is a different fact and the later ones are only worth stating
 				    while the earlier are untrue, so at most ONE strip shows — three
@@ -488,7 +563,10 @@ export function SessionScreen({
 				    flag; the retained view is what the reader is looking at). Each
 				    clears itself when the daemon's next projection (or the SSE's own
 				    reopen) says otherwise. */}
-				<div className="pointer-events-none absolute inset-x-0 top-full z-10">
+				<div
+					ref={setLadderEl}
+					className="pointer-events-none absolute inset-x-0 top-full z-10"
+				>
 					{projection.ended ? (
 						<EndedSessionStrip sessionId={sessionId} />
 					) : projection.degraded ? (
@@ -508,10 +586,6 @@ export function SessionScreen({
 					) : null}
 				</div>
 			</div>
-			{/* The spend + context glance (phase 1), read-only and self-hiding:
-			    it renders nothing until either reading has something to state. */}
-			<SessionStatus projection={projection} />
-
 			{showEmptyState ? (
 				/* A just-started session has no messages yet. An empty scroll
 				   area reads as "did it break?"; this placeholder says the
@@ -530,6 +604,7 @@ export function SessionScreen({
 					entries={projection.transcript}
 					pending={pendingEchoes}
 					streaming={projection.streaming}
+					topInset={ladderInset}
 				/>
 			)}
 
