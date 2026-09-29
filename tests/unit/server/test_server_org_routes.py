@@ -129,6 +129,32 @@ async def test_team_publish_requires_the_tenant(
 
 
 @pytest.mark.asyncio
+async def test_team_publish_refuses_an_invalid_document_locally(
+    test_app_client, temp_dir, fake_org_credential
+) -> None:
+    """A document the hub would refuse is refused HERE: 422, no hub client.
+
+    The oversize brief is written straight to the row -- the registry re-reads
+    briefs from disk without re-bounding them, so this is exactly the document
+    a pull-then-push hands the builder, and exactly why the preflight exists.
+    """
+    team = _new_team(temp_dir)
+    (temp_dir / "teams" / team.id / "instructions.md").write_text("x" * 41_200, encoding="utf-8")
+
+    with patch("local_operator.server.routes.agents.RadientClient") as mock_client:
+        response = await test_app_client.post(f"/v1/teams/{team.id}/publish?tenant_id=org-1")
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "invalid_team_document"
+    assert detail["details"] == {
+        "field": "instructions",
+        "rule": "must be at most 32768 characters (submitted 41200)",
+    }
+    mock_client.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_team_publish_unknown_local_team_keeps_the_local_404(
     test_app_client, temp_dir, fake_org_credential
 ) -> None:

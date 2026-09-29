@@ -8409,9 +8409,13 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     §1.6's mapping) and publishes it into the organization's workspace. Teams
     are org-only in v1, so ``--org`` is required: when it is omitted the
     account's memberships are printed and the flag demanded -- no interactive
-    prompt, no guessed target.
+    prompt, no guessed target. The document is preflighted by the builder, so
+    a team the hub would refuse reports here, before any upload is spent.
     """
-    from local_operator.teams import hub_team_document  # lazy: pydantic models
+    from local_operator.teams import (  # lazy: pydantic models
+        TeamDocumentError,
+        hub_team_document,
+    )
 
     target = _org_target_or_picker(args, base_dir)
     if target is None:
@@ -8421,7 +8425,13 @@ def teams_push_command(args: argparse.Namespace, team_registry: Any, base_dir: P
     if team is None:
         print(f"\n\033[1;31mError: No team found with name: {args.name}\033[0m")
         return 1
-    document = hub_team_document(team)
+    try:
+        document = hub_team_document(team)
+    except TeamDocumentError as exc:
+        # A local preflight refusal: the hub would refuse the same document,
+        # so render it like this command's other refusals and spend no upload.
+        print(f"\n\033[1;31mError: cannot push this team: {exc.field} {exc.rule}\033[0m")
+        return 1
     try:
         result = client.publish_team_document(document, tenant)
     except Exception as exc:  # noqa: BLE001 — the hub's refusal is the report
