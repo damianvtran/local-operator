@@ -61,3 +61,30 @@ def test_read_fresh_sees_a_write_from_another_manager(tmp_path) -> None:
     ConfigManager(tmp_path).set_config_value("hub", {"auto_update": {"agents": False}})
     assert HubSyncSettings.from_config(held).auto_agents is True  # stale by construction
     assert HubSyncSettings.read_fresh(held).auto_agents is False
+
+
+def test_read_fresh_sees_merge_model_and_never_moves_a_torn_config(tmp_path, monkeypatch) -> None:
+    """R2-1 / R2-2: merge_model is live too, and a periodic read never touches the file."""
+
+    from local_operator.config import ConfigManager
+    from local_operator.hub_sync.resolver import resolve_merge_model
+
+    held = ConfigManager(tmp_path)
+    ConfigManager(tmp_path).set_config_value("hub", {"merge_model": "openai/gpt-4o"})
+    assert HubSyncSettings.read_fresh(held).merge_model == "openai/gpt-4o"
+    assert HubSyncSettings.from_config(held).merge_model == ""  # the held manager IS stale
+    # ...and the resolver, which the daemon builds from that held manager, follows the disk.
+    monkeypatch.setattr(
+        "local_operator.model.configure.build_model_spec",
+        lambda hosting, model, info=None: SimpleNamespace(),
+    )
+    assert resolve_merge_model(held).label == "openai/gpt-4o"
+
+    cfg = tmp_path / "config.yml"
+    cfg.write_text("values: [unterminated\n  : :", encoding="utf-8")
+    before = cfg.read_bytes()
+    fallback = HubSyncSettings.read_fresh(held)  # torn read -> the held manager's view
+    assert fallback == HubSyncSettings.from_config(held)
+    assert cfg.read_bytes() == before and sorted(p.name for p in tmp_path.iterdir()) == [
+        "config.yml"
+    ]

@@ -208,6 +208,26 @@ async def test_an_apply_holds_the_cross_process_lease_and_refuses_when_it_is_tak
     assert report.reports[0].applied
 
 
+async def test_a_refusal_names_when_a_dead_holders_lease_expires(
+    rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-3(b): not a vague "try again" -- the caller learns the crash-TTL bound."""
+
+    runner, _hub, _agents, root, _cm, _ = rig
+    ctx = await runner.context()
+    monkeypatch.setattr(svc, "LEASE_WAIT_S", 0.0)
+    other = st.RunnerLease(root)
+    assert other.acquire()
+    try:
+        with pytest.raises(svc.HubBusy, match=r"expires in about \d+s"):
+            await asyncio.to_thread(svc.apply_items, ctx, kind="agent")
+        left = other.remaining_s()
+        assert left is not None and 0 < left <= st.LEASE_TTL_S
+    finally:
+        other.release()
+    assert other.remaining_s() is None  # released -> no file -> nothing to wait for
+
+
 async def test_the_lease_heartbeat_outlives_its_ttl(tmp_path: Path) -> None:
     lease = st.RunnerLease(tmp_path, ttl_s=0.3)
     assert lease.acquire()

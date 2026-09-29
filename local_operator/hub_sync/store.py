@@ -49,7 +49,12 @@ BACKOFF_JITTER = 0.1
 MAX_ATTEMPTS = 6
 MODEL_UNAVAILABLE_RETRY_S = 3600
 MISSING_RETRY_S = 24 * 3600
-LEASE_TTL_S = 600.0
+#: Crash-recovery bound only: a live holder's heartbeat renews every ``TTL / 3``, so
+#: a short TTL costs a healthy run nothing and shortens how long a HARD-KILLED
+#: daemon wedges every writer (``lop agents|teams sync``, the routes, the tool).
+#: Not shorter than a few heartbeat periods: a holder whose thread is starved (or
+#: whose host slept) for a whole TTL loses the lease to a contender.
+LEASE_TTL_S = 180.0
 
 #: Classes that are decided by a human, not a timer (B4.3).
 NO_AUTO_RETRY = {"merge-refused", "prompt-too-long"}
@@ -480,6 +485,11 @@ class RunnerLease:
         self._token = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self._held = False
         self._beat_stop: threading.Event | None = None
+        # Serialises ``renew`` against ``release``: without it the heartbeat can pass
+        # its ``_held`` check, lose the CPU to ``release`` (which unlinks the file),
+        # then ``os.replace`` a fresh lease file with OUR token back into place --
+        # a lease nobody holds that blocks every writer for a full TTL.
+        self._guard = threading.Lock()
 
     def acquire(self, wait_s: float = 0.0) -> bool:
         """Take the lease, waiting up to ``wait_s`` for a live holder; start the heartbeat."""
@@ -544,34 +554,51 @@ class RunnerLease:
         file would parse it as "expired" and steal a live lease.
         """
 
-        if not self._held:
-            return False
-        try:
-            data = json.loads(self._path.read_text("utf-8"))
-            if data.get("holder") != self._token:
-                self._held = False
+        with self._guard:
+            if not self._held:
                 return False
-            data["expires_at"] = time.time() + self._ttl
-            tmp = self._path.with_name(f"{self._path.name}.{self._token.replace(':', '-')}.tmp")
-            tmp.write_text(json.dumps(data), "utf-8")
-            os.replace(tmp, self._path)
+            try:
+                data = json.loads(self._path.read_text("utf-8"))
+                if data.get("holder") != self._token:
+                    self._held = False
+                    return False
+                data["expires_at"] = time.time() + self._ttl
+                tmp = self._path.with_name(f"{self._path.name}.{self._token.replace(':', '-')}.tmp")
+                tmp.write_text(json.dumps(data), "utf-8")
+                os.replace(tmp, self._path)
+            except (OSError, ValueError):
+                return False
+            return True
+
+    def remaining_s(self) -> float | None:
+        """Seconds until the CURRENT holder's lease expires; ``None`` if unreadable/free.
+
+        Lets a refused caller say how long a crashed holder can still block it,
+        rather than a vague "try again".
+        """
+
+        try:
+            expires = float(json.loads(self._path.read_text("utf-8")).get("expires_at", 0.0))
         except (OSError, ValueError):
-            return False
-        return True
+            return None
+        return max(0.0, expires - time.time())
 
     def release(self) -> None:
         if self._beat_stop is not None:
             self._beat_stop.set()
             self._beat_stop = None
-        if not self._held:
-            return
-        self._held = False
-        try:
-            holder = json.loads(self._path.read_text("utf-8")).get("holder")
-            if holder == self._token:
-                self._path.unlink()
-        except (OSError, ValueError):
-            pass
+        with self._guard:
+            if not self._held:
+                return
+            # Flipped under the guard, so a heartbeat already inside ``renew`` finishes
+            # first and any later one sees ``_held`` False and never rewrites the file.
+            self._held = False
+            try:
+                holder = json.loads(self._path.read_text("utf-8")).get("holder")
+                if holder == self._token:
+                    self._path.unlink()
+            except (OSError, ValueError):
+                pass
 
     def __enter__(self) -> "RunnerLease":
         return self

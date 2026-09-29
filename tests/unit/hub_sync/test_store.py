@@ -157,6 +157,44 @@ def test_the_lease_is_exclusive_across_processes_and_expires_for_a_dead_holder(
     assert st.RunnerLease(tmp_path).acquire() is True
 
 
+def test_a_heartbeat_racing_release_never_recreates_the_lease_file(tmp_path: Path) -> None:
+    """R2-3(a): ``renew`` after ``release`` must not write the lease back.
+
+    Reproduced by making the heartbeat's file read yield to ``release`` between its
+    ``_held`` check and its ``os.replace`` -- the exact interleaving a bare check
+    loses. With the guard, ``release`` waits for the in-flight renew and the file
+    is gone afterwards.
+    """
+
+    import threading
+
+    lease = st.RunnerLease(tmp_path, ttl_s=600.0)
+    assert lease.acquire()
+    path = tmp_path / "hub" / ".runner.lease"
+    inside = threading.Event()
+    real_read = Path.read_text
+
+    def slow_read(self: Path, *a: Any, **k: Any) -> str:
+        text = real_read(self, *a, **k)
+        if self == path and threading.current_thread().name == "renew-under-test":
+            inside.set()
+            time.sleep(0.3)  # release() is called while we hold the stale read
+        return text
+
+    Path.read_text = slow_read  # type: ignore[method-assign]
+    try:
+        t = threading.Thread(target=lease.renew, name="renew-under-test")
+        t.start()
+        assert inside.wait(5)
+        lease.release()
+        t.join(5)
+    finally:
+        Path.read_text = real_read  # type: ignore[method-assign]
+    assert not path.exists()
+    assert list(path.parent.glob(".runner.lease*")) == []
+    assert lease.renew() is False and not path.exists()
+
+
 def test_nothing_is_written_under_the_real_home(tmp_path: Path, monkeypatch) -> None:
     """The store writes ONLY under the config dir it was given (AGENTS.md: isolating a run)."""
 
