@@ -108,6 +108,27 @@ according to what happens when a second device touches it.
 - **Classes 2, 6:** untouched. Local-only, and every mesh code path must prove
   it does not touch them (§5.4).
 
+**The Radient organization login is class 3, with the class's narrowest
+defaults.** `lop login radient` stores a rotating OAuth grant in `auth.db`
+(served to organization calls by `resolve_radient_oauth_access`), so the mesh
+treats it exactly as the classes above: the owner serves a short-lived bearer
+and never the refresh token. Three decisions are deliberate, and they belong
+here because the bearer carries organization-write authority — publish and
+pull teams, publish and delete agents, read memberships (`clients/radient.py`)
+— rather than inference capacity:
+
+- **Share is explicit.** `lop network credential share radient --with <device>`
+  is the only grant path: there is no join-time default, and when the §2.3
+  join-defaults and the §6 pools land it must never be offered to `pool`-kind
+  members and must be recommended as an opt-in, never auto-yes.
+- **Holders default to `scope: "session"`** — the class-3 default, kept because
+  it is the smallest useful authority here too.
+- **The destination guard stays on the SENDING side.**
+  `RADIENT_ORG_ALLOW_NONCANONICAL_BASE` is read where the request is sent (the
+  borrower), so an owner is never asked for a bearer bound for a host the
+  operator did not opt into, and a refused destination produces no broker
+  traffic at all.
+
 ### 1.2 One inventory fact that shapes the wire
 
 `get_api_key` (`auth_store.py:1652`) and `get_oauth_access`
@@ -306,6 +327,12 @@ Defaults, chosen so the common case needs no keystroke:
 | `api-key-static` (classes 1, 4) | **no** | A static key is a bearer with no expiry and no rotation; granting it is a permanent capability increase. One keystroke when the operator wants it. |
 | `secret` (class 2) | not offered | Not brokered (§4.8). |
 | Anything, when the joining member is `kind: "pool"` | **yes** for `oauth-rotating`, `scope: "session"`, and the operator sees an extra line: `ephemeral member — the grant dies with the member lifecycle` | §6. |
+
+One class-3 login narrows these defaults further: the Radient organization
+login (§1.1) is never part of the join list, is never offered to `pool`-kind
+members, and is recommended as an opt-in rather than offered as auto-yes — its
+bearer carries organization-write authority, and the operator's own explicit
+`credential share` is the only grant path.
 
 `lop network credential share <provider> --with <device> [--scope session|device]`
 and `... --revoke <device>` change the list afterwards; both are

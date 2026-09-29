@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from typing import Any
 
 import pytest
 
@@ -127,6 +128,40 @@ async def test_parallel_legacy_readers_share_one_refresh_lock(tmp_path, monkeypa
         refreshed = store.get_credential(row.id)
         assert refreshed is not None
         assert refreshed.data["access"] == "fresh-fixture"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_an_injected_store_is_used_without_the_mesh_predicate(tmp_path, monkeypatch) -> None:
+    """P4: an injected store is used VERBATIM — the mesh predicate is never consulted.
+
+    ``build_auth_store`` replaced the resolvers' own construction; the ``store=`` seam
+    exists for tests and embedded callers (the server passes its own) and must stay a
+    plain pass-through, or an injected root would be quietly swapped for the ambient
+    one. Red the moment ``build_auth_store`` is consulted on this path.
+    """
+
+    def _forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the resolver consulted build_auth_store for an injected store")
+
+    monkeypatch.setattr("local_operator.network.credentials.build_auth_store", _forbidden)
+    store = AuthStore(tmp_path / "auth.db", config_dir=tmp_path)
+    try:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": "oauth-fixture",
+                "refresh": "refresh-fixture",
+                "expires": int(time.time() * 1000) + 3600000,
+            },
+        )
+        access = await resolve_radient_oauth_access(tmp_path, URL, store=store)
+        assert access is not None
+        assert access.access_token == "oauth-fixture"
+        value = await resolve_radient_credential(tmp_path, URL, store=store)
+        assert value.get_secret_value() == "oauth-fixture"
     finally:
         store.close()
 
