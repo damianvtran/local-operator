@@ -546,6 +546,13 @@ class HistoryPage(BaseModel):
     entries: list[HistoryEntry]
     has_more: bool
     cursor_missing: bool
+    #: Anchored reads only (design §D4): a row newer than this page's newest
+    #: exists beyond it. ``None`` on every other read, whose contract does not
+    #: bound the newer side — a ``before_id`` page has newer rows above it by
+    #: construction, so a ``False`` there would be a claim the reader never
+    #: made. The frozen wire (design §D9) draws the field as optional for
+    #: exactly this reason, and an older client ignores a key it does not know.
+    has_newer: bool | None = None
 
 
 #: How a child's transcript read ended, when the absence of rows needs naming.
@@ -570,6 +577,16 @@ class ChildTranscriptPage(HistoryPage):
     """
 
     state: ChildTranscriptState
+    #: EXCLUDED rather than defaulted (remediation round 1, Q1). A child read
+    #: has no anchored mode — the route takes no ``around_id`` — so the
+    #: newer-side question is never asked here, and the inherited default would
+    #: otherwise serialize as a ``null`` on every child page: a shape change to
+    #: an envelope that predates this field and is not part of §D9's extension.
+    #: The child shape has its own pins asserting the four keys exactly (unit:
+    #: ready/pending/gone; e2e: a real subagent's transcript), and keeping them
+    #: green is the point — an absent key and a null key are different
+    #: contracts, and only the parent page's contract gained this question.
+    has_newer: bool | None = Field(default=None, exclude=True)
 
 
 #: What one rail tick is: a user message or a completed agent turn (design D1).

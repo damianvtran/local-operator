@@ -2419,16 +2419,34 @@ async def history(
     session_id: str,
     request: Request,
     before_id: str | None = Query(default=None, max_length=128),
+    around_id: str | None = Query(default=None, max_length=128),
+    before: int | None = Query(default=None, ge=0, le=500),
+    after: int | None = Query(default=None, ge=0, le=500),
     limit: int = Query(default=100, ge=1, le=500),
 ):
     # READ, for the same reason as ``snapshot`` beside it — and on a draft the
     # empty page is the correct answer (the open frame's own ``history()``
     # returns one for a directory that does not exist), not a 404.
+    #
+    # ``around_id``/``before``/``after`` are the anchored mode (design §D4): one
+    # page centred on an entry id, for the renderer's far jump. The reader's own
+    # validator rejects the combinations that describe no window (an anchor
+    # named with a cursor, counts with no anchor) through ``errors()``, so the
+    # request fails the same way whichever door it came through; the numeric
+    # bounds here are the wire's (0..500 per side) and fail as the ordinary 422.
     async with (
         errors(request),
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
-        return reply(await bridge.history(before_id=before_id, limit=limit))
+        return reply(
+            await bridge.history(
+                before_id=before_id,
+                around_id=around_id,
+                before=before,
+                after=after,
+                limit=limit,
+            )
+        )
 
 
 @router.get(
