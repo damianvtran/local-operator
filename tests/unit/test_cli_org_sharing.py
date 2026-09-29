@@ -172,6 +172,63 @@ def test_teams_push_publishes_the_local_team(
     assert "Successfully pushed team 'release-crew' to organization 'org-a'" in out
 
 
+def test_teams_push_refuses_an_oversize_document_locally(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The preflight reports HERE, in the command's own refusal shape: no
+    upload is spent on a document the hub would refuse."""
+    from local_operator.paths import config_dir
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    TeamRegistry(config_dir()).create_team(
+        TeamEditFields(
+            name="release-crew",
+            description="d" * 2001,
+            manager="manager",
+            instructions="You ship.",
+        )
+    )
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 1
+
+    out = capsys.readouterr().out
+    assert (
+        "cannot push this team: description must be at most 2000 characters (submitted 2001)" in out
+    )
+    assert org_hub.published_teams == []
+
+
+def test_teams_push_sends_a_brief_over_the_old_cap(
+    org_hub: _FakeOrgHub,
+    tmp_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A brief between the old local bound (8000) and the hub's (32768) is a
+    valid upload and reaches the client."""
+    from local_operator.paths import config_dir
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    brief = "y" * 9_000
+    TeamRegistry(config_dir()).create_team(
+        TeamEditFields(name="release-crew", manager="manager", instructions=brief)
+    )
+    monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
+
+    assert main() == 0
+
+    out = capsys.readouterr().out
+    assert len(org_hub.published_teams) == 1
+    document, tenant = org_hub.published_teams[0]
+    assert document["instructions"] == brief
+    assert tenant == "org-a"
+    assert "Successfully pushed team 'release-crew' to organization 'org-a'" in out
+
+
 def test_teams_push_without_org_prints_the_memberships_and_requires_the_flag(
     org_hub: _FakeOrgHub,
     tmp_home: Path,

@@ -1444,7 +1444,11 @@ async def publish_team_to_radient(
     on which surface ran.
     """
     try:
-        from local_operator.teams import TeamRegistry, hub_team_document
+        from local_operator.teams import (
+            TeamDocumentError,
+            TeamRegistry,
+            hub_team_document,
+        )
 
         api_key, base_url = await _org_radient_credentials(config_manager, provider_auth_store)
         # Same scrub as the other org relays (security review round 1, S-1).
@@ -1460,7 +1464,17 @@ async def publish_team_to_radient(
         except (KeyError, ValueError):
             raise HTTPException(status_code=404, detail=f"Team with ID {team_id} not found")
 
-        document = hub_team_document(team)
+        try:
+            document = hub_team_document(team)
+        except TeamDocumentError as exc:
+            # A document this machine can already see the hub would refuse
+            # (the local-refusal arm of the agent publication routes, team
+            # twin): 422 in the hub's own vocabulary, and no hub client is
+            # built for it -- the route's ordering rule.
+            raise HTTPException(
+                status_code=422,
+                detail=_publication_detail("invalid_team_document", str(exc), exc.details),
+            )
         # Built once the local row is known to be publishable: an unknown team
         # never constructs a hub client, matching the agent routes' ordering.
         radient_client = RadientClient(api_key=api_key, base_url=base_url)

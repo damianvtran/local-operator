@@ -71,10 +71,22 @@ from local_operator.types import TeamRegistryLockTimeout, TeamRegistryRecoveryEr
 
 logger = logging.getLogger(__name__)
 
-#: Cap on each team instruction file. Same bound as a role body: these ride
-#: in front of a manager session and every member launch, so an unbounded
-#: paste is an unbounded per-turn bill.
-MAX_TEAM_INSTRUCTIONS_CHARS = 8_000
+#: Cap on each team brief (``instructions.md`` and ``project.md`` -- one
+#: constant, because agent-server bounds both fields with one number).
+#: Mirrors the hub's per-field caps -- ``TeamInstructionsMaxChars`` =
+#: ``TeamProjectMaxChars`` = 32768 in agent-server's
+#: ``internal/requests/hub_team.go``; the two sides cite each other and must
+#: stay in lockstep -- so a brief authored here can always be published and a
+#: pulled one can always be installed.
+#:
+#: Raised from 8000 on 2026-09-29: the operator's largest briefs (measured
+#: maxima 12,869 / 7,304) were refused locally while the hub accepts them.
+#: The new bound keeps >=2.5x headroom over the largest of those.
+#: These ride in front of a manager session and every member launch, so an
+#: unbounded paste is an unbounded per-turn bill -- which is why a bound
+#: exists at all, and why it is the hub's own number rather than a local
+#: invention.
+MAX_TEAM_INSTRUCTIONS_CHARS = 32_768
 
 #: A team name is also a slash-command argument, so it cannot contain spaces
 #: or slashes — ``/team feature-release ship it`` has to parse unambiguously.
@@ -361,6 +373,153 @@ def validate_team_name(name: str) -> str:
 _TEAM_NAME_MAX_CHARS = 64
 
 
+#: Hub caps for a published team document, mirroring agent-server's team
+#: validator (``internal/requests/hub_team.go``) field for field: the
+#: description and manager lengths, the roster size, and each slot's
+#: role/kind/count band. The rule text a refusal carries is the hub's own
+#: sentence, so a document refused here reads as one refused by the hub --
+#: plus the submitted magnitude, which a local refusal knows and the hub's
+#: never carries (by the time the hub sees the document there is nothing
+#: left but the cap it states).
+HUB_TEAM_DESCRIPTION_MAX_CHARS = 2000
+HUB_TEAM_MANAGER_MAX_CHARS = 128
+HUB_TEAM_MEMBERS_MAX_ITEMS = 64
+HUB_TEAM_MEMBER_ROLE_MAX_CHARS = 128
+HUB_TEAM_MEMBER_KIND_MAX_CHARS = 32
+HUB_TEAM_MEMBER_COUNT_MAX = 16
+
+
+class TeamDocumentError(ValueError):
+    """A team document refused before it was sent, in the hub's own vocabulary.
+
+    ``field`` and ``rule`` are the same two values the hub returns as
+    ``details`` for an ``invalid_team_document`` refusal, so a caller renders
+    a locally-refused document and a hub-refused one identically -- one switch
+    on one code, not two error paths (the agent side's
+    :class:`~local_operator.clients.radient.InstructionSetError` pattern).
+    ``rule`` carries the magnitude this machine submitted wherever the hub's
+    sentence is a limit: a local refusal can see the document, and its author
+    needs the number to trim.
+    """
+
+    def __init__(self, field: str, rule: str) -> None:
+        super().__init__(f"The team document is not valid: {field} {rule}.")
+        self.field = field
+        self.rule = rule
+
+    @property
+    def details(self) -> dict[str, Any]:
+        """The machine-readable half, shaped as the hub's ``details``."""
+
+        return {"field": self.field, "rule": self.rule}
+
+
+def _submitted_rule(rule: str, count: int) -> str:
+    """The hub's rule text plus the magnitude this document submitted."""
+
+    return f"{rule} (submitted {count})"
+
+
+def _preflight_hub_team_document(document: Mapping[str, Any]) -> None:
+    """Refuse a built team document the hub's validator would refuse.
+
+    Runs on the document :func:`hub_team_document` has just built -- the ONE
+    place both publish surfaces (the CLI's ``teams push`` and the desktop
+    route) take their payload from -- so a team the hub would refuse is
+    refused locally, before any upload is spent. The checks mirror
+    agent-server's ``TeamDocument.Validate`` in order, and each refusal
+    carries the hub's own rule text (plus the submitted magnitude; see
+    :func:`_submitted_rule`).
+
+    Raises:
+        TeamDocumentError: For the first field the hub would refuse.
+    """
+
+    # The agent path's own name rule -- reused rather than restated, because a
+    # name refused here and one refused by the hub must read identically.
+    # Imported lazily: this module is on the app's boot path; the HTTP stack
+    # (and the agent publication module it lives in) is not.
+    from local_operator.clients.radient import _name_rule
+
+    rule = _name_rule(str(document.get("name") or ""))
+    if rule:
+        raise TeamDocumentError("name", rule)
+
+    description = str(document.get("description") or "")
+    if len(description) > HUB_TEAM_DESCRIPTION_MAX_CHARS:
+        raise TeamDocumentError(
+            "description",
+            _submitted_rule(
+                f"must be at most {HUB_TEAM_DESCRIPTION_MAX_CHARS} characters", len(description)
+            ),
+        )
+
+    manager = str(document.get("manager") or "")
+    if len(manager) > HUB_TEAM_MANAGER_MAX_CHARS:
+        raise TeamDocumentError(
+            "manager",
+            _submitted_rule(
+                f"must be at most {HUB_TEAM_MANAGER_MAX_CHARS} characters", len(manager)
+            ),
+        )
+
+    members = document.get("members")
+    members = members if isinstance(members, list) else []
+    if len(members) > HUB_TEAM_MEMBERS_MAX_ITEMS:
+        raise TeamDocumentError(
+            "members",
+            _submitted_rule(f"must hold at most {HUB_TEAM_MEMBERS_MAX_ITEMS} items", len(members)),
+        )
+    for member in members:
+        role = str(member.get("role") or "")
+        if not role.strip() or len(role) > HUB_TEAM_MEMBER_ROLE_MAX_CHARS:
+            raise TeamDocumentError(
+                "members",
+                _submitted_rule(
+                    "must hold slots whose role is 1 to "
+                    f"{HUB_TEAM_MEMBER_ROLE_MAX_CHARS} characters",
+                    len(role),
+                ),
+            )
+        kind = str(member.get("kind") or "")
+        if len(kind) > HUB_TEAM_MEMBER_KIND_MAX_CHARS:
+            raise TeamDocumentError(
+                "members",
+                _submitted_rule(
+                    "must hold slots whose kind is at most "
+                    f"{HUB_TEAM_MEMBER_KIND_MAX_CHARS} characters",
+                    len(kind),
+                ),
+            )
+        raw_count = member.get("count")
+        count = 1 if raw_count is None else int(raw_count)
+        if count < 1 or count > HUB_TEAM_MEMBER_COUNT_MAX:
+            raise TeamDocumentError(
+                "members",
+                _submitted_rule(
+                    f"must hold slot counts from 1 to {HUB_TEAM_MEMBER_COUNT_MAX}", count
+                ),
+            )
+
+    instructions = str(document.get("instructions") or "")
+    if len(instructions) > MAX_TEAM_INSTRUCTIONS_CHARS:
+        raise TeamDocumentError(
+            "instructions",
+            _submitted_rule(
+                f"must be at most {MAX_TEAM_INSTRUCTIONS_CHARS} characters", len(instructions)
+            ),
+        )
+
+    project = str(document.get("project") or "")
+    if len(project) > MAX_TEAM_INSTRUCTIONS_CHARS:
+        raise TeamDocumentError(
+            "project",
+            _submitted_rule(
+                f"must be at most {MAX_TEAM_INSTRUCTIONS_CHARS} characters", len(project)
+            ),
+        )
+
+
 def hub_team_document(team: Team) -> dict[str, Any]:
     """The published team document for a local ``Team`` (design §1.6).
 
@@ -375,8 +534,17 @@ def hub_team_document(team: Team) -> dict[str, Any]:
     spelling (``agent``/``team``) because the hub deliberately does not enums
     it (its decoder stores what the author wrote; see ``requests.TeamMemberSlot``
     in agent-server), and the pull side decides what it recognises.
+
+    The document is preflighted against the hub's own caps and name rule
+    (:func:`_preflight_hub_team_document`) before it is returned, so a team
+    the hub would refuse is refused HERE, by the surface that knows why,
+    without spending an upload or building a hub client.
+
+    Raises:
+        TeamDocumentError: When the document breaks one of the hub's rules;
+            ``field``/``rule`` say which, in the hub's own vocabulary.
     """
-    return {
+    document = {
         "name": team.name,
         "description": team.description,
         "manager": team.manager,
@@ -388,6 +556,8 @@ def hub_team_document(team: Team) -> dict[str, Any]:
         "project": team.project,
         "version": "1.0.0",
     }
+    _preflight_hub_team_document(document)
+    return document
 
 
 def _local_name_for_published(name: str) -> tuple[str, bool]:
