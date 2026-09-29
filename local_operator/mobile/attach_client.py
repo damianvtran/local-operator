@@ -71,6 +71,16 @@ from local_operator.session.runtime.types import (
     drain_phrase_for_frame,
 )
 
+try:
+    # The carriage capability token (mobile STT). cf9f's PR adds it beside the
+    # other record-capability tokens; on a tree that predates it the name is
+    # absent and this client fails CLOSED — it never sends the annotation —
+    # which is the same rule the relay's strip-gate (``MobileDaemon.request``)
+    # follows.
+    from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+except ImportError:  # pragma: no cover — only on a pre-carriage tree
+    INPUT_MODE_CAPABILITY = ""
+
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
 #: acquires the turn lock) on a busy owner, short enough that a wedged owner
@@ -1082,6 +1092,13 @@ class AttachClient:
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in record.capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
+        # MAY THIS OWNER STORE THE INPUT ANNOTATION, resolved per dial exactly
+        # like the mute flag beside it: the fields ride only to a record that
+        # advertised input-mode-v1, and an older/unadvertised owner gets frames
+        # byte-identical to today's — absence is the legacy reading.
+        self._input_mode_supported = bool(INPUT_MODE_CAPABILITY) and (
+            INPUT_MODE_CAPABILITY in record.capabilities
+        )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
@@ -1706,6 +1723,12 @@ class AttachClient:
             raise ConnectionError("not attached")
         self._req_seq += 1
         req = self._req_seq
+        # THE CARRIAGE GATE'S LAST MILE — see _strip_unsupported_annotation.
+        # Applied HERE, not only in the builders, because the wake path calls
+        # request_ack_with_duplicate directly and never passes through them:
+        # an owner that did not advertise ``input-mode-v1`` must receive
+        # byte-identical frames on EVERY path (agent review round 1, R1-1).
+        fields = self._strip_unsupported_annotation(fields)
         # FITTED BEFORE THE FUTURE IS REGISTERED, because this can raise
         # `OversizedRequest` and a future parked in `_pending` for a request
         # that was never written is never resolved by anything: it sits there
@@ -1781,18 +1804,80 @@ class AttachClient:
             self._raise_for_reply_error(reply)
         return reply.get("data")
 
+    def _strip_unsupported_annotation(self, fields: dict[str, Any]) -> dict[str, Any]:
+        """Drop ``input_mode``/``input_path`` unless the owner advertised the capability.
+
+        THE CLIENT'S HALF OF THE CARRIAGE GATE — the relay's strip in
+        ``MobileDaemon.request`` is the sibling — and this is the copy that a
+        frame cannot route around, because it runs at the one point every
+        annotation-carrying frame is written (:meth:`_request_frame`).
+        ``_request_payload`` is a second frame write point and does not strip;
+        no live path carries the annotation through it today, so every current
+        door is covered — a future op that gives it an annotation field must
+        route the pair through this strip as well. The pair reaches the wire
+        through more than one door: ``prompt``/``steer``/
+        ``send_command`` build it in :meth:`_annotation_fields`, but the wake
+        path (``launch._deliver``) and the desktop admit path
+        (``attached.admit_prompt``) hand it straight to
+        ``request_ack_with_duplicate``, which never passes that builder. A
+        frame to an owner that never advertised ``input-mode-v1`` must be the
+        frame that owner would have seen before this feature existed, on every
+        path — absence is the legacy reading. Fail-closed as everywhere else:
+        ``_input_mode_supported`` is False when the constant is absent or the
+        record did not advertise it, and ``getattr`` reads it because
+        construction-free doubles (``object.__new__(AttachClient)``) drive the
+        request paths without ever having connected — the same courtesy
+        ``authority_proof`` extends to its members, and False is the fail-closed
+        answer for a client that never saw a record.
+        """
+        if getattr(self, "_input_mode_supported", False):
+            return fields
+        if "input_mode" not in fields and "input_path" not in fields:
+            return fields
+        return {
+            key: value for key, value in fields.items() if key not in ("input_mode", "input_path")
+        }
+
+    def _annotation_fields(self, input_mode: str, input_path: str) -> dict[str, Any]:
+        """The builder-side carriage fields, empty values and old owners omitted.
+
+        ``prompt``/``steer``/``send_command`` construct their envelope here.
+        The capability half of the rule lives in
+        :meth:`_strip_unsupported_annotation` (called below) and is re-applied
+        at the write point for the doors that never build through here; empty
+        values are omitted because absence is the legacy reading and an
+        explicit empty is nothing a consumer should have to interpret.
+
+        The declared value type is ``Any``, not ``str``, because every caller
+        SPREADS the result into a frame builder's ``**fields`` beside declared
+        keyword parameters (``_request``'s ``deadline_s: float`` /
+        ``on_delta``): pyright checks a ``dict[str, str]`` spread against THOSE
+        parameters and refuses the frame on paper only — the values are the
+        annotation pair, and the cast semantics it wants are the payload
+        catch-all's.
+        """
+        fields: dict[str, str] = {}
+        if input_mode:
+            fields["input_mode"] = input_mode
+        if input_path:
+            fields["input_path"] = input_path
+        return self._strip_unsupported_annotation(fields)
+
     async def prompt(
         self,
         text: str,
         *,
         command_id: str | None = None,
         images: list[dict[str, str]] | None = None,
+        input_mode: str = "",
+        input_path: str = "",
     ) -> str:
         return await self._request(
             "prompt",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
+            **self._annotation_fields(input_mode, input_path),
         )
 
     async def send_command(self, command: ContinuationCommand, *, streaming: bool = False) -> str:
@@ -1806,13 +1891,19 @@ class AttachClient:
             raise ValueError("command belongs to another conversation")
         if streaming:
             return await self.steer(
-                command.text, command_id=command.command_id, images=command.images
+                command.text,
+                command_id=command.command_id,
+                images=command.images,
+                input_mode=command.input_mode,
+                input_path=command.input_path,
             )
         try:
             return await self.prompt(
                 command.text,
                 command_id=command.command_id,
                 images=command.images,
+                input_mode=command.input_mode,
+                input_path=command.input_path,
             )
         except RuntimeError as exc:
             # Local import, matching this module's other `session.errors` use:
@@ -1823,7 +1914,11 @@ class AttachClient:
             if not isinstance(exc, TurnInFlight) and "already streaming" not in str(exc):
                 raise
             return await self.steer(
-                command.text, command_id=command.command_id, images=command.images
+                command.text,
+                command_id=command.command_id,
+                images=command.images,
+                input_mode=command.input_mode,
+                input_path=command.input_path,
             )
 
     async def steer(
@@ -1832,12 +1927,15 @@ class AttachClient:
         *,
         command_id: str | None = None,
         images: list[dict[str, str]] | None = None,
+        input_mode: str = "",
+        input_path: str = "",
     ) -> str:
         return await self._request(
             "steer",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
+            **self._annotation_fields(input_mode, input_path),
         )
 
     async def desktop_watch(self, *, visible: bool, can_notify: bool) -> str:
@@ -2244,6 +2342,8 @@ async def continue_command(
             text=command.text,
             images=list(command.images),
             command_id=command.command_id,
+            input_mode=command.input_mode,
+            input_path=command.input_path,
         ),
         config_dir=config_dir,
         deadline_s=deadline_s,

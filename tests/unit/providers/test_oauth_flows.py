@@ -1591,6 +1591,11 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         # changes WHERE the credential is used (never chat) rather than how it
         # is obtained.
         "typesafe",
+        # ElevenLabs joined with the mobile voice path: same story one flag
+        # over — its key is pasted from the console, and speech-only changes
+        # WHERE the credential is used (speech-to-text, never chat) rather
+        # than how it is obtained.
+        "elevenlabs",
     }, required
 
     # And the union a host actually gates on: required plus the browser

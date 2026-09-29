@@ -402,3 +402,25 @@ html :focus-visible {
 	-webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
 	mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
 }
+
+/* The dictation recording dot: a slow pulse so an ACTIVE recording reads at a
+   glance. The word and the timer beside it carry the state on their own, so
+   reducing the animation to none loses no information — and `animation: none`
+   is the reduced-motion branch, not a separate class. */
+@keyframes lo-dictation-pulse {
+	0%,
+	100% {
+		opacity: 1;
+	}
+	50% {
+		opacity: 0.35;
+	}
+}
+.lo-dictation-dot {
+	animation: lo-dictation-pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+	.lo-dictation-dot {
+		animation: none;
+	}
+}

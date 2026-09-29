@@ -105,6 +105,7 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     from local_operator.providers.registry import (
         get_provider_definition,
         is_decision_only,
+        is_speech_only,
     )
 
     if get_provider_definition(provider) is None:
@@ -112,8 +113,10 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     # A provider that can serve no chat completion is not a selection this reader
     # may hand out, for the same reason the provider registry refuses one as a
     # hosting: TypeSafe's Jev rejects ``chat/completions`` on every host we reach
-    # it through (``ProviderDefinition.decision_only``), so honouring the row would
-    # resume a conversation onto a model that 400s every turn. Refused HERE, in the
+    # it through (``ProviderDefinition.decision_only``) and ElevenLabs serves
+    # speech-to-text with no chat route at all (``ProviderDefinition.speech_only``),
+    # so honouring either row would resume a conversation onto a model that 400s
+    # every turn. Refused HERE, in the
     # one validator both owner-side readers go through —
     # ``session_factory.resolve_hosting_model_with_source`` and
     # ``Session._restore_selected_model`` — rather than only in the resolver, which
@@ -122,8 +125,10 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     # what the journal says" outcome the callers already handle: the next turn
     # writes a selection that does describe a running session. The refusal is not
     # silent for a RESUME: ``refused_decision_only_selection`` below lets the
-    # resolver name the provider and the remedy instead of falling back quietly.
-    if is_decision_only(provider):
+    # resolver name the provider and the remedy instead of falling back quietly —
+    # and it answers for BOTH flag classes this reader refuses, so a speech-only
+    # row gets the same named refusal (agent review round 1, R1-3).
+    if is_decision_only(provider) or is_speech_only(provider):
         return None
     return StoredModelSelection(
         provider,
@@ -347,6 +352,11 @@ def refused_decision_only_selection(directory: Path) -> str | None:
     own journal never named. This answers the one question the resolver cannot ask
     of the row itself: "was there a stored identity, and did THIS build refuse it
     for being un-chattable?" The message it feeds names the provider and ``/model``.
+    It must answer for BOTH flag classes the validator refuses — decision-only and
+    speech-only — because the resolver's fallback is identical for the two: a probe
+    wired to one flag would let the other resume silently onto the configured
+    hosting, the exact outcome this reader exists to prevent (agent review round 1,
+    R1-3).
 
     BACKWARD, like :func:`_settled_selection`, and for the same reason: this runs
     only on the journals whose forward fold is expensive (the resolver has already
@@ -355,13 +365,13 @@ def refused_decision_only_selection(directory: Path) -> str | None:
     ``version == 2`` selector row, which is the row the fold would have settled on.
 
     Only a v2 row is inspected, and that is a claim about the population rather
-    than a shortcut: a selector naming a decision-only provider can only have been
-    WRITTEN by a build that already shipped that provider — every writer today
-    journals v2 — while a hand-edited version-less row still cannot become a
-    selection at all (``_selection`` refuses it too), so the only thing lost on
-    that path is the named explanation, never the refusal itself.
+    than a shortcut: a selector naming a decision-only or speech-only provider can
+    only have been WRITTEN by a build that already shipped that provider — every
+    writer today journals v2 — while a hand-edited version-less row still cannot
+    become a selection at all (``_selection`` refuses it too), so the only thing
+    lost on that path is the named explanation, never the refusal itself.
     """
-    from local_operator.providers.registry import is_decision_only
+    from local_operator.providers.registry import is_decision_only, is_speech_only
 
     path = directory / "transcript.jsonl"
     try:
@@ -394,7 +404,8 @@ def refused_decision_only_selection(directory: Path) -> str | None:
                     # have kept looking below it and any name here would be a guess.
                     return None
                 provider = selector.split("/", 1)[0]
-                return provider if provider and is_decision_only(provider) else None
+                refused = is_decision_only(provider) or is_speech_only(provider)
+                return provider if provider and refused else None
     return None
 
 

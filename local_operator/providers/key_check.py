@@ -95,6 +95,19 @@ def _request(definition: ProviderDefinition, key: str) -> tuple[str, dict[str, s
         # (measured), so it cannot tell a good key from a bad one. /key is the
         # authenticated read of the key's own metadata.
         return f"{base}/key", {"Authorization": f"Bearer {key}"}
+    if definition.id == "elevenlabs":
+        # The models list is the cheapest authenticated read: measured 2026-09-28,
+        # it is authentication-gated (a bogus key answers 401 "Invalid API key",
+        # and no key at all 404s workspace_not_found), so the response is always
+        # a verdict of some kind. The key rides ElevenLabs' own header --
+        # xi-api-key, never Authorization.
+        #
+        # A SCOPED key is the case this read must not misjudge, and the same
+        # measurement pinned it: a speech-only key 401s here with
+        # "missing the permission models_read" while transcribing fine, so it
+        # saves UNVERIFIED rather than being refused (see ``_PERMISSION_MARKERS``;
+        # the invalid spelling -- "Invalid API key" -- still refuses).
+        return f"{base}/models", {"xi-api-key": key}
     return f"{base}/models", {"Authorization": f"Bearer {key}"}
 
 
@@ -109,7 +122,20 @@ def _mentions_key(body: str) -> bool:
 #: this operation. Missing scopes: api.model.read" -- a key that chats fine. A
 #: status code alone cannot tell it from a revoked key, so the body decides, and
 #: this check runs BEFORE the 401 rule: refusing a good key is the worse error.
-_PERMISSION_MARKERS = ("insufficient permissions", "missing scope", "insufficient_scope")
+#:
+#: ElevenLabs says the same thing in its own words, measured 2026-09-28 against a
+#: speech-to-text-scoped key: 401 "The API key you used is missing the permission
+#: models_read to execute this operation." with ``"status": "missing_permissions"``
+#: -- while that SAME key returns 200 from ``/v1/speech-to-text``. Both spellings
+#: are listed because the sentence and the machine status field carry them
+#: separately, and this provider's whole point is that such keys exist.
+_PERMISSION_MARKERS = (
+    "insufficient permissions",
+    "missing scope",
+    "insufficient_scope",
+    "missing the permission",
+    "missing_permissions",
+)
 
 #: What a 403 must say to count as a verdict on the key itself. Deliberately not
 #: the bare ``auth`` stem: "not authorized to access this model" and "unauthorized

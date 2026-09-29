@@ -258,22 +258,28 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     ``auto`` query the OpenRouter rows score higher (7 to 6) and a rung below the
     score would change nothing.
 
-    DECISION-ONLY PROVIDERS ARE DROPPED, in both branches, before any scoring.
-    This is the surface ``/model`` offers the catalogue THROUGH, and ranking is
-    the last gate before a row becomes a choice: a decision model (TypeSafe's Jev)
-    rejects ``chat/completions`` on every host, so selecting one would open a
-    session that cannot answer a turn — the failure the user has no way to read
-    as "that model was never offerable". The controller's catalogue already
-    excludes them (``_chat_providers``); this keeps the promise for a caller that
-    builds rows from somewhere else, which is exactly how the phone's sheet and
-    the desktop picker came to rank the same list two ways.
+    DECISION-ONLY AND SPEECH-ONLY PROVIDERS ARE DROPPED, in both branches,
+    before any scoring. This is the surface ``/model`` offers the catalogue
+    THROUGH, and ranking is the last gate before a row becomes a choice: a
+    decision model (TypeSafe's Jev) rejects ``chat/completions`` on every host,
+    and a speech-only provider (ElevenLabs) serves no chat route at all, so
+    selecting either would open a session that cannot answer a turn — the
+    failure the user has no way to read as "that model was never offerable". The
+    controller's catalogue already excludes them (``_chat_providers``); this
+    keeps the promise for a caller that builds rows from somewhere else, which is
+    exactly how the phone's sheet and the desktop picker came to rank the same
+    list two ways.
     """
     # Imported at CALL time, like the sibling helpers in ``providers.failover``:
     # ``providers.registry`` is a heavier module and this one is stdlib-only by
     # design (it is imported by the mobile daemon, which renders no terminal).
-    from local_operator.providers.registry import is_decision_only
+    from local_operator.providers.registry import is_decision_only, is_speech_only
 
-    rows = [row for row in rows if not is_decision_only(row.provider)]
+    rows = [
+        row
+        for row in rows
+        if not is_decision_only(row.provider) and not is_speech_only(row.provider)
+    ]
     # TWO EMPTY-ISH CASES, and they are not the same. `query.strip() == ""` is the
     # user having typed nothing, which lists the catalogue in its natural order.
     # A query that is non-empty but NORMALISES to "" (`.`, `!`, `...`, `-`) is the
