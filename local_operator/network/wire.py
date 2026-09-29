@@ -116,6 +116,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "credential-broker-v1",
     "compute-pool-v1",
     "peer-readiness-v1",
+    "mcp-defs-v1",
 )
 MESH_NET_V1 = "mesh-net-v1"
 #: The peer-readiness op's capability (``readiness.py``). It is advertised by
@@ -125,6 +126,12 @@ MESH_NET_V1 = "mesh-net-v1"
 #: had to compose. Named here so the tuple above, the slice's ask condition
 #: and the tests read ONE spelling of the string.
 PEER_READINESS_V1 = "peer-readiness-v1"
+#: The MCP server-definition sync's capability (``mcpdefs.py``). Advertised by
+#: every build that ships ``net_mcp_defs``; a sender checks it BEFORE its first
+#: request, so an old peer never has to compose a not-implemented refusal it
+#: did not ask to make. Named here so the tuple above, the push's ask condition
+#: and the tests read ONE spelling of the string.
+MCP_DEFS_V1 = "mcp-defs-v1"
 
 
 # ---------------------------------------------------------------------------
