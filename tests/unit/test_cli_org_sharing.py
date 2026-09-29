@@ -754,8 +754,30 @@ def test_teams_push_derives_from_the_manager_when_an_agents_store_exists(
     manager_agent = agents.create_agent(
         AgentEditFields.model_validate({"name": "manager", "description": "Runs it."})
     )
+    # Every field spelled out (the tree's convention for ``AgentEditFields`` —
+    # pyright requires them, no defaults): ``update_agent`` skips ``None``
+    # values, so the pair is all this sets.
     agents.update_agent(
-        manager_agent.id, AgentEditFields(hosting="openrouter", model="vendor/model")
+        manager_agent.id,
+        AgentEditFields(
+            name=None,
+            security_prompt=None,
+            hosting="openrouter",
+            model="vendor/model",
+            description=None,
+            tags=None,
+            categories=None,
+            last_message=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            max_tokens=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            seed=None,
+            current_working_directory=None,
+        ),
     )
     _make_team()
     monkeypatch.setattr("sys.argv", ["program", "teams", "push", "--org", "org-a", "release-crew"])
