@@ -32,6 +32,7 @@ from typing import Any
 import pytest
 
 from local_operator.config import ConfigManager
+from local_operator.session.naming import TITLE_SYSTEM_PROMPT
 from tests.e2e.harness import NO_NOTIFY_ENV
 
 #: The escape the QA/bench harnesses use, set for the CHILD env AND the test
@@ -46,6 +47,22 @@ CELL_RE = re.compile(r"CELL(\d+[A-Z]*)")
 #: it: unenforced stdout is the raw message, enforced stdout is the payload
 #: span — so the resume cell can tell enforcement from its absence.
 FENCED_JSON_REPLY = 'Answer:\n```json\n{"cell": 11}\n```'
+
+
+def _is_title_call(body: dict[str, Any]) -> bool:
+    """Whether this request is the harness's own conversation-naming call.
+
+    An UNNAMED exec run fires one ``Name this conversation …`` model call
+    beside the turn (``session.naming``, whose prompt is the constant above);
+    it carries the user message, so without this predicate the fixture would
+    count it as a turn call — and, worse, let it consume a scripted reply
+    from the cell's sequence. The cells count TURN calls.
+    """
+    messages = body.get("messages") or []
+    if not messages or messages[0].get("role") != "system":
+        return False
+    content = str(messages[0].get("content", "") or "")
+    return content.startswith(TITLE_SYSTEM_PROMPT.split("\n", 1)[0])
 
 
 @pytest.fixture
@@ -116,10 +133,17 @@ def exec_server(tmp_path, monkeypatch):
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(body)
-            wire = json.dumps(body.get("messages", []))
-            match = CELL_RE.search(wire)
-            cell = match.group(0) if match else ""
-            delta = {"role": "assistant", "content": _reply(cell, _calls(cell))}
+            if _is_title_call(body):
+                # The harness's naming call: answer it with a well-formed title
+                # (so the run is titled like any real one) and hand it to
+                # neither the per-cell call counter nor the scripted replies.
+                text = "<title>Output modes cell</title>"
+            else:
+                wire = json.dumps(body.get("messages", []))
+                match = CELL_RE.search(wire)
+                cell = match.group(0) if match else ""
+                text = _reply(cell, _calls(cell))
+            delta = {"role": "assistant", "content": text}
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -138,11 +162,23 @@ def exec_server(tmp_path, monkeypatch):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     serving = threading.Thread(target=server.serve_forever, daemon=True)
     serving.start()
+    # The knowledge layer's advisory probe is switched OFF for these cells, by
+    # its documented off-switch: with ``classification.auto`` off the wiring
+    # returns before it imports the package and the prompt is byte-identical to
+    # a harness without the layer. Left on, it fires one classification model
+    # call per user message against the SAME loopback provider, racing the turn
+    # on a 50 ms budget — which both consumes a scripted reply from the cell's
+    # sequence and inflates the per-cell provider-call census non-
+    # deterministically (observed: a 2-call retry cell counted 3). The cells are
+    # about the output contract, not about the recommender; a count that varies
+    # with the machine's load would be exactly the clock-keyed assertion the
+    # harness's own testing rules forbid.
     config = ConfigManager(root)
     config.update_config(
         {
             "hosting": "openai-compatible",
             "model_name": "exec-fixture",
+            "classification": {"auto": False},
             "providers": {
                 "openai-compatible": {
                     "base_url": f"http://127.0.0.1:{server.server_port}/v1",
@@ -208,8 +244,17 @@ def exec_server(tmp_path, monkeypatch):
 
 
 def _cells(requests: list[dict[str, Any]], cell: str) -> list[dict[str, Any]]:
-    """The recorded provider requests carrying this cell's prompt marker."""
-    return [r for r in requests if cell in json.dumps(r.get("messages", []))]
+    """The recorded TURN requests carrying this cell's prompt marker.
+
+    The harness's own naming call is excluded: it carries the user message
+    too, but it is not a turn call and counting it inflated every census by
+    one (observed on the first e2e runs: a 2-call retry counted 3).
+    """
+    return [
+        body
+        for body in requests
+        if cell in json.dumps(body.get("messages", [])) and not _is_title_call(body)
+    ]
 
 
 def _await_terminal(job_id: str, timeout: float = 240.0) -> dict[str, Any]:

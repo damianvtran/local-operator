@@ -381,6 +381,11 @@ class PrintRenderer:
                     style="dim",
                     highlight=False,
                     markup=False,
+                    # One stderr line per rejected attempt, literally: rich
+                    # would otherwise reflow a long schema reason at the
+                    # console width, splitting the pinned prefix from its
+                    # reason for anything grepping stderr.
+                    soft_wrap=True,
                 )
         elif isinstance(event, RetryStartEvent):
             self.console.print(f"[dim]retry {event.attempt}: {event.error}[/dim]", highlight=False)
@@ -449,11 +454,19 @@ class PrintRenderer:
                 # on this path may raise.
                 sentence = append_auth_recovery(event.error, provider or None)
                 sentence = append_usage_limit_recovery(sentence, provider or None)
+                # ``soft_wrap``: rich otherwise reflows this line at the console
+                # width (80 when stderr is not a terminal), which broke a
+                # pinned contract sentence mid-phrase — measured on the
+                # exhausted-contract path, where stderr must carry
+                # "… after 3 attempts: …" as ONE line for the operators and
+                # scripts that read it. An error line is data, not prose; a
+                # terminal is free to wrap it visually.
                 self.console.print(
                     f"Error: {sentence}",
                     style="red",
                     highlight=False,
                     markup=False,
+                    soft_wrap=True,
                 )
             elif event.aborted:
                 self.console.print("[red]aborted[/red]", highlight=False)
