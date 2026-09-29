@@ -30674,7 +30674,9 @@ class OperatorApp(App[None]):
         The read is a relay call, so it runs in a thread exactly as the
         sidebar's refresh does; the roster of devices that did NOT answer rides
         with the rows, because an empty answer from a silent peer is not the
-        park clearing (see `park_edges`).
+        park clearing (see `park_edges`). A whole-RELAY failure is different:
+        it names nobody, which is why it is indistinguishable from an
+        all-clear here — the residual `park_edges` documents.
         """
 
         def collect() -> tuple[tuple[SessionRow, ...], tuple[UnansweredPeer, ...]]:
@@ -30728,10 +30730,13 @@ class OperatorApp(App[None]):
         answer this read, and `park_edges` carries their episodes forward — a
         refused or timed-out peer must not withdraw a card (the park may still
         be live) and must not drop the episode (recovery would then re-announce
-        the same park as a second episode; agent review round 1, MINOR-1). A
-        whole-relay failure delivers neither rows nor names, so it stays
-        ambiguous; treating it as silence is the conservative direction for a
-        notice.
+        the same park as a second episode; agent review round 1, MINOR-1).
+        A WHOLE-RELAY failure is the residual, stated as shipped: it delivers
+        neither rows nor names, so an outage and an all-clear are
+        indistinguishable at this seam and the effect is a withdraw plus a
+        re-announce of the same park when the relay answers again. Accepted and
+        recorded (round-2 review NIT-1; the fix is a not-answered signal out of
+        `peer_rows._read`), not claimed as handled.
 
         The OS banner is deliberately NOT `self._notify(...)`: that funnel
         composes the body from THIS session's transcript, and the body here is
