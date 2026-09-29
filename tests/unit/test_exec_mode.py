@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelSpec,
     NoticeEvent,
+    OutputValidationEvent,
     ReasoningDeltaEvent,
     TextContent,
     ToolExecutionEndEvent,
@@ -650,6 +651,54 @@ def test_an_error_notice_is_marked_by_a_glyph_not_only_by_colour() -> None:
     assert lines[0] == "✗ Tool not found: reed_file"
     assert lines[1] == "! running low on context"
     assert lines[2] == "compacted"
+
+
+def test_error_wrapping_is_scoped_to_the_contract_exhaustion_sentence() -> None:
+    """Review R-1. ``soft_wrap`` is scoped to the contract-exhaustion line.
+
+    rich reflows a long line at the console width (80 when stderr is not a
+    terminal), and the exhausted-contract sentence is a PINNED one-line
+    contract (the spec's cell 7 asserts it as one phrase) — so that line
+    prints with ``soft_wrap``. Every other error keeps the historical reflow,
+    because an unenforced run's stderr must stay byte-identical to the pre-PR
+    behaviour. The two buffers below differ only in the events fed (same
+    sentence): the generic run reflows (no line exceeds the width), the
+    contract run does not. The scoping is keyed on the exhausted
+    ``OutputValidationEvent`` the renderer already tracks, not on the text.
+    """
+    sentence = (
+        "final response did not satisfy the output contract (json) after 3 "
+        "attempts: not valid JSON: Expecting value: line 1 column 1 (char 0)"
+    )
+
+    generic_buffer = io.StringIO()
+    generic = PrintRenderer(
+        json_mode=False,
+        console=Console(file=generic_buffer, no_color=True, highlight=False, width=80),
+    )
+    generic.handle(AgentEndEvent(messages=[], aborted=False, error=sentence, generation=1))
+    generic_lines = generic_buffer.getvalue().splitlines()
+    assert generic_lines, "the generic error still renders"
+    assert max(len(line) for line in generic_lines) <= 80
+
+    contract_buffer = io.StringIO()
+    contract = PrintRenderer(
+        json_mode=False,
+        console=Console(file=contract_buffer, no_color=True, highlight=False, width=80),
+    )
+    contract.handle(
+        OutputValidationEvent(
+            format="json",
+            attempt=3,
+            max_attempts=3,
+            ok=False,
+            exhausted=True,
+            error="not valid JSON: Expecting value: line 1 column 1 (char 0)",
+        )
+    )
+    contract.handle(AgentEndEvent(messages=[], aborted=False, error=sentence, generation=1))
+    contract_lines = contract_buffer.getvalue().splitlines()
+    assert any("after 3 attempts: not valid JSON" in line for line in contract_lines)
 
 
 def test_a_notice_cannot_smuggle_control_sequences_to_the_terminal() -> None:
@@ -1933,6 +1982,44 @@ def test_build_worker_argv_threads_workstream_to_the_worker(
     monkeypatch.setattr("local_operator.session_factory.create_session", fake_create_session)
     exec_worker._default_session_factory(parsed)
     assert seen["workstream"] is True
+
+
+def test_build_worker_argv_threads_the_output_contract_flags() -> None:
+    """`--background` is the same request run elsewhere, and the schema path
+    is absolutised BEFORE this boundary: the worker resolves it from its own
+    cwd, so a relative path would silently name a different file there."""
+    args = ExecArgs(output_format="json", output_schema="/abs/report.schema.json", output_retries=3)
+    argv = build_worker_argv("do it", args)
+    assert "--output-format=json" in argv
+    assert "--output-schema=/abs/report.schema.json" in argv
+    assert "--output-retries=3" in argv
+    parsed = exec_worker.build_parser().parse_args(argv[argv.index("-m") + 2 :])
+    assert parsed.output_format == "json"
+    assert parsed.output_schema == "/abs/report.schema.json"
+    assert parsed.output_retries == 3
+    # Opt-in: an unenforced run carries none of the three.
+    bare = build_worker_argv("bare", ExecArgs())
+    assert "--output-format" not in bare
+    assert "--output-schema" not in bare
+    assert "--output-retries" not in bare
+
+
+def test_the_status_guard_covers_the_output_contract_flags() -> None:
+    """`--status` may not combine with run options, and its guard reads
+    ``STARTUP_FIELDS`` rather than a second hand-maintained list — so
+    membership in that tuple IS the guard (see ``cli.py``'s run_options)."""
+    from local_operator.exec_startup import STARTUP_FIELDS
+
+    assert "output_format" in STARTUP_FIELDS
+    assert "output_schema" in STARTUP_FIELDS
+    assert "output_retries" in STARTUP_FIELDS
+    # And the argv spelling STARTUP_FIELDS derives is what the worker parser
+    # accepts (the underscore-to-dash form build_worker_argv emits).
+    parsed = exec_worker.build_parser().parse_args(
+        ["--prompt=p", "--output-format=json", "--output-retries=2"]
+    )
+    assert parsed.output_format == "json"
+    assert parsed.output_retries == 2
 
 
 def test_the_foreground_factory_carries_workstream_to_the_stamp(

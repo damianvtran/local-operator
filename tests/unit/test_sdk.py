@@ -1016,6 +1016,7 @@ def test_public_surface_is_pinned() -> None:
         "EngageOutcome",
         "Errand",
         "EventHandler",
+        "MarkdownSchema",
         "PeerMessageErrand",
         "PromptErrand",
         "SessionEventStream",
@@ -1028,6 +1029,7 @@ def test_public_surface_is_pinned() -> None:
         "ViewerSessionProtocol",
         "WakeErrand",
         "WarmErrand",
+        "decode_output",
         "deliver",
         "events",
         "open_session",
@@ -1069,3 +1071,79 @@ def test_public_surface_is_pinned() -> None:
         ("allow_multi_root", K),
     ]
     assert params(sdk.events) == [("session", P)]
+
+
+# --- output contract enforcement ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_open_session_applies_the_output_contract_through_the_session_method(
+    scratch: SessionRoots,
+) -> None:
+    """A spec's ``output_*`` fields reach the SAME post-open method exec
+    installs them with, before the first turn — and the contract is announced
+    in the session's system blocks (otherwise every first attempt is a coin
+    flip)."""
+    async with sdk.open_session(
+        _mock_spec(
+            output_format="json",
+            output_schema={"type": "object", "required": ["name"]},
+            output_retries=1,
+        ),
+        roots=scratch,
+    ) as session:
+        concrete = cast(Any, session)
+        contract = concrete._output_contract
+        assert contract is not None
+        assert contract.format == "json"
+        assert contract.max_attempts == 2
+        blocks = await concrete._prepare_system_blocks(commit_state=False)
+        assert any(block.startswith("Output contract:") for block in blocks)
+        assert any('"required"' in block for block in blocks)
+
+
+@pytest.mark.asyncio
+async def test_open_session_refuses_a_contract_it_cannot_build(scratch: SessionRoots) -> None:
+    """The common ``OutputContract`` validation, surfaced as ``SessionSpecError``
+    (the spec surface's own error class) rather than a bare ValueError."""
+    from local_operator.output_contract import MarkdownSchema
+
+    with pytest.raises(SessionSpecError, match="MarkdownSchema applies to format"):
+        async with sdk.open_session(
+            _mock_spec(output_format="json", output_schema=MarkdownSchema()), roots=scratch
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_spawn_refuses_output_enforcement_with_a_named_remedy(
+    scratch: SessionRoots, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import local_operator.session.runtime.launch as launch_mod
+
+    async def fake_engage(*args, **kwargs):  # pragma: no cover — must not run
+        raise AssertionError("engage must not be reached")
+
+    monkeypatch.setattr(launch_mod, "engage_runtime", fake_engage)
+    with pytest.raises(SessionSpecError, match="cannot carry output enforcement"):
+        await sdk.spawn_session(
+            _mock_spec(output_format="json"),
+            roots=scratch,
+            errand=launch_mod.PromptErrand(text="go"),
+        )
+
+
+def test_attach_refuses_output_enforcement() -> None:
+    """An attach spec that carried enforcement would be inert by construction:
+    the viewer never installs owner-side state. Refused, never silently set."""
+    with pytest.raises(SessionSpecError, match="the owning runtime decides"):
+        sdk._refuse_attach_extras(SessionSpec(resume="abc123def456", output_format="json"))
+
+
+def test_the_output_contract_helpers_are_lazy_reexports() -> None:
+    """``decode_output``/``MarkdownSchema`` resolve through the PEP 562 table
+    to the contract module's own objects (identity, not a copy)."""
+    from local_operator import output_contract
+
+    assert sdk.decode_output is output_contract.decode_output
+    assert sdk.MarkdownSchema is output_contract.MarkdownSchema

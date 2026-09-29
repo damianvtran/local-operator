@@ -57,7 +57,7 @@ The event JSON projection for line-oriented consumers is
 
 | Entry point | What it does | Exec-parity reference |
 | --- | --- | --- |
-| `open_session(spec, roots=..., mode="own"\|"attach")` | `own`: builds the session in this process (like `lop exec` foreground) and yields it for use inside an `async with`. `attach`: the viewer path for an id whose runtime is **already live**; a cold id is refused with a remedy. An attach spec carries `resume` only — owner-side fields (team/profile/tools/name/goal) and non-default `approvals` are refused, not silently inert. | `session_factory.create_session` |
+| `open_session(spec, roots=..., mode="own"\|"attach")` | `own`: builds the session in this process (like `lop exec` foreground) and yields it for use inside an `async with`. `attach`: the viewer path for an id whose runtime is **already live**; a cold id is refused with a remedy. An attach spec carries `resume` only — owner-side fields (team/profile/tools/name/goal), non-default `approvals` and `output_*` enforcement are refused, not silently inert. | `session_factory.create_session` |
 | `spawn_session(spec, roots=..., errand=...)` | Runtime-hosted and survives the caller: mints a viewer-style id (`uuid4().hex[:12]`), warms a detached runtime with the spec's birth sample, then delivers the errand over the one engagement router. | phone/TUI spawn (`engage_runtime`) |
 | `deliver(session_id, roots=..., errand=...)` | One engagement for an existing session (`id` or `@latest`), cold or live. | `lop send` / mobile engage |
 | `events(session)` | Async iterator over `session.subscribe()`; `aclose()` (or `async with`) unsubscribes. | `exec --json`'s stream |
@@ -87,12 +87,70 @@ same construction, not a copy of it. On top:
 | `tools` | The run's whole reach — exec `--tools` semantics, one-way for the session's life; a second declaration may only tighten. Excluded tools are unreachable by name. |
 | `approvals` | See the table below. |
 | `name`, `goal` | Conversation title and standing goal. |
+| `output_format`, `output_schema`, `output_retries` | Enforce the final response's format (and optionally a schema) for every turn — the same contract `lop exec --output-format` installs, applied through the same post-open `Session.set_output_contract`. See [Enforcing the final response contract](#enforcing-the-final-response-contract). |
 | `notifications` | A *spawned* runtime is silenced by default (the harness's "nobody is watching" posture); `True` lets it inherit the launcher's posture. In-process sessions leave notification policy to the host process. |
 
 Not carried, deliberately: `--effort` (a runner-level knob applied after
 construction; use `birth_effort` for the construction-time level), `--loop` /
 `--loop-goal` (exec's continuation mechanism; an SDK caller drives turns
 itself), `--clear-goal` (adjusts a resumed run rather than starting one).
+
+## Enforcing the final response contract
+
+`SessionSpec.output_format` (with optional `output_schema` and
+`output_retries`) makes the session's harness validate each turn's terminal
+assistant text, and retry inside the same turn when it does not conform — the
+same `Session.set_output_contract` method `lop exec --output-format` installs,
+through the same validator (`OutputContract`). `None` (the default) leaves
+every turn byte-identical to a session without it. The `exec` docs own the
+per-format strictness table and the extraction rules; the schema spelling here
+is a TYPE or a MAPPING rather than a file path:
+
+```python
+from pydantic import BaseModel
+from local_operator.sdk import SessionSpec, SessionRoots, events, open_session
+
+
+class Invoice(BaseModel):
+    total: int
+    currency: str
+
+
+spec = SessionSpec(
+    hosting="openrouter",
+    model="deepseek/deepseek-v4.1-flash",
+    output_format="json",
+    output_schema=Invoice,          # model class, dataclass, TypedDict, raw JSON Schema, …
+    output_retries=1,               # 0-5; default 2 (three attempts per turn)
+)
+
+async with open_session(spec, roots=roots) as session:
+    stream = events(session)
+    await session.prompt("Extract the invoice")
+    async for event in stream:
+        if event.type == "output_validation" and event.ok:
+            invoice = Invoice.model_validate_json(event.payload_text)  # the validated span
+        if event.type == "agent_end":
+            if event.error:  # exhaustion is a turn error, like any provider error
+                raise RuntimeError(event.error)
+            break
+```
+
+Failure semantics are the SDK's ordinary turn semantics: an exhausted budget
+ends the turn with `agent_end.error` of
+`final response did not satisfy the output contract (…) after N attempts: <reason>`
+and `session.last_turn_outcome == "error"` — `await session.prompt(...)` still
+resolves (a turn error is an event, not an exception, exactly as every provider
+error). A successful check is visible as an `output_validation` event with
+`ok=True` and `payload_text` (the exact span that validated);
+`local_operator.sdk.decode_output` re-decodes that span with the same rules if
+you only have the text.
+
+Refused rather than silently inert: `output_*` on an `attach` spec (the viewer
+cannot install owner state) and on `spawn_session` (post-open state has no
+channel to a new runtime child). The composition that works is the documented
+one: `open_session(..., mode="own")` → `dispose` → `spawn_session` the same
+id, or drive the session in-process.
 
 ## Approval policies
 
@@ -165,10 +223,10 @@ failure shape this surface refuses to have):
 * **attach auto-spawn** — a cold id gets a remedy, not a spawn; use
   `spawn_session`/`deliver` first.
 * **post-open state on `spawn_session`** — `team`, `profile`, `tools`, `name`,
-  `goal`, non-default `approvals` and `yolo` have no sanctioned channel to a
-  *new* runtime child. The composition that works: `open_session` (attach what
-  you need) → `dispose` → `spawn_session` the same id; resume restores the
-  attachment sidecars.
+  `goal`, non-default `approvals`, `yolo` and the `output_*` enforcement fields
+  have no sanctioned channel to a *new* runtime child. The composition that
+  works: `open_session` (attach what you need) → `dispose` → `spawn_session`
+  the same id; resume restores the attachment sidecars.
 * **`spec.resume(id)` as a method** — the field keeps the name for exec parity;
   the helper is `spec.with_resume(id)`.
 

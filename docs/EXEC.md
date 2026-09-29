@@ -32,6 +32,9 @@ lop --resume SESSION_ID
 | `--name TEXT` | Set the persisted conversation title. |
 | `--tools NAMES` | Declare this run's whole reach: a comma-separated list of tools, and the only ones the session may reach — an excluded tool is unreachable by name, not merely unapproved, and delegated children inherit the bound. The declaration is **one-way** for the session's life (a second declaration may only tighten it; a host that needs a different set starts a session with it) and it is not persisted, so a later `--resume` without the flag is unrestricted. It also stands as the APPROVAL for the names it lists *where nobody can be asked* — a non-TTY run without `--control`; on a terminal, and under `--control`, every write/exec call is still put to the gate. Overrides an attached role's `tools:` allow-list, and inherits it when the flag is absent. A name this build does not have is unreachable, and reported at the end of the run. |
 | `--effort LEVEL` | Set reasoning effort using the selected model's existing validation. Unsupported levels fail before a turn. |
+| `--output-format FORMAT` | Enforce the format of the assistant's FINAL response for this run: `markdown`, `json`, `yaml` or `toml`. Bounded by contract: formats, optional schemas and a retry budget only — enforcement is validation plus bounded retry, never a re-encode, and the payload on stdout is the model's own validated bytes. Without this flag no enforcement happens and the run is byte-identical to before the flag existed. See [Final-response enforcement](#final-response-enforcement---output-format). |
+| `--output-schema PATH` | A JSON file the decoded payload must satisfy: a JSON Schema for `json`/`yaml`/`toml`, or `{"required_sections": ["<section>", ...]}` for `markdown`. Read and validated before the run starts (a bad file fails as `exec failed: …`, exit 1, with no session directory behind it). Requires `--output-format`. |
+| `--output-retries N` | Max retries after a rejected final response (0–5; default 2, so three attempts). Not persisted — each `--resume` invocation carries its own flags. Requires `--output-format`. |
 | `--workstream` | Publish this run as a long-lived parallel WORKSTREAM the operator asked for: it is listed in the sidebar, `/resume` and the phone list, labelled with the session that opened it, and can be followed and steered. It changes **visibility only**, never the approval posture: every exec run already publishes its discovery record, so the row is followable and steerable without `--control`, and a `--tools` declaration still stands as the approval exactly as it does for an unflagged run. Add `--control` yourself when the run's gates should park for a supervisor. Only meaningful under an agent's shell — it is what selects the `agent-workstream` stamp below; at your own terminal nothing is stamped and the run is an ordinary session. Absent (the default, and what every caller that predates the flag gets) an agent-opened run is `agent-shell`: hidden everywhere and silent. |
 | `--resume [ID]` | Reopen the same transcript; omit the ID to select the most recent session. A live headless runtime is refused rather than raced; `lop --resume ID` attaches the TUI to that runtime instead. |
 | `--background` | Detach a worker. The launcher prints a bounded readiness receipt, not a claim that the work completed. |
@@ -54,6 +57,73 @@ startup options override only their own slots. Team and profile can coexist;
 a profile does not remove the team's roster. Stored loop progress remains
 visible, but restarting or resuming never automatically replays iterations.
 Pass a new loop option explicitly to start another loop.
+
+## Final-response enforcement (`--output-format`)
+
+`lop exec` can require the assistant's FINAL response to be a machine-readable
+payload and fail the run (exit 1) when it is not. The check runs at the one
+point a turn ends cleanly: a rejected response becomes one more model step
+**inside the same turn** (the retry notice is an ordinary, persisted user
+message, so a resumed transcript explains the continuation), and a run that
+exhausts its retries fails loudly rather than printing something wrong.
+
+```sh
+lop exec 'Extract the invoice as JSON' --output-format json
+lop exec 'Reply with YAML' --output-format yaml --output-retries 3
+lop exec 'Draft release notes' --output-format markdown --output-schema sections.json
+lop exec 'Parse the report' --output-format json --output-schema report.schema.json --background
+```
+
+**What is enforced, per format.** Tolerance is about *locating* the payload;
+content is strict.
+
+| format | decoder | strict about | tolerated / noted |
+| --- | --- | --- | --- |
+| `json` | `json.loads` | full strict JSON: no trailing commas, no single quotes, `NaN`/`Infinity` rejected | any JSON value (object/array/scalar) when the whole text or a fence is exact; a prose scan finds a bare `{`/`[`-anchored span |
+| `yaml` | PyYAML safe loader | one document only; the decoded value must be a mapping or sequence (a bare scalar is prose, not a payload) | PyYAML semantics: JSON is a subset, `yes`/`on` are booleans, duplicate keys last-wins, dates decode to dates |
+| `toml` | `tomllib` | TOML 1.0 as stdlib enforces it: duplicate keys rejected | trailing commas in arrays; the root is always a table, so the payload is always a mapping |
+| `markdown` | none — the text IS the payload | non-empty; balanced fenced code blocks | everything else; markdown has no formal well-formedness |
+
+**Where the payload is found (in this order, first decode that also satisfies
+the schema wins):** a fence labelled with the target format; an
+unlabelled/unknown-label fence; the whole text; and for `json` only, a bare
+`{`- or `[`-anchored span in prose. A fence labelled with a *different*
+recognised format is skipped — the label is an explicit claim, and the retry is
+the remedy.
+
+**Schemas.** For `json`/`yaml`/`toml`, `--output-schema` names a JSON Schema
+file (Draft 2020-12; meta-schema checked before the run). For `markdown` it is
+the one vocabulary markdown has: `{"required_sections": ["Summary", "Risks"]}`
+— each named section must appear as an ATX heading, case-insensitively, in the
+given order.
+
+**Failure semantics.** A rejected attempt logs one dim stderr line
+(`! output check failed (<format>, attempt <n>/<m>): <reason>`) and, when the
+budget is spent, the run ends with exit 1 and the two stderr lines
+`Error: final response did not satisfy the output contract (<format>) after N attempts: <reason>`
+and `exec failed: the turn did not complete` (the existing headless failure
+line, whose text comes from `exec_session`'s fallback unless a prior prompt
+failure recorded a more specific reason). **stdout carries
+nothing** for an exhausted turn — a wrong payload on stdout is worse than an
+empty one for `… | jq` consumers. On success, stdout is the VALIDATED payload
+span (the winning candidate, stripped): `lop exec --output-format json | jq .`
+works even when the payload arrived inside a fence or surrounded by prose.
+
+**Interactions.**
+
+* `--json` gains one `output_validation` event per checked attempt
+  (`ok`, `attempt`, `max_attempts`, `payload_text` on success); nothing else on
+  the event stream changes, and an unenforced run emits none.
+* `--loop` / `--loop-goal` enforce **every** turn; a turn that exhausts its
+  retries fails the run and stops the loop.
+* `--background` is the same request run elsewhere: the schema path is made
+  absolute before the spawn, the worker re-validates the file, and a failed run
+  reaches the ledger as `failed` (`lop exec --status JOB_ID`), with both stderr
+  lines in the job log.
+* `--resume` never persists enforcement: the flags of THIS invocation apply,
+  and a later resume without them is unrestricted (like `--tools`).
+* `--output-retries` counts retries **per turn** (default 2, so three attempts
+  per turn); the range is 0–5.
 
 ## What may not start a session: an agent's shell
 

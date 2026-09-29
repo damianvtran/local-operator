@@ -5663,6 +5663,156 @@ async def test_a_runaway_follow_up_still_ends_the_run_as_a_named_cut_off():
     assert len(stream.requests) <= 6
 
 
+# --- final-response output contract -----------------------------------------
+
+
+def _good_reply(text: str = '{"ok": true}') -> list[StreamEvent]:
+    return [StreamTextDelta(delta=text), StreamEndEvent(stop_reason="stop")]
+
+
+def _bad_reply(text: str = "this is not json") -> list[StreamEvent]:
+    return [StreamTextDelta(delta=text), StreamEndEvent(stop_reason="stop")]
+
+
+@pytest.mark.asyncio
+async def test_final_response_gate_passes_on_the_first_attempt() -> None:
+    from local_operator.output_contract import OutputContract
+
+    stream = ScriptedStream([_good_reply()])
+    context = LoopContext(tools=[])
+    config = make_config(stream, final_response_gate=OutputContract(format="json"))
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    validations = [e for e in events if e.type == "output_validation"]
+    assert len(validations) == 1
+    assert validations[0].ok is True
+    assert validations[0].attempt == 1
+    assert validations[0].max_attempts == 3
+    assert validations[0].payload_text == '{"ok": true}'
+    assert validations[0].exhausted is False
+    assert len(stream.requests) == 1  # no extra model step on success
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is None and end.aborted is False
+
+
+@pytest.mark.asyncio
+async def test_no_gate_emits_no_output_validation_events() -> None:
+    """The byte-identical default: no contract, no events, no retry."""
+    stream = ScriptedStream([_good_reply("plain prose, no contract")])
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    assert not [e for e in events if e.type == "output_validation"]
+    assert len(stream.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_final_response_gate_retries_inside_the_same_turn() -> None:
+    """One rejected answer becomes ONE MORE MODEL STEP, not a second run:
+    the retry is a visible, persisted user message on the wire."""
+    from local_operator.output_contract import OutputContract
+
+    stream = ScriptedStream([_bad_reply(), _good_reply()])
+    context = LoopContext(tools=[])
+    config = make_config(stream, final_response_gate=OutputContract(format="json"))
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    validations = [e for e in events if e.type == "output_validation"]
+    assert [(v.attempt, v.ok, v.exhausted) for v in validations] == [
+        (1, False, False),
+        (2, True, False),
+    ]
+    assert len(stream.requests) == 2
+    last = context.messages[-1]
+    assert isinstance(last, Message)
+    assert last.text == '{"ok": true}'
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.error is None
+    # Persisted shape: assistant, the retry notice, the answering assistant.
+    # Narrow to ``Message``: ``AgentMessage`` is the union with the
+    # host-authored ``CustomMessage``, and this path must produce plain rows.
+    rows = [row for row in end.messages if isinstance(row, Message)]
+    assert len(rows) == len(end.messages) == 3
+    assert [row.role for row in rows] == ["assistant", "user", "assistant"]
+    retry = rows[1]
+    assert retry.text.startswith("Harness output check: ")
+    assert "The required output format is json." in retry.text
+    assert "(attempt 2 of 3)" in retry.text
+    # And the retry rode the NEXT provider request.
+    wire = [
+        m.text for m in stream.requests[1].messages if isinstance(m, Message) and m.role == "user"
+    ]
+    assert any(text.startswith("Harness output check: ") for text in wire)
+
+
+@pytest.mark.asyncio
+async def test_final_response_gate_exhaustion_fails_the_turn() -> None:
+    from local_operator.output_contract import OutputContract
+
+    stream = ScriptedStream([_bad_reply(), _bad_reply(), _bad_reply()])
+    context = LoopContext(tools=[])
+    config = make_config(stream, final_response_gate=OutputContract(format="json"))
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    validations = [e for e in events if e.type == "output_validation"]
+    assert len(validations) == 3
+    assert [v.attempt for v in validations] == [1, 2, 3]
+    assert validations[-1].exhausted is True
+    assert validations[-1].ok is False
+    assert len(stream.requests) == 3  # the budget is 1 + retries; no fourth call
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is False
+    assert end.error is not None
+    assert end.error.startswith(
+        "final response did not satisfy the output contract (json) after 3 attempts: "
+    )
+    # Exactly one terminal event per run, contract or not.
+    assert [e.type for e in events].count("agent_end") == 1
+
+
+@pytest.mark.asyncio
+async def test_final_response_gate_ignores_non_clean_exits() -> None:
+    """An aborted run fails for its own reason; the gate never masks it and
+    never fires (no final response exists)."""
+    from local_operator.output_contract import OutputContract
+
+    abort = AbortSignal()
+
+    class _AbortingStream:
+        def __call__(self, request, signal):
+            abort.abort("stopped")
+
+            async def gen():
+                yield StreamTextDelta(delta="partial")
+
+            return gen()
+
+    context = LoopContext(tools=[])
+    config = make_config(_AbortingStream(), final_response_gate=OutputContract(format="json"))
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, abort):
+        events.append(event)
+
+    assert not [e for e in events if e.type == "output_validation"]
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.aborted is True
+
+
 # ---------------------------------------------------------------------------
 # Nameless tool calls (incident 2026-09-29): dropped at assembly, model re-asked
 # ---------------------------------------------------------------------------
