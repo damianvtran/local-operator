@@ -34,6 +34,7 @@ from local_operator.server.models.desktop_sessions import (
     AnswerReceipt,
     ArchiveState,
     AttentionState,
+    CheckpointManifest,
     ChildTrajectoryRelease,
     ChildTrajectoryWindow,
     ChildTranscriptPage,
@@ -2428,6 +2429,36 @@ async def history(
         host(request).session(session_id, read=True, allow_draft=True) as bridge,
     ):
         return reply(await bridge.history(before_id=before_id, limit=limit))
+
+
+@router.get(
+    "/v1/desktop/sessions/{session_id}/checkpoints",
+    response_model=CRUDResponse[CheckpointManifest],
+)
+async def checkpoints(session_id: str, request: Request):
+    """The checkpoint rail's manifest: user ticks, completion ticks, outcomes.
+
+    A READ like ``history`` beside it — and on a draft the empty manifest is
+    the correct answer rather than a 404: there is no journal to derive from,
+    which is exactly why the rail renders nothing.
+
+    The manifest is derived and cached by ``session/transcript_index.py``. A
+    cold or stale cache answers ``building`` while a background scan runs, so
+    the rail's first paint is immediate even on a 272 MB journal; the renderer
+    polls until ``ready`` (design D2's poll discipline). For a peer
+    conversation the answer is ``state: "unsupported"`` (D4) — v1 derives
+    checkpoints from this device's journal only.
+
+    ``naming`` on each completion rides the same manifest; its ``state`` is
+    what tells the rail to keep polling while a name is being generated
+    (``sessions.checkpoints.warm`` is BE-2's op and is not part of this
+    route).
+    """
+    async with (
+        errors(request),
+        host(request).session(session_id, read=True, allow_draft=True) as bridge,
+    ):
+        return reply(await bridge.checkpoints())
 
 
 @router.get(
