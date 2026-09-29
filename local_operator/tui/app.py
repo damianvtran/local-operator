@@ -18747,7 +18747,12 @@ class OperatorApp(App[None]):
         if command in ("agent", "agents"):
             choices = self._agent_argument_choices(editor)
             picker.set_choices(choices)
-            editor.set_name_choices(frozenset(c.name.lower() for c in choices))
+            # The NAME-completion vocabulary stays names-only, exactly as
+            # ``/team``'s does: its reserved ``chart`` word is a picker ROW but
+            # never a Tab completion ("Tab must never silently open a chart
+            # when the user meant to message"), and the same rule protects
+            # ``/agent`` — Tab completes profiles, the picker shows the verb.
+            editor.set_name_choices(frozenset(c.name.lower() for c in self._agent_choices()))
 
     def _project_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/project <…>`` list: the reserved verbs, then names.

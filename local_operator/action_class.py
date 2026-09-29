@@ -39,7 +39,6 @@ degrade, not crash.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -291,6 +290,13 @@ async def class_switch_receipt(session: Any, rest: str, SlashResult: Any) -> Any
     sessions self-correct at their next delivery-time read) and folds its
     clause in through ``class_switch_clause``.
     """
+    # Imported HERE, not at module scope: ``action_class`` is on the CLI's
+    # startup path (``settings_io`` reads it for the class rows), and a
+    # module-level asyncio import put it back on the startup path where
+    # ``tests/unit/test_import_graph.py`` forbids it (CI round 7). Only the
+    # switch — an interactive-time operation — pays for it.
+    import asyncio
+
     from local_operator.agent_profiles import resolve_profile
 
     registry = getattr(session, "agent_registry", None)
