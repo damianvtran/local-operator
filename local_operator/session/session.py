@@ -7296,10 +7296,19 @@ class Session:
         here. ``steer`` is synchronous (it only queues; the drain at the next
         boundary persists the row) while the gate's resolver is async, and
         refusing AFTER the surfaces have acked a queued steer would be a
-        retraction, not an admission decision. An audio steer to a model that
-        cannot render it is refused by the WIRE renderer (``WireCannotCarryAudio``)
-        at the boundary the row joins — loud, named, and at the one point where
-        the model that will run is the one being asked.
+        retraction, not an admission decision. The recording is still kept
+        from a model that cannot take it, one layer down: an audio block the
+        active spec or its wire cannot carry is replaced by a one-line notice
+        at HISTORY RENDER (``_without_uncarryable_audio``) before any request
+        is built, so a steer to an incapable model costs no provider refusal
+        and the model reads a notice where the recording was. What a steer
+        does NOT get is the typed ``AudioInputUnsupported`` a prompt raises at
+        its door; the renderer's structural refusal
+        (``WireCannotCarryAudio``) is only the backstop for the one
+        configuration the strip deliberately treats as the chat wire — a spec
+        that also states ``supports_responses_api``, whose body choice is a
+        process setting this layer does not read — not the mechanism this
+        door relies on.
         """
         extra: dict[str, Any] = {}
         if message_id:
