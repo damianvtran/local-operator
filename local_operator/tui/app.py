@@ -19557,8 +19557,12 @@ class OperatorApp(App[None]):
 
         An agent literally named ``class`` collides with the reserved word
         exactly as a team named ``chart`` collides with its subcommand: its
-        row completes to the ``=class `` ESCAPE (both resolvers strip one
-        leading ``=``), which its detail names.
+        row completes to the ``=class `` ESCAPE (the handlers strip one
+        leading ``=``), which its detail names. The same rule covers a name
+        that ITSELF starts with ``=`` (R4-2 — ``=`` is not a reserved
+        character): such a row completes doubled (``==foo``), because the
+        strip removes exactly one and the doubled form resolves the literal
+        name.
 
         Once ``class `` is in the buffer the second slot re-offers the profile
         names as ``class <name>`` compounds, which complete to the report
@@ -19579,10 +19583,13 @@ class OperatorApp(App[None]):
         if not space:
             rows: list[ArgumentChoice] = []
             for choice in names:
-                if choice.name.casefold() == "class":
-                    # The collision row: completing the bare name would route
-                    # to the subcommand, so it completes to the escape and its
-                    # detail says which path it takes.
+                if choice.name.casefold() == "class" or choice.name.startswith("="):
+                    # The escape row. Two cases, one shape: completing a bare
+                    # `class` would route to the subcommand, and completing a
+                    # name that already starts with `=` would resolve its
+                    # STRIPPED spelling — the handlers remove exactly ONE `=`,
+                    # so both complete to a row whose leading `=` makes the
+                    # strip a no-op against the name that follows (R4-2).
                     rows.append(
                         ArgumentChoice(
                             f"={choice.name}",
@@ -19769,9 +19776,12 @@ class OperatorApp(App[None]):
         # It wins in first position, with the two `/team` escape hatches —
         # `/agent class class <cls>` switches an agent literally named `class`
         # (the second token is the name), and a leading `=` on the name
-        # (`/agent =class …`) means "literal name, never a subcommand". `=` is
-        # not a legal name character, so the escape cannot collide with a real
-        # profile.
+        # (`/agent =class …`) means "literal name, never a subcommand", and the
+        # strip removes exactly ONE `=` — `=` is NOT a reserved character in
+        # profile names (`create_agent(name="=foo")` succeeds), so a profile
+        # whose name itself starts with `=` is addressed by doubling it
+        # (`/agent ==foo` reaches the profile literally named `=foo`; review
+        # round 4, R4-2: the escape is positional, not a charset restriction).
         first, _, rest = arg.partition(" ")
         if first.strip().casefold() in {word for word, _help in agent_subcommand_rows()}:
             self._cmd_agent_class(rest.strip(), notice)
@@ -46674,6 +46684,15 @@ class OperatorApp(App[None]):
         session = self._session
         name, _, request = arg.partition(" ")
         name = name.strip()
+        # The ``=`` escape, mirroring ``_team_attach_slash_result`` above and
+        # the other two agent seams (``_cmd_agent``, ``serving.py``): the strip
+        # removes exactly ONE ``=`` and the remainder is looked up literally,
+        # so a profile literally named ``class`` — and any name that itself
+        # starts with ``=``, addressed by doubling it — stays reachable from a
+        # follower of THIS app's session (review round 4, R4-1: this builder
+        # was the one seam without it).
+        if name.startswith("="):
+            name = name[1:]
         request = request.strip()
         if name.lower() in ("clear", "none") and not request:
             detach = getattr(session, "clear_agent_profile", None)

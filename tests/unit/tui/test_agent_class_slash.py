@@ -241,6 +241,9 @@ async def test_the_agent_picker_offers_the_class_verb(tmp_path: Path) -> None:
     """
     registry = AgentRegistry(tmp_path)
     registry.create_agent(_fields(name="auditor", description="Audit changes", tags=["role"]))
+    # R4-2: a name that ITSELF starts with the escape character — its row must
+    # complete doubled (``==odd``), because the handlers strip exactly one `=`.
+    registry.create_agent(_fields(name="=odd", description="Odd name", tags=["role"]))
     session = FakeSession()
     session.agent_registry = registry
     app = OperatorApp(lambda: _factory(session))
@@ -252,10 +255,12 @@ async def test_the_agent_picker_offers_the_class_verb(tmp_path: Path) -> None:
         rows = app._agent_argument_choices(_PickerEditor("/agent "))
         compounds = app._agent_argument_choices(_PickerEditor("/agent class "))
 
+    # ``=odd`` sorts before every letter, so it also proves the escape row
+    # leads — it is a NAME row (the common action), not the verb.
+    assert rows[0].name == "==odd", rows
     assert any(row.name == "auditor" for row in rows), rows
     # U4: agent NAMES lead; the reserved verb is present but LAST, so it is
     # never the default Tab completion (never first).
-    assert rows[0].name == "auditor", rows
     assert rows[-1].name == "class" and rows[-1].detail == "subcommand", rows
     assert "proactive" in rows[-1].description
     # After the verb the names are offered as ``class <name>`` compounds, which
