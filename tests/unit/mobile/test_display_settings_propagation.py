@@ -12,6 +12,9 @@ These tests drive the exact seam production uses — ``MobileDaemon
 .watch_display_settings`` plus a watcher tick — with the write shaped like
 another process's (``settings_io._store``, below the notify hook), and never
 the clock: ``poll_now()`` is the tick. The frame this pins is "no restart".
+The retained-route cells extend that to QA round 2's Q1: a route the daemon
+has served live keeps a per-route projection, and the flip must drop that too
+(the stale branch would otherwise re-serve the retained frame on reconnect).
 """
 
 from __future__ import annotations
@@ -32,9 +35,13 @@ from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
 from local_operator.harness.types import CustomMessage, Message, TextContent, ToolCall
 from local_operator.mobile.daemon import (
     MobileDaemon,
+    SessionEntry,
     _durable_projection,
+    _entry_for_session,
     _history_page,
 )
+from local_operator.mobile.types import SessionProjection
+from local_operator.session.runtime import registry
 from local_operator.session.transcript import Transcript
 
 SESSION = "prop-s1"
@@ -122,6 +129,60 @@ async def _seed_session(config_dir: Path, *, extra_turn: bool = False) -> Path:
 
 def _kinds(page) -> list[str]:
     return [entry.kind for entry in page]
+
+
+async def _retained_route(daemon: MobileDaemon, *, live_version: int = 53) -> int:
+    """The state a phone's live view leaves behind, then the route's death.
+
+    Two captures, both production shapes: the attach repaint that retains a
+    live route's summary (``_connect_phone.repaint`` ->
+    ``capture_subagent_details(..., record=record)``), then the reaper's
+    terminal capture on death (``_scan_once``: ``_durable_projection`` ->
+    ``capture(..., record=..., terminal=True)``). ``live_version`` stands in
+    for the live owner's fold counter — restart-at-zero per owner, so strictly
+    above the fresh durable fold's single bump; 53 is the number the QA
+    round 2 repro observed on the wire for the frozen `W` route. Returns the
+    retained epoch the summary carries.
+    """
+    record = registry.SessionRecord(
+        pid=4242,
+        kind="daemon",
+        session_id=SESSION,
+        conversation_name="retained",
+        cwd="/tmp",
+        model_label="",
+        control_port=1,
+        control_key="k",
+        started_at=1.0,
+        heartbeat_at=1.0,
+    )
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+    daemon.table.session_subscribers.setdefault(SESSION, set()).add(asyncio.Queue())
+
+    live = await asyncio.to_thread(_durable_projection, SESSION)
+    assert live is not None
+    live.version = live_version
+    entry.projection = daemon.capture_subagent_details(live, record=record)
+    entry.ended = True
+    dead = await asyncio.to_thread(_durable_projection, SESSION)
+    assert dead is not None
+    daemon.capture_subagent_details(dead, record=record, terminal=True)
+    daemon._prune_projection_generation(SESSION)
+    return live_version + 1
+
+
+async def _reconnect_seed(daemon: MobileDaemon) -> SessionProjection:
+    """``api_session_events``' opening seed, in the handler's own order: the
+    live projection when a live entry has one, else a fresh durable fold
+    captured against the route's generation ledger."""
+    live = _entry_for_session(daemon, SESSION)
+    projection: SessionProjection | None = live.projection if live is not None else None
+    if projection is None:
+        projection = await asyncio.to_thread(_durable_projection, SESSION)
+        assert projection is not None  # the fixture seeds this session on disk
+        projection = daemon.capture_subagent_details(projection)
+    return projection
 
 
 @pytest.mark.asyncio
@@ -249,6 +310,115 @@ async def test_a_non_display_write_leaves_the_fold_cache_alone(
     _write_elsewhere(config_dir, KEY, True)
     assert process_watcher(config_dir).poll_now() is not None
     assert _durable_fold_cache().get(directory) is not state
+
+
+@pytest.mark.asyncio
+async def test_a_retained_routes_sse_seed_follows_the_flip_without_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2, cell 4, inverted: a route the phone has VIEWED live re-seeds
+    from the post-flip fold on reconnect — not from its retained pre-flip frame.
+
+    The freeze this pins (Q1): ``session_projections[sid]`` outlives the flip,
+    and the stale branch of ``capture_subagent_details`` re-serves it in place
+    of the fresh durable fold, so every reconnect carried the last live frame —
+    ``["user", "peer_message", "tool", "assistant"]`` — until a restart.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    await _seed_session(config_dir)
+
+    daemon = MobileDaemon(port=0, password="pw")
+    daemon.watch_display_settings()
+    epoch = await _retained_route(daemon)
+
+    # The route is genuinely retained — the pre-flip seed IS the live frame.
+    seed = await _reconnect_seed(daemon)
+    assert _kinds(seed.transcript) == ["user", "peer_message", "tool", "assistant"]
+    assert seed.version == epoch
+
+    _write_elsewhere(config_dir, KEY, True)
+    assert process_watcher(config_dir).poll_now() is not None
+
+    seed = await _reconnect_seed(daemon)
+    assert _kinds(seed.transcript) == ["user", "assistant"]
+    # Re-materialized at the retained epoch: a browser has already observed
+    # this version, so the flip must not renumber the route under it.
+    assert seed.version == epoch
+
+    # And the retained path is reversible the same way (consecutive writes
+    # stay clean: each tick converges the next seed from the fresh fold).
+    _write_elsewhere(config_dir, KEY, False)
+    assert process_watcher(config_dir).poll_now() is not None
+    seed = await _reconnect_seed(daemon)
+    assert _kinds(seed.transcript) == ["user", "peer_message", "tool", "assistant"]
+    assert seed.version == epoch
+
+
+@pytest.mark.asyncio
+async def test_a_cold_routes_sse_seed_is_untouched_by_the_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA round 2, cell 3: the route with no retained projection was right
+    before this fix and stays right — the seed is the fresh fold at v1."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    await _seed_session(config_dir)
+
+    daemon = MobileDaemon(port=0, password="pw")
+    daemon.watch_display_settings()
+    assert SESSION not in daemon.session_projections
+
+    _write_elsewhere(config_dir, KEY, True)
+    assert process_watcher(config_dir).poll_now() is not None
+
+    seed = await _reconnect_seed(daemon)
+    assert _kinds(seed.transcript) == ["user", "assistant"]
+    assert seed.version == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_config_write_leaves_the_retained_state_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA cell 10's unreadable probe, at the daemon's half of the contract: a
+    hand-edit failure fans out nothing, so no cache is dropped and the last
+    good value keeps being served — and the next VALID write still converges,
+    with no restart."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    await _seed_session(config_dir)
+
+    daemon = MobileDaemon(port=0, password="pw")
+    daemon.watch_display_settings()
+    epoch = await _retained_route(daemon)
+
+    from local_operator.mobile.daemon import _durable_fold_cache
+
+    # Warm the durable fold so the identity assertions below have a state.
+    page, _more = await asyncio.to_thread(_history_page, SESSION, None, 50)
+    assert _kinds(page) == ["user", "peer_message", "tool", "assistant"]
+    directory = config_dir / "sessions" / SESSION
+    state = _durable_fold_cache().get(directory)
+
+    (config_dir / "config.yml").write_text("display: [unclosed\n", encoding="utf-8")
+    assert process_watcher(config_dir).poll_now() is None
+    assert _durable_fold_cache().get(directory) is state
+    assert SESSION in daemon.session_projections
+
+    # The last good snapshot still serves (OFF), from the retained frame.
+    seed = await _reconnect_seed(daemon)
+    assert _kinds(seed.transcript) == ["user", "peer_message", "tool", "assistant"]
+    assert seed.version == epoch
+
+    # The hand-edit is repaired with the flipped value; the flip still lands.
+    _write_elsewhere(config_dir, KEY, True)
+    assert process_watcher(config_dir).poll_now() is not None
+    seed = await _reconnect_seed(daemon)
+    assert _kinds(seed.transcript) == ["user", "assistant"]
 
 
 @pytest.mark.asyncio
