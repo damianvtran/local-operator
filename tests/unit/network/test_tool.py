@@ -506,6 +506,45 @@ def test_the_new_actions_render_what_the_cli_actually_emits() -> None:
     ]
 
 
+def test_the_credentials_digest_carries_the_shareable_block() -> None:
+    """The agent surface mirrors the CLI's device-level ledger (design §2): the
+    shareability preflight, read through ``_scrub`` in the order the real path uses."""
+    payload = {
+        "ok": True,
+        "networks": [],
+        "shareable": [
+            {
+                "server": "slack",
+                "url": "https://h.example/mcp",
+                "transport": "http",
+                "login_here": True,
+                "shared_with": [{"device": "d_1", "name": "cloud-node-1", "scope": "session"}],
+                "remedy": "lop network credential share mcp:https://h.example/mcp --with <device>",
+            },
+            {
+                "server": "notion",
+                "url": "https://n.example/mcp",
+                "transport": "http",
+                "login_here": False,
+                "shared_with": [],
+                "remedy": "run '/mcp login https://n.example/mcp' here first",
+            },
+        ],
+    }
+    scrubbed = net_tool._scrub(payload)  # noqa: SLF001 — the scrub boundary under test
+    assert net_tool._render("credentials", scrubbed) == [  # noqa: SLF001
+        "shareable here:",
+        "  slack  http  login held — share: lop network credential share mcp:https://h.example/mcp"
+        " --with <device>",
+        "      shared with cloud-node-1 (session)",
+        "  notion  http  no login here yet — run '/mcp login https://n.example/mcp' here first",
+    ]
+    # An absent block leaves the old rendering (and its fallback) alone.
+    assert net_tool._render("credentials", {"ok": True, "networks": []}) == [  # noqa: SLF001
+        "nothing is shared with or by this device"
+    ]
+
+
 def test_a_detached_ceremony_is_reaped_by_a_waiter_of_its_own() -> None:
     """The zombie agent review round 1 caught, as a regression.
 
@@ -996,6 +1035,44 @@ def test_the_agent_peer_digest_reads_a_reason_the_way_a_person_does() -> None:
     # passed, which is what ``details`` carries into the agent's result.
     assert payload["peers"][0]["reason"].startswith("unreachable: 127.0.0.1:0")
     assert payload["peers"][0]["device_id"] not in body
+
+
+def test_the_peers_digest_carries_the_build_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design §4 through the same helper the CLI uses: a stale peer is the one the
+    model should send `lop-update` to, and an unknown build stays silent."""
+    from local_operator.network import relay
+
+    monkeypatch.setattr(relay, "build_stamp", lambda: {"version": "0.64.1"})
+    lines = net_tool._render(  # noqa: SLF001 — the renderer under test
+        "peers",
+        {
+            "peers": [
+                {
+                    "reachable": True,
+                    "device_id": "d_" + "1" * 32,
+                    "name": "fresh",
+                    "reason": "",
+                    "build": {"version": "0.64.1"},
+                },
+                {
+                    "reachable": True,
+                    "device_id": "d_" + "2" * 32,
+                    "name": "stale",
+                    "reason": "",
+                    "build": {"version": "0.63.2"},
+                },
+                {"reachable": True, "device_id": "d_" + "3" * 32, "name": "quiet", "reason": ""},
+            ]
+        },
+    )
+    assert "reachable   fresh  build 0.64.1" in lines, lines
+    assert (
+        "reachable   stale  build 0.63.2 — behind this device (0.64.1); "
+        "run `lop-update` there" in lines
+    ), lines
+    assert "reachable   quiet" in lines, lines
 
 
 def test_the_agent_digest_carries_a_removed_devices_own_standing() -> None:

@@ -1274,6 +1274,11 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
     document (one bounded ``net_broker`` frame each), and the listing renders what it
     learned. ``allow_no_answer`` because a listing must still work with the relay
     down: it then shows what this device already knew, which is honest.
+
+    A DEVICE-LEVEL LEDGER CLOSES THE LISTING (design §2): the user-scope HTTP/SSE MCP
+    servers declared here, whether a login is held for each, and where each is already
+    shared — the up-front answer to "which of my logins can travel", which the share
+    verb's refusal used to be the first word of. Read-only, like everything else here.
     """
     from local_operator.network.credentials.state import PlacementState
     from local_operator.network.identity import load as load_identity
@@ -1360,11 +1365,19 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 "credentials": keys,
             }
         )
+    # THE PREFLIGHT THE OFFLOAD TEST FOUND MISSING (design §2). A login held here but
+    # shared nowhere had no row on any surface until `credential share` refused, so
+    # the operator learned what was shareable only at share time.
+    from local_operator.network import readiness as readiness_mod
+
+    shareable = _shareable_servers(self_device)
+    lines.extend(readiness_mod.shareable_lines(shareable))
     payload = {
         "ok": True,
         "self_device": self_device,
         "self_device_name": self_name,
         "networks": networks,
+        "shareable": shareable,
         "refreshed": bool(pulled),
     }
     # A MEMBER WHOSE DOCUMENT COULD NOT BE MERGED IS SAID OUT LOUD (review round 5,
@@ -1389,6 +1402,69 @@ def _cmd_credentials(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
     return _emit(args, payload, lines)
+
+
+def _shareable_servers(self_device: str) -> list[dict[str, Any]]:
+    """The device-level "shareable here" rows for ``lop network credentials``.
+
+    Every user-scope HTTP/SSE server declared in this device's ``mcp.json`` (stdio
+    servers have no login to share and are excluded), joined with (a) whether a login
+    row exists HERE — the same read the share verb's refusal makes, reused so the
+    ledger and the refusal cannot disagree — and (b) any placement entry this device
+    holds for ``mcp:<url>``, so an already-shared login says where. READ-ONLY: no
+    declare, no placement write, no broker semantics change; ``remedy`` is the
+    command the operator would run next, with ``<device>`` standing where a target
+    device goes (the ledger cannot know which one).
+    """
+    from local_operator.network import readiness as readiness_mod
+    from local_operator.network.credentials import placement as placement_mod
+
+    rows: list[dict[str, Any]] = []
+    fact = readiness_mod.mcp_servers_fact(_config_dir())
+    for server in fact.get("servers") or []:
+        if server.get("transport") not in ("http", "sse"):
+            continue
+        url = str(server.get("url") or "")
+        if not url:
+            # No URL, no login to hold and nothing to share: a row here would render
+            # a remedy naming an empty command.
+            continue
+        login_here = server.get("has_row")  # True | False | None (store unreadable)
+        shared_with: list[dict[str, str]] = []
+        found = placement_mod.placement_entries_for(mcp_url=url, root=_config_dir())
+        if found is not None:
+            network_id, entry = found
+            record = _record_for(network_id)
+            for holder in entry.holders:
+                if holder.device in (self_device, entry.owner_device):
+                    # The owner's own row and this device's are not "shares" — the same
+                    # rule the network blocks below render with.
+                    continue
+                shared_with.append(
+                    {
+                        "device": holder.device,
+                        "name": _member_name(record, holder.device) if record is not None else "",
+                        "scope": holder.scope,
+                    }
+                )
+        key = f"mcp:{url}"
+        if login_here is True:
+            remedy = f"lop network credential share {key} --with <device>"
+        elif login_here is False:
+            remedy = readiness_mod.mcp_login_remedy(url)
+        else:
+            remedy = ""
+        rows.append(
+            {
+                "server": str(server.get("name") or ""),
+                "url": url,
+                "transport": str(server.get("transport") or ""),
+                "login_here": login_here,
+                "shared_with": shared_with,
+                "remedy": remedy,
+            }
+        )
+    return rows
 
 
 def _cmd_credential(args: argparse.Namespace) -> int:
@@ -1568,6 +1644,7 @@ def _require_local_credential(key: str, provider: str) -> None:
     ``no_local_credential`` with a sentence telling the operator to sign in on the
     device they just shared FROM, which is the confusing half of a lazy check.
     """
+    from local_operator.network import readiness as readiness_mod
     from local_operator.network.credentials.types import is_mcp_key, mcp_url_from_key
     from local_operator.network.types import MeshRefusal
 
@@ -1579,10 +1656,10 @@ def _require_local_credential(key: str, provider: str) -> None:
                 return
         except Exception:  # noqa: BLE001
             pass
+        url = mcp_url_from_key(key)
         raise MeshRefusal(
             "no_local_credential",
-            f"this device has no MCP login for {mcp_url_from_key(key)}; run '/mcp login "
-            f"{mcp_url_from_key(key)}' here first",
+            f"this device has no MCP login for {url}; {readiness_mod.mcp_login_remedy(url)}",
         )
     rows = _provider_rows(provider, _config_dir())
     if not rows:
@@ -4324,16 +4401,32 @@ def _peer_line(row: Any) -> str:
     The token is not lost: it is the ``reason`` field of this verb's ``--json``
     payload, which is the machine surface and the detail view these lines
     summarise (the row also keeps ``device_id`` there, for the same reason).
+
+    A REACHABLE PEER WHOSE BUILD IS KNOWN CARRIES IT (design §4), and a peer BEHIND
+    this device carries the ``lop-update`` hint — the rows already carry the stamp
+    (``{}`` when no link answered), so this adds no wire traffic and no probe. An
+    unknown build renders the old line byte for byte; the existing pins are the A/B
+    rule for that.
     """
     from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
 
     name = str(row.get("name") or "").strip() or UNNAMED_DEVICE
-    if row.get("reachable"):
-        return f"{name}  reachable"
-    return (
-        f"{name} cannot be reached from this device right now "
-        f"({peer_reason_words(str(row.get('reason') or ''))})"
-    )
+    if not row.get("reachable"):
+        return (
+            f"{name} cannot be reached from this device right now "
+            f"({peer_reason_words(str(row.get('reason') or ''))})"
+        )
+    line = f"{name}  reachable"
+    # The suffix only when a version is actually there to compare: "not known" must
+    # render exactly the old line, and the old pins are the A/B rule for it.
+    build = row.get("build")
+    if not isinstance(build, Mapping) or not build.get("version"):
+        return line
+    from local_operator.network import readiness as readiness_mod
+    from local_operator.network import relay as relay_mod
+
+    comparison = readiness_mod.compare_builds(build, relay_mod.build_stamp())
+    return line + readiness_mod.build_suffix(comparison)
 
 
 def _cmd_peers(args: argparse.Namespace) -> int:
