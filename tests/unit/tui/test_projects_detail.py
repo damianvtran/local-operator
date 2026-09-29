@@ -105,13 +105,16 @@ async def test_detail_meta_sheds_whole_clauses_and_states_nothing_set() -> None:
     full = detail_meta_line(view, width=200).plain
     assert (
         full
-        == "owner: damian · team: core · start 20 Sep · target 4 Oct · est 5pt · tags tui · spec"
+        == "owner: damian · team: core · target 4 Oct · start 20 Sep · est 5pt · tags tui · spec"
     )
-    # Narrow: clauses drop from the TAIL, whole, until the line fits.
+    # Narrow: clauses drop from the TAIL, whole, until the line fits — and the
+    # DEADLINE outlives the start date (design review round 1, D2).
     narrow = detail_meta_line(view, width=30).plain
     assert narrow.startswith("owner: damian")
     assert "tags" not in narrow and "est 5pt" not in narrow
     assert len(narrow) <= 30
+    mid = detail_meta_line(view, width=50).plain
+    assert "target 4 Oct" in mid and "start 20 Sep" not in mid
     assert detail_meta_line(_row(), width=80).plain == "no estimate or dates"
     # Nothing set but a name/status: still the shipped sentence, not a blank.
     assert detail_meta_line(_row(team=None), width=80).plain == "no estimate or dates"
@@ -383,6 +386,23 @@ async def test_detail_section_jumps_move_the_row_cursor_to_the_neighbour(
         assert view._detail_page.selected_action_label() == "toggle"
 
 
+def _dom_top_section(page: Any) -> str | None:
+    """The section the viewport actually shows: the last heading at/above the
+    container's content top, read from live widget regions — the DOM truth a
+    ruler assertion compares against."""
+    base = page.content_region.y
+    best: str | None = None
+    for child in page.children:
+        section = getattr(child, "section", None)
+        if section is None:
+            continue
+        if child.region.y <= base:
+            best = section[0]
+        else:
+            break
+    return best
+
+
 async def test_the_detail_ruler_tracks_scrolling_with_a_tall_page(
     tmp_path: Path,
 ) -> None:
@@ -408,12 +428,29 @@ async def test_the_detail_ruler_tracks_scrolling_with_a_tall_page(
         await pilot.press("d")
         await pilot.pause()
         await pilot.pause()
+        # The ruler must equal the DOM truth: the section whose heading is the
+        # last one at or above the viewport top. Checked against the live
+        # widget regions, not against a literal, so the invariant survives
+        # fixture edits — design review round 1, D1 (the old math read a
+        # section the viewport did not show).
+        page = view._detail_page
+        assert _dom_top_section(page) == "overview"
         assert view.rendered_rows()[1].startswith("── overview ")
-        assert view._detail_page.max_scroll_y > 0
+        assert page.max_scroll_y > 0
+        # A FORCED repaint must not change the reading: the entry frames used
+        # to pass by paint ORDER (the reveal scroll never repainted the rule),
+        # not by computation (D1).
+        view._paint_rule()
+        await pilot.pause()
+        assert view.rendered_rows()[1].startswith("── overview ")
         await pilot.press("end")  # to the content's bottom; cursor stays put
         await pilot.pause()
         await pilot.pause()
-        assert view.rendered_rows()[1].startswith("── sessions (1) ")
+        assert _dom_top_section(page) == "milestones"
+        assert view.rendered_rows()[1].startswith("── milestones (0/14) ")
+        view._paint_rule()
+        await pilot.pause()
+        assert view.rendered_rows()[1].startswith("── milestones (0/14) ")
 
 
 async def test_the_canvas_ladder_advertises_d_detail_and_keeps_the_60_snapshot(

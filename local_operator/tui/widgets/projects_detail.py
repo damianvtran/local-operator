@@ -437,22 +437,29 @@ class ProjectDetailPage(VerticalScroll):
         """``(start_row, label, count)`` per section, in paint order.
 
         ``start_row`` is the heading's own row in the scrollable content's
-        coordinate space. Measured, not assumed: ``child.region.y`` minus the
-        container's ``content_region.y`` is ALREADY scroll-independent (both
-        move with the scroll offset together), so adding ``scroll_offset``
-        double-counted it and the ruler named the wrong section on a scrolled
-        page. Unlaid rows (region height 0) answer the empty list, so the
-        caller paints the plain rule for that frame instead of a guess.
+        coordinate space: ``child.region.y`` is SCREEN-translated (it slides
+        with the scroll), so the settled offset is added back — measured: the
+        description heading's ``region.y`` moves 6 → −4 across offsets 2 → 12
+        while ``content_region.y`` stays put, so region-minus-content alone is
+        scroll-DEPENDENT and the ruler read a later section than the one the
+        viewport actually shows (design review round 1, D1). No ``max(0, …)``:
+        a settled content row is ≥ 0 by construction and clamping was what let
+        the wrong reading look plausible. A ``scroll_y`` watch can fire BEFORE
+        the children move — the caller repaints after the refresh, not inside
+        the watcher (``ProjectsView._detail_scroll_changed``). Unlaid rows
+        (region height 0) answer the empty list, so the caller paints the
+        plain rule for that frame instead of a guess.
         """
         anchors: list[tuple[int, str, str | None]] = []
         base = self.content_region.y
+        offset = int(self.scroll_offset.y)
         for child in self.children:
             section = getattr(child, "section", None)
             if section is None:
                 continue
             if child.region.height <= 0:
                 return []
-            anchors.append((max(0, child.region.y - base), section[0], section[1]))
+            anchors.append((child.region.y - base + offset, section[0], section[1]))
         return anchors
 
     def _fit_meta(self) -> None:

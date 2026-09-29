@@ -699,12 +699,17 @@ class ProjectsView(Vertical):
         """The detail's ruler tracks ITS viewport (design §6).
 
         Same zero-row counterpart as the canvas rule, watching the detail
-        body's own ``scroll_y``; a plain rule is impossible here while the
-        page has sections, so unlike the canvas there is nothing to skip.
+        body's own ``scroll_y``. The repaint is DEFERRED past the refresh: a
+        scroll watch can fire before the children's regions move, and an
+        anchor read at that instant is the stale offset's (design review
+        round 1, D1, measured — the entry reveal's scroll was exactly this
+        case). After the refresh the children sit at the settled offset and
+        the anchors are content-relative again; the pass is idempotent like
+        every deferred chrome paint in this file.
         """
         if self._mode != "detail":
             return
-        self._paint_rule()
+        self.call_after_refresh(self._paint_rule)
 
     def _paint_hints(self) -> None:
         """Lay out the footer hints, shedding WHOLE hints until the row fits.

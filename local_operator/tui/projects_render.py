@@ -2132,8 +2132,9 @@ def detail_meta_line(
 
     Absent fields drop out; nothing set reads the shipped sentence ``no
     estimate or dates``. Shed order drops the sentence's TAIL first (tags,
-    est, completed, target, start, owner), so "which stream, and is it
-    current" survives longest (S6d parity P2's ranking; design may re-rank).
+    est, completed, start, target, team), so the deadline survives the start
+    date and "which stream, and is it current" survives longest (design
+    review round 1, D2).
     """
     resolver = _styles(style_for)
     project = _row(view)
@@ -2146,12 +2147,16 @@ def detail_meta_line(
     team = str(project.get("team") or "")
     if team:
         clauses.append((f"team: {team}", "dim"))
-    start = format_short_date(project.get("start_date"))
-    if start:
-        clauses.append((f"start {start}", "dim"))
+    # The TARGET leads its start: the deadline is the "is this on track" fact,
+    # and whole-clause shedding pops from the tail — putting start last means
+    # the deadline outlives it at narrow widths (design review round 1, D2;
+    # the canvas rows lead with `→{target}` for the same reason).
     target = format_short_date(project.get("target_date"))
     if target:
         clauses.append((f"target {target}", "dim"))
+    start = format_short_date(project.get("start_date"))
+    if start:
+        clauses.append((f"start {start}", "dim"))
     completed = format_short_date(project.get("completed_at"))
     if completed:
         clauses.append((f"completed {completed}", "dim"))
