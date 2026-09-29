@@ -619,7 +619,33 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: band this file keeps, and together with the known CI-vs-local offset (~25
 #: billed) it clears CI rather than this machine alone — and the tighten band
 #: below (1,200) is not in play.
-BUDGET_BILLED_TOKENS = 34_716
+#:
+#: RAISED 34,716 -> 34,789 for the PROJECTS CREATE-DEFAULTS wording slice —
+#: folded OVER the monitor-notify raise above: the ``project`` tool's
+#: ``description`` / ``title`` / ``progress`` / ``attach`` field text now says
+#: what those fields already do (a markdown description that is rendered, a
+#: short display title, every NEW progress line appended to the history,
+#: attachments stored on that entry), and the empty-listing receipt teaches
+#: the same create default. Measured on the MERGED tree with the sanctioned
+#: command; the slice's own delta (+203 chars = +73 billed, measured
+#: same-host on its pre-fold trees) carries over exactly — the four field
+#: texts ride ``tool_schemas`` and are the only block this slice moves:
+#:
+#:   baseline (origin/main 8c5b762df)      96,357 chars = ~34,661 billed
+#:   head (this branch, folded)            96,560 chars = ~34,734 billed
+#:     = +203 chars = +73 billed: the four field descriptions on ONE tool.
+#:       The empty-listing receipt that teaches the same create default is
+#:       runtime text — it never enters the measured start context and costs
+#:       nothing until a listing is read. The schema is the only text an agent
+#:       reads before its first create, and the alternative was a refusal (an
+#:       over-long description) or a misread of "one line on the workstream"
+#:       that the guide then has to undo; the rationale stays in the guide and
+#:       the seeds, which cost nothing until read.
+#:
+#: The raise lands at head + 55 — the band this file keeps, and together with
+#: the known CI-vs-local offset (~25 billed) it clears CI rather than this
+#: machine alone — and the tighten band below (1,200) is not in play.
+BUDGET_BILLED_TOKENS = 34_789
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
