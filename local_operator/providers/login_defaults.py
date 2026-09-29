@@ -100,19 +100,24 @@ def plan_login_defaults(
        the error it produces recommends this command as the remedy, so
        "already set, leave it alone" would loop one level deeper.
 
-    …and ONE provider is exempt from ALL THREE: a DECISION-ONLY one
-    (``registry.is_decision_only`` — TypeSafe's Jev), whose wire rejects
-    ``chat/completions`` on every host we reach it through. Logging in to it
-    stores a credential the resource-classification layer uses and is not a
-    statement about chat routing at all, so the routing is left exactly as it
-    was and the plan carries a RECEIPT saying so (``hosting=None`` +
-    ``receipt``, the dataclass's own "wrote nothing, but here is why" shape —
-    callers print it instead of the write receipt). Adopting it in case 2 would
-    produce a config whose very next session cannot answer a turn: the same trap
-    the catalogue, the ``/model`` ranking, the session-model resolver and the
-    failover chain each refuse, and login is the fifth door to it. It is
-    deliberately NOT repaired in case 3 either — a hosting that is already
-    broken is not improved by replacing it with one that cannot serve a session.
+    …and providers that can serve no CHAT turn are exempt from ALL THREE: a
+    DECISION-ONLY one (``registry.is_decision_only`` — TypeSafe's Jev, whose
+    wire rejects ``chat/completions`` on every host we reach it through) and a
+    SPEECH-ONLY one (``registry.is_speech_only`` — ElevenLabs, whose wire serves
+    speech-to-text only). Logging in to one of them stores a credential the
+    harness's other layers use — resource classification for Jev, the mobile
+    voice path for ElevenLabs — and is not a statement about chat routing at
+    all, so the routing is left exactly as it was and the plan carries a RECEIPT
+    saying so (``hosting=None`` + ``receipt``, the dataclass's own "wrote nothing,
+    but here is why" shape — callers print it instead of the write receipt).
+    Adopting either kind in case 2 would produce a config whose very next
+    session cannot answer a turn: the same trap the catalogue, the ``/model``
+    ranking, the session-model resolver and the failover chain each refuse, and
+    login is the fifth door to it. For ElevenLabs the exemption is the ONLY
+    correct outcome — storing the key is the whole point of its login, and its
+    row exists so that key can be stored at all. Neither is deliberately NOT
+    repaired in case 3 either — a hosting that is already broken is not improved
+    by replacing it with one that cannot serve a session.
 
     The exemption is checked BEFORE case 1, and that ordering is load-bearing
     rather than incidental: the receipt is the only place a user learns why this
@@ -188,7 +193,7 @@ def plan_login_defaults(
     # path -- and a no-op plan is the honest answer when there is nothing
     # legitimate to write.
     definition = get_provider_definition(resolved)
-    if definition is not None and definition.decision_only:
+    if definition is not None and (definition.decision_only or definition.speech_only):
         # BEFORE the "hosting already set and usable" case, deliberately: this branch
         # writes nothing in EVERY configuration, and its receipt is the only place a
         # user learns why logging in to TypeSafe left their routing alone. Returning

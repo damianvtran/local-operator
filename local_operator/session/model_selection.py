@@ -105,6 +105,7 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     from local_operator.providers.registry import (
         get_provider_definition,
         is_decision_only,
+        is_speech_only,
     )
 
     if get_provider_definition(provider) is None:
@@ -112,8 +113,10 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     # A provider that can serve no chat completion is not a selection this reader
     # may hand out, for the same reason the provider registry refuses one as a
     # hosting: TypeSafe's Jev rejects ``chat/completions`` on every host we reach
-    # it through (``ProviderDefinition.decision_only``), so honouring the row would
-    # resume a conversation onto a model that 400s every turn. Refused HERE, in the
+    # it through (``ProviderDefinition.decision_only``) and ElevenLabs serves
+    # speech-to-text with no chat route at all (``ProviderDefinition.speech_only``),
+    # so honouring either row would resume a conversation onto a model that 400s
+    # every turn. Refused HERE, in the
     # one validator both owner-side readers go through —
     # ``session_factory.resolve_hosting_model_with_source`` and
     # ``Session._restore_selected_model`` — rather than only in the resolver, which
@@ -123,7 +126,7 @@ def _selection(selector: Any, effort: Any, *, authoritative: bool = False, boot:
     # writes a selection that does describe a running session. The refusal is not
     # silent for a RESUME: ``refused_decision_only_selection`` below lets the
     # resolver name the provider and the remedy instead of falling back quietly.
-    if is_decision_only(provider):
+    if is_decision_only(provider) or is_speech_only(provider):
         return None
     return StoredModelSelection(
         provider,

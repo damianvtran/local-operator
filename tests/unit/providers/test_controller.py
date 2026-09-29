@@ -3935,9 +3935,10 @@ async def test_live_catalogue_without_a_providers_argument_is_unchanged(
     AND every LOGIN FLAVOUR is absent: a flavour adds no catalogue its base
     does not already carry (they resolve to one credential and therefore one
     listing), so the chat registry this method enumerates is the decision-only
-    filter AND the flavour filter — see ``_chat_providers``. The ids below are the
-    five ``store_credentials_as`` flavours; asserting them by name here is what
-    makes a flavour that starts reaching the catalogue again fail loudly.
+    filter, the speech-only filter AND the flavour filter — see
+    ``_chat_providers``. The ids below are the five ``store_credentials_as``
+    flavours; asserting them by name here is what makes a flavour that starts
+    reaching the catalogue again fail loudly.
     """
     store.upsert_credential("anthropic", {"key": "sk-ant", "type": "api_key"})
     calls = _spy_available_models(monkeypatch, live={"anthropic": ["claude-opus-5"]})
@@ -3951,7 +3952,9 @@ async def test_live_catalogue_without_a_providers_argument_is_unchanged(
     assert set(statuses) == {
         definition.id
         for definition in PROVIDER_REGISTRY
-        if not definition.decision_only and not definition.store_credentials_as
+        if not definition.decision_only
+        and not definition.speech_only
+        and not definition.store_credentials_as
     }
     assert {
         "openai-device",

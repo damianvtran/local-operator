@@ -503,39 +503,49 @@ def _not_chat_hosting_message(hosting: str, source: str = "config") -> str:
     """Error text for a hosting that can serve no chat completion at all.
 
     Names what the provider IS (a decision model reached through the
-    classification layer) as well as what it cannot do, because the value is a
-    real, working provider with a shipped login: a bare "unsupported hosting"
-    would read as a typo the user should go and re-check in the console they just
+    classification layer, or a speech provider whose wire serves only
+    speech-to-text) as well as what it cannot do, because the value is a real,
+    working provider with a shipped login: a bare "unsupported hosting" would
+    read as a typo the user should go and re-check in the console they just
     pasted a key from.
     """
-    from local_operator.providers.registry import decision_only_message
+    from local_operator.providers.registry import (
+        decision_only_message,
+        is_speech_only,
+        speech_only_message,
+    )
 
     remedy = _HOSTING_NOT_CHAT_REMEDY.get(source, _HOSTING_NOT_CHAT_REMEDY["config"])
-    # The FACT comes from the registry's one sentence (``decision_only_message``),
-    # which ``build_model_spec`` refuses a live switch with too: the two surfaces
-    # explain the same provider, so they must not drift into two spellings of it.
-    # The REMEDY stays local because it is per-surface — this one knows whether the
-    # value came from the config file, a flag, an agent record or a stored row.
-    return f"{decision_only_message(hosting)} {remedy}"
+    # The FACT comes from the registry's one sentence — whichever class the
+    # provider is — which ``build_model_spec`` refuses a live switch with too:
+    # the two surfaces explain the same provider, so they must not drift into
+    # two spellings of it. The REMEDY stays local because it is per-surface —
+    # this one knows whether the value came from the config file, a flag, an
+    # agent record or a stored row.
+    fact = (
+        speech_only_message(hosting) if is_speech_only(hosting) else decision_only_message(hosting)
+    )
+    return f"{fact} {remedy}"
 
 
-def _refuse_decision_only(provider: str, source: str) -> None:
+def _refuse_non_chat(provider: str, source: str) -> None:
     """Raise ``HostingNotChatError`` when ``provider`` can serve no chat turn.
 
-    One spelling for a check that now sits at four doors — the resolved config /
+    One spelling for a check that sits at several doors — the resolved config /
     agent / flag hosting, a resume's ``--hosting``/``--model`` pair, and the
-    desktop pick boundary's own gate — because the failure it reports is the same
-    fact every time and its message is the only place that fact is explained (see
-    :func:`_not_chat_hosting_message`).
+    desktop pick boundary's own gate — because the failure it reports is the
+    same fact every time (a decision-only provider like TypeSafe's Jev, or a
+    speech-only one like ElevenLabs) and its message is the only place that
+    fact is explained (see :func:`_not_chat_hosting_message`).
 
     Deliberately a raise rather than a predicate: every caller that needs the
     answer needs the SAME outcome from it, and a caller that wants to *report*
     instead of raise (the pick boundary, which answers a 422) does its own check
     where its own error shape lives.
     """
-    from local_operator.providers.registry import is_decision_only
+    from local_operator.providers.registry import is_decision_only, is_speech_only
 
-    if is_decision_only(provider):
+    if is_decision_only(provider) or is_speech_only(provider):
         raise HostingNotChatError(_not_chat_hosting_message(provider, source), provider, source)
 
 
@@ -610,6 +620,7 @@ def resolve_hosting_model_with_source(
     from local_operator.providers.registry import (
         get_provider_definition,
         is_decision_only,
+        is_speech_only,
     )
     from local_operator.session.model_selection import (
         read_model_selection,
@@ -643,12 +654,13 @@ def resolve_hosting_model_with_source(
                 raise HostingUnknownError(
                     _unknown_hosting_message(provider, "flag"), provider, "flag"
                 )
-            # A deliberate override naming a decision model gets the same refusal
-            # as the config path, and it has to be HERE rather than after the
-            # default-model lookup: a decision-only provider has no default model,
-            # so the lookup would report "no model configured" — a message about a
-            # symptom, for a pair that can never run whatever model it names.
-            _refuse_decision_only(provider, "flag")
+            # A deliberate override naming a provider that can serve no chat
+            # turn gets the same refusal as the config path, and it has to be
+            # HERE rather than after the default-model lookup: such a provider
+            # has no default model, so the lookup would report "no model
+            # configured" — a message about a symptom, for a pair that can never
+            # run whatever model it names.
+            _refuse_non_chat(provider, "flag")
             if not model:
                 raise ModelNotConfiguredError(_no_model_message(provider), provider)
             return provider, model, "flag"
@@ -715,18 +727,18 @@ def resolve_hosting_model_with_source(
         raise HostingUnknownError(
             _unknown_hosting_message(hosting, hosting_source), hosting, hosting_source
         )
-    if is_decision_only(hosting):
+    if is_decision_only(hosting) or is_speech_only(hosting):
         # A KNOWN provider that can never serve a chat completion (TypeSafe's
-        # Jev: every host we reach it through rejects ``chat/completions``).
-        # Refused HERE, at the same preflight as an unknown id, for the same
-        # reason: this is the one point every front end classifies, so the
-        # condition reaches the guided setup state where ``/model`` supplies a
-        # chat provider, instead of booting a session that dies on its first
-        # turn with a provider error nobody can read as "that hosting was never
-        # chattable". NOT ``HostingUnknownError``: saying "not a known provider"
-        # about a provider this build ships a login for would be false, and the
-        # repair it prescribes (``/login``) is already done.
-        _refuse_decision_only(hosting, hosting_source)
+        # Jev, every host rejects ``chat/completions``; or ElevenLabs, whose wire
+        # serves speech-to-text only). Refused HERE, at the same preflight as an
+        # unknown id, for the same reason: this is the one point every front end
+        # classifies, so the condition reaches the guided setup state where
+        # ``/model`` supplies a chat provider, instead of booting a session that
+        # dies on its first turn with a provider error nobody can read as "that
+        # hosting was never chattable". NOT ``HostingUnknownError``: saying "not
+        # a known provider" about a provider this build ships a login for would
+        # be false, and the repair it prescribes (``/login``) is already done.
+        _refuse_non_chat(hosting, hosting_source)
     if not model_name:
         # A hosting with no model is not a dead end: every mainstream provider
         # has a reasonable default, so resolve to it rather than raising. Only

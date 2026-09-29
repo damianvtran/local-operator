@@ -513,7 +513,16 @@ def test_every_hosted_cloud_provider_has_a_suggestion() -> None:
 
     for provider in PROVIDER_REGISTRY:
         storage = credential_provider_id(provider.id)
-        if provider.allows_missing_api_key or provider.decision_only or provider.wire == "mock":
+        if (
+            provider.allows_missing_api_key
+            or provider.decision_only
+            or provider.speech_only
+            or provider.wire == "mock"
+        ):
+            # A speech-only provider is never a chat hosting (see
+            # ``speech_only``), so the card this test guards does not exist for
+            # it: a "Suggested: <chat model>" row would offer a model its wire
+            # cannot run, which is the dead end the flag exists to prevent.
             continue
         assert suggested_model_for(storage) is not None, storage
 
