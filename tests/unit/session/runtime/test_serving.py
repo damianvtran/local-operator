@@ -3031,6 +3031,8 @@ async def test_a_restored_receipt_pair_is_re_materialized_when_the_host_takes_th
         # and it must not outlive the loop.
         if session._spend_tasks:
             await asyncio.gather(*list(session._spend_tasks), return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_audio_is_probed_away_for_a_session_that_predates_the_keyword() -> None:
     """A reduced session must never receive a keyword its signature lacks.
