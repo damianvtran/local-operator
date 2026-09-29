@@ -1237,17 +1237,19 @@ def _report_ignored_keys(
 
 def normalise_public_reply(
     value: Any, *, action_binding: str = LEGACY_ACTION_BINDING
-) -> tuple[list[Any], str | None, int]:
+) -> tuple[list[Any], str | None, tuple[str, ...]]:
     """The one accepted reply shape, however the reply was framed.
 
     Returns the action array, the model's public note -- ``None`` for the note
     when the reply carried no ``public_observations`` key at all, which is what
     still separates a legacy actions-only batch (nothing to publish) from an
-    envelope that recorded an empty note -- and how many action fields the
-    sibling-kind tolerance dropped (:func:`drop_sibling_action_fields`),
-    carried out of here because an accepted reply is the only place those
-    replies are still visible: the ones it recovers stop producing the rejection
-    artifacts that used to make the class countable.
+    envelope that recorded an empty note -- and the sibling-kind tolerance's
+    dropped fields as ``kind.field`` names
+    (:func:`drop_sibling_action_fields`). The names are carried out of here
+    because an accepted reply is the only place those replies are still
+    visible: the ones it recovers stop producing the rejection artifacts that
+    used to make the class countable, and the names are also what the
+    model-facing correction (:func:`tolerated_fields_note`) is built from.
 
     What is ACCEPTED here is deliberately framing-blind: a bare action array, a
     bare array under ``action_batch``, the full envelope, any of those inside
@@ -1295,7 +1297,7 @@ def normalise_public_reply(
     # already state. Dropped and reported -- see
     # :func:`drop_sibling_action_fields` for why dropping is the disposition this
     # contract uses and what stays refused.
-    actions, tolerated_action_fields = drop_sibling_action_fields(actions)
+    actions, tolerated_fields = drop_sibling_action_fields(actions)
     note = _public_note(framed, batch)
     _report_ignored_keys(framed, batch, action_binding=action_binding)
     if top_from_string or nested_from_string:
@@ -1312,7 +1314,7 @@ def normalise_public_reply(
             "(%d action(s))",
             len(actions),
         )
-    return actions, note, tolerated_action_fields
+    return actions, note, tolerated_fields
 
 
 def decode_public_reply(payload: str) -> dict[str, Any]:
@@ -1538,7 +1540,7 @@ _ACTION_KIND_FIELDS: dict[str, frozenset[str]] = {
 _ACTION_FIELD_NAMES: frozenset[str] = frozenset().union(*_ACTION_KIND_FIELDS.values())
 
 
-def drop_sibling_action_fields(actions: list[Any]) -> tuple[list[Any], int]:
+def drop_sibling_action_fields(actions: list[Any]) -> tuple[list[Any], tuple[str, ...]]:
     """Drop fields that belong to a SIBLING action kind, and say so.
 
     THE MEASURED DEFECT. A model that puts ``frame_id`` on a ``wait``, or
@@ -1582,16 +1584,22 @@ def drop_sibling_action_fields(actions: list[Any]) -> tuple[list[Any], int]:
     (``action_tool._build_batch``), so the tolerance cannot come to mean two
     different things depending on which channel the model answered on.
 
-    Returns the normalised actions and HOW MANY fields were dropped, and the
-    count is part of the contract rather than a courtesy: a tolerance nobody can
-    count is indistinguishable from one that stopped firing, and this one's
-    whole justification is a measured rate. The dropped names themselves are
-    model-text-free (``kind.field`` out of a fixed vocabulary) but the signed
-    bundle carries only the count, and it carries it as its own
-    ``reply_tolerance`` event (``ReplyTolerancePayload``) rather than as a field
-    of the response it belongs to: that event is what makes the rate countable
-    from bundles written now WITHOUT re-baselining the ``model_response`` events
-    every earlier bundle was sealed with. The log line keeps the roster.
+    Returns the normalised actions and the dropped fields, as ``kind.field``
+    names in the reply's action order -- the count is ``len(...)``, and it is
+    part of the contract rather than a courtesy: a tolerance nobody can count is
+    indistinguishable from one that stopped firing, and this one's whole
+    justification is a measured rate. The NAMES are carried out beside it
+    because the count has a reader that cannot use it: the correction the model
+    must be shown (:func:`tolerated_fields_note`) has to say which field was not
+    accepted, and an accepted reply leaves no rejection artifact for the model
+    to learn from -- the log line is not something it ever reads. The names
+    themselves are model-text-free (``kind.field`` out of a fixed vocabulary),
+    which is what lets them be rendered back into a request at all. The signed
+    bundle still carries only the count, as its own ``reply_tolerance`` event
+    (``ReplyTolerancePayload``) rather than as a field of the response it
+    belongs to: that event is what makes the rate countable from bundles written
+    now WITHOUT re-baselining the ``model_response`` events every earlier bundle
+    was sealed with. The log line keeps the roster.
 
     Precondition: ``actions`` is a list of the reply's own action values. Every
     caller has already established that -- a reply whose ``actions`` is not a
@@ -1632,7 +1640,77 @@ def drop_sibling_action_fields(actions: list[Any]) -> tuple[list[Any], int]:
             len(dropped),
             _unexpected_key_summary(dropped),
         )
-    return normalised, len(dropped)
+    return normalised, tuple(dropped)
+
+
+#: How many distinct ``kind.field`` pairs :func:`tolerated_fields_note` names
+#: before summarising the rest. The same bound and the same reason as
+#: ``_MAX_EXTRA_KEYS_SHOWN`` above: the line is written into a REQUEST, and
+#: while the vocabulary is finite, one reply can put many of its fields on the
+#: wrong kinds.
+_MAX_TOLERATED_FIELD_PAIRS = 5
+
+
+def _kind_takes_phrase(kind: str) -> str:
+    """What one kind's own shape accepts, read from the vocabulary table.
+
+    Derived rather than transcribed, the same rule the table itself follows: a
+    field added to a kind updates the correction on the same commit it updates
+    the tolerance, so the note cannot tell the model to send a shape the
+    validator would refuse.
+    """
+
+    declared = _ACTION_KIND_FIELDS.get(kind, frozenset())
+    takes = sorted(name for name in declared if name not in ("kind", "observation_id"))
+    if not takes:
+        return f'a "{kind}" action takes no further fields'
+    return f'a "{kind}" action takes {", ".join(json.dumps(name) for name in takes)}'
+
+
+def tolerated_fields_note(dropped: Sequence[str]) -> str | None:
+    """One model-facing line naming each field the tolerance dropped, and why.
+
+    THE MEASURED DEFECT this answers. Dropping a sibling field without saying so
+    left the model to discover the contract by trial and error -- a live episode
+    put ``frame_id`` on three ``wait`` actions in one reply, then on two, then
+    one, reading as a model probing a contract nothing ever answered. The
+    tolerance still drops, because the field cannot be honoured (``wait`` has no
+    coordinates for a frame to bind, and its adapter statement is a timed
+    pause), and the action still runs as declared -- but the next reply the
+    model receives now says WHICH field was not accepted, on which kind, and
+    what that kind does take, so the correction is read instead of probed.
+
+    Derived entirely from the fixed vocabulary -- every name rendered here was
+    matched against ``_ACTION_KIND_FIELDS`` before it could be dropped, so no
+    model-supplied text reaches the line -- deduplicated in first-seen order
+    (the model needs to learn the contract once; how many times the reply
+    repeated the mistake is the log line's business), and bounded at
+    ``_MAX_TOLERATED_FIELD_PAIRS``.
+
+    ``None`` when nothing was dropped, which is also the callers' test: both
+    deliveries -- the tool channel's result content and the prose channel's
+    next observation message -- render only a non-``None`` note.
+    """
+
+    if not dropped:
+        return None
+    pairs: list[tuple[str, str]] = []
+    for name in dropped:
+        kind, _, field = name.partition(".")
+        if kind and field and (kind, field) not in pairs:
+            pairs.append((kind, field))
+    if not pairs:
+        return None
+    clauses: list[str] = []
+    for kind, field in pairs[:_MAX_TOLERATED_FIELD_PAIRS]:
+        clause = f'"{field}" was not accepted on a "{kind}" action and was ignored'
+        if kind in _ACTION_KIND_FIELDS:
+            clause += f" ({_kind_takes_phrase(kind)})"
+        clauses.append(clause)
+    withheld = len(pairs) - len(clauses)
+    if withheld > 0:
+        clauses.append(f"and {withheld} more")
+    return "Note: " + "; ".join(clauses) + "."
 
 
 def public_reply_schema(

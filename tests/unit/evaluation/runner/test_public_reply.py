@@ -1031,6 +1031,15 @@ async def test_a_tolerated_reply_reaches_the_bundle_with_its_counts(
     assert [record.request_id for record in tolerances] == [responses[0].request_id]
     assert tolerances[0].leading_framing_bytes == len(preamble.encode("utf-8"))
     assert tolerances[0].tolerated_action_fields == 1
+    # And the model was TOLD -- the half a count cannot deliver. The note rides
+    # the observation that followed the tolerated reply, in the very request
+    # the bundle's second response answers, so the correction is inside the
+    # measured stream and not only in the sealed counts.
+    replay = "\n".join(message.text for message in stream.requests[1].messages)
+    assert (
+        'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+        '(a "wait" action takes "duration_ms").' in replay
+    )
 
 
 def test_an_unsafe_reply_degrades_without_losing_the_rejection() -> None:

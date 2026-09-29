@@ -313,6 +313,31 @@ class TestBridgeDiscipline:
         assert len(executed) == 2
 
     @pytest.mark.asyncio
+    async def test_a_dropped_sibling_field_is_stated_in_the_result(self, tmp_path: Path) -> None:
+        """A carried-and-dropped field is not silent on this channel either.
+
+        The result of the call is the next thing the model reads, so the note
+        rides it ahead of the observation: the definition of a silent drop is
+        that the model is never told, and a model that is never told re-sends
+        the same field on the next reply instead of correcting it.
+        """
+
+        bridge = _bridge(tmp_path, execute=None)
+
+        result = await bridge.call(
+            {"actions": [{"kind": "wait", "duration_ms": 50, "frame_id": "screen"}]}
+        )
+
+        assert result["is_error"] is False
+        assert result["content"][0].text == (
+            'Note: "frame_id" was not accepted on a "wait" action and was ignored '
+            '(a "wait" action takes "duration_ms").'
+        )
+        # The field was still dropped, never forwarded: the call executed and
+        # the rendered observation follows the note, exactly as before.
+        assert result["content"][1].text == "seen 1"
+
+    @pytest.mark.asyncio
     async def test_a_finish_batch_is_terminal_and_never_executes(self, tmp_path: Path) -> None:
         executed: list[Any] = []
         bridge = _bridge(tmp_path, execute=None)
