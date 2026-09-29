@@ -139,13 +139,13 @@ def _publish_desktop_presence(**window: Any):
     return publisher
 
 
-def _publish(kind: str, session_id: str, anchor: str = "a1") -> str:
+def _publish(kind: str, session_id: str, anchor: str = "a1", *, notify: bool = True) -> str:
     """Publish a completion into the machine-wide store, as a turn would."""
     import uuid
 
     token = str(uuid.uuid4())
     AttentionStore(config_dir() / "attention.db").publish(
-        f"session/{session_id}", token, anchor, kind
+        f"session/{session_id}", token, anchor, kind, notify=notify
     )
     return token
 
@@ -217,6 +217,29 @@ async def test_exactly_one_rung_delivers_the_completion(
     finally:
         if publisher is not None:
             publisher.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_completion_is_never_announced_by_the_runtime(
+    tmp_path: Path, monkeypatch, banners
+) -> None:
+    """§14: rung 4 reads the ONE notify value too (review round 1, F2).
+
+    Before the fix this arm never consulted it: a quiet wake/monitor completion
+    got an OS banner from the runtime whenever nothing else was running, and
+    the claim spent the watermark other surfaces read. The gate must leave the
+    banner unraised AND the watermark unspent.
+    """
+    session, handle = await _rig(tmp_path, monkeypatch)
+    calls, _state = banners
+    try:
+        session_id = handle._session_id_for_resume()
+        token = _publish("complete", session_id, notify=False)
+        await asyncio.to_thread(handle._announce_completion)
+        assert calls == [], calls
+        assert _delivered(session_id, token) is False, "the claim must stay unspent"
+    finally:
         await session.dispose()
 
 

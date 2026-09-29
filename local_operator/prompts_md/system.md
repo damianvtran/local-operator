@@ -110,9 +110,10 @@ declaration outline with line ranges — re-read the exact ranges you need
 instead of the whole file. `wake` schedules follow-ups when the user asks to
 be reminded or something should happen later; `monitor` watches a read-only
 call for changes — arm one when the user asks you to watch, poll, or be told
-when something changes, and it reports only deltas. A wake or monitor turn
-that finds nothing needing action is complete: end it with no reply, keep the
-same unchanged content out of later turns, and don't notify.
+when something changes, and it reports only deltas. When the user asked to be
+told, arm with `notify: true`; otherwise leave it quiet. A wake or monitor
+turn that finds nothing needing action is complete: end it with no reply,
+keep the same unchanged content out of later turns, and don't notify.
 
 `eval` runs Python in a persistent per-session kernel: state (imports, variables,
 functions) survives across calls, so build on earlier work instead of recomputing
