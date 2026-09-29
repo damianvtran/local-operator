@@ -1769,3 +1769,59 @@ def test_the_listing_names_the_restart_remedy_for_a_share_that_just_landed(
     payload = json.loads(capsys.readouterr().out)
     assert payload["newly_borrowable"] == []
     assert "note:" not in json.dumps(payload)
+
+
+def test_a_cached_quota_refusal_counts_down_and_renders_the_remainder(tmp_path: Path) -> None:
+    """D1 (design round 1): the sentence shows the LIVE remainder, and it shrinks.
+
+    The refusal is recorded with the owner's remainder and re-served from the state
+    file while it stands. The number the cache honours is the one recorded at refusal
+    time, so what is still ahead is that number MINUS the row's age — and the sentence
+    a person reads must count down. ``cached_refusal`` takes ``now`` for the same
+    reason ``PlacementState.status`` does: the countdown is arithmetic, and a test
+    that slept would be testing the sleep.
+    """
+    from local_operator.network.credentials.client import MeshCredentialClient
+    from local_operator.network.credentials.types import BrokerError
+
+    root = tmp_path / "borrower"
+    root.mkdir()
+    borrower = "d_" + "b" * 32
+    document = placement_mod.PlacementDocument(NETWORK, root=root, written_by=OWNER)
+    document.declare(
+        "openai",
+        owner_device=OWNER,
+        owner_device_name="owner-laptop",
+        provider="openai",
+        by=OWNER,
+    )
+    document.grant("openai", borrower, scope="session", by=OWNER)
+    client = MeshCredentialClient(
+        root=root, self_device=borrower, network_id=NETWORK, placement=document
+    )
+
+    client.state.observe("openai", "quota_blocked", owner_device=OWNER, retry_after_ms=45_000)
+
+    live = client.cached_refusal("openai")
+    assert live is not None and live.code == "quota_blocked"
+    assert 43_000 <= live.retry_after_ms <= 45_000, live
+
+    observed = float(client.state.observation("openai")["observed_at"])  # type: ignore[index]
+    exact = client.cached_refusal("openai", now=observed)
+    assert exact is not None and exact.retry_after_ms == 45_000, exact
+
+    later = client.cached_refusal("openai", now=observed + 10.0)
+    assert later is not None
+    assert 34_000 <= later.retry_after_ms <= 35_000, later
+
+    rendered = client._render(  # noqa: SLF001 — the cached path's own renderer
+        BrokerError(code="quota_blocked", retry_after_ms=35_000), "openai", "openai"
+    )
+    assert "rate-limited for another 35 s" in rendered.message, rendered.message
+
+    # The end-to-end cached path (no dial: the refusal short-circuits before the
+    # relay is consulted) renders the live countdown, not the old wording.
+    served = client.request_grant_sync("openai", session_id="s-1")
+    assert isinstance(served, BrokerError), served
+    assert "for another " in served.message, served.message
+    assert "for now" not in served.message, served.message

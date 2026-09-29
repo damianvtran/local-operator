@@ -50,6 +50,27 @@ def render_last_seen(seconds: float | None) -> str:
     return f"{int(round(hours / 24.0))} d ago"
 
 
+def render_retry_after(ms: float | int | None) -> str:
+    """``45 s`` / ``2 min`` — the forward twin of :func:`render_last_seen`.
+
+    Round numbers, one unit, for the same reason as there: the operator is judging
+    "retry now or move on", and a second-by-second figure would read as a
+    measurement rather than as the hint the owner actually sent. The value it
+    renders was clamped at the wire boundary (``MAX_PEER_RETRY_AFTER_MS``) and is
+    counted down by ``MeshCredentialClient.cached_refusal``, so the sentence never
+    promises more than the cache will honour. ``""`` means "nothing to say" — an
+    older owner that sent no remainder, or a value the boundary dropped.
+    """
+    if not ms or ms <= 0:
+        return ""
+    seconds = float(ms) / 1000.0
+    if seconds < 60:
+        # Five-second steps: the coarsest step that still tells a 45 s wait apart
+        # from a 5 s one, and never a ``0 s``.
+        return f"{max(5, int(seconds / 5.0 + 0.5) * 5)} s"
+    return f"{max(1, int(seconds / 60.0 + 0.5))} min"
+
+
 def render_broker_error(
     error: BrokerError,
     *,
@@ -106,6 +127,18 @@ def render_broker_error(
             f"this one; run '{login}' on the device that needs it."
         )
     if error.code == "quota_blocked":
+        # THE REMAINDER, WHEN THE OWNER MEASURED ONE (design round 1, D1). The
+        # producer sends the earliest unblock and the cache keeps counting it down;
+        # "for now" read as if nothing were known, and the design's §4.9 row shows a
+        # time for exactly this refusal. Absent (an older owner, or a value the
+        # boundary dropped) keeps the old wording.
+        left = render_retry_after(error.retry_after_ms)
+        if left:
+            return (
+                f"'{label}' on {owner} is rate-limited for another {left}, so nothing "
+                "was borrowed. The usual failover to another of your own logins is "
+                "already running."
+            )
         return (
             f"'{label}' on {owner} is rate-limited for now, so nothing was borrowed. The "
             "usual failover to another of your own logins is already running."
