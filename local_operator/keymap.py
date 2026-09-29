@@ -158,16 +158,20 @@ KEY_ACTIONS: tuple[KeyAction, ...] = (
     ),
     # The first DESKTOP-scoped action. Not a Textual binding: no `action_*`
     # method, no `Binding`, and `tip=""` so the splash cannot advertise a key
-    # no terminal can press. The stored default is `primary+alt+space` — ONE
-    # value that registers as ⌘⌥Space on macOS and Ctrl+Alt+Space on
-    # Windows/Linux, which is why the token is `primary` and not a per-OS
+    # no terminal can press. The stored default is `primary+alt+shift+space` —
+    # ONE value that registers as ⌘⌥⇧Space on macOS and Ctrl+Alt+Shift+Space
+    # on Windows/Linux, which is why the token is `primary` and not a per-OS
     # default; the registry must declare exactly one value because
     # `is_default` compares against it on whichever machine reads the config.
+    # It replaced `primary+alt+space` (⌘⌥Space) in September 2026, when that
+    # chord was found opening macOS's Finder Spotlight window (Apple KB 102650)
+    # beside this app's mini composer — the reserved set below now refuses it,
+    # so a revert cannot be stored.
     KeyAction(
         id="keymap.quick_send",
         action="",
         label="Quick send",
-        default="primary+alt+space",
+        default="primary+alt+shift+space",
         help="Opens a small composer over other apps; messages the chief of staff.",
         tip="",
         scope="desktop",
@@ -326,6 +330,14 @@ COMPOSER_KEYS: frozenset[str] = frozenset(
 DESKTOP_RESERVED_COMBOS: dict[str, str] = {
     "meta+space": "Spotlight uses ⌘Space — pick a chord with another modifier",
     "primary+space": "Spotlight uses ⌘Space — pick a chord with another modifier",
+    # The Finder/Spotlight search window (Option-Command-Space, Apple KB
+    # 102650) — the chord quick-send shipped on until September 2026, found by
+    # pressing it: the Finder search window opened beside the mini composer.
+    # Both spellings, because `meta` IS ⌘ on macOS; the original collision
+    # survey missed this one, so it is refused rather than left to be
+    # rediscovered.
+    "meta+alt+space": "Spotlight uses ⌘⌥Space in Finder — pick a chord with another modifier",
+    "primary+alt+space": "Spotlight uses ⌘⌥Space in Finder — pick a chord with another modifier",
     "ctrl+space": "input-source switching uses Ctrl+Space",
     "meta+ctrl+space": "the emoji picker uses ⌃⌘Space",
     "alt+space": (
@@ -475,7 +487,7 @@ def validate_key(value: Any, *, scope: str = "app", action_id: str | None = None
 #: Canonical modifier order. Load-bearing, not cosmetic: it makes
 #: ``ctrl+meta+space`` and ``meta+ctrl+space`` ONE stored string, so the
 #: reserved table below and every comparison see a single spelling. Matches the
-#: design's own examples (``primary+alt+space``, ``meta+shift+n``,
+#: design's own examples (``primary+alt+shift+space``, ``meta+shift+n``,
 #: ``meta+ctrl+space``).
 _DESKTOP_MODIFIER_ORDER = ("primary", "meta", "ctrl", "alt", "shift")
 
@@ -564,7 +576,7 @@ def _validate_accelerator(value: Any) -> str | None:
     is a registration failure to SURFACE (§G.5), never a silent dead key.
     """
     if not isinstance(value, str):
-        return "expected a shortcut, like primary+alt+space"
+        return "expected a shortcut, like primary+alt+shift+space"
     if "," in value:
         # Electron has no alternates concept and the registrar can express
         # exactly one chord per action, so a value Textual would read as "two
@@ -576,7 +588,7 @@ def _validate_accelerator(value: Any) -> str | None:
     ]
     tokens = [token for token in tokens if token]
     if not tokens:
-        return "expected a shortcut, like primary+alt+space"
+        return "expected a shortcut, like primary+alt+shift+space"
     key_token = tokens[-1]
     for token in tokens[:-1]:
         if not _is_desktop_modifier(token):
@@ -589,7 +601,7 @@ def _validate_accelerator(value: Any) -> str | None:
                 return "a shortcut has one key and it goes last — like ctrl+f5"
             return f"unknown modifier `{token}`"
     if _is_desktop_modifier(key_token):
-        return "add a key to the shortcut, like primary+alt+space"
+        return "add a key to the shortcut, like primary+alt+shift+space"
     # The FULL chord first, so a chord the table names specifically (`meta+tab`
     # → "⌘Tab switches apps") states its own job rather than the generic
     # reason of its key half; then the key TOKEN, which is refused in any chord.
@@ -708,7 +720,7 @@ _HOLD_GRAMMAR = _DesktopGrammar(
 )
 
 #: action id -> the grammar its desktop value is written in. ``quick_send``
-#: uses the accelerator default (``primary+alt+space``); ``push_to_talk``
+#: uses the accelerator default (``primary+alt+shift+space``); ``push_to_talk``
 #: registered the bare-modifier HOLD grammar when the STT stream froze its
 #: value space — a hold (``alt-right-hold``) is not expressible as an Electron
 #: accelerator, which is exactly why this seam exists. Keep this a plain dict;

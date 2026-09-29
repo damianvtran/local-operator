@@ -341,7 +341,7 @@ async def test_a_desktop_row_captures_and_validates_by_its_own_rules(tmp_path: P
     The refusal SENTENCE is what proves which grammar ran: the app scope's
     bare-key refusal names the composer, the desktop one names the missing
     modifier. A desktop row judged by the app rules would also refuse its own
-    shipped default (`primary+alt+space` is not a key a terminal can send), so
+    shipped default (`primary+alt+shift+space` is not a key a terminal can send), so
     a regression here would read as "this row can never be edited from the
     terminal". The committed value is read back through a FRESH manager, the
     same reason the other capture test does.
