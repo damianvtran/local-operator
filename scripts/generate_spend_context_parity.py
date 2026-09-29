@@ -102,6 +102,14 @@ def _spend_case(inputs: dict[str, Any], usage: dict[str, int] | None) -> list[An
     properties for the figure and its rung, then `_spend_text`'s spelling
     rules on top (zero drops the segment; a floor marks it; `None` + billed
     tokens is `$—`).
+
+    THE POLICY BELOW IS A RE-EXPRESSION, NOT A CALL, and that difference is a
+    manual-update contract: `OperatorApp._spend_text` is a method on the
+    mounted TUI app, so no seam can invoke it from this script (or from the
+    phone's own test tree). A change to its zero / floor / `$—` rules must be
+    mirrored here AND in `tests/unit/mobile/test_tui_bridge.py` BY HAND; only
+    the vocabulary (the constants imported above) is shared by import, so a
+    rule that moves without its mirror drifts silently.
     """
     state = FrontendSessionState(session_id="parity", epoch="parity", **inputs)
     total = state.cumulative_cost
@@ -235,12 +243,12 @@ def _context_cases() -> list[list[Any]]:
             ]
         )
 
-    # Nothing to report / no denominator.
+    # Nothing to report / no denominator. (`999/0` is NOT duplicated here:
+    # the crossing sweep below is its canonical case — review round 1, NIT 2.)
     case(0, 200_000)
     case(-5, 1_000)
     case(12_000, 0)
     case(1_500, 0)
-    case(999, 0)
 
     # The `format_context_tokens` / `format_window` crossings.
     for tokens in (999, 1_000, 1_001, 12_400, 999_999, 1_000_000, 1_250_000):

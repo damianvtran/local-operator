@@ -629,6 +629,13 @@ def test_the_phone_spend_context_fixture_still_matches_the_python_sources() -> N
     rather than compared against literals, so the property answers themselves
     are the contract: a change to `cumulative_cost` fails this suite, and the
     TS port then has to be regenerated to match.
+
+    THE `$—` / ZERO / `≥` HALF IS A RE-EXPRESSION, NOT A CALL (review round 1,
+    NIT 1): `OperatorApp._spend_text` is a method on the mounted TUI app, so
+    no seam here can invoke it, and the block below mirrors its rules BY HAND —
+    as `scripts/generate_spend_context_parity.py` mirrors them on the
+    generation side. Only the constants are shared by import; a change to the
+    band's rules must be mirrored in both places or the phone drifts silently.
     """
     from local_operator.session.frontend_state import (
         CostKnowledge,
