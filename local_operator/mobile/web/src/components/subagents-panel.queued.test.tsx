@@ -102,6 +102,28 @@ describe("the roster header with a parked child", () => {
 		// to say.
 		expect(header).not.toContain("queued");
 	});
+
+	it("yields the LABEL, not the count group, when the header is squeezed (D6)", () => {
+		render(
+			<AgentRoster
+				sessionId="s1"
+				subagents={[child("a"), child("b"), child("c", { status: "failed" })]}
+				parentJobId={null}
+			/>
+		);
+		const label = screen.getByText("subagents");
+		const running = screen.getByText("2/3 running");
+		/* The count group is a `shrink-0` SIBLING of the truncating label — not a
+		   child of it — so a squeezed row drops pieces of the label and can never
+		   cut the count mid-phrase. "subagents 1/5 r…" was the defect: the count
+		   group survived only up to "r…". */
+		expect(label.className).toContain("truncate");
+		expect(label.className).toContain("min-w-0");
+		expect(label.contains(running)).toBe(false);
+		expect(label.parentElement).toBe(running.parentElement);
+		expect(running.className).toContain("shrink-0");
+		expect(running.className).toContain("whitespace-nowrap");
+	});
 });
 
 describe("the roster row's treatment for a parked child", () => {
