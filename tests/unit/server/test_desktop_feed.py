@@ -138,9 +138,18 @@ def _session(root: Path, session_id: str) -> Path:
     return directory
 
 
-def _publish(root: Path, session_id: str, kind: str = "complete", anchor: str = "a1") -> str:
+def _publish(
+    root: Path,
+    session_id: str,
+    kind: str = "complete",
+    anchor: str = "a1",
+    *,
+    notify: bool = True,
+) -> str:
     token = str(uuid.uuid4())
-    AttentionStore(root / "attention.db").publish(f"session/{session_id}", token, anchor, kind)
+    AttentionStore(root / "attention.db").publish(
+        f"session/{session_id}", token, anchor, kind, notify=notify
+    )
     return token
 
 
@@ -383,6 +392,34 @@ def test_the_doorbell_delivers_a_completion_with_no_bridge_anywhere(tmp_path):
     # No desktop is connected and nothing else holds the session, so rung 1 did
     # not apply and the feed composes the banner itself.
     assert announced[0]["payload"]["focus_policy"] == "always"
+
+
+def test_a_quiet_completion_is_never_announced(tmp_path):
+    """§14: the feed reads the row's own notify value; nothing re-derives it.
+
+    Both arms in one cell and one tick: the quiet session's completion emits no
+    banner although its `attention` frame still ships, and the loud control's
+    does — so the assertion cannot pass on a feed that announces nothing at
+    all.
+    """
+    root = tmp_path
+    quiet, loud = "q" * 12, "l" * 12
+    _session(root, quiet)
+    _session(root, loud)
+
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, quiet, notify=False)
+    loud_token = _publish(root, loud)
+    _tick(feed)
+    frames = _collect(feed, subscription)
+    asyncio.run(feed.close())
+
+    announced = _notified(frames)
+    assert len(announced) == 1, frames
+    assert announced[0]["session_id"] == loud
+    assert announced[0]["payload"]["completion_token"] == loud_token
 
 
 def test_the_feed_ships_the_bridge_payload_byte_for_byte(tmp_path):

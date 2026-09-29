@@ -2833,6 +2833,13 @@ class DesktopSessionBridge:
         the conversation was ever run on the mock — the case here being a
         session a rig left in a store this backend serves.
 
+        §14's origin-aware flag is read the same way and from the same read:
+        the SESSION computed it once per run and the row carries it
+        (``state["notify"]``), so a quiet wake/monitor completion is offered to
+        nobody without this method knowing what a wake is. The ``.get``
+        default keeps an older runtime's rows — and an older remote state —
+        exactly as loud as they were.
+
         Guarded end to end: a notification is chrome, and this runs inside the
         1 s attention poll whose loop already treats a store error as costing
         one tick rather than the feature.
@@ -2847,6 +2854,7 @@ class DesktopSessionBridge:
             or token == previous.get("completion_token")
             or not state.get("unseen")
             or state.get("kind") not in BRIDGE_NOTIFIABLE_KINDS
+            or not state.get("notify", True)
         ):
             return
         # OFF THE LOOP, like every neighbouring store read in this method's poll
