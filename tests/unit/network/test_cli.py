@@ -608,6 +608,51 @@ def test_a_peer_row_is_a_name_and_words_never_the_wire_token() -> None:
     )
 
 
+def test_a_reachable_peer_row_carries_its_build_and_the_behind_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Design §4 / S5: the rows already carry ``build``, so the line states parity.
+
+    One exact string per branch: unknown renders NOTHING (the pins above are that
+    A/B), equal and ahead carry the bare version, and behind carries the only
+    remedy that runs on the other device. No wire change and no probe — the value
+    was already in the row, ``{}`` when no link answered.
+    """
+    monkeypatch.setattr(relay, "build_stamp", lambda: {"version": "0.64.1", "source_ref": "x"})
+    row = {
+        "device_id": "d_" + "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+        "name": "pixel-8",
+        "reachable": True,
+        "reason": "",
+    }
+    assert net_cli._peer_line({**row, "build": {"version": "0.64.1"}}) == (  # noqa: SLF001
+        "pixel-8  reachable  build 0.64.1"
+    )
+    assert net_cli._peer_line({**row, "build": {"version": "0.63.2"}}) == (  # noqa: SLF001
+        "pixel-8  reachable  build 0.63.2 — behind this device (0.64.1); " "run `lop-update` there"
+    )
+    assert net_cli._peer_line({**row, "build": {"version": "0.66.0"}}) == (  # noqa: SLF001
+        "pixel-8  reachable  build 0.66.0"
+    )
+    # Unknown stays byte-for-byte the old line: `{}`, absent, and unparsable alike.
+    assert net_cli._peer_line({**row, "build": {}}) == "pixel-8  reachable"  # noqa: SLF001
+    assert net_cli._peer_line({**row, "build": {"version": "0.28.0rc1"}}) == (  # noqa: SLF001
+        "pixel-8  reachable"
+    )
+    # And the suffix never rides an unreachable row.
+    assert (
+        net_cli._peer_line(  # noqa: SLF001
+            {
+                **row,
+                "reachable": False,
+                "reason": "connect_failed:ConnectionRefusedError",
+                "build": {"version": "0.63.2"},
+            }
+        )
+        == "pixel-8 cannot be reached from this device right now (it did not answer)"
+    )
+
+
 def test_a_peer_row_with_several_addresses_glosses_the_whole_list(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1401,3 +1446,244 @@ def test_the_printed_join_command_does_not_pin_an_endpoint_the_token_carries(
     assert net_cli._cmd_invite(args) == 0  # noqa: SLF001
     empty = capsys.readouterr().out
     assert "--host <this device's address:port>" in empty, empty
+
+
+# ---------------------------------------------------------------------------
+# `lop network credentials`: the device-level shareable ledger (design §2)
+# ---------------------------------------------------------------------------
+
+SLACK_URL = "https://hooks.slack.com/services/T000/B000/XXXX"
+NOTION_URL = "https://mcp.notion.com/mcp"
+
+
+class _FakeCredentialStore:
+    """The one read ``has_stored_row`` makes, without an auth.db on disk."""
+
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def list_credentials(self, provider: str) -> list[Any]:
+        return list(self._rows)
+
+    def close(self) -> None:
+        pass
+
+
+def _mcp_login_row(url: str) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=1, identity_key=url, updated_at=0)
+
+
+def _share_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """One network, this device holding the slack login and sharing it with a peer.
+
+    Returns ``(self_device, peer_device)``. The mcp.json declares three servers —
+    an http one with a login, an http one without, and a stdio one — so the
+    matrix (login x shared x transport) is exercised in one pass, and the stdio
+    row proves the exclusion.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "slack": {"type": "http", "url": SLACK_URL},
+                    "notion": {"type": "http", "url": NOTION_URL},
+                    "fs": {"command": "npx", "args": ["-y", "x"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    from local_operator.network import identity as identity_mod
+    from local_operator.network.credentials import placement as placement_mod
+
+    self_device = identity_mod.load_or_mint().device_id
+    peer_device = "d_" + "b" * 32
+    record = types.NetworkRecord(
+        network_id=NETWORK, name="home", self_device_id=self_device, self_role="admin"
+    )
+    record.members.append(types.MemberRecord(device_id=self_device, name="this-device"))
+    record.members.append(types.MemberRecord(device_id=peer_device, name="cloud-node-1"))
+    store.save(record, root)
+    document = placement_mod.PlacementDocument(NETWORK, root=root)
+    key = f"mcp:{SLACK_URL}"
+    document.declare(key, owner_device=self_device, owner_device_name="this-device", by=self_device)
+    document.grant(key, peer_device, scope="session", by=self_device)
+    document.save()
+    return self_device, peer_device
+
+
+def test_credentials_lists_the_shareable_ledger_per_server(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The 2026-09-28 offload gap: a login held here but shared nowhere had no row
+    on any surface until `credential share` refused it at share time. The ledger
+    answers up front, and its ``--json`` is the contract the tool digest reads."""
+    self_device, peer_device = _share_fixture(root, monkeypatch)
+    monkeypatch.setattr(
+        readiness, "_open_store", lambda _root: _FakeCredentialStore([_mcp_login_row(SLACK_URL)])
+    )
+    assert net_cli._cmd_credentials(Namespace(json=True, network="")) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    shareable = payload["shareable"]
+    # The fact sorts servers by name, and the ledger follows that order.
+    assert [row["server"] for row in shareable] == ["notion", "slack"]
+    notion, slack = shareable
+    assert slack == {
+        "server": "slack",
+        "url": SLACK_URL,
+        "transport": "http",
+        "login_here": True,
+        "shared_with": [{"device": peer_device, "name": "cloud-node-1", "scope": "session"}],
+        "remedy": f"lop network credential share mcp:{SLACK_URL} --with <device>",
+    }
+    assert notion == {
+        "server": "notion",
+        "url": NOTION_URL,
+        "transport": "http",
+        "login_here": False,
+        "shared_with": [],
+        "remedy": f"run '/mcp login {NOTION_URL}' here first",
+    }
+    # stdio servers have no login to share and are excluded entirely.
+    assert all(row["server"] != "fs" for row in shareable)
+    # And no field name carries a scrubber marker, so the tool digest cannot eat
+    # the row's facts on its way to a model.
+    for row in shareable:
+        for field_name in row:
+            lowered = field_name.lower()
+            assert not any(
+                marker in lowered for marker in ("token", "secret", "password")
+            ), field_name
+
+
+def test_credentials_shareable_block_renders_login_states_and_shares(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The human register: the three row kinds, the one shipped login sentence,
+    and the existing nest for a share that already exists."""
+    _share_fixture(root, monkeypatch)
+    monkeypatch.setattr(
+        readiness, "_open_store", lambda _root: _FakeCredentialStore([_mcp_login_row(SLACK_URL)])
+    )
+    assert net_cli._cmd_credentials(Namespace(json=False, network="")) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert "home:" in out
+    assert "shareable here:" in out
+    assert (
+        f"  slack  http  login held — share: lop network credential share mcp:{SLACK_URL}"
+        " --with <device>" in out
+    ), out
+    assert "      shared with cloud-node-1 (session)" in out, out
+    assert (
+        f"  notion  http  no login here yet — run '/mcp login {NOTION_URL}' here first" in out
+    ), out
+    assert "fs" not in out
+
+
+def test_credentials_shareable_state_is_three_valued(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unreadable store is NOT "no login" — the same rule ``has_stored_row``
+    states for the share verb; the ledger must not send the operator to sign in
+    when it simply could not read."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"slack": {"type": "http", "url": SLACK_URL}}}),
+        encoding="utf-8",
+    )
+
+    class _Unreadable:
+        def list_credentials(self, provider: str) -> Any:
+            raise OSError("store unreadable")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(readiness, "_open_store", lambda _root: _Unreadable())
+    assert net_cli._cmd_credentials(Namespace(json=True, network="")) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["shareable"][0]["login_here"] is None
+    assert payload["shareable"][0]["remedy"] == ""
+    assert net_cli._cmd_credentials(Namespace(json=False, network="")) == 0  # noqa: SLF001
+    out = capsys.readouterr().out
+    assert "no login here yet" not in out
+    assert "login state not known — this device's credential store could not be read" in out, out
+
+
+def test_credentials_shareable_read_creates_nothing(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ledger is an observation: no declare, no placement write, no auth.db —
+    the same read-only discipline the readiness report's own cell pins."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    (root / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"slack": {"type": "http", "url": SLACK_URL}}}),
+        encoding="utf-8",
+    )
+    before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+    assert net_cli._cmd_credentials(Namespace(json=True, network="")) == 0  # noqa: SLF001
+    capsys.readouterr()
+    after = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+    assert after == before, f"the listing created files: {sorted(set(after) - set(before))}"
+
+
+def test_a_refused_share_does_not_create_a_store(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The share path's reads are GATED ON THE STORE'S EXISTENCE (review round 1,
+    MINOR; QA round 1, Q1): on a device that never signed in, a refused share
+    must not be the reason an ``auth.db`` appears. Red on base — the ambient
+    ``AuthStore`` / ``McpTokenStorage`` constructions wrote one before the
+    refusal; the same class ``readiness._mcp_row_exists`` closed for the ledger.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    assert not (root / "auth.db").exists()
+    # (1) The shape read the share verb runs first.
+    shape = net_cli._credential_shape(f"mcp:{NOTION_URL}")  # noqa: SLF001
+    assert shape == ("mcp-rotating", "mcp-oauth", "")
+    assert not (root / "auth.db").exists(), "the shape read wrote a store"
+    # (2) The refusal itself.
+    with pytest.raises(types.MeshRefusal) as refusal:
+        net_cli._require_local_credential(f"mcp:{NOTION_URL}", "mcp-oauth")  # noqa: SLF001
+    assert "no MCP login" in refusal.value.sentence
+    assert not (root / "auth.db").exists(), "the refusal wrote a store"
+    # (3) The provider read both halves of the verb share.
+    assert net_cli._provider_rows("openai", root) == []  # noqa: SLF001
+    assert not (root / "auth.db").exists(), "the provider read wrote a store"
+
+
+def test_a_damaged_store_degrades_instead_of_raising(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store that EXISTS but cannot be opened must not raise out of the share
+    path (convergence round 2, MAJOR): ``AuthStore`` connects eagerly, so the
+    open-first construction has to answer ``None`` for an unopenable database and
+    let every caller render its own degrade (default shape / refusal / no rows) —
+    ``network.cli.main`` re-raises non-MeshRefusals, so a leaked DatabaseError
+    lands ``credential share`` on the stack-trace panel where base degraded.
+    """
+    import os
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    database = root / "auth.db"
+    for kind in ("corrupt", "locked"):
+        if database.exists():
+            os.chmod(database, 0o600)
+        if kind == "corrupt":
+            database.write_bytes(b"not a database")
+        else:
+            database.write_bytes(b"")
+            os.chmod(database, 0o000)
+        try:
+            shape = net_cli._credential_shape(f"mcp:{NOTION_URL}")  # noqa: SLF001
+            assert shape == ("mcp-rotating", "mcp-oauth", ""), kind
+            with pytest.raises(types.MeshRefusal) as refusal:
+                net_cli._require_local_credential(f"mcp:{NOTION_URL}", "mcp-oauth")  # noqa: SLF001
+            assert "no MCP login" in refusal.value.sentence, kind
+            assert net_cli._provider_rows("openai", root) == [], kind  # noqa: SLF001
+        finally:
+            if database.exists():
+                os.chmod(database, 0o600)

@@ -501,8 +501,10 @@ Diagnose in this order, and stop at the first answer that explains it:
 5. `lop network ready [--peer <device>]` — readiness for offload: observed
    reachability first, then the peer's install checks (operator authority, build
    parity, git identity, MCP servers, the model and per-server MCP credentials),
-   every failing row carrying its exact remedy and the side to run it on. It
-   reads and creates nothing on either device.
+   every failing row carrying its exact remedy and the side to run it on. The
+   git-identity remedy suggests this device's own `user.name`/`user.email` — edit
+   them if the peer should commit as someone else. It reads and creates nothing on
+   either device.
 6. A session on a peer is waiting for approval and it cannot be allowed from
    here — `lop network ready --peer <device>`: its `operator_authority` row says
    whether anything there can allow; the fix is `lop operator install` on that
