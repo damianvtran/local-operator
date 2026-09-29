@@ -21,16 +21,23 @@ from .api import (
     summarize_messages,
 )
 from .pass_ import CompactionPassResult, run_compaction_pass
-from .pruning import STALE_FRAME_NOTICE, prune_stale_frames
+from .pruning import (
+    SESSION_KEEP_RECENT_FRAMES,
+    STALE_FRAME_NOTICE,
+    prune_stale_frames,
+    prune_stale_frames_in_place,
+)
 
 __all__ = [
     "CompactionPassResult",
     "CompactionResult",
     "CompactionSettings",
+    "SESSION_KEEP_RECENT_FRAMES",
     "STALE_FRAME_NOTICE",
     "build_compaction_prompt",
     "find_cut_point",
     "prune_stale_frames",
+    "prune_stale_frames_in_place",
     "prune_tool_outputs",
     "run_compaction_pass",
     "summarize_messages",
