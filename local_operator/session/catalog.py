@@ -93,12 +93,13 @@ class CatalogEntry:
 
     @property
     def rank(self) -> tuple[int, int, float, str]:
-        """``(tier, wake_rank, -birth, id)`` — a wake orders the PREVIOUS group only.
+        """``(tier, wake_rank, -birth, id)`` — a wake or monitor orders the PREVIOUS group only.
 
         ``wake_rank`` is scoped to cold rows (``not self.active``): inside
-        Previous an armed wake leads, then a dormant one, then everything else.
-        Every ACTIVE row gets the same constant, so the key cannot reorder
-        anything the user is currently working with.
+        Previous an armed wake — or an armed monitor — leads, then a dormant
+        one of either family, then everything else. Every ACTIVE row gets the
+        same constant, so the key cannot reorder anything the user is
+        currently working with.
 
         **Why scoped rather than uniform.** The first cut applied the key in
         every tier, on the reasoning that it "only breaks ties within one
@@ -145,6 +146,14 @@ class CatalogEntry:
         Banding it directly under the armed rows puts the block boundary where
         the glyph changes, and costs no row and no chrome.
 
+        **Monitors ride the same bands (design §12).** An armed monitor leads
+        the cold group exactly like an armed wake, and a dormant monitor bands
+        with the dormant wakes: the two families are the same promise (work
+        will happen without a keystroke), so the rank VALUE widens while the
+        tuple SHAPE — and every persisted cursor's parse — stays put. The
+        picker's glyph vocabulary is deliberately untouched by this slice; the
+        ordering half is what the catalogue owns.
+
         The key lives HERE rather than in :func:`session_category` because that
         function is shared with the mobile daemon, whose summaries carry no wake
         data at all (durable rows come from ``recent_session_rows``, not
@@ -184,8 +193,12 @@ class CatalogEntry:
         # Cold rows only. An active row takes the constant, which is what makes
         # the key structurally unable to reorder Active rather than merely
         # declining to today.
-        armed = not self.active and bool(self.row.wakes) and not self.row.wakes_dormant
-        dormant = not self.active and bool(self.row.wakes) and self.row.wakes_dormant
+        wakes_armed = bool(self.row.wakes) and not self.row.wakes_dormant
+        wakes_dormant = bool(self.row.wakes) and self.row.wakes_dormant
+        monitors_armed = bool(self.row.monitors) and not self.row.monitors_dormant
+        monitors_dormant = bool(self.row.monitors) and self.row.monitors_dormant
+        armed = not self.active and (wakes_armed or monitors_armed)
+        dormant = not self.active and (wakes_dormant or monitors_dormant)
         wake_rank = 0 if armed else 1 if dormant else 2
         # Activity may update ages and badges, but must not move a click target.
         return tier, wake_rank, -self.row.created_at, self.id
@@ -905,12 +918,18 @@ def live_state_from_flags(source: object) -> str:
 #: own constants would silently never match, and the failure mode of that is the
 #: one this change exists to remove.
 #:
-#: Adding a fourth source is one word here plus the ``degraded += (...)`` at the
+#: Adding a source is one word here plus the ``degraded += (...)`` at the
 #: read that can fail; nothing else changes shape.
 DECORATION_LIVENESS = "liveness"
 DECORATION_WAKES = "wakes"
+DECORATION_MONITORS = "monitors"
 DECORATION_ATTENTION = "attention"
-DECORATION_SOURCES = (DECORATION_LIVENESS, DECORATION_WAKES, DECORATION_ATTENTION)
+DECORATION_SOURCES = (
+    DECORATION_LIVENESS,
+    DECORATION_WAKES,
+    DECORATION_MONITORS,
+    DECORATION_ATTENTION,
+)
 
 
 def decorate_rows(
@@ -933,9 +952,10 @@ def decorate_rows(
     enough (QA round 1, Q1; see the ``if include_live`` block).
 
     Two reads for the whole list: the discovery records say which sessions
-    are running, working, attached or not answering, and the wake index says
-    which have reminders armed. Best-effort — a picker that cannot read either
-    one still lists every session exactly as it did before, because the
+    are running, working, attached or not answering, the wake index says
+    which have reminders armed, and the monitor index says which have
+    standing watches armed. Best-effort — a picker that cannot read any of
+    them still lists every session exactly as it did before, because the
     fields are defaulted and the markers simply do not appear.
 
     BEST-EFFORT IS NOT SILENT, and this is the correction. The fields above are
@@ -984,6 +1004,14 @@ def decorate_rows(
         logger.warning("session catalogue could not read the wake index", exc_info=True)
         wake_index = {}
         degraded += (DECORATION_WAKES,)
+    try:
+        from local_operator.monitors.store import read_index as read_monitor_index
+
+        monitor_index = read_monitor_index(directory)
+    except Exception:  # noqa: BLE001
+        logger.warning("session catalogue could not read the monitor index", exc_info=True)
+        monitor_index = {}
+        degraded += (DECORATION_MONITORS,)
 
     live: dict[str, tuple[Any, str]] = {}
     for record, state in scanned:
@@ -1140,6 +1168,8 @@ def decorate_rows(
             subagents_queued = getattr(record, "subagents_queued", None)
         entry = wake_index.get(row.id) or {}
         schedules = entry.get("schedules") or () if isinstance(entry, dict) else ()
+        monitor_entry = monitor_index.get(row.id) or {}
+        monitors = (monitor_entry.get("monitors") or ()) if isinstance(monitor_entry, dict) else ()
         age: float | None = None
         if record_state is not None:
             age = registry.classify(record_state[0], check_zombie=False).heartbeat_age_s
@@ -1153,6 +1183,10 @@ def decorate_rows(
                 wakes=len(schedules),
                 wakes_dormant=bool(
                     isinstance(entry, dict) and (entry.get("stopped_at") or entry.get("held_at"))
+                ),
+                monitors=len(monitors),
+                monitors_dormant=bool(
+                    isinstance(monitor_entry, dict) and monitor_entry.get("stopped_at")
                 ),
                 kind=kind,
                 heartbeat_age_s=age,

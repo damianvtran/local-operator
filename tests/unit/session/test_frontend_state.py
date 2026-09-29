@@ -120,6 +120,60 @@ def test_state_json_roundtrip_preserves_full_model_usage_and_future_fields() -> 
     assert wire["last_usage"]["future_usage_field"] == 7
 
 
+def test_monitor_state_maps_the_schedulers_index_rows() -> None:
+    """Design §12: the wire row is the scheduler's OWN index projection, so a
+    live payload and a cold index row cannot disagree about a monitor's
+    shape."""
+    from local_operator.session.frontend_state import _monitor_state
+
+    class _Scheduler:
+        def index_rows(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "m1",
+                    "name": "watch the deploy queue",
+                    "tool": "bash",
+                    "every_ms": 60_000,
+                    "next_due_at": 123,
+                    "checks": 2,
+                    "disabled": False,
+                    "arguments": {"command": "ls"},
+                }
+            ]
+
+    rows = _monitor_state(_Scheduler())
+
+    assert rows[0].id == "m1" and rows[0].name == "watch the deploy queue"
+    assert rows[0].checks == 2
+    # ``extra="allow"``: the spec fields the model does not declare ride the
+    # same payload, which is what the desktop UI renders from.
+    assert rows[0].model_dump()["arguments"] == {"command": "ls"}
+
+
+def test_monitor_state_survives_a_broken_scheduler() -> None:
+    """Unreadable is empty, like ``_wake_state``: a status surface must not be
+    able to take the state build down."""
+    from local_operator.session.frontend_state import _monitor_state
+
+    assert _monitor_state(object()) == []
+
+
+def test_the_revision_moves_when_monitors_move() -> None:
+    """Design §12: ``"monitors"`` joins the revised collections, so a
+    coalescing reader repaints when the watch list changes — and only then."""
+    from local_operator.session.frontend_state import MonitorState
+
+    store = FrontendStateStore(_state())
+    before = store.revision()
+    assert before.monitors == 0
+
+    store.mutate(monitors=[MonitorState(id="m1", name="watch", next_due_at=1)])
+
+    after = store.revision()
+    assert after.monitors == before.monitors + 1
+    assert after.wakes == before.wakes  # only the moved collection counts
+
+
 def test_snapshot_jobs_preserve_immutable_mapping_and_sequence_interfaces() -> None:
     state = FrontendStateStore(
         _state(

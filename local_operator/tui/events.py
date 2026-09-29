@@ -52,6 +52,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     ModelChangeEvent,
+    MonitorDeltaEvent,
     NoticeEvent,
     PeerMessageDeliveredEvent,
     RetryEndEvent,
@@ -371,6 +372,27 @@ class WakeDelivered(SessionEvent):
         self.catchup = catchup
         self.wake_id = wake_id
         self.occurrence = occurrence
+
+
+class MonitorDelta(SessionEvent):
+    """A material monitor delta was delivered — render the expandable receipt.
+
+    The ``WakeDelivered`` sibling: a monitor re-runs a read-only call with no
+    model in the loop, so the delivery arrives with no user keystroke either,
+    and the collapsed line has to name WHICH monitor fired. ``monitor_id`` is
+    the cancel handle; the counts ride along so a surface can render them
+    without re-parsing the envelope sentence.
+    """
+
+    def __init__(
+        self, text: str, monitor_id: str = "", name: str = "", changes: int = 0, skipped: int = 0
+    ) -> None:
+        super().__init__()
+        self.text = text
+        self.monitor_id = monitor_id
+        self.name = name
+        self.changes = changes
+        self.skipped = skipped
 
 
 class PeerMessageDelivered(SessionEvent):
@@ -1073,6 +1095,15 @@ class EventController:
         # a superseded turn cannot invalidate it.
         self._post(WakeDelivered(event.text, event.catchup, event.wake_id, event.occurrence))
 
+    def _handle_monitor_delta(self, event: MonitorDeltaEvent) -> None:
+        # The same no-generation-guard rationale as ``_handle_wake_delivered``:
+        # a monitor delivery is a state fact about the session (this delta was
+        # handed to it, and the receipt must paint ahead of the work it
+        # triggered), not a turn-scoped boundary a superseded turn can void.
+        self._post(
+            MonitorDelta(event.text, event.monitor_id, event.name, event.changes, event.skipped)
+        )
+
     def _handle_peer_message_delivered(self, event: PeerMessageDeliveredEvent) -> None:
         # No generation guard: a peer delivery is a state fact about the
         # session (this message landed), not a turn-scoped boundary, so a
@@ -1171,6 +1202,7 @@ class EventController:
         "tool_execution_end": _handle_tool_end,
         "notice": _handle_notice,
         "wake_delivered": _handle_wake_delivered,
+        "monitor_delta": _handle_monitor_delta,
         "peer_message_delivered": _handle_peer_message_delivered,
         "steering_delivered": _handle_steering_delivered,
         "compaction_start": _handle_compaction_start,

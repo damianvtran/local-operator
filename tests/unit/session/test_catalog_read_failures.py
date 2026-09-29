@@ -399,6 +399,24 @@ def test_a_failed_wake_read_is_named_and_the_rows_survive(tmp_path: Path, monkey
     assert set(_degraded(entries).values()) == {("wakes",)}
 
 
+def test_a_failed_monitor_read_is_named_and_the_rows_survive(tmp_path: Path, monkeypatch) -> None:
+    """The monitor index is a decoration too (design §12): its failure costs
+    the mark, not the row."""
+    import local_operator.monitors.store as monitor_store
+
+    _store(tmp_path, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+
+    def explode(_directory: Path) -> Any:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(monitor_store, "read_index", explode)
+
+    entries = load_catalog(tmp_path)
+
+    assert {entry.id for entry in entries} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert set(_degraded(entries).values()) == {("monitors",)}
+
+
 def test_a_failed_attention_read_is_named(tmp_path: Path, monkeypatch) -> None:
     """``unseen`` is part of ``active``, so its default is a claim about reading.
 

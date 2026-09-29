@@ -626,6 +626,60 @@ def wake_receipt_headline(text: str) -> str:
     return head.strip()
 
 
+#: The model-facing envelope prefix ``monitors.delivery`` opens a delta with.
+#: BOTH receipt surfaces strip it — the collapsed line and the expanded body
+#: (design review round 1, D2) — so it lives here once rather than in the
+#: widget.
+MONITOR_ENVELOPE_PREFIX = "(monitor) "
+
+#: How the monitor formatter opens its cancel instruction (a whole LINE,
+#: capital C — ``monitors/delivery.py``).
+_MONITOR_CANCEL_LINE_PREFIX = "cancel with monitor("
+
+
+def monitor_receipt_body(text: str) -> str:
+    """A monitor delivery's text minus the model-facing envelope prefix.
+
+    The expansion's half of the receipt polish, symmetric with
+    :func:`monitor_receipt_headline` — the collapse has always stripped
+    ``(monitor) ``; the expansion kept it until design review round 1 (D2),
+    which is the inconsistency this closes. Nothing else is rewritten: the
+    expansion is what the model was handed (design §12), cancel hint and all.
+    """
+    if text.startswith(MONITOR_ENVELOPE_PREFIX):
+        return text[len(MONITOR_ENVELOPE_PREFIX) :]
+    return text
+
+
+def monitor_receipt_headline(text: str) -> str:
+    """The human-readable headline of a monitor delivery.
+
+    The monitor twin of :func:`wake_receipt_headline`. A delta's persisted
+    text starts ``(monitor) '<name>' m1: <n> change(s) at <clock> — check
+    <k> …``, and the ``(monitor)`` prefix is model-facing markup the row's own
+    affordance already says — so what the reader wants from the collapsed line
+    is WHICH monitor fired and how much moved.
+
+    The cancel instruction is dropped BY LINE as well as by inline clause.
+    The formatter emits it as its own capital-C line, and the collapsed
+    paragraph is every line up to the blank one — so at fold widths wide
+    enough to fit the whole envelope the sentence reached the user (round 1
+    review, F1, reproduced at width 160). The inline-clause strip stays as
+    shape-closing for a producer that ever moves it onto the identity line.
+    """
+    head, _, _ = text.partition("\n\n")
+    lines = [
+        line
+        for line in head.splitlines()
+        if not line.strip().lower().startswith(_MONITOR_CANCEL_LINE_PREFIX)
+    ]
+    head = " ".join(" ".join(lines).split())  # collapse any envelope whitespace
+    head = head.split(" — cancel with monitor(", 1)[0]
+    while head.startswith(MONITOR_ENVELOPE_PREFIX):
+        head = head[len(MONITOR_ENVELOPE_PREFIX) :]
+    return head.strip()
+
+
 #: Painted under a child's report that was HELD when it arrived — the delivery
 #: turn it would have opened either fell on the leaving latch or was dropped
 #: before it could run — so the row is durable and no turn ran for it at the
