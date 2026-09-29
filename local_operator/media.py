@@ -34,6 +34,26 @@ from dataclasses import dataclass
 #: failure surfaces as a provider 400 halfway through a turn.
 SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
+#: Audio containers the desktop attachment fetch route may serve under their
+#: own content type. Deliberately the sniffer's full OUTPUT set
+#: (:func:`sniff_audio`): a stored block was admitted by CONTENT, so serving
+#: it as the type its bytes verified as is the honest answer, and anything
+#: outside this set still degrades to ``application/octet-stream`` + nosniff.
+#: This is NOT the capture allowlist — that is ``stt.audio.AUDIO_MIME_TYPES``,
+#: narrower on purpose (only what the surfaces are supposed to produce).
+SUPPORTED_AUDIO_MIME_TYPES = frozenset(
+    {
+        "audio/wav",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/webm",
+        "audio/ogg",
+        "audio/flac",
+        "audio/aiff",
+        "audio/aac",
+    }
+)
+
 #: Recognised but NOT directly sendable — a caller must transcode first (see
 #: ``helpers.convert_heic_to_png_file``). Named here anyway because "I do not
 #: know what this is" and "this is an iPhone screenshot you must convert" are
