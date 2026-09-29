@@ -27,11 +27,19 @@ def test_binding_ids_config_keys_and_app_bindings_are_one_vocabulary() -> None:
     the app, which is why it lives beside the other registry tests rather than
     in the TUI directory: the assertion is about the REGISTRY agreeing with the
     app, not about anything rendering.
+
+    Scope-aware since desktop-scoped actions exist: the settings registry and
+    the registry must agree over ALL actions, while the app drives only the
+    app-scope half — and a desktop id appearing in ``BINDINGS`` is its own
+    failure (a binding no terminal can press, whose empty action Textual would
+    happily resolve only when the impossible key is hit).
     """
     from local_operator.tui.app import OperatorApp
 
     registry_ids = {action.id for action in keymap.KEY_ACTIONS}
     settings_keys = {setting.key for setting in settings_io.SETTINGS if setting.section == "keymap"}
+    app_ids = {action.id for action in keymap.KEY_ACTIONS if action.scope == "app"}
+    desktop_ids = {action.id for action in keymap.KEY_ACTIONS if action.scope == "desktop"}
     # `BINDINGS` is typed as accepting tuples as well as `Binding`s, so the id
     # is read through `getattr` rather than by attribute access.
     binding_ids = {
@@ -41,7 +49,8 @@ def test_binding_ids_config_keys_and_app_bindings_are_one_vocabulary() -> None:
     }
 
     assert registry_ids == settings_keys, "settings registry drifted from KEY_ACTIONS"
-    assert registry_ids == binding_ids, "OperatorApp.BINDINGS drifted from KEY_ACTIONS"
+    assert app_ids == binding_ids, "OperatorApp.BINDINGS drifted from KEY_ACTIONS' app scope"
+    assert desktop_ids & binding_ids == set(), "a desktop-scope action grew a Textual binding"
 
 
 def test_every_binding_action_exists_on_the_app() -> None:
@@ -49,11 +58,16 @@ def test_every_binding_action_exists_on_the_app() -> None:
 
     Textual resolves the action lazily, so a typo here ships as a hotkey that
     does nothing on the one machine that presses it. Checked structurally
-    instead.
+    instead — and INVERTED for desktop scope: a desktop action must have NO
+    ``action_*`` method, because its key is not a Textual binding and an
+    app-level method would be the first half of a dead binding.
     """
     from local_operator.tui.app import OperatorApp
 
     for action in keymap.KEY_ACTIONS:
+        if action.scope == "desktop":
+            assert not hasattr(OperatorApp, f"action_{action.action}"), action.id
+            continue
         assert hasattr(OperatorApp, f"action_{action.action}"), action.action
 
 
@@ -71,10 +85,21 @@ def test_keymap_settings_are_flat_dotted() -> None:
 
 
 def test_shipped_defaults_are_bindable_and_unreserved() -> None:
-    """A default that its own validator rejects would be unfixable from the page."""
+    """A default that its own validator rejects would be unfixable from the page.
+
+    Per scope: each default runs through the validator for its OWN scope, and
+    against the reserved set that scope has — the app's `RESERVED_KEYS` are
+    terminal keys, while a desktop value answers to `DESKTOP_RESERVED_COMBOS`
+    (a desktop default that was an OS-reserved chord could never register).
+    """
     for action in keymap.KEY_ACTIONS:
-        assert keymap.validate_key(action.default) is None, action.id
-        assert action.default not in keymap.RESERVED_KEYS
+        assert (
+            keymap.validate_key(action.default, scope=action.scope, action_id=action.id) is None
+        ), action.id
+        if action.scope == "desktop":
+            assert action.default not in keymap.DESKTOP_RESERVED_COMBOS, action.id
+        else:
+            assert action.default not in keymap.RESERVED_KEYS
 
 
 def test_shipped_defaults_do_not_collide_with_each_other() -> None:
@@ -315,5 +340,158 @@ def test_alternates_splits_and_normalizes_every_member() -> None:
     assert keymap.alternates("CTRL+G") == frozenset({"ctrl+g"})
     # Spelling variants cannot appear as distinct members.
     assert keymap.alternates("ctrl+g,CTRL+G") == frozenset({"ctrl+g"})
+
+
+# ---------------------------------------------------------------------------
+# Desktop scope: the accelerator grammar and its dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_desktop_values_canonicalize_into_one_stored_spelling() -> None:
+    """Aliases, order and duplicates collapse — one physical chord, one string.
+
+    `cmd`/`command`/`super` are the literal meta key, `option` is alt and
+    `control` is ctrl; the fixed order makes `ctrl+meta+space` and
+    `meta+ctrl+space` the same stored value, which is what the reserved set
+    below matches against.
+    """
+    assert keymap.normalize_desktop_key("CMD+Option+Space") == "meta+alt+space"
+    assert keymap.normalize_desktop_key("  Super + ALT + f8 ") == "meta+alt+f8"
+    assert keymap.normalize_desktop_key("control+shift+N") == "ctrl+shift+n"
+    assert keymap.normalize_desktop_key("ctrl+meta+space") == "meta+ctrl+space"
+    assert keymap.normalize_desktop_key("alt+alt+ctrl+n") == "ctrl+alt+n"
+
+
+def test_desktop_validation_refuses_os_reserved_chords_with_their_jobs() -> None:
+    """A refusal names the job the chord already does, and alias/case spelling
+    cannot smuggle the same chord past it."""
+    for combo, reason in keymap.DESKTOP_RESERVED_COMBOS.items():
+        if combo in ("escape", "tab", "enter"):
+            # Key TOKENS: refused in any chord, with the same reason.
+            assert keymap.validate_desktop_key(f"ctrl+{combo}") == reason
+        else:
+            assert keymap.validate_desktop_key(combo) == reason
+    assert keymap.validate_desktop_key("CMD+SPACE") is not None
+    assert (
+        keymap.validate_desktop_key("ctrl+meta+space")
+        == keymap.DESKTOP_RESERVED_COMBOS["meta+ctrl+space"]
+    )
+
+
+def test_desktop_validation_refuses_comma_alternates() -> None:
+    """Electron has no alternates concept and the registrar expresses exactly
+    one chord, so a value Textual would read as "two keys" must not be storable
+    here. The TUI scope keeps alternates, unchanged."""
+    reason = keymap.validate_desktop_key("ctrl+n,f5")
+    assert reason is not None and "one chord" in reason
+    assert keymap.validate_key("ctrl+n,f5") is None
+
+
+def test_desktop_validation_needs_a_modifier_for_typable_keys() -> None:
+    """A bare letter/digit/space would fire while the user types; a bare
+    function key is not typable and is allowed (it is the classic media-key
+    chord)."""
+    reason = keymap.validate_desktop_key("n")
+    assert reason is not None and "modifier" in reason
+    assert keymap.validate_desktop_key("space") is not None
+    assert keymap.validate_desktop_key("f8") is None
+
+
+def test_desktop_validation_refuses_shape_errors() -> None:
+    """Dangling modifiers, extra keys, unknown modifiers and unknown keys all
+    come back as a reason, never as a silent store."""
+    assert "add a key" in (keymap.validate_desktop_key("ctrl+alt") or "")
+    assert "one key" in (keymap.validate_desktop_key("n+f5") or "")
+    assert "unknown modifier" in (keymap.validate_desktop_key("banana+n") or "")
+    assert "not a key" in (keymap.validate_desktop_key("banana") or "")
+    assert keymap.validate_desktop_key("") is not None
+    assert keymap.validate_desktop_key(7) is not None
+
+
+def test_validate_key_dispatches_by_scope() -> None:
+    """The SAME string is acceptable or refused depending on the row's scope.
+
+    `primary+alt+space` is the shipped desktop default and is not a key any
+    terminal can send; it must be refused by the app rules and accepted by the
+    desktop ones. Scope dispatch is what makes the write boundary, the capture
+    widget and `lop config edit` agree.
+    """
+    assert keymap.validate_key("primary+alt+space") is not None
+    assert (
+        keymap.validate_key("primary+alt+space", scope="desktop", action_id="keymap.quick_send")
+        is None
+    )
+    assert keymap.validate_key("n", scope="desktop") is not None
+    # An id the registry does not know falls back to the app scope rather than
+    # silently becoming a desktop shortcut.
+    assert keymap.scope_of("keymap.not_a_row") == "app"
+    assert keymap.scope_of("keymap.quick_send") == "desktop"
+
+
+def test_the_desktop_grammar_mapping_is_what_dispatches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-ACTION grammar seam, pinned.
+
+    `keymap.push_to_talk`'s planned bare-modifier hold is not expressible as
+    an Electron accelerator, so validation and normalization dispatch through
+    `_DESKTOP_GRAMMARS` keyed by action id rather than on scope alone; a fake
+    grammar registered in-test is what proves the mapping is consulted instead
+    of the accelerator rules being a scope-wide hardcode.
+    """
+    fake = keymap._DesktopGrammar(
+        normalize=lambda text: f"fake:{text}",
+        validate=lambda value: "the fake grammar refuses everything",
+    )
+    monkeypatch.setitem(keymap._DESKTOP_GRAMMARS, "keymap.push_to_talk", fake)
+    assert (
+        keymap.validate_desktop_key("alt-right-hold", action_id="keymap.push_to_talk")
+        == "the fake grammar refuses everything"
+    )
+    assert keymap.normalize_desktop_key("alt-right-hold", action_id="keymap.push_to_talk") == (
+        "fake:alt-right-hold"
+    )
+    assert (
+        keymap.validate_key("alt-right-hold", scope="desktop", action_id="keymap.push_to_talk")
+        == "the fake grammar refuses everything"
+    )
+    # No registered grammar still means the accelerator rules for a desktop row.
+    assert keymap.validate_desktop_key("primary+alt+space", action_id="keymap.quick_send") is None
+
+
+def test_resolved_keymap_applies_the_desktop_grammar() -> None:
+    """A desktop override is canonicalized on the way in, and an unstorable
+    value is dropped and named rather than leaving a dead shortcut."""
+    action = keymap.BY_ID["keymap.quick_send"]
+    assert keymap.resolved_keymap({action.id: "CMD+SHIFT+N"}) == (
+        {action.id: "meta+shift+n"},
+        [],
+    )
+    resolved, rejected = keymap.resolved_keymap({action.id: "meta+space"})
+    assert resolved == {} and rejected == [action.id]
+
+
+def test_group_conflict_compares_desktop_values_canonically() -> None:
+    """Cross-scope collisions are found on the canonical string: a global
+    chord that the app already binds to a terminal key is held, and the
+    desktop row's own default does not collide with anything."""
+    problem = keymap.group_conflict("keymap.quick_send", "ctrl+n", {})
+    assert problem is not None and "ctrl+n" in problem
+    assert keymap.group_conflict("keymap.quick_send", "primary+alt+space", {}) is None
+
+
+def test_display_key_maps_platform_tokens_only_for_desktop_scope() -> None:
+    """App scope is Textual's own vocabulary; desktop scope is the one place
+    `primary`/`meta` become readable, per platform."""
+    assert keymap.display_key("escape") == "esc"
+    assert (
+        keymap.display_key("primary+alt+space", scope="desktop", platform="darwin")
+        == "cmd+alt+space"
+    )
+    assert (
+        keymap.display_key("primary+alt+space", scope="desktop", platform="win32")
+        == "ctrl+alt+space"
+    )
+    assert keymap.display_key("meta+shift+n", scope="desktop", platform="linux") == (
+        "super+shift+n"
+    )
     assert keymap.alternates("") == frozenset()
     assert keymap.alternates(" f5 , ctrl+g ") == frozenset({"f5", "ctrl+g"})
