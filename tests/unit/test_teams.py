@@ -12,14 +12,22 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Thread
+from typing import Any
 
 import pytest
 import yaml
 
 import local_operator.teams as teams_module
 from local_operator.teams import (
+    HUB_TEAM_DESCRIPTION_MAX_CHARS,
+    HUB_TEAM_MANAGER_MAX_CHARS,
+    HUB_TEAM_MEMBER_COUNT_MAX,
+    HUB_TEAM_MEMBER_KIND_MAX_CHARS,
+    HUB_TEAM_MEMBER_ROLE_MAX_CHARS,
+    HUB_TEAM_MEMBERS_MAX_ITEMS,
     MAX_TEAM_INSTRUCTIONS_CHARS,
     Team,
+    TeamDocumentError,
     TeamEditFields,
     TeamMember,
     TeamRegistry,
@@ -321,14 +329,21 @@ def test_the_two_manager_prompts_agree_on_the_projects_duty(registry: TeamRegist
 
 
 def test_oversized_briefs_are_refused(registry: TeamRegistry) -> None:
-    with pytest.raises(ValueError, match="exceed"):
-        registry.create_team(
-            TeamEditFields(
-                name="huge",
-                manager="manager",
-                instructions="x" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1),
-            )
-        )
+    """Round-1 C-2: the refusal says WHICH brief overflowed and by how much.
+
+    One bound covers two files, so "team instructions" on a project overflow
+    names the wrong remedy; and a trim needs the gap between brief and cap.
+    """
+    over = "x" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1)
+
+    with pytest.raises(ValueError, match=r"team instructions exceeded .*\(submitted 32769\)"):
+        registry.create_team(TeamEditFields(name="huge", manager="manager", instructions=over))
+    with pytest.raises(ValueError, match=r"team project exceeded .*\(submitted 32769\)"):
+        registry.create_team(TeamEditFields(name="huge", manager="manager", project=over))
+
+    created = registry.create_team(TeamEditFields(name="small", manager="manager"))
+    with pytest.raises(ValueError, match=r"team project exceeded .*\(submitted 32769\)"):
+        registry.update_team(created.id, TeamEditFields(project=over))
 
 
 def test_reload_from_disk(tmp_path: Path) -> None:
@@ -2432,6 +2447,210 @@ def test_import_hub_team_re_raises_a_refusal_a_suffix_cannot_fix(tmp_path: Path)
     registry = TeamRegistry(tmp_path)
 
     with pytest.raises(ValueError):
-        registry.import_hub_team({"name": "crew", "members": [], "instructions": "x" * 9000})
+        registry.import_hub_team(
+            {"name": "crew", "members": [], "instructions": "x" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1)}
+        )
 
     assert registry.list_teams() == []
+
+
+# --- Hub caps: the raised local bound, the preflight, and the pull ---------------
+
+
+def _hub_cap_team(**overrides: Any) -> Team:
+    """A team inside every hub cap, so a test can overrun exactly one field."""
+    fields: dict[str, Any] = {
+        "id": "team-cap",
+        "name": "release-crew",
+        "created_date": datetime.now(timezone.utc),
+        "description": "Ships the release.",
+        "manager": "manager",
+        "members": [TeamMember(role="coder", count=1)],
+        "instructions": "You ship the release.",
+        "project": "rad-1",
+    }
+    fields.update(overrides)
+    return Team(**fields)
+
+
+def test_team_briefs_at_the_hub_cap_install_and_one_over_is_refused(
+    registry: TeamRegistry,
+) -> None:
+    """The local bound IS the hub's: 32768 characters install, 32769 do not."""
+    at_cap = "x" * MAX_TEAM_INSTRUCTIONS_CHARS
+    registry.create_team(TeamEditFields(name="at-cap", manager="manager", instructions=at_cap))
+
+    with pytest.raises(ValueError, match="exceed"):
+        registry.create_team(
+            TeamEditFields(
+                name="over-instructions",
+                manager="manager",
+                instructions="x" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1),
+            )
+        )
+    # The ONE constant bounds both briefs, so a project over it is refused too.
+    with pytest.raises(ValueError, match="exceed"):
+        registry.create_team(
+            TeamEditFields(
+                name="over-project",
+                manager="manager",
+                project="x" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1),
+            )
+        )
+
+    stored = registry.get_team_by_name("at-cap")
+    assert stored is not None
+    assert len(stored.instructions) == MAX_TEAM_INSTRUCTIONS_CHARS
+
+
+def test_hub_team_document_accepts_briefs_at_the_hub_cap() -> None:
+    at_cap = "x" * MAX_TEAM_INSTRUCTIONS_CHARS
+
+    document = hub_team_document(_hub_cap_team(instructions=at_cap, project=at_cap))
+
+    assert document["instructions"] == at_cap
+    assert document["project"] == at_cap
+
+
+@pytest.mark.parametrize(
+    ("overrides", "field", "rule"),
+    [
+        # The hub's name rule catches a spelling ``_NAME_RE`` allows -- the
+        # reuse of the agent path's own rule is what refuses it here.
+        ({"name": "release-crew-"}, "name", 'must not begin or end with "-" or "."'),
+        (
+            {"description": "d" * (HUB_TEAM_DESCRIPTION_MAX_CHARS + 1)},
+            "description",
+            "must be at most 2000 characters (submitted 2001)",
+        ),
+        (
+            {"manager": "m" * (HUB_TEAM_MANAGER_MAX_CHARS + 1)},
+            "manager",
+            "must be at most 128 characters (submitted 129)",
+        ),
+        (
+            {"instructions": "i" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1)},
+            "instructions",
+            "must be at most 32768 characters (submitted 32769)",
+        ),
+        (
+            {"project": "p" * (MAX_TEAM_INSTRUCTIONS_CHARS + 1)},
+            "project",
+            "must be at most 32768 characters (submitted 32769)",
+        ),
+    ],
+)
+def test_hub_team_document_preflights_a_capped_field(
+    overrides: dict[str, Any], field: str, rule: str
+) -> None:
+    """Each refusal names the hub's field and sentence, plus the submitted size."""
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(_hub_cap_team(**overrides))
+
+    assert (refusal.value.field, refusal.value.rule) == (field, rule)
+    assert refusal.value.details == {"field": field, "rule": rule}
+    assert str(refusal.value) == f"The team document is not valid: {field} {rule}."
+
+
+def test_hub_team_document_preflights_the_roster_slot_cap() -> None:
+    team = _hub_cap_team(
+        members=[
+            TeamMember(role=f"role-{index}") for index in range(HUB_TEAM_MEMBERS_MAX_ITEMS + 1)
+        ]
+    )
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == (
+        "members",
+        "must hold at most 64 items (submitted 65)",
+    )
+
+
+def test_hub_team_document_preflights_an_overlong_role() -> None:
+    team = _hub_cap_team(members=[TeamMember(role="r" * (HUB_TEAM_MEMBER_ROLE_MAX_CHARS + 1))])
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == (
+        "members",
+        "must hold slots whose role is 1 to 128 characters (submitted 129)",
+    )
+
+
+def test_hub_team_document_preflights_a_slot_kind_over_the_cap() -> None:
+    """The local model cannot spell a long kind (it is a two-value Literal), but
+    the preflight mirrors the hub for a ``Team`` assembled out of band -- the
+    same class of input the oversize-brief check exists for."""
+    slot = TeamMember.model_construct(
+        role="coder", kind="k" * (HUB_TEAM_MEMBER_KIND_MAX_CHARS + 1), count=1
+    )
+    team = _hub_cap_team(members=[slot])
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == (
+        "members",
+        "must hold slots whose kind is at most 32 characters (submitted 33)",
+    )
+
+
+def test_hub_team_document_preflights_a_slot_count_outside_the_band() -> None:
+    """Belt-and-braces like the kind check: the model bounds count to 1..16."""
+    slot = TeamMember.model_construct(
+        role="coder", kind="agent", count=HUB_TEAM_MEMBER_COUNT_MAX + 1
+    )
+    team = _hub_cap_team(members=[slot])
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == (
+        "members",
+        "must hold slot counts from 1 to 16 (submitted 17)",
+    )
+
+
+def test_import_hub_team_accepts_a_brief_over_the_old_cap(tmp_path: Path) -> None:
+    """The operator's largest brief (12,869 chars) installs after a pull."""
+    brief = "x" * 12_869
+
+    outcome = TeamRegistry(tmp_path).import_hub_team(
+        {"name": "lopdev", "members": [], "instructions": brief, "project": "rad-1"}
+    )
+
+    assert outcome.renamed_from is None
+    assert len(outcome.team.instructions) == 12_869
+    assert outcome.team.project == "rad-1"
+    stored = TeamRegistry(tmp_path).get_team(outcome.team.id)
+    assert stored.instructions == brief
+
+
+@pytest.mark.parametrize("brief", ["", "   \n\t"])
+def test_hub_team_document_refuses_a_blank_brief(brief: str) -> None:
+    """Round-1 M1: the hub refuses a blank brief ("it IS the team"), so a
+    0-byte ``instructions.md`` -- a real row state -- is refused here too."""
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(_hub_cap_team(instructions=brief))
+
+    assert (refusal.value.field, refusal.value.rule) == ("instructions", "must not be empty")
+
+
+@pytest.mark.parametrize("role", ["", "   "])
+def test_hub_team_document_refuses_a_blank_role_without_a_count(role: str) -> None:
+    """Round-1 C-1: the blank arm states the rule alone -- there is no magnitude
+    to report, and a count would contradict the sentence it explains."""
+    slot = TeamMember.model_construct(role=role, kind="agent", count=1)
+    team = _hub_cap_team(members=[slot])
+
+    with pytest.raises(TeamDocumentError) as refusal:
+        hub_team_document(team)
+
+    assert (refusal.value.field, refusal.value.rule) == (
+        "members",
+        "must hold slots whose role is 1 to 128 characters",
+    )
+    assert "submitted" not in refusal.value.rule
