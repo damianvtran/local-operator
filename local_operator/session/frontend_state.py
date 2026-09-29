@@ -1134,6 +1134,34 @@ class WakeState(BaseModel):
     remaining: int | None = None
 
 
+class MonitorState(BaseModel):
+    """One armed monitor as the wire carries it (design §12, “Session
+    frontend state”): the spec's identity plus the row's health counters, the
+    same field set the derived index row carries (§10.2).
+
+    ``extra="allow"`` matches :class:`WakeState`: a viewer that predates a
+    field still parses a newer row, and a consumer that knows the whole spec
+    (``arguments``, ``ignore``, …) reads it from the same payload without a
+    second model.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    name: str
+    tool: str = ""
+    every_ms: int | None = None
+    until_at: int | None = None
+    description: str = ""
+    next_due_at: int | None = None
+    last_check_at: int = 0
+    checks: int = 0
+    deliveries: int = 0
+    consecutive_failures: int = 0
+    disabled: bool = False
+    disabled_reason: str = ""
+
+
 class McpServerState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -2847,6 +2875,10 @@ class FrontendSessionState(BaseModel):
     jobs: list[JobState] = Field(default_factory=list)
     todos: list[TodoPhaseState] = Field(default_factory=list)
     wakes: list[WakeState] = Field(default_factory=list)
+    #: The session's armed monitors, the ``wakes`` sibling (design §12). The
+    #: desktop sidebar reads this field for its monitor rows; a viewer that
+    #: predates monitors ignores it.
+    monitors: list[MonitorState] = Field(default_factory=list)
     mcp_servers: list[McpServerState] = Field(default_factory=list)
     mcp_startup: dict[str, Any] | None = None
     loop: dict[str, Any] | None = None
@@ -4858,6 +4890,7 @@ class FrontendRevision(NamedTuple):
     jobs: int
     todos: int
     wakes: int
+    monitors: int
     lifecycle: int
 
 
@@ -5196,8 +5229,8 @@ class FrontendStateStore:
             return list(self._subscribers)
 
     #: The collections :meth:`revision` counts, i.e. what the TUI's dock band is
-    #: painted from (the subagent, todo and wake panels).
-    _REVISED_COLLECTIONS: Final = ("jobs", "todos", "wakes")
+    #: painted from (the subagent, todo, wake and monitor rows).
+    _REVISED_COLLECTIONS: Final = ("jobs", "todos", "wakes", "monitors")
 
     def _bump_revisions(self, before: FrontendSessionState, after: FrontendSessionState) -> None:
         """Advance :meth:`revision` for each collection whose content moved.
@@ -5229,7 +5262,8 @@ class FrontendStateStore:
             revisions[name] += 1
 
     def revision(self) -> "FrontendRevision":
-        """A token that moves whenever ``jobs``, ``todos`` or ``wakes`` move.
+        """A token that moves whenever ``jobs``, ``todos``, ``wakes`` or
+        ``monitors`` move.
 
         Lets a reader skip re-deriving a view it already painted from those
         collections -- the TUI's dock band was re-projecting a 252-row roster on
@@ -5244,6 +5278,7 @@ class FrontendStateStore:
             jobs=revisions.get("jobs", 0),
             todos=revisions.get("todos", 0),
             wakes=revisions.get("wakes", 0),
+            monitors=revisions.get("monitors", 0),
             lifecycle=revisions.get("lifecycle", 0),
         )
 
@@ -5953,6 +5988,7 @@ class FrontendStateStore:
         title = str(getattr(session, "conversation_name", "") or "")
         todos = _todo_state(str(getattr(session, "session_id", current.session_id)))
         wakes = _wake_state(getattr(session, "wake_scheduler", None))
+        monitors = _monitor_state(getattr(session, "monitor_scheduler", None))
         mcp_servers = _mcp_state(
             getattr(session, "mcp_manager", None), getattr(session, "mcp_startup", None)
         )
@@ -6100,6 +6136,7 @@ class FrontendStateStore:
             jobs=jobs,
             todos=todos,
             wakes=wakes,
+            monitors=monitors,
             mcp_servers=mcp_servers,
             mcp_startup=mcp_startup,
             history_cursor=history_cursor,
@@ -7447,6 +7484,21 @@ def _todo_state(session_id: str) -> list[TodoPhaseState]:
 def _wake_state(scheduler: Any) -> list[WakeState]:
     try:
         return [WakeState.model_validate(schedule.model_dump()) for schedule in scheduler.schedules]
+    except Exception:
+        return []
+
+
+def _monitor_state(scheduler: Any) -> list[MonitorState]:
+    """The scheduler's rows through its OWN index projection.
+
+    ``index_rows()`` is the one place the spec and its health counters are
+    joined for a derived reader (§10.2), and the index file a cold process
+    reads is written from it — so the live payload and the on-disk row cannot
+    disagree about a monitor's shape. Unreadable is empty, like ``_wake_state``:
+    a status surface must not be able to take the state build down.
+    """
+    try:
+        return [MonitorState.model_validate(row) for row in scheduler.index_rows()]
     except Exception:
         return []
 

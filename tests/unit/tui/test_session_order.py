@@ -311,6 +311,125 @@ def test_armed_wake_ties_fall_back_to_birth_then_id():
     assert [e.id for e in rank_entries(rows)] == ["w-a", "w-b", "w-old"]
 
 
+# -- monitors ride the same bands (design §12) -------------------------------
+
+# ``(live_state, pending, monitors, monitors_dormant)`` -> the band ``rank``
+# assigns. The monitors family's ``WAKE_BANDS``, and pinning the band for the
+# same reason: a regression should say "an active row became distinguishable",
+# not merely move a list.
+MONITOR_BANDS = [
+    ("attached", None, 0, False, 2),
+    ("attached", None, 2, False, 2),
+    ("busy", None, 2, False, 2),
+    ("", "ask", 2, False, 2),
+    ("", None, 2, False, 0),
+    ("", None, 1, True, 1),
+    ("", None, 0, False, 2),
+]
+
+
+@pytest.mark.parametrize("live_state,pending,monitors,dormant,band", MONITOR_BANDS)
+def test_monitor_rank_is_scoped_to_cold_rows(live_state, pending, monitors, dormant, band):
+    entry = CatalogEntry(
+        SessionRow(
+            "s",
+            100,
+            "row",
+            live_state=live_state,
+            pending=pending,
+            monitors=monitors,
+            monitors_dormant=dormant,
+            created_at=1,
+        )
+    )
+    assert entry.rank[1] == band
+
+
+def test_an_armed_monitor_leads_the_cold_group():
+    """The ``wake_rows`` shape for the monitors family: the armed watches are
+    the OLDEST in the group, so under a birth-only key they would sort last."""
+    rows = [
+        CatalogEntry(SessionRow("plain-new", 100, "Newest, no watch", created_at=90)),
+        CatalogEntry(
+            SessionRow(
+                "dormant-mid",
+                100,
+                "Stopped, monitor dormant",
+                created_at=50,
+                monitors=1,
+                monitors_dormant=True,
+            )
+        ),
+        CatalogEntry(SessionRow("plain-old", 100, "Oldest, no watch", created_at=30)),
+        CatalogEntry(SessionRow("armed-b", 100, "Armed watch, older", created_at=20, monitors=1)),
+        CatalogEntry(SessionRow("armed-a", 100, "Armed watch, oldest", created_at=10, monitors=2)),
+    ]
+    expected_order = ["armed-b", "armed-a", "dormant-mid", "plain-new", "plain-old"]
+    assert [e.id for e in rank_entries(rows)] == expected_order
+
+
+def test_the_two_families_share_the_bands_and_the_tuple_shape():
+    """An armed monitor leads with an armed wake, a dormant one bands with the
+    dormant wakes, and the tuple shape every persisted cursor parses is
+    unchanged."""
+    rows = [
+        CatalogEntry(
+            SessionRow(
+                "wake-armed-monitor-dormant",
+                100,
+                "mix",
+                created_at=10,
+                wakes=1,
+                monitors=1,
+                monitors_dormant=True,
+            )
+        ),
+        CatalogEntry(
+            SessionRow(
+                "wake-dormant-monitor-armed",
+                100,
+                "mix2",
+                created_at=20,
+                wakes=1,
+                wakes_dormant=True,
+                monitors=1,
+            )
+        ),
+        CatalogEntry(
+            SessionRow(
+                "both-dormant",
+                100,
+                "both",
+                created_at=40,
+                wakes=1,
+                wakes_dormant=True,
+                monitors=1,
+                monitors_dormant=True,
+            )
+        ),
+        CatalogEntry(SessionRow("plain", 100, "none", created_at=30)),
+    ]
+    order = [e.id for e in rank_entries(rows)]
+    assert order == [
+        "wake-dormant-monitor-armed",
+        "wake-armed-monitor-dormant",
+        "both-dormant",
+        "plain",
+    ]
+    for entry in rows:
+        assert len(entry.rank) == 4  # (tier, wake_rank, -birth, id) — unchanged
+
+
+def test_monitor_and_wake_ties_fall_back_to_birth_then_id():
+    """The widened value only bands; birth and id still order within a band."""
+    rows = [
+        CatalogEntry(SessionRow("m-old", 100, "Armed, older", created_at=5, monitors=1)),
+        CatalogEntry(SessionRow("m-b", 100, "Armed, newer b", created_at=9, monitors=3)),
+        CatalogEntry(SessionRow("m-a", 100, "Armed, newer a", created_at=9, monitors=1)),
+    ]
+    assert [e.id for e in rank_entries(rows)] == ["m-a", "m-b", "m-old"]
+
+
 def test_mobile_uses_same_categories_birth_and_ties():
     table = SessionTable()
     durable = {}

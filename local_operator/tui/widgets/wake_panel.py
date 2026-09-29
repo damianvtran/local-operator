@@ -8,6 +8,11 @@ panel is that a session's autonomy is otherwise invisible: a wake fires with
 no keystroke, and without a standing list the only way to know the session
 will wake at 08:30 is to catch the delivery line as it scrolls past.
 
+Monitor rows join the SAME band (design §12): wake rows first, then a monitor
+section — one line per armed monitor with its due/state slot and its health —
+under the same shared row budget. One band, not a fourth panel: the dock's
+rows are a shared column, and a new sibling would spend everyone's floor (U7).
+
 **It also reports a wake that is NOT being delivered.** A schedule whose
 supervisor engagement keeps failing used to paint exactly like a healthy one,
 so the surface an operator actually watches could not say the thing the wake
@@ -36,6 +41,14 @@ from local_operator.wakes.display import format_age, format_wake_time
 #: more than the band can afford; the cap plus an overflow marker keeps a
 #: full scheduler from eating the transcript.
 MAX_WAKE_ROWS = 3
+#: The most monitor rows the band will spend (design §12), and the floor below
+#: which the monitor section is dropped whole — its header plus one row. A
+#: half-section (a header with no row, or rows with no header) reads as a
+#: different defect than "there is more than fits", so the band shows one or
+#: nothing; the wake cap's own marker arithmetic (``_row_window``) is what
+#: "fits" means on either side.
+MAX_MONITOR_ROWS = 2
+_MIN_MONITOR_SECTION_ROWS = 2
 #: Rows the panel never shrinks below while displayed (header + one wake).
 _MIN_BODY_ROWS = 2
 #: The dock's fixed rows around the band — the same figure ``TodoPanel``
@@ -52,24 +65,35 @@ _DOCK_ROWS = 8
 _COLLAPSED_TRANSCRIPT_FLOOR = 2
 
 
+def _overflow_line(label: str, dim: Style) -> Text:
+    """The "… N more" marker line a section appends when rows are hidden."""
+    line = Text(no_wrap=True, overflow="ellipsis")
+    line.append(label, style=dim)
+    return line
+
+
 class WakePanel(Container):
     """The session's scheduled wakes, rendered in the dock band above todos.
 
     One row per SCHEDULE, not per occurrence: a wake that fires every hour
     for a week is still one schedule (``w1``), so it gets one line naming its
     next fire and a snippet of its prompt — the recurrence is stated once on
-    that line, never re-listed per trigger. Visibility follows the scheduler:
-    ``display: none`` while it holds no schedules, so the band collapses.
+    that line, never re-listed per trigger. Monitor rows ride the same band
+    under their own section (design §12), wake rows first. Visibility follows
+    the schedulers: ``display: none`` while the session holds neither wakes
+    nor monitors, so the band collapses.
     """
 
     def __init__(self) -> None:
         super().__init__(id="wake-panel", classes="band-slot")
         self._body = Static(classes="band-body", id="wake-body")
-        #: What is painted: the per-schedule fingerprint AND the row/width budgets it
-        #: was rendered against, so the 1 Hz poll repaints only when either
-        #: moved (``TodoPanel``'s discipline — same contents, different space
-        #: is a different paint).
-        self._shown: tuple[tuple[tuple[str, ...], ...], int, int] | None = None
+        #: What is painted: the per-schedule and per-monitor fingerprints AND
+        #: the row/width budgets they were rendered against, so the 1 Hz poll
+        #: repaints only when either moved (``TodoPanel``'s discipline — same
+        #: contents, different space is a different paint).
+        self._shown: (
+            tuple[tuple[tuple[str, ...], ...], tuple[tuple[str, ...], ...], int, int] | None
+        ) = None
         #: ``(config root, deliveries dir mtime_ns, ledger)`` — see :meth:`_owed`.
         self._owed_cache: tuple[str, int, dict[str, dict[str, Any]]] | None = None
         # Hidden until the first schedule exists: an empty panel is not content.
@@ -93,18 +117,19 @@ class WakePanel(Container):
         try:
             scheduler = getattr(session, "wake_scheduler", None)
             schedules = list(scheduler.schedules) if scheduler is not None else []
+            monitors = self._monitor_rows(session)
             owed = self._owed(session)
             fingerprint = tuple(self._fingerprint(schedule, owed) for schedule in schedules)
             budget = self._body_rows()
-            state = (fingerprint, budget, self._row_cells())
+            state = (fingerprint, monitors, budget, self._row_cells())
             if state == self._shown:
                 return  # equality guard — identical list and budgets = no work
             self._shown = state
-            if not fingerprint:
+            if not fingerprint and not monitors:
                 self.display = False
                 return
             self.display = True
-            self._body.update(self._build(fingerprint))
+            self._body.update(self._build(fingerprint, monitors))
         except Exception:
             self.display = False
 
@@ -188,33 +213,146 @@ class WakePanel(Container):
         message = " ".join(str(schedule.message).split())
         return (str(schedule.id), due_label, every, message, ink)
 
+    def _monitor_rows(self, session: Any) -> tuple[tuple[str, ...], ...]:
+        """Monitor rows as paint-relevant tuples — the wake fingerprint's twin.
+
+        Read from the LIVE scheduler (the runtime the session owns), not the
+        derived index: a monitor's health lives in its counters (next due, the
+        disabled reason, the failure count the auto-disable ladder walks), and
+        the index is only rewritten on change events, so a cold reader would
+        paint stale health on the surface that exists to make it visible.
+        Defensive like the rest of ``sync``: any failure yields no monitor
+        rows rather than taking the band down.
+        """
+        try:
+            scheduler = getattr(session, "monitor_scheduler", None)
+            specs = list(scheduler.monitors) if scheduler is not None else []
+        except Exception:
+            return ()
+        rows: list[tuple[str, ...]] = []
+        for spec in specs:
+            counters: dict[str, Any] = {}
+            if scheduler is not None:
+                try:
+                    runtime = scheduler.runtime(spec.id)
+                    if runtime is not None:
+                        counters = dict(runtime.counters or {})
+                except Exception:
+                    counters = {}
+            rows.append(self._monitor_fingerprint(spec, counters))
+        return tuple(rows)
+
+    @classmethod
+    def _monitor_fingerprint(cls, spec: Any, counters: dict[str, Any]) -> tuple[str, ...]:
+        """One monitor as a paint-relevant tuple; the wake fingerprint's shape.
+
+        The due label carries the same minute-level rounding the wake label
+        gets (a sub-minute clock drift must not repaint the 1 Hz poll). A
+        disabled monitor's due slot becomes the state word, and the ink turns
+        warning for a disabled monitor or one mid-ladder on the failure count
+        (§11.3) — the same two-fact split the wake row makes, because the band
+        cannot afford a health column of its own.
+        """
+        disabled = bool(counters.get("disabled"))
+        failures = counters.get("consecutive_failures")
+        fail_count = failures if isinstance(failures, int) and not isinstance(failures, bool) else 0
+        failing = fail_count > 0
+        due = counters.get("next_due_at")
+        if disabled:
+            label = "disabled"
+        elif isinstance(due, int) and not isinstance(due, bool):
+            label = format_wake_time(due)
+        else:
+            label = "waiting"
+        ink = "warning" if (disabled or failing) else "dim"
+        health = ""
+        if disabled:
+            health = " ".join(str(counters.get("disabled_reason") or "").split())
+        elif failing:
+            health = f"{fail_count} failed"
+        every_ms = getattr(spec, "every_ms", None)
+        every = f"every {format_duration(every_ms)}" if every_ms else "once"
+        name = " ".join(str(getattr(spec, "name", "")).split())
+        return (str(spec.id), label, every, name, ink, health)
+
     # -- rendering ------------------------------------------------------------
-    def _build(self, rows: tuple[tuple[str, ...], ...]) -> Text:
+    def _build(
+        self,
+        rows: tuple[tuple[str, ...], ...],
+        monitors: tuple[tuple[str, ...], ...] = (),
+    ) -> Text:
         dim = Style(color=theme_mod.semantic_color("dim"))
         muted = Style(color=theme_mod.semantic_color("muted"))
         warning = Style(color=theme_mod.semantic_color("warning"))
 
+        budget = self._body_rows()
+        lines: list[Text] = []
+        if rows:
+            # Wake rows first (design §12). The wake section keeps the band's
+            # original contract and the first share of the budget; the monitor
+            # section reserves the floor it needs (its header + one row), and
+            # when the budget cannot afford even that the wakes win whole —
+            # two half-sections each claiming rows they cannot show is the
+            # worse frame, and the wake rows are the band's original contract.
+            room = (
+                budget if not monitors else max(_MIN_BODY_ROWS, budget - _MIN_MONITOR_SECTION_ROWS)
+            )
+            lines.extend(self._wake_section(rows, room=room, dim=dim, muted=muted, warning=warning))
+        if monitors:
+            room = (budget - len(lines)) if rows else budget
+            if room >= _MIN_MONITOR_SECTION_ROWS:
+                lines.extend(
+                    self._monitor_section(
+                        monitors, room=room, dim=dim, muted=muted, warning=warning
+                    )
+                )
+        # The band is content-sized: Rich overflow alone cannot constrain its
+        # natural width. Clamp every row, including a long id/date/recurrence,
+        # against the screen just as TodoPanel does, before it is measured.
+        cells = self._row_cells()
+        for line in lines:
+            line.truncate(cells, overflow="ellipsis")
+        return Text("\n").join(lines)
+
+    @staticmethod
+    def _row_window(count: int, room: int, limit: int) -> tuple[int, bool]:
+        """How many rows fit under a section header, and whether to mark the rest.
+
+        The wake cap's arithmetic, extracted so the monitor section cannot
+        drift from it. When a row would be hidden, reserve a row for the
+        "… N more" marker; at the floor (``room == 0``) the visible rows are
+        dropped in favour of the count — one "w1 …" line beside a silent
+        "+5 hidden" is the bigger lie, since the header's total already
+        implies the misses. When EXACTLY one row would be hidden, showing it
+        costs the same row the marker costs, so it is shown instead.
+        """
+        room = max(0, room)
+        cap = min(room, limit)
+        marker = count > cap
+        if marker:
+            cap = min(max(room - 1, 0), limit)
+            if count == cap + 1:
+                cap += 1
+                marker = False
+        return cap, marker
+
+    def _wake_section(
+        self,
+        rows: tuple[tuple[str, ...], ...],
+        *,
+        room: int,
+        dim: Style,
+        muted: Style,
+        warning: Style,
+    ) -> list[Text]:
+        """The wake half of the band. ``room`` counts its header too."""
         header = Text(no_wrap=True, overflow="ellipsis")
         header.append("Wakes", style=muted)
         header.append(" · ", style=dim)
         header.append(f"{len(rows)} scheduled" if len(rows) != 1 else "1 scheduled", style=muted)
 
-        room = max(1, self._body_rows() - 1)
-        cap = min(room, MAX_WAKE_ROWS)
-        marker = len(rows) > cap
-        if marker:
-            # Reserve a row for the "… N more" marker. At the floor budget
-            # (room == 1) this drops the one visible wake in favour of the
-            # count — a single "w1 …" line beside a silent "+5 hidden" is the
-            # bigger lie, since the header's total already implies the misses.
-            cap = min(max(room - 1, 0), MAX_WAKE_ROWS)
-            if len(rows) == cap + 1:
-                # "… 1 more wake" costs exactly the row the wake itself costs.
-                cap += 1
-                marker = False
+        cap, marker = self._row_window(len(rows), max(1, room) - 1, MAX_WAKE_ROWS)
         visible = rows[:cap]
-
-        cells = self._row_cells()
         lines = [header]
         for wake_id, due_label, every, message, ink in visible:
             row = Text(no_wrap=True, overflow="ellipsis")
@@ -231,15 +369,48 @@ class WakePanel(Container):
                 row.append(f" — {message}", style=dim)
             lines.append(row)
         if marker:
-            overflow = Text(no_wrap=True, overflow="ellipsis")
-            overflow.append(f"… {len(rows) - len(visible)} more wakes", style=dim)
-            lines.append(overflow)
-        # The band is content-sized: Rich overflow alone cannot constrain its
-        # natural width. Clamp every row, including a long id/date/recurrence,
-        # against the screen just as TodoPanel does, before it is measured.
-        for line in lines:
-            line.truncate(cells, overflow="ellipsis")
-        return Text("\n").join(lines)
+            lines.append(_overflow_line(f"… {len(rows) - len(visible)} more wakes", dim))
+        return lines
+
+    def _monitor_section(
+        self,
+        rows: tuple[tuple[str, ...], ...],
+        *,
+        room: int,
+        dim: Style,
+        muted: Style,
+        warning: Style,
+    ) -> list[Text]:
+        """The monitor half of the band, the wake section's twin.
+
+        One row per armed monitor: id, the due-or-state slot, its interval,
+        its name, and — when there is one — the health tail (the disabled
+        reason, or the failure count the auto-disable ladder is walking,
+        §11.3).
+        """
+        header = Text(no_wrap=True, overflow="ellipsis")
+        header.append("Monitors", style=muted)
+        header.append(" · ", style=dim)
+        header.append(f"{len(rows)} watching" if len(rows) != 1 else "1 watching", style=muted)
+
+        cap, marker = self._row_window(len(rows), max(1, room) - 1, MAX_MONITOR_ROWS)
+        visible = rows[:cap]
+        lines = [header]
+        for monitor_id, label, every, name, ink, health in visible:
+            row = Text(no_wrap=True, overflow="ellipsis")
+            row.append("- ", style=dim)
+            row.append(monitor_id, style=muted)
+            row.append(" ", style=dim)
+            row.append(label, style=warning if ink == "warning" else dim)
+            row.append(f" · {every}", style=dim)
+            if name:
+                row.append(f" — {name}", style=dim)
+            if health:
+                row.append(f" · {health}", style=warning if ink == "warning" else dim)
+            lines.append(row)
+        if marker:
+            lines.append(_overflow_line(f"… {len(rows) - len(visible)} more monitors", dim))
+        return lines
 
     # -- geometry (the TodoPanel budget discipline) ----------------------------
     def predicted_rows(self) -> int:
@@ -253,14 +424,15 @@ class WakePanel(Container):
         return max(1, self._body_rows())
 
     def _body_rows(self) -> int:
-        """Rows this paint may fill — header, wakes and any overflow marker.
+        """Rows this paint may fill — both headers, both sections and markers.
 
         Falls back to the ceiling whenever the screen cannot be consulted —
         a panel synced before mount, in a test, or on a reduced host must
         still paint rather than hide itself (an exception here used to land
         in ``sync``'s guard and flip the panel invisible off-app).
         """
-        ceiling = MAX_WAKE_ROWS + 2
+        # Two headers + both section caps + one overflow marker each.
+        ceiling = MAX_WAKE_ROWS + MAX_MONITOR_ROWS + 4
         try:
             screen_height = self.screen.size.height
         except Exception:  # no screen yet (tests, reduced hosts, pre-mount)
