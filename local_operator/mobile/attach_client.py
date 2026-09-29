@@ -71,6 +71,16 @@ from local_operator.session.runtime.types import (
     drain_phrase_for_frame,
 )
 
+try:
+    # The carriage capability token (mobile STT). cf9f's PR adds it beside the
+    # other record-capability tokens; on a tree that predates it the name is
+    # absent and this client fails CLOSED — it never sends the annotation —
+    # which is the same rule the relay's strip-gate (``MobileDaemon.request``)
+    # follows.
+    from local_operator.session.runtime.types import INPUT_MODE_CAPABILITY
+except ImportError:  # pragma: no cover — only on a pre-carriage tree
+    INPUT_MODE_CAPABILITY = ""
+
 #: How long to wait for an ack/error matching a request id. Mirrors the
 #: daemon's ``request`` timeout: long enough for a turn-boundary op (prompt
 #: acquires the turn lock) on a busy owner, short enough that a wedged owner
@@ -1082,6 +1092,13 @@ class AttachClient:
         self._drain_phrase = ""
         self._attention_supported = "completion-ack-v1" in record.capabilities
         self._event_mute_supported = EVENT_MUTE_CAPABILITY in record.capabilities
+        # MAY THIS OWNER STORE THE INPUT ANNOTATION, resolved per dial exactly
+        # like the mute flag beside it: the fields ride only to a record that
+        # advertised input-mode-v1, and an older/unadvertised owner gets frames
+        # byte-identical to today's — absence is the legacy reading.
+        self._input_mode_supported = bool(INPUT_MODE_CAPABILITY) and (
+            INPUT_MODE_CAPABILITY in record.capabilities
+        )
         self._exclusive_move_supported = EXCLUSIVE_MOVE_CAPABILITY in record.capabilities
         try:
             reader, writer = await asyncio.open_connection(
@@ -1781,18 +1798,40 @@ class AttachClient:
             self._raise_for_reply_error(reply)
         return reply.get("data")
 
+    def _annotation_fields(self, input_mode: str, input_path: str) -> dict[str, str]:
+        """The carriage fields, ONLY for an owner that advertised the capability.
+
+        This is the second half of the gate — the relay's strip in
+        ``MobileDaemon.request`` is the first — and both say the same thing: a
+        frame to an owner that never advertised ``input-mode-v1`` must be the
+        frame that owner would have seen before this feature existed. Absence is
+        the legacy reading, so empty values are omitted too rather than sent as
+        empty strings.
+        """
+        if not self._input_mode_supported:
+            return {}
+        fields: dict[str, str] = {}
+        if input_mode:
+            fields["input_mode"] = input_mode
+        if input_path:
+            fields["input_path"] = input_path
+        return fields
+
     async def prompt(
         self,
         text: str,
         *,
         command_id: str | None = None,
         images: list[dict[str, str]] | None = None,
+        input_mode: str = "",
+        input_path: str = "",
     ) -> str:
         return await self._request(
             "prompt",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
+            **self._annotation_fields(input_mode, input_path),
         )
 
     async def send_command(self, command: ContinuationCommand, *, streaming: bool = False) -> str:
@@ -1806,13 +1845,19 @@ class AttachClient:
             raise ValueError("command belongs to another conversation")
         if streaming:
             return await self.steer(
-                command.text, command_id=command.command_id, images=command.images
+                command.text,
+                command_id=command.command_id,
+                images=command.images,
+                input_mode=command.input_mode,
+                input_path=command.input_path,
             )
         try:
             return await self.prompt(
                 command.text,
                 command_id=command.command_id,
                 images=command.images,
+                input_mode=command.input_mode,
+                input_path=command.input_path,
             )
         except RuntimeError as exc:
             # Local import, matching this module's other `session.errors` use:
@@ -1823,7 +1868,11 @@ class AttachClient:
             if not isinstance(exc, TurnInFlight) and "already streaming" not in str(exc):
                 raise
             return await self.steer(
-                command.text, command_id=command.command_id, images=command.images
+                command.text,
+                command_id=command.command_id,
+                images=command.images,
+                input_mode=command.input_mode,
+                input_path=command.input_path,
             )
 
     async def steer(
@@ -1832,12 +1881,15 @@ class AttachClient:
         *,
         command_id: str | None = None,
         images: list[dict[str, str]] | None = None,
+        input_mode: str = "",
+        input_path: str = "",
     ) -> str:
         return await self._request(
             "steer",
             command_id=command_id or str(uuid.uuid4()),
             text=text,
             images=list(images or []),
+            **self._annotation_fields(input_mode, input_path),
         )
 
     async def desktop_watch(self, *, visible: bool, can_notify: bool) -> str:
@@ -2244,6 +2296,8 @@ async def continue_command(
             text=command.text,
             images=list(command.images),
             command_id=command.command_id,
+            input_mode=command.input_mode,
+            input_path=command.input_path,
         ),
         config_dir=config_dir,
         deadline_s=deadline_s,

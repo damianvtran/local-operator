@@ -131,20 +131,37 @@ _MAX_SPAWNS = 3
 
 @dataclass(frozen=True, slots=True)
 class PromptErrand:
-    """A user turn. The reason a session usually starts."""
+    """A user turn. The reason a session usually starts.
+
+    ``input_mode``/``input_path`` are the reserved annotation (mobile STT,
+    input-mode-v1): how the text was produced (typed / dictated / mixed) and
+    which voice path dictated the part that was. They ride the errand so the
+    WAKE path (a cold session's first prompt) carries exactly what the live
+    path carries; ``_deliver`` hands them to the attach client, which drops
+    them for an owner that did not advertise the capability. EMPTY (the
+    default) is the legacy reading, so every existing producer is unchanged.
+    """
 
     text: str
     images: list[dict[str, str]] = field(default_factory=list)
     command_id: str = ""
+    input_mode: str = ""
+    input_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
 class SteerErrand:
-    """A mid-turn injection into a session that is already working."""
+    """A mid-turn injection into a session that is already working.
+
+    Carries the same annotation fields as :class:`PromptErrand`, for the same
+    reason and with the same empty-means-legacy rule.
+    """
 
     text: str
     images: list[dict[str, str]] = field(default_factory=list)
     command_id: str = ""
+    input_mode: str = ""
+    input_path: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -834,11 +851,23 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         # the same defect the warm/wake arm above refuses (agent review round
         # 1, R2). ``duplicate`` stays the runtime's own, so the idempotency
         # seam is unchanged.
+        #
+        # The annotation rides UNCONDITIONALLY from here: the CLIENT is the one
+        # that drops it for an owner which did not advertise the capability
+        # (``AttachClient._annotation_fields``), so the wake path and the
+        # follower path apply one rule in one place rather than two gates that
+        # could disagree.
+        annotation: dict[str, str] = {}
+        for name in ("input_mode", "input_path"):
+            value = getattr(work, name, "")
+            if value:
+                annotation[name] = value
         return await client.request_ack_with_duplicate(
             op,
             text=work.text,
             images=work.images,
             command_id=work.command_id,
+            **annotation,
         )
     finally:
         client.close()

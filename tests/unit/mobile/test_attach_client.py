@@ -1262,3 +1262,106 @@ async def test_a_timed_out_aside_deregisters_its_delta_sink() -> None:
         await task
 
     assert client._delta_sinks == {}
+
+
+# ---------------------------------------------------------------------------
+# The input-mode annotation carriage (mobile STT, input-mode-v1)
+# ---------------------------------------------------------------------------
+
+
+def _annotation_token() -> str:
+    """The frozen token from its one home (cf9f's constant), or the spelling.
+
+    On a pre-carriage tree the constant is absent and the module fails closed
+    (never sends the annotation); this test supplies the frozen spelling to
+    exercise the carriage logic BEFORE that merge, and reads the constant once
+    it lands — both spell the same string.
+    """
+    return attach_client.INPUT_MODE_CAPABILITY or "input-mode-v1"
+
+
+@pytest.mark.asyncio
+async def test_the_annotation_never_rides_to_an_owner_that_did_not_advertise_it(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absence is the legacy reading: an old owner sees the pre-feature frame."""
+    handle = FakeHandle("sess-a")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        client = AttachClient(lambda _p: None, lambda _r: None)
+        await client.connect(record, "sess-a")
+        assert client._input_mode_supported is False
+        sent: list[tuple[str, dict[str, Any]]] = []
+        original = client._request
+
+        async def spy(op: str, **fields: Any) -> Any:
+            sent.append((op, fields))
+            return await original(op, **fields)
+
+        monkeypatch.setattr(client, "_request", spy)
+        await client.prompt("a", input_mode="dictated", input_path="provider_stt_radient")
+        assert "input_mode" not in sent[-1][1]
+        assert "input_path" not in sent[-1][1]
+        await client.steer("b", input_mode="typed")
+        assert "input_mode" not in sent[-1][1]
+        await client.detach()
+    finally:
+        r.close()
+
+
+@pytest.mark.asyncio
+async def test_a_capable_owner_gets_the_annotation_on_prompt_steer_and_send_command(
+    config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = _annotation_token()
+    monkeypatch.setattr(attach_client, "INPUT_MODE_CAPABILITY", token)
+    handle = FakeHandle("sess-b")
+    r = RuntimeServer(handle, kind="tui")
+    r.start()
+    try:
+        record = await _wait_record()
+        # The advertisement cf9f's carriage adds to the record; appended here so
+        # the client-side gate has a capable owner to answer.
+        record.capabilities = [*record.capabilities, token]
+        client = AttachClient(lambda _p: None, lambda _r: None)
+        await client.connect(record, "sess-b")
+        assert client._input_mode_supported is True
+        sent: list[tuple[str, dict[str, Any]]] = []
+        original = client._request
+
+        async def spy(op: str, **fields: Any) -> Any:
+            sent.append((op, fields))
+            return await original(op, **fields)
+
+        monkeypatch.setattr(client, "_request", spy)
+
+        await client.prompt("a", input_mode="mixed", input_path="provider_stt_elevenlabs")
+        assert sent[-1][1]["input_mode"] == "mixed"
+        assert sent[-1][1]["input_path"] == "provider_stt_elevenlabs"
+
+        # Empty stays off the wire even here: absence is the legacy reading, and
+        # an explicit empty means nothing a consumer should have to interpret.
+        await client.prompt("b")
+        assert "input_mode" not in sent[-1][1]
+        await client.steer("c", input_mode="typed")
+        assert sent[-1][1]["input_mode"] == "typed"
+
+        from local_operator.mobile.types import ContinuationCommand
+
+        command = ContinuationCommand.from_json(
+            {
+                "command_id": "12345678-1234-4678-9234-567812345678",
+                "session_id": "sess-b",
+                "text": "through send_command",
+                "input_mode": "dictated",
+                "input_path": "provider_stt_radient",
+            }
+        )
+        await client.send_command(command, streaming=False)
+        assert sent[-1][1]["input_mode"] == "dictated"
+        assert sent[-1][1]["input_path"] == "provider_stt_radient"
+        await client.detach()
+    finally:
+        r.close()
