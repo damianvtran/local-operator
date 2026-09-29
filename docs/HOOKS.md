@@ -91,6 +91,10 @@ failures on `PostToolUse` will not be given them.
 - **Failures never break a turn:** an unreadable file, a crash, a timeout or
   garbage output is logged, and the tool result goes back unchanged.
 
+Native and forwarded sources run independently — there is no cross-source
+dedupe, so a command listed in both `hooks.json` and a forwarded settings file
+runs once per source.
+
 ## Not supported yet
 
 `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `Stop`,
