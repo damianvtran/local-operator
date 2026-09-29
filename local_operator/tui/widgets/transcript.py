@@ -2531,16 +2531,22 @@ class MonitorDeltaBlock(WakeBlock):
     def _summary(self) -> tuple[str, str]:
         """(identity, message body) — the monitor twin of ``WakeBlock._summary``.
 
-        The collapsed line strips the model-facing ``(monitor)`` prefix (see
-        ``harness.rows.monitor_receipt_headline``). The expansion is the FULL
-        delivered text — envelope, description, cancel hint and the bounded
-        delta — because that is what the model was handed: a monitor has no
-        user-authored prompt behind it to show instead, which is why the split
-        differs from ``WakeBlock``'s.
+        Both halves are polished: the collapsed line strips the model-facing
+        ``(monitor)`` prefix (see ``harness.rows.monitor_receipt_headline``)
+        and the expanded BODY strips the same prefix from its first line
+        (design review round 1, D2 — the expansion kept what the collapse
+        removed). The expansion is otherwise the FULL delivered text —
+        envelope, description, cancel hint and the bounded delta — because
+        that is what the model was handed: a monitor has no user-authored
+        prompt behind it to show instead, which is why the split differs from
+        ``WakeBlock``'s.
         """
-        from local_operator.harness.rows import monitor_receipt_headline
+        from local_operator.harness.rows import (
+            monitor_receipt_body,
+            monitor_receipt_headline,
+        )
 
-        return monitor_receipt_headline(self._text), self._text
+        return monitor_receipt_headline(self._text), monitor_receipt_body(self._text)
 
 
 #: Cell cap on one advisory sender field. The header is an identity label, and
