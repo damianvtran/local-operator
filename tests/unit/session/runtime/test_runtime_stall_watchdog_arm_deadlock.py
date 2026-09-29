@@ -886,6 +886,29 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
 
 
+def _walk_finished_in(text: str) -> bool:
+    """Did the dump's all-thread walk run to its own end?
+
+    TWO ENDINGS ARE FINISHED, and both count because they are the same fact seen
+    from two sides: the walk reached this process's OLDEST thread -- this test's
+    own frame, the strongest reading -- or it reached CPython's own thread cap.
+    ``faulthandler.dump_traceback(all_threads=True)`` walks
+    ``_Py_DumpTracebackThreads``, which visits newest-to-oldest and stops after
+    ``MAX_NTHREADS`` (100) threads with a bare ``...`` line it writes on the way
+    out. A pytest worker that has carried a full shard's load holds more live
+    threads than that, so the main thread -- the oldest, and the only carrier of
+    this file's name -- sits past the cap and is never visited: the CI of PR
+    #1695 failed exactly there on three attempts, on three different workers
+    (gw2, gw0, gw1), every dump ending ``\\n...\\n`` and naming no frame of the test.
+
+    THE CAP LINE ARRIVES ONLY AT THAT RETURN -- the frame-depth ellipsis carries
+    a leading space and nothing else writes a bare ``...`` line -- so "either
+    ending is present" reads exactly as "the walk is over": a snapshot that
+    caught the walk mid-write carries neither.
+    """
+    return Path(__file__).name in text or any(line == "..." for line in text.splitlines())
+
+
 def _armed_in(tmp_path: Path, probe: _SteppingProbe) -> Path:
     """Arm THIS process against ``tmp_path``, with the exit leg held, and return its dump.
 
@@ -970,13 +993,17 @@ def test_the_progress_deadline_is_taken_before_the_predicate_can_pre_empt_it(
             stall_watchdog.PROGRESS_MARKER in text
         ), f"the fire does not name the leg that produced it:\n{text[-600:]!r}"
         # AN ALL-THREAD DUMP, and the frames have to be THIS process's: a dump that
-        # names no frame of the running test is not the walk the fire promises.
+        # names no frame of the running test is not the walk the fire promises,
+        # unless the walk ended at CPython's own thread cap -- a shard-loaded
+        # pytest worker holds 100+ threads, which is where PR #1695's CI went red
+        # (see ``_walk_finished_in``).
         assert (
             "Thread 0x" in text or "Current thread" in text
         ), f"the fire wrote no thread dump:\n{text[-600:]!r}"
-        assert Path(__file__).name in text, (
-            "the dump does not name a frame of this process, so it is not the all-thread "
-            f"walk the bound's evidence is:\n{text[-600:]!r}"
+        assert _walk_finished_in(text), (
+            "the dump neither names a frame of this process nor carries CPython's "
+            "thread-cap ending, so it is not the finished all-thread walk the "
+            f"bound's evidence is:\n{text[-600:]!r}"
         )
         # THE NEXT WAKE: the episode after the fire is re-armed for a whole bound, and a
         # sampler that stopped here would leave that deadline with nobody to take it --
@@ -987,6 +1014,66 @@ def test_the_progress_deadline_is_taken_before_the_predicate_can_pre_empt_it(
         )
     finally:
         stall_watchdog.disarm()
+
+
+def test_a_walk_capped_by_cpython_reads_as_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE CAP: a worker carrying a shard's worth of threads must not red the cell above.
+
+    THE SHAPE THIS PINS comes from CI rather than from a reading: on PR #1695
+    the cell above failed on three attempts (workers gw2, gw0 and gw1) with
+    dumps that ended ``\\n...\\n`` and named no frame of this file -- CPython's
+    ``_Py_DumpTracebackThreads`` caps its newest-to-oldest walk at 100 threads,
+    and a worker that has carried a full shard's load holds more than that, so
+    the main thread (the oldest, and the only carrier of this file's name) is
+    never reached. This cell builds the capped condition deterministically --
+    its own parked threads, newer than main -- and asserts both halves: the cap
+    really lands (so this cell cannot pass on an uncapped walk), and
+    :func:`_walk_finished_in`, the reading the cell above shares, accepts the
+    capped dump as the finished evidence it is.
+
+    THE THREADS ARE OURS AND RELEASED, because a pin to a cap must not become
+    the next cell's soup: one Event parks them all and one ``set()`` wakes them.
+    """
+    gate = threading.Event()
+    soup = [
+        threading.Thread(target=gate.wait, name=f"cap-soup-{i}", daemon=True) for i in range(110)
+    ]
+    for thread in soup:
+        thread.start()
+    try:
+        clock = _SteppingClock()
+        monkeypatch.setattr(stall_watchdog, "time", clock)
+        probe = _SteppingProbe(clock)
+        dump = _armed_in(tmp_path, probe)
+        try:
+            assert _wait_for(lambda: _fires_in(_read(dump)) >= 1, timeout=120.0), (
+                "the bound never fired under the cap rig, so this cell proved "
+                f"nothing about a capped dump:\n{_read(dump)[-600:]!r}"
+            )
+            assert _wait_for(
+                lambda: any(
+                    line.startswith(stall_watchdog.HELD_MARKER) for line in _read(dump).splitlines()
+                ),
+                timeout=120.0,
+            ), f"the fire was never recorded as held:\n{_read(dump)[-600:]!r}"
+            text = _read(dump)
+            assert any(line == "..." for line in text.splitlines()), (
+                "the walk did not hit CPython's thread cap, so this cell proves "
+                f"nothing about a capped dump:\n{text[-600:]!r}"
+            )
+            assert _walk_finished_in(text), (
+                "a walk capped by CPython's own thread limit did not read as "
+                "finished, so the cell above is red on any worker carrying 100 "
+                f"threads:\n{text[-600:]!r}"
+            )
+        finally:
+            stall_watchdog.disarm()
+    finally:
+        gate.set()
+        for thread in soup:
+            thread.join(timeout=5)
 
 
 def test_a_lane_holding_a_step_is_spared_with_no_dump(
